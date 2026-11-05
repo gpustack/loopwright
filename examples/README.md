@@ -17,3 +17,7 @@ These observations are synthetic example data, not receipts from a real external
 
 Parsing these files does not authorize acceptance for another run.
 A host must supply its own expected lock and authenticated current evidence to `constructRunResult`.
+
+For state integration, follow the [host protocol](../docs/state.md#host-protocol): create or explicitly reopen the same
+identity, claim authority, reserve, authorize once, and record authenticated observations or explicit reconciliation.
+These core JSON examples do not create a store, authenticate a receipt or grant a dispatch permit.

@@ -1,0 +1,21 @@
+{
+  "name": "@loopwright/state",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": "26.13.0"
+  },
+  "dependencies": {
+    "@loopwright/core": "0.0.0"
+  }
+}

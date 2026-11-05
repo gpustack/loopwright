@@ -9,13 +9,17 @@
     "npm": "11.x"
   },
   "workspaces": [
-    "packages/core"
+    "packages/core",
+    "packages/state"
   ],
   "scripts": {
-    "build": "tsc -p packages/core/tsconfig.json",
+    "build": "npm run build:core && tsc -p packages/state/tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
-    "test": "tsc -p tsconfig.test.json && node --test .test-build/packages/core/test/*.test.js"
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/core/test/*.test.js .test-build/packages/state/test/*.test.js",
+    "build:core": "tsc -p packages/core/tsconfig.json",
+    "pretypecheck": "npm run build:core",
+    "pretest": "npm run build:core"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
