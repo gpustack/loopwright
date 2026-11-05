@@ -1,0 +1,30 @@
+{
+  "name": "loopwright",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.20.0",
+  "engines": {
+    "node": "26.x",
+    "npm": "11.x"
+  },
+  "workspaces": [
+    "packages/core"
+  ],
+  "scripts": {
+    "build": "tsc -p packages/core/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint .",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/packages/core/test/*.test.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1"
+  },
+  "overrides": {
+    "minimatch": "11.0.1"
+  }
+}

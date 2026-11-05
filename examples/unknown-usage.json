@@ -1,0 +1,113 @@
+{
+  "apiVersion": "loopwright.dev/v1alpha1",
+  "kind": "RunResult",
+  "metadata": {
+    "id": "run-1"
+  },
+  "spec": {
+    "status": "completed",
+    "subject": {
+      "lockHash": {
+        "algorithm": "sha256",
+        "hex": "0ba5d3dc19f5b1e017c7e1a4150ea95857f25782959571452523d015f6b74bb9"
+      },
+      "contractHash": {
+        "algorithm": "sha256",
+        "hex": "9ada67e414f91c58e52a9a21801606baf2616e80dafa713efd3a95f955a211a3"
+      },
+      "repository": "team/repository",
+      "baseRevision": "base-1",
+      "sourceRevision": "source-1",
+      "candidateDigest": {
+        "algorithm": "sha256",
+        "hex": "21a0c40b8a2ce71881b1fa049c389dd9e67816280e1bb429f9053b96be9ca279"
+      },
+      "targetMatrixDigest": null
+    },
+    "verification": {
+      "apiVersion": "loopwright.dev/v1alpha1",
+      "kind": "VerificationResult",
+      "metadata": {
+        "id": "admission-1"
+      },
+      "spec": {
+        "subject": {
+          "lockHash": {
+            "algorithm": "sha256",
+            "hex": "0ba5d3dc19f5b1e017c7e1a4150ea95857f25782959571452523d015f6b74bb9"
+          },
+          "contractHash": {
+            "algorithm": "sha256",
+            "hex": "9ada67e414f91c58e52a9a21801606baf2616e80dafa713efd3a95f955a211a3"
+          },
+          "repository": "team/repository",
+          "baseRevision": "base-1",
+          "sourceRevision": "source-1",
+          "candidateDigest": {
+            "algorithm": "sha256",
+            "hex": "21a0c40b8a2ce71881b1fa049c389dd9e67816280e1bb429f9053b96be9ca279"
+          },
+          "targetMatrixDigest": null
+        },
+        "required": [
+          {
+            "checkId": "tests",
+            "status": "passed",
+            "evidenceId": "observation-1",
+            "reason": "observed_pass",
+            "detail": null
+          }
+        ],
+        "optional": [],
+        "satisfied": true,
+        "diagnostics": []
+      }
+    },
+    "usage": {
+      "requests": [
+        {
+          "requestId": "request-1",
+          "inputTokens": {
+            "provenance": "unknown"
+          },
+          "outputTokens": {
+            "provenance": "unknown"
+          },
+          "costMicrousd": {
+            "provenance": "unknown"
+          }
+        }
+      ],
+      "inputTokens": {
+        "knownSubtotal": 0,
+        "unknownCount": 1,
+        "completeness": "partial",
+        "provenance": "unknown"
+      },
+      "outputTokens": {
+        "knownSubtotal": 0,
+        "unknownCount": 1,
+        "completeness": "partial",
+        "provenance": "unknown"
+      },
+      "totalTokens": {
+        "knownSubtotal": 0,
+        "unknownCount": 2,
+        "completeness": "partial",
+        "provenance": "unknown"
+      },
+      "costMicrousd": {
+        "knownSubtotal": 0,
+        "unknownCount": 1,
+        "completeness": "partial",
+        "provenance": "unknown"
+      }
+    },
+    "externalEffects": "none",
+    "noChange": null,
+    "memory": {
+      "status": "not_requested",
+      "reason": null
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "apiVersion": "loopwright.dev/v1alpha1",
+  "kind": "TaskContract",
+  "metadata": {
+    "id": "example-update"
+  },
+  "spec": {
+    "goal": "Update the pinned package",
+    "taskpack": "package-update",
+    "target": {
+      "repository": "team/repository",
+      "baseRevision": "base-1",
+      "sourceRevision": "source-1",
+      "matrix": null
+    },
+    "scope": {
+      "writable": [
+        "packages/**"
+      ],
+      "protected": [
+        "packages/policy/**"
+      ]
+    },
+    "roles": [
+      {
+        "id": "builder",
+        "adapter": "pi",
+        "provider": "github-copilot",
+        "model": "exact-model",
+        "thinking": "high",
+        "tools": [
+          "read",
+          "mcp__probe__allowed"
+        ]
+      }
+    ],
+    "trustedContext": {
+      "revision": "context-1",
+      "discovery": "disabled",
+      "resources": []
+    },
+    "budgets": {
+      "wallTimeMs": 1000,
+      "totalTokens": 1000,
+      "perCallOutputTokens": 100,
+      "maxModelCalls": 10,
+      "maxConcurrency": 2,
+      "maxFormatRepairs": 0,
+      "maxImplementationRepairs": 2,
+      "maxTransportRetries": 1,
+      "enforcement": {
+        "wallTime": "hard_admission",
+        "tokens": "soft_accounting",
+        "modelCalls": "hard_admission",
+        "concurrency": "hard_admission",
+        "formatRepairs": "hard_admission",
+        "implementationRepairs": "hard_admission",
+        "transportRetries": "hard_admission"
+      }
+    },
+    "steps": [
+      {
+        "id": "build",
+        "kind": "agent",
+        "uses": "package.patch",
+        "roleId": "builder",
+        "dependsOn": []
+      }
+    ],
+    "acceptance": {
+      "required": [
+        "tests"
+      ],
+      "checks": [
+        {
+          "id": "tests",
+          "allowedEvidenceLevels": [
+            "synthetic_fixture"
+          ]
+        }
+      ]
+    }
+  }
+}
