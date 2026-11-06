@@ -21,3 +21,6 @@ A host must supply its own expected lock and authenticated current evidence to `
 For state integration, follow the [host protocol](../docs/state.md#host-protocol): create or explicitly reopen the same
 identity, claim authority, reserve, authorize once, and record authenticated observations or explicit reconciliation.
 These core JSON examples do not create a store, authenticate a receipt or grant a dispatch permit.
+
+The [Pi adapter lifecycle](pi-adapter.md) demonstrates public execute, metadata consumption, safe capture and cleanup
+using host-supplied authority and frozen inputs. It does not manufacture runtime identities or credentials.

@@ -1,0 +1,1 @@
+{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["mount","umount2","ptrace","unshare","setns","bpf","keyctl","reboot","kexec_load","init_module","finit_module","delete_module","open_by_handle_at"],"action":"SCMP_ACT_ERRNO","errnoRet":1}]}

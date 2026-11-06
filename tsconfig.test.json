@@ -9,6 +9,8 @@
     "packages/core/src/**/*.ts",
     "packages/core/test/**/*.ts",
     "packages/state/src/**/*.ts",
-    "packages/state/test/**/*.ts"
+    "packages/state/test/**/*.ts",
+    "packages/agent-pi/src/**/*.ts",
+    "packages/agent-pi/test/**/*.ts"
   ]
 }

@@ -11,12 +11,12 @@ npm run lint
 npm test
 ```
 
-Dependencies are development-only and exactly locked. The minimatch override pins its patched version
-for the development lint toolchain. No runtime dependency is installed for the core library.
+Dependencies are exactly locked. Core has no runtime dependencies; state consumes core, and the private Pi adapter
+uses pinned Pi 1.5.0 packages. The root minimatch override applies to the resolved graph, including SDK dependencies.
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
-Build emits `packages/core/dist` and `packages/state/dist`; test compilation emits `.test-build`.
+Build emits `packages/core/dist`, `packages/state/dist` and `packages/agent-pi/dist`; test compilation emits `.test-build`.
 Both are ignored, as are dependencies and root `.claude` scratch.
 Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored.
 Tests use Node's test runner and public package boundaries. Private constructor seams isolate clock/transaction
@@ -53,3 +53,30 @@ deduplication. Clock fixtures do not alter the host clock. Synthetic evidence do
 A bounded production-fence mutation was compiled successfully, made an existing public stale-owner assertion fail,
 and was restored byte-for-byte before rebuilding and measuring GREEN. This is regression sensitivity evidence,
 not a production behavior switch. See the specification's A01-A07 matrix for the individual acceptance obligations.
+
+## Pi adapter validation
+
+The root commands compile, lint and test the adapter as well as core/state. Deterministic adapter tests use controlled
+HTTP and private constructor seams; those seams are absent from package exports. They need no Docker or credentials.
+`npm run test:pi -- --case all` runs the adapter subset; selectors include session, requests, tools, mcp, lifecycle and dispositions.
+
+Separate native qualifications require Docker Desktop Linux arm64, the pinned base image, the installed locked graph,
+and the qualified macOS state runtime. Run root build and tests first, then:
+
+```sh
+npm run qualify:pi -- --case all
+npm run qualify:pi:live
+```
+
+The first command builds the derived image without network or pulling a new base, then runs both model selections,
+actual physical sends, context/parser controls, containment, MCP/codemode, recovery, dispositions, retained limits,
+context/parser and final owner/send-once mutation sensitivity, and descendant cleanup. Each case has its own finite deadline and records owned resource identities.
+It stops nonzero at the first failed or blocked case. Required local fixture configuration is described in the
+[adapter guide](pi-adapter.md#qualification-setup). A missing prerequisite is not a passing skipped test.
+
+The live command requires explicit estimated mode and a ready-token file; its default is BLOCKED before transport.
+It is excluded from `--case all` and normal tests. Preserve its original retained state and eight-attempt allowance.
+See [runtime evaluation](pi-runtime-evaluation.md#live-observations) for the exact scope and remaining unknowns.
+
+Whole-command deadline tests use a labeled simulated clock; they do not represent real 100 second SDK/provider timings.
+Affected native lifecycle cases run separately. Qualification socket selection and historical-script status are in the adapter guide.
