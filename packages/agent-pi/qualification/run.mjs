@@ -25,6 +25,9 @@ const cases = {
   'admission-mutations': ['admission-mutations.mjs', 30],
 };
 const selected = name === 'all' ? Object.keys(cases) : [name];
+const ownerIndex = process.argv.indexOf('--owner');
+const owner = ownerIndex < 0 ? null : process.argv[ownerIndex + 1];
+if (owner !== null && owner !== 'controller') throw new Error('Unsupported qualification owner');
 function prerequisite(key) {
   if (!existsSync('packages/agent-pi/dist/sdk-worker.js') || !existsSync('.test-build/packages/agent-pi/test/session-fixtures.js')) return 'COMPILED_FIXTURES_REQUIRED';
   if (['context-guard', 'parser-context-failures', 'mutations', 'admission-mutations'].includes(key)) return null;
@@ -49,7 +52,8 @@ else for (const key of selected) {
   const ownership = process.cwd() + '/.claude/s03-t0/outer-' + randomBytes(6).toString('hex') + '.json';
   try {
     const extra = key === 'limits' && process.argv.includes('--ledger-dir') ? ['--ledger-dir', process.argv[process.argv.indexOf('--ledger-dir') + 1]] : [];
-    const output = execFileSync(process.execPath, ['packages/agent-pi/qualification/' + script, ownership, ...caseArguments, ...extra], { timeout: seconds * 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4194304 });
+    const ownerArguments = key === 'runtime-image' && owner ? ['--owner', owner] : [];
+    const output = execFileSync(process.execPath, ['packages/agent-pi/qualification/' + script, ownership, ...caseArguments, ...extra, ...ownerArguments], { timeout: seconds * 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 4194304 });
     console.log(JSON.stringify({ case: key, result: JSON.parse(output) }, null, 2));
   } catch (error) {
     let cleanup = 'not_requested';

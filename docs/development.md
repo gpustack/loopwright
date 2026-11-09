@@ -16,7 +16,7 @@ uses pinned Pi 1.5.0 packages. The root minimatch override applies to the resolv
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
-Build emits `packages/core/dist`, `packages/state/dist` and `packages/agent-pi/dist`; test compilation emits `.test-build`.
+Build emits `dist` in core, state, agent-pi, controller and cli; test compilation emits `.test-build`.
 Both are ignored, as are dependencies and root `.claude` scratch.
 Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored.
 Tests use Node's test runner and public package boundaries. Private constructor seams isolate clock/transaction
@@ -80,3 +80,14 @@ See [runtime evaluation](pi-runtime-evaluation.md#live-observations) for the exa
 
 Whole-command deadline tests use a labeled simulated clock; they do not represent real 100 second SDK/provider timings.
 Affected native lifecycle cases run separately. Qualification socket selection and historical-script status are in the adapter guide.
+
+## Controller validation
+
+`npm run test:controller -- --case config|progress|verification|scheduling|recovery|artifacts` selects focused offline
+controller groups. It compiles current package outputs before tests that import public package roots. Root tests also
+exercise CLI argument parsing and actual subprocess dry-run/run/resume/status/inspect without Docker or credentials.
+The controller/CLI use only public core/state/adapter APIs. Test-only execution ports remain outside package exports.
+
+Native qualification uses the same cumulative local experiment authority and explicit owned evidence. Failed result,
+unknown effects, held reservations and observed/allocated time remain distinct. Image/daemon preparation is not native
+SDK or live-provider acceptance. See the qualification README and retained program evidence for their actual scope.

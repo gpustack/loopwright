@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { parseJsonRpcMessage, type JsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { DispatchPermit, OperationRecord } from '@loopwright/state';
-import { digestArtifact } from '@loopwright/core';
+import { digestArtifact, type ArtifactRef } from '@loopwright/core';
 import { canonical, digest, object } from './boundary.js';
 import { parseBoundedJson } from './context.js';
 import { Candidate } from './candidate.js';
@@ -48,14 +48,17 @@ export class Mcp {
     if (!('id' in value) && value.method === 'notifications/cancelled') { this.cancel((value.params as { requestId?: unknown } | undefined)?.requestId); return; }
     if (!('id' in value) && value.method !== 'notifications/initialized' || 'id' in value && value.method.startsWith('notifications/')) refuse('MCP_FAILED', '', { phase: 'tool' });
     this.#ready ??= this.#process.ready(AbortSignal.any([this.#abort.signal, AbortSignal.timeout(10000)])); await this.#ready;
-    if (!('id' in value)) { await this.#process.send(value, () => { signal.throwIfAborted(); if (this.#failed || this.#closed) refuse('MCP_FAILED', '', { phase: 'tool' }); }); return; }
+    if (!('id' in value)) {
+      const current = () => { signal.throwIfAborted(); if (this.#failed || this.#closed) refuse('MCP_FAILED', '', { phase: 'tool' }); stateValue(this.host.store.renew(this.host.authority), 'tool'); };
+      await this.#process.send(value, current, { identity: null, operation: null, permit: null, before: null, signal, assertCurrent: current, receive: message => this.#receive(message) }); return;
+    }
     const key = rpcKey(value.id); if (this.#used.has(key)) refuse('MCP_FAILED', '', { phase: 'tool' }); this.#used.add(key);
-    let operation: OperationRecord | null = null, permit: DispatchPermit | null = null, expected: Pending['expected'] = null;
+    let operation: OperationRecord | null = null, permit: DispatchPermit | null = null, expected: Pending['expected'] = null, before: ArtifactRef | null = null;
     if (value.method === 'tools/call') {
       if (!identity || identity.name !== 'mcp__workspace__read_file' || !this.input.policy.mcp.names.includes(identity.name)) refuse('TOOL_DENIED', '', { phase: 'tool' });
       const params = object(value.params, Object.keys(value.params ?? {})); if (Object.keys(params).some(name => !['name', 'arguments', '_meta'].includes(name)) || params.name !== 'read_file') refuse('TOOL_DENIED', '', { phase: 'tool' });
       const args = object(params.arguments, ['path']); if (typeof args.path !== 'string') refuse('TOOL_DENIED', '', { phase: 'tool' });
-      const file = await this.candidate.checkRead(args.path); expected = { path: file.path, digest: file.ref.digest.hex };
+      const file = await this.candidate.checkRead(args.path); expected = { path: file.path, digest: file.ref.digest.hex }; before = file.ref;
       const view = stateValue(this.host.store.inspect(), 'tool'); if (view.counts.operations >= this.input.policy.limits.operations) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
       const operationId = 'tool-' + digest(Buffer.from(canonical({ sessionId: this.input.sessionId, parent: identity.parentRequestId, callId: identity.callId, name: identity.name }))).hex.slice(0, 32), existing = this.host.store.getOperation(operationId);
       if (existing.ok) refuse('RECOVERY_REQUIRED', '', { phase: 'tool' }); if (existing.error.code !== 'RECORD_NOT_FOUND') stateValue(existing, 'tool');
@@ -70,7 +73,9 @@ export class Mcp {
     const pending: Pending = { key, message: value, reply, identity, signal, operation, permit, expected, sent: false, ended: false, progress: 0,
       abort: () => this.#fail('CANCELLED'), timer: setTimeout(() => this.#fail('DEADLINE'), absolute), idle: setTimeout(() => this.#fail('MCP_FAILED'), idle) };
     this.#pending.set(key, pending); signal.addEventListener('abort', pending.abort, { once: true });
-    try { await this.#process.send(value, () => { if (pending.sent || signal.aborted || this.#closed || this.#failed) refuse('MCP_FAILED', '', { phase: 'tool' }); if (operation && permit) guardLocalOperation(this.host, operation, permit, signal, this.#closed); else stateValue(this.host.store.renew(this.host.authority), 'tool'); pending.sent = true; }); }
+    const current = () => { if (signal.aborted || this.#closed || this.#failed) refuse('MCP_FAILED', '', { phase: 'tool' }); if (operation && permit) guardLocalOperation(this.host, operation, permit, signal, this.#closed); else stateValue(this.host.store.renew(this.host.authority), 'tool'); };
+    try { await this.#process.send(value, () => { if (pending.sent) refuse('MCP_FAILED', '', { phase: 'tool' }); current(); pending.sent = true; },
+      { identity, operation, permit, before, signal, assertCurrent: current, receive: message => this.#receive(message) }); }
     catch (error) { this.#fail(error instanceof PiFailure ? error.detail.code : 'MCP_FAILED'); throw error; }
   }
   async #receive(message: JsonRpcMessage): Promise<void> {

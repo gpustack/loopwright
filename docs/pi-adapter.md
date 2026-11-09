@@ -1,6 +1,6 @@
 # Isolated Pi adapter
 
-`@loopwright/agent-pi` is a private workspace package. It exposes `openPiAdapter` and readonly host types.
+`@loopwright/agent-pi` is a private workspace package. It preserves v1 `openPiAdapter` with fixed local stdio MCP and adds v2 exports for S04 controller integration.
 It executes one admitted role under the original TaskLock and S02 owner. The caller evaluates task acceptance.
 SDK 1.5.0 is selected; durable is unselected and pi-retry is disabled. See the [runtime evaluation](pi-runtime-evaluation.md).
 The [architecture decision](adr/0002-isolated-pi-sdk.md) records the alternatives and accepted costs.
@@ -15,11 +15,25 @@ The [architecture decision](adr/0002-isolated-pi-sdk.md) records the alternative
 | Context | Strict `proven_bound` default refuses; explicit immutable `estimated_guard` is available |
 | Accounting | `soft_only`; hard token admission and hard money limits are unsupported |
 | Tools | Exact role/policy intersection of read, bash, write, edit, codemode and `mcp__workspace__read_file` |
-| MCP | One fixed local read-only workspace server; no remote, token or OAuth transport |
+| MCP | v1: fixed local read-only stdio server; v2: approved sessionless HTTP JSON route |
 
 Requested, catalog-supported, session-effective and outbound-observed selection are separate capability fields.
 Outbound identity remains null until an admitted request is observed. These fields do not attest provider-internal effort.
 Local controlled HTTP and container qualifications passed. Live provider observations remain blocked without an explicit ready-token source.
+
+## S04 v2 controller and HTTP MCP exports
+
+`openPiAdapterV2(host, input)` opens the v2 adapter. `PiHostV2.resolveMcpCredential(binding)` is the dedicated
+host callback for an MCP bearer token, separate from the provider's `resolveCredential` callback.
+
+The `sessionless-http-json-v1` MCP policy specifies `destinationRef`, `endpoint`, `approvedAddresses` and
+`credentialRef`. Loopback `http://127.0.0.1:<port>/...` or `https://<dns-hostname>/...` (using SNI equal to the
+endpoint hostname and system trust roots) is required. Connections use a pinned approved IP; redirects,
+SSE, OAuth and session headers are unsupported. The host retains credentials and mediates the HTTP route.
+
+`describePiAdapterFiles()` returns `sdkIntegrity`, `restrictionDigest` and `localMcpScriptDigest` for static registry
+authoring. `decodePiCapture(input)` verifies and decodes retained native checkpoint workspace/session artifacts offline,
+without opening Docker or an adapter session. Neither static description nor decoding qualifies a live provider.
 
 ## Trust and execution
 

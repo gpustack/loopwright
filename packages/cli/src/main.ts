@@ -1,0 +1,81 @@
+#!/usr/bin/env node
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
+import { parseArguments, UsageError } from './arguments.js';
+import { initDraft, writeOutput } from './draft.js';
+const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
+export function encoded(value: unknown): string {
+  return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
+}
+async function stdout(value: string): Promise<void> {
+  if (Buffer.byteLength(value) > 1048576) throw new Error('CLI_OUTPUT_LIMIT');
+  await new Promise<void>((done, reject) => { const timer = setTimeout(() => reject(new Error('CLI_BACKPRESSURE')), 1000); process.stdout.write(value, error => { clearTimeout(timer); if (error) reject(error); else done(); }); });
+}
+async function stderr(value: string): Promise<void> {
+  if (Buffer.byteLength(value) > 1048576) throw new Error('CLI_OUTPUT_LIMIT');
+  await new Promise<void>((done, reject) => { const timer = setTimeout(() => reject(new Error('CLI_BACKPRESSURE')), 1000); process.stderr.write(value, error => { clearTimeout(timer); if (error) reject(error); else done(); }); });
+}
+export function diagnosticExit(error: ControllerDiagnostic): number {
+  if (error.code === 'RECOVERY_REQUIRED' || error.code === 'AUTHORITY_REFUSED' || error.code === 'OWNER_BUSY') return 7;
+  if (error.code === 'CAPABILITY_UNSUPPORTED' || error.code === 'MCP_AUTHENTICATION_REQUIRED') return 3;
+  if (error.code === 'BUDGET_EXHAUSTED' || error.code === 'ATTEMPT_LIMIT' || error.code === 'REPEAT_FAILURE') return 5;
+  if (error.code === 'DEADLINE') return 6;
+  if (['STATE_UNAVAILABLE', 'CLEANUP_FAILED', 'ARTIFACT_INVALID', 'OUTPUT_LIMIT'].includes(error.code)) return 8;
+  return ['admission', 'compile', 'configuration'].includes(error.phase) ? 2 : 4;
+}
+export function executionExit(value: CycleExecution, signal: string | null): number {
+  if (value.kind === 'incident') return value.incident.code === 'RECOVERY_REQUIRED' ? 7 : 8;
+  switch (value.result.spec.status) {
+    case 'completed': case 'no_change': return 0;
+    case 'blocked': return 3;
+    case 'failed': return 4;
+    case 'exhausted': return 5;
+    case 'expired': return 6;
+    case 'reconcile_required': return 7;
+    case 'cancelled': return signal === 'SIGTERM' ? 143 : 130;
+  }
+}
+export async function main(argv: readonly string[]): Promise<number> {
+  if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
+  if (argv.length === 1 && argv[0] === '--version') { await stdout('0.0.0\n'); return 0; }
+  let sequence = 0, runId: string | null = null, json = argv.includes('--json');
+  const emit = async (kind: Envelope['kind'], data: unknown, summary?: string) => { const envelope: Envelope = { version: 1, kind, sequence: ++sequence, runId, data }; if (!json && kind === 'diagnostic') { await stderr(encoded(summary ?? kind) + '\n'); return; } await stdout(json ? encoded(envelope) + '\n' : encoded(summary ?? kind) + '\n'); };
+  try {
+    const args = parseArguments(argv), get = (key: string) => args.values.get(key)!, output = args.values.get('output'); json = args.flags.has('json');
+    if (args.command === 'init') { await initDraft(get('directory'), args.flags.has('force')); await emit('status', { runId: null, source: 'unavailable', stage: 'draft', status: 'unsupported', currentState: null, checkpoint: null, cleanup: null, unavailable: ['currentState', 'checkpoint', 'cleanup'] }, 'Draft written; execution readiness unsupported.'); return 0; }
+    if (args.command === 'status' || args.command === 'inspect') {
+      runId = get('run-id'); const input = { runRoot: get('run-root'), runId };
+      const observed = args.command === 'status' ? await readStatus(input) : await inspectRun({ ...input, ...(output === undefined ? {} : { output }) });
+      if (!observed.ok) { await emit('diagnostic', observed.error, observed.error.code); return diagnosticExit(observed.error); }
+      const status = 'manifest' in observed.value ? observed.value.status! : observed.value;
+      await emit(args.command === 'status' ? 'status' : 'inspection', observed.value, 'source' in status ? status.source + ': ' + status.status : 'inspection'); return 'source' in status && status.source === 'unavailable' ? 8 : 0;
+    }
+    const loaded = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: args.values.has('repo') ? [resolve(get('repo'))] : [] });
+    if (!loaded.ok) { await emit('diagnostic', loaded.error, loaded.error.code); return diagnosticExit(loaded.error); }
+    if (args.command === 'check' || args.flags.has('dry-run')) {
+      const compiled = await compilePlan(loaded.value); if (!compiled.ok) { await emit('diagnostic', compiled.error, compiled.error.code); return diagnosticExit(compiled.error); }
+      if (output !== undefined) await writeOutput(output, Buffer.from(encoded(compiled.value) + '\n'));
+      await emit('plan', compiled.value, 'Plan checked; admission not performed; execution readiness not checked.'); return 0;
+    }
+    runId = get('run-id'); const abort = new AbortController(); let caughtSignal: string | null = null;
+    const interrupt = () => { caughtSignal ??= 'SIGINT'; abort.abort(); }, terminate = () => { caughtSignal ??= 'SIGTERM'; abort.abort(); };
+    process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);
+    try {
+      const input = { configuration: loaded.value, repository: resolve(get('repo')), runRoot: resolve(get('run-root')), runId, signal: abort.signal,
+        onEvent: async (event: unknown) => { if (json) await emit('event', event); else process.stderr.write('progress\n'); } };
+      const execution = args.command === 'resume' ? await resumeCycle(input) : await runCycle(input);
+      if (!execution.ok) { await emit('diagnostic', execution.error, execution.error.code); return diagnosticExit(execution.error); }
+      if (execution.value.kind === 'incident') await emit('incident', execution.value.incident, execution.value.incident.code);
+      else await emit('result', execution.value, execution.value.result.spec.status);
+      return executionExit(execution.value, caughtSignal);
+    } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
+  } catch (error) {
+    const code = error instanceof UsageError ? 'CLI_USAGE' : 'CLI_UNAVAILABLE';
+    await emit('diagnostic', { version: 1, code }, code); return error instanceof UsageError ? 2 : 8;
+  }
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => { process.exitCode = 8; });
+}

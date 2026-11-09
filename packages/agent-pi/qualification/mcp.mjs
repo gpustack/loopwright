@@ -26,10 +26,14 @@ const registry = { kind: 'restricted-roles-v1', dockerSocket: dockerSocket(), do
 const originalStart = OwnedContainer.prototype.start;
 OwnedContainer.prototype.start = async function(signal) { registry.roles.push({ directory: this.directory, name: this.name, labels: this.labels, image }); await persistRegistry(); return originalStart.call(this, signal); };
 const good = result => { assert.equal(result.ok, true); return result.value; };
-function input() {
+function input(mode) {
  const value = sessionInput(), task = structuredClone(value.lock.spec.contract); task.spec.roles[0].tools = ['read', 'codemode', 'mcp__workspace__read_file']; task.spec.budgets.wallTimeMs = 90000;
  value.lock = good(admitTask(task, { admissionId: 'admission-1', runId: 'run-1' })); value.policy.tools = task.spec.roles[0].tools;
- value.policy.mcp = { ...value.policy.mcp, scriptDigest, names: ['mcp__workspace__read_file'], effects: ['read_only'] }; value.policy.limits.toolWallMs = 2000;
+ value.policy.mcp = { ...value.policy.mcp, scriptDigest, names: ['mcp__workspace__read_file'], effects: ['read_only'] };
+ // REVIEW-069 R-C: the tightened 2000ms wall stays only on the deadline/limit fixture modes whose assertions bound
+ // sub-3s timing; every settled/guard mode uses the production 10000ms default (S03 caller rule <=10s) so one
+ // nested in-container MCP roundtrip plus first tool-process boot cannot trip a false DEADLINE.
+ value.policy.limits.toolWallMs = ['quiet', 'progress', 'frame-flood', 'total-flood', 'infinite', 'output'].includes(mode) ? 2000 : 10000;
  value.policy.mcp.absoluteTimeoutSeconds = 3;
  const bytes = Buffer.from('PROTECTED_BASELINE'); value.candidate.artifacts.push({ name: 'packages/policy/config.txt', bytes }); value.candidate.manifest.spec.entries.push(good(digestArtifact('packages/policy/config.txt', bytes))); return value;
 }
@@ -68,7 +72,7 @@ class FixtureProcess extends McpProcess {
 }
 const selected = process.argv[4] ?? 'all', cases = selected === 'positive' ? ['direct', 'nested'] : selected === 'fixtures' ? Object.keys(fixtureModes) : selected === 'all' ? Object.keys(definitions) : [selected]; assert.ok(cases.every(mode => definitions[mode])); let passed = false;
 async function fixtureEffectControl() {
- const f = await requestFixture(undefined, input), candidate = join(f.host.directory, 'fixture-control'); let pipe, client, absent = false;
+ const f = await requestFixture(undefined, () => input('control')), candidate = join(f.host.directory, 'fixture-control'); let pipe, client, absent = false;
  const facts = { level: 'Independent trusted fixture positive control: direct public MCP client into owned scratch; bypasses production task authorization only for this test', physical: 'unknown', marker: 'unknown' };
  try {
   await mkdir(candidate, { mode: 0o755 }); for (const artifact of f.input.candidate.artifacts) { await mkdir(join(candidate, artifact.name, '..'), { recursive: true, mode: 0o755 }); await writeFile(join(candidate, artifact.name), artifact.bytes, { mode: 0o444 }); }
@@ -91,7 +95,7 @@ async function fixtureEffectControl() {
 try {
  if (selected === 'fixtures' || selected === 'all') await fixtureEffectControl();
  for (const mode of cases) {
-  const call = definitions[mode], f = await requestFixture(index => ({ status: 200, body: stream(index === 1 ? call : null) }), input); let adapter;
+  const call = definitions[mode], f = await requestFixture(index => ({ status: 200, body: stream(index === 1 ? call : null) }), () => input(mode)); let adapter;
   const facts = { mode, image, scriptDigest, phase: 'setup', physical: 'unknown', state: { available: false }, operations: 'unknown', receipts: { available: false }, requests: [], faults: [], mcpSent: [], forwardedProgressFrames: 0, forwardedProgressBytes: 0, closed: 'unknown' }; let fixtureProcess;
   const persist = async () => { facts.physical = f.physical(); facts.state = boundedState(f.host.store); facts.receipts = await receiptDigests(f.host.artifactsDirectory); const operations = f.host.store.listOperations({ limit: 32, cursor: null }); facts.operations = operations.ok && operations.value.next === null ? operations.value.items.map(record => ({ id: record.intent.operationId, effect: record.intent.effect, state: record.state, target: record.intent.targetIdentity, outcome: record.initialReceipt?.outcome ?? null })) : 'unknown'; await writeFile(join(raw, mode + '.json'), JSON.stringify(facts)); };
   try {

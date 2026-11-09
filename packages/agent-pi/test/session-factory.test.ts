@@ -26,8 +26,9 @@ function fixture() {
   }) };
   return { input, host, ports, counts: () => ({ starts, closes, environments }), cleanup: () => { store.close(); rmSync(directory, { recursive: true, force: true }); } };
 }
-test('public package exports one factory and keeps test/SDK/state constructors internal', async () => {
-  const exported = await import('../src/index.js'); assert.deepEqual(Object.keys(exported), ['openPiAdapter']);
+test('public package exports only approved factories and passive APIs and keeps test/SDK/state constructors internal', async () => {
+  const exported = await import('../src/index.js');
+  assert.deepEqual(Object.keys(exported), ['decodePiCapture', 'describePiAdapterFiles', 'openPiAdapter', 'openPiAdapterV2']);
 });
 test('factory validates before any runtime or credential effect and owns capability facts', async () => {
   const f = fixture();

@@ -4,14 +4,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
 import { createLocalRun, type StateResult, type RequestAdmission } from '@loopwright/state';
+import { admitTask } from '@loopwright/core';
 import type { PiHost } from '../src/types.js';
 import { sessionInput } from './session-fixtures.js';
 import { digest } from '../src/boundary.js';
 import { daemonFixture } from './daemon-fixtures.js';
 export function stateGood<T>(result: StateResult<T>): T { assert.equal(result.ok, true, JSON.stringify(result)); if (!result.ok) throw new Error('fixture state failed'); return result.value; }
 export async function requestFixture(plan?: (call: number) => { status: number; body: string; headers?: Record<string, string> }, createInput = sessionInput, leaseMs = 1000) {
-  const input = createInput(), directory = mkdtempSync(join(realpathSync(tmpdir()), 'loopwright-pi-request-'));
+  let input = createInput(); const directory = mkdtempSync(join(realpathSync(tmpdir()), 'loopwright-pi-request-'));
   mkdirSync(join(directory, 'runtime')); mkdirSync(join(directory, 'artifacts')); const daemon = daemonFixture(directory);
+  // REVIEW-072: under S03 qualification the s03-io supervisor instrumentation stretches constructAdapter past a
+  // 2000ms task wall; calibrate only that frozen fixture value (deadline mode) before the store is created.
+  if (process.env.S04_S03_SCOPE && input.lock.spec.contract.spec.budgets.wallTimeMs === 2000) {
+    const task = structuredClone(input.lock.spec.contract) as { spec: { budgets: { wallTimeMs: number } } };
+    task.spec.budgets.wallTimeMs = 5000;
+    const admitted = admitTask(task, { admissionId: 'admission-1', runId: input.lock.spec.runId });
+    assert.equal(admitted.ok, true);
+    if (admitted.ok) input = { ...input, lock: admitted.value };
+  }
   const identity = { directory: join(directory, 'state'), storeId: 'store-1', lock: input.lock, policy: { version: 1 as const, leaseMs, cost: 'observe_only' as const },
     binding: { coreApiVersion: 'loopwright.dev/v1alpha1' as const, hostVersion: 'fixture', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: input.policy.resourceVersion, clockEpoch: 'fixture-boot' } };
   const store = stateGood(createLocalRun(identity)), view = stateGood(store.inspect());

@@ -1,6 +1,6 @@
 # Loopwright
 
-Private TypeScript contracts, evidence-bound acceptance, persistent local state and an isolated Pi adapter.
+Private TypeScript contracts, evidence-bound acceptance, persistent local state, an isolated Pi adapter, and a bounded local controller/CLI.
 The core library validates data and evaluates caller-selected evidence. The state package adds shared admission,
 fenced ownership, intent/receipt journals and checkpoints over retained local SQLite.
 The Pi adapter connects admitted roles to pinned SDK sessions, contained tools and a host-owned request sender.
@@ -33,3 +33,6 @@ Explicit estimated mode retains context uncertainty and soft token accounting.
 Read the [runtime evaluation](docs/pi-runtime-evaluation.md) for SDK/durable selection, optional-plugin disposition,
 finite limits and measured local costs. Live-provider qualification is blocked without an explicit ready-token source.
 Docker and live checks are separate commands; the normal test total does not imply either passed.
+
+Read [the local controller and CLI](docs/controller.md) for explicit trusted configuration, finite cycles, safe resume,
+read-only inspection and bounded public exports. Static plans and offline test results carry their own evidence scope.

@@ -11,18 +11,22 @@
   "workspaces": [
     "packages/core",
     "packages/state",
-    "packages/agent-pi"
+    "packages/agent-pi",
+    "packages/controller",
+    "packages/cli"
   ],
   "scripts": {
-    "build": "npm run build:core && tsc -p packages/state/tsconfig.json && tsc -p packages/agent-pi/tsconfig.json",
+    "build": "npm run build:core && tsc -p packages/state/tsconfig.json && tsc -p packages/agent-pi/tsconfig.json && tsc -p packages/controller/tsconfig.json && tsc -p packages/cli/tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
-    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/core/test/*.test.js .test-build/packages/state/test/*.test.js .test-build/packages/agent-pi/test/*.test.js packages/agent-pi/qualification/absence.test.mjs packages/agent-pi/qualification/docker-socket.test.mjs",
+    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/core/test/*.test.js .test-build/packages/state/test/*.test.js .test-build/packages/agent-pi/test/*.test.js .test-build/packages/controller/test/*.test.js .test-build/packages/cli/test/*.test.js packages/agent-pi/qualification/absence.test.mjs packages/agent-pi/qualification/docker-socket.test.mjs packages/controller/qualification/schedule.test.mjs",
     "build:core": "tsc -p packages/core/tsconfig.json",
     "pretypecheck": "npm run build:core",
     "pretest": "npm run build:core",
     "qualify:pi": "node packages/agent-pi/qualification/run.mjs",
+    "qualify:controller": "node packages/controller/qualification/run.mjs",
     "test:pi": "node packages/agent-pi/qualification/test-runner.mjs",
+    "test:controller": "node packages/controller/qualification/test-runner.mjs",
     "qualify:pi:live": "node packages/agent-pi/qualification/live.mjs"
   },
   "devDependencies": {

@@ -5,11 +5,23 @@ import { canonical } from './boundary.js';
 import { parseBoundedJson } from './context.js';
 import { refuse } from './errors.js';
 import type { PiHost, PiOpenInput } from './types.js';
+import type { ArtifactRef } from '@loopwright/core';
+import type { DispatchPermit, OperationRecord } from '@loopwright/state';
+import type { ToolIdentity } from './tools.js';
+export interface McpDispatchContext {
+  readonly identity: (ToolIdentity & { readonly parentRequestId: string }) | null;
+  readonly operation: OperationRecord | null;
+  readonly permit: DispatchPermit | null;
+  readonly before: ArtifactRef | null;
+  readonly signal: AbortSignal;
+  readonly assertCurrent: () => void;
+  readonly receive: (message: JsonRpcMessage) => Promise<void>;
+}
 export interface McpProcessPort {
   on(event: 'message', listener: (message: JsonRpcMessage) => void): this;
   on(event: 'failed', listener: () => void): this;
   ready(signal: AbortSignal): Promise<void>;
-  send(message: JsonRpcMessage, guard: () => void): Promise<void>;
+  send(message: JsonRpcMessage, guard: () => void, context?: McpDispatchContext): Promise<void>;
   close(): Promise<ContainerExit | null>;
 }
 /** Raw stdio JSON-RPC belongs only to the separate, owned, read-only MCP role. */

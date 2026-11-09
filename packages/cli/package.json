@@ -1,0 +1,6 @@
+{
+  "name": "@loopwright/cli", "version": "0.0.0", "private": true, "type": "module",
+  "engines": { "node": "26.13.0" },
+  "bin": { "loopwright": "./dist/main.js" },
+  "dependencies": { "@loopwright/controller": "0.0.0" }
+}

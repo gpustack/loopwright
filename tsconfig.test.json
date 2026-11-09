@@ -11,6 +11,10 @@
     "packages/state/src/**/*.ts",
     "packages/state/test/**/*.ts",
     "packages/agent-pi/src/**/*.ts",
-    "packages/agent-pi/test/**/*.ts"
+    "packages/agent-pi/test/**/*.ts",
+    "packages/controller/src/**/*.ts",
+    "packages/controller/test/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/cli/test/**/*.ts"
   ]
 }
