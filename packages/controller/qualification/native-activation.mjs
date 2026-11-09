@@ -51,7 +51,7 @@ export async function runApprovedNativeBootstrap(manifestRef,wire,challenge){
 
 /** Fixed R064/065/066 controller-owned S03 supervisor; scope records and env cannot issue membership. */
 export async function runApprovedS03(bootstrap){
-  if(resolve('.')!=='/Users/thxcode/orca/workspaces/loopwright/loopwright-s04-controller'||resolve(process.argv[1]??'')!==resolve('packages/controller/qualification/delivery-s03.mjs')||process.argv.length!==6||process.argv[2]!=='--case'||process.argv[4]!=='--owner'||process.argv[5]!=='controller')fail('NATIVE_ACTIVATION_HELD');
+  if(resolve('.')!=='/Users/thxcode/orca/workspaces/loopwright/loopwright-s04-controller'||resolve(process.argv[1]??'')!==resolve('packages/controller/qualification/delivery-pi.mjs')||process.argv.length!==6||process.argv[2]!=='--case'||process.argv[4]!=='--owner'||process.argv[5]!=='controller')fail('NATIVE_ACTIVATION_HELD');
   const activation=Object.freeze({});activations.add(activation);
-  try{const {executeS03Group}=await import('./delivery-s03.mjs');return await executeS03Group(activation,bootstrap,process.argv[3]);}finally{activations.delete(activation);}
+  try{const {executeS03Group}=await import('./delivery-pi.mjs');return await executeS03Group(activation,bootstrap,process.argv[3]);}finally{activations.delete(activation);}
 }

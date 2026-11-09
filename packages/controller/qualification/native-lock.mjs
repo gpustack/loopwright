@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { constants, openSync, closeSync, fstatSync, lstatSync, writeFileSync, fsyncSync, unlinkSync, renameSync, existsSync } from 'node:fs';
 import { canonical, nonce, same, sha, readPrivate, checkedRef, syncParent, exclusive, fail, localOwner } from './native-context.mjs';
-import { s03DebitScope, applyS03Debit } from './s03-scope.mjs';
+import { s03DebitScope, applyS03Debit } from './pi-scope.mjs';
 import { claimLauncherBootstrap,finishLauncherBootstrap } from './native-preflight-launcher.mjs';
 const parentTimes=new WeakMap();
 const s03Debits=new WeakMap();

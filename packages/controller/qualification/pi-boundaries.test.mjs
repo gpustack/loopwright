@@ -8,15 +8,15 @@ import {readFileSync,writeFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {mkdirSync,mkdtempSync,rmSync,symlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {generatedCpuActor} from './s03-fixtures.mjs';
-import {keepReplacementAlive} from './s03-crash-lease.mjs';
+import {generatedCpuActor} from './pi-fixtures.mjs';
+import {keepReplacementAlive} from './pi-crash-lease.mjs';
 import {createLocalRun} from '../../state/dist/index.js';
-import {s03Groups,s03Caps} from './s03-scope.mjs';
-import {publicStateObserver} from './s03-observer.mjs';
-import {collectCopiedS03Closure,retainS03Output} from './s03-closure.mjs';
+import {s03Groups,s03Caps} from './pi-scope.mjs';
+import {publicStateObserver} from './pi-observer.mjs';
+import {collectCopiedS03Closure,retainS03Output} from './pi-closure.mjs';
 import {charges} from './native-ledger.mjs';
 import { sessionInput } from '../../../.test-build/packages/agent-pi/test/session-fixtures.js';
-import {copiedS03Fixture} from './s03-copied-fixture.mjs';
+import {copiedS03Fixture} from './pi-copied-fixture.mjs';
 import {canonical,sha,exclusive,checkedRef} from './native-context.mjs';
 const actual=resolve('.claude/s04-qualification/budget.json'),actualBefore=readFileSync(actual);
 test('fixed fifteen group envelope matches R066 and independent raw/admission paths have no host dispatch bypass',()=>{
@@ -26,12 +26,12 @@ test('fixed fifteen group envelope matches R066 and independent raw/admission pa
 });
 test('original absolute cutoff, changed owner birth/boot and dead original parent deny BEFORE mocked lower',()=>{
   for(const mode of ['clock','birth','boot']){const f=copiedS03Fixture('session',mode==='clock'?-100:100000);if(mode!=='clock'){const book=JSON.parse(readFileSync(f.path));book.qualificationReservations.entries.at(-1).owner[mode]='changed';writeFileSync(f.path,canonical(book)+'\n',{mode:0o600});}let lower=0;assert.throws(()=>{f.debit(f.input('provider','denied'));lower++;});assert.equal(lower,0);}
-  const module=fileURLToPath(new URL('./s03-copied-fixture.mjs',import.meta.url)),lock=fileURLToPath(new URL('./native-lock.mjs',import.meta.url)),output=spawnSync(process.execPath,['--input-type=module','-e',`import {copiedS03Fixture} from ${JSON.stringify(module)};const f=copiedS03Fixture();process.stdout.write(JSON.stringify({path:f.path,input:f.input('provider','after-death')}));`],{timeout:10000,encoding:'utf8'});assert.equal(output.status,0,output.stderr);const dead=JSON.parse(output.stdout),probe=spawnSync(process.execPath,['--input-type=module','-e',`import {debitS03Reservation} from ${JSON.stringify(lock)};const f=JSON.parse(process.argv[1]);debitS03Reservation(f.path,f.input,{copied:true});process.stdout.write('LOWER');`,JSON.stringify(dead)],{timeout:10000,encoding:'utf8'});assert.notEqual(probe.status,0);assert.equal(probe.stdout,'');
+  const module=fileURLToPath(new URL('./pi-copied-fixture.mjs',import.meta.url)),lock=fileURLToPath(new URL('./native-lock.mjs',import.meta.url)),output=spawnSync(process.execPath,['--input-type=module','-e',`import {copiedS03Fixture} from ${JSON.stringify(module)};const f=copiedS03Fixture();process.stdout.write(JSON.stringify({path:f.path,input:f.input('provider','after-death')}));`],{timeout:10000,encoding:'utf8'});assert.equal(output.status,0,output.stderr);const dead=JSON.parse(output.stdout),probe=spawnSync(process.execPath,['--input-type=module','-e',`import {debitS03Reservation} from ${JSON.stringify(lock)};const f=JSON.parse(process.argv[1]);debitS03Reservation(f.path,f.input,{copied:true});process.stdout.write('LOWER');`,JSON.stringify(dead)],{timeout:10000,encoding:'utf8'});assert.notEqual(probe.status,0);assert.equal(probe.stdout,'');
 });
 test('copied environment, wrong owner route and decoded records cannot activate actual native work',()=>{
   const f=copiedS03Fixture(),wire=Buffer.from(canonical({path:f.path,base:f.base,key:'unregistered'})).toString('base64url');
-  const preload=resolve('packages/controller/qualification/s03-count-preload.mjs'),child=spawnSync(process.execPath,['--import',preload,'-e','process.stdout.write("LOWER")'],{env:{PATH:process.env.PATH,S04_S03_SCOPE:wire},encoding:'utf8',timeout:10000});assert.notEqual(child.status,0);assert.equal(child.stdout,'');
-  for(const args of [['--case','unknown','--owner','controller'],['--case','session','--owner','foreign']]){const r=spawnSync(process.execPath,['packages/controller/qualification/delivery-s03.mjs',...args],{encoding:'utf8',timeout:10000});assert.notEqual(r.status,0);assert.equal(r.stdout,'');}
+  const preload=resolve('packages/controller/qualification/pi-count-preload.mjs'),child=spawnSync(process.execPath,['--import',preload,'-e','process.stdout.write("LOWER")'],{env:{PATH:process.env.PATH,S04_S03_SCOPE:wire},encoding:'utf8',timeout:10000});assert.notEqual(child.status,0);assert.equal(child.stdout,'');
+  for(const args of [['--case','unknown','--owner','controller'],['--case','session','--owner','foreign']]){const r=spawnSync(process.execPath,['packages/controller/qualification/delivery-pi.mjs',...args],{encoding:'utf8',timeout:10000});assert.notEqual(r.status,0);assert.equal(r.stdout,'');}
   assert.deepEqual(readFileSync(actual),actualBefore);
 });
 function closedCpu(){
@@ -116,7 +116,7 @@ test('generated mutation actors accept the frozen probe raw tmpdir path and stil
 });
 
 test('an unclosed synchronous launch closes via its proven-dead actor while alive-actor and node variants refuse',()=>{
-  const entryPath=resolve('packages/controller/qualification/s03-copied-fixture.mjs'),syncIdentity=()=>({entry:entryPath,argv:sha(canonical([entryPath])),cpuOnly:false,generated:null,child:null,closed:false,result:null});
+  const entryPath=resolve('packages/controller/qualification/pi-copied-fixture.mjs'),syncIdentity=()=>({entry:entryPath,argv:sha(canonical([entryPath])),cpuOnly:false,generated:null,child:null,closed:false,result:null});
   // Positive: a fixture descendant registers an unclosed synchronous cleanup launch, then dies before closure collects.
   const f=closedCpu();
   const child=spawnSync(process.execPath,['--input-type=module','-e',`import {debitS03Reservation} from ${JSON.stringify(fileURLToPath(new URL('./native-lock.mjs',import.meta.url)))};const f=JSON.parse(process.argv[1]);debitS03Reservation(f.path,{...f.base,kind:'cleanup-process',key:f.key,units:0,identity:f.identity},{copied:true});`,JSON.stringify({path:f.path,base:f.base,key:'sync-launch-cut',identity:syncIdentity()})],{timeout:10000,encoding:'utf8'});

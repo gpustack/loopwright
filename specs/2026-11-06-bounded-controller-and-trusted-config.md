@@ -348,7 +348,7 @@ is not used under the per-group v2 reservation ledger); controller-owned native 
 node packages/controller/qualification/delivery-native.mjs --case cycle --phase initial|finalController
 node packages/controller/qualification/delivery-native.mjs --case repair --phase initial|finalController
 node packages/controller/qualification/delivery-preflight.mjs
-node packages/controller/qualification/delivery-s03.mjs --case <group> --owner controller
+node packages/controller/qualification/delivery-pi.mjs --case <group> --owner controller
 ```
 
 Qualification exits 0 only for a passed selected group, 1 for a failed assertion, and 2 for a blocked prerequisite.
@@ -1130,7 +1130,7 @@ or actual resource limits. An actual native restart still requires its concrete 
   equality job. Ship reviews this core composition; missing/forged/stale/wrong-producer proof and last-byte mutations
   cannot become success. Keep a changed completed case with honest failed implicit equality.
   Verify: `npm ci`; `npm run build`; `npm run typecheck`; `npm run lint`; `npm test`;
-  `node packages/controller/qualification/delivery-native.mjs --case cycle|repair --phase finalController`; `node packages/controller/qualification/delivery-preflight.mjs`; `node packages/controller/qualification/delivery-s03.mjs --case <group> --owner controller`;
+  `node packages/controller/qualification/delivery-native.mjs --case cycle|repair --phase finalController`; `node packages/controller/qualification/delivery-preflight.mjs`; `node packages/controller/qualification/delivery-pi.mjs --case <group> --owner controller`;
   public CLI help/example checks and spec/content/scope/signoff audits.
 
 T0 is gated feasibility implementation. Its approval does not permit broadening the adapter.

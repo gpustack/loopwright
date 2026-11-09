@@ -1,4 +1,4 @@
-import { s03Groups } from './s03-scope.mjs';
+import { s03Groups } from './pi-scope.mjs';
 export const qualificationMaxima = Object.freeze({ provider: 960, mcp: 1728, containers: 896 });
 export const phaseLimits = Object.freeze({ t0: 320, initial: 1500, finalPi: 1900, finalController: 1380 });
 export const leaves = Object.freeze({
@@ -14,7 +14,7 @@ export const leaves = Object.freeze({
   secrets: ['native-fixtures.mjs', 60],
   'image-preflight': ['native-image-inspector.mjs', 750],
   'derived-image-build': ['delivery-build.mjs', 120],
-  ...Object.fromEntries(Object.keys(s03Groups).map(group=>['s03-'+group,['delivery-s03.mjs',group==='recovery'?810:group==='limits'?920:120]])),
+  ...Object.fromEntries(Object.keys(s03Groups).map(group=>['s03-'+group,['delivery-pi.mjs',group==='recovery'?810:group==='limits'?920:120]])),
 });
 export const nativeActivationHeld = () => true;
 const aliases = Object.freeze({ feasibility: ['parser-descriptor', 'capture-binding'], 'mcp-auth': ['mcp-http', 'mcp-tls', 'mcp-credentials'] });

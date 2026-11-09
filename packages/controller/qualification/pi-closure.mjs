@@ -3,7 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {readPrivate,checkedRef,sha,canonical,exclusive,localOwner,same,monotonic,fail} from './native-context.mjs';
 import {join} from 'node:path';
 import {requireNativeActivation} from './native-activation.mjs';
-import {s03Budget,s03DebitScope} from './s03-scope.mjs';
+import {s03Budget,s03DebitScope} from './pi-scope.mjs';
 const nativeRead=spawnSync,closures=new WeakMap();
 const need=v=>{if(!v)fail('QUALIFICATION_S03_CLOSURE');};
 /** Private original-owner closure, not a NativeTerminal, measured use, permit, or serialized grant. */

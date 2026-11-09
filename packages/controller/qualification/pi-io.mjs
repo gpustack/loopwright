@@ -10,14 +10,14 @@ import {readFileSync,existsSync,realpathSync,readdirSync} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {canonical,sha,nonce,localOwner,monotonic,same,exclusive,fail} from './native-context.mjs';
-import {s03DebitScope,s03ActorArgv,fixtureGroups} from './s03-scope.mjs';
+import {s03DebitScope,s03ActorArgv,fixtureGroups} from './pi-scope.mjs';
 import {debitS03Reservation,observeS03Container} from './native-lock.mjs';
-import {publicStateObserver,physicalObservation} from './s03-observer.mjs';
-import {daemonLiteral,fixtureSocket,fakeInfoCli,generatedCpuActor,admissionTransport} from './s03-fixtures.mjs';
+import {publicStateObserver,physicalObservation} from './pi-observer.mjs';
+import {daemonLiteral,fixtureSocket,fakeInfoCli,generatedCpuActor,admissionTransport} from './pi-fixtures.mjs';
 // Saved before installation: metadata and binding observations must not recursively use the wrappers.
 const original={...childProcess,fetch:globalThis.fetch,listen:net.Server.prototype.listen,connect:net.Socket.prototype.connect,http:http.request,https:https.request};
 const need=v=>{if(!v)fail('QUALIFICATION_S03_LOWER');};
-const preload=pathToFileURL(resolve('packages/controller/qualification/s03-count-preload.mjs')).href;
+const preload=pathToFileURL(resolve('packages/controller/qualification/pi-count-preload.mjs')).href;
 export function installS03Io({path,base,plan,copied=false,targets=null}){
   need(copied?targets&&targets.original:!targets&&path===resolve('.claude/s04-qualification/budget.json'));
   const cp=targets?.childProcess??childProcess,globals=targets?.globals??globalThis;

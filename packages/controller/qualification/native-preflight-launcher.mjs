@@ -86,13 +86,13 @@ export function beginApprovedDeliveryBootstrap(){
 }
 /** Same original common lock/time path, fixed S03 owner route only; no environment grants. */
 export function beginApprovedS03Bootstrap(){
-  need(resolve('.')===project&&resolve(process.argv[1]??'')===join(project,'packages/controller/qualification/delivery-s03.mjs')&&process.argv.length===6&&process.argv[2]==='--case'&&process.argv[4]==='--owner'&&process.argv[5]==='controller','CONTEXT');
+  need(resolve('.')===project&&resolve(process.argv[1]??'')===join(project,'packages/controller/qualification/delivery-pi.mjs')&&process.argv.length===6&&process.argv[2]==='--case'&&process.argv[4]==='--owner'&&process.argv[5]==='controller','CONTEXT');
   need(['runtime-image','session','session-opus','physical-sends','context-guard','parser-context-failures','runtime-path','containment','mcp','recovery','dispositions','limits','cleanup','mutations','admission-mutations'].includes(process.argv[3]),'CONTEXT');
   return openBootstrap(actualBudget,'s03');
 }
 /** Consume only this original process's settled one-use attempt; UNKNOWN accounting keeps every blocker. */
 export function finishDeliveryBootstrap(handle,accounting,directory){
-  const value=bootstraps.get(handle);need(value&&value.path===actualBudget&&value.state==='transferred'&&value.attempt&&['delivery-preflight.mjs','delivery-s03.mjs'].some(name=>resolve(process.argv[1]??'')===join(project,'packages/controller/qualification',name)),'BOOTSTRAP_STATE');
+  const value=bootstraps.get(handle);need(value&&value.path===actualBudget&&value.state==='transferred'&&value.attempt&&['delivery-preflight.mjs','delivery-pi.mjs'].some(name=>resolve(process.argv[1]??'')===join(project,'packages/controller/qualification',name)),'BOOTSTRAP_STATE');
   const ack=JSON.parse(readOriginalRef(accounting.ack)),receipt=JSON.parse(readOriginalRef(accounting.receipt));
   need(ack.id===receipt.commandId&&canonical(ack.transition.receipt)===canonical(accounting.receipt)&&canonical(ack.pending)===canonical(receipt.pending)&&receipt.startedMonotonicMs===value.started&&ack.owner.pid===process.pid,'SETTLED_IDENTITY');
   const lock=value.path+'.lock',fd=openSync(lock,constants.O_CREAT|constants.O_EXCL|constants.O_WRONLY|constants.O_NOFOLLOW,0o600);let complete=false;

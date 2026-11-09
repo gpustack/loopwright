@@ -7,8 +7,8 @@ import { withBudgetLock,beginParentTimeFence,parentTimeState,sealParentTimeFence
 import { validateUsage, phaseLimits, allowance, qualificationMaxima } from './schedule.mjs';
 import { requireNativeActivation, requireNativePreflightActivation } from './native-activation.mjs';
 import { validateTerminalGraph } from './native-terminal.mjs';
-import { validateS03Entry, readS03Plan, s03Groups, s03Identity, s03PriorIdentity, s03ActiveIdentity } from './s03-scope.mjs';
-import { originalS03Closure } from './s03-closure.mjs';
+import { validateS03Entry, readS03Plan, s03Groups, s03Identity, s03PriorIdentity, s03ActiveIdentity } from './pi-scope.mjs';
+import { originalS03Closure } from './pi-closure.mjs';
 import { readBridgeLeaf } from './native-bridge.mjs';
 const maxima = qualificationMaxima, leafMaxima = { provider: 64, mcp: 128, containers: 64 };
 const reservations = new WeakMap();

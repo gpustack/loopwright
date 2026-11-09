@@ -3,7 +3,7 @@ import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {NativeLedger} from './native-ledger.mjs';
 import {debitS03Reservation,parentTimeState} from './native-lock.mjs';
-import {s03Caps,s03ActiveIdentity} from './s03-scope.mjs';
+import {s03Caps,s03ActiveIdentity} from './pi-scope.mjs';
 import {exclusive,canonical,sha,localOwner,monotonic} from './native-context.mjs';
 const actual=resolve('.claude/s04-qualification/budget.json'),actualBefore=readFileSync(actual),entry=fileURLToPath(import.meta.url);
 export function copiedS03Fixture(group='session',windowMs=100000,identity=s03ActiveIdentity){

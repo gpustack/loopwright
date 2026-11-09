@@ -1,8 +1,8 @@
 /* global process */
 import {readFileSync} from 'node:fs';
 import * as original from '../../state/dist/index.js';
-import {stateObserver} from './s03-count-preload.mjs';
-import {keepReplacementAlive} from './s03-crash-lease.mjs';
+import {stateObserver} from './pi-count-preload.mjs';
+import {keepReplacementAlive} from './pi-crash-lease.mjs';
 export function createLocalRun(input){
   const opened=original.createLocalRun(input);
   if(opened.ok&&process.argv[1]?.endsWith('/recovery-crashes.mjs'))keepReplacementAlive(opened.value);

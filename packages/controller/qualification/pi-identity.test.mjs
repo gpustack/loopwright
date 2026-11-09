@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { NativeLedger, validateBudget } from './native-ledger.mjs';
-import { copiedS03Fixture } from './s03-copied-fixture.mjs';
-import { s03Identity, s03PriorIdentity, s03ActiveIdentity } from './s03-scope.mjs';
+import { copiedS03Fixture } from './pi-copied-fixture.mjs';
+import { s03Identity, s03PriorIdentity, s03ActiveIdentity } from './pi-scope.mjs';
 import { exclusive, canonical, sha } from './native-context.mjs';
 
 const actualPath = resolve('.claude/s04-qualification/budget.json');

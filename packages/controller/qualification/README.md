@@ -64,10 +64,10 @@ actual source blobs and Pi workspace/session captures, without treating logical 
 or interpreting user file contents as storage references. Missing actual backing bytes still fail qualification.
 
 
-The fixed controller-owned `delivery-s03.mjs --case <group> --owner controller` wrapper runs the unchanged original
+The fixed controller-owned `delivery-pi.mjs --case <group> --owner controller` wrapper runs the unchanged original
 S03 scripts under the same held qualification book and original parent clock. REVIEW064/065/066 authorize the
 fifteen-group prospective envelope192containers/224provider/448MCP, within the single global512/512/1024 limits
-(containers/provider/MCP). Current table and source-derived raw precharges live in `s03-scope.mjs` and the retained
+(containers/provider/MCP). Current table and source-derived raw precharges live in `pi-scope.mjs` and the retained
 plan; an attempted allocation is immutable. Same-book child debits cannot reserve/refund/settle quota or issue S02
 permission. Genuine public S02 dispatch methods run unchanged; the facade debits before returning their original
 permits, then lower gates re-read original public permission after private counting. The admission mutation fixture
@@ -81,5 +81,5 @@ an original NativeTerminal seal remain UNKNOWN/ABSENT. Closed scope events are r
 
 The runtime-image row references the fresh complete existing-image preflight and its original elapsed/ACK, counted
 once as initial:image-preflight; it does not run the S03 builder. Standalone retained-store readiness may use the
-fixed `s03-cpu-preload.mjs`: it denies every child-process/network lower and populates only the explicit synthetic
+fixed `pi-cpu-preload.mjs`: it denies every child-process/network lower and populates only the explicit synthetic
 1024-request local SQLite fixture. CPU readiness is not native SDK/provider evidence or a second budget authority.

@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {charges} from './native-ledger.mjs';
 import {debitS03Reservation,observeS03Container,mutateLegacyBudget} from './native-lock.mjs';
-import {copiedS03Fixture} from './s03-copied-fixture.mjs';
+import {copiedS03Fixture} from './pi-copied-fixture.mjs';
 import {canonical,localOwner} from './native-context.mjs';
 const actual=resolve('.claude/s04-qualification/budget.json'),actualBefore=readFileSync(actual);
 

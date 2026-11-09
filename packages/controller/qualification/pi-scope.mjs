@@ -78,7 +78,7 @@ export function verifyS03Actor(plan,{copied=false,cleanup=false,events=[],claimK
     need(peer&&peer.identity.argv===argv&&peer.identity.entry===entry&&same(peer.actor,localOwner(process.ppid))&&(peer.identity.child===null||same(peer.identity.child,localOwner())));
     if(peer.identity.generated){need(peer.identity.cpuOnly&&peer.identity.generated.entry===entry&&peer.identity.generated.files.length===4);for(const row of peer.identity.generated.files)need(sha(readFileSync(row.path))===row.sha256);}
     need(plan.entries.includes(entry)||peer.identity.cpuOnly&&plan.group==='mutations'&&entry.endsWith('/check.mjs')||fixtureGroups.has(plan.group)&&entry==='node:daemon-fixture');
-  }else need(entry===resolve(plan.project,'packages/controller/qualification/delivery-s03.mjs')||copied);
+  }else need(entry===resolve(plan.project,'packages/controller/qualification/delivery-pi.mjs')||copied);
   // REVIEW-078: under native runs the same plan sources/socket/executable stat sweep is re-verified at most
   // once per 200ms (3 back-to-back child.stdin.write frames land within <1ms); copied runs sweep every call so
   // writeFileSync probes still fail immediately.

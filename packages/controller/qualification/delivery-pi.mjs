@@ -8,7 +8,7 @@ const project='/Users/thxcode/orca/workspaces/loopwright/loopwright-s04-controll
 export async function executeS03Group(activation,bootstrap,group){
   const {requireNativeActivation}=await import('./native-activation.mjs');requireNativeActivation(activation);
   const {launcherBootstrapState,finishDeliveryBootstrap}=await import('./native-preflight-launcher.mjs');
-  const {NativeLedger,charges}=await import('./native-ledger.mjs'),{s03Groups,s03Caps,s03Budget,s03ActiveIdentity}=await import('./s03-scope.mjs');
+  const {NativeLedger,charges}=await import('./native-ledger.mjs'),{s03Groups,s03Caps,s03Budget,s03ActiveIdentity}=await import('./pi-scope.mjs');
   const {exclusive,canonical,sha,readPrivate,checkedRef,localOwner,monotonic,fail,nonce,same}=await import('./native-context.mjs');
   const {parentTimeState}=await import('./native-lock.mjs'),{allowance}=await import('./schedule.mjs');
   const original=launcherBootstrapState(bootstrap),directory=join(project,'.claude/s04-qualification/s03-'+group+'-'+nonce());mkdirSync(directory,{mode:0o700});
@@ -18,7 +18,7 @@ export async function executeS03Group(activation,bootstrap,group){
     if(!Object.hasOwn(s03Groups,group)||group==='runtime-image')fail('QUALIFICATION_S03_EXISTING_PREFLIGHT_ROW_REQUIRED');
     const book=ledger.read(),available=allowance(book.native,'finalPi','s03-'+group,['recovery','limits'].includes(group)?300:120),hardCutoff=BigInt(original.startedMonotonicMs)+BigInt(Math.floor(available*1000)),workCutoff=hardCutoff-20000n;
     if(monotonic()>=workCutoff)fail('QUALIFICATION_LIMIT');
-    const {currentS03Preflight}=await import('./s03-preflight-binding.mjs'),preflight=currentS03Preflight();exclusive(join(directory,'fresh-image-binding.json'),preflight);
+    const {currentS03Preflight}=await import('./pi-preflight-binding.mjs'),preflight=currentS03Preflight();exclusive(join(directory,'fresh-image-binding.json'),preflight);
     const before=exclusive(join(directory,'before-reservation.json'),readPrivate(s03Budget)),client=join(directory,'docker-client');mkdirSync(client,{mode:0o700});
     const sources=[];const walk=path=>{for(const item of readdirSync(path,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))){const file=join(path,item.name);if(item.isDirectory())walk(file);else if(item.isFile()&&/\.(?:mjs|js|json)$/.test(item.name)){const bytes=readFileSync(file);sources.push({path:realpathSync(file),byteLength:bytes.length,sha256:sha(bytes)});}}};
     for(const root of ['packages/controller/qualification','packages/agent-pi/qualification','packages/core/dist','packages/state/dist','packages/agent-pi/dist','.test-build/packages/agent-pi/test','.test-build/packages/agent-pi/src'])walk(join(project,root));
@@ -36,13 +36,13 @@ export async function executeS03Group(activation,bootstrap,group){
     for(const future of Object.keys(s03Groups).filter(key=>key===group||!attempted.has(key)))for(const kind of Object.keys(used))used[kind]+=s03Caps(future)[kind];
     if(used.containers>547||used.provider>568||used.mcp>1480)fail('QUALIFICATION_S03_PROGRAM_ENVELOPE');exclusive(join(directory,'prospective-table.json'),{groups:s03Groups,usedAndRemaining:used,limits:{containers:547,provider:568,mcp:1480}});
     const handle=ledger.reserve(context,plan.caps,planRef),base={reservationId:handle.id,plan:planRef};admitted=true;
-    const {installS03Io}=await import('./s03-io.mjs');io=installS03Io({path:s03Budget,base,plan});
+    const {installS03Io}=await import('./pi-io.mjs');io=installS03Io({path:s03Budget,base,plan});
     for(const [kind,units]of Object.entries(precharge))if(units)io.debit({kind,key:'fixed-precharge:'+group+':'+kind,units,identity:{group,source:context.sourceDigest,route:kind==='provider'?'frozen-sdk-or-admission-fixture':'frozen-raw-or-trusted-mcp-fixture'}});
     const child=(await import('node:child_process')).spawn(process.execPath,argv,{detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/local/bin:/usr/bin:/bin',HOME:directory,LANG:'C.UTF-8'}});
     const owner=localOwner(child.pid);let timer;
     const stop=()=>{let actual;try{actual=localOwner(child.pid);}catch(error){if(error.status===1)return;throw error;}if(!same(actual,owner))fail('QUALIFICATION_S03_PROCESS_IDENTITY');const pgid=nativeRead('/bin/ps',['-p',String(child.pid),'-o','pgid='],{encoding:'utf8',timeout:1000,maxBuffer:128}).trim();if(pgid!==String(child.pid))fail('QUALIFICATION_S03_PROCESS_GROUP');process.kill(-child.pid,'SIGTERM');};
     let result;try{timer=setTimeout(stop,Math.max(1,Number(workCutoff-monotonic())));result=await child.s03Closed;}finally{clearTimeout(timer);}
-    const {retainS03Output}=await import('./s03-closure.mjs'),output=retainS03Output(directory,result);
+    const {retainS03Output}=await import('./pi-closure.mjs'),output=retainS03Output(directory,result);
     let parsed=null;try{parsed=JSON.parse(result.stdout);}catch{if(result.code===0)fail('QUALIFICATION_S03_RESULT');}
     if(result.code===0){
       if(parsed.status!=='passed'&&parsed.passed!==true&&group!=='parser-context-failures')fail('QUALIFICATION_S03_RESULT');
@@ -61,7 +61,7 @@ export async function executeS03Group(activation,bootstrap,group){
     }
 
     const approvalFile='/Users/thxcode/Documents/github.com/thxcode/loopwright/.claude/reports/loopwright-harness-architecture/spec-S04/REVIEW-066-full-s03-row-audit.md',approvalBytes=readFileSync(approvalFile);if(sha(approvalBytes)!=='24fa154ecd0cbbd18be8d459ae3021f3763c0f4e3112af3c7c5ac97fa11467ae')fail('QUALIFICATION_S03_APPROVAL');
-    const approval=exclusive(join(directory,'approval-original.bin'),approvalBytes),{collectS03Closure}=await import('./s03-closure.mjs'),closure=collectS03Closure(activation,s03Budget,base,{result:{code:result.code,signal:result.signal},output,approval});
+    const approval=exclusive(join(directory,'approval-original.bin'),approvalBytes),{collectS03Closure}=await import('./pi-closure.mjs'),closure=collectS03Closure(activation,s03Budget,base,{result:{code:result.code,signal:result.signal},output,approval});
     const allocation=ledger.allocateS03(handle,closure);io.flush();io.restore();io=null;
     const accounting=ledger.completeParentTime(time,{exit:result.code,signal:result.signal,error:result.code===0?null:'ORIGINAL_S03_FAILED'});finishDeliveryBootstrap(bootstrap,accounting,directory);
     return {directory,group,result:result.code===0?'PASS':'FAIL',allocation,accounting,observed:parsed,charges:charges(ledger.read()),scope:'local original S03 assertions; full conservative quota, actual use/billing UNKNOWN; no live provider'};
@@ -74,7 +74,7 @@ export async function executeS03Group(activation,bootstrap,group){
 }
 if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){
   if(process.argv.length===6&&process.argv[2]==='--case'&&process.argv[3]==='runtime-image'&&process.argv[4]==='--owner'&&process.argv[5]==='controller'&&resolve('.')===project){
-    const {currentS03Preflight}=await import('./s03-preflight-binding.mjs'),{exclusive}=await import('./native-context.mjs'),result={group:'runtime-image',result:'PASS',kind:'existing-pinned-image-verification',preflight:currentS03Preflight()};exclusive(join(project,'.claude/s04-qualification/s03-runtime-image-final-031.json'),result);process.stdout.write(JSON.stringify(result)+'\n');
+    const {currentS03Preflight}=await import('./pi-preflight-binding.mjs'),{exclusive}=await import('./native-context.mjs'),result={group:'runtime-image',result:'PASS',kind:'existing-pinned-image-verification',preflight:currentS03Preflight()};exclusive(join(project,'.claude/s04-qualification/s03-runtime-image-final-031.json'),result);process.stdout.write(JSON.stringify(result)+'\n');
   }else{
   const launcher=await import('./native-preflight-launcher.mjs'),bootstrap=launcher.beginApprovedS03Bootstrap();
   const {runApprovedS03}=await import('./native-activation.mjs');

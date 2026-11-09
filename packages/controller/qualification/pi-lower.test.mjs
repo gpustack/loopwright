@@ -9,9 +9,9 @@ import {pathToFileURL} from 'node:url';
 import {promisify} from 'node:util';
 import {createLocalRun} from '@loopwright/state';
 import {sessionInput} from '../../../.test-build/packages/agent-pi/test/session-fixtures.js';
-import {copiedS03Fixture} from './s03-copied-fixture.mjs';
-import {installS03Io} from './s03-io.mjs';
-import {publicStateObserver,physicalObservation} from './s03-observer.mjs';
+import {copiedS03Fixture} from './pi-copied-fixture.mjs';
+import {installS03Io} from './pi-io.mjs';
+import {publicStateObserver,physicalObservation} from './pi-observer.mjs';
 import {canonical,exclusive} from './native-context.mjs';
 const good=r=>{assert.equal(r.ok,true,JSON.stringify(r));return r.value;};
 function child(){const c=new EventEmitter();Object.assign(c,{pid:process.pid,stdout:new PassThrough(),stderr:new PassThrough(),stdin:new PassThrough()});return c;}
@@ -29,7 +29,7 @@ test('all five launch variants retain SAME quota and minimal-env Node descendant
   assert.equal(cp.execFileSync(process.execPath,[entry],{env:{PATH:'/usr/bin:/bin'},encoding:'utf8'}),'{}');
   cp.spawnSync(process.execPath,[entry],{env:{}});
   const promised=cp.execFile[promisify.custom](process.execPath,[entry],{env:{}});assert.equal(promised.child.pid,process.pid);await promised;
-  assert.equal(count(),5);for(const row of launched){assert.ok(row.options.env.NODE_OPTIONS.includes('s03-count-preload.mjs'));const context=JSON.parse(Buffer.from(row.options.env.S04_S03_SCOPE,'base64url'));assert.equal(context.path,f.path);assert.deepEqual(context.base,f.base);assert.ok(context.key.startsWith('launch:'));}let before=count();
+  assert.equal(count(),5);for(const row of launched){assert.ok(row.options.env.NODE_OPTIONS.includes('pi-count-preload.mjs'));const context=JSON.parse(Buffer.from(row.options.env.S04_S03_SCOPE,'base64url'));assert.equal(context.path,f.path);assert.deepEqual(context.base,f.base);assert.ok(context.key.startsWith('launch:'));}let before=count();
   for(const method of ['spawn','spawnSync','execFile','execFileSync'])assert.throws(()=>cp[method](process.execPath,['-e','process.exit(0)'],{}),/S03/);
   assert.throws(()=>cp.fork(entry,[],{shell:true}),/S03/);assert.equal(count(),before);
   writeFileSync(f.source.path,'changed');assert.throws(()=>cp.execFileSync(process.execPath,[entry],{}),/S03/);assert.equal(count(),before);
