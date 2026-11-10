@@ -1,13 +1,18 @@
 export { loadTrustedConfiguration } from './config.js';
 export { compilePlan } from './compile.js';
+export { installedHandlerDigests } from './handlers.js';
 export { CONTROLLER_API_VERSION } from './types.js';
 export type * from './types.js';
 export type { ControllerDiagnostic, ControllerResult } from './errors.js';
 export { runCycle } from './controller.js';
 export type { RunCycleInput } from './controller.js';
+export { runCycleWithPorts } from './controller.js';
+export type { ControllerPorts } from './controller.js';
+export { signPayload, verifySignedPayload } from './gate.js';
 export type { CycleExecution, ControllerIncident } from './finalize.js';
 export type { ControllerEvent } from './events.js';
 export { resumeCycle } from './recovery.js';
+export { resumeCycleWithPorts } from './recovery.js';
 export { reconcileCycle } from './reconcile.js';
 export type { ReconcileCycleInput, ReconcileExecution } from './reconcile.js';
 export { readStatus, inspectRun } from './inspect.js';

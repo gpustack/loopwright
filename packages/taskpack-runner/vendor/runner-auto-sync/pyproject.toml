@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gpustack-runner"
+description = "GPUStack Runner is library for registering runnable accelerated backends and services in GPUStack."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "GPUStack Authors", email = "contact@gpustack.ai"}]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "argcomplete>=3.6.3",
+    "dataclasses-json>=0.6.7",
+    "packaging>=21.0",
+    "requests>=2.33.0",
+]
+dynamic = ["version"]
+
+[project.scripts]
+gpustack-runner = "gpustack_runner.__main__:main"
+
+[project.urls]
+"Homepage" = "https://github.com/gpustack/runner"
+"Bug Tracker" = "https://github.com/gpustack/gpustack/issues"
+
+[dependency-groups]
+dev=[
+    "pyclean==3.4.0",
+    "pre-commit==4.5.0; python_version >= '3.11'",
+    "pytest==9.0.3",
+    "hatchling",
+    "hatch-vcs",
+    "mkdocs>=1.6.1",
+    "mkdocstrings-python>=1.18.0",
+    "mkdocs-material>=9.6.18",
+    "pymdown-extensions>=11.0.1",
+]

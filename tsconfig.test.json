@@ -15,6 +15,8 @@
     "packages/controller/src/**/*.ts",
     "packages/controller/test/**/*.ts",
     "packages/cli/src/**/*.ts",
-    "packages/cli/test/**/*.ts"
+    "packages/cli/test/**/*.ts",
+    "packages/taskpack-runner/src/**/*.ts",
+    "packages/taskpack-runner/test/**/*.ts"
   ]
 }
