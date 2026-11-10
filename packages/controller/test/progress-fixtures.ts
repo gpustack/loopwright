@@ -51,7 +51,7 @@ export async function retainedFixture(checks = 1, A = 3, I = 2, leaseMs = 60000,
   const progress = new ProgressStore(store, authority, artifacts, plan, lock, planRef, sourceRef);
   const draft: Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> } = {
     version: 2, runId: lock.spec.runId, lockHash: lock.spec.lockHash, stage: { kind: 'bootstrap', phase: 'bootstrap', capacity: plan.capacity },
-    nodes: plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null, candidate: current,
+    nodes: plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null, publication: { status: 'idle', operationId: null, receipt: null }, candidate: current,
     failures: [], verifierReceipts: [], verifierRefusals: [], eventSequence: 0, terminalIntent: null,
   };
   return { ...f, loaded: loaded.value, plan, directory, owner, artifacts, store, authority, lock, identity, progress, draft, candidate,

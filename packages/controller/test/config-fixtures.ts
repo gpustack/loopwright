@@ -31,10 +31,12 @@ export async function configurationFixture() {
     runtimeProfiles: [{ id: 'docker', dockerExecutable: '/usr/local/bin/docker', dockerSocket: '/private/declared/docker.sock', identity: { sdkIntegrity: files.sdkIntegrity, graphDigest: hash(await readFile(new URL('../../../package-lock.json', import.meta.resolve('@loopwright/agent-pi')))), configDigest: files.restrictionDigest, imageDigest: 'sha256:' + 'a'.repeat(64), profile: 'linux/arm64' } }],
     resources: [], credentialBindings: [{ id: 'copilot', consumer: 'provider', destinationRef: 'github-copilot', environmentNames: ['PROVIDER_TOKEN'], template: '${PROVIDER_TOKEN}' }],
     environmentBindings: [{ name: 'PROVIDER_TOKEN', classification: 'credential', paths: ['/spec/credentials/0/template'] }],
+    gateEndpoints: [], publicationEndpoints: [],
   } };
   const config: ControllerConfiguration = { apiVersion: 'loopwright.dev/controller/v1alpha1', kind: 'ControllerConfig', metadata: { id: 'task' }, spec: {
     task: structuredClone(validated.value), registry: { id: 'operator', digest: hash('') }, profiles: { roles: [{ roleId: 'builder', profileRef: 'builder' }], steps: [{ stepId: 'build', handlerRef: 'package.patch' }] },
     credentials: [{ ref: 'copilot', template: '${PROVIDER_TOKEN}' }], controls: { maxAttempts: 3, drainReserveMs: 120000, repeatFailureLimit: 2, submission: { mode: 'artifact_or_assistant', path: null } },
+    publication: { mode: 'disabled' },
   } };
   const input = { configPath: join(taskDirectory, 'task.json'), registryPath: join(operator, 'registry.json'), registrySha256: '', untrustedRoots: [taskDirectory] };
   const environment: Record<string, string | undefined> = { PROVIDER_TOKEN: TOKEN }, lookedUp: string[] = [];

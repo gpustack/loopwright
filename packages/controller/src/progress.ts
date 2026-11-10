@@ -1,6 +1,6 @@
 import { bindSubject, identifyManifest, type ArtifactManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
 import type { Authority, CheckpointRecord, LocalRunStore, OperationRecord, Page, PageCursor, RequestRecord } from '@loopwright/state';
-import { canonical, freeze, hash, integer, list, record, same, text, digestValue } from './schema.js';
+import { canonical, freeze, hash, id, integer, list, record, same, text, digestValue } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
 import { stateValue, checkedRef, ArtifactStore, type ArtifactReader } from './storage.js';
@@ -14,7 +14,9 @@ export function phaseSchedule(capacity: CheckpointCapacity): readonly string[] {
   const phases = ['bootstrap'];
   for (let attempt = 1; attempt <= capacity.A; attempt++) for (const suffix of ['pre', 'native', 'post']) phases.push('role.' + attempt + '.' + suffix);
   for (let generation = 0; generation < capacity.V; generation++) for (let slot = 0; slot < capacity.C; slot++) for (const suffix of ['pre', 'post']) phases.push('verify.' + generation + '.' + slot + '.' + suffix);
+  if (capacity.publication === true) phases.push('publication.pre', 'publication.post');
   phases.push('terminal.intent', 'terminal.result', 'terminal.observations');
+  if (capacity.publication === true) phases.push('reconcile.result');
   if (phases.length !== capacity.D) refuse('ARTIFACT_INVALID', '', 'recovery'); return phases;
 }
 export function stableId(runId: string, nodeId: string, purpose: string, repair: string, ordinal: number): string {
@@ -39,11 +41,19 @@ export function journal(store: LocalRunStore) {
 }
 function watermarks(raw: unknown): void { const value = record(raw, ['requests', 'operations']); integer(value.requests, 0, 1024); integer(value.operations, 0, 2048); }
 function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
-  const value = record(raw, ['version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints', 'submission', 'candidate', 'failures', 'verifierReceipts', 'verifierRefusals', 'eventSequence', 'terminalIntent']);
+  const hasPublication = Object.hasOwn(raw as object, 'publication'), value = record(raw, ['version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints', 'submission', 'publication', 'candidate', 'failures', 'verifierReceipts', 'verifierRefusals', 'eventSequence', 'terminalIntent']);
   if (value.version !== 2 || value.runId !== lock.spec.runId || !same(value.lockHash, lock.spec.lockHash)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   integer(value.sequence, 1, 64); integer(value.eventSequence, 0, Number.MAX_SAFE_INTEGER); if (value.previous !== null) checkedRef(value.previous); if (value.submission !== null) checkedRef(value.submission);
+  let publication: ControllerProgress['publication'] = { status: 'idle', operationId: null, receipt: null };
+  if (hasPublication) {
+    const item = record(value.publication, ['status', 'operationId', 'receipt']);
+    if (!['idle', 'pending', 'confirmed', 'failed', 'unresolved'].includes(text(item.status))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    if (item.status === 'idle') { if (item.operationId !== null || item.receipt !== null) refuse('RECOVERY_REQUIRED', '', 'recovery'); }
+    else { id(item.operationId, '/publication/operationId'); if (['confirmed', 'failed'].includes(text(item.status)) && item.receipt === null) refuse('RECOVERY_REQUIRED', '', 'recovery'); if (item.receipt !== null) checkedRef(item.receipt); }
+    publication = { status: item.status as ControllerProgress['publication']['status'], operationId: item.operationId as string | null, receipt: item.receipt as ArtifactRef | null };
+  }
   const stage = record(value.stage, ['kind', 'phase', 'capacity', 'consumed', 'watermarks']);
-  const kinds = ['bootstrap', 'role_pre', 'role_post', 'verifier_pre', 'verifier_post', 'terminal_intent', 'terminal_result', 'terminal_observations'];
+  const kinds = ['bootstrap', 'role_pre', 'role_post', 'verifier_pre', 'verifier_post', 'publication_pre', 'publication_post', 'terminal_intent', 'terminal_result', 'terminal_observations', 'reconcile_result'];
   if (!kinds.includes(text(stage.kind)) || !same(stage.capacity, plan.capacity)) refuse('RECOVERY_REQUIRED', '', 'recovery'); watermarks(stage.watermarks);
   const schedule = phaseSchedule(plan.capacity), consumed = list(stage.consumed, '', 64).map(item => text(item, '', 64));
   if (!schedule.includes(text(stage.phase)) || consumed.at(-1) !== stage.phase || consumed.length !== value.sequence || new Set(consumed).size !== consumed.length || consumed.some(phase => !schedule.includes(phase))) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -103,7 +113,9 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
     if (Number(generation) !== candidate.generation || !receipt && !refusal || phase.endsWith('.post') && (receipt?.receipt === null || !consumed.includes('verify.' + generation + '.' + ordinal + '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
   if (value.terminalIntent !== null) { const terminal = record(value.terminalIntent, ['primary', 'result', 'observations']); text(terminal.primary, '', 64); if (terminal.result !== null) checkedRef(terminal.result); if (terminal.observations !== null) checkedRef(terminal.observations); }
-  return raw as ControllerProgress;
+  if (consumed.includes('publication.pre') && publication.status === 'idle') refuse('RECOVERY_REQUIRED', '', 'recovery');
+  if (consumed.includes('publication.post') && ['idle', 'pending'].includes(publication.status)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  return { ...(raw as ControllerProgress), publication };
 }
 export function validateProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
   try { return checkedProgress(raw, plan, lock); }
@@ -132,6 +144,9 @@ function extension(previous: ControllerProgress | null, current: ControllerProgr
     const ordinal = plan.verifierSlots.findIndex(slot => slot.id === row.slot);
     if (current.stage.kind !== 'verifier_pre' || current.stage.phase !== 'verify.' + row.generation + '.' + ordinal + '.pre' || row.generation !== current.candidate.generation) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
+  const rank = { idle: 0, pending: 1, unresolved: 2, confirmed: 3, failed: 3 } as const;
+  if (rank[current.publication.status] < rank[previous.publication.status] || previous.publication.operationId !== null && previous.publication.operationId !== current.publication.operationId
+    || previous.publication.receipt !== null && !same(previous.publication.receipt, current.publication.receipt)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   for (const failure of previous.failures) {
     const retained = current.failures.find(item => same(item.signature, failure.signature));
     if (!retained || retained.count < failure.count || retained.generation !== failure.generation) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -218,7 +233,8 @@ export class ProgressStore {
     for (const row of progress.verifierRefusals) entries.push({ id: row.slot + '.' + row.generation + '.refusal', kind: 'preflight-refusal', ref: row.record });
     if (progress.terminalIntent?.result) entries.push({ id: 'result', kind: 'result', ref: progress.terminalIntent.result });
     if (progress.terminalIntent?.observations) entries.push({ id: 'observations', kind: 'observations', ref: progress.terminalIntent.observations });
-    if (entries.length > 2 * this.plan.capacity.J + this.plan.capacity.A + 4 || entries.some(entry => Buffer.byteLength(canonical(entry)) > 768 || Buffer.byteLength(canonical(entry.ref)) > 512)) refuse('OUTPUT_LIMIT', '', 'execution');
+    if (progress.publication.receipt !== null) entries.push({ id: 'publication.receipt', kind: 'publication-receipt', ref: progress.publication.receipt });
+    if (entries.length > 2 * this.plan.capacity.J + this.plan.capacity.A + 4 + (progress.publication.receipt !== null ? 1 : 0) || entries.some(entry => Buffer.byteLength(canonical(entry)) > 768 || Buffer.byteLength(canonical(entry.ref)) > 512)) refuse('OUTPUT_LIMIT', '', 'execution');
     return { version: 1, runId: this.lock.spec.runId, entries };
   }
   async publish(draft: Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { readonly stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> }, phase: string,
@@ -246,14 +262,16 @@ export class ProgressStore {
     afterCommit?.(committed);
     return { checkpoint: committed, ref, progress, index, manifest };
   }
-  decision(head: ProgressHead | null): 'not_started' | 'safe' | 'adopt_capture' | 'terminal' {
+  decision(head: ProgressHead | null): 'not_started' | 'safe' | 'adopt_capture' | 'terminal' | 'reconcile_required' {
     const records = journal(this.store), view = records.view;
-    if (view.clockStatus !== 'trusted' || view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const externalUncertain = records.operations.filter(item => item.intent.effect === 'external_write' && (item.state === 'dispatch_uncertain' || item.state === 'unresolved'));
+    if (view.clockStatus !== 'trusted' || view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations > externalUncertain.length || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
     if (!head) { if (view.counts.requests || view.counts.operations || view.counts.checkpoints) refuse('RECOVERY_REQUIRED', '', 'recovery'); return 'not_started'; }
-    if (head.progress.stage.kind.startsWith('terminal')) {
+    if (head.progress.stage.kind.startsWith('terminal') || head.progress.stage.kind === 'reconcile_result') {
       if (view.counts.requests !== head.progress.stage.watermarks.requests || view.counts.operations !== head.progress.stage.watermarks.operations) refuse('RECOVERY_REQUIRED', '', 'recovery');
       return 'terminal';
     }
+    if (externalUncertain.length) return 'reconcile_required';
     const active = head.progress.attempts.at(-1);
     if (active && active.finished === null) {
       const nativeId = phaseCheckpointId(this.lock.spec.runId, 'role.' + active.ordinal + '.native');
@@ -267,6 +285,11 @@ export class ProgressStore {
       const additions = records.operations.filter(item => item.sequence > head.progress.stage.watermarks.operations);
       if (row && view.counts.requests === head.progress.stage.watermarks.requests && additions.length <= 1
         && additions.every(item => item.intent.operationId === row.operationId && item.state === 'confirmed' && item.intent.effect === 'read_only')) return 'safe';
+    }
+    if (head.progress.stage.kind === 'publication_pre' && head.progress.publication.operationId !== null) {
+      const additions = records.operations.filter(item => item.sequence > head.progress.stage.watermarks.operations);
+      if (view.counts.requests === head.progress.stage.watermarks.requests && additions.length <= 1
+        && additions.every(item => item.intent.operationId === head.progress.publication.operationId && item.state === 'confirmed' && item.intent.effect === 'external_write')) return 'safe';
     }
     if (view.counts.requests !== head.progress.stage.watermarks.requests || view.counts.operations !== head.progress.stage.watermarks.operations) refuse('RECOVERY_REQUIRED', '', 'recovery');
     return 'safe';

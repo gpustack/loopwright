@@ -1,11 +1,11 @@
 import { isAbsolute } from 'node:path';
 import { isIP } from 'node:net';
 import { digestArtifact } from '@loopwright/core';
-import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation } from './types.js';
+import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation, type GateEndpoint, type PublicationEndpoint } from './types.js';
 import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
 import { refuse } from './errors.js';
-const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1'];
+const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1', 'gate.v1'];
 function unique(value: readonly { readonly id: string }[], path: string): void { if (new Set(value.map(item => item.id)).size !== value.length) refuse('CONFIG_SCHEMA', path); }
 function enumValue(value: unknown, values: readonly string[], path: string): void { if (typeof value !== 'string' || !values.includes(value)) refuse('CONFIG_SCHEMA', path); }
 export function validateHandler(raw: unknown, path: string): Handler {
@@ -15,12 +15,15 @@ export function validateHandler(raw: unknown, path: string): Handler {
   const implementation = value.implementation as Implementation, agent = implementation.startsWith('pi.');
   if (value.kind !== (agent ? 'agent' : 'check')) refuse('CONFIG_SCHEMA', path + '/kind');
   const capabilities = list(value.capabilities, path + '/capabilities').map(item => text(item, path + '/capabilities', 64));
-  const expected = agent ? implementation === 'pi.compact.v1' ? ['pi', 'compaction'] : ['pi'] : ['inert_bytes', 'read_only'];
+  const expected = agent ? implementation === 'pi.compact.v1' ? ['pi', 'compaction'] : ['pi'] : implementation === 'gate.v1' ? ['external_service', 'read_only'] : ['inert_bytes', 'read_only'];
   if (!same(capabilities, expected)) refuse('CAPABILITY_UNSUPPORTED', path + '/capabilities');
   if (implementation === 'pi.agent.v1') {
     const parameters = record(value.parameters, ['prompt', 'purpose'], path + '/parameters'); text(parameters.prompt, path + '/parameters/prompt'); enumValue(parameters.purpose, ['task', 'review'], path + '/parameters/purpose');
   } else if (implementation === 'pi.compact.v1') record(value.parameters, [], path + '/parameters');
-  else {
+  else if (implementation === 'gate.v1') {
+    const parameters = record(value.parameters, ['checkId', 'endpointRef', 'gateId'], path + '/parameters');
+    id(parameters.checkId, path + '/parameters/checkId'); id(parameters.endpointRef, path + '/parameters/endpointRef'); text(parameters.gateId, path + '/parameters/gateId', 128);
+  } else {
     const fields = implementation === 'json-artifact.v1' ? ['checkId', 'path', 'required', 'equals'] : ['checkId'];
     const parameters = record(value.parameters, fields, path + '/parameters');
     if (parameters.checkId !== null) id(parameters.checkId, path + '/parameters/checkId');
@@ -72,11 +75,38 @@ function role(raw: unknown, path: string): RoleProfile {
   if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
   const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp'); return { ...(raw as RoleProfile), context: checkedContext };
 }
+/** Outbound endpoints accept exact https URLs or explicit-port loopback http; credentials, query strings and fragments never pass. */
+function endpointUrl(raw: unknown, path: string): string {
+  const value = text(raw, path, 2048);
+  let url: URL; try { url = new URL(value); } catch { refuse('CONFIG_SCHEMA', path); }
+  if (url.href !== value || url.username || url.password || url.hash || url.search) refuse('CONFIG_SCHEMA', path);
+  const loopback = url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === '[::1]') && url.port !== '';
+  if (url.protocol !== 'https:' && !loopback) refuse('CONFIG_SCHEMA', path);
+  return value;
+}
+function gateEndpoint(raw: unknown, path: string): GateEndpoint {
+  const value = record(raw, ['id', 'url', 'signingCredentialRef', 'authCredentialRef', 'timeoutMs', 'maxPollMs', 'pollInitialMs', 'pollMaxMs', 'jitter'], path);
+  id(value.id, path + '/id'); endpointUrl(value.url, path + '/url'); id(value.signingCredentialRef, path + '/signingCredentialRef');
+  if (value.authCredentialRef !== null) id(value.authCredentialRef, path + '/authCredentialRef');
+  integer(value.timeoutMs, 1000, 60000, path + '/timeoutMs'); integer(value.maxPollMs, 1000, 600000, path + '/maxPollMs');
+  integer(value.pollInitialMs, 100, 30000, path + '/pollInitialMs'); integer(value.pollMaxMs, value.pollInitialMs as number, value.maxPollMs as number, path + '/pollMaxMs');
+  integer(value.jitter, 0, 1000, path + '/jitter');
+  return raw as GateEndpoint;
+}
+function publicationEndpoint(raw: unknown, path: string): PublicationEndpoint {
+  const value = record(raw, ['id', 'url', 'signingCredentialRef', 'authCredentialRef', 'timeoutMs'], path);
+  id(value.id, path + '/id'); endpointUrl(value.url, path + '/url'); id(value.signingCredentialRef, path + '/signingCredentialRef');
+  if (value.authCredentialRef !== null) id(value.authCredentialRef, path + '/authCredentialRef');
+  integer(value.timeoutMs, 1000, 60000, path + '/timeoutMs');
+  return raw as PublicationEndpoint;
+}
 export function validateRegistry(raw: unknown): TrustedRegistry {
   const top = record(raw, ['apiVersion', 'kind', 'metadata', 'spec'], '/registry');
   if (top.apiVersion !== CONTROLLER_API_VERSION || top.kind !== 'TrustedRegistry') refuse('CONFIG_SCHEMA', '/registry');
   id(record(top.metadata, ['id'], '/registry/metadata').id, '/registry/metadata/id');
-  const value = record(top.spec, ['version', 'resourceVersion', 'handlers', 'roleProfiles', 'resources', 'runtimeProfiles', 'credentialBindings', 'environmentBindings'], '/registry/spec');
+  const spec = top.spec as Record<string, unknown>, hasGate = Object.hasOwn(spec, 'gateEndpoints'), hasPublication = Object.hasOwn(spec, 'publicationEndpoints');
+  const value = record(top.spec, ['version', 'resourceVersion', 'handlers', 'roleProfiles', 'resources', 'runtimeProfiles', 'credentialBindings', 'environmentBindings',
+    ...(hasGate ? ['gateEndpoints' as const] : []), ...(hasPublication ? ['publicationEndpoints' as const] : [])], '/registry/spec');
   integer(value.version, 1, 1, '/registry/spec/version'); text(value.resourceVersion, '/registry/spec/resourceVersion', 128);
   const handlers = list(value.handlers).map((item, i) => validateHandler(item, '/registry/spec/handlers/' + i)); unique(handlers, '/registry/spec/handlers');
   const roles = list(value.roleProfiles).map((item, i) => role(item, '/registry/spec/roleProfiles/' + i)); unique(roles, '/registry/spec/roleProfiles');
@@ -95,7 +125,7 @@ export function validateRegistry(raw: unknown): TrustedRegistry {
   unique(value.resources as readonly { id: string }[], '/registry/spec/resources');
   for (const item of list(value.credentialBindings)) {
     const binding = record(item, ['id', 'consumer', 'destinationRef', 'environmentNames', 'template'], '/registry/spec/credentialBindings');
-    id(binding.id); id(binding.destinationRef); enumValue(binding.consumer, ['provider', 'mcp'], '/registry/spec/credentialBindings');
+    id(binding.id); id(binding.destinationRef); enumValue(binding.consumer, ['provider', 'mcp', 'gate', 'publisher'], '/registry/spec/credentialBindings');
     const names = list(binding.environmentNames).map(name => text(name)); if (new Set(names).size !== names.length || names.some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) refuse('CONFIG_SCHEMA', '/registry/spec/credentialBindings');
     const parts = template(text(binding.template), '/registry/spec/credentialBindings'), used = parts.flatMap(part => part.name === null ? [] : [part.name]);
     if (!used.length || used.some(name => !names.includes(name))) refuse('CONFIG_SCHEMA', '/registry/spec/credentialBindings');
@@ -110,6 +140,9 @@ export function validateRegistry(raw: unknown): TrustedRegistry {
     return { name: binding.name, paths };
   });
   if (new Set(environment.map(item => item.name)).size !== environment.length) refuse('CONFIG_SCHEMA', '/registry/spec/environmentBindings');
+  const gateEndpoints = (hasGate ? list(value.gateEndpoints, '/registry/spec/gateEndpoints', 16).map((item, i) => gateEndpoint(item, '/registry/spec/gateEndpoints/' + i)) : []);
+  const publicationEndpoints = (hasPublication ? list(value.publicationEndpoints, '/registry/spec/publicationEndpoints', 16).map((item, i) => publicationEndpoint(item, '/registry/spec/publicationEndpoints/' + i)) : []);
+  unique(gateEndpoints, '/registry/spec/gateEndpoints'); unique(publicationEndpoints, '/registry/spec/publicationEndpoints');
   const checked = raw as TrustedRegistry;
-  return { ...checked, spec: { ...checked.spec, roleProfiles: roles } };
+  return { ...checked, spec: { ...checked.spec, roleProfiles: roles, gateEndpoints, publicationEndpoints } };
 }

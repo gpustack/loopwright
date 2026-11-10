@@ -14,7 +14,9 @@ import { freezeSource, verifySource, type FrozenSource } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
 import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
 import { retainSubmission, normalizeSubmission, type Submission, type RetainedSubmission } from './submission.js';
-import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory } from './verification.js';
+import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
+import { prepareGate, Gate, authenticatedGate, type PreparedGate } from './gate.js';
+import { preparePublication, Publication, headRevision, type PreparedPublication } from './publication.js';
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
 import { nextNode, descendants, compactionTarget } from './scheduler.js';
 import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt } from './repair.js';
@@ -62,7 +64,7 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     if (!admitted.ok) refuse('CONFIG_SCHEMA', '/spec/task', 'admission'); const lock = admitted.value, manifest = await artifacts.json('manifest', source.manifest, 32768);
     const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts };
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
-    for (const slot of plan.verifierSlots) prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
+    for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
     const planRef = await artifacts.json('plan', plan, 1048576), lockRef = await artifacts.json('task-lock', lock, 1048576);
     const identity: LocalRunIdentity = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + runId).hex.slice(0, 40), lock,
       policy: { version: 1, leaseMs: 60000, cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }],
@@ -79,13 +81,24 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
 }
 export class Cycle {
   head: ProgressHead | null; candidate: ByteInventory; submission: RetainedSubmission | null = null; readonly checks = new Map<string, VerifiedCheck>(); readonly refusals = new Map<string, PreflightRefusal>();
-  readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier;
+  readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier; readonly gate: Gate; readonly publisher: Publication;
   #activeAdapter: PiAdapterV2 | null = null; #candidateKnown = true; #cleanup: ControllerIncident['cleanup'] = 'complete';
+  #publicationObservation: { readonly status: 'not_run' | 'confirmed' | 'failed' | 'unresolved'; readonly reason: string | null; readonly receipt: ArtifactRef | null } = { status: 'not_run', reason: 'disabled', receipt: null };
   constructor(readonly context: CycleContext, head: ProgressHead | null = null, candidate?: ByteInventory, readonly resumeAdoption?: boolean) {
     this.head = head; this.candidate = candidate ?? { manifest: context.source.manifest, ref: { name: '', digest: hash(''), byteLength: 0 }, files: context.source.artifacts };
     this.deadline = new WorkDeadline(context.store, context.authority, context.plan.controls.drainReserveMs, context.signal);
     this.events = new ControllerEvents(context.store, context.artifacts, context.onEvent, () => this.deadline.stop('OUTPUT_LIMIT'), head?.progress.eventSequence ?? 0);
     this.verifier = new Verifier(context.store, context.authority, context.artifacts, context.plan, context.lock, () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; });
+    this.gate = new Gate(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
+      () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
+      detail => this.events.push('gate_waiting', null, null, null, [], detail));
+    this.publisher = new Publication(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
+      () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; }, context.descriptor.repository);
+    if (head && head.progress.publication.status !== 'idle') {
+      const prior = head.progress.publication;
+      this.#publicationObservation = prior.status === 'confirmed' ? { status: 'confirmed', reason: null, receipt: prior.receipt }
+        : prior.status === 'failed' ? { status: 'failed', reason: 'not_executed', receipt: prior.receipt } : { status: 'unresolved', reason: 'unresolved', receipt: null };
+    }
   }
   get generation(): number { return this.head?.progress.candidate.generation ?? 0; }
   get draft(): Draft {
@@ -101,7 +114,7 @@ export class Cycle {
     const bound = bindSubject(lock, source.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'admission');
     await this.events.push('admission', null);
     await this.publish({ version: 2, runId: lock.spec.runId, lockHash: lock.spec.lockHash, stage: { kind: 'bootstrap', phase: 'bootstrap', capacity: plan.capacity },
-      nodes: plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null,
+      nodes: plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null, publication: { status: 'idle', operationId: null, receipt: null },
       candidate: { manifest, digest: bound.value.candidateDigest, generation: 0, workspace: source.workspace, privateSession: null }, failures: [], verifierReceipts: [], verifierRefusals: [], eventSequence: this.events.sequence, terminalIntent: null }, 'bootstrap');
   }
   async guard(): Promise<void> { this.deadline.assert(); await this.context.owner.assertCurrent(); await verifySource(this.context.source, this.context.plan.task, this.context.owner); this.deadline.assert(); }
@@ -122,10 +135,14 @@ export class Cycle {
     }
     if (existing) {
       const key = slotId + ':' + this.generation, known = this.checks.get(key); if (known) return known;
-      const job = prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts }, this.candidate, this.generation, existing.producerNonce);
+      const gateSlot = plan.verifierSlots.find(item => item.id === slotId)!.handler.implementation === 'gate.v1';
+      const job = gateSlot
+        ? prepareGate(plan, lock, slotId, this.candidate, this.generation, existing.producerNonce, this.context.loaded.registry.spec.gateEndpoints)
+        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts }, this.candidate, this.generation, existing.producerNonce);
       const operation = this.context.store.getOperation(job.operationId);
       const restored = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND' && existing.receipt === null
-        ? await this.verifier.run(job, this.deadline.abort.signal) : await this.verifier.restore(job);
+        ? await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal))
+        : await (gateSlot ? this.gate.restore(job as PreparedGate) : this.verifier.restore(job as PreparedVerification));
       if (existing.receipt !== null && (!same(existing.receipt, restored.receipt) || !same(existing.output, restored.output))) refuse('RECOVERY_REQUIRED', '', 'recovery');
       this.checks.set(key, restored);
       const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId), phase = 'verify.' + this.generation + '.' + ordinal;
@@ -133,7 +150,7 @@ export class Cycle {
         if (this.draft.stage.phase !== phase + '.pre') refuse('RECOVERY_REQUIRED', '', 'recovery');
         let failures = this.draft.failures;
         if (restored.status === 'failed') {
-          const slot = plan.verifierSlots[ordinal]!, trusted = authenticatedCheck(restored), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: restored.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
+          const slot = plan.verifierSlots[ordinal]!, trusted = gateSlot ? authenticatedGate(restored) : authenticatedCheck(restored), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: restored.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
           failures = rememberFailure(failures, failureSignature({ category: 'implementation', codes: [restored.reason!], handler: slot.handler.implementation, handlerVersion: 1, target: typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : slot.id, candidate: trusted.subject.candidateDigest, evidence: [stable] }), this.generation, restored.output);
         }
         await this.publish({ ...this.draft, failures, stage: { ...this.draft.stage, kind: 'verifier_post' },
@@ -145,20 +162,23 @@ export class Cycle {
     if (this.draft.failures.length >= 16) refuse('OUTPUT_LIMIT', '', 'verification');
     await this.guard(); const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId); if (ordinal < 0) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
     const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts };
-    const sized = preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
-    if (sized.kind === 'refused') {
+    const gateSlot = plan.verifierSlots[ordinal]!.handler.implementation === 'gate.v1';
+    const sized = gateSlot ? null : preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
+    if (sized && sized.kind === 'refused') {
       const row = await this.verifier.storeRefusal(sized.prepared); await this.events.push('verification', 'OUTPUT_LIMIT');
       await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierRefusals: [...this.draft.verifierRefusals, row] }, phase + '.pre');
       await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_post' }, nodes: this.nodeDispositions(this.draft.nodes, this.generation, { slotId, status: 'blocked' }) }, phase + '.post');
       const checked = await this.verifier.restoreRefusal(sized.prepared, row); this.refusals.set(slotId + ':' + this.generation, checked); return checked;
     }
-    const job = sized.job;
+    const job: PreparedVerification | PreparedGate = gateSlot
+      ? prepareGate(plan, lock, slotId, this.candidate, this.generation, nonce, this.context.loaded.registry.spec.gateEndpoints)
+      : sized!.job;
     await this.events.push('verification', null);
     await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierReceipts: [...this.draft.verifierReceipts, { slot: slotId, generation: this.generation, operationId: job.operationId, producerNonce: nonce, output: null, receipt: null }] }, phase + '.pre');
-    this.deadline.assert(); const checked = await this.verifier.run(job, this.deadline.abort.signal); this.checks.set(slotId + ':' + this.generation, checked);
+    this.deadline.assert(); const checked = await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal)); this.checks.set(slotId + ':' + this.generation, checked);
     let draft: Draft = { ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_post' as const }, verifierReceipts: this.draft.verifierReceipts.map(item => item.slot === slotId && item.generation === this.generation ? { ...item, output: checked.output, receipt: checked.receipt } : item) };
     if (checked.status === 'failed') {
-      const slot = plan.verifierSlots[ordinal]!, trusted = authenticatedCheck(checked), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: checked.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
+      const slot = plan.verifierSlots[ordinal]!, trusted = gateSlot ? authenticatedGate(checked) : authenticatedCheck(checked), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: checked.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
       const signature = failureSignature({ category: 'implementation', codes: [checked.reason!], handler: slot.handler.implementation, handlerVersion: 1, target: typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : slot.id, candidate: trusted.subject.candidateDigest, evidence: [stable] });
       draft = { ...draft, failures: rememberFailure(draft.failures, signature, this.generation, checked.output) };
     }
@@ -398,9 +418,44 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         this.submission = { version: 1, origin: 'controller', raw, value };
       }
       const acceptance = evaluateControllerAcceptance(this.context.plan, this.context.lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission.value, this.context.store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals());
-      if (acceptance.result.spec.status !== 'failed' || !await this.implementationRepair()) return acceptance;
-      await this.graph();
+      if (acceptance.result.spec.status === 'failed' && await this.implementationRepair()) { await this.graph(); continue; }
+      return acceptance.result.spec.status === 'completed' ? await this.publishBoundary(acceptance) : acceptance;
     }
+  }
+  async publishBoundary(acceptance: AcceptanceObservation): Promise<AcceptanceObservation> {
+    const { plan, lock, store, loaded } = this.context, publication = plan.publication;
+    if (publication.mode !== 'pull_request' || ['confirmed', 'failed', 'unresolved'].includes(this.draft.publication.status)) return acceptance;
+    const view = stateValue(store.inspect()), endpoint = loaded.registry.spec.publicationEndpoints.find(item => item.id === publication.endpointRef);
+    if (!endpoint) refuse('CONFIG_REFERENCE', '/spec/publication', 'execution');
+    const subject = (() => { const bound = bindSubject(lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'execution'); return bound.value; })();
+    const scope = acceptance.verifierMatrix.find(row => row.implicit === 'scope');
+    const head = headRevision(this.context.descriptor.repository);
+    if (![plan.task.spec.target.baseRevision, plan.task.spec.target.sourceRevision].includes(head)) refuse('TARGET_MISMATCH', '', 'execution');
+    if (this.draft.publication.status !== 'pending') {
+      const eligible = this.draft.nodes.every(node => node.state === 'completed') && scope?.status === 'passed'
+        && view.clockStatus === 'trusted' && !view.counts.dispatchedRequests && !view.counts.unresolvedRequests && !view.counts.unresolvedOperations && !view.ledger.violations.length
+        && this.submission !== null && this.submission.value.status === 'completed'
+        && same(this.draft.candidate.digest, subject.candidateDigest);
+      if (!eligible) { this.#publicationObservation = { status: 'not_run', reason: 'ineligible', receipt: null }; return acceptance; }
+    }
+    const prepared: PreparedPublication = preparePublication(plan, lock, view.storeId, endpoint, subject);
+    const operation = store.getOperation(prepared.operationId);
+    await this.events.push('publication', null);
+    if (!this.head?.progress.stage.consumed.includes('publication.pre')) await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'publication_pre' }, publication: { status: 'pending', operationId: prepared.operationId, receipt: null } }, 'publication.pre');
+    this.deadline.assert();
+    const result = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND'
+      ? await this.publisher.run(prepared, endpoint, this.deadline.abort.signal)
+      : await this.publisher.restore(prepared, endpoint);
+    if (result.kind === 'settled') {
+      this.#publicationObservation = result.outcome === 'succeeded'
+        ? { status: 'confirmed', reason: null, receipt: result.receiptRef }
+        : { status: 'failed', reason: 'not_executed', receipt: result.receiptRef };
+      await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'publication_post' }, publication: { status: result.outcome === 'succeeded' ? 'confirmed' : 'failed', operationId: prepared.operationId, receipt: result.receiptRef } }, 'publication.post');
+    } else {
+      this.#publicationObservation = { status: 'unresolved', reason: result.reason, receipt: null };
+      await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'publication_post' }, publication: { status: 'unresolved', operationId: prepared.operationId, receipt: null } }, 'publication.post');
+    }
+    return evaluateControllerAcceptance(plan, lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission!.value, store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals());
   }
   async terminal(primary: AcceptanceObservation | ControllerIncident): Promise<CycleExecution> {
     const { store, artifacts, lock } = this.context, secondary: ControllerDiagnostic['code'][] = [];
@@ -422,7 +477,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       const eventsRef = await this.events.close(); finalizer.check();
       observations = await finalizer.put('observations', { version: 1, primary: primaryRef, requestedStatus: accepted ? primary.requestedStatus : null, diagnostic: accepted ? primary.diagnostic : primary.code,
         requestedStatusSource: this.submission === null ? 'unavailable' : this.submission.origin === 'controller' ? 'controller_check_only' : 'captured_submission', selectedNoChangeCheck: accepted ? primary.selectedNoChangeCheck : this.context.plan.noChangeEligibility.checkId, contradictions: accepted ? primary.contradictions : [], verifierMatrix: accepted ? primary.verifierMatrix : null,
-        verification: accepted ? primary.verification : null, preflightRefusals: accepted ? primary.preflightRefusals : null, events: eventsRef, cleanup: this.#cleanup, memory: { status: 'not_requested', reason: null }, publication: { status: 'not_run', reason: 'outside_scope' } });
+        verification: accepted ? primary.verification : null, preflightRefusals: accepted ? primary.preflightRefusals : null, events: eventsRef, cleanup: this.#cleanup, memory: { status: 'not_requested', reason: null }, publication: this.#publicationObservation });
       await checkpoint('terminal_observations', 'terminal.observations');
     } catch (error) { secondary.push(safeDiagnostic(error, 'finalization').code); }
     finally { try { await this.events.close(); } catch { secondary.push('CLEANUP_FAILED'); this.#cleanup = 'pending'; } }

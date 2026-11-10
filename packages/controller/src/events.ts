@@ -11,9 +11,10 @@ import { readBoundedFile } from './files.js';
 import { parsePrivateJson } from './parser.js';
 export interface ControllerEvent {
   readonly version: 1; readonly sequence: number; readonly runId: string; readonly lockHash: Digest;
-  readonly nodeId: string | null; readonly attemptId: string | null; readonly stage: 'admission' | 'waiting' | 'role' | 'verification' | 'repair' | 'drain' | 'terminal';
+  readonly nodeId: string | null; readonly attemptId: string | null; readonly stage: 'admission' | 'waiting' | 'role' | 'verification' | 'repair' | 'drain' | 'terminal' | 'gate_waiting' | 'publication';
   readonly code: string | null; readonly budget: { readonly admittedCalls: number; readonly formatRepairs: number; readonly implementationRepairs: number; readonly transportRetries: number; readonly chargedTokens: string; readonly remainingTokens: string };
   readonly deadlineMonotonicMs: string; readonly references: readonly ArtifactRef[];
+  readonly gate: null | { readonly operationId: string; readonly gateId: string; readonly elapsedMs: number; readonly nextPollMs: number; readonly deadlineMs: number };
 }
 /** Append public-safe observations during work. Finalization seals the same inode without copying its body. */
 export class ControllerEvents {
@@ -39,12 +40,13 @@ export class ControllerEvents {
       this.artifacts.vault.assertClean(bytes); if (bytes.length && bytes.at(-1) !== 10) refuse('RECOVERY_REQUIRED', '', 'recovery');
       let count = 0;
       for (const line of bytes.length ? bytes.subarray(0, -1).toString().split('\n') : []) {
-        const row = record(parsePrivateJson(Buffer.from(line), 4096), ['version', 'sequence', 'runId', 'lockHash', 'nodeId', 'attemptId', 'stage', 'code', 'budget', 'deadlineMonotonicMs', 'references']);
+        const row0: unknown = parsePrivateJson(Buffer.from(line), 4096), hasGate = Object.hasOwn(row0 as object, 'gate'), row = record(row0, ['version', 'sequence', 'runId', 'lockHash', 'nodeId', 'attemptId', 'stage', 'code', 'budget', 'deadlineMonotonicMs', 'references', ...(hasGate ? ['gate' as const] : [])]);
         if (Buffer.byteLength(line) + 1 > 4096 || canonical(row) !== line || row.version !== 1 || row.sequence !== ++count || row.runId !== view.runId || !same(row.lockHash, view.lockHash)
-          || row.deadlineMonotonicMs !== view.clock.basis.taskDeadlineMonotonicMs || !['admission', 'waiting', 'role', 'verification', 'repair', 'drain', 'terminal'].includes(text(row.stage)) || this.#terminal || row.stage === 'terminal' && !this.terminalRecovery
+          || row.deadlineMonotonicMs !== view.clock.basis.taskDeadlineMonotonicMs || !['admission', 'waiting', 'role', 'verification', 'repair', 'drain', 'terminal', 'gate_waiting', 'publication'].includes(text(row.stage)) || this.#terminal || row.stage === 'terminal' && !this.terminalRecovery
           || row.code !== null && !CODES.includes(row.code as ControllerDiagnostic['code'])) refuse('RECOVERY_REQUIRED', '', 'recovery');
         if (row.nodeId !== null) id(row.nodeId); if (row.attemptId !== null) id(row.attemptId);
         if (row.stage === 'terminal') this.#terminal = true;
+        if (row.gate !== null && row.gate !== undefined) { const detail = record(row.gate, ['operationId', 'gateId', 'elapsedMs', 'nextPollMs', 'deadlineMs']); id(detail.operationId); text(detail.gateId, '', 128); integer(detail.elapsedMs, 0, Number.MAX_SAFE_INTEGER); integer(detail.nextPollMs, 0, 600000); integer(detail.deadlineMs, 0, Number.MAX_SAFE_INTEGER); }
         const budget = record(row.budget, ['admittedCalls', 'formatRepairs', 'implementationRepairs', 'transportRetries', 'chargedTokens', 'remainingTokens']);
         for (const key of ['admittedCalls', 'formatRepairs', 'implementationRepairs', 'transportRetries']) integer(budget[key], 0, 1024);
         for (const key of ['chargedTokens', 'remainingTokens']) if (!/^(?:0|[1-9][0-9]{0,39})$/.test(text(budget[key]))) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -60,13 +62,13 @@ export class ControllerEvents {
   async ready(): Promise<void> { await this.#ready; if (this.#initializationFailed) refuse('RECOVERY_REQUIRED', '', 'recovery'); }
   get hasTerminal(): boolean { return this.#terminal; }
   get sequence(): number { return this.#sequence; }
-  async push(stage: ControllerEvent['stage'], code: ControllerDiagnostic['code'] | null, nodeId: string | null = null, attemptId: string | null = null, refs: readonly ArtifactRef[] = []): Promise<void> {
+  async push(stage: ControllerEvent['stage'], code: ControllerDiagnostic['code'] | null, nodeId: string | null = null, attemptId: string | null = null, refs: readonly ArtifactRef[] = [], gate: ControllerEvent['gate'] = null): Promise<void> {
     await this.#ready;
     if (this.#initializationFailed || this.#closed || this.#failed && stage !== 'terminal' || stage === 'terminal' && this.#terminal) refuse('OUTPUT_LIMIT', '', 'execution');
     const view = stateValue(this.store.inspect()), ledger = view.ledger;
     const event: ControllerEvent = freeze({ version: 1, sequence: this.#sequence + 1, runId: id(view.runId), lockHash: view.lockHash, nodeId: nodeId === null ? null : id(nodeId), attemptId: attemptId === null ? null : id(attemptId), stage, code,
       budget: { admittedCalls: ledger.admittedCalls, formatRepairs: ledger.formatRepairs, implementationRepairs: ledger.implementationRepairs, transportRetries: ledger.transportRetries, chargedTokens: ledger.chargedTokens.decimal, remainingTokens: ledger.remainingTokens.decimal },
-      deadlineMonotonicMs: view.clock.basis.taskDeadlineMonotonicMs, references: refs.map(checkedRef) });
+      deadlineMonotonicMs: view.clock.basis.taskDeadlineMonotonicMs, references: refs.map(checkedRef), gate });
     const bytes = Buffer.from(canonical(event) + '\n'); this.artifacts.vault.assertClean(bytes);
     const terminal = stage === 'terminal', fail = () => { this.#failed = true; this.stop(); refuse('OUTPUT_LIMIT', '', 'execution'); };
     if (bytes.length > 4096 || refs.length > 16 || this.#queued >= (terminal ? 128 : 127) || this.#queueBytes + bytes.length > (terminal ? 524288 : 520192) || this.#bytes + bytes.length > (terminal ? 4194304 : 4190208)) return fail();

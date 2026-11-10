@@ -13,7 +13,8 @@ import type { ControllerDiagnostic, CycleExecution } from '@loopwright/controlle
 for (const argv of [[], ['status'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--run-id', 'y'], ['status', '--run-root', '/tmp', '--run-id', 'x', 'extra'], ['check', '--config'], ['run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--latest'], ['run', '--dry-run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c', '--repo', '/tmp']]) test('cli: rejects incomplete/duplicate/unknown argument set ' + JSON.stringify(argv), () => assert.throws(() => parseArguments(argv)));
 test('cli: accepts every exact documented command flag shape', () => {
   const common = ['--config', '/config', '--registry', '/registry', '--registry-sha256', 'a'.repeat(64)], run = ['--repo', '/repo', '--run-root', '/runs', '--run-id', 'id'];
-  for (const args of [['init', '--directory', '/draft', '--force', '--json'], ['check', ...common, '--output', '/plan', '--json'], ['run', ...common, '--dry-run'], ['run', ...common, ...run, '--json'], ['resume', ...common, ...run], ['status', '--run-root', '/runs', '--run-id', 'id'], ['inspect', '--run-root', '/runs', '--run-id', 'id', '--output', '/export']]) assert.doesNotThrow(() => parseArguments(args));
+  for (const args of [['init', '--directory', '/draft', '--force', '--json'], ['check', ...common, '--output', '/plan', '--json'], ['run', ...common, '--dry-run'], ['run', ...common, ...run, '--json'], ['resume', ...common, ...run], ['reconcile', ...common, ...run, '--receipt', '/receipt.json', '--json'], ['status', '--run-root', '/runs', '--run-id', 'id'], ['inspect', '--run-root', '/runs', '--run-id', 'id', '--output', '/export']]) assert.doesNotThrow(() => parseArguments(args));
+  assert.throws(() => parseArguments(['reconcile', ...common, ...run]));
 });
 test('cli: display encodes controls, ANSI, workflow text and line separators', () => {
   const value = '\u001b[31m\n::warning::\r\u0085\u2028'; const output = encoded(value); assert.equal(output.includes('\u001b'), false); assert.equal(output.includes('\n'), false); assert.equal(output.includes('::'), false); assert.equal(output.includes('\u0085'), false); assert.equal(JSON.parse(output), value);
@@ -35,7 +36,7 @@ test('cli: stable terminal and diagnostic exit mapping preserves uncertainty ove
   for (const [status, code] of [['completed', 0], ['no_change', 0], ['blocked', 3], ['failed', 4], ['exhausted', 5], ['expired', 6], ['reconcile_required', 7], ['cancelled', 130]] as const) {
     const value = { kind: 'result', result: { spec: { status } } } as CycleExecution; assert.equal(executionExit(value, 'SIGINT'), code); if (status === 'cancelled') assert.equal(executionExit(value, 'SIGTERM'), 143);
   }
-  for (const [code, expected] of [['CONFIG_SYNTAX', 2], ['OWNER_BUSY', 7], ['BUDGET_EXHAUSTED', 5], ['DEADLINE', 6], ['CLEANUP_FAILED', 8]] as const) assert.equal(diagnosticExit({ code, phase: 'configuration' } as ControllerDiagnostic), expected);
+  for (const [code, phase, expected] of [['CONFIG_SYNTAX', 'configuration', 2], ['OWNER_BUSY', 'recovery', 7], ['BUDGET_EXHAUSTED', 'recovery', 5], ['DEADLINE', 'recovery', 6], ['RECEIPT_CONFLICT', 'recovery', 7], ['CLEANUP_FAILED', 'recovery', 8]] as const) assert.equal(diagnosticExit({ code, phase } as ControllerDiagnostic), expected);
 });
 
 test('cli: real subprocess dry-run, run, resume and inspect share production public controller paths', async () => {

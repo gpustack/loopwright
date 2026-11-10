@@ -8,7 +8,7 @@ import { interpolate } from './interpolation.js';
 import { credentialDeclarations, createVault, type CredentialVault } from './credentials.js';
 import { result, refuse } from './errors.js';
 import { digestValue, freeze, hash, id, integer, list, record, same, text } from './schema.js';
-import { CONTROLLER_API_VERSION, type ControllerConfiguration, type LoadedConfiguration, type LoadConfigurationInput, type RegistryResource } from './types.js';
+import { CONTROLLER_API_VERSION, type ControllerConfiguration, type LoadedConfiguration, type LoadConfigurationInput, type RegistryResource, type PublicationConfig } from './types.js';
 interface ApprovedState {
   readonly input: LoadConfigurationInput; readonly vault: CredentialVault;
   readonly resources: readonly { readonly id: string; readonly kind: RegistryResource['kind']; readonly ref: import('@loopwright/core').ArtifactRef; readonly bytes: Uint8Array }[];
@@ -21,11 +21,23 @@ export interface ConfigurationPorts { readonly environment: (name: string) => st
 function format(path: string): 'json' | 'yaml' {
   const extension = extname(path); if (extension === '.json') return 'json'; if (['.yml', '.yaml'].includes(extension)) return 'yaml'; refuse('CONFIG_SYNTAX');
 }
+function publicationBlock(raw: unknown): PublicationConfig {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) refuse('CONFIG_SCHEMA', '/spec/publication');
+  const mode = (raw as Record<string, unknown>).mode;
+  if (mode === 'disabled') { record(raw, ['mode'], '/spec/publication'); return { mode: 'disabled' }; }
+  if (mode !== 'pull_request') refuse('CONFIG_SCHEMA', '/spec/publication/mode');
+  const value = record(raw, ['mode', 'endpointRef', 'targetBranch', 'headBranchPrefix', 'titleTemplate'], '/spec/publication');
+  id(value.endpointRef, '/spec/publication/endpointRef');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(text(value.targetBranch, '/spec/publication/targetBranch', 128))) refuse('CONFIG_SCHEMA', '/spec/publication/targetBranch');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(text(value.headBranchPrefix, '/spec/publication/headBranchPrefix', 64).replace(/\/$/, '')) || /\/\//.test(value.headBranchPrefix as string)) refuse('CONFIG_SCHEMA', '/spec/publication/headBranchPrefix');
+  text(value.titleTemplate, '/spec/publication/titleTemplate', 256);
+  return { mode: 'pull_request', endpointRef: value.endpointRef as string, targetBranch: value.targetBranch as string, headBranchPrefix: value.headBranchPrefix as string, titleTemplate: value.titleTemplate as string };
+}
 function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<string, unknown> } {
   const top = record(raw, ['apiVersion', 'kind', 'metadata', 'spec']);
   if (top.apiVersion !== CONTROLLER_API_VERSION || top.kind !== 'ControllerConfig') refuse('CONFIG_SCHEMA');
   id(record(top.metadata, ['id'], '/metadata').id, '/metadata/id');
-  const spec = record(top.spec, ['task', 'registry', 'profiles', 'credentials', 'controls'], '/spec');
+  const spec = record(top.spec, ['task', 'registry', 'profiles', 'credentials', 'controls', ...(Object.hasOwn(top.spec as object, 'publication') ? ['publication' as const] : [])], '/spec');
   const binding = record(spec.registry, ['id', 'digest'], '/spec/registry'); id(binding.id); digestValue(binding.digest);
   const profiles = record(spec.profiles, ['roles', 'steps'], '/spec/profiles');
   for (const [kind, identity, reference] of [['roles', 'roleId', 'profileRef'], ['steps', 'stepId', 'handlerRef']] as const) {
@@ -36,6 +48,7 @@ function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<s
   integer(controls.drainReserveMs, 120000, 300000, '/spec/controls/drainReserveMs'); integer(controls.maxAttempts, 1, 16, '/spec/controls/maxAttempts'); integer(controls.repeatFailureLimit, 2, 2, '/spec/controls/repeatFailureLimit');
   const submission = record(controls.submission, ['mode', 'path'], '/spec/controls/submission');
   if (submission.mode !== 'artifact_or_assistant' || submission.path !== null && !digestArtifact(text(submission.path), new Uint8Array()).ok) refuse('CONFIG_SCHEMA', '/spec/controls/submission');
+  spec.publication = publicationBlock(spec.publication === undefined ? { mode: 'disabled' } : spec.publication);
   return { top, spec };
 }
 /** Internal ports only select the launching environment; public callers cannot inject loaders or transports. */

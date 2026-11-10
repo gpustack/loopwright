@@ -1,6 +1,7 @@
 import { bindSubject, evaluateAcceptance, constructRunResult, type ArtifactManifest, type Evidence, type RequestUsage, type ResolvedArtifact, type RunResult, type RunStatus, type SubmittedCheck, type TaskLock, type VerificationResult } from '@loopwright/core';
 import type { LocalRunStore } from '@loopwright/state';
 import { authenticatedCheck, authenticatedRefusal, type PreflightRefusal, type VerifiedCheck } from './verification.js';
+import { authenticatedGate } from './gate.js';
 import { journal } from './progress.js';
 import { canonical, freeze, hash, same } from './schema.js';
 import { refuse } from './errors.js';
@@ -21,9 +22,9 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
   const bound = bindSubject(lock, candidate); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); const subject = bound.value, records = journal(store);
   const eligible: Evidence[] = [], artifacts: ResolvedArtifact[] = [...candidateFiles], bySlot = new Map<string, VerifiedCheck>();
   for (const checked of checks) {
-    const original = authenticatedCheck(checked), slot = plan.verifierSlots.find(slot => slot.id === checked.slotId), operation = records.operations.find(item => item.intent.operationId === checked.operationId);
+    const original = plan.verifierSlots.find(slot => slot.id === checked.slotId)?.handler.implementation === 'gate.v1' ? authenticatedGate(checked) : authenticatedCheck(checked), slot = plan.verifierSlots.find(slot => slot.id === checked.slotId), operation = records.operations.find(item => item.intent.operationId === checked.operationId);
     if (!slot || bySlot.has(slot.id) || checked.generation !== generation || checked.checkId !== slot.checkId || !same(original.subject, subject) || !same(original.evidence.spec.subject, subject)
-      || original.evidence.spec.observedStatus !== checked.status || original.evidence.spec.checkId !== slot.checkId || original.evidence.spec.producerId !== 'loopwright.byte-verifier.v1'
+      || original.evidence.spec.observedStatus !== checked.status || original.evidence.spec.checkId !== slot.checkId || original.evidence.spec.producerId !== (slot.handler.implementation === 'gate.v1' ? 'loopwright.gate-verifier.v1' : 'loopwright.byte-verifier.v1')
       || !same(original.planDigest, plan.planDigest) || !same(original.header.handlerDigest, slot.handler.digest) || original.header.handler !== slot.handler.implementation
       || !same(original.header.candidate.ref.digest, hash(canonical(candidate))) || original.header.candidate.ref.byteLength !== Buffer.byteLength(canonical(candidate))
       || !operation || operation.state !== 'confirmed' || !same(operation.intent.requestDigest, original.requestDigest) || !same(operation.reconciliation ?? operation.initialReceipt, original.receipt) || !same(original.receipt.evidence.artifact, checked.output)) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
@@ -44,7 +45,7 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
     const slot = plan.verifierSlots.find(slot => slot.implicit === null && slot.checkId === check.id)!, verified = bySlot.get(slot.id);
     const negative = negativeBySlot.get(slot.id); if (negative) return { checkId: check.id, status: 'blocked', evidenceId: null, reason: negative.reason };
     if (!verified) return { checkId: check.id, status: 'not_run', evidenceId: null, reason: 'verifier_not_run' };
-    const evidence = authenticatedCheck(verified).evidence; return { checkId: check.id, status: verified.status, evidenceId: evidence.metadata.id, reason: verified.reason };
+    const evidence = slot.handler.implementation === 'gate.v1' ? authenticatedGate(verified).evidence : authenticatedCheck(verified).evidence; return { checkId: check.id, status: verified.status, evidenceId: evidence.metadata.id, reason: verified.reason };
   });
   const contradictions = (submission?.checks ?? []).filter(claim => claim.status === 'passed' && claims.some(actual => actual.checkId === claim.checkId && actual.status === 'failed')).map(claim => claim.checkId);
   const input = { trusted: { expectedLock: lock, candidateManifest: candidate, eligibleEvidence: eligible }, claims }, evaluated = evaluateAcceptance(tree(input), artifacts);
@@ -70,9 +71,17 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
     const observed = item.resolution?.kind === 'terminal_usage' ? item.resolution.observation : item.initialObservation;
     usage.push(observed?.usage ?? { requestId: item.admission.requestId, inputTokens: { provenance: 'unknown' }, outputTokens: { provenance: 'unknown' }, costMicrousd: { provenance: 'unknown' } });
   }
-  const external = records.operations.filter(item => item.intent.effect === 'external_write'), externalEffects = external.some(item => item.state === 'dispatch_uncertain' || item.state === 'unresolved' || (item.reconciliation ?? item.initialReceipt)?.outcome === 'failed') ? 'unknown'
-    : external.some(item => item.state === 'confirmed' && (item.reconciliation ?? item.initialReceipt)?.outcome === 'succeeded') ? 'confirmed' : 'none';
+  const external = records.operations.filter(item => item.intent.effect === 'external_write');
+  let externalEffects: 'none' | 'possible' | 'confirmed' | 'unknown' = 'none', publicationNotExecuted = false;
+  for (const item of external) {
+    const receipt = item.reconciliation ?? item.initialReceipt;
+    if (item.state === 'dispatch_uncertain' || item.state === 'unresolved') externalEffects = 'unknown';
+    else if (receipt?.outcome === 'succeeded') externalEffects = 'confirmed';
+    else if (receipt?.outcome === 'not_executed') publicationNotExecuted = true;
+    else if (receipt?.outcome === 'failed') externalEffects = 'unknown';
+  }
   if (externalEffects === 'unknown') status = 'reconcile_required';
+  else if (publicationNotExecuted) status = 'failed';
   const draft = { trusted: { ...input.trusted, usage, externalEffects, noChange: status === 'no_change' ? { checkId: selected!, evidenceId: noChangeProof!.metadata.id, reason: 'candidate_equals_source' } : null },
     candidate: { status, checks: claims, memory: { status: 'not_requested', reason: null } } };
   const result = constructRunResult(tree(draft), artifacts); if (!result.ok) refuse('RECOVERY_REQUIRED', '', 'verification');

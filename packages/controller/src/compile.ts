@@ -7,11 +7,11 @@ import { freeze, canonical, hash, same } from './schema.js';
 import { refuse, result } from './errors.js';
 import { compactionTarget } from './scheduler.js';
 import type { CheckpointCapacity, CompiledPlan, LoadedConfiguration, PlannedRole, VerifierSlot } from './types.js';
-export function checkpointCapacity(A: number, N: number, I: number, C: number): CheckpointCapacity {
-  if (![A, N, I, C].every(Number.isSafeInteger) || A < 1 || A > 16 || N < 0 || I < 0 || C < 2 || C > 16) refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
-  const V = 1 + Math.min(A, N + I), J = C * V, D = 4 + 3 * A + 2 * J;
+export function checkpointCapacity(A: number, N: number, I: number, C: number, publication: boolean): CheckpointCapacity {
+  if (![A, N, I, C].every(Number.isSafeInteger) || A < 1 || A > 16 || N < 0 || I < 0 || C < 2 || C > 16 || typeof publication !== 'boolean') refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
+  const V = 1 + Math.min(A, N + I), J = C * V, D = 4 + 3 * A + 2 * J + (publication ? 3 : 0);
   if (D > 64) refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
-  return { A, N, I, C, V, J, D, additionalRefs: 4, requiredRefs: 6, checkpointBytes: 40960 };
+  return { A, N, I, C, V, J, D, publication, additionalRefs: 4, requiredRefs: 6, checkpointBytes: 40960 };
 }
 export function compilePlan(loaded: LoadedConfiguration) {
   return result(async (): Promise<CompiledPlan> => {
@@ -30,11 +30,24 @@ export function compilePlan(loaded: LoadedConfiguration) {
       orderedDAG.push({ id: ready.id, kind: ready.kind, dependsOn: [...ready.dependsOn].sort(), roleId: ready.roleId, handler: handler.implementation === 'pi.agent.v1' ? { ...handler, parameters: { ...handler.parameters, prompt: '[private command sha256:' + hash(String(handler.parameters.prompt)).hex + ']' } } : handler }); done.add(ready.id); pending.splice(pending.indexOf(ready), 1);
     }
     for (const node of orderedDAG) if (node.handler.implementation === 'pi.compact.v1') compactionTarget({ orderedDAG }, node.id);
-    const verifierSlots: VerifierSlot[] = [];
+    const verifierSlots: VerifierSlot[] = [], networkCredentials: { readonly ref: string; readonly consumer: 'gate' | 'publisher' }[] = [];
+    const networkCredential = (ref: string, consumer: 'gate' | 'publisher', path: string): void => {
+      const binding = registry.credentialBindings.find(item => item.id === ref);
+      if (!binding || binding.consumer !== consumer) refuse('CONFIG_REFERENCE', path, 'compile');
+      if (!networkCredentials.some(item => item.ref === ref)) networkCredentials.push({ ref: binding.id, consumer });
+    };
     for (const check of task.spec.acceptance.checks) {
       const matches = registry.handlers.filter(handler => handler.kind === 'check' && handler.parameters.checkId === check.id);
       if (matches.length !== 1) refuse('CONFIG_REFERENCE', '/spec/task/spec/acceptance', 'compile');
-      verifierSlots.push({ id: 'check.' + check.id, checkId: check.id, implicit: null, handler: matches[0]! });
+      const handler = matches[0]!;
+      if (handler.implementation === 'gate.v1') {
+        if (!check.allowedEvidenceLevels.includes('external_service')) refuse('CONFIG_SCHEMA', '/spec/task/spec/acceptance', 'compile');
+        const endpoint = registry.gateEndpoints.find(item => item.id === handler.parameters.endpointRef);
+        if (!endpoint) refuse('CONFIG_REFERENCE', '/registry/spec/gateEndpoints', 'compile');
+        networkCredential(endpoint.signingCredentialRef, 'gate', '/registry/spec/gateEndpoints');
+        if (endpoint.authCredentialRef !== null) networkCredential(endpoint.authCredentialRef, 'gate', '/registry/spec/gateEndpoints');
+      }
+      verifierSlots.push({ id: 'check.' + check.id, checkId: check.id, implicit: null, handler });
     }
     for (const [implementation, implicit] of [['scope.v1', 'scope'], ['no-change.v1', 'no_change']] as const) {
       const matches = registry.handlers.filter(handler => handler.implementation === implementation && handler.parameters.checkId === null);
@@ -46,10 +59,17 @@ export function compilePlan(loaded: LoadedConfiguration) {
     for (const node of orderedDAG.filter(node => node.kind === 'check')) if (!verifierSlots.some(slot => slot.handler.id === node.handler.id)) refuse('CONFIG_REFERENCE', '/spec/profiles/steps', 'compile');
     const noChangeId = [...task.spec.acceptance.required].sort().find(checkId => task.spec.acceptance.checks.find(check => check.id === checkId)!.allowedEvidenceLevels.includes('local_execution')
       && verifierSlots.some(slot => slot.checkId === checkId && slot.implicit === null && slot.handler.implementation === 'no-change.v1')) ?? null;
-    const capacity = checkpointCapacity(config.spec.controls.maxAttempts, orderedDAG.filter(node => node.kind === 'agent' && node.handler.implementation !== 'pi.compact.v1').length, task.spec.budgets.maxImplementationRepairs, verifierSlots.length);
+    const publication = config.spec.publication;
+    if (publication.mode === 'pull_request') {
+      const endpoint = registry.publicationEndpoints.find(item => item.id === publication.endpointRef);
+      if (!endpoint) refuse('CONFIG_REFERENCE', '/spec/publication', 'compile');
+      networkCredential(endpoint.signingCredentialRef, 'publisher', '/spec/publication');
+      if (endpoint.authCredentialRef !== null) networkCredential(endpoint.authCredentialRef, 'publisher', '/spec/publication');
+    }
+    const capacity = checkpointCapacity(config.spec.controls.maxAttempts, orderedDAG.filter(node => node.kind === 'agent' && node.handler.implementation !== 'pi.compact.v1').length, task.spec.budgets.maxImplementationRepairs, verifierSlots.length, publication.mode === 'pull_request');
     const description = await describePiAdapterFiles(); if (!description.ok) refuse('CAPABILITY_UNSUPPORTED', '', 'compile', { piCode: description.error.code });
-    const files = description.value;
-    if (task.spec.budgets.maxModelCalls > files.limits.requests || task.spec.budgets.maxModelCalls + capacity.J + 3 * capacity.A > files.limits.operations) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
+    const files = description.value, publicationOps = publication.mode === 'pull_request' ? 1 : 0;
+    if (task.spec.budgets.maxModelCalls > files.limits.requests || task.spec.budgets.maxModelCalls + capacity.J + publicationOps + 3 * capacity.A > files.limits.operations) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
     const graphDigest = hash(await readBoundedFile(fileURLToPath(new URL('../../../package-lock.json', import.meta.resolve('@loopwright/agent-pi'))), 1048576, false));
     const roles: PlannedRole[] = [], neededCredentials = new Set<string>();
     for (const role of task.spec.roles) {
@@ -75,12 +95,13 @@ export function compilePlan(loaded: LoadedConfiguration) {
         policy: { version: 2, policyId: 'controller.' + loaded.registryDigest.hex.slice(0, 32), resourceVersion: registry.resourceVersion, adapterId: 'pi', adapterVersion: '0.0.0', runtime: runtime.identity,
           selection: profile.selection, resources: [files.preamble, ...task.spec.trustedContext.resources], tools: role.tools, mcp,
           context: profile.context, accounting: 'soft_only', retry: 'sender_only', extensions: [], privateArtifacts: true,
-          limits: { ...files.limits, sessionBytes: 2097152, operations: files.limits.operations - capacity.J } } });
+          limits: { ...files.limits, sessionBytes: 2097152, operations: files.limits.operations - capacity.J - publicationOps } } });
     }
+    for (const item of networkCredentials) neededCredentials.add(item.ref);
     if (!same([...neededCredentials].sort(), state.vault.references)) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
     const plan = { version: 1 as const, runId: null, lock: null, admission: 'not_performed' as const, effectfulReadiness: 'not_checked' as const,
       sourceDocumentDigest: loaded.sourceDigest, taskByteDigest: hash('loopwright.dev/controller/task/v1\0' + canonical(task)), registryDigest: loaded.registryDigest,
-      task, orderedDAG, scope: task.spec.scope, budgets: task.spec.budgets, controls: config.spec.controls, roles,
+      task, orderedDAG, scope: task.spec.scope, budgets: task.spec.budgets, controls: config.spec.controls, roles, publication,
       resources: state.resources.map(({ id, kind, ref }) => ({ id, kind, ref })),
       credentialReferences: [...neededCredentials].sort().map(ref => { const item = registry.credentialBindings.find(item => item.id === ref)!; return { ref, consumer: item.consumer, destinationRef: item.destinationRef }; }),
       verifierSlots, capacity, noChangeEligibility: { available: noChangeId !== null, checkId: noChangeId, reason: noChangeId === null ? 'original_required_no_change_check_missing' as const : null },

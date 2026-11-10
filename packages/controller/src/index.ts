@@ -8,6 +8,8 @@ export type { RunCycleInput } from './controller.js';
 export type { CycleExecution, ControllerIncident } from './finalize.js';
 export type { ControllerEvent } from './events.js';
 export { resumeCycle } from './recovery.js';
+export { reconcileCycle } from './reconcile.js';
+export type { ReconcileCycleInput, ReconcileExecution } from './reconcile.js';
 export { readStatus, inspectRun } from './inspect.js';
 export type { RunStatus, CurrentState, InspectRunInput } from './inspect.js';
 export type { RetainedRunInput } from './retained.js';

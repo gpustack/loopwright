@@ -24,9 +24,9 @@ async function snapshot(input: RetainedRunInput) {
     let observed: Record<string, unknown> | null = null, primary: unknown = null;
     if (head?.progress.terminalIntent?.result) primary = parsePrivateJson(await retained.artifacts.read(head.progress.terminalIntent.result, 1048576), 1048576);
     if (head?.progress.terminalIntent?.observations) observed = parsePrivateJson(await retained.artifacts.read(head.progress.terminalIntent.observations, 1048576), 1048576) as Record<string, unknown>;
-    const facts = records.view; let valid = facts.clockStatus === 'trusted';
-    try { progress.decision(head); } catch { valid = false; }
-    const status: RunStatus = freeze({ runId: input.runId, source: valid ? 'current' : 'retained', stage: head?.progress.stage.kind ?? 'not_started', status: valid ? head?.progress.terminalIntent?.primary ?? 'in_progress' : null,
+    const facts = records.view; let valid = facts.clockStatus === 'trusted', decision: ReturnType<typeof progress.decision> | null = null;
+    try { decision = progress.decision(head); } catch { valid = false; }
+    const status: RunStatus = freeze({ runId: input.runId, source: valid ? 'current' : 'retained', stage: head?.progress.stage.kind ?? 'not_started', status: valid ? head?.progress.terminalIntent?.primary ?? (decision === 'reconcile_required' ? 'reconcile_required' : 'in_progress') : null,
       currentState: { revision: facts.revision, clockStatus: facts.clockStatus, counts: facts.counts, ledger: facts.ledger, clock: facts.clock }, checkpoint: head?.checkpoint.checkpointId ?? null,
       cleanup: observed && ['complete', 'pending', 'failed'].includes(String(observed.cleanup)) ? observed.cleanup as RunStatus['cleanup'] : null,
       unavailable: [...(valid ? [] : ['status']), ...(observed ? [] : ['cleanup'])] });
@@ -81,7 +81,16 @@ export function inspectRun(input: InspectRunInput) {
     } else bundle.absent('events.jsonl');
     bundle.json('usage.json', { version: 1, ledger: saved.records.view.ledger, requests: saved.records.requests.map(row => ({ requestId: row.admission.requestId, state: row.state, usage: (row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation)?.usage ?? null })) });
     bundle.json('checkpoint.manifest.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, checkpoints: saved.records.checkpoints.map(cp => ({ checkpointId: cp.checkpointId, sequence: cp.sequence, subject: cp.subject, artifacts: cp.additionalArtifacts })) });
-    for (const name of ['review.json', 'memory.json', 'publication.json']) bundle.absent(name, 'outside_scope', 'not_run');
+    for (const name of ['review.json', 'memory.json']) bundle.absent(name, 'outside_scope', 'not_run');
+    const publication = head?.progress.publication, externalWrite = saved.records.operations.find(item => item.intent.effect === 'external_write');
+    const journalReceipt = externalWrite && externalWrite.state === 'confirmed' ? externalWrite.reconciliation ?? externalWrite.initialReceipt : null;
+    if (externalWrite && journalReceipt) {
+      try { bundle.json('publication.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, status: journalReceipt.outcome === 'succeeded' ? 'confirmed' : 'failed', operationId: externalWrite.intent.operationId, receipt: journalReceipt }); }
+      catch { bundle.absent('publication.json'); }
+    } else if (publication && publication.receipt !== null && ['confirmed', 'failed'].includes(publication.status)) {
+      try { bundle.json('publication.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, status: publication.status, operationId: publication.operationId, receipt: parsePrivateJson(await saved.artifacts.read(publication.receipt, 65536), 65536) }); }
+      catch { bundle.absent('publication.json'); }
+    } else bundle.absent('publication.json', saved.plan.publication.mode === 'disabled' ? 'disabled' : 'ineligible', 'not_run');
     if (input.output !== undefined) await bundle.write(input.output, saved.directory);
     return freeze({ status: saved.status, manifest: bundle.manifest() });
   }, 'inspection');

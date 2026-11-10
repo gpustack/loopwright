@@ -2,7 +2,7 @@ import type { ArtifactRef, Digest, TaskContract, Subject } from '@loopwright/cor
 import type { AdapterPolicyV2, AdapterPolicy, RuntimeIdentity } from '@loopwright/agent-pi';
 import type { Json, Scalar } from './schema.js';
 export const CONTROLLER_API_VERSION = 'loopwright.dev/controller/v1alpha1' as const;
-export type Implementation = 'pi.agent.v1' | 'pi.compact.v1' | 'scope.v1' | 'json-artifact.v1' | 'no-change.v1';
+export type Implementation = 'pi.agent.v1' | 'pi.compact.v1' | 'scope.v1' | 'json-artifact.v1' | 'no-change.v1' | 'gate.v1';
 export interface Handler {
   readonly id: string; readonly version: 1; readonly digest: Digest; readonly kind: 'agent' | 'check'; readonly implementation: Implementation;
   readonly parameters: Readonly<Record<string, Json>>; readonly capabilities: readonly string[];
@@ -13,13 +13,23 @@ export interface RoleProfile {
 }
 export interface RegistryResource { readonly id: string; readonly kind: 'instruction' | 'skill' | 'document'; readonly path: string; readonly digest: Digest }
 export interface RuntimeProfile { readonly id: string; readonly identity: RuntimeIdentity; readonly dockerExecutable: string; readonly dockerSocket: string }
-export interface CredentialBinding { readonly id: string; readonly consumer: 'provider' | 'mcp'; readonly destinationRef: string; readonly environmentNames: readonly string[]; readonly template: string }
+export interface CredentialBinding { readonly id: string; readonly consumer: 'provider' | 'mcp' | 'gate' | 'publisher'; readonly destinationRef: string; readonly environmentNames: readonly string[]; readonly template: string }
 export interface EnvironmentBinding { readonly name: string; readonly classification: 'nonsecret' | 'credential'; readonly paths: readonly string[] }
+export interface GateEndpoint {
+  readonly id: string; readonly url: string; readonly signingCredentialRef: string; readonly authCredentialRef: string | null;
+  readonly timeoutMs: number; readonly maxPollMs: number; readonly pollInitialMs: number; readonly pollMaxMs: number; readonly jitter: number;
+}
+export interface PublicationEndpoint {
+  readonly id: string; readonly url: string; readonly signingCredentialRef: string; readonly authCredentialRef: string | null; readonly timeoutMs: number;
+}
+export type PublicationConfig = { readonly mode: 'disabled' }
+  | { readonly mode: 'pull_request'; readonly endpointRef: string; readonly targetBranch: string; readonly headBranchPrefix: string; readonly titleTemplate: string };
 export interface TrustedRegistry {
   readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'TrustedRegistry'; readonly metadata: { readonly id: string };
   readonly spec: { readonly version: 1; readonly resourceVersion: string; readonly handlers: readonly Handler[]; readonly roleProfiles: readonly RoleProfile[];
     readonly resources: readonly RegistryResource[]; readonly runtimeProfiles: readonly RuntimeProfile[];
-    readonly credentialBindings: readonly CredentialBinding[]; readonly environmentBindings: readonly EnvironmentBinding[] };
+    readonly credentialBindings: readonly CredentialBinding[]; readonly environmentBindings: readonly EnvironmentBinding[];
+    readonly gateEndpoints: readonly GateEndpoint[]; readonly publicationEndpoints: readonly PublicationEndpoint[] };
 }
 export interface Controls {
   readonly drainReserveMs: number; readonly maxAttempts: number; readonly repeatFailureLimit: 2;
@@ -30,7 +40,7 @@ export interface ControllerConfiguration {
   readonly spec: { readonly task: TaskContract; readonly registry: { readonly id: string; readonly digest: Digest };
     readonly profiles: { readonly roles: readonly { readonly roleId: string; readonly profileRef: string }[]; readonly steps: readonly { readonly stepId: string; readonly handlerRef: string }[] };
     /** Original approved templates, never their expansions. */
-    readonly credentials: readonly { readonly ref: string; readonly template: string }[]; readonly controls: Controls };
+    readonly credentials: readonly { readonly ref: string; readonly template: string }[]; readonly controls: Controls; readonly publication: PublicationConfig };
 }
 export interface LoadConfigurationInput {
   readonly configPath: string; readonly registryPath: string; readonly registrySha256: string;
@@ -43,7 +53,7 @@ export interface LoadedConfiguration {
   readonly sourceDigest: Digest; readonly registryDigest: Digest;
 }
 export interface CheckpointCapacity { readonly A: number; readonly N: number; readonly I: number; readonly C: number; readonly V: number; readonly J: number; readonly D: number;
-  readonly additionalRefs: 4; readonly requiredRefs: 6; readonly checkpointBytes: 40960 }
+  readonly publication: boolean; readonly additionalRefs: 4; readonly requiredRefs: 6; readonly checkpointBytes: 40960 }
 export interface VerifierSlot { readonly id: string; readonly checkId: string; readonly implicit: 'scope' | 'no_change' | null; readonly handler: Handler }
 export interface PlannedRole { readonly roleId: string; readonly profileRef: string; readonly providerCredentialRef: string | null; readonly runtime: RuntimeProfile; readonly policy: AdapterPolicyV2 }
 export interface CompiledPlan {
@@ -53,6 +63,7 @@ export interface CompiledPlan {
   readonly scope: TaskContract['spec']['scope']; readonly budgets: TaskContract['spec']['budgets']; readonly controls: Controls;
   readonly roles: readonly PlannedRole[]; readonly resources: readonly { readonly id: string; readonly kind: RegistryResource['kind']; readonly ref: ArtifactRef }[];
   readonly credentialReferences: readonly { readonly ref: string; readonly consumer: CredentialBinding['consumer']; readonly destinationRef: string }[];
+  readonly publication: PublicationConfig;
   readonly verifierSlots: readonly VerifierSlot[]; readonly capacity: CheckpointCapacity;
   readonly noChangeEligibility: { readonly available: boolean; readonly checkId: string | null; readonly reason: 'original_required_no_change_check_missing' | null };
   readonly verificationLimits: { readonly headerBytes: 16384; readonly packetBytes: 1048576; readonly jsonFileBytes: 1032184;
@@ -61,7 +72,7 @@ export interface CompiledPlan {
   readonly evidenceNeeds: readonly { readonly checkId: string; readonly levels: readonly string[] }[];
 }
 export interface JsonExpectations { readonly checkId: string; readonly path: string; readonly required: readonly string[]; readonly equals: Readonly<Record<string, Scalar>> }
-export type ProgressKind = 'bootstrap' | 'role_pre' | 'role_post' | 'verifier_pre' | 'verifier_post' | 'terminal_intent' | 'terminal_result' | 'terminal_observations';
+export type ProgressKind = 'bootstrap' | 'role_pre' | 'role_post' | 'verifier_pre' | 'verifier_post' | 'publication_pre' | 'publication_post' | 'terminal_intent' | 'terminal_result' | 'terminal_observations' | 'reconcile_result';
 export interface Watermarks { readonly requests: number; readonly operations: number }
 export interface ControllerAttempt {
   readonly ordinal: number; readonly id: string; readonly nodeId: string; readonly nativeStepId: string; readonly sessionId: string; readonly purpose: 'task' | 'reviewer' | 'compaction';
@@ -76,6 +87,7 @@ export interface ControllerProgress {
   readonly attempts: readonly ControllerAttempt[];
   readonly nativeCheckpoints: readonly { readonly attemptId: string; readonly checkpointId: string; readonly outcome: ArtifactRef }[];
   readonly submission: ArtifactRef | null;
+  readonly publication: { readonly status: 'idle' | 'pending' | 'confirmed' | 'failed' | 'unresolved'; readonly operationId: string | null; readonly receipt: ArtifactRef | null };
   readonly candidate: { readonly manifest: ArtifactRef; readonly digest: Digest; readonly generation: number; readonly workspace: ArtifactRef; readonly privateSession: ArtifactRef | null };
   readonly failures: readonly { readonly signature: Digest; readonly count: number; readonly generation: number; readonly evidence: ArtifactRef | null }[];
   readonly verifierReceipts: readonly { readonly slot: string; readonly generation: number; readonly operationId: string; readonly producerNonce: string; readonly output: ArtifactRef | null; readonly receipt: ArtifactRef | null }[];
@@ -84,5 +96,5 @@ export interface ControllerProgress {
 }
 export interface ReceiptIndex {
   readonly version: 1; readonly runId: string;
-  readonly entries: readonly { readonly id: string; readonly kind: 'plan' | 'source' | 'role' | 'verifier-output' | 'verifier-receipt' | 'preflight-refusal' | 'result' | 'observations'; readonly ref: ArtifactRef }[];
+  readonly entries: readonly { readonly id: string; readonly kind: 'plan' | 'source' | 'role' | 'verifier-output' | 'verifier-receipt' | 'preflight-refusal' | 'publication-receipt' | 'result' | 'observations'; readonly ref: ArtifactRef }[];
 }

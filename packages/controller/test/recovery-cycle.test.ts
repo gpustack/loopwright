@@ -26,7 +26,7 @@ async function bootstrap(context: CycleContext) {
   const manifest = await context.artifacts.json('manifest', context.source.manifest, 32768), subject = bindSubject(context.lock, context.source.manifest); assert.ok(subject.ok); if (!subject.ok) throw new Error('fixture');
   const draft: Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> } = {
     version: 2, runId: context.lock.spec.runId, lockHash: context.lock.spec.lockHash, stage: { kind: 'bootstrap', phase: 'bootstrap', capacity: context.plan.capacity },
-    nodes: context.plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null,
+    nodes: context.plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null, publication: { status: 'idle', operationId: null, receipt: null },
     candidate: { manifest, digest: subject.value.candidateDigest, generation: 0, workspace: context.source.workspace, privateSession: null }, failures: [], verifierReceipts: [], verifierRefusals: [], eventSequence: 0, terminalIntent: null,
   };
   return context.progress.publish(draft, 'bootstrap');

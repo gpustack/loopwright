@@ -30,6 +30,6 @@ export async function installedHandlerDigests() {
     };
     await visit(root, '', 1);
   }
-  return Object.fromEntries((['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1'] as Implementation[])
+  return Object.fromEntries((['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1', 'gate.v1'] as Implementation[])
     .map(implementation => [implementation, hash('loopwright.dev/controller/handler/v1\0' + canonical({ implementation, inventory }))])) as Record<Implementation, ReturnType<typeof hash>>;
 }

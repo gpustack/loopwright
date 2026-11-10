@@ -19,6 +19,7 @@ retains that charge and returns `RECOVERY_REQUIRED` (CLI exit7); it cannot captu
 - `compilePlan(loadedConfiguration)`
 - `runCycle({ configuration, repository, runRoot, runId, signal?, onEvent? })`
 - `resumeCycle({ configuration, repository, runRoot, runId, signal?, onEvent? })`
+- `reconcileCycle({ configuration, runRoot, runId, receipt })`
 - `readStatus({ runRoot, runId })` and `inspectRun({ runRoot, runId, output? })`
 
 `ControllerConfig` and `TrustedRegistry` envelopes both use that `apiVersion`. The registry's
@@ -29,7 +30,7 @@ A bare `$` is literal. Names match `^[A-Za-z_][A-Za-z0-9_]*$`; malformed `${...}
 `${NAME:-x}` fail with `CONFIG_ENV_SYNTAX`. A `$` followed by something other than `$` or `{`, including `$(...)`,
 is literal.
 
-Registry `spec.credentialBindings` ties each `id`, `consumer` (`provider` or `mcp`), `destinationRef`,
+Registry `spec.credentialBindings` ties each `id`, `consumer` (`provider`, `mcp`, `gate` or `publisher`), `destinationRef`,
 `environmentNames` and `template` to a `{ ref, template }` entry in `ControllerConfig.spec.credentials`.
 Resolved secrets stay in the private host vault and out of `CompiledPlan`. See the
 [configuration example](../examples/controller.md#configuration-and-mcp-credential-authoring).
@@ -44,6 +45,7 @@ loopwright run --config FILE --registry FILE --registry-sha256 HEX --repo DIR --
 loopwright status --run-root DIR --run-id ID [--json]
 loopwright inspect --run-root DIR --run-id ID [--json] [--output DIR]
 loopwright resume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]
+loopwright reconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]
 ```
 
 Paths and stable IDs are explicit. There is no latest-run selection or configuration discovery. Registry bytes must be
@@ -88,6 +90,76 @@ exit0; unavailable authority exits8. An explicit inspect output directory receiv
 lock/plan, candidate bytes, verification/result, usage, checkpoint metadata and events when available. Optional absent
 or not-run artifacts are listed with reasons. SQLite, private native sessions, command bodies and ownership nonces
 are excluded. Bundle hashes identify bytes; a bundle does not create run authority.
+
+## Authenticated gates, publication and reconciliation
+
+A `gate.v1` check handler delegates a required check to an operator-operated external gate. Its parameters bind
+`checkId`, `endpointRef` and `gateId`; its capabilities are `external_service` and `read_only`. The referenced
+check must allow the `external_service` evidence level. The controller sends one signed request per poll
+(`x-loopwright-signature`, HMAC-SHA256 over the canonical body with the endpoint's `gate` signing credential),
+with `redirect: 'error'`, a per-request `timeoutMs` bound and verdicts `pending`, `approved`, `denied` and `expired`.
+Polling sleeps on deterministic exponential backoff between `pollInitialMs` and `pollMaxMs` plus bounded jitter, inside
+a poll window of `min(maxPollMs, permitLease - 2000ms, remainingTaskTime - drainReserveMs - 2000ms)` (about 58s under
+the 60s store lease), renewing the store lease and emitting `gate_waiting` events whose detail carries the effective
+`deadlineMs`. `approved`
+produces `external_service` evidence with `observedStatus: 'passed'`; `denied` produces `failed`; everything else
+blocks with `EVIDENCE_UNAVAILABLE` or `GATE_TIMEOUT`. Verdict signatures, exact store/run/lock/operation/dispatch/
+check/subject bindings and `expiresAtMs` are verified with constant-time comparison; any mismatch never produces
+evidence. Endpoint URLs must be exact `https://` or loopback `http://127.0.0.1:<port>`/`http://[::1]:<port>` with
+no userinfo, query, fragment or embedded credentials.
+
+Publication is opt-in: `ControllerConfig.spec.publication` with mode `pull_request` names a registry
+`publicationEndpoints` entry. It runs only after the acceptance result is `completed`, every graph node and the
+implicit scope check passed, the trusted clock reports zero unresolved work and violations, and repository `HEAD`
+still equals the lock's `baseRevision`. The controller records the deterministic idempotency key, persists the
+`external_write` intent and a `publication.pre` checkpoint before authorizing the single dispatch, then sends one
+signed request. A verified `succeeded` receipt confirms `externalEffects`; an authenticated `not_executed` receipt
+settles the run as `failed`; a timeout, transport error, invalid signature or unproven `failed` outcome marks the
+operation `unresolved` and forces `reconcile_required`. The POST timeout is clamped to
+`min(timeoutMs, permitLease - 2000ms, remainingTaskTime - drainReserveMs - 2000ms)` so a slow publisher can never
+outlive its dispatch permit. Resume replays retained receipts, never re-dispatches, and
+`inspectRun` exports `publication.json` from the journal truth when a receipt is confirmed.
+
+`loopwright reconcile` settles an unresolved publication with an operator-supplied receipt file: the exact signed
+`publication_receipt` document plus its `signature`. It also settles an interrupted `gate.v1` check with a signed
+`gate_verdict` receipt; a reconciled gate resumes the remaining cycle, including publication when configured, so
+reconciling an interrupted gate must run before `resume` (which settles an interrupted read-only gate fail-closed as
+`GATE_TIMEOUT`). `reconcileCycle` re-derives the idempotency key, verifies the
+HMAC and every binding, and settles through the journal. Exit codes follow the table: `0` for a confirmed
+publication or an approved gate, `3` for a blocked run, `4` for an authenticated `not_executed` or denied gate,
+`7` for anything still unresolved. Re-running with the same
+receipt succeeds idempotently; a different receipt for an already-settled operation refuses with `RECEIPT_CONFLICT`
+(exit7). Reconciling an uncertain publication on a run that ended in an immutable incident records the verified
+receipt in the journal and `publication.json` while retaining the incident and returning `unresolved`
+(`reason: 'incident_retained'`, exit `7`). A publication whose response claims `failed` stays unresolved on purpose: the controller cannot prove that
+nothing was created remotely.
+
+Adding controller source files changes every installed handler digest, because digests cover the whole dist
+inventory. Registries that embed handler digests must be re-derived after each build; fixtures and examples derive
+them at runtime. See the
+[configuration example](../examples/controller.md#configuration-and-mcp-credential-authoring) and the
+[gate and publication example](../examples/controller.md#authenticated-gates-and-publication).
+
+### Wire schemas and signatures
+
+Gate requests and publication requests are JSON documents signed with the endpoint's signing credential:
+`x-loopwright-signature` carries the lowercase hex HMAC-SHA256 of the exact request/response body bytes, optionally
+prefixed with `sha256=`. Verification is constant time; uppercase hex, trailing garbage and short signatures fail.
+A `gate_request` binds `storeId`, `runId`, `lockHash`, `operationId`, `dispatchId`, `dispatchGeneration`, `gateId`,
+`checkId`, `candidateDigest`, the full `subject`, and a `requestDigest`. A `gate_verdict` echoes those bindings and
+carries `status` (`pending`/`approved`/`denied`/`expired`), `reason` (null unless the verdict is final) and a
+wall-clock `expiresAtMs`; `approved` verdicts must be within `[now, now + 24h]` of the controller's sampled wall
+clock or they are discarded. A `publication_request` binds the same store/run/lock/operation/dispatch identity plus
+`idempotencyKey`, `targetBranch`, `headBranch`, `title`, `candidateDigest`, `baseRevision` and `sourceRevision`.
+A `publication_receipt` echoes those bindings and carries `outcome` (`succeeded`/`not_executed`/`failed`),
+`externalUrl` (null or at most 512 characters) and `reason`; `candidateDigest` is optional on operator receipt
+files (always bound through the idempotency key, and verified directly when present). Responses must be
+`application/json` at most 16384
+(request) or 65536 (publication) bytes with a matching signature header; anything else is refused or blocks the
+check without evidence. Operator receipt files contain the exact signed receipt document plus a `signature` field;
+the file must be a regular, non-symlink file of at most 65536 bytes. Live HTTP `x-loopwright-signature` headers
+sign the exact wire JSON bytes (`<hex>` or `sha256=<hex>`), whereas operator receipt files carry a top-level
+`signature` field computed over the canonical receipt document without the `signature` key.
 
 Offline tests include public check-only run/resume, real Git/S02/Workers, CLI subprocesses and export integrity. They
 establish those local behaviors. Native Pi/provider/MCP qualification is recorded separately and cannot be inferred

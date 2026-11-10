@@ -98,6 +98,102 @@ Use `$$` for a literal dollar sign; `$${NAME}` remains literal `${NAME}` after o
 `http://127.0.0.1:<port>/...` with `approvedAddresses: ["127.0.0.1"]`; remote HTTPS MCP uses a DNS hostname endpoint
 (SNI matches the endpoint hostname against the system trust store) with its pinned `approvedAddresses`.
 
+## Authenticated gates and publication
+
+The registry declares endpoint tables and their credentials next to the existing provider and MCP bindings.
+Endpoint URLs must be exact `https://` or explicit-port loopback `http://127.0.0.1:<port>`/`http://[::1]:<port>`,
+without userinfo, query strings or fragments. A `gate.v1` check handler references one gate endpoint and one
+declared check whose `allowedEvidenceLevels` includes `external_service`. Handler digests must be re-derived after
+each controller build; derive them at runtime from the installed controller instead of copying them between documents.
+
+```json
+{
+  "apiVersion": "loopwright.dev/controller/v1alpha1",
+  "kind": "TrustedRegistry",
+  "metadata": {"id": "operator"},
+  "spec": {
+    "handlers": [{
+      "id": "approval",
+      "kind": "check",
+      "implementation": "gate.v1",
+      "version": 1,
+      "digest": {"algorithm": "sha256", "hex": "DERIVE_FROM_INSTALLED_HANDLERS"},
+      "parameters": {"checkId": "approval", "endpointRef": "ci-gate", "gateId": "merge-gate"},
+      "capabilities": ["external_service", "read_only"]
+    }],
+    "credentialBindings": [
+      {"id": "gate-signer", "consumer": "gate", "destinationRef": "gate-service", "environmentNames": ["GATE_SECRET"], "template": "${GATE_SECRET}"},
+      {"id": "publisher-signer", "consumer": "publisher", "destinationRef": "publisher-service", "environmentNames": ["PUBLISHER_SECRET"], "template": "${PUBLISHER_SECRET}"},
+      {"id": "publisher-auth", "consumer": "publisher", "destinationRef": "publisher-service", "environmentNames": ["PUBLISHER_TOKEN"], "template": "${PUBLISHER_TOKEN}"}
+    ],
+    "environmentBindings": [
+      {"name": "GATE_SECRET", "classification": "credential", "paths": ["/spec/credentials/1/template"]},
+      {"name": "PUBLISHER_SECRET", "classification": "credential", "paths": ["/spec/credentials/2/template"]},
+      {"name": "PUBLISHER_TOKEN", "classification": "credential", "paths": ["/spec/credentials/3/template"]}
+    ],
+    "gateEndpoints": [{
+      "id": "ci-gate",
+      "url": "https://gate.example.internal/gate",
+      "signingCredentialRef": "gate-signer",
+      "authCredentialRef": null,
+      "timeoutMs": 5000,
+      "maxPollMs": 60000,
+      "pollInitialMs": 200,
+      "pollMaxMs": 8000,
+      "jitter": 100
+    }],
+    "publicationEndpoints": [{
+      "id": "pr-publisher",
+      "url": "https://publisher.example.internal/publish",
+      "signingCredentialRef": "publisher-signer",
+      "authCredentialRef": "publisher-auth",
+      "timeoutMs": 10000
+    }]
+  }
+}
+```
+
+The task declares the matching required check, the gate step, and the credentials the endpoints consume:
+
+```json
+{
+  "apiVersion": "loopwright.dev/controller/v1alpha1",
+  "kind": "ControllerConfig",
+  "metadata": {"id": "task"},
+  "spec": {
+    "task": {"spec": {"steps": [{"id": "approval", "kind": "check", "uses": "approval", "roleId": null, "dependsOn": ["build"]}],
+      "acceptance": {"required": ["approval"], "checks": [{"id": "approval", "allowedEvidenceLevels": ["external_service"]}]}}},
+    "credentials": [
+      {"ref": "gate-signer", "template": "${GATE_SECRET}"},
+      {"ref": "publisher-signer", "template": "${PUBLISHER_SECRET}"},
+      {"ref": "publisher-auth", "template": "${PUBLISHER_TOKEN}"}
+    ],
+    "publication": {
+      "mode": "pull_request",
+      "endpointRef": "pr-publisher",
+      "targetBranch": "main",
+      "headBranchPrefix": "loopwright/",
+      "titleTemplate": "Loopwright run ${lockHash} on ${repository}"
+    }
+  }
+}
+```
+
+Publication runs once per run, after a completed acceptance result, and produces a pull request through the
+publisher service. The controller signs each request with the endpoint signing credential and a bearer authorization
+header when `authCredentialRef` is set. If the run ends `reconcile_required`, obtain the signed
+`publication_receipt` from the publisher operator, save it with its `signature` field, and settle explicitly:
+
+```text
+loopwright reconcile --config controller.json --registry registry.json \
+  --registry-sha256 64HEXDIGEST --repo /srv/repo --run-root /srv/runs \
+  --run-id run-2026-11-09-a --receipt receipt-from-publisher.json
+```
+
+Exit `0` confirms the external effect, exit `4` records an authenticated `not_executed`, and exit `7` means the
+run is still unresolved. The same receipt file reconciles idempotently; a different receipt for a settled operation
+refuses with `RECEIPT_CONFLICT`. See [controller commands](../docs/controller.md#authenticated-gates-publication-and-reconciliation).
+
 ```ts
 import { loadTrustedConfiguration, compilePlan } from '@loopwright/controller';
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
+import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, reconcileCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
 import { parseArguments, UsageError } from './arguments.js';
 import { initDraft, writeOutput } from './draft.js';
-const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -18,7 +18,7 @@ async function stderr(value: string): Promise<void> {
   await new Promise<void>((done, reject) => { const timer = setTimeout(() => reject(new Error('CLI_BACKPRESSURE')), 1000); process.stderr.write(value, error => { clearTimeout(timer); if (error) reject(error); else done(); }); });
 }
 export function diagnosticExit(error: ControllerDiagnostic): number {
-  if (error.code === 'RECOVERY_REQUIRED' || error.code === 'AUTHORITY_REFUSED' || error.code === 'OWNER_BUSY') return 7;
+  if (error.code === 'RECOVERY_REQUIRED' || error.code === 'AUTHORITY_REFUSED' || error.code === 'OWNER_BUSY' || error.code === 'RECEIPT_CONFLICT') return 7;
   if (error.code === 'CAPABILITY_UNSUPPORTED' || error.code === 'MCP_AUTHENTICATION_REQUIRED') return 3;
   if (error.code === 'BUDGET_EXHAUSTED' || error.code === 'ATTEMPT_LIMIT' || error.code === 'REPEAT_FAILURE') return 5;
   if (error.code === 'DEADLINE') return 6;
@@ -51,6 +51,16 @@ export async function main(argv: readonly string[]): Promise<number> {
       if (!observed.ok) { await emit('diagnostic', observed.error, observed.error.code); return diagnosticExit(observed.error); }
       const status = 'manifest' in observed.value ? observed.value.status! : observed.value;
       await emit(args.command === 'status' ? 'status' : 'inspection', observed.value, 'source' in status ? status.source + ': ' + status.status : 'inspection'); return 'source' in status && status.source === 'unavailable' ? 8 : 0;
+    }
+    if (args.command === 'reconcile') {
+      runId = get('run-id');
+      const trusted = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: [resolve(get('repo'))] });
+      if (!trusted.ok) { await emit('diagnostic', trusted.error, trusted.error.code); return diagnosticExit(trusted.error); }
+      const reconciled = await reconcileCycle({ configuration: trusted.value, runRoot: resolve(get('run-root')), runId, receipt: resolve(get('receipt')) });
+      if (!reconciled.ok) { await emit('diagnostic', reconciled.error, reconciled.error.code); return diagnosticExit(reconciled.error); }
+      if (args.values.has('output')) await writeOutput(resolve(get('output')), Buffer.from(encoded(reconciled.value)));
+      await emit('result', reconciled.value, reconciled.value.kind === 'settled' ? 'reconciled: ' + reconciled.value.status : 'unresolved: ' + reconciled.value.reason);
+      return reconciled.value.kind === 'settled' ? reconciled.value.status === 'completed' ? 0 : reconciled.value.status === 'blocked' ? 3 : 4 : 7;
     }
     const loaded = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: args.values.has('repo') ? [resolve(get('repo'))] : [] });
     if (!loaded.ok) { await emit('diagnostic', loaded.error, loaded.error.code); return diagnosticExit(loaded.error); }

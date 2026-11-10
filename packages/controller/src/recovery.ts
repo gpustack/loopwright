@@ -17,6 +17,8 @@ import { parsePrivateJson } from './parser.js';
 import { normalizeSubmission, type RetainedSubmission } from './submission.js';
 import { freeze, hash, record, same } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
+import { Gate, prepareGate } from './gate.js';
+import { Publication, preparePublication } from './publication.js';
 import { executeCycleContext, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
 import type { CycleExecution, ControllerIncident } from './finalize.js';
 
@@ -39,7 +41,7 @@ async function restoredCandidate(context: CycleContext, head: ProgressHead | nul
 async function retainedPrimary(context: CycleContext, head: ProgressHead): Promise<CycleExecution> {
   const intent = head.progress.terminalIntent; if (!intent?.result) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const raw = parsePrivateJson(await context.artifacts.read(intent.result, 1048576), 1048576);
-  let complete = head.progress.stage.kind === 'terminal_observations', observations = intent.observations;
+  let complete = head.progress.stage.kind === 'terminal_observations' || head.progress.stage.kind === 'reconcile_result', observations = intent.observations;
   if (observations) await context.artifacts.read(observations, 1048576);
   const checked = validateDocument(raw, 'RunResult');
   if (!complete && checked.ok) {
@@ -55,7 +57,8 @@ async function retainedPrimary(context: CycleContext, head: ProgressHead): Promi
       }
       const eventsRef = await events.close(); finalizer.check();
       observations = await finalizer.put('observations', { version: 1, primary: intent.result, requestedStatus: null, diagnostic: null, requestedStatusSource: 'unavailable', selectedNoChangeCheck: context.plan.noChangeEligibility.checkId,
-        contradictions: [], verifierMatrix: null, verification: checked.value.spec.verification, preflightRefusals: null, events: eventsRef, cleanup: 'complete', memory: { status: 'not_requested', reason: null }, publication: { status: 'not_run', reason: 'outside_scope' },
+        contradictions: [], verifierMatrix: null, verification: checked.value.spec.verification, preflightRefusals: null, events: eventsRef, cleanup: 'complete', memory: { status: 'not_requested', reason: null },
+        publication: head.progress.publication.status === 'confirmed' ? { status: 'confirmed', reason: null, receipt: head.progress.publication.receipt } : head.progress.publication.status === 'failed' ? { status: 'failed', reason: 'not_executed', receipt: head.progress.publication.receipt } : head.progress.publication.status === 'unresolved' || head.progress.publication.status === 'pending' ? { status: 'unresolved', reason: 'unresolved', receipt: null } : { status: 'not_run', reason: 'disabled', receipt: null },
         unavailable: ['requestedStatus', 'contradictions', 'verifierMatrix', 'preflightRefusals'], recoveredOriginalPrimary: true });
       finalizer.reserve(65536 + 65536 + 40960);
       await context.progress.publish({ ...current.progress, eventSequence: events.sequence, stage: { ...current.progress.stage, kind: 'terminal_observations' }, terminalIntent: { ...intent, observations } }, 'terminal.observations'); complete = true;
@@ -95,16 +98,32 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
       let context: CycleContext = { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
       const candidate = await restoredCandidate(context, head);
-      // A verifier proof can reconcile its original dispatch, but can never authorize a replacement Worker.
+      // A verifier proof can reconcile its original dispatch, but can never authorize a replacement Worker or request.
       if (head?.progress.stage.kind === 'verifier_pre') {
         const row = head.progress.verifierReceipts.find(item => item.generation === head!.progress.candidate.generation && item.receipt === null);
         if (row) {
           const operation = store.getOperation(row.operationId);
           if (operation.ok && operation.value.dispatch !== null) {
-            const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts }, candidate, head.progress.candidate.generation, row.producerNonce);
-            const subject = head.checkpoint.subject;
-            await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
+            const slot = plan.verifierSlots.find(item => item.id === row.slot)!, subject = head.checkpoint.subject;
+            if (slot.handler.implementation === 'gate.v1') {
+              const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, input.configuration.registry.spec.gateEndpoints);
+              await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(input.configuration).vault.resolveNetworkCredential(ref), () => subject).restore(prepared);
+            } else {
+              const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts }, candidate, head.progress.candidate.generation, row.producerNonce);
+              await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
+            }
           }
+        }
+      }
+      // A publication operation parked at publication_pre reconciles under recovery authority: a settled live proof
+      // confirms the dispatch (resume completes), an absent proof marks it unresolved (resume finishes reconcile_required).
+      const publicationConfig = plan.publication;
+      if (head?.progress.stage.kind === 'publication_pre' && head.progress.publication.operationId !== null && publicationConfig.mode === 'pull_request') {
+        const operation = store.getOperation(head.progress.publication.operationId);
+        const endpoint = input.configuration.registry.spec.publicationEndpoints.find(item => item.id === publicationConfig.endpointRef);
+        if (operation.ok && operation.value.dispatch !== null && operation.value.state === 'dispatch_uncertain' && endpoint) {
+          const prepared = preparePublication(plan, lock, original.storeId, endpoint, head.checkpoint.subject);
+          await new Publication(store, authority, artifacts, plan, lock, ref => approvedState(input.configuration).vault.resolveNetworkCredential(ref), () => head.checkpoint.subject, descriptor.repository).restore(prepared, endpoint);
         }
       }
       const decision = progress.decision(head);

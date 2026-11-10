@@ -1,10 +1,11 @@
 export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
-export interface Arguments { readonly command: 'init' | 'check' | 'run' | 'resume' | 'status' | 'inspect'; readonly values: ReadonlyMap<string, string>; readonly flags: ReadonlySet<string> }
+export interface Arguments { readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect'; readonly values: ReadonlyMap<string, string>; readonly flags: ReadonlySet<string> }
 const commands = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'] },
   run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output'], flags: ['json', 'dry-run'] },
   resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], flags: ['json'] },
+  reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output'], flags: ['json'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
   inspect: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id', 'output'], flags: ['json'] },
 };
