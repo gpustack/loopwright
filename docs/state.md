@@ -1,9 +1,17 @@
-# Persistent local state
+# Persistent Local State Store
 
 `@loopwright/state` stores one admitted run in one retained local directory. It supplies ownership,
 shared token admission, an intent/receipt journal and checkpoint references. It executes no requests or effects.
 The public types are in [types.ts](../packages/state/src/types.ts); the complete contract and transition rules
 are in the [state specification](../specs/2026-11-05-persistent-state-and-admission.md).
+
+## Contents
+
+- [Supported storage and clock](#supported-storage-and-clock)
+- [Host protocol](#host-protocol)
+- [Accounting and uncertainty](#accounting-and-uncertainty)
+- [Errors and bounded storage](#errors-and-bounded-storage)
+- [Evidence boundary](#evidence-boundary)
 
 ## Supported storage and clock
 
@@ -110,3 +118,7 @@ races, duplicate/conflicting identities, every stale-owner mutation family, and 
 Synthetic trusted receipts, private clock samples, quota setup and native fault injection isolate software boundaries.
 They do not establish provider billing, producer authenticity, external exactly-once execution, host-loss durability,
 OS containment or deployment qualification. Future adapters, executors, publishers and services must prove those paths.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

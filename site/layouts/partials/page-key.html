@@ -1,0 +1,6 @@
+{{- $key := "/" -}}
+{{- with .File -}}
+  {{- $key = printf "/%s%s/" .Dir .TranslationBaseName -}}
+  {{- if eq .TranslationBaseName "_index" -}}{{ $key = printf "/%s" .Dir }}{{- end -}}
+{{- end -}}
+{{- return $key -}}

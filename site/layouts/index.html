@@ -1,0 +1,43 @@
+{{ define "main" }}
+  <p class="section-label">Loopwright</p>
+  <h1>Bounded, verified repository work</h1>
+  {{ .Content }}
+  <p><a href="#getting-started">Get started</a> · <a href="{{ "docs/getting-started/architecture/" | relLangURL }}">Read the architecture</a></p>
+
+  <h2 id="architecture">Architecture</h2>
+  {{ with resources.Get "images/architecture-flow.svg" }}<img src="{{ .RelPermalink }}" alt="Loopwright architecture flow from intake to closure" width="1272" height="560" style="width: 100%; height: auto; display: block; margin: 1.25rem 0;">{{ end }}
+  <ol>
+    <li><strong>Intake:</strong> Validate scope, author TaskContract, and compile trusted configuration.</li>
+    <li><strong>State:</strong> Reserve authority in the fenced SQLite StateStore before physical dispatch.</li>
+    <li><strong>Execute:</strong> Run isolated Pi adapter with optional System-One decision advisory.</li>
+    <li><strong>Verify &amp; Gate:</strong> Bind independent check evidence to candidate digests and enforce authenticated gates.</li>
+    <li><strong>Publish &amp; Compact:</strong> Reconcile external effect receipts and compact reviewed memory into CAS stores.</li>
+  </ol>
+
+  <h2 id="modules">Modules</h2>
+  <div class="directory">
+    <div><a href="{{ "docs/contracts/" | relLangURL }}">Task Contracts</a><p>Bounded task contracts, schemas, and evidence structures.</p></div>
+    <div><a href="{{ "docs/state/" | relLangURL }}">Persistent State Store</a><p>Fenced SQLite state store with monotonic clock fencing.</p></div>
+    <div><a href="{{ "docs/pi-adapter/" | relLangURL }}">Isolated Pi Adapter</a><p>Isolated runtime adapter and containerized tool containment.</p></div>
+    <div><a href="{{ "docs/controller/" | relLangURL }}">Bounded Controller</a><p>Execution controller, repair loop, and supervisor dispatch.</p></div>
+    <div><a href="{{ "docs/runner-taskpack/" | relLangURL }}">Runner Taskpack</a><p>Declarative taskpack intake and offline runner parity.</p></div>
+    <div><a href="{{ "docs/memory/" | relLangURL }}">Reviewed Memory</a><p>Reviewed memory compaction and content-addressable storage.</p></div>
+    <div><a href="{{ "docs/decisions/" | relLangURL }}">Decision Routing</a><p>Calibrated System-One advisory routing and candidate selection.</p></div>
+    <div><a href="{{ "docs/github-app/" | relLangURL }}">GitHub App Control Plane</a><p>Webhook receiver, intake gates, and Action workflows.</p></div>
+    <div><a href="{{ "docs/closure-matrix/" | relLangURL }}">Closure Matrix</a><p>Capability closure ledger, failure semantics, and verification audit.</p></div>
+  </div>
+
+  <h2 id="getting-started">Getting Started</h2>
+  <p>Run Loopwright locally via the CLI, reusable GitHub Action, or GitHub App control plane.</p>
+  {{ $cliCmd := `loopwright closure --verify-failures` }}
+  {{ partial "code-block.html" (dict "lang" "bash" "content" (highlight $cliCmd "bash" "")) }}
+  <p>See <a href="{{ "docs/operate/cli/" | relLangURL }}">CLI operations</a>, <a href="{{ "docs/operate/github-action/" | relLangURL }}">GitHub Action configuration</a>, and <a href="{{ "docs/operate/github-app/" | relLangURL }}">GitHub App deployment</a>.</p>
+
+  <h2 id="operations">Operations &amp; Walkthroughs</h2>
+  <div class="directory">
+    <div><a href="{{ "docs/walkthroughs/declarative-taskpack/" | relLangURL }}">Declarative Taskpack</a><p>Author and run a declarative repository taskpack.</p></div>
+    <div><a href="{{ "docs/operate/github-action/" | relLangURL }}">GitHub Action</a><p>Configure reusable Action steps with verified gate evidence.</p></div>
+    <div><a href="{{ "docs/operate/github-app/" | relLangURL }}">GitHub App</a><p>Deploy the control plane webhook server and intake gate.</p></div>
+    <div><a href="{{ "docs/development/" | relLangURL }}">Development</a><p>Build, test, and qualify packages across the monorepo.</p></div>
+  </div>
+{{ end }}

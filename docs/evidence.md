@@ -1,4 +1,4 @@
-# Evidence and acceptance
+# Verification Evidence and Authority
 
 The trusted host supplies `expectedLock`, `candidateManifest`, and `eligibleEvidence`
 in a separate `trusted` input. Actor submissions are `claims` for evaluation, or
@@ -6,6 +6,12 @@ in a separate `trusted` input. Actor submissions are `claims` for evaluation, or
 The host must authenticate producers and collect/select their observations before calling.
 Passing actor data as trusted evidence violates this caller contract.
 A valid schema, producer name, hash, or serialized type brand cannot make evidence eligible.
+
+## Contents
+
+- [Boundary](#boundary)
+
+## Boundary
 
 An observation binds one acceptance check and its observed status to the exact lock,
 contract, repository, destination base, source, candidate manifest, and target matrix.
@@ -62,3 +68,7 @@ Aggregates contain `knownSubtotal`, `unknownCount`, and `complete`/`partial` com
 All-unknown observations have unknown provenance; an empty trusted inventory is explicit complete zero.
 The host must include every admitted request and normalize overlapping provider token categories.
 The library cannot discover omitted calls or certify provider billing. It does not settle a budget ledger.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

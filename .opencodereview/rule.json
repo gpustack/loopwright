@@ -1,0 +1,76 @@
+{
+  "include": [
+    "docs/**/*.md",
+    "README.md"
+  ],
+  "exclude": [
+    "**/dist/**",
+    "**/.test-build/**",
+    "**/node_modules/**",
+    "packages/*/test/**",
+    "packages/*/qualification/**",
+    "packages/taskpack-runner/vendor/**",
+    "site/public/**",
+    "site/resources/**"
+  ],
+  "rules": [
+    {
+      "path": "packages/core/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of contract compatibility and evidence binding; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/state/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of lease fencing, monotonic clocks and unknown accounting; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/agent-pi/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of isolation, physical send admission and secret containment; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/controller/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of independent verification, bounded retries and effect reconciliation; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/taskpack-runner/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of frozen corpus integrity and offline parity; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/memory/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of reviewed proposals and compare-and-swap; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/decisions/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of three-zone routing and non-delegable authority; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/github-app/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of tenant isolation, webhook authentication and token scrubbing; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "packages/cli/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of exit codes and honest closure evidence; cite concrete scenarios and preserve package boundaries."
+    },
+    {
+      "path": "action.yml",
+      "merge_system_rule": true,
+      "rule": "Keep inputs and outputs synchronized with the implementation; protect secrets and host qualification."
+    },
+    {
+      "path": "docs/**/*.md",
+      "rule": "Check current source behavior, evidence boundaries, page shape, links and module-map ownership."
+    },
+    {
+      "path": "README.md",
+      "rule": "Keep the entry points and package boundaries accurate and link to owning documentation."
+    }
+  ]
+}

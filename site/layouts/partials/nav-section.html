@@ -1,0 +1,48 @@
+{{ $group := .group | default dict }}
+{{ $current := .current }}
+{{ $name := .name | default $group.name }}
+{{ $items := $group.items | default slice }}
+{{ $page := .page }}
+
+{{ $active := false }}
+{{ if $items }}
+  {{ range $items }}
+    {{ $p := site.GetPage . }}
+    {{ if $p }}
+      {{ if eq $current.RelPermalink $p.RelPermalink }}
+        {{ $active = true }}
+      {{ end }}
+    {{ end }}
+  {{ end }}
+{{ else if $page }}
+  {{ $active = hasPrefix $current.RelPermalink $page.RelPermalink }}
+{{ end }}
+
+<details class="nav-section" {{ if or $active (and $current.IsHome (eq $name "Getting Started")) }}open{{ end }}>
+  <summary>{{ $name }}</summary>
+  <div class="nav-children">
+    {{ if $items }}
+      {{ range $items }}
+        {{ $p := site.GetPage . }}
+        {{ if $p }}
+          {{ $label := index site.Data.navigation.labels (partial "page-key.html" $p) | default (partial "page-title.html" $p) }}
+          <a title="{{ partial "page-title.html" $p }}" href="{{ $p.RelPermalink }}" {{ if eq $current.RelPermalink $p.RelPermalink }}aria-current="page"{{ end }}>{{ $label }}</a>
+        {{ end }}
+      {{ end }}
+    {{ else if $page }}
+      {{ if $page.Content }}
+        {{ $overviewLabels := site.Data.navigation.overview_labels | default dict }}
+        {{ $overviewLabel := index $overviewLabels (partial "page-key.html" $page) | default "Overview" }}
+        <a title="{{ partial "page-title.html" $page }}" href="{{ $page.RelPermalink }}" {{ if eq $current.RelPermalink $page.RelPermalink }}aria-current="page"{{ end }}>{{ $overviewLabel }}</a>
+      {{ end }}
+      {{ range partial "ordered-pages.html" $page }}
+        {{ $pName := partial "nav-label.html" . }}
+        {{ if .IsSection }}
+          {{ partial "nav-section.html" (dict "page" . "name" $pName "current" $current) }}
+        {{ else }}
+          <a title="{{ partial "page-title.html" . }}" href="{{ .RelPermalink }}" {{ if eq $current.RelPermalink .RelPermalink }}aria-current="page"{{ end }}>{{ $pName }}</a>
+        {{ end }}
+      {{ end }}
+    {{ end }}
+  </div>
+</details>

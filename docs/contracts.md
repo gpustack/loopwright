@@ -1,10 +1,16 @@
-# Contract boundary
+# Task Contracts and Schemas
 
 The exact alpha schemas, field ranges, and limits are in the
 [task contract specification](../specs/2026-11-05-task-contracts-and-evidence.md).
 All six persisted kinds use `apiVersion: loopwright.dev/v1alpha1` and the hierarchy
 `metadata` / `spec`. Unknown fields and versions are rejected, including nested policy fields.
 There are no permissive policy defaults or scalar coercions.
+
+## Contents
+
+- [Boundary](#boundary)
+
+## Boundary
 
 The private package exports `validateDocument`, `admitTask`, `digestArtifact`,
 `identifyManifest`, `bindSubject`, `isWritablePath`, `aggregateUsage`,
@@ -50,3 +56,7 @@ Scope uses exact POSIX relative names, final `dir/**`, or explicit `**`.
 Other globs, parent traversal, absolute names, backslashes, encoded separators,
 device names, and ambiguous segments are rejected. Protected patterns win.
 Matching is case-sensitive and lexical. It does not resolve symlinks or enforce filesystem containment.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

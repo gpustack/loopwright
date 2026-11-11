@@ -1,8 +1,14 @@
-# Identity and original bytes
+# Canonical Identity and Digests
 
 Task contracts identify both the destination `baseRevision` and candidate `sourceRevision`.
 The host supplies immutable revision identities. Equal values are allowed.
 The library performs no Git, filesystem, or network lookup.
+
+## Contents
+
+- [Boundary](#boundary)
+
+## Boundary
 
 Canonical JSON sorts object keys by UTF-16 code units, preserves every array order,
 uses standard JSON escaping and no insignificant whitespace, and admits only safe-integer numbers.
@@ -30,3 +36,7 @@ Duplicate names, ASCII case-fold collisions, and file/descendant conflicts are r
 Entry order remains part of manifest identity. Artifact bytes are never decoded or reformatted for hashing.
 Candidate manifest identity and each referenced original-byte digest are separate checks.
 Digests identify content; they do not authenticate its producer.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

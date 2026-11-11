@@ -1,10 +1,19 @@
-# Decision routing (`@loopwright/decisions`)
+# System-One Decision Routing
 
 `@loopwright/decisions` is the optional, policy-gated System-One decision layer of the harness. It answers
 narrow, closed-world questions — capability tiering, cycle alignment, soft compaction advisories, and
 candidate diff triage — through calibrated provider primitives, and never through full frontier-model
 planning turns. Every call is disabled by default, redacted before send, hard-deadline supervised,
 budget-reserved, and routed through a three-zone confidence gate with deterministic fallbacks.
+
+## Contents
+
+- [Opt-in policy and disclosure](#opt-in-policy-and-disclosure)
+- [Providers and wire dialects](#providers-and-wire-dialects)
+- [Primitives and confidence zones](#primitives-and-confidence-zones)
+- [Deadlines, retries, and budget](#deadlines-retries-and-budget)
+- [Authority boundary and nodes](#authority-boundary-and-nodes)
+- [Controlled benchmark](#controlled-benchmark)
 
 ## Opt-in policy and disclosure
 
@@ -107,3 +116,7 @@ estimated costs, and wall time, plus pairwise `jevOnVsOffDelta` values. The reco
 `jev_on.acceptancePassRate >= jev_off.acceptancePassRate`; otherwise it returns
 `default_deterministic_only`. Every automated test and benchmark arm runs offline against in-memory
 fixtures; live provider calls are never exercised.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

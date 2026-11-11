@@ -1,38 +1,26 @@
 # Loopwright
 
-Private TypeScript contracts, evidence-bound acceptance, persistent local state, an isolated Pi adapter, and a bounded local controller/CLI.
-The core library validates data and evaluates caller-selected evidence. The state package adds shared admission,
-fenced ownership, intent/receipt journals and checkpoints over retained local SQLite.
-The Pi adapter connects admitted roles to pinned SDK sessions, contained tools and a host-owned request sender.
+Loopwright is a nine-package TypeScript harness for bounded repository work, independent verification, and authenticated publication, with a GitHub Action and App control plane. Read the [documentation](docs/README.md) and [architecture](docs/getting-started/architecture.md) for authority and evidence boundaries.
 
-Tested environment: macOS arm64, Node v26.13.0, npm 11.20.0.
+## Usage
 
-```sh
-npm ci
-npm run build
-npm run typecheck
-npm run lint
-npm test
-```
+1. Review the reusable [GitHub Action](docs/operate/github-action.md) and `.loopwright/taskpack.yaml` [walkthrough](docs/walkthroughs/declarative-taskpack.md); the current Action runtime fails host qualification.
+2. Deploy the [GitHub App control plane](docs/operate/github-app.md) with `@loopwright/github-app`.
+3. Operate the local [CLI](docs/operate/cli.md), including closure audits.
+4. Integrate the TypeScript SDK and optional [System-One decisions](docs/decisions.md) with `@loopwright/decisions`.
 
-Tests need no credentials or live services after dependency installation.
+## Packages
 
-Read [contracts](docs/contracts.md), [identity rules](docs/identity.md),
-[evidence authority](docs/evidence.md), and [development](docs/development.md).
-The [examples](examples/README.md) include satisfied, failed, missing-check, and unknown-usage results.
-Read [persistent local state](docs/state.md) for the qualified SQLite/runtime profile and host protocol.
-The [core specification](specs/2026-11-05-task-contracts-and-evidence.md) defines the exact alpha schema and limits.
+| Package | Responsibility |
+| --- | --- |
+| [`@loopwright/core`](packages/core/) | Contracts and evidence |
+| [`@loopwright/state`](packages/state/) | Fenced SQLite authority |
+| [`@loopwright/agent-pi`](packages/agent-pi/) | Isolated Pi runtime |
+| [`@loopwright/controller`](packages/controller/) | Bounded controller and verification |
+| [`@loopwright/taskpack-runner`](packages/taskpack-runner/) | Runner parity and taskpacks |
+| [`@loopwright/memory`](packages/memory/) | Reviewed memory and compaction |
+| [`@loopwright/decisions`](packages/decisions/) | Advisory decision routing |
+| [`@loopwright/github-app`](packages/github-app/) | GitHub intake and control plane |
+| [`@loopwright/cli`](packages/cli/) | Local operations and closure |
 
-The caller authenticates verifier observations and selects the expected admission lock.
-The core keeps actor claims separate and recomputes acceptance during run construction.
-The state package accounts for trusted host requests; adapters still authenticate evidence and enforce actual dispatch.
-Core and state do not execute agents. The private [Pi adapter](docs/pi-adapter.md) adds local Docker execution;
-it does not evaluate task acceptance or publish changes. Its default context mode refuses without a proven bound.
-Explicit estimated mode retains context uncertainty and soft token accounting.
-
-Read the [runtime evaluation](docs/pi-runtime-evaluation.md) for SDK/durable selection, optional-plugin disposition,
-finite limits and measured local costs. Live-provider qualification is blocked without an explicit ready-token source.
-Docker and live checks are separate commands; the normal test total does not imply either passed.
-
-Read [the local controller and CLI](docs/controller.md) for explicit trusted configuration, finite cycles, safe resume,
-read-only inspection and bounded public exports. Static plans and offline test results carry their own evidence scope.
+See [development](docs/development.md) for build and verification commands.

@@ -1,9 +1,20 @@
-# Reviewed memory and CAS compaction
+# Reviewed Memory and CAS Compaction
 
 `@loopwright/memory` keeps repository-scoped active knowledge for a taskpack under
 `.loopwright/memory/<taskpack>/`, curates it into verified proposals after a cycle settles, and controls the
 two-layer context compaction of an agent session. The package never changes a primary `RunResult`, never
 spends exhausted model budget, and never writes outside the taskpack memory directory.
+
+## Contents
+
+- [Three-tier separation](#three-tier-separation)
+- [Entries](#entries)
+- [Settled-outcome finalization](#settled-outcome-finalization)
+- [Five-gate verification](#five-gate-verification)
+- [Compare-and-swap application](#compare-and-swap-application)
+- [Two-layer compaction](#two-layer-compaction)
+- [Commands](#commands)
+- [Crash recovery](#crash-recovery)
 
 ## Three-tier separation
 
@@ -134,3 +145,7 @@ untouched entries. Once the lock is stale (writer dead), unstructured, or remove
 orphan entry file, or entry-file/index drift is refused, and manual recovery is to delete the stale
 `.cas.lock`, the leftover `.tmp-*` files, and any `entries/<id>.md` that has no index row, or to restore
 `index.json` and `entries/` from Git.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

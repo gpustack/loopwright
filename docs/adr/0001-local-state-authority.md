@@ -1,7 +1,14 @@
-# Local state authority and process-crash recovery
+# ADR 0001: Local State Authority
 
 Date: 2026-11-05
 Status: Accepted
+
+## Contents
+
+- [Context](#context)
+- [Decision](#decision)
+- [Alternatives](#alternatives)
+- [Consequences](#consequences)
 
 ## Context
 
@@ -37,3 +44,7 @@ throughput; requests, operations, checkpoints and pages have finite caps, and un
 The trusted host still owns canonical paths, boot identity, receipt authentication and actual dispatch enforcement.
 Local SIGKILL tests qualify process recovery with retained storage. They establish no host/power-loss durability,
 external exactly-once effect, provider-internal billing or OS containment guarantee.
+
+**See also**: [Documentation index](../README.md)
+
+**Next**: [Architecture](../getting-started/architecture.md)

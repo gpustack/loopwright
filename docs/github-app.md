@@ -1,9 +1,17 @@
-# GitHub App control plane, reusable Action entrypoint, and declarative taskpacks
+# GitHub App Control Plane and Taskpack Intake
 
 `@loopwright/github-app` is the control-plane and declarative-onboarding layer of Loopwright. It lets a target
 repository adopt Loopwright through a `.loopwright/taskpack.yaml` manifest, drives runs through a reusable
 GitHub Action or CLI entrypoint, and operates a loopback HTTP control plane with webhook admission,
 tenant-isolated queueing, and short-lived installation tokens.
+
+## Contents
+
+- [Module map](#module-map)
+- [Declarative taskpack onboarding](#declarative-taskpack-onboarding)
+- [Reusable Action entrypoint](#reusable-action-entrypoint)
+- [Control plane](#control-plane)
+- [Offline testing](#offline-testing)
 
 ## Module map
 
@@ -158,3 +166,7 @@ on injected monotonic clock samples. Run the suites with:
 npm --workspace @loopwright/github-app test
 npm test
 ```
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

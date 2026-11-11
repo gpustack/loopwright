@@ -5,3 +5,7 @@ coverage/
 .claude/*
 !.claude/skills
 !.claude/settings.json
+site/public/
+site/resources/
+site/.hugo_build.lock
+.sbin/

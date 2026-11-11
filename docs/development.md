@@ -1,4 +1,4 @@
-# Local development
+# Development and Verification
 
 Tested: macOS arm64, Node v26.13.0, npm 11.20.0.
 Run these commands at the repository root:
@@ -36,6 +36,12 @@ that proves the boundary limit, not that the fixture is a valid contract.
 Evidence labels in test/example data are fixture inputs. They do not establish a real verifier,
 agent, hardware run, deployment, process sandbox, crash recovery, or provider billing guarantee.
 All such boundaries require later host/runtime qualification.
+
+## Contents
+
+- [State package validation](#state-package-validation)
+- [Pi adapter validation](#pi-adapter-validation)
+- [Controller validation](#controller-validation)
 
 ## State package validation
 
@@ -91,3 +97,7 @@ The controller/CLI use only public core/state/adapter APIs. Test-only execution 
 Native qualification uses the same cumulative local experiment authority and explicit owned evidence. Failed result,
 unknown effects, held reservations and observed/allocated time remain distinct. Image/daemon preparation is not native
 SDK or live-provider acceptance. See the qualification README and retained program evidence for their actual scope.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

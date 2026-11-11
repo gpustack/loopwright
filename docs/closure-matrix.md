@@ -1,4 +1,4 @@
-# Capability closure matrix and failure semantics (`@loopwright/cli`)
+# Capability Closure Matrix and Failure Semantics
 
 `@loopwright/cli` sits at the top of the workspace build graph, so it is the one package that can audit
 every other package. The closure matrix turns that position into a machine-verifiable receipt:
@@ -6,7 +6,16 @@ a frozen 23-row capability ledger, a repository evidence audit, a non-falsificat
 unprovisioned external gates, and a deterministic 14-scenario cross-package failure harness. Operators
 and automated gates run one command, `loopwright closure`, and read one versioned `Envelope`.
 
-## The frozen capability ledger
+## Contents
+
+- [Frozen capability ledger](#frozen-capability-ledger)
+- [Non-falsification invariant](#non-falsification-invariant)
+- [Repository evidence integrity](#repository-evidence-integrity)
+- [Integrated failure matrix](#integrated-failure-matrix)
+- [Closure command](#closure-command)
+- [Cost and environment](#cost-and-environment)
+
+## Frozen capability ledger
 
 `CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows with
 distinct ids, one primary owner per workspace package. Eighteen rows are `closed_local` with
@@ -26,7 +35,7 @@ Every row names a closure criterion, a residual boundary, and at least one `evid
 resolves to a committed regular file in the repository. Non-passed rows must carry a non-empty
 `unlockPrerequisite`; passed rows must not.
 
-## The non-falsification invariant
+## Non-falsification invariant
 
 Local unit tests, mocks, or container fixtures can never upgrade an unprovisioned external gate. Any
 supplied entry with `evidenceLevel: 'unprovisioned_external'` that claims `disposition: 'closed_local'`
@@ -43,7 +52,7 @@ and be regular files without symbolic links. Missing evidence fails with `CLOSUR
 traversal, symlinks, escapes, or the presence of `.github/workflows` in the audited root fail with
 `CLOSURE_EVIDENCE_UNTRUSTED`.
 
-## The integrated failure-semantics matrix
+## Integrated failure matrix
 
 `runIntegratedFailureMatrix` executes 14 deterministic scenarios in-process against the real public APIs
 of `@loopwright/core`, `@loopwright/state`, `@loopwright/agent-pi` (`describePiAdapterFiles` adapter
@@ -87,7 +96,7 @@ the report and exit-code contract.
 14. `decision_authority_escalation_refusal` — `DECISION_AUTHORITY_VIOLATION` refuses non-delegable
     intents; `DECISION_DISCLOSURE_VIOLATION` stops secret-bearing state with zero transport calls.
 
-## The `closure` command
+## Closure command
 
 ```sh
 loopwright closure [--repo DIR] [--output FILE] [--json] [--verify-failures]
@@ -110,3 +119,7 @@ The command is offline, credential-free, and Docker-free. Thirteen scenarios fin
 second combined; the runner loopback publication probe spends roughly two to three seconds on its git
 fixture and frozen validators, so a full `--verify-failures` audit takes about three seconds on a
 qualified workstation. Local Node `26.x` with the installed workspace graph is the only requirement.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

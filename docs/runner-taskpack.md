@@ -1,10 +1,21 @@
-# Runner taskpack and offline parity
+# Runner Taskpack and Offline Parity
 
 Operator documentation for `@loopwright/taskpack-runner`: the package that vendors the frozen
 `gpustack/runner` auto-sync domain modules, drives them through a contained Python bridge, compiles
 Loopwright taskpacks from Runner triggers, serves the authenticated validation gate and publication
 endpoint on loopback, and proves byte-level parity against the frozen revision without any network,
 Docker, or model access.
+
+## Contents
+
+- [Vendored frozen corpus](#vendored-frozen-corpus)
+- [Contained Python bridge](#contained-python-bridge)
+- [Runner intake](#runner-intake)
+- [Taskpack compilation](#taskpack-compilation)
+- [Loopback gate and publication service](#loopback-gate-and-publication-service)
+- [Containment boundaries](#containment-boundaries)
+- [Offline parity harness](#offline-parity-harness)
+- [Commands](#commands)
 
 ## Vendored frozen corpus
 
@@ -139,3 +150,7 @@ node --test .test-build/packages/taskpack-runner/test/parity.test.js
 
 All verification runs locally on the development host; no remote host, container farm, or network
 service participates.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

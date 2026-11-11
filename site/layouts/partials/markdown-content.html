@@ -1,0 +1,33 @@
+{{- $lines := slice -}}
+{{- $fence := "" -}}
+{{- $comment := false -}}
+{{- range split .RawContent "\n" -}}
+  {{- $line := . -}}
+  {{- $markers := findRE "^ {0,3}(`{3,}|~{3,})" $line 1 -}}
+  {{- if $markers -}}
+    {{- $marker := strings.TrimSpace (index $markers 0) -}}
+    {{- if eq $fence "" -}}
+      {{- $fence = $marker -}}
+    {{- else if and (hasPrefix $marker (substr $fence 0 1)) (ge (len $marker) (len $fence)) -}}
+      {{- $fence = "" -}}
+    {{- end -}}
+  {{- else if eq $fence "" -}}
+    {{- if $comment -}}
+      {{- if in $line "-->" -}}
+        {{- $comment = false -}}
+      {{- end -}}
+    {{- else if hasPrefix (strings.TrimSpace $line) "<!--" -}}
+      {{- if not (in $line "-->") -}}
+        {{- $comment = true -}}
+      {{- end -}}
+    {{- else -}}
+      {{- range findRE `!?\[[^\]\n]*\]\([^\)\n]+\)` $line -}}
+        {{- $target := replaceRE `^!?\[[^\]]*\]\(([^\)]+)\)$` "$1" . -}}
+        {{- $destination := partial "link-destination.html" (dict "page" $ "destination" $target "markdown" true) -}}
+        {{- $line = replace $line . (replace . (printf "(%s)" $target) (printf "(%s)" $destination)) -}}
+      {{- end -}}
+    {{- end -}}
+  {{- end -}}
+  {{- $lines = $lines | append $line -}}
+{{- end -}}
+{{- return (printf "%s\n" (strings.TrimSpace (delimit $lines "\n"))) -}}

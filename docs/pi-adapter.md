@@ -1,15 +1,28 @@
-# Isolated Pi adapter
+# Isolated Pi Runtime Adapter
 
-`@loopwright/agent-pi` is a private workspace package. It preserves v1 `openPiAdapter` with fixed local stdio MCP and adds v2 exports for S04 controller integration.
-It executes one admitted role under the original TaskLock and S02 owner. The caller evaluates task acceptance.
+`@loopwright/agent-pi` is a private workspace package. It preserves v1 `openPiAdapter` with fixed local stdio MCP and adds v2 exports for controller integration.
+It executes one admitted role under the original TaskLock and state owner. The caller evaluates task acceptance.
 SDK 1.5.0 is selected; durable is unselected and pi-retry is disabled. See the [runtime evaluation](pi-runtime-evaluation.md).
 The [architecture decision](adr/0002-isolated-pi-sdk.md) records the alternatives and accepted costs.
+
+## Contents
+
+- [Supported profile](#supported-profile)
+- [Controller and HTTP MCP exports](#controller-and-http-mcp-exports)
+- [Trust and execution](#trust-and-execution)
+- [Host construction](#host-construction)
+- [Commands and outcomes](#commands-and-outcomes)
+- [Capture and recovery](#capture-and-recovery)
+- [Context and finite limits](#context-and-finite-limits)
+- [Qualification setup](#qualification-setup)
+- [Qualification inventory](#qualification-inventory)
+- [Backend and execution modes](#backend-and-execution-modes)
 
 ## Supported profile
 
 | Component | Qualified boundary |
 | --- | --- |
-| Trusted owner and S02 | macOS arm64, Node 26.13.0, bundled SQLite 3.54.1; one host/boot, retained local disk |
+| Trusted owner and state authority | macOS arm64, Node 26.13.0, bundled SQLite 3.54.1; one host/boot, retained local disk |
 | SDK, native VM, tool and MCP roles | Pinned Linux arm64 image under Docker Desktop; separate containers |
 | Provider route | GitHub Copilot, Anthropic messages HTTP; Sonnet 5.5/xhigh or Opus 5.5/high |
 | Context | Strict `proven_bound` default refuses; explicit immutable `estimated_guard` is available |
@@ -21,7 +34,7 @@ Requested, catalog-supported, session-effective and outbound-observed selection 
 Outbound identity remains null until an admitted request is observed. These fields do not attest provider-internal effort.
 Local controlled HTTP and container qualifications passed. Live provider observations remain blocked without an explicit ready-token source.
 
-## S04 v2 controller and HTTP MCP exports
+## Controller and HTTP MCP exports
 
 `openPiAdapterV2(host, input)` opens the v2 adapter. `PiHostV2.resolveMcpCredential(binding)` is the dedicated
 host callback for an MCP bearer token, separate from the provider's `resolveCredential` callback.
@@ -40,7 +53,7 @@ without opening Docker or an adapter session. Neither static description nor dec
 The trusted host opens state, supplies current Authority, resolves a ready credential, controls exact containers and sends HTTP.
 SDK workers serialize requests and propose effects. They have network none and no state, credential or Docker socket access.
 The sender admits only POST to `https://api.individual.githubcopilot.com/v1/messages?beta=true`, without redirects.
-Every physical attempt receives its own original one-use S02 permit after final bytes and current authority are checked.
+Every physical attempt receives its own original one-use state authority permit after final bytes and current authority are checked.
 Native retries are disabled. The owner's bounded terminal-429 retry consumes a new parent attempt and preserves the original charge.
 
 All roles mount the entire candidate read-only. `read` and `bash` use separate tool containers and fresh scratch per call.
@@ -65,7 +78,7 @@ Do not discard an old store or replace its clock/deadline to start another sessi
 `PiHost` contains the opened store, Authority, absolute Docker executable/socket, exact RuntimeIdentity and two owned canonical
 directories. Use a fresh runtime `directory` for each opened adapter and one stable private `artifactsDirectory` per retained run.
 The directories must be owner-only and outside untrusted writable roots. Preserve artifacts and the execution-owner guard across crashes.
-The caller releases its S02 owner only after adapter cleanup completes; closing the adapter does not release state authority.
+The caller releases its state owner only after adapter cleanup completes; closing the adapter does not release state authority.
 
 `resolveCredential(binding)` is a trusted host callback. Its input includes provider, model, exact destination, purpose,
 run/role/step, monotonic expiry and AbortSignal. Return one already-ready bearer token under those limits. The resolver must bound
@@ -85,7 +98,7 @@ The matching resource bytes enter context as literal data and cannot install ext
 
 ## Commands and outcomes
 
-| Method | Caller responsibility and result |
+| Method | Responsibility |
 | --- | --- |
 | `capabilities()` | Inspect frozen selection, runtime, resources and supported restrictions; no send |
 | `execute({commandId,text,purpose,repair})` | Supply a new bounded literal command and trusted attribution; includes separately admitted tool-loop requests |
@@ -107,7 +120,7 @@ After a valid command starts, its value is a `PiOutcome`: execution_settled, fai
 Every outcome retains bounded request/operation ID lists, provider termination, usage and local cleanup. Its `error` preserves
 the execution cause and underlying state code; `cleanupError` separately records a cleanup failure. `localCleanup` is complete,
 pending or failed. A cleanup failure cannot replace the original cause or claim complete cleanup.
-Token usage is complete only when every request in that command has accepted S02 input/output counts. Raw candidates or
+Token usage is complete only when every request in that command has accepted state authority input/output counts. Raw candidates or
 a published final artifact alone do not prove accounting; rejected or uncertain observations remain incomplete. This says
 nothing about final cost or billing, and does not include unrelated earlier requests.
 Idle cancel preserves the prior terminal status, request facts and execution error, updating actual cleanup only. An active
@@ -124,7 +137,7 @@ guard. A retained binding/legacy/identity refusal returns `RECOVERY_REQUIRED` an
 ## Capture and recovery
 
 Capture validates every bounded native session row and tool pair, writes synced immutable session/workspace artifacts, then
-publishes their refs through S02. Unreferenced artifacts grant no restore authority. A committed checkpoint with a lost ACK is looked up by identity.
+publishes their refs through state authority. Unreferenced artifacts grant no restore authority. A committed checkpoint with a lost ACK is looked up by identity.
 
 Restore supplies the retained checkpoint ID, workspace/session refs and authenticated bytes, plus candidate bytes matching the
 captured manifest. Runtime, policy, resources, lock, role, original clock and authoritative current checkpoint must still match.
@@ -138,7 +151,7 @@ through private config and bounded sanitized CLI, then rejects an identity misma
 Original guard/state remain unchanged on refusal; legacy unbound guards require explicit safe intervention, not migration/reset.
 Alias socket paths are refused. Engine ID is local consistency evidence, not attestation; the trusted operator must keep the
 endpoint and daemon stable throughout each guarded operation. Malicious daemons or concurrent administrative retargeting are unqualified.
-A live previous owner blocks replacement even after S02 lease expiry. Dead-owner recovery requires exact child exit and absence.
+A live previous owner blocks replacement even after state authority lease expiry. Dead-owner recovery requires exact child exit and absence.
 Missing birth/exit evidence requires explicit safe intervention; a TTL or broad name match never authorizes deletion.
 
 ## Context and finite limits
@@ -204,7 +217,7 @@ It runs in `all` beside the four context/parser mutations. `session-mutations.mj
 `factory-gate.mjs` preserves the closed native-factory investigation. They are not final entrypoints or newly executed proof;
 the latter's legacy finish assertions predate structured outcomes. Current final native sessions still use the real factory path.
 
-## Current backend and future execution modes
+## Backend and execution modes
 
 Docker is this adapter version's implemented backend. It is not a universal Loopwright product requirement.
 The current public PiHost requires Docker executable/socket fields. RuntimeIdentity and snapshot/request policy bind an image,
@@ -218,3 +231,7 @@ Future capability design must distinguish GPU/toolchain access, filesystem/netwo
 A task requiring isolation must refuse an incapable backend; direct execution alone cannot prevent same-privilege code from
 bypassing mediation, reading credentials or changing state. Common admission, budgets, events, deadlines and recovery remain
 separate responsibilities. These are later design constraints, not claims that an executor abstraction already exists.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)

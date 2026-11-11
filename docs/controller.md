@@ -1,15 +1,20 @@
-# Local controller and CLI
+# Bounded Controller and Repair Loop
 
 The private `@loopwright/controller` workspace compiles an explicit trusted configuration and runs a finite task graph.
 Core constructs the acceptance result, state owns the original admission/budget/clock, and the Pi adapter owns request
 and contained-tool dispatch. Controller progress stores identities and evidence references; it grants no extra calls,
 tokens, repair attempts or time. The qualified state profile remains macOS arm64, Node26.13.0/SQLite3.54.1 on one boot.
 
-S02 charges repair allowances per admitted SDK request. One implementation repair command can require a write turn
+State authority charges repair allowances per admitted SDK request. One implementation repair command can require a write turn
 and a submission turn, consuming two implementation repair requests. The controller separately bounds commands
 with `maxAttempts`; disabling implementation repair preserves the independently observed failed acceptance result.
-A counted 429 retry can leave the original token charge unknown. Under the current S02/S03 contract, the controller
+A counted 429 retry can leave the original token charge unknown. Under the current state and adapter authority contract, the controller
 retains that charge and returns `RECOVERY_REQUIRED` (CLI exit7); it cannot capture or resume unresolved accounting.
+
+## Contents
+
+- [Public API and configuration envelopes](#public-api-and-configuration-envelopes)
+- [Authenticated gates, publication and reconciliation](#authenticated-gates-publication-and-reconciliation)
 
 ## Public API and configuration envelopes
 
@@ -161,7 +166,11 @@ the file must be a regular, non-symlink file of at most 65536 bytes. Live HTTP `
 sign the exact wire JSON bytes (`<hex>` or `sha256=<hex>`), whereas operator receipt files carry a top-level
 `signature` field computed over the canonical receipt document without the `signature` key.
 
-Offline tests include public check-only run/resume, real Git/S02/Workers, CLI subprocesses and export integrity. They
+Offline tests include public check-only run/resume, real Git/state authority/Workers, CLI subprocesses and export integrity. They
 establish those local behaviors. Native Pi/provider/MCP qualification is recorded separately and cannot be inferred
 from the unit total or a static plan. Live-provider qualification requires its separate explicitly approved credential
 source; no CLI command implicitly publishes or applies external changes.
+
+**See also**: [Documentation index](README.md)
+
+**Next**: [Architecture](getting-started/architecture.md)
