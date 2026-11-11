@@ -7,6 +7,7 @@ export { digestArtifact, type ArtifactManifest, type ResolvedArtifact } from './
 export { evaluateAcceptance, type VerificationResult, type EvaluatedCheck } from './acceptance.js';
 export type { Evidence, SubmittedCheck } from './evidence.js';
 export { aggregateUsage, type RequestUsage, type Quantity, type Aggregate, type UsageSummary } from './usage.js';
+export { SecretScrubber } from './scrubber.js';
 export { constructRunResult, type RunResult, type RunStatus, type MemoryObservation, type NoChangeVerification } from './results.js';
 import { contractSchema, type TaskContract } from './contracts.js';
 import { lockSchema, type TaskLock } from './identity.js';

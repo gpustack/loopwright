@@ -20,6 +20,8 @@
     "packages/taskpack-runner/test/**/*.ts",
     "packages/memory/src/**/*.ts",
     "packages/memory/test/**/*.ts",
+    "packages/decisions/src/**/*.ts",
+    "packages/decisions/test/**/*.ts",
     "packages/github-app/src/**/*.ts",
     "packages/github-app/test/**/*.ts"
   ]
