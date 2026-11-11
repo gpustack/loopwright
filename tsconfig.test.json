@@ -17,6 +17,8 @@
     "packages/cli/src/**/*.ts",
     "packages/cli/test/**/*.ts",
     "packages/taskpack-runner/src/**/*.ts",
-    "packages/taskpack-runner/test/**/*.ts"
+    "packages/taskpack-runner/test/**/*.ts",
+    "packages/memory/src/**/*.ts",
+    "packages/memory/test/**/*.ts"
   ]
 }
