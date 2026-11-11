@@ -82,7 +82,7 @@
 - Use for: github app and action
 - Aliases: github-app
 - Guides: [github-app.md](github-app.md), [operate/github-app.md](operate/github-app.md), [operate/github-action.md](operate/github-action.md)
-- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md)
+- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md)
 - Code: [github-app](../packages/github-app/)
 - Related: [taskpacks](#declarative-taskpacks-and-runner-parity), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -123,6 +123,7 @@
 | [2026-11-11-capability-closure-matrix-and-failure-semantics.md](../specs/2026-11-11-capability-closure-matrix-and-failure-semantics.md) | capability closure matrix and failure semantics |
 | [2026-11-11-github-app-control-plane-and-declarative-taskpack.md](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md) | github app control plane and declarative taskpack |
 | [2026-11-11-jev-decision-routing-and-controlled-benchmark.md](../specs/2026-11-11-jev-decision-routing-and-controlled-benchmark.md) | jev decision routing and controlled benchmark |
+| [2026-11-11-native-os-sandbox-execution-backends.md](../specs/2026-11-11-native-os-sandbox-execution-backends.md) | native os sandbox execution backends |
 | [2026-11-11-reviewed-memory-and-cas-compaction.md](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md) | reviewed memory and cas compaction |
 
 ## All pages

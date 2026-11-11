@@ -61,10 +61,26 @@ spec:
       - retry
       - revise
       - status
+  sandbox:
+    preferredBackends:
+      - macos-seatbelt
+      - linux-bwrap
+      - linux-landlock
+      - docker
+    networkMode: none
+    requiredCapabilities:
+      - filesystemReadContainment
+      - filesystemWriteContainment
+      - protectedPathReadOnlyMask
+      - networkIsolation
+      - processTreeCleanup
+    deniedReadPaths:
+      - ~/.ssh
 ```
 
 - Save this as `.loopwright/taskpack.yaml` in the target repository.
 - Writable scope cannot overlap protected paths; proposal paths must stay writable and memory must stay under `.loopwright/memory/<id>` outside writable scope.
+- Optional `spec.sandbox` pins preferred OS sandbox backends (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, `direct-dedicated`), `networkMode` (`none`, `loopback-only`, `allow-outbound`), `requiredCapabilities`, and `deniedReadPaths`.
 - The bounded parser refuses symlinks, traversal, unsafe keys and interpolation.
 
 ## Step 2: Validate locally

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
+import { existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { defaultCorpusRoot, verifyFrozenCorpus } from './corpus.js';
 import { RunnerTaskpackError } from './types.js';
 
@@ -75,10 +76,18 @@ socket.socket.connect = _loopback_only_connect
 socket.socket.connect_ex = _loopback_only_connect_ex
 `;
 
+export interface PythonSandboxOptions {
+  readonly enabled: boolean;
+  readonly writablePaths?: readonly string[] | undefined;
+  readonly protectedPaths?: readonly string[] | undefined;
+  readonly networkMode?: 'none' | 'loopback-only' | undefined;
+}
+
 export interface PythonBridgeOptions {
   readonly pythonExecutable?: string;
   readonly pathAllowlist?: string;
   readonly defaultTimeoutMs?: number;
+  readonly sandbox?: PythonSandboxOptions | undefined;
 }
 
 export interface PythonRunOptions {
@@ -86,6 +95,7 @@ export interface PythonRunOptions {
   readonly cwd?: string;
   readonly stdin?: string;
   readonly maxOutputBytes?: number;
+  readonly sandbox?: PythonSandboxOptions | undefined;
 }
 
 export interface PythonRunResult {
@@ -140,6 +150,114 @@ function minorVersionAtLeast(version: string, major: number, minor: number): boo
 }
 
 const AUTO_CANDIDATES = ['python3', 'python3.11', 'python3.12', 'python3.10', 'python3.13'] as const;
+const SEATBELT_EXECUTABLE = '/usr/bin/sandbox-exec';
+const BUILTIN_PROTECTED_SUBPATHS = ['.git', '.github', '.loopwright', '.claude', '.agents', 'AGENTS.md', 'CLAUDE.md'] as const;
+const DEFAULT_DENIED_HOME_SUBPATHS = [
+  '.ssh', '.aws', '.gnupg', '.config/gh', '.config/gcloud',
+  '.kube', '.docker', '.netrc', '.npmrc', '.pypirc',
+] as const;
+
+function isSameOrRunnerSubpath(candidate: string, root: string): boolean {
+  if (root === '/') return true;
+  return candidate === root || candidate.startsWith(`${root}${sep}`);
+}
+
+function canonicalizeRunnerPath(rawPath: string, baseDir: string): string {
+  const target = isAbsolute(rawPath) ? resolve(rawPath) : resolve(baseDir, rawPath);
+  if (/[\0\r\n"\\]/.test(target)) {
+    throw new RunnerTaskpackError('PYTHON_BOUNDARY', 'sandbox path contains forbidden characters');
+  }
+  const suffix: string[] = [];
+  let cursor = target;
+  while (true) {
+    if (existsSync(cursor)) {
+      try {
+        const real = realpathSync(cursor);
+        return suffix.length === 0 ? real : join(real, ...suffix.reverse());
+      } catch {
+        // continue walking up on broken symlink
+      }
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return target;
+    suffix.push(cursor.slice(parent === '/' ? 1 : parent.length + 1));
+    cursor = parent;
+  }
+}
+
+export function buildPythonSeatbeltProfile(
+  scratchDir: string,
+  cwd: string | undefined,
+  sandbox: PythonSandboxOptions,
+  homeDirectory: string = homedir(),
+): string {
+  const canonicalScratch = canonicalizeRunnerPath(scratchDir, scratchDir);
+  const baseDir = cwd !== undefined ? canonicalizeRunnerPath(cwd, canonicalScratch) : canonicalScratch;
+  const deniedReadSet = new Set<string>();
+  if (typeof homeDirectory === 'string' && homeDirectory.length > 0 && isAbsolute(homeDirectory)) {
+    const canonicalHome = canonicalizeRunnerPath(homeDirectory, canonicalScratch);
+    if (!isSameOrRunnerSubpath(canonicalHome, canonicalScratch) && !isSameOrRunnerSubpath(canonicalHome, baseDir)) {
+      for (const subpath of DEFAULT_DENIED_HOME_SUBPATHS) {
+        const deniedCandidate = canonicalizeRunnerPath(join(canonicalHome, subpath), canonicalHome);
+        if (!isSameOrRunnerSubpath(canonicalScratch, deniedCandidate) && !isSameOrRunnerSubpath(baseDir, deniedCandidate)) {
+          deniedReadSet.add(deniedCandidate);
+        }
+      }
+    }
+  }
+  const writableSet = new Set<string>([canonicalScratch]);
+  for (const entry of sandbox.writablePaths ?? []) {
+    writableSet.add(canonicalizeRunnerPath(entry, baseDir));
+  }
+  const protectedSet = new Set<string>();
+  if (cwd !== undefined) {
+    for (const rel of BUILTIN_PROTECTED_SUBPATHS) {
+      protectedSet.add(canonicalizeRunnerPath(rel, baseDir));
+    }
+  }
+  for (const entry of sandbox.protectedPaths ?? []) {
+    protectedSet.add(canonicalizeRunnerPath(entry, baseDir));
+  }
+  const lines: string[] = [
+    '(version 1)',
+    '(allow default)',
+  ];
+  if (deniedReadSet.size > 0) {
+    lines.push('(deny file-read*');
+    for (const deniedPath of [...deniedReadSet].sort()) {
+      lines.push(`  (subpath "${deniedPath}")`);
+    }
+    lines.push(')');
+  }
+  lines.push(
+    '(deny file-write*)',
+    '(allow file-write*',
+    '  (literal "/dev/null")',
+    '  (literal "/dev/zero")',
+    '  (literal "/dev/dtracehelper")',
+  );
+  for (const writablePath of [...writableSet].sort()) {
+    lines.push(`  (subpath "${writablePath}")`);
+  }
+  lines.push(')');
+  if (protectedSet.size > 0) {
+    lines.push('(deny file-write*');
+    for (const protectedPath of [...protectedSet].sort()) {
+      lines.push(`  (subpath "${protectedPath}")`);
+    }
+    lines.push(')');
+  }
+  const netMode = sandbox.networkMode ?? 'loopback-only';
+  if (netMode === 'none') {
+    lines.push('(deny network*)');
+  } else {
+    lines.push('(deny network*)');
+    lines.push('(allow network-outbound (remote ip "localhost:*"))');
+    lines.push('(allow network-inbound (local ip "localhost:*"))');
+    lines.push('(allow network-bind (local ip "localhost:*"))');
+  }
+  return `${lines.join('\n')}\n`;
+}
 
 /**
  * Contained runner for frozen Python helpers: sanitized environment (private HOME, pinned git settings,
@@ -149,6 +267,7 @@ export class PythonBridge {
   readonly #configuredExecutable: string | null;
   readonly #pathAllowlist: string;
   readonly #defaultTimeoutMs: number;
+  readonly #defaultSandbox: PythonSandboxOptions | undefined;
   #interpreter: Promise<{ readonly executable: string; readonly version: string; readonly modules: readonly string[] }> | null = null;
   #scratch: Promise<string> | null = null;
   #disposed = false;
@@ -159,6 +278,7 @@ export class PythonBridge {
     this.#configuredExecutable = configured;
     this.#pathAllowlist = options.pathAllowlist ?? DEFAULT_PATH_ALLOWLIST;
     this.#defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#defaultSandbox = options.sandbox;
   }
 
   /** Private per-bridge scratch tree holding the socket guard and serving as HOME. */
@@ -250,11 +370,18 @@ export class PythonBridge {
       throw new RunnerTaskpackError('PYTHON_BOUNDARY', 'python helper stdin exceeded the bounded stream size');
     }
     const environment = await this.#environment();
+    const scratch = await this.#scratchDirectory();
+    const activeSandbox = options.sandbox ?? this.#defaultSandbox;
+    const useSeatbelt = activeSandbox?.enabled === true && process.platform === 'darwin' && existsSync(SEATBELT_EXECUTABLE);
+    const spawnExec = useSeatbelt ? SEATBELT_EXECUTABLE : executable;
+    const spawnArgv = useSeatbelt
+      ? ['-p', buildPythonSeatbeltProfile(scratch, options.cwd, activeSandbox), '--', executable, ...argv]
+      : [...argv];
     const timeoutMs = options.timeoutMs ?? this.#defaultTimeoutMs;
     const maximum = options.maxOutputBytes ?? MAX_STREAM_BYTES;
     const started = performance.now();
     return await new Promise<ContainedOutcome>((resolve, reject) => {
-      const child = spawn(executable, [...argv], { env: environment, cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      const child = spawn(spawnExec, spawnArgv, { env: environment, cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       const killGroup = (signal: NodeJS.Signals): void => {
         try { if (child.pid !== undefined) process.kill(-child.pid, signal); } catch { child.kill(signal); }
       };

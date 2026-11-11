@@ -9,6 +9,7 @@ tenant-isolated queueing, and short-lived installation tokens.
 
 - [Module map](#module-map)
 - [Declarative taskpack onboarding](#declarative-taskpack-onboarding)
+- [OS sandbox backends](#os-sandbox-backends)
 - [Reusable Action entrypoint](#reusable-action-entrypoint)
 - [Control plane](#control-plane)
 - [Offline testing](#offline-testing)
@@ -20,6 +21,7 @@ tenant-isolated queueing, and short-lived installation tokens.
 | `src/types.ts` | Public interfaces, closed error-code union, `GitHubAppError` |
 | `src/schema.ts` | Bounded YAML-subset/JSON parser and the `TaskpackManifest` validator |
 | `src/taskpack.ts` | `loadDeclarativeTaskpack`, `compileDeclarativeTaskpack`, generic intake helpers |
+| `src/sandbox.ts` | Native macOS Seatbelt, Linux Bubblewrap/Landlock compilers, capability negotiation, and execution |
 | `src/webhook.ts` | Constant-time HMAC-SHA256 verification, `WebhookDeliveryStore`, event/comment intake |
 | `src/tenant-queue.ts` | `TenantAdmissionQueue`: tenant partitioning, concurrency 1, lease-epoch fencing |
 | `src/token-broker.ts` | RS256 App JWTs, `InstallationTokenBroker`, multi-encoding `SecretScrubber` |
@@ -99,6 +101,30 @@ The loader enforces the hard invariants before anything compiles:
 `ControllerConfiguration` that pass `@loopwright/core` `validateDocument` and `@loopwright/controller`
 `loadTrustedConfiguration` + `compilePlan`. Signing secrets appear only as `${NAME}` templates resolved
 from explicitly bound environment variables.
+
+## OS sandbox backends
+
+`src/sandbox.ts` provides kernel-enforced OS sandbox execution backends (`macos-seatbelt`, `linux-bwrap`,
+`linux-landlock`, `docker`, and `direct-dedicated`) with fail-closed capability negotiation:
+
+- **macOS Seatbelt (`macos-seatbelt`)**: `compileMacosSeatbeltProfile` canonicalizes paths with `realpath`,
+  denies reading sensitive credential directories (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`,
+  `~/.config/gh`, plus `deniedReadPaths`), emits global `(deny file-write*)`, allows writes only to
+  canonicalized `writablePaths` and scratch directories, and places `(deny file-write*)` overrides for
+  protected paths (`.git`, `.github`, `.loopwright`, `.claude`, `.agents`, `AGENTS.md`, `CLAUDE.md`, and
+  manifest `scope.protected`) after the writable grants so XNU Seatbelt last-match-wins precedence blocks
+  modifications inside writable roots.
+- **Linux Bubblewrap + Seccomp (`linux-bwrap`) and Landlock LSM (`linux-landlock`)**:
+  `compileLinuxBwrapCommand` synthesizes `--unshare-all`, `--die-with-parent`, `--new-session`,
+  `--ro-bind / /`, `--tmpfs` masks on denied credential paths, `--bind` mounts for `writablePaths`, and
+  subsequent `--ro-bind-try` read-only masks for protected paths alongside a canonical seccomp BPF syscall
+  filter (`computeSandboxSeccompProfile`). On Linux hosts without unprivileged user namespaces or `bwrap`,
+  `linux-landlock` enforces `PR_SET_NO_NEW_PRIVS` and Landlock `LANDLOCK_RULE_PATH_BENEATH` rules via
+  recursive directory tree-splitting.
+- **Fail-closed negotiation (`negotiateSandboxBackend`)**: refuses missing or untrusted binaries
+  (`SANDBOX_BACKEND_UNAVAILABLE`) and backends that lack required isolation capabilities
+  (`SANDBOX_CAPABILITY_INSUFFICIENT`); `direct-dedicated` is refused unless
+  `allowDedicatedDirectOverride: true` is explicitly supplied by the host operator.
 
 ## Reusable Action entrypoint
 

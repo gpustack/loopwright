@@ -1,4 +1,10 @@
-import { GitHubAppError, DEFAULT_COMMENT_PREFIXES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS, TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, type TaskpackCommentCommand, type TaskpackManifest, type TaskpackUpstreamDescriptor } from './types.js';
+import {
+  GitHubAppError, DEFAULT_COMMENT_PREFIXES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
+  TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES,
+  type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
+  type TaskpackCommentCommand, type TaskpackManifest, type TaskpackSandboxDeclaration,
+  type TaskpackUpstreamDescriptor,
+} from './types.js';
 
 export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
@@ -443,7 +449,7 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
   const version = requireString(metadata['version'], '/metadata/version', 1, 64);
   if (!VERSION_PATTERN.test(version)) manifestInvalid('version must match [A-Za-z0-9][A-Za-z0-9._+-]*', '/metadata/version');
 
-  const spec = requireObject(root['spec'], '/spec', ['goal', 'scope', 'upstreams', 'proposal', 'verification', 'publication', 'memory', 'triggers']);
+  const spec = requireObject(root['spec'], '/spec', ['goal', 'scope', 'upstreams', 'proposal', 'verification', 'publication', 'memory', 'triggers', 'sandbox']);
   const goal = requireObject(spec['goal'], '/spec/goal', ['candidate', 'noChange']);
   const goalCandidate = requireString(goal['candidate'], '/spec/goal/candidate', 1, 1024);
   const goalNoChange = requireString(goal['noChange'], '/spec/goal/noChange', 1, 1024);
@@ -589,11 +595,72 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
       return entry;
     });
 
-  return Object.freeze({
-    apiVersion: TASKPACK_MANIFEST_API_VERSION,
-    kind: 'TaskpackManifest',
-    metadata: Object.freeze({ id, name, version }),
-    spec: Object.freeze({
+  let sandbox: TaskpackSandboxDeclaration | undefined;
+  if (spec['sandbox'] !== undefined) {
+    const rawSandbox = requireObject(spec['sandbox'], '/spec/sandbox', ['preferredBackends', 'networkMode', 'requiredCapabilities', 'deniedReadPaths']);
+    const allowedBackends: readonly SandboxBackendId[] = ['macos-seatbelt', 'linux-bwrap', 'linux-landlock', 'docker', 'direct-dedicated'];
+    const allowedCapabilities: readonly SandboxCapability[] = [
+      'filesystemReadContainment', 'filesystemWriteContainment', 'protectedPathReadOnlyMask',
+      'networkIsolation', 'processTreeCleanup', 'syscallFiltering',
+    ];
+    let preferredBackends: readonly SandboxBackendId[] | undefined;
+    if (rawSandbox['preferredBackends'] !== undefined) {
+      preferredBackends = Object.freeze(
+        requireStringList(rawSandbox['preferredBackends'], '/spec/sandbox/preferredBackends', 1, 5).map((item, idx) => {
+          if (!(allowedBackends as readonly string[]).includes(item)) {
+            manifestInvalid(`unsupported sandbox backend "${item}"`, `/spec/sandbox/preferredBackends/${idx}`);
+          }
+          return item as SandboxBackendId;
+        }),
+      );
+    }
+    let networkMode: SandboxNetworkMode | undefined;
+    if (rawSandbox['networkMode'] !== undefined) {
+      const modeStr = requireString(rawSandbox['networkMode'], '/spec/sandbox/networkMode', 1, 32);
+      if (modeStr !== 'none' && modeStr !== 'loopback-only' && modeStr !== 'allow-outbound') {
+        manifestInvalid(`unsupported sandbox networkMode "${modeStr}"`, '/spec/sandbox/networkMode');
+      }
+      networkMode = modeStr;
+    } else {
+      networkMode = 'none';
+    }
+    let requiredCapabilities: readonly SandboxCapability[] | undefined;
+    if (rawSandbox['requiredCapabilities'] !== undefined) {
+      requiredCapabilities = Object.freeze(
+        requireStringList(rawSandbox['requiredCapabilities'], '/spec/sandbox/requiredCapabilities', 0, 6).map((item, idx) => {
+          if (!(allowedCapabilities as readonly string[]).includes(item)) {
+            manifestInvalid(`unsupported sandbox capability "${item}"`, `/spec/sandbox/requiredCapabilities/${idx}`);
+          }
+          return item as SandboxCapability;
+        }),
+      );
+    }
+    let deniedReadPaths: readonly string[] | undefined;
+    if (rawSandbox['deniedReadPaths'] !== undefined) {
+      deniedReadPaths = Object.freeze(
+        requireStringList(rawSandbox['deniedReadPaths'], '/spec/sandbox/deniedReadPaths', 0, 64).map((entry, idx) => {
+          const itemPath = `/spec/sandbox/deniedReadPaths/${idx}`;
+          if (entry.startsWith('~/')) {
+            return `~/${normalizeRelativePath(entry.slice(2), itemPath)}`;
+          }
+          return normalizeRelativePath(entry, itemPath);
+        }),
+      );
+    }
+    const sandboxObj: {
+      preferredBackends?: readonly SandboxBackendId[];
+      networkMode?: SandboxNetworkMode;
+      requiredCapabilities?: readonly SandboxCapability[];
+      deniedReadPaths?: readonly string[];
+    } = { networkMode };
+    if (preferredBackends !== undefined) sandboxObj.preferredBackends = preferredBackends;
+    if (requiredCapabilities !== undefined) sandboxObj.requiredCapabilities = requiredCapabilities;
+    if (deniedReadPaths !== undefined) sandboxObj.deniedReadPaths = deniedReadPaths;
+    sandbox = Object.freeze(sandboxObj);
+  }
+
+  const specRecord: TaskpackManifest['spec'] = sandbox === undefined
+    ? Object.freeze({
       goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
       scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
       upstreams: Object.freeze(upstreams),
@@ -602,7 +669,24 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
       publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
       memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
       triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
-    }),
+    })
+    : Object.freeze({
+      goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
+      scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
+      upstreams: Object.freeze(upstreams),
+      proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
+      verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
+      publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
+      memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
+      triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
+      sandbox,
+    });
+
+  return Object.freeze({
+    apiVersion: TASKPACK_MANIFEST_API_VERSION,
+    kind: 'TaskpackManifest',
+    metadata: Object.freeze({ id, name, version }),
+    spec: specRecord,
   });
 }
 

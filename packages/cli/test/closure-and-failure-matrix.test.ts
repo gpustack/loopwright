@@ -118,6 +118,10 @@ test('closure: the full 14-scenario matrix passes against real public APIs', { t
   assert.equal(codes.get('mutated_pr_head_publication_abort'), 'RECEIPT_CONFLICT');
   assert.equal(codes.get('compaction_pending_operation_preservation'), 'COMPACTION_AUTHORITY_VIOLATION');
   assert.equal(codes.get('untrusted_taskpack_and_oauth_boundary_refusal'), 'MCP_OAUTH_UNSUPPORTED');
+  const scenario13 = report.scenarios.find(scenario => scenario.scenarioId === 'untrusted_taskpack_and_oauth_boundary_refusal')!;
+  assert.ok(scenario13.assertions.some(claim => claim.includes('SANDBOX_CAPABILITY_INSUFFICIENT')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('macOS Seatbelt profile')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('Linux Bubblewrap command')));
   assert.equal(codes.get('decision_authority_escalation_refusal'), 'DECISION_AUTHORITY_VIOLATION');
   for (const scenario of report.scenarios) { assert.ok(scenario.assertions.length > 0, scenario.scenarioId); assert.ok(scenario.elapsedMs >= 0); }
   assert.equal(closureExitCode({ version: 1, integrity: { ok: true, checkedFiles: 23, failures: [] }, falsificationDetected: false, diagnostics: [], summary: { total: 23, closedLocal: 18, deferredOwned: 2, blockedExternal: 3, unprovisionedExternal: 5, passed: 18 }, failureMatrix: report } as ClosureMatrixReport, true), 0);

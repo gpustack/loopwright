@@ -15,7 +15,7 @@ import { DecisionBudgetTracker, DecisionError, DEFAULT_DECISION_POLICY, assertDe
 import type { DecisionPolicyConfig } from '@loopwright/decisions';
 import { buildCompactionSummary, evaluateCompactionPolicy, restoreFromCompactionLedger, selectActiveMemory, storeDigestOf } from '@loopwright/memory';
 import type { CompactionLedgerState, MemoryEntry, MemoryStoreIndex } from '@loopwright/memory';
-import { GitHubAppError, loadDeclarativeTaskpack, validateMcpAuthConfiguration, validateTaskpackManifest } from '@loopwright/github-app';
+import { compileLinuxBwrapCommand, compileMacosSeatbeltProfile, GitHubAppError, loadDeclarativeTaskpack, negotiateSandboxBackend, validateMcpAuthConfiguration, validateTaskpackManifest } from '@loopwright/github-app';
 import { computeRunnerCandidateDigest, defaultCorpusRoot, startRunnerTaskpackService } from '@loopwright/taskpack-runner';
 import { diagnosticExit, executionExit } from './main.js';
 import type { IntegratedFailureMatrixReport, IntegratedFailureScenarioId, IntegratedFailureScenarioResult } from './closure.js';
@@ -517,6 +517,24 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
   r.expect(String(oauth.ok ? '' : oauth.code), 'MCP_OAUTH_UNSUPPORTED', 'interactive OAuth configuration refuses with MCP_OAUTH_UNSUPPORTED');
   const challenge = validateMcpAuthConfiguration({ servers: [{ serverId: 'workspace' }], transportChallenge: { status: 401, wwwAuthenticate: 'Bearer realm="control-plane"' } });
   r.expect(String(challenge.ok ? '' : challenge.code), 'MCP_AUTHENTICATION_REQUIRED', 'an interactive transport challenge refuses with MCP_AUTHENTICATION_REQUIRED');
+  let sandboxCode: string | null = null;
+  try {
+    negotiateSandboxBackend(
+      { workspaceRoot: '/tmp/lw-sandbox-probe', writablePaths: ['docs'], preferredBackends: ['direct-dedicated'] },
+      { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+    );
+  } catch (error) { sandboxCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  r.expect(sandboxCode ?? '', 'SANDBOX_CAPABILITY_INSUFFICIENT', 'direct-dedicated sandbox without override refuses with SANDBOX_CAPABILITY_INSUFFICIENT');
+  const seatbelt = compileMacosSeatbeltProfile(
+    { workspaceRoot: '/tmp/lw-sandbox-probe', writablePaths: ['docs'], protectedPaths: ['docs/protected-notes.md'], networkMode: 'none' },
+    { platform: 'darwin', arch: 'arm64', homeDirectory: '/var/empty', probeExecutables: false },
+  );
+  r.assert(seatbelt.profileText.includes('(deny file-write*)') && seatbelt.profileText.includes('(deny network*)'), 'macOS Seatbelt profile enforces write and network containment');
+  const bwrap = compileLinuxBwrapCommand(
+    { workspaceRoot: '/tmp/lw-sandbox-probe', writablePaths: ['docs'], protectedPaths: ['docs/protected-notes.md'], networkMode: 'none' },
+    { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty', probeExecutables: false },
+  );
+  r.assert(bwrap.args.includes('--unshare-all') && bwrap.args.includes('--ro-bind-try'), 'Linux Bubblewrap command enforces namespace isolation and read-only protected masks');
   return outcome(id, started, r.claims(), r.failed(), 'MCP_OAUTH_UNSUPPORTED');
 }
 async function scenarioFourteen(): Promise<IntegratedFailureScenarioResult> {

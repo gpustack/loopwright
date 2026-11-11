@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { DEFAULT_PATH_ALLOWLIST, PythonBridge } from '../src/python-bridge.js';
+import { buildPythonSeatbeltProfile, DEFAULT_PATH_ALLOWLIST, PythonBridge } from '../src/python-bridge.js';
 import { RunnerTaskpackError } from '../src/types.js';
 
 const ENV_SHAPE_CODE = `import json, os
@@ -206,5 +206,65 @@ except Exception as error:
       assert.equal(error.code, 'PYTHON_UNAVAILABLE');
       return true;
     });
+  });
+
+  it('wraps python subprocesses in macOS Seatbelt when sandbox.enabled is true (AC-4)', { skip: process.platform !== 'darwin' }, async () => {
+    const fs = await import('node:fs/promises');
+    const root = await mkdtemp(join(await fs.realpath(tmpdir()), 'bridge-seatbelt-'));
+    scratchRoots.push(root);
+    const docsDir = join(root, 'docs');
+    const gitDir = join(root, '.git');
+    await fs.mkdir(docsDir, { recursive: true });
+    await fs.mkdir(gitDir, { recursive: true });
+    await fs.writeFile(join(gitDir, 'config'), '[core]\n', 'utf8');
+
+    const sandboxed = bridge({
+      sandbox: { enabled: true, writablePaths: [docsDir], protectedPaths: [join(docsDir, 'readonly.md')], networkMode: 'none' },
+    });
+
+    // 1. Writing inside writablePaths succeeds.
+    const allowedFile = join(docsDir, 'output.txt');
+    const okRes = await sandboxed.run(
+      'import sys; open(sys.stdin.read().strip(), "w").write("allowed-content"); print("OK")',
+      { cwd: root, stdin: allowedFile },
+    );
+    assert.equal(okRes.exitCode, 0, okRes.stderr);
+    assert.equal((await fs.readFile(allowedFile, 'utf8')).trim(), 'allowed-content');
+
+    // 2. Writing outside writablePaths (e.g. root/outside.txt) is blocked by Seatbelt.
+    const outsideFile = join(root, 'outside.txt');
+    const deniedOutside = await sandboxed.run(
+      'import sys\ntry:\n    open(sys.stdin.read().strip(), "w").write("escaped")\n    print("WRITTEN")\nexcept PermissionError:\n    print("DENIED")',
+      { cwd: root, stdin: outsideFile },
+    );
+    assert.equal(deniedOutside.exitCode, 0, deniedOutside.stderr);
+    assert.equal(deniedOutside.stdout.trim(), 'DENIED');
+
+    // 3. Writing to protected path (.git/config or docs/readonly.md) is blocked by Seatbelt.
+    const deniedProtected = await sandboxed.run(
+      'import sys\ntry:\n    open(sys.stdin.read().strip(), "w").write("tampered")\n    print("WRITTEN")\nexcept PermissionError:\n    print("DENIED")',
+      { cwd: root, stdin: join(docsDir, 'readonly.md') },
+    );
+    assert.equal(deniedProtected.exitCode, 0, deniedProtected.stderr);
+    assert.equal(deniedProtected.stdout.trim(), 'DENIED');
+
+    // 4. Generated Seatbelt profile denies reading default host credential subpaths unless home is inside scratch/cwd.
+    const profileWithHostHome = buildPythonSeatbeltProfile(
+      root,
+      root,
+      { enabled: true, writablePaths: [docsDir], networkMode: 'none' },
+      '/var/empty/mock-home',
+    );
+    assert.ok(profileWithHostHome.includes('(deny file-read*'));
+    assert.ok(profileWithHostHome.includes('/mock-home/.ssh")'));
+    assert.ok(profileWithHostHome.includes('/mock-home/.config/gcloud")'));
+
+    const profileWithNestedHome = buildPythonSeatbeltProfile(
+      root,
+      root,
+      { enabled: true, writablePaths: [docsDir], networkMode: 'none' },
+      join(root, 'nested-home'),
+    );
+    assert.equal(profileWithNestedHome.includes('(deny file-read*'), false);
   });
 });

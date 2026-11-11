@@ -31,7 +31,7 @@ The service binds loopback by default. Provide authenticated ingress and a confi
 
 ## Host qualification
 
-Qualify platform, Node runtime, local storage, clock and storage profile before running; interactive MCP OAuth is refused. In-memory queue and delivery state do not establish durable deployed recovery. See [control plane details](../github-app.md) and [closure](../closure-matrix.md) for current boundaries.
+Qualify platform, Node runtime, local storage, clock and storage profile before running; interactive MCP OAuth is refused. For native OS sandbox execution without Docker, provision `/usr/bin/sandbox-exec` on macOS (`macos-seatbelt`) or `/usr/bin/bwrap` (`linux-bwrap`) / Linux Landlock LSM (`linux-landlock`) on Linux; `negotiateSandboxBackend` fails closed (`SANDBOX_BACKEND_UNAVAILABLE` or `SANDBOX_CAPABILITY_INSUFFICIENT`) rather than falling back to unsandboxed host execution. In-memory queue and delivery state do not establish durable deployed recovery. See [control plane details](../github-app.md) and [closure](../closure-matrix.md) for current boundaries.
 
 **See also**: [Taskpack intake](../github-app.md)
 

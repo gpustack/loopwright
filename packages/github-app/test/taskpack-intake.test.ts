@@ -232,6 +232,48 @@ describe('declarative taskpack loading (AC-1)', () => {
       (draft.spec as Record<string, unknown>).memory = { directory: 'memory', apply: 'separate-pull-request', onNoModelBudget: 'deterministic-observations-only' };
     })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
   });
+
+  it('validates optional spec.sandbox declarations and rejects invalid backends, capabilities, or traversal paths (AC-3)', async () => {
+    const withSandboxYaml = `${VALID_MANIFEST_YAML}  sandbox:
+    preferredBackends:
+      - macos-seatbelt
+      - linux-bwrap
+      - linux-landlock
+      - docker
+    networkMode: loopback-only
+    requiredCapabilities:
+      - filesystemReadContainment
+      - filesystemWriteContainment
+      - protectedPathReadOnlyMask
+    deniedReadPaths:
+      - ~/.ssh
+      - secrets/local
+`;
+    const parsed = await loadDeclarativeTaskpack({ bytes: Buffer.from(withSandboxYaml, 'utf8'), format: 'yaml' });
+    assert.deepEqual(parsed.spec.sandbox, {
+      preferredBackends: ['macos-seatbelt', 'linux-bwrap', 'linux-landlock', 'docker'],
+      networkMode: 'loopback-only',
+      requiredCapabilities: ['filesystemReadContainment', 'filesystemWriteContainment', 'protectedPathReadOnlyMask'],
+      deniedReadPaths: ['~/.ssh', 'secrets/local'],
+    });
+
+    const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+    assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
+      (draft.spec as Record<string, unknown>).sandbox = { preferredBackends: ['unknown-backend'] };
+    })), (error: GitHubAppError) => error.code === 'TASKPACK_MANIFEST_INVALID');
+
+    assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
+      (draft.spec as Record<string, unknown>).sandbox = { preferredBackends: ['macos-seatbelt', 'macos-seatbelt'] };
+    })), (error: GitHubAppError) => error.code === 'TASKPACK_MANIFEST_INVALID');
+
+    assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
+      (draft.spec as Record<string, unknown>).sandbox = { requiredCapabilities: ['invalidCapability'] };
+    })), (error: GitHubAppError) => error.code === 'TASKPACK_MANIFEST_INVALID');
+
+    assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
+      (draft.spec as Record<string, unknown>).sandbox = { deniedReadPaths: ['~/.ssh/../etc/passwd'] };
+    })), (error: GitHubAppError) => error.code === 'TASKPACK_MANIFEST_INVALID');
+  });
 });
 
 describe('compileDeclarativeTaskpack (AC-1)', () => {

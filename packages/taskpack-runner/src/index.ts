@@ -35,6 +35,7 @@ export {
 } from './python-bridge.js';
 export type {
   FrozenUnitCheckResult, PythonBridgeOptions, PythonPreflight, PythonRunOptions, PythonRunResult,
+  PythonSandboxOptions,
 } from './python-bridge.js';
 export { RunnerTaskpackError } from './types.js';
 export type * from './types.js';

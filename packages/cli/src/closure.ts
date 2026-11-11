@@ -146,7 +146,7 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
     'Wall-clock alignment to external time authorities is out of scope.', ['packages/state/src/clock.ts', 'packages/state/test/clock.test.ts']),
   CLOSED('qualified-host-clock-and-storage-profile', 'Qualified host clock and storage profile', 'host-qualification', '@loopwright/github-app', 'unit_and_integration',
     'Host qualification refuses unqualified filesystems, unqualified platforms, and drifting clocks.',
-    'Deployed host qualification requires the deployed control plane.', ['packages/github-app/src/qualification.ts', 'packages/github-app/test/token-broker-qualification.test.ts']),
+    'Deployed host qualification requires the deployed control plane.', ['packages/github-app/src/qualification.ts', 'packages/github-app/src/sandbox.ts', 'packages/github-app/test/token-broker-qualification.test.ts', 'packages/github-app/test/sandbox.test.ts']),
   CLOSED('state-interface-and-sqlite-limits', 'State interface and SQLite limits', 'state-store-interface', '@loopwright/state', 'unit_and_integration',
     'The retained store interface honors SQLite limits for pages, records, and reopen.',
     'Non-SQLite storage engines are out of scope.', ['packages/state/src/store.ts', 'packages/state/src/connection.ts', 'packages/state/test/store.test.ts']),

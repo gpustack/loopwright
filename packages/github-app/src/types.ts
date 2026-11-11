@@ -15,6 +15,8 @@ export const GITHUB_APP_ERROR_CODES = Object.freeze([
   'TOKEN_BROKER_CONFIG_INVALID', 'TOKEN_SCOPE_VIOLATION', 'TOKEN_SECRET_LEAK_DETECTED', 'TOKEN_TTL_EXCEEDED',
   'HOST_PROFILE_UNQUALIFIED', 'HOST_CLOCK_UNTRUSTED', 'STORAGE_PROFILE_INSUFFICIENT',
   'MCP_OAUTH_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED',
+  'SANDBOX_POLICY_INVALID', 'SANDBOX_BACKEND_UNAVAILABLE',
+  'SANDBOX_CAPABILITY_INSUFFICIENT', 'SANDBOX_EXECUTION_FAILED',
   'ACTION_INPUT_INVALID', 'SERVICE_FAULT',
 ] as const);
 export type GitHubAppErrorCode = typeof GITHUB_APP_ERROR_CODES[number];
@@ -85,7 +87,111 @@ export interface TaskpackManifest {
       readonly commentCommands: readonly TaskpackCommentCommand[];
       readonly commentPrefixes: readonly string[];
     };
+    readonly sandbox?: TaskpackSandboxDeclaration | undefined;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Native OS sandbox execution backends (Seatbelt, Bubblewrap, Landlock, Docker)
+// ---------------------------------------------------------------------------
+
+export type SandboxBackendId = 'macos-seatbelt' | 'linux-bwrap' | 'linux-landlock' | 'docker' | 'direct-dedicated';
+export type SandboxNetworkMode = 'none' | 'loopback-only' | 'allow-outbound';
+export type SandboxCapability =
+  | 'filesystemReadContainment'
+  | 'filesystemWriteContainment'
+  | 'protectedPathReadOnlyMask'
+  | 'networkIsolation'
+  | 'processTreeCleanup'
+  | 'syscallFiltering';
+
+export interface TaskpackSandboxDeclaration {
+  readonly preferredBackends?: readonly SandboxBackendId[] | undefined;
+  readonly networkMode?: SandboxNetworkMode | undefined;
+  readonly requiredCapabilities?: readonly SandboxCapability[] | undefined;
+  readonly deniedReadPaths?: readonly string[] | undefined;
+}
+
+export interface SandboxPolicyInput {
+  readonly workspaceRoot: string;
+  readonly writablePaths: readonly string[];
+  readonly protectedPaths?: readonly string[] | undefined;
+  readonly deniedReadPaths?: readonly string[] | undefined;
+  readonly scratchDirectory?: string | undefined;
+  readonly networkMode?: SandboxNetworkMode | undefined;
+  readonly requiredCapabilities?: readonly SandboxCapability[] | undefined;
+  readonly preferredBackends?: readonly SandboxBackendId[] | undefined;
+  readonly allowDedicatedDirectOverride?: boolean | undefined;
+}
+
+export interface SandboxHostEnvironment {
+  readonly platform: 'darwin' | 'linux' | string;
+  readonly arch: 'arm64' | 'x64' | string;
+  readonly homeDirectory?: string | undefined;
+  readonly seatbeltExecutable?: string | undefined;
+  readonly bwrapExecutable?: string | undefined;
+  readonly pythonExecutable?: string | undefined;
+  readonly dockerExecutable?: string | undefined;
+  readonly dockerSocket?: string | undefined;
+  readonly probeExecutables?: boolean | undefined;
+}
+
+export interface NegotiatedSandboxBackend {
+  readonly backendId: SandboxBackendId;
+  readonly executablePath: string | null;
+  readonly capabilities: readonly SandboxCapability[];
+  readonly networkMode: SandboxNetworkMode;
+  readonly profileDigest: Digest;
+}
+
+export interface CompiledMacosSeatbeltProfile {
+  readonly backendId: 'macos-seatbelt';
+  readonly executablePath: string;
+  readonly profileText: string;
+  readonly profileDigest: Digest;
+  readonly canonicalWorkspaceRoot: string;
+  readonly canonicalWritablePaths: readonly string[];
+  readonly canonicalProtectedPaths: readonly string[];
+  readonly canonicalDeniedReadPaths: readonly string[];
+  readonly networkMode: SandboxNetworkMode;
+}
+
+export interface CompiledLinuxBwrapCommand {
+  readonly backendId: 'linux-bwrap';
+  readonly executablePath: string;
+  readonly args: readonly string[];
+  readonly seccompProfileJson: string;
+  readonly seccompDigest: Digest;
+  readonly profileDigest: Digest;
+  readonly canonicalWorkspaceRoot: string;
+  readonly canonicalWritablePaths: readonly string[];
+  readonly canonicalProtectedPaths: readonly string[];
+  readonly canonicalDeniedReadPaths: readonly string[];
+  readonly networkMode: SandboxNetworkMode;
+}
+
+export interface SandboxedCommandInput {
+  readonly policy: SandboxPolicyInput;
+  readonly host?: SandboxHostEnvironment | undefined;
+  readonly command: string;
+  readonly args?: readonly string[] | undefined;
+  readonly cwd?: string | undefined;
+  readonly env?: Readonly<Record<string, string>> | undefined;
+  readonly stdin?: string | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly maxOutputBytes?: number | undefined;
+  readonly secretsToScrub?: readonly string[] | undefined;
+}
+
+export interface SandboxedCommandResult {
+  readonly backendId: SandboxBackendId;
+  readonly profileDigest: Digest;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+  readonly durationMs: number;
 }
 
 // ---------------------------------------------------------------------------

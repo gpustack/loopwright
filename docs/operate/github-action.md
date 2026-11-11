@@ -59,7 +59,7 @@ The Action metadata declares a `result` output, but the current CLI shim prints 
 
 ## Taskpack and triggers
 
-Configure writable and protected scope, checks, publication and triggers in the [taskpack walkthrough](../walkthroughs/declarative-taskpack.md). Scheduled, manual, repository dispatch, release, issue comment and pull request review events are supported by intake subject to taskpack policy. The Action itself does not install a workflow in this repository.
+Configure writable and protected scope, checks, publication, triggers, and optional `spec.sandbox` preferences (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`) in the [taskpack walkthrough](../walkthroughs/declarative-taskpack.md). When a taskpack declares `spec.sandbox`, backend negotiation (`negotiateSandboxBackend`) fails closed if the runner lacks the required OS sandbox binary or isolation capabilities. Scheduled, manual, repository dispatch, release, issue comment and pull request review events are supported by intake subject to taskpack policy. The Action itself does not install a workflow in this repository.
 
 **See also**: [Control plane](../github-app.md)
 
