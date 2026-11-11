@@ -20,7 +20,7 @@
     "packages/decisions"
   ],
   "scripts": {
-    "build": "npm run build:core && tsc -p packages/state/tsconfig.json && tsc -p packages/agent-pi/tsconfig.json && tsc -p packages/controller/tsconfig.json && tsc -p packages/cli/tsconfig.json && tsc -p packages/taskpack-runner/tsconfig.json && tsc -p packages/memory/tsconfig.json && tsc -p packages/decisions/tsconfig.json && tsc -p packages/github-app/tsconfig.json",
+    "build": "npm run build:core && tsc -p packages/state/tsconfig.json && tsc -p packages/agent-pi/tsconfig.json && tsc -p packages/controller/tsconfig.json && tsc -p packages/taskpack-runner/tsconfig.json && tsc -p packages/memory/tsconfig.json && tsc -p packages/decisions/tsconfig.json && tsc -p packages/github-app/tsconfig.json && tsc -p packages/cli/tsconfig.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
     "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/core/test/*.test.js .test-build/packages/state/test/*.test.js .test-build/packages/agent-pi/test/*.test.js .test-build/packages/controller/test/*.test.js .test-build/packages/cli/test/*.test.js .test-build/packages/taskpack-runner/test/*.test.js .test-build/packages/memory/test/*.test.js .test-build/packages/decisions/test/*.test.js .test-build/packages/github-app/test/*.test.js packages/agent-pi/qualification/absence.test.mjs packages/agent-pi/qualification/docker-socket.test.mjs packages/controller/qualification/schedule.test.mjs",

@@ -2,5 +2,18 @@
   "name": "@loopwright/cli", "version": "0.0.0", "private": true, "type": "module",
   "engines": { "node": "26.13.0" },
   "bin": { "loopwright": "./dist/main.js" },
-  "dependencies": { "@loopwright/controller": "0.0.0" }
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./main": { "types": "./dist/main.d.ts", "import": "./dist/main.js" }
+  },
+  "dependencies": {
+    "@loopwright/agent-pi": "0.0.0",
+    "@loopwright/controller": "0.0.0",
+    "@loopwright/core": "0.0.0",
+    "@loopwright/decisions": "0.0.0",
+    "@loopwright/github-app": "0.0.0",
+    "@loopwright/memory": "0.0.0",
+    "@loopwright/state": "0.0.0",
+    "@loopwright/taskpack-runner": "0.0.0"
+  }
 }

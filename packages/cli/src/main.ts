@@ -4,8 +4,9 @@ import { pathToFileURL } from 'node:url';
 import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, reconcileCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
 import { parseArguments, UsageError } from './arguments.js';
 import { initDraft, writeOutput } from './draft.js';
-const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
-export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
+import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
+const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
 }
@@ -37,6 +38,12 @@ export function executionExit(value: CycleExecution, signal: string | null): num
     case 'cancelled': return signal === 'SIGTERM' ? 143 : 130;
   }
 }
+export function closureExitCode(report: ClosureMatrixReport, verifyFailures: boolean): number {
+  if (report.falsificationDetected || report.diagnostics.some(diagnostic => diagnostic.code === CLOSURE_FALSIFICATION_FORBIDDEN || diagnostic.code === 'CAPABILITY_UNSUPPORTED')) return 3;
+  if (!report.integrity.ok) return 8;
+  if (verifyFailures && (report.failureMatrix === null || !report.failureMatrix.allPassed)) return 4;
+  return report.summary.closedLocal === 18 && report.summary.unprovisionedExternal === 5 ? 0 : 3;
+}
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
   if (argv.length === 1 && argv[0] === '--version') { await stdout('0.0.0\n'); return 0; }
@@ -45,6 +52,14 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     const args = parseArguments(argv), get = (key: string) => args.values.get(key)!, output = args.values.get('output'); json = args.flags.has('json');
     if (args.command === 'init') { await initDraft(get('directory'), args.flags.has('force')); await emit('status', { runId: null, source: 'unavailable', stage: 'draft', status: 'unsupported', currentState: null, checkpoint: null, cleanup: null, unavailable: ['currentState', 'checkpoint', 'cleanup'] }, 'Draft written; execution readiness unsupported.'); return 0; }
+    if (args.command === 'closure') {
+      const { runIntegratedFailureMatrix } = await import('./failure-matrix.js');
+      const report = await evaluateClosureMatrix({ repoRoot: resolve(args.values.has('repo') ? get('repo') : process.cwd()), verifyFailures: args.flags.has('verify-failures'), runFailureMatrix: () => runIntegratedFailureMatrix() });
+      if (args.values.has('output')) await writeOutput(resolve(get('output')), Buffer.from(encoded(report) + '\n'));
+      const matrix = report.failureMatrix === null ? '' : `; failure matrix ${report.failureMatrix.passed}/${report.failureMatrix.total} passed`;
+      await emit('closure', report, `closure: ${report.summary.closedLocal} closed local, ${report.summary.unprovisionedExternal} unprovisioned external; integrity ${report.integrity.ok ? 'ok' : 'failed'}; ${report.falsificationDetected ? 'falsification detected' : 'no falsification'}${matrix}`);
+      return closureExitCode(report, args.flags.has('verify-failures'));
+    }
     if (args.command === 'status' || args.command === 'inspect') {
       runId = get('run-id'); const input = { runRoot: get('run-root'), runId };
       const observed = args.command === 'status' ? await readStatus(input) : await inspectRun({ ...input, ...(output === undefined ? {} : { output }) });

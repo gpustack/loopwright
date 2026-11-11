@@ -7,7 +7,7 @@ export type {
   LegacyScenarioContext, LegacyScenarioOutcome, RunnerParityCaseResult, RunnerParityReport,
   RunnerParityScenario,
 } from './parity.js';
-export { startRunnerTaskpackService } from './service.js';
+export { startRunnerTaskpackService, computeRunnerCandidateDigest } from './service.js';
 export type {
   OperatorReceiptInput, RunnerCandidateIdentity, RunnerCandidateRegistration, RunnerTaskpackService,
   RunnerTaskpackServiceOptions,
