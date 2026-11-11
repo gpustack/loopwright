@@ -19,6 +19,8 @@
     "packages/taskpack-runner/src/**/*.ts",
     "packages/taskpack-runner/test/**/*.ts",
     "packages/memory/src/**/*.ts",
-    "packages/memory/test/**/*.ts"
+    "packages/memory/test/**/*.ts",
+    "packages/github-app/src/**/*.ts",
+    "packages/github-app/test/**/*.ts"
   ]
 }

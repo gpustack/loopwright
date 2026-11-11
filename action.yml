@@ -1,0 +1,65 @@
+name: 'Loopwright Taskpack Action'
+description:
+  'Run the Loopwright declarative taskpack cycle for a target repository: qualify the deployment host,'
+  ' load .loopwright/taskpack.yaml, compile the trusted registry and controller configuration outside the'
+  ' checkout, and invoke the controller cycle through an optional delegate.'
+branding:
+  icon: 'refresh-cw'
+  color: 'purple'
+
+# This file intentionally lives at the repository root, never under .github/workflows/:
+# the Loopwright repository ships zero CI workflow files.
+
+inputs:
+  taskpack-path:
+    description: 'Path to the declarative taskpack manifest inside the target repository.'
+    required: false
+    default: '.loopwright/taskpack.yaml'
+  mode:
+    description: "Cycle mode: 'candidate' or 'no-change'."
+    required: false
+    default: 'candidate'
+  event-name:
+    description: 'Triggering event name (schedule, workflow_dispatch, repository_dispatch, release, issue_comment, pull_request_review).'
+    required: false
+    default: 'workflow_dispatch'
+  event-path:
+    description: 'Path to the event payload JSON file (github.event_path).'
+    required: false
+  run-root:
+    description: 'Trusted root directory for compiled artifacts; must live outside the repository checkout.'
+    required: false
+  run-id:
+    description: 'Stable identifier for this run.'
+    required: false
+  storage-profile:
+    description: "Deployment storage profile: 'actions-basic' or 'durable'."
+    required: false
+    default: 'actions-basic'
+  provider:
+    description: 'Model provider for the author role.'
+    required: false
+  model:
+    description: 'Model identifier for the author role.'
+    required: false
+  thinking:
+    description: 'Thinking budget tier (minimal, low, medium, high, xhigh).'
+    required: false
+  dry-run:
+    description: "Compile without invoking the controller delegate when 'true'."
+    required: false
+    default: 'false'
+  gate-endpoint-url:
+    description: 'External verification gate endpoint URL.'
+    required: false
+  publication-endpoint-url:
+    description: 'Managed publication endpoint URL.'
+    required: false
+
+outputs:
+  result:
+    description: 'Structured JSON result of the entrypoint run.'
+
+runs:
+  using: 'node20'
+  main: 'packages/github-app/dist/action.js'
