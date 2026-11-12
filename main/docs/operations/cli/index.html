@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <script>
+    (() => {
+      try {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeChoice = theme === "light" || theme === "dark" ? theme : "system";
+        if (localStorage.getItem("sidebar-collapsed") === "true") {
+          document.documentElement.dataset.sidebarCollapsed = "true";
+        }
+      } catch {
+        document.documentElement.dataset.themeChoice = "system";
+      }
+    })();
+  </script>
+  
+  
+  
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/main/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/main/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <meta name="robots" content="noindex, follow">
+  <title>CLI · Loopwright</title>
+  
+  <link rel="alternate" type="text/markdown" href="/loopwright/main/docs/operations/cli/index.md">
+  
+  <link rel="describedby" href="/loopwright/main/llms.txt">
+  <link rel="stylesheet" href="/loopwright/main/css/site.ec048c8ebf1c3f4c4d6f42d0df85a7beafbf4d566f1c8eedf65c01f3969b3500.css">
+  <link rel="stylesheet" href="/loopwright/main/css/code.d2570c1cc6480f9c62bc31ec538eef2578ce80980588c469638a5f95416bfc7b.css">
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    
+    <a class="brand" href="/loopwright/main/" aria-label="Loopwright home"><img src="/loopwright/main/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <nav class="top-links" aria-label="Main navigation">
+      <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      
+  
+  <details class="picker version-picker" id="version-picker"
+    data-root="http://docs.gpustack.ai/loopwright/" data-version="main"
+    data-release-kind="development"
+    data-home="/loopwright/main/" data-page="/loopwright/main/docs/operations/cli/">
+    <summary>
+      <svg class="picker-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>
+      <span class="visually-hidden">Documentation version: </span><span class="picker-value">main</span>
+      <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+    </summary>
+    <div class="picker-panel">
+      <span class="picker-row is-current" aria-current="true">main (development)</span>
+      <p class="picker-note">Enable JavaScript to list other versions.</p>
+    </div>
+  </details>
+  <span id="version-status" class="visually-hidden" role="status"></span>
+
+
+<details class="picker theme-picker">
+  <summary>
+    <span class="theme-icons" aria-hidden="true">
+      <svg class="theme-icon theme-icon-light" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <svg class="theme-icon theme-icon-dark" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <svg class="theme-icon theme-icon-system" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+    </span>
+    <span class="visually-hidden">Theme</span>
+    <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+  </summary>
+  <div class="picker-panel">
+    <button class="picker-row theme-row" type="button" data-theme-choice="light">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <span>Light</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="dark">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <span>Dark</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="system" aria-current="true">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+      <span>System</span>
+    </button>
+  </div>
+</details>
+
+      <form class="top-search" role="search" action="/loopwright/main/search/" method="get">
+        <label class="visually-hidden" for="top-query">Search documentation</label>
+        <input id="top-query" name="q" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false">
+        <button type="submit" aria-label="Search"><svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg></button>
+      </form>
+    </nav>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <button class="nav-toggle" type="button" aria-controls="docs-navigation" aria-expanded="false">Browse documentation</button>
+      <button class="sidebar-toggle" type="button" aria-controls="docs-navigation" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg class="sidebar-toggle-icon" aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2.5" width="12" height="11" rx="2"/>
+          <line x1="6" y1="2.5" x2="6" y2="13.5"/>
+          <polyline class="sidebar-icon-arrow" points="10.5 6 8.5 8 10.5 10"/>
+        </svg>
+      </button>
+      <nav id="docs-navigation" class="sidebar-inner">
+        <a class="nav-home" href="/loopwright/main/" >Overview</a>
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Getting Started</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Architecture" href="/loopwright/main/docs/getting-started/architecture/" >Architecture</a>
+        
+      
+        
+        
+          
+          <a title="Installation" href="/loopwright/main/docs/getting-started/installation/" >Installation</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+        
+      
+    
+  
+
+
+<details class="nav-section" open>
+  <summary>Operations</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="GitHub Action" href="/loopwright/main/docs/operations/github-action/" >GitHub Action</a>
+        
+      
+        
+        
+          
+          <a title="GitHub App" href="/loopwright/main/docs/operations/github-app/" >GitHub App</a>
+        
+      
+        
+        
+          
+          <a title="CLI" href="/loopwright/main/docs/operations/cli/" aria-current="page">CLI</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Walkthroughs</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Declarative Taskpack" href="/loopwright/main/docs/walkthroughs/declarative-taskpack/" >Declarative Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Managed Controller" href="/loopwright/main/docs/walkthroughs/managed-controller/" >Managed Controller</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Configuration</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Taskpack" href="/loopwright/main/docs/configuration/taskpack/" >Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Task Contract" href="/loopwright/main/docs/configuration/task-contract/" >Task Contract</a>
+        
+      
+        
+        
+          
+          <a title="Controller and Registry" href="/loopwright/main/docs/configuration/controller-and-registry/" >Controller and Registry</a>
+        
+      
+        
+        
+          
+          <a title="Sandbox Backends" href="/loopwright/main/docs/configuration/sandbox-backends/" >Sandbox Backends</a>
+        
+      
+        
+        
+          
+          <a title="Decision Routing" href="/loopwright/main/docs/configuration/decision-routing/" >Decision Routing</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+      </nav>
+    </aside>
+    <main id="main-content">
+      
+      <div class="breadcrumbs">
+        <a href="/loopwright/main/docs/">Docs</a><span aria-hidden="true">/</span>
+        
+          
+        
+        <span aria-current="page">CLI</span>
+      </div>
+      
+      <article>
+        
+  <h1 id="cli">CLI</h1>
+<p>The CLI validates trusted configuration and manages bounded local runs. Install the <code>loopwright</code> command on your laptop first via <a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
+, then use it to prepare, inspect, resume, or reconcile work and audit capability closure.</p>
+<h2 id="contents">Contents</h2>
+<ul>
+<li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a>
+</li>
+<li><a href="#step-2-approve-bindings">Step 2: Approve bindings</a>
+</li>
+<li><a href="#step-3-check-configuration">Step 3: Check configuration</a>
+</li>
+<li><a href="#step-4-run-work">Step 4: Run work</a>
+</li>
+<li><a href="#step-5-inspect-recovery">Step 5: Inspect recovery</a>
+</li>
+<li><a href="#step-6-audit-closure">Step 6: Audit closure</a>
+</li>
+<li><a href="#command-reference">Command reference</a>
+</li>
+<li><a href="#exit-codes">Exit codes</a>
+</li>
+</ul>
+<h2 id="step-1-generate-drafts">Step 1: Generate drafts</h2>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright init --directory ./loopwright-config</span></span></code></pre></div>
+</div>
+<p>The command creates <code>controller.draft.yaml</code>, <code>registry.draft.yaml</code>, and <code>README.draft.md</code> for <strong>Managed Controller</strong> workflows (for a complete populated setup, follow <a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
+). Note that <code>loopwright init</code> does not generate <code>.loopwright/taskpack.yaml</code>; to bootstrap or migrate a repository <code>Taskpack</code> interactively, use the <a href="/loopwright/main/docs/getting-started/installation/#prompt-bootstrap"><code>llms.txt</code> bootstrap prompt</a>
+.</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TrustedRegistry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">operator-draft</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resourceVersion</span><span class="p">:</span><span class="w"> </span><span class="l">context-draft</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">handlers</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roleProfiles</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">runtimeProfiles</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">credentialBindings</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">environmentBindings</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span></span></span></code></pre></div>
+</div>
+<ul>
+<li><strong>Draft</strong>: The excerpt shows the generated registry; <code>controller.draft.yaml</code> contains <code>REVIEW_REQUIRED</code> placeholders that must be replaced before execution.</li>
+<li><strong>Authority</strong>: Keep approved registry bytes and run state outside the checkout.</li>
+<li><strong>Context</strong>: <code>proven_bound</code> is the strict default; estimated guards require explicit immutable opt-in.</li>
+</ul>
+<table>
+  <thead>
+      <tr>
+          <th>File</th>
+          <th>Purpose</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>controller.draft.yaml</code></td>
+          <td>Task, registry <code>name</code> + digest, profile references, and controls</td>
+      </tr>
+      <tr>
+          <td><code>registry.draft.yaml</code></td>
+          <td>Trusted handlers, profiles, resources, and bindings</td>
+      </tr>
+      <tr>
+          <td><code>README.draft.md</code></td>
+          <td>Draft readiness and review instructions</td>
+      </tr>
+  </tbody>
+</table>
+<h2 id="step-2-approve-bindings">Step 2: Approve bindings</h2>
+<p>Review the task scope, exact installed profiles, handlers, credentials, and registry bytes. Replace every placeholder and calculate the SHA-256 of the final approved registry. The generated digest matches only the initial draft bytes.</p>
+<h2 id="step-3-check-configuration">Step 3: Check configuration</h2>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
+</span></span><span class="line"><span class="cl">loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json</span></span></code></pre></div>
+</div>
+<p>Both commands validate and compile statically. Neither proves execution readiness, provider availability, or host qualification.</p>
+<h2 id="step-4-run-work">Step 4: Run work</h2>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
+</span></span><span class="line"><span class="cl">loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo</span></span></code></pre></div>
+</div>
+<p>Use <code>resume</code> for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.</p>
+<h2 id="step-5-inspect-recovery">Step 5: Inspect recovery</h2>
+<p><span class="diagram-scroll"><img src="/loopwright/main/docs/assets/diagrams/reconcile-closure-flow.svg" alt="Recovery, receipt reconciliation, and closure audit" decoding="async"></span></p>
+<!-- flowchart LR
+  Inspect["01 Inspect state"] -> Reconcile["02 Reconcile receipt"] -> Closed["03 Verify closed_local"] -> External["04 Report external gaps"]
+-->
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright status --run-root TRUSTED_ROOT --run-id demo --json
+</span></span><span class="line"><span class="cl">loopwright inspect --run-root TRUSTED_ROOT --run-id demo --output INSPECTION_DIR --json
+</span></span><span class="line"><span class="cl">loopwright reconcile --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --receipt RECEIPT --json</span></span></code></pre></div>
+</div>
+<p>Inspect state and evidence before recovery. Reconcile an unknown external outcome with its matching authenticated receipt; absent evidence stays unknown.</p>
+<h2 id="step-6-audit-closure">Step 6: Audit closure</h2>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright closure --verify-failures --json</span></span></code></pre></div>
+</div>
+<p>Closure exits <code>0</code> for a valid report, <code>3</code> for falsification or unsupported capability, <code>4</code> for failure-matrix failure, and <code>8</code> for integrity failure. JSON output uses versioned envelopes with kind, sequence, run identity, and data.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Disposition</th>
+          <th>Evidence scope</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>closed_local</code></td>
+          <td>Recorded local evidence level</td>
+          <td>Local criterion and failure matrix passed</td>
+      </tr>
+      <tr>
+          <td><code>blocked_external</code></td>
+          <td>Unprovisioned external dependency</td>
+          <td>Live service, host, or hardware remains external</td>
+      </tr>
+      <tr>
+          <td><code>deferred_owned</code></td>
+          <td>Deferred owned capability</td>
+          <td>Recorded prerequisite remains unimplemented or deferred</td>
+      </tr>
+  </tbody>
+</table>
+<h2 id="command-reference">Command reference</h2>
+<table>
+  <thead>
+      <tr>
+          <th>Subcommand</th>
+          <th>Required flags</th>
+          <th>Optional flags</th>
+          <th>Purpose</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>init</code></td>
+          <td><code>--directory</code></td>
+          <td><code>--force</code>, <code>--json</code></td>
+          <td>Emit <code>controller.draft.yaml</code> and <code>registry.draft.yaml</code></td>
+      </tr>
+      <tr>
+          <td><code>check</code></td>
+          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
+          <td><code>--output</code>, <code>--json</code></td>
+          <td>Compile and verify configuration and registry digest statically</td>
+      </tr>
+      <tr>
+          <td><code>run</code></td>
+          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
+          <td><code>--json</code></td>
+          <td>Execute a bounded controller run</td>
+      </tr>
+      <tr>
+          <td><code>run --dry-run</code></td>
+          <td><code>--dry-run</code>, <code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
+          <td><code>--output</code>, <code>--json</code></td>
+          <td>Compile plan statically (<code>--repo</code>, <code>--run-root</code>, <code>--run-id</code> disallowed)</td>
+      </tr>
+      <tr>
+          <td><code>resume</code></td>
+          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
+          <td><code>--json</code></td>
+          <td>Resume an existing run under identical trusted bindings</td>
+      </tr>
+      <tr>
+          <td><code>status</code></td>
+          <td><code>--run-root</code>, <code>--run-id</code></td>
+          <td><code>--json</code></td>
+          <td>Read current run stage, lease state, and checkpoint summary</td>
+      </tr>
+      <tr>
+          <td><code>inspect</code></td>
+          <td><code>--run-root</code>, <code>--run-id</code></td>
+          <td><code>--output</code>, <code>--json</code></td>
+          <td>Export redacted run receipts, checkpoints, and diagnostics</td>
+      </tr>
+      <tr>
+          <td><code>reconcile</code></td>
+          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code>, <code>--receipt</code></td>
+          <td><code>--output</code>, <code>--json</code></td>
+          <td>Settle an unknown external outcome with an authenticated receipt</td>
+      </tr>
+      <tr>
+          <td><code>closure</code></td>
+          <td>None</td>
+          <td><code>--repo</code>, <code>--output</code>, <code>--verify-failures</code>, <code>--json</code></td>
+          <td>Audit the 23-capability closure matrix and 14-case failure suite</td>
+      </tr>
+      <tr>
+          <td><code>app-serve</code></td>
+          <td><code>--config</code></td>
+          <td><code>--repo</code>, <code>--json</code></td>
+          <td>Start the opt-in GitHub App HTTP webhook and token listener</td>
+      </tr>
+  </tbody>
+</table>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright app-serve --config github-app.yaml --repo . --json</span></span></code></pre></div>
+</div>
+<p>Set <code>spec.listen.enabled: true</code> first. The command exits <code>2</code> for disabled or invalid configuration, <code>130</code> on SIGINT, and <code>143</code> on SIGTERM. See <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
+ for configuration and host requirements.</p>
+<h2 id="exit-codes">Exit codes</h2>
+<table>
+  <thead>
+      <tr>
+          <th>Code</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td>0</td>
+          <td>Completed, no change, or successful static command</td>
+      </tr>
+      <tr>
+          <td>2</td>
+          <td>Usage or configuration rejected</td>
+      </tr>
+      <tr>
+          <td>3</td>
+          <td>Unsupported capability or blocked work</td>
+      </tr>
+      <tr>
+          <td>4</td>
+          <td>Execution or acceptance failed</td>
+      </tr>
+      <tr>
+          <td>5</td>
+          <td>Allowance exhausted</td>
+      </tr>
+      <tr>
+          <td>6</td>
+          <td>Deadline expired</td>
+      </tr>
+      <tr>
+          <td>7</td>
+          <td>Reconciliation or ownership needed</td>
+      </tr>
+      <tr>
+          <td>8</td>
+          <td>Authoritative result unavailable or incident</td>
+      </tr>
+      <tr>
+          <td>130</td>
+          <td>Accounted SIGINT, subject to uncertainty precedence</td>
+      </tr>
+      <tr>
+          <td>143</td>
+          <td>Accounted SIGTERM, subject to uncertainty precedence</td>
+      </tr>
+  </tbody>
+</table>
+<nav class="reading-footer" aria-label="Further reading">
+    <section>
+      <h2>See also</h2>
+      <ul class="related-pages"><li><a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
+ (install <code>@gpustack/loopwright</code> and copy bootstrap prompts)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ (approve trusted execution bindings)</li></ul>
+    </section><section class="next-page">
+        <h2>Next</h2>
+        <div><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
+ — populate <code>registry.yaml</code> and <code>controller.yaml</code> end to end.</div>
+      </section></nav>
+
+      </article>
+    </main>
+    <aside class="toc-panel" aria-label="Page navigation">
+      <div class="toc-inner">
+        
+          <nav id="TableOfContents">
+  <ul>
+    <li><a href="#contents">Contents</a></li>
+    <li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a></li>
+    <li><a href="#step-2-approve-bindings">Step 2: Approve bindings</a></li>
+    <li><a href="#step-3-check-configuration">Step 3: Check configuration</a></li>
+    <li><a href="#step-4-run-work">Step 4: Run work</a></li>
+    <li><a href="#step-5-inspect-recovery">Step 5: Inspect recovery</a></li>
+    <li><a href="#step-6-audit-closure">Step 6: Audit closure</a></li>
+    <li><a href="#command-reference">Command reference</a></li>
+    <li><a href="#exit-codes">Exit codes</a></li>
+  </ul>
+</nav>
+        
+      </div>
+    </aside>
+  </div>
+  <script src="/loopwright/main/js/site.cb70edb8dec0dae174f86424d636c297d7ecb595545ba2b405e20dae4f9cceed.js" defer></script>
+</body>
+</html>

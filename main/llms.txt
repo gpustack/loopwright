@@ -1,0 +1,42 @@
+# Loopwright
+
+> Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified work.
+
+Documentation version: main. Source revision: fee8b7a8caafacfc770259d3d72952aacec14149.
+These pages come from the repository's docs/ sources. For version-specific behavior, use the
+documentation and code for your release. This index routes questions; follow its links for evidence.
+
+## Interactive Bootstrap Protocol
+
+1. Choose an operating mode with the user: Declarative Taskpack Mode (simple single-file .loopwright/taskpack.yaml + GitHub Action/App for repository sync and PRs) or Managed Controller Mode (out-of-repo TrustedRegistry registry.yaml + SHA-256-pinned ControllerConfig controller.yaml + TaskContract for fine-grained CLI governance).
+2. Fetch the Markdown exports listed below for the chosen mode before generating YAML (Declarative Taskpack Walkthrough + Taskpack Manifest Reference + GitHub Action Configuration for Mode 1; Managed Controller Walkthrough + Task Contracts and Schemas + Controller and Trusted Registry for Mode 2).
+3. Inspect the target repository (including existing automatic synchronized workflows, release scripts, version manifests, and folder layout) and confirm upstream sources, writable/protected scope, verification checks, and PR publication settings interactively with the user.
+4. Emit two-space Pretty YAML with apiVersion: loopwright.dev/v1alpha1, keep .loopwright/memory/<id> outside writable scope, and never embed raw secrets or untrusted ${ENV} interpolation inside taskpack.yaml.
+
+## Getting Started
+
+- [Architecture](/loopwright/main/docs/getting-started/architecture/index.md): Execution stages, trust boundaries, and configuration map
+- [Installation](/loopwright/main/docs/getting-started/installation/index.md): Install the CLI on a laptop or wire the GitHub Action
+
+## Operations
+
+- [GitHub Action](/loopwright/main/docs/operations/github-action/index.md): Configure and run the reusable GitHub Action
+- [GitHub App](/loopwright/main/docs/operations/github-app/index.md): Deploy and configure the GitHub App control plane
+- [CLI](/loopwright/main/docs/operations/cli/index.md): Generate drafts, inspect runs, reconcile, and audit closure
+
+## Walkthroughs
+
+- [Declarative Taskpack](/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md): Author or migrate a single-file repository taskpack
+- [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md): Configure out-of-repo registries, contracts, and CLI runs
+
+## Configuration
+
+- [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md): Configure every field and enum in .loopwright/taskpack.yaml
+- [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md): Configure task goals, scope, roles, budgets, DAGs, and evidence
+- [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md): Configure approved handlers, profiles, credentials, and controls
+- [Sandbox Backends](/loopwright/main/docs/configuration/sandbox-backends/index.md): Select OS or container sandboxes and required capabilities
+- [Decision Routing](/loopwright/main/docs/configuration/decision-routing/index.md): Configure advisory routing policies, providers, and thresholds
+
+## Optional
+
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/fee8b7a8caafacfc770259d3d72952aacec14149/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.

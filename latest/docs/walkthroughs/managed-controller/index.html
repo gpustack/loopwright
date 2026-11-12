@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <script>
+    (() => {
+      try {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.themeChoice = theme === "light" || theme === "dark" ? theme : "system";
+        if (localStorage.getItem("sidebar-collapsed") === "true") {
+          document.documentElement.dataset.sidebarCollapsed = "true";
+        }
+      } catch {
+        document.documentElement.dataset.themeChoice = "system";
+      }
+    })();
+  </script>
+  
+  
+  
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/latest/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/latest/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <meta name="robots" content="noindex, follow">
+  <title>Managed Controller · Loopwright</title>
+  
+  <link rel="alternate" type="text/markdown" href="/loopwright/latest/docs/walkthroughs/managed-controller/index.md">
+  
+  <link rel="describedby" href="/loopwright/latest/llms.txt">
+  <link rel="stylesheet" href="/loopwright/latest/css/site.ec048c8ebf1c3f4c4d6f42d0df85a7beafbf4d566f1c8eedf65c01f3969b3500.css">
+  <link rel="stylesheet" href="/loopwright/latest/css/code.d2570c1cc6480f9c62bc31ec538eef2578ce80980588c469638a5f95416bfc7b.css">
+</head>
+<body class="docs-page">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <header class="topbar">
+    
+    <a class="brand" href="/loopwright/latest/" aria-label="Loopwright home"><img src="/loopwright/latest/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <nav class="top-links" aria-label="Main navigation">
+      <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
+        <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
+        <span>GitHub</span>
+      </a>
+      
+  
+  <details class="picker version-picker" id="version-picker"
+    data-root="http://docs.gpustack.ai/loopwright/" data-version="main"
+    data-release-kind="development"
+    data-home="/loopwright/latest/" data-page="/loopwright/latest/docs/walkthroughs/managed-controller/">
+    <summary>
+      <svg class="picker-icon" aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Zm-6 0a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Zm8.25-.75a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z"/></svg>
+      <span class="visually-hidden">Documentation version: </span><span class="picker-value">main</span>
+      <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+    </summary>
+    <div class="picker-panel">
+      <span class="picker-row is-current" aria-current="true">main (development)</span>
+      <p class="picker-note">Enable JavaScript to list other versions.</p>
+    </div>
+  </details>
+  <span id="version-status" class="visually-hidden" role="status"></span>
+
+
+<details class="picker theme-picker">
+  <summary>
+    <span class="theme-icons" aria-hidden="true">
+      <svg class="theme-icon theme-icon-light" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <svg class="theme-icon theme-icon-dark" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <svg class="theme-icon theme-icon-system" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+    </span>
+    <span class="visually-hidden">Theme</span>
+    <svg class="picker-caret" aria-hidden="true" viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>
+  </summary>
+  <div class="picker-panel">
+    <button class="picker-row theme-row" type="button" data-theme-choice="light">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Zm5.657-8.157a.75.75 0 0 1 0 1.061l-1.061 1.06a.749.749 0 1 1-1.06-1.06l1.06-1.06a.75.75 0 0 1 1.06 0Zm-9.193 9.193a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.749.749 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.061Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 1 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Z"/></svg>
+      <span>Light</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="dark">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/></svg>
+      <span>Dark</span>
+    </button>
+    <button class="picker-row theme-row" type="button" data-theme-choice="system" aria-current="true">
+      <svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M1.75 2h12.5c.966 0 1.75.784 1.75 1.75v7.5A1.75 1.75 0 0 1 14.25 13H8.75v2h1.5a.75.75 0 0 1 0 1.5h-5a.75.75 0 0 1 0-1.5h1.5v-2H1.75A1.75 1.75 0 0 1 0 11.25v-7.5C0 2.784.784 2 1.75 2Zm0 1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+      <span>System</span>
+    </button>
+  </div>
+</details>
+
+      <form class="top-search" role="search" action="/loopwright/latest/search/" method="get">
+        <label class="visually-hidden" for="top-query">Search documentation</label>
+        <input id="top-query" name="q" type="search" placeholder="Search docs" autocomplete="off" spellcheck="false">
+        <button type="submit" aria-label="Search"><svg aria-hidden="true" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg></button>
+      </form>
+    </nav>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Documentation navigation">
+      <button class="nav-toggle" type="button" aria-controls="docs-navigation" aria-expanded="false">Browse documentation</button>
+      <button class="sidebar-toggle" type="button" aria-controls="docs-navigation" aria-expanded="true" aria-label="Collapse sidebar" title="Collapse sidebar">
+        <svg class="sidebar-toggle-icon" aria-hidden="true" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2.5" width="12" height="11" rx="2"/>
+          <line x1="6" y1="2.5" x2="6" y2="13.5"/>
+          <polyline class="sidebar-icon-arrow" points="10.5 6 8.5 8 10.5 10"/>
+        </svg>
+      </button>
+      <nav id="docs-navigation" class="sidebar-inner">
+        <a class="nav-home" href="/loopwright/latest/" >Overview</a>
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Getting Started</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Architecture" href="/loopwright/latest/docs/getting-started/architecture/" >Architecture</a>
+        
+      
+        
+        
+          
+          <a title="Installation" href="/loopwright/latest/docs/getting-started/installation/" >Installation</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Operations</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="GitHub Action" href="/loopwright/latest/docs/operations/github-action/" >GitHub Action</a>
+        
+      
+        
+        
+          
+          <a title="GitHub App" href="/loopwright/latest/docs/operations/github-app/" >GitHub App</a>
+        
+      
+        
+        
+          
+          <a title="CLI" href="/loopwright/latest/docs/operations/cli/" >CLI</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+        
+      
+    
+  
+
+
+<details class="nav-section" open>
+  <summary>Walkthroughs</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Declarative Taskpack" href="/loopwright/latest/docs/walkthroughs/declarative-taskpack/" >Declarative Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Managed Controller" href="/loopwright/latest/docs/walkthroughs/managed-controller/" aria-current="page">Managed Controller</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+          
+
+
+
+
+
+
+
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+    
+    
+      
+    
+  
+
+
+<details class="nav-section" >
+  <summary>Configuration</summary>
+  <div class="nav-children">
+    
+      
+        
+        
+          
+          <a title="Taskpack" href="/loopwright/latest/docs/configuration/taskpack/" >Taskpack</a>
+        
+      
+        
+        
+          
+          <a title="Task Contract" href="/loopwright/latest/docs/configuration/task-contract/" >Task Contract</a>
+        
+      
+        
+        
+          
+          <a title="Controller and Registry" href="/loopwright/latest/docs/configuration/controller-and-registry/" >Controller and Registry</a>
+        
+      
+        
+        
+          
+          <a title="Sandbox Backends" href="/loopwright/latest/docs/configuration/sandbox-backends/" >Sandbox Backends</a>
+        
+      
+        
+        
+          
+          <a title="Decision Routing" href="/loopwright/latest/docs/configuration/decision-routing/" >Decision Routing</a>
+        
+      
+    
+  </div>
+</details>
+
+        
+      </nav>
+    </aside>
+    <main id="main-content">
+      
+      <div class="breadcrumbs">
+        <a href="/loopwright/latest/docs/">Docs</a><span aria-hidden="true">/</span>
+        
+          
+        
+        <span aria-current="page">Managed Controller</span>
+      </div>
+      
+      <article>
+        
+  <h1 id="managed-controller">Managed Controller</h1>
+<p>Managed controller mode is Loopwright&rsquo;s fine-grained governance workflow for platform engineers and local CLI operators. You author an out-of-repo <code>TrustedRegistry</code>, pin its SHA-256 digest inside <code>ControllerConfig</code> alongside a <code>TaskContract</code> DAG, and drive admission, execution, inspection, and crash reconciliation via the <code>loopwright</code> CLI.</p>
+<p>For single-file repository automation where Loopwright compiles contracts and digests automatically, follow <a href="/loopwright/latest/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
+ instead.</p>
+<h2 id="contents">Contents</h2>
+<ul>
+<li><a href="#configuration-relationships">Configuration relationships</a>
+</li>
+<li><a href="#overview">Overview</a>
+</li>
+<li><a href="#prompt-bootstrap">Prompt bootstrap</a>
+</li>
+<li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a>
+</li>
+<li><a href="#step-2-pin-registry">Step 2: Pin registry</a>
+</li>
+<li><a href="#step-3-author-controller">Step 3: Author controller</a>
+</li>
+<li><a href="#step-4-execute-run">Step 4: Execute run</a>
+</li>
+<li><a href="#step-5-reconcile-receipts">Step 5: Reconcile receipts</a>
+</li>
+</ul>
+<h2 id="configuration-relationships">Configuration relationships</h2>
+<p><span class="diagram-scroll"><img src="/loopwright/latest/docs/assets/diagrams/managed-controller-relations.svg" alt="Managed controller configuration relationships" decoding="async"></span></p>
+<!-- flowchart TB
+  Controller["ControllerConfig (controller.yaml)"] -> Task["Embedded TaskContract (spec.task)"]
+  Controller -> Bridge["Binding Bridge (spec.registry, profiles, credentials)"]
+  Bridge -> Registry["Out-of-repo TrustedRegistry (registry.yaml · metadata.name)"]
+  Task -> Registry
+-->
+<p>Managed controller mode coordinates an operator-owned authority store (<code>TrustedRegistry</code>) with a run configuration (<code>ControllerConfig</code> embedding <code>TaskContract</code>):</p>
+<table>
+  <thead>
+      <tr>
+          <th>Relationship</th>
+          <th>Source field</th>
+          <th>Target declaration</th>
+          <th>Runtime invariant</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td>Containment</td>
+          <td><code>ControllerConfig.spec.task</code></td>
+          <td>Embedded <code>TaskContract</code> (<code>apiVersion</code>, <code>kind</code>, <code>spec</code>)</td>
+          <td>JCS-hashed into run lock; carries zero credentials or handler digests</td>
+      </tr>
+      <tr>
+          <td>Registry hash lock</td>
+          <td><code>ControllerConfig.spec.registry.{name,digest}</code></td>
+          <td><code>TrustedRegistry.metadata.name</code> + file SHA-256</td>
+          <td>Must match <code>--registry-sha256</code> and live outside repo/config roots</td>
+      </tr>
+      <tr>
+          <td>Role binding</td>
+          <td><code>spec.profiles.roles[].{roleId,profileRef}</code></td>
+          <td>Bridges <code>TaskContract.roles[].id</code> to <code>roleProfiles[].id</code></td>
+          <td>Enforces provider, context ceiling, tool subset, and <code>runtimeRef</code></td>
+      </tr>
+      <tr>
+          <td>Step &amp; check binding</td>
+          <td><code>spec.profiles.steps[].{stepId,handlerRef}</code></td>
+          <td>Bridges <code>TaskContract.steps[].id</code> to <code>handlers[].id</code></td>
+          <td>Verifies installed handler SHA-256 and <code>acceptance.checks[].id</code></td>
+      </tr>
+      <tr>
+          <td>Context pinning</td>
+          <td><code>TaskContract.trustedContext.{revision,resources}</code></td>
+          <td><code>TrustedRegistry.{resourceVersion,resources[]}</code></td>
+          <td>Matches context revision and read-only instruction SHA-256 digests</td>
+      </tr>
+      <tr>
+          <td>Secret &amp; PR wiring</td>
+          <td><code>spec.credentials[]</code> &amp; <code>publication.endpointRef</code></td>
+          <td><code>credentialBindings[]</code>, <code>environmentBindings[]</code>, <code>publicationEndpoints[]</code></td>
+          <td>Resolves <code>${ENV}</code> in memory only; signs HMAC PR/gate requests</td>
+      </tr>
+  </tbody>
+</table>
+<h2 id="overview">Overview</h2>
+<p><span class="diagram-scroll"><img src="/loopwright/latest/docs/assets/diagrams/managed-controller-flow.svg" alt="Managed controller lifecycle" decoding="async"></span></p>
+<!-- flowchart LR
+  Init["01 Init drafts"] -> Registry["02 Pin TrustedRegistry"] -> Config["03 Bind ControllerConfig"] -> Run["04 Check & run"] -> Reconcile["05 Inspect & settle"]
+-->
+<h2 id="prompt-bootstrap">Prompt bootstrap</h2>
+<p><code>loopwright init</code> writes generic <code>REVIEW_REQUIRED</code> placeholders. To assemble tailored <code>registry.yaml</code> and <code>controller.yaml</code> files interactively without looking up digests by hand, paste this prompt into your local coding agent:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Managed Controller, Task Contract, and Controller and Registry. Inspect this target repository, confirm my writable/protected scope, budgets, and required checks, compute the installed Loopwright handler and graph SHA-256 digests on this machine, write out-of-repo registry.yaml and controller.yaml, and validate them with loopwright check.</span></span></code></pre></div>
+</div>
+<h2 id="step-1-generate-drafts">Step 1: Generate drafts</h2>
+<p>Install <code>@gpustack/loopwright</code> (see <a href="/loopwright/latest/docs/getting-started/installation/">Installation</a>
+) and initialize starter YAML files in a real non-symlink directory <strong>outside</strong> the target repository:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">mkdir -p <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust&#34;</span>
+</span></span><span class="line"><span class="cl">loopwright init --directory <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops&#34;</span>
+</span></span><span class="line"><span class="cl">cp <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/registry.draft.yaml&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span>
+</span></span><span class="line"><span class="cl">cp <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.draft.yaml&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span></span></span></code></pre></div>
+</div>
+<p><code>loopwright init</code> writes <code>0600</code> drafts. Keep <code>registry.yaml</code> in <code>$HOME/loopwright-trust</code> outside <code>cwd</code>, outside <code>$HOME/loopwright-ops</code>, and outside any target repository (<code>REGISTRY_UNTRUSTED</code>).</p>
+<h2 id="step-2-pin-registry">Step 2: Pin registry</h2>
+<p>Compute the installed handler and runtime digests from your Loopwright installation so <code>registry.yaml</code> pins verified code bytes:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">node --input-type<span class="o">=</span>module -e <span class="s2">&#34;
+</span></span></span><span class="line"><span class="cl"><span class="s2">import { createHash } from &#39;node:crypto&#39;;
+</span></span></span><span class="line"><span class="cl"><span class="s2">import { readFileSync } from &#39;node:fs&#39;;
+</span></span></span><span class="line"><span class="cl"><span class="s2">import { fileURLToPath } from &#39;node:url&#39;;
+</span></span></span><span class="line"><span class="cl"><span class="s2">import { installedHandlerDigests } from &#39;@loopwright/controller&#39;;
+</span></span></span><span class="line"><span class="cl"><span class="s2">import { describePiAdapterFiles } from &#39;@loopwright/agent-pi&#39;;
+</span></span></span><span class="line"><span class="cl"><span class="s2">const handlers = await installedHandlerDigests();
+</span></span></span><span class="line"><span class="cl"><span class="s2">const pi = await describePiAdapterFiles();
+</span></span></span><span class="line"><span class="cl"><span class="s2">const lock = readFileSync(fileURLToPath(new URL(&#39;../../../package-lock.json&#39;, import.meta.resolve(&#39;@loopwright/agent-pi&#39;))));
+</span></span></span><span class="line"><span class="cl"><span class="s2">console.log({ handlers, pi, graphSha256: createHash(&#39;sha256&#39;).update(lock).digest(&#39;hex&#39;) });
+</span></span></span><span class="line"><span class="cl"><span class="s2">&#34;</span></span></span></code></pre></div>
+</div>
+<p>Populate <code>$HOME/loopwright-trust/registry.yaml</code> (<code>metadata.name</code> is referenced by <code>controller.yaml</code>):</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TrustedRegistry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">prod-operator-registry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resourceVersion</span><span class="p">:</span><span class="w"> </span><span class="l">rev-2026-11</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">handlers</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">pi-author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">agent</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">pi.agent.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">digest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l">Update packages/app/manifest.json and satisfy required schema keys.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">task</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">pi</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">json-artifact.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">digest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">checkId</span><span class="p">:</span><span class="w"> </span><span class="l">manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">packages/app/manifest.json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">required</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">schema_version</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">release</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">equals</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">schema_version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">inert_bytes</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read_only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">scope</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">scope.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">digest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">checkId</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">inert_bytes</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read_only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roleProfiles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">builder-profile</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">selection</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l">openai-completions</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">write</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">edit</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">context</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">proven_bound</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">estimator</span><span class="p">:</span><span class="w"> </span><span class="l">lw-pi-final-json-bytes-v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">proofId</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">evidence</span><span class="p">:</span><span class="w"> </span><span class="l">estimated</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">workingWindowCeiling</span><span class="p">:</span><span class="w"> </span><span class="m">98304</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxRequestBytes</span><span class="p">:</span><span class="w"> </span><span class="m">65536</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">serviceMargin</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">toolReserve</span><span class="p">:</span><span class="w"> </span><span class="m">16384</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">1024</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">runtimeRef</span><span class="p">:</span><span class="w"> </span><span class="l">default-runtime</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">providerCredentialRef</span><span class="p">:</span><span class="w"> </span><span class="l">zai-token</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">mcp</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">serverId</span><span class="p">:</span><span class="w"> </span><span class="l">workspace</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">scriptDigest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">names</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">effects</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">idleTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">absoluteTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">10</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">runtimeProfiles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">default-runtime</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dockerExecutable</span><span class="p">:</span><span class="w"> </span><span class="l">/usr/local/bin/docker</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dockerSocket</span><span class="p">:</span><span class="w"> </span><span class="l">/var/run/docker.sock</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">identity</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">sdkIntegrity</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;sdk-integrity&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">graphDigest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">imageDigest</span><span class="p">:</span><span class="w"> </span><span class="l">sha256:&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">configDigest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">profile</span><span class="p">:</span><span class="w"> </span><span class="l">linux/arm64</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">credentialBindings</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">zai-token</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">consumer</span><span class="p">:</span><span class="w"> </span><span class="l">provider</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">destinationRef</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">environmentNames</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">ZAI_API_KEY</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="l">${ZAI_API_KEY}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">environmentBindings</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">classification</span><span class="p">:</span><span class="w"> </span><span class="l">credential</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">paths</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">/spec/credentials/0/template</span></span></span></code></pre></div>
+</div>
+<p>Compute and export the SHA-256 digest of the finalized <code>registry.yaml</code>:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REGISTRY_SHA</span><span class="o">=</span><span class="k">$(</span>shasum -a <span class="m">256</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> <span class="p">|</span> awk <span class="s1">&#39;{print $1}&#39;</span><span class="k">)</span>
+</span></span><span class="line"><span class="cl"><span class="nb">echo</span> <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span></span></span></code></pre></div>
+</div>
+<h2 id="step-3-author-controller">Step 3: Author controller</h2>
+<p>Edit <code>$HOME/loopwright-ops/controller.yaml</code> to embed your <code>TaskContract</code>, bind <code>registry.name</code> + <code>$REGISTRY_SHA</code>, and map roles and steps:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">ControllerConfig</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">registry</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">prod-operator-registry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">digest</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">task</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskContract</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">goal</span><span class="p">:</span><span class="w"> </span><span class="l">Update packages/app/manifest.json release metadata and pass JSON validation.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">app-manifest</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">target</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">repository</span><span class="p">:</span><span class="w"> </span><span class="l">acme/example-app</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">baseRevision</span><span class="p">:</span><span class="w"> </span><span class="l">main</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">sourceRevision</span><span class="p">:</span><span class="w"> </span><span class="l">v1.4.0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">matrix</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">scope</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">writable</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="s2">&#34;packages/app/**&#34;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">protected</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="s2">&#34;packages/app/policy/**&#34;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">roles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">adapter</span><span class="p">:</span><span class="w"> </span><span class="l">pi</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">tools</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">read</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">write</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">edit</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">trustedContext</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">revision</span><span class="p">:</span><span class="w"> </span><span class="l">rev-2026-11</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">discovery</span><span class="p">:</span><span class="w"> </span><span class="l">disabled</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">wallTimeMs</span><span class="p">:</span><span class="w"> </span><span class="m">300000</span><span class="w"> </span><span class="c"># Must exceed controls.drainReserveMs (120000 ms).</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">64000</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">perCallOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">1024</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">8</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxConcurrency</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxFormatRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxImplementationRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxTransportRetries</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">enforcement</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">wallTime</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">tokens</span><span class="p">:</span><span class="w"> </span><span class="l">soft_accounting</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">modelCalls</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">concurrency</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">formatRepairs</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">implementationRepairs</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">transportRetries</span><span class="p">:</span><span class="w"> </span><span class="l">hard_admission</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">steps</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">agent</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">pi-author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">verify-manifest</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">author-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">acceptance</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">required</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">checks</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">allowedEvidenceLevels</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">              </span>- <span class="l">local_execution</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">profiles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">roles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">profileRef</span><span class="p">:</span><span class="w"> </span><span class="l">builder-profile</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">steps</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">stepId</span><span class="p">:</span><span class="w"> </span><span class="l">author-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">handlerRef</span><span class="p">:</span><span class="w"> </span><span class="l">pi-author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">stepId</span><span class="p">:</span><span class="w"> </span><span class="l">verify-manifest</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">handlerRef</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">credentials</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">ref</span><span class="p">:</span><span class="w"> </span><span class="l">zai-token</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="l">${ZAI_API_KEY}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">controls</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">drainReserveMs</span><span class="p">:</span><span class="w"> </span><span class="m">120000</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">repeatFailureLimit</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">submission</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">artifact_or_assistant</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">disabled</span></span></span></code></pre></div>
+</div>
+<ul>
+<li><strong>Contract fields</strong>: See <a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
+ for every <code>TaskContract</code> field and budget invariant.</li>
+<li><strong>Registry and controller fields</strong>: See <a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ for every <code>TrustedRegistry</code> and <code>ControllerConfig</code> field.</li>
+</ul>
+<h2 id="step-4-execute-run">Step 4: Execute run</h2>
+<p>Run static compilation first (<code>check</code> performs zero network calls and zero state admission), then launch the fenced run outside <code>$HOME/loopwright-trust</code>:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">ZAI_API_KEY</span><span class="o">=</span><span class="s2">&#34;zai_example_token&#34;</span>
+</span></span><span class="line"><span class="cl">loopwright check --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> --registry-sha256 <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span> --json
+</span></span><span class="line"><span class="cl">loopwright run --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> --registry-sha256 <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span> --repo /path/to/example-app --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --json</span></span></code></pre></div>
+</div>
+<h2 id="step-5-reconcile-receipts">Step 5: Reconcile receipts</h2>
+<p>Query run state, export evidence bundles, or resume/reconcile interrupted executions:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright status --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --json
+</span></span><span class="line"><span class="cl">loopwright inspect --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --output <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs/bundle-01&#34;</span></span></span></code></pre></div>
+</div>
+<ul>
+<li><strong>Resume after host restart</strong>: Run <code>loopwright resume</code> with the same <code>--run-root</code>, <code>--run-id</code>, <code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, and <code>--repo</code>.</li>
+<li><strong>Reconcile uncertain publication (exit <code>7</code>)</strong>: Never retry uncertain remote mutations blindly; verify remote state and settle with <code>loopwright reconcile ... --receipt receipt.json</code> (see <a href="/loopwright/latest/docs/operations/cli/">CLI</a>
+).</li>
+</ul>
+<nav class="reading-footer" aria-label="Further reading">
+    <section>
+      <h2>See also</h2>
+      <ul class="related-pages"><li><a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
+ (every <code>TaskContract</code> field and budget rule)</li><li><a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ (every <code>TrustedRegistry</code> and <code>ControllerConfig</code> field)</li></ul>
+    </section><section class="next-page">
+        <h2>Next</h2>
+        <div><a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
+ — review complete contract schemas, budgets, and evidence levels.</div>
+      </section></nav>
+
+      </article>
+    </main>
+    <aside class="toc-panel" aria-label="Page navigation">
+      <div class="toc-inner">
+        
+          <nav id="TableOfContents">
+  <ul>
+    <li><a href="#contents">Contents</a></li>
+    <li><a href="#configuration-relationships">Configuration relationships</a></li>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#prompt-bootstrap">Prompt bootstrap</a></li>
+    <li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a></li>
+    <li><a href="#step-2-pin-registry">Step 2: Pin registry</a></li>
+    <li><a href="#step-3-author-controller">Step 3: Author controller</a></li>
+    <li><a href="#step-4-execute-run">Step 4: Execute run</a></li>
+    <li><a href="#step-5-reconcile-receipts">Step 5: Reconcile receipts</a></li>
+  </ul>
+</nav>
+        
+      </div>
+    </aside>
+  </div>
+  <script src="/loopwright/latest/js/site.cb70edb8dec0dae174f86424d636c297d7ecb595545ba2b405e20dae4f9cceed.js" defer></script>
+</body>
+</html>
