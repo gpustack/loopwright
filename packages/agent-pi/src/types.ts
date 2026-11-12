@@ -43,10 +43,52 @@ export interface PiLimits {
   readonly candidateEntries: number; readonly fileBytes: number; readonly toolWallMs: number;
   readonly requests: number; readonly operations: number; readonly checkpoints: number;
 }
+export type PiWireApi = 'anthropic-messages' | 'openai-completions' | 'openai-responses';
+export type PiThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export interface PiSamplingParams {
+  readonly temperature?: number;
+  readonly top_p?: number;
+  readonly top_k?: number;
+  readonly min_p?: number;
+  readonly presence_penalty?: number;
+  readonly repetition_penalty?: number;
+}
+export interface PiCustomModelCompat {
+  readonly supportsStore?: boolean;
+  readonly supportsDeveloperRole?: boolean;
+  readonly supportsReasoningEffort?: boolean;
+  readonly supportsUsageInStreaming?: boolean;
+  readonly maxTokensField?: 'max_completion_tokens' | 'max_tokens';
+  readonly requiresToolResultName?: boolean;
+  readonly requiresAssistantAfterToolResult?: boolean;
+  readonly requiresThinkingAsText?: boolean;
+  readonly thinkingFormat?: 'openai' | 'zai' | 'qwen' | 'qwen-chat-template' | 'openrouter' | 'deepseek';
+  readonly supportsStrictMode?: boolean;
+  readonly zaiToolStream?: boolean;
+}
+export interface PiCustomProviderConfig {
+  readonly baseUrl: string;
+  readonly authHeader?: boolean;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly contextWindow: number;
+  readonly maxTokens: number;
+  readonly reasoning: boolean;
+  readonly thinkingLevelMap?: Readonly<Record<string, string | null>>;
+  readonly samplingParams?: PiSamplingParams;
+  readonly samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
+  readonly compat?: PiCustomModelCompat;
+}
+export interface PiModelSelection {
+  readonly provider: string;
+  readonly model: string;
+  readonly thinking: string;
+  readonly api: PiWireApi;
+  readonly customProvider?: PiCustomProviderConfig;
+}
 export interface AdapterPolicy {
   readonly version: 1; readonly policyId: string; readonly resourceVersion: string; readonly adapterId: 'pi'; readonly adapterVersion: '0.0.0';
   readonly runtime: RuntimeIdentity;
-  readonly selection: { readonly provider: string; readonly model: string; readonly thinking: string; readonly api: 'anthropic-messages' };
+  readonly selection: PiModelSelection;
   readonly resources: readonly ResourceIdentity[]; readonly tools: readonly string[];
   readonly mcp: { readonly serverId: 'workspace'; readonly scriptDigest: Digest; readonly names: readonly string[];
     readonly effects: readonly 'read_only'[]; readonly idleTimeoutSeconds: number; readonly absoluteTimeoutSeconds: number };

@@ -94,11 +94,34 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
       if (!Number.isSafeInteger(value.outputTokens) || value.outputTokens < 1 || value.outputTokens > 1024) throw new Error('output bound'); outputTokens = value.outputTokens;
       const directory = await mkdtemp('/tmp/loopwright-sdk-');
       runtime = await ModelRuntime.create({ credentials: { read: async () => ({ type: 'api_key', key: 'loopwright-non-secret-placeholder' }), list: async () => [], modify: async () => undefined, delete: async () => {} }, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
+      if (value.selection.customProvider) {
+        const cp = value.selection.customProvider;
+        runtime.registerProvider(value.selection.provider, {
+          baseUrl: cp.baseUrl,
+          api: value.selection.api,
+          apiKey: 'loopwright-non-secret-placeholder',
+          ...(cp.authHeader !== undefined ? { authHeader: cp.authHeader } : {}),
+          ...(cp.headers ? { headers: { ...cp.headers } } : {}),
+          models: [{
+            id: value.selection.model,
+            name: value.selection.model,
+            reasoning: cp.reasoning,
+            input: ['text'],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: cp.contextWindow,
+            maxTokens: cp.maxTokens,
+            ...(cp.thinkingLevelMap ? { thinkingLevelMap: { ...cp.thinkingLevelMap } as never } : {}),
+            ...(cp.compat ? { compat: { ...cp.compat } } : {}),
+            ...(cp.samplingParams ? { samplingParams: { ...cp.samplingParams } } : {}),
+            ...(cp.samplingParamsByThinkingLevel ? { samplingParamsByThinkingLevel: structuredClone(cp.samplingParamsByThinkingLevel) as never } : {}),
+          }],
+        });
+      }
       const model = runtime.getModel(value.selection.provider, value.selection.model);
-      if (!model || model.api !== 'anthropic-messages') { await channel.send('refused', { code: 'MODEL_UNAVAILABLE' }); return; }
+      if (!model || model.api !== value.selection.api) { await channel.send('refused', { code: 'MODEL_UNAVAILABLE' }); return; }
       const compiled = await compileTrustedFactories([{ name: 'loopwright-authorization', factory: authorization }, ...(value.toolNames.includes('codemode') || value.mcp.names.length ? nativeMcpFactories({ tools: value.toolNames, mcp: value.mcp }, mcp) : [])], value.systemPrompt);
       const customTools = options.customTools ?? bridgedTools(value.toolNames, executeTool);
-      const created = await createAgentSession({ cwd: '/workspace/candidate', agentDir: directory, modelRuntime: runtime, model, thinkingLevel: value.selection.thinking as 'high' | 'xhigh', tools: options.customTools ? customTools.map(tool => tool.name) : value.toolNames, customTools,
+      const created = await createAgentSession({ cwd: '/workspace/candidate', agentDir: directory, modelRuntime: runtime, model, thinkingLevel: value.selection.thinking as never, tools: options.customTools ? customTools.map(tool => tool.name) : value.toolNames, customTools,
         resourceLoader: compiled.loader, settingsManager: compiled.settings, sessionManager: SessionManager.inMemory('/workspace/candidate', undefined, restoredEntries ?? undefined) });
       session = created.session; safeSnapshot = restoredEntries !== null; restoredEntries = null;
       session.subscribe(event => {
@@ -113,16 +136,24 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
         historyBound(); const invocation = ++ordinal; let used = false, slot: string | null = null;
         const grant = new Promise<string>((resolve, reject) => { invocationWaiters.set(invocation, { resolve, reject }); });
         void grant.catch(() => {});
-        void channel.send('invoke', { invocation, ...value.selection }).catch(() => channel.fail());
+        void channel.send('invoke', { invocation, provider: value.selection.provider, model: value.selection.model, thinking: value.selection.thinking, api: value.selection.api }).catch(() => channel.fail());
         const fetch = async (url: unknown, init: { body?: unknown; method?: string; headers?: HeadersInit } | undefined): Promise<Response> => {
           if (used || !active || pendingFetch) throw new Error('unadmitted fetch'); used = true; slot = await grant;
           if (typeof init?.body !== 'string') throw new Error('unsupported final body'); const bytes = Buffer.from(init.body); if (bytes.length > 65536) throw new Error('request bytes');
-          const headers = new Headers(init.headers); const auth = headers.get('authorization');
-          if (auth && auth !== 'Bearer loopwright-non-secret-placeholder') throw new Error('unexpected SDK credential'); headers.delete('authorization');
+          const headers = new Headers(init.headers);
+          const auth = headers.get('authorization');
+          if (auth && auth !== 'Bearer loopwright-non-secret-placeholder') throw new Error('unexpected SDK credential');
+          headers.delete('authorization');
+          const xApiKey = headers.get('x-api-key');
+          if (xApiKey && xApiKey !== 'loopwright-non-secret-placeholder') throw new Error('unexpected SDK credential');
+          headers.delete('x-api-key');
           const response = new Promise<Response>((resolve, reject) => { pendingFetch = { invocation, slot: slot!, resolve, reject }; });
           const [, answer] = await Promise.all([channel.sendBytes('fetch', { invocation, slot, url: String(url), method: init.method, headers: Object.fromEntries(headers) }, bytes), response]); return answer;
         };
-        const native = runtime.streamSimple(selectedModel, context, { ...streamOptions, fetch: fetch as typeof globalThis.fetch, apiKey: 'loopwright-non-secret-placeholder', env: {}, reasoning: value.selection.thinking as 'high' | 'xhigh', maxTokens: outputTokens, maxRetries: 0, cacheRetention: 'short' });
+        const restStreamOptions = { ...streamOptions };
+        delete restStreamOptions.reasoning;
+        const reasoningPart = value.selection.thinking === 'off' ? {} : { reasoning: value.selection.thinking as Exclude<typeof value.selection.thinking, 'off'> };
+        const native = runtime.streamSimple(selectedModel, context, { ...restStreamOptions, ...reasoningPart, fetch: fetch as typeof globalThis.fetch, apiKey: 'loopwright-non-secret-placeholder', env: {}, maxTokens: outputTokens, maxRetries: 0, cacheRetention: 'short' });
         const receipt = native.result().then(async message => {
           const toolCalls = message.content.filter(block => block.type === 'toolCall').map(call => ({ id: call.id, name: call.name, argumentsDigest: toolArgumentsDigest(call.arguments) }));
           if (slot) for (const call of toolCalls) roots.set(call.id, { invocation, slot, parentId: null });

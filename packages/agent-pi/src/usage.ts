@@ -2,6 +2,7 @@ import type { Quantity, RequestUsage, Digest } from '@loopwright/core';
 import { parseBoundedJson } from './context.js';
 import { evaluateRawResponse, type RawResponseResult } from './response.js';
 import { canonical, digest } from './boundary.js';
+import type { PiWireApi } from './types.js';
 export interface RawToolCall { readonly id: string; readonly name: string; readonly argumentsDigest: Digest }
 export interface RawInspection {
   readonly termination: 'confirmed' | 'unknown'; readonly rawStop: string | null; readonly responseDigest: Digest;
@@ -10,14 +11,132 @@ export interface RawInspection {
 const unknown = (): Quantity => ({ provenance: 'unknown' });
 const number = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && !Object.is(value, -0);
 export function toolArgumentsDigest(value: unknown): Digest { return digest(Buffer.from('loopwright.dev/tool-arguments/v1\0' + canonical(value))); }
-export function inspectRawResponse(bytes: Uint8Array, status: number, model: string): RawInspection {
-  let admission = evaluateRawResponse(bytes, status);
+
+function inspectOpenAiCompletions(bytes: Uint8Array, source: string, status: number, admission: RawResponseResult): RawInspection {
+  let termination: RawInspection['termination'] = 'unknown';
+  let rawStop: string | null = null;
+  const usage: { inputTokens: Quantity; outputTokens: Quantity; costMicrousd: Quantity } = { inputTokens: unknown(), outputTokens: unknown(), costMicrousd: unknown() };
+  const toolCalls: RawToolCall[] = [];
+  const result = (): RawInspection => ({ termination, rawStop, responseDigest: digest(bytes), usage, admission, toolCalls });
+
+  if (status !== 200) {
+    const parsed = parseBoundedJson(source) as { error?: { message?: unknown } };
+    if (parsed && typeof parsed.error === 'object' && parsed.error !== null && [400, 401, 403, 404, 429].includes(status)) {
+      termination = 'confirmed';
+    }
+    return result();
+  }
+
+  const normalized = source.replace(/\r\n/g, '\n');
+  if (!normalized.endsWith('\n\n')) return result();
+  let done = false;
+  let promptTokens: number | null = null;
+  let completionTokens: number | null = null;
+  const calls = new Map<number, { id: string; name: string; arguments: string }>();
+
+  for (const frame of normalized.split('\n\n').filter(Boolean)) {
+    const dataLines = frame.split('\n').filter(line => !line.startsWith(':'));
+    if (dataLines.length === 0) continue;
+    const payload = dataLines.map(line => line.slice(6)).join('\n').trim();
+    if (payload === '[DONE]') { done = true; continue; }
+    const chunk = parseBoundedJson(payload) as {
+      choices?: { finish_reason?: string | null; delta?: { tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
+      usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null;
+    };
+    for (const choice of chunk.choices ?? []) {
+      if (typeof choice.finish_reason === 'string' && choice.finish_reason.length > 0) rawStop = choice.finish_reason;
+      for (const tc of choice.delta?.tool_calls ?? []) {
+        if (number(tc.index)) {
+          const existing = calls.get(tc.index) ?? { id: '', name: '', arguments: '' };
+          if (typeof tc.id === 'string' && tc.id.length > 0) existing.id = tc.id;
+          if (typeof tc.function?.name === 'string' && tc.function.name.length > 0) existing.name += tc.function.name;
+          if (typeof tc.function?.arguments === 'string') existing.arguments += tc.function.arguments;
+          calls.set(tc.index, existing);
+        }
+      }
+    }
+    if (chunk.usage && typeof chunk.usage === 'object') {
+      if (number(chunk.usage.prompt_tokens)) promptTokens = chunk.usage.prompt_tokens;
+      if (number(chunk.usage.completion_tokens)) completionTokens = chunk.usage.completion_tokens;
+    }
+  }
+
+  if (done && rawStop && ['stop', 'tool_calls', 'length', 'content_filter', 'network_error'].includes(rawStop) && (admission.ok || admission.terminalComplete === true)) {
+    termination = 'confirmed';
+    if (promptTokens !== null) usage.inputTokens = { provenance: 'reported', value: promptTokens };
+    if (completionTokens !== null) usage.outputTokens = { provenance: 'reported', value: completionTokens };
+  }
+  if (admission.ok) {
+    for (const [, entry] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+      toolCalls.push({ id: entry.id, name: entry.name, argumentsDigest: toolArgumentsDigest(parseBoundedJson(entry.arguments || '{}')) });
+    }
+  }
+  return result();
+}
+
+function inspectOpenAiResponses(bytes: Uint8Array, source: string, status: number, admission: RawResponseResult): RawInspection {
+  let termination: RawInspection['termination'] = 'unknown';
+  let rawStop: string | null = null;
+  const usage: { inputTokens: Quantity; outputTokens: Quantity; costMicrousd: Quantity } = { inputTokens: unknown(), outputTokens: unknown(), costMicrousd: unknown() };
+  const toolCalls: RawToolCall[] = [];
+  const result = (): RawInspection => ({ termination, rawStop, responseDigest: digest(bytes), usage, admission, toolCalls });
+
+  if (status !== 200) {
+    const parsed = parseBoundedJson(source) as { error?: unknown };
+    if (parsed && typeof parsed.error === 'object' && parsed.error !== null && [400, 401, 403, 404, 429].includes(status)) {
+      termination = 'confirmed';
+    }
+    return result();
+  }
+
+  const normalized = source.replace(/\r\n/g, '\n');
+  if (!normalized.endsWith('\n\n')) return result();
+  for (const frame of normalized.split('\n\n').filter(Boolean)) {
+    const dataLine = frame.split('\n').find(line => line.startsWith('data: '));
+    if (!dataLine) continue;
+    const payload = dataLine.slice(6).trim();
+    if (payload === '[DONE]') continue;
+    const item = parseBoundedJson(payload) as {
+      type?: string;
+      response?: {
+        status?: string;
+        usage?: { input_tokens?: unknown; output_tokens?: unknown };
+        output?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string }[];
+      };
+    };
+    if (item.type === 'response.completed' || item.type === 'response.incomplete' || item.type === 'response.failed') {
+      rawStop = item.response?.status ?? item.type;
+      if (admission.ok || admission.terminalComplete === true) {
+        termination = 'confirmed';
+        if (number(item.response?.usage?.input_tokens)) usage.inputTokens = { provenance: 'reported', value: item.response!.usage!.input_tokens! };
+        if (number(item.response?.usage?.output_tokens)) usage.outputTokens = { provenance: 'reported', value: item.response!.usage!.output_tokens! };
+      }
+      if (admission.ok && item.type === 'response.completed') {
+        for (const out of item.response?.output ?? []) {
+          if (out.type === 'function_call') {
+            toolCalls.push({
+              id: out.call_id ?? out.id ?? '',
+              name: out.name ?? '',
+              argumentsDigest: toolArgumentsDigest(parseBoundedJson(out.arguments || '{}')),
+            });
+          }
+        }
+      }
+    }
+  }
+  return result();
+}
+
+export function inspectRawResponse(bytes: Uint8Array, status: number, model: string, api: PiWireApi = 'anthropic-messages', strictModelMatch = true): RawInspection {
+  let admission = evaluateRawResponse(bytes, status, api);
   let termination: RawInspection['termination'] = 'unknown', rawStop: string | null = null;
   const usage: { inputTokens: Quantity; outputTokens: Quantity; costMicrousd: Quantity } = { inputTokens: unknown(), outputTokens: unknown(), costMicrousd: unknown() };
   const toolCalls: RawToolCall[] = [], result = (): RawInspection => ({ termination, rawStop, responseDigest: digest(bytes), usage, admission, toolCalls });
   try {
     if (bytes.byteLength > 1048576) return result();
     const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    if (api === 'openai-completions') return inspectOpenAiCompletions(bytes, source, status, admission);
+    if (api === 'openai-responses') return inspectOpenAiResponses(bytes, source, status, admission);
     if (status !== 200) {
       const error = parseBoundedJson(source) as { type?: unknown; error?: { type?: unknown } };
       const expected: Record<number, string> = { 400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_error', 404: 'not_found_error', 429: 'rate_limit_error' };
@@ -45,7 +164,8 @@ export function inspectRawResponse(bytes: Uint8Array, status: number, model: str
       if (!event || event.type !== lines[0]!.slice(7)) throw new Error('event mismatch');
       if (event.type === 'message_start') {
         if (started) throw new Error('duplicate start'); started = true; const message = event.message as Record<string, unknown>;
-        if (message?.model !== model || message.role !== 'assistant' || !Array.isArray(message.content) || message.content.length) throw new Error('response identity'); update(message.usage, false);
+        const modelMatches = strictModelMatch ? message?.model === model : typeof message?.model === 'string' && (message.model === model || message.model.startsWith(model + '-'));
+        if (!modelMatches || message.role !== 'assistant' || !Array.isArray(message.content) || message.content.length) throw new Error('response identity'); update(message.usage, false);
       } else if (event.type === 'message_delta') {
         if (!started || ++deltas !== 1) throw new Error('delta'); rawStop = (event.delta as { stop_reason?: unknown })?.stop_reason as string;
         if (typeof rawStop !== 'string') throw new Error('stop'); update(event.usage, true);

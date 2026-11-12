@@ -20,6 +20,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./catalog": {
+      "types": "./dist/catalog-api.d.ts",
+      "import": "./dist/catalog-api.js"
     }
   }
 }

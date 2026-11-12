@@ -8,7 +8,7 @@ export function snapshot(input: unknown): Json {
   const copy = (value: unknown, depth: number): Json => {
     if (++nodes > 65536 || depth > 64) refuse('INPUT_INVALID');
     if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
-      if (typeof value === 'number' && (!Number.isSafeInteger(value) || Object.is(value, -0))) refuse('INPUT_INVALID');
+      if (typeof value === 'number' && (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER || Object.is(value, -0))) refuse('INPUT_INVALID');
       if (typeof value === 'string' && (value.length > 16384 || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value))) refuse('INPUT_INVALID');
       bytes += Buffer.byteLength(JSON.stringify(value)); if (bytes > 1048576) refuse('INPUT_INVALID'); return value;
     }

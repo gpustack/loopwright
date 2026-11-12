@@ -13,6 +13,8 @@ export interface ContextSelection {
   readonly tools: readonly string[];
   readonly contextWindow: number;
   readonly perCallOutputTokens: number;
+  readonly provider?: string;
+  readonly api?: 'anthropic-messages' | 'openai-completions' | 'openai-responses';
 }
 export interface ContextAssessment {
   readonly mode: 'estimated_guard';
@@ -161,6 +163,54 @@ function validateBody(value: Json, selection: ContextSelection, output: number):
   }
   if (pending.size) unsafe();
 }
+function validateTokenProviderBody(value: Json, selection: ContextSelection, output: number): void {
+  const body = record(value);
+  if (body.model !== selection.modelId || body.stream !== true) unsafe();
+  if (selection.api === 'anthropic-messages') {
+    if (body.max_tokens !== output) unsafe();
+    const definitions = new Set<string>();
+    for (const tool of body.tools === undefined ? [] : array(body.tools)) {
+      const item = record(tool);
+      const name = text(item.name);
+      if (!selection.tools.includes(name) || definitions.has(name)) unsafe();
+      definitions.add(name);
+      record(item.input_schema);
+    }
+    if (!Array.isArray(body.messages) || body.messages.length === 0) unsafe();
+    return;
+  }
+  if (selection.api === 'openai-completions') {
+    const cap = body.max_tokens ?? body.max_completion_tokens;
+    if (cap !== output) unsafe();
+    const definitions = new Set<string>();
+    for (const tool of body.tools === undefined ? [] : array(body.tools)) {
+      const item = record(tool);
+      if (item.type !== 'function') unsafe();
+      const fn = record(item.function);
+      const name = text(fn.name);
+      if (!selection.tools.includes(name) || definitions.has(name)) unsafe();
+      definitions.add(name);
+      record(fn.parameters);
+    }
+    if (!Array.isArray(body.messages) || body.messages.length === 0) unsafe();
+    return;
+  }
+  if (selection.api === 'openai-responses') {
+    if (body.max_output_tokens !== undefined && body.max_output_tokens !== output) unsafe();
+    const definitions = new Set<string>();
+    for (const tool of body.tools === undefined ? [] : array(body.tools)) {
+      const item = record(tool);
+      if (item.type !== 'function') unsafe();
+      const name = text(item.name);
+      if (!selection.tools.includes(name) || definitions.has(name)) unsafe();
+      definitions.add(name);
+      record(item.parameters);
+    }
+    if (!Array.isArray(body.input) || body.input.length === 0) unsafe();
+    return;
+  }
+  unsafe();
+}
 export function checkRequestBytes(bytes: Uint8Array): boolean {
   return bytes instanceof Uint8Array && !(bytes.buffer instanceof SharedArrayBuffer) && bytes.byteLength <= 65536;
 }
@@ -175,7 +225,10 @@ export function assessFinalRequestContext(bytes: Uint8Array, policy: ContextPoli
     const owned = Uint8Array.prototype.slice.call(bytes) as Uint8Array;
     const input = integer(owned.byteLength + margin, 1), total = integer(input + output, 1);
     assessment = { mode: 'estimated_guard', estimator: 'lw-pi-final-json-bytes-v1', version: 1, provenance: 'estimated', contextFit: 'unproven', bodyBytes: owned.byteLength, inputReservation: input, outputReservation: output, totalReservation: total, serviceMargin: margin, toolReserve: reserve, workingWindow: window, bodyDigest: createHash('sha256').update('loopwright.dev/pi-context/v1\0').update(owned).digest('hex'), withinByteLimit: owned.byteLength <= ceiling, withinWindow: integer(total + reserve, 1) <= window, coverage: 'unsupported' };
-    validateBody(parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(owned)), selection, output);
+    const parsed = parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(owned));
+    const isLegacyCopilot = (!selection.api || selection.api === 'anthropic-messages') && (!selection.provider || selection.provider === 'github-copilot');
+    if (isLegacyCopilot) validateBody(parsed, selection, output);
+    else validateTokenProviderBody(parsed, selection, output);
     assessment = { ...assessment, coverage: 'complete' };
     if (!assessment.withinByteLimit || !assessment.withinWindow) unsafe();
     return { ok: true, value: assessment };

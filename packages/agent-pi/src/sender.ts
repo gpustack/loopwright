@@ -7,13 +7,13 @@ import { assessFinalRequestContext, parseBoundedJson } from './context.js';
 import { PiFailure, refuse } from './errors.js';
 import { inspectRawResponse, toolArgumentsDigest, type RawInspection } from './usage.js';
 import { publishReceipt } from './receipt.js';
-import { PROVIDER_DESTINATION, boundedResponse, semanticHeaders, validateInvocation, validateRequestResources, type FetchIdentity, type InvocationIdentity, type ParsedCandidate, type RuntimeBroker, type RuntimeReply, type ToolAuthorization } from './provider.js';
+import { boundedResponse, semanticHeaders, validateInvocation, validateRequestResources, type FetchIdentity, type InvocationIdentity, type ParsedCandidate, type RuntimeBroker, type RuntimeReply, type ToolAuthorization } from './provider.js';
 import type { PiHost, PiOpenInput, PiCommand, PiOutcome, PiErrorCode, PiError, PiContextRecord } from './types.js';
 import type { ToolExecutor, ToolIdentity, ToolResult } from './tools.js';
 import type { Mcp } from './mcp.js';
 import type { JsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { EventPublisher } from './events.js';
-import { selectedCatalog, type CatalogIdentity } from './catalog.js';
+import { resolveProviderAuthHeaderName, resolveProviderDestination, selectedCatalog, type CatalogIdentity } from './catalog.js';
 interface Attempt {
   readonly requestId: string; readonly operationId: string; readonly context: PiContextRecord;
   raw?: RawInspection; status?: number; committed: boolean; committedUsage?: RawInspection['usage'];
@@ -34,7 +34,8 @@ export interface SenderPorts { readonly fetch: typeof globalThis.fetch; readonly
 const unknown = (): Quantity => ({ provenance: 'unknown' });
 /** One active host command, original permits only, and no native/provider retry authority. */
 export class Sender implements RuntimeBroker {
-  readonly #admission: Admission; readonly #catalog: CatalogIdentity; #turn: Turn | null = null; #lastInvocation = 0;
+  readonly #admission: Admission; readonly #catalog: CatalogIdentity; readonly #destination: string; readonly #authHeader: 'authorization' | 'x-api-key';
+  #turn: Turn | null = null; #lastInvocation = 0;
   #slots = new Map<number, Slot>(); #commands = new Set<string>(); #blocked = false; #lastSlot: Slot | null = null;
   #outboundObserved = false;
   #events: EventPublisher = async () => {};
@@ -68,7 +69,9 @@ export class Sender implements RuntimeBroker {
   cancelTool(identity: ToolIdentity): void { const pending = this.#toolCancels.get(identity.invocation + ':' + identity.callId); if (pending?.slot === identity.slot) pending.abort.abort(); }
   get outboundObserved(): boolean { return this.#outboundObserved; }
   constructor(readonly host: PiHost, readonly input: PiOpenInput, readonly ports: SenderPorts = { fetch: globalThis.fetch }) {
-    this.#admission = new Admission(host, { destination: PROVIDER_DESTINATION, fetch: ports.fetch });
+    this.#destination = resolveProviderDestination(input.policy.selection);
+    this.#authHeader = resolveProviderAuthHeaderName(input.policy.selection);
+    this.#admission = new Admission(host, { destination: this.#destination, fetch: ports.fetch });
     this.#catalog = freeze(structuredClone(ports.catalog ?? selectedCatalog(input)));
   }
   begin(kind: 'execute' | 'compact', input: unknown): void {
@@ -101,8 +104,9 @@ export class Sender implements RuntimeBroker {
     const slot = this.#slot(identity.invocation, identity.slot), turn = slot.turn;
     if (slot.claimed || turn.failure || turn.abort.signal.aborted) refuse('REQUEST_REFUSED'); slot.claimed = true;
     try {
-      const headers = semanticHeaders(identity), bytes = Buffer.from(input);
-      const assessment = assessFinalRequestContext(bytes, this.input.policy.context, { modelId: this.input.policy.selection.model, effort: this.input.policy.selection.thinking, tools: this.input.policy.tools, contextWindow: this.#catalog.contextWindow, perCallOutputTokens: this.input.lock.spec.contract.spec.budgets.perCallOutputTokens });
+      const headers = semanticHeaders(identity, this.input.policy.selection), bytes = Buffer.from(input);
+      const contextSelection = { modelId: this.input.policy.selection.model, effort: this.input.policy.selection.thinking, tools: this.input.policy.tools, contextWindow: this.#catalog.contextWindow, perCallOutputTokens: this.input.lock.spec.contract.spec.budgets.perCallOutputTokens, provider: this.input.policy.selection.provider, api: this.input.policy.selection.api };
+      const assessment = assessFinalRequestContext(bytes, this.input.policy.context, contextSelection);
       if (!assessment.ok) { await this.#context(null, assessment.assessment ?? null, false); refuse('CONTEXT_UNSAFE', '', { phase: 'admission' }); }
       await validateRequestResources(bytes, this.input, turn.kind);
       let previous: string | null = null;
@@ -114,21 +118,22 @@ export class Sender implements RuntimeBroker {
         const signal = AbortSignal.any([turn.abort.signal, AbortSignal.timeout(Math.min(90000, remaining))]);
         const credential = await this.#credential(turn, signal);
         if (bytes.includes(Buffer.from(credential))) refuse('PAYLOAD_MISMATCH', '', { phase: 'admission' });
-        const attemptAssessment = assessFinalRequestContext(bytes, this.input.policy.context, { modelId: this.input.policy.selection.model, effort: this.input.policy.selection.thinking, tools: this.input.policy.tools, contextWindow: this.#catalog.contextWindow, perCallOutputTokens: this.input.lock.spec.contract.spec.budgets.perCallOutputTokens });
+        const attemptAssessment = assessFinalRequestContext(bytes, this.input.policy.context, contextSelection);
         if (!attemptAssessment.ok) { await this.#context(null, attemptAssessment.assessment ?? null, false); refuse('CONTEXT_UNSAFE', '', { phase: 'admission' }); }
         const seed = randomBytes(16).toString('hex'), requestId = 'req-' + seed, operationId = 'op-' + seed, attemptId = 'attempt-' + seed;
-        const requestDigest = digest(Buffer.concat([Buffer.from('loopwright.dev/pi-request/v1\0' + canonical({ method: 'POST', destination: PROVIDER_DESTINATION, headers,
+        const requestDigest = digest(Buffer.concat([Buffer.from('loopwright.dev/pi-request/v1\0' + canonical({ method: 'POST', destination: this.#destination, headers,
           selection: this.input.policy.selection, runtime: this.input.policy.runtime, policy: digest(Buffer.from(canonical(this.input.policy))), lock: this.input.lock.spec.lockHash,
           sessionId: this.input.sessionId, roleId: this.input.roleId, stepId: this.input.stepId, commandId: turn.command.commandId, purpose: turn.command.purpose, repair: turn.command.repair, attemptId, resources: this.input.policy.resources })), bytes]));
         const request: RequestAdmission = { requestId, operationId, roleId: this.input.roleId, nodeId: this.input.stepId, attemptId, purpose: turn.command.purpose, repair: turn.command.repair, transportRetryOf: previous,
           requestDigest, inputUpperBound: attemptAssessment.value.inputReservation, outputUpperBound: attemptAssessment.value.outputReservation, totalUpperBound: attemptAssessment.value.totalReservation,
-          capability: { adapterId: 'pi', adapterVersion: '0.0.0', provider: this.input.policy.selection.provider, model: this.input.policy.selection.model, kind: 'soft_only', coversAllBillableTokens: false, enforcesOutputBound: true }, targetIdentity: PROVIDER_DESTINATION };
+          capability: { adapterId: 'pi', adapterVersion: '0.0.0', provider: this.input.policy.selection.provider, model: this.input.policy.selection.model, kind: 'soft_only', coversAllBillableTokens: false, enforcesOutputBound: true }, targetIdentity: this.#destination };
         const context = await this.#context(requestId, attemptAssessment.value, true);
         await this.#events('request_start', { requestId, operationId, attemptId, digest: requestDigest });
         const attempt: Attempt = { requestId, operationId, context, committed: false }; turn.requests.push(attempt); slot.final = attempt;
         let response: Response, body: Uint8Array;
         try {
-          const ticket = this.#admission.issue(request, { destination: PROVIDER_DESTINATION, headers: { ...headers, authorization: 'Bearer ' + credential }, body: bytes, signal });
+          const authPair = this.#authHeader === 'x-api-key' ? { 'x-api-key': credential } : { authorization: 'Bearer ' + credential };
+          const ticket = this.#admission.issue(request, { destination: this.#destination, headers: { ...headers, ...authPair }, body: bytes, signal });
           response = await this.#admission.dispatch(ticket); this.#outboundObserved = true; body = await boundedResponse(response, this.input.policy.limits.responseBytes, signal);
         } catch (error) {
           if (signal.aborted && !turn.abort.signal.aborted) turn.failure ??= 'DEADLINE';
@@ -142,7 +147,8 @@ export class Sender implements RuntimeBroker {
         // This check prevents a credential echo from entering SDK/model/session data or receipt artifacts.
         const decoded = Buffer.from(body).toString('utf8').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16))).replace(/\\\//g, '/');
         if (decoded.includes(credential)) { this.host.store.markRequestUnresolved(this.host.authority, requestId, 'connection_lost'); turn.uncertain = true; refuse('PROVIDER_RESPONSE_INVALID', '', { phase: 'dispatch', effect: 'possible', requestId, operationId }); }
-        attempt.raw = inspectRawResponse(body, response.status, this.input.policy.selection.model); attempt.status = response.status;
+        const strictModel = this.input.policy.selection.provider === 'github-copilot' && !this.input.policy.selection.customProvider;
+        attempt.raw = inspectRawResponse(body, response.status, this.input.policy.selection.model, this.input.policy.selection.api, strictModel); attempt.status = response.status;
         const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
         if (mediaType !== (response.status === 200 ? 'text/event-stream' : 'application/json')) { turn.failure ??= 'PROVIDER_RESPONSE_INVALID'; }
         await publishReceipt(this.host.artifactsDirectory, requestId, 'raw', { version: 1, requestId, operationId, requestDigest, responseDigest: attempt.raw.responseDigest,
@@ -174,7 +180,7 @@ export class Sender implements RuntimeBroker {
     const scope = stateValue(this.host.store.inspect()), now = BigInt(scope.clock.sampledNow.monotonicMs), task = BigInt(scope.clock.basis.taskDeadlineMonotonicMs);
     const readiness = AbortSignal.any([signal, AbortSignal.timeout(10000)]); let listener: () => void = () => {};
     try {
-      const credential = await Promise.race([this.host.resolveCredential({ provider: this.input.policy.selection.provider, model: this.input.policy.selection.model, destination: PROVIDER_DESTINATION, purpose: turn.command.purpose,
+      const credential = await Promise.race([this.host.resolveCredential({ provider: this.input.policy.selection.provider, model: this.input.policy.selection.model, destination: this.#destination, purpose: turn.command.purpose,
         runId: this.input.lock.spec.runId, roleId: this.input.roleId, stepId: this.input.stepId, notAfterMonotonicMs: String(task < now + 10000n ? task : now + 10000n), signal: readiness }),
       new Promise<never>((_, reject) => { listener = () => reject(new Error('Credential readiness cancelled')); readiness.addEventListener('abort', listener, { once: true }); if (readiness.aborted) listener(); })]);
       if (turn !== this.#turn || readiness.aborted || typeof credential.bearerToken !== 'string' || credential.bearerToken.length < 16 || credential.bearerToken.length > 16384 || /[^\x21-\x7e]|["\\]/.test(credential.bearerToken)) refuse('REQUEST_REFUSED', '', { phase: 'admission' });
@@ -278,7 +284,7 @@ export class Sender implements RuntimeBroker {
   }
   cancelMcp(id: unknown): void { this.#mcp?.cancel(id); }
   async closeMcp(): Promise<void> { await this.#mcp?.close(); }
-  #safeStop(value: string | null): string | null { return value && ['end_turn', 'tool_use', 'max_tokens', 'model_context_window_exceeded', 'pause_turn', 'stop_sequence', 'refusal', 'sensitive'].includes(value) ? value : null; }
+  #safeStop(value: string | null): string | null { return value && ['end_turn', 'tool_use', 'max_tokens', 'model_context_window_exceeded', 'pause_turn', 'stop_sequence', 'refusal', 'sensitive', 'stop', 'tool_calls', 'length', 'content_filter', 'completed', 'incomplete'].includes(value) ? value : null; }
   async #delay(ms: number, signal: AbortSignal): Promise<void> {
     await new Promise<void>((resolve, reject) => { const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(new Error('Retry cancelled')); };
       const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, ms); signal.addEventListener('abort', abort, { once: true }); if (signal.aborted) abort(); });
