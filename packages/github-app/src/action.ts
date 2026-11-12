@@ -1,15 +1,23 @@
 import { createHash } from 'node:crypto';
-import { closeSync, openSync, readFileSync } from 'node:fs';
+import { appendFileSync, closeSync, openSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PI_THINKING_LEVELS, PI_WIRE_APIS, isOAuthOnlyPiProvider } from '@loopwright/agent-pi/catalog';
+import {
+  LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveTaskpackModelCandidates, selectHealthyModelCandidate,
+  type ParsedPiModelsJson,
+} from './models-config.js';
 import { validateMcpAuthConfiguration, qualifyDeploymentHostProfile } from './qualification.js';
 import { authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseCommentCommand, prepareTaskpackIntake, validateCommentGuidance } from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
+import { serializePrettyYaml } from './yaml.js';
 import {
   GitHubAppError,
-  type ActionEntrypointInput, type ActionEntrypointResult, type ClockSample, type HostTaskpackBindings,
-  type TaskpackCommentCommand, type TaskpackIntakeOutcome, type WrittenCompiledTaskpack,
+  type ActionDelegateOutcome, type ActionEntrypointInput, type ActionEntrypointResult, type ClockSample,
+  type HostRoleSelection, type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi,
+  type ResolvedModelCandidate, type TaskpackCommentCommand, type TaskpackIntakeOutcome,
+  type TaskpackManifest, type WrittenCompiledTaskpack,
 } from './types.js';
 
 function systemSample(): ClockSample {
@@ -107,12 +115,42 @@ function readNumber(value: unknown, field: string): number | null {
   return typeof number === 'number' && Number.isSafeInteger(number) ? number : null;
 }
 
+function shouldRotateModelCandidate(outcome: ActionDelegateOutcome): boolean {
+  if (outcome.ok) return false;
+  if (/reconcile_required|PUBLICATION_|GATE_/i.test(outcome.detail)) return false;
+  if (outcome.retryableProviderFailure !== undefined) return outcome.retryableProviderFailure;
+  return /PROVIDER_RESPONSE_INVALID|PROVIDER_TIMEOUT|MODEL_UNAVAILABLE|insufficient_quota|quota|rate_limit|http_402|http_429|1113/i.test(outcome.detail);
+}
+
+async function invokeDelegateForCandidate(
+  candidate: ResolvedModelCandidate,
+  taskpack: WrittenCompiledTaskpack,
+  delegate: NonNullable<ActionEntrypointInput['delegate']>,
+): Promise<ActionDelegateOutcome> {
+  if (!candidate.usesActiveTokenEnv || candidate.token === undefined) {
+    return delegate(taskpack);
+  }
+  const previous = process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+  process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = candidate.token;
+  try {
+    return await delegate(taskpack);
+  } finally {
+    if (previous === undefined) {
+      delete process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+    } else {
+      process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = previous;
+    }
+  }
+}
+
 /**
  * Run the complete offline-testable Action flow: qualify the host, refuse interactive MCP authentication,
- * load the target manifest, evaluate trigger intake, compile, write trusted artifacts outside the checkout,
- * scrub them, and optionally delegate execution.
+ * load the target manifest, evaluate trigger intake, select a healthy model candidate (probing when >= 2
+ * candidates are configured), compile, write trusted artifacts outside the checkout, scrub them, and
+ * optionally delegate execution with fresh-session fallback across remaining healthy model candidates.
  */
 export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): Promise<ActionEntrypointResult> {
+  const runtimeEnv = input.env ?? process.env;
   const storageProfile = input.storageProfile ?? 'actions-basic';
   const startSample = input.previousClockSample ?? systemSample();
   const basis = input.clockBasis ?? {
@@ -141,13 +179,29 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
   }
   const mcp = validateMcpAuthConfiguration({ servers: input.mcpServers ?? [], transportChallenge: input.mcpTransportChallenge ?? null });
   if (!mcp.ok) return { kind: 'refused', code: mcp.code, reason: mcp.reason };
+  if (input.provider !== undefined && isOAuthOnlyPiProvider(input.provider)) {
+    return {
+      kind: 'refused',
+      code: 'PROVIDER_OAUTH_UNSUPPORTED',
+      reason: `Pi provider "${input.provider}" uses OAuth or CLI login, which Loopwright refuses; configure a token-authenticated Pi provider`,
+    };
+  }
 
   const manifestPath = join(input.repositoryRoot, input.taskpackPath ?? '.loopwright/taskpack.yaml');
-  const manifest = await loadDeclarativeTaskpack({ manifestPath, repositoryRoot: input.repositoryRoot })
-    .catch((error: unknown) => error instanceof GitHubAppError ? null : Promise.reject(error));
-  if (manifest === null) return blocked('target repository manifest failed validation', 'loadDeclarativeTaskpack refused the manifest');
+  let manifest: TaskpackManifest;
+  try {
+    manifest = await loadDeclarativeTaskpack({ manifestPath, repositoryRoot: input.repositoryRoot });
+  } catch (error) {
+    if (error instanceof GitHubAppError) {
+      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+        return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+      }
+      return blocked('target repository manifest failed validation', 'loadDeclarativeTaskpack refused the manifest');
+    }
+    throw error;
+  }
 
-  const tenant = { installationId: 0, repositoryId: 0, repositoryFullName: input.repositoryFullName, taskpackId: manifest.metadata.id };
+  const tenant = { installationId: 0, repositoryId: 0, repositoryFullName: input.repositoryFullName, taskpackId: manifest.metadata.name };
   let intake: TaskpackIntakeOutcome;
   if (eventNameIsTrigger(input.eventName)) {
     const outcome = prepareTaskpackIntake({
@@ -170,7 +224,7 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     if ('blockedReason' in evaluation) return blocked(evaluation.blockedReason, evaluation.detail);
     const commandDigest = createHash('sha256').update(evaluation.guidance, 'utf8').digest('hex');
     if (evaluation.command === 'status') {
-      intake = { kind: 'status', disposition: 'ready', summary: `status query admitted for ${input.repositoryFullName}/${manifest.metadata.id}` };
+      intake = { kind: 'status', disposition: 'ready', summary: `status query admitted for ${input.repositoryFullName}/${manifest.metadata.name}` };
     } else if (evaluation.command === 'revise') {
       const reviseInput = {
         mode: 'revise' as const, tenant,
@@ -195,68 +249,211 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     return blocked(`unsupported event ${input.eventName}`);
   }
 
-  const bindings: HostTaskpackBindings = {
+  let modelsConfig: ParsedPiModelsJson | undefined;
+  if (input.modelsJsonPath !== undefined) {
+    try {
+      modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+        }
+        return blocked(error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  const scrubber = new SecretScrubber();
+  const gateEnvName = input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET';
+  const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
+  if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
+  if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
+
+  const hasHostRoleOverrides = input.provider !== undefined
+    || input.model !== undefined
+    || input.thinking !== undefined
+    || input.api !== undefined
+    || input.baseUrl !== undefined;
+  const roleSelection: HostRoleSelection | undefined = hasHostRoleOverrides
+    ? {
+      provider: input.provider,
+      model: input.model,
+      thinking: input.thinking,
+      api: input.api,
+      baseUrl: input.baseUrl,
+    }
+    : undefined;
+
+  const makeBindings = (candidate: ResolvedModelCandidate): HostTaskpackBindings => ({
     mode: input.mode,
     repository: input.repositoryFullName,
     baseRevision: input.baseRevision,
     sourceRevision: input.sourceRevision ?? input.baseRevision,
     targetMatrix: input.targetMatrix ?? null,
-    roleSelection: {
-      provider: input.provider ?? 'github-copilot',
-      model: input.model ?? 'claude-sonnet-5.5',
-      thinking: input.thinking ?? 'xhigh',
-    },
+    roleSelection,
+    candidateIndex: candidate.manifestIndex,
+    allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
+    modelsJsonPath: input.modelsJsonPath,
     runtimeOptions: {},
     budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
     gateEndpoints: input.gateEndpoints ?? [],
     publicationEndpoint: input.publicationEndpoint ?? null,
-    credentialEnvMap: input.credentialEnvMap ?? {
-      provider: 'LOOPWRIGHT_PROVIDER_TOKEN',
-      gate: 'LOOPWRIGHT_GATE_SIGNING_SECRET',
-      publication: 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+    credentialEnvMap: {
+      provider: input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
+        ? input.credentialEnvMap.provider
+        : candidate.providerEnvName,
+      gate: gateEnvName,
+      publication: publicationEnvName,
     },
     resourceVersion: input.resourceVersion,
     authorPrompt: input.authorPrompt,
-  };
+  });
 
-  let compiled;
+  let candidates: readonly ResolvedModelCandidate[];
   try {
-    compiled = await compileDeclarativeTaskpack(manifest, bindings);
+    const previewBindings: HostTaskpackBindings = {
+      mode: input.mode,
+      repository: input.repositoryFullName,
+      baseRevision: input.baseRevision,
+      sourceRevision: input.sourceRevision ?? input.baseRevision,
+      targetMatrix: input.targetMatrix ?? null,
+      roleSelection,
+      allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
+      modelsJsonPath: input.modelsJsonPath,
+      runtimeOptions: {},
+      budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
+      gateEndpoints: input.gateEndpoints ?? [],
+      publicationEndpoint: input.publicationEndpoint ?? null,
+      credentialEnvMap: {
+        provider: input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN',
+        gate: gateEnvName,
+        publication: publicationEnvName,
+      },
+      resourceVersion: input.resourceVersion,
+      authorPrompt: input.authorPrompt,
+    };
+    candidates = resolveTaskpackModelCandidates(manifest, previewBindings, {
+      modelsConfig,
+      env: runtimeEnv,
+      explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
+      scrubber,
+    });
   } catch (error) {
-    if (error instanceof GitHubAppError) return blocked(error.code, error.message);
+    if (error instanceof GitHubAppError) {
+      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+        return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+      }
+      return blocked(error.code, error.message);
+    }
     throw error;
   }
 
-  const realRunRoot = await realpath(input.runRoot);
-  const realRepositoryRoot = await realpath(input.repositoryRoot);
-  if (insideRoot(realRunRoot, realRepositoryRoot)) return blocked('run root must live outside the target repository checkout');
-  // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
-  // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
-  const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}`);
-  const registryDirectory = join(trustedDirectory, 'registry');
-  const configDirectory = join(trustedDirectory, 'config');
-  await mkdir(registryDirectory, { recursive: true });
-  await mkdir(configDirectory, { recursive: true });
-  await chmod(trustedDirectory, 0o700);
-  await chmod(registryDirectory, 0o700);
-  await chmod(configDirectory, 0o700);
-  const registryPath = join(registryDirectory, 'registry.json');
-  const configPath = join(configDirectory, 'config.json');
-  const configBytes = Buffer.from(JSON.stringify(compiled.config));
-  await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
-  await writeFile(configPath, configBytes, { mode: 0o600 });
-  await chmod(registryPath, 0o600);
-  await chmod(configPath, 0o600);
-  const scrubber = new SecretScrubber();
-  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
-  assertCleanArtifact(configBytes, scrubber, '/config');
-  const taskpack: WrittenCompiledTaskpack = {
-    ...compiled, configBytes, trustedDirectory, registryPath, configPath,
+  let currentPos = 0;
+  if (input.dryRun !== true && candidates.length >= 2) {
+    try {
+      const selected = await selectHealthyModelCandidate(candidates, {
+        fetchImpl: input.probeFetch,
+        totalTimeoutMs: input.probeTimeoutMs,
+        scrubber,
+      });
+      currentPos = selected.index;
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  let realRunRoot: string;
+  let realRepositoryRoot: string;
+  const compileAndWriteCandidate = async (candidate: ResolvedModelCandidate, attemptSeq: number): Promise<WrittenCompiledTaskpack> => {
+    const compiled = await compileDeclarativeTaskpack(manifest, makeBindings(candidate));
+    realRunRoot ??= await realpath(input.runRoot);
+    realRepositoryRoot ??= await realpath(input.repositoryRoot);
+    if (insideRoot(realRunRoot, realRepositoryRoot)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'run root must live outside the target repository checkout');
+    }
+    // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
+    // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
+    const suffix = attemptSeq === 0 ? '' : `-fallback-${attemptSeq}`;
+    const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}${suffix}`);
+    const registryDirectory = join(trustedDirectory, 'registry');
+    const configDirectory = join(trustedDirectory, 'config');
+    await mkdir(registryDirectory, { recursive: true });
+    await mkdir(configDirectory, { recursive: true });
+    await chmod(trustedDirectory, 0o700);
+    await chmod(registryDirectory, 0o700);
+    await chmod(configDirectory, 0o700);
+    const registryPath = join(registryDirectory, 'registry.yaml');
+    const configPath = join(configDirectory, 'config.yaml');
+    const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+    await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
+    await writeFile(configPath, configBytes, { mode: 0o600 });
+    await chmod(registryPath, 0o600);
+    await chmod(configPath, 0o600);
+    assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+    assertCleanArtifact(configBytes, scrubber, '/config');
+    return {
+      ...compiled, configBytes, trustedDirectory, registryPath, configPath,
+    };
   };
-  const delegateOutcome = input.dryRun === true || input.delegate === undefined
-    ? null
-    : await input.delegate(taskpack).then(outcome => ({ ok: outcome.ok, detail: outcome.detail }));
-  return { kind: 'compiled', manifest, intake, taskpack, delegateOutcome };
+
+  let activeCandidate = candidates[currentPos]!;
+  let activeTaskpack: WrittenCompiledTaskpack;
+  try {
+    activeTaskpack = await compileAndWriteCandidate(activeCandidate, 0);
+  } catch (error) {
+    if (error instanceof GitHubAppError) {
+      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+        return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+      }
+      if (error.code === 'ACTION_INPUT_INVALID') {
+        return blocked(error.message);
+      }
+      return blocked(error.code, error.message);
+    }
+    throw error;
+  }
+
+  if (input.dryRun === true || input.delegate === undefined) {
+    return { kind: 'compiled', manifest, intake, taskpack: activeTaskpack, delegateOutcome: null };
+  }
+
+  let attemptSeq = 0;
+  let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, input.delegate);
+  while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
+    const remaining = candidates.slice(currentPos + 1);
+    let nextSelected;
+    try {
+      nextSelected = await selectHealthyModelCandidate(remaining, {
+        fetchImpl: input.probeFetch,
+        totalTimeoutMs: input.probeTimeoutMs,
+        forceProbe: true,
+        scrubber,
+      });
+    } catch {
+      lastOutcome = {
+        ok: false,
+        detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
+      };
+      break;
+    }
+    currentPos = currentPos + 1 + nextSelected.index;
+    activeCandidate = candidates[currentPos]!;
+    attemptSeq += 1;
+    activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+    lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, input.delegate);
+  }
+
+  return {
+    kind: 'compiled',
+    manifest,
+    intake,
+    taskpack: activeTaskpack,
+    delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
+  };
 }
 
 function eventNameIsTrigger(eventName: string): boolean {
@@ -278,27 +475,43 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
       eventPayload = undefined;
     }
   }
-  const thinking = env['INPUT_THINKING'];
+  const thinking = env['INPUT_THINKING']?.trim();
+  const api = env['INPUT_API']?.trim();
   const storageProfile = env['INPUT_STORAGE-PROFILE'];
   const mode = env['INPUT_MODE'];
+  const gateEndpointUrl = env['INPUT_GATE-ENDPOINT-URL']?.trim();
+  const publicationEndpointUrl = env['INPUT_PUBLICATION-ENDPOINT-URL']?.trim();
   const result = await runGitHubActionEntrypoint({
     repositoryRoot,
-    taskpackPath: env['INPUT_TASKPACK-PATH'],
+    taskpackPath: env['INPUT_TASKPACK-PATH']?.trim() || undefined,
     repositoryFullName: env['LOOPWRIGHT_REPOSITORY'] ?? env['GITHUB_REPOSITORY'] ?? basename(repositoryRoot),
     baseRevision: env['GITHUB_SHA'] ?? 'HEAD',
     mode: mode === 'no-change' ? 'no-change' : 'candidate',
-    eventName: env['INPUT_EVENT-NAME'] ?? env['GITHUB_EVENT_NAME'] ?? 'workflow_dispatch',
+    eventName: env['INPUT_EVENT-NAME']?.trim() || env['GITHUB_EVENT_NAME'] || 'workflow_dispatch',
     eventPayload,
-    runRoot: env['INPUT_RUN-ROOT'] ?? env['RUNNER_TEMP'] ?? resolve(repositoryRoot, '../.loopwright-runs'),
-    runId: env['INPUT_RUN-ID'] ?? env['GITHUB_RUN_ID'] ?? 'local',
+    runRoot: env['INPUT_RUN-ROOT']?.trim() || env['RUNNER_TEMP'] || resolve(repositoryRoot, '../.loopwright-runs'),
+    runId: env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local',
     storageProfile: storageProfile === 'durable' ? 'durable' : 'actions-basic',
-    provider: env['INPUT_PROVIDER'],
-    model: env['INPUT_MODEL'],
-    thinking: thinking === 'minimal' || thinking === 'low' || thinking === 'medium' || thinking === 'high' || thinking === 'xhigh' ? thinking : undefined,
+    provider: env['INPUT_PROVIDER']?.trim() || undefined,
+    model: env['INPUT_MODEL']?.trim() || undefined,
+    thinking: thinking !== undefined && (PI_THINKING_LEVELS as readonly string[]).includes(thinking) ? thinking as PiThinkingLevel : undefined,
+    api: api !== undefined && (PI_WIRE_APIS as readonly string[]).includes(api) ? api as PiWireApi : undefined,
+    baseUrl: env['INPUT_BASE-URL']?.trim() || undefined,
+    providerTokenEnv: env['INPUT_PROVIDER-TOKEN-ENV']?.trim() || undefined,
+    modelsJsonPath: env['INPUT_MODELS-JSON']?.trim() || undefined,
+    allowManifestCustomBaseUrl: env['INPUT_ALLOW-CUSTOM-BASE-URL'] === 'true',
+    gateEndpoints: gateEndpointUrl ? [{ id: 'default', url: gateEndpointUrl, signingCredentialRef: 'taskpack-gate-signing' }] : undefined,
+    publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
+    env,
     dryRun: env['INPUT_DRY-RUN'] === 'true',
   });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const serialized = JSON.stringify(result);
+  process.stdout.write(`${serialized}\n`);
+  const githubOutput = env['GITHUB_OUTPUT'];
+  if (typeof githubOutput === 'string' && githubOutput.length > 0) {
+    appendFileSync(githubOutput, `result<<LOOPWRIGHT_EOF\n${serialized}\nLOOPWRIGHT_EOF\n`, 'utf8');
+  }
   return result.kind === 'compiled' || result.kind === 'no_change' ? 0 : 1;
 }
 

@@ -72,8 +72,16 @@ def _loopback_only_connect_ex(self, address, *args, **kwargs):
     return _original_connect_ex(self, address, *args, **kwargs)
 
 
+def _loopback_only_getfqdn(name=""):
+    candidate = name.strip() if isinstance(name, str) else name
+    if candidate in ("", "0.0.0.0", "::") or _is_loopback_host(candidate):
+        return "localhost"
+    raise PermissionError(77, "non-loopback dns lookup blocked by the contained runner bridge: %r" % (name,))
+
+
 socket.socket.connect = _loopback_only_connect
 socket.socket.connect_ex = _loopback_only_connect_ex
+socket.getfqdn = _loopback_only_getfqdn
 `;
 
 export interface PythonSandboxOptions {
@@ -129,7 +137,7 @@ const PRELUDE_CODE = `import importlib.util, json, platform
 print(json.dumps({"version": platform.python_version(), "modules": [name for name in ("packaging", "yaml", "requests") if importlib.util.find_spec(name) is not None]}))`;
 
 const PYTEST_PROBE_CODE = `import importlib.util, json
-print(json.dumps({"pytest": importlib.util.find_spec("pytest") is not None}))`;
+print(json.dumps({"pytest": importlib.util.find_spec("pytest") is not None, "xdist": importlib.util.find_spec("xdist") is not None}))`;
 
 const SELF_CHECK_CODE = `import importlib, json, sys
 config = json.loads(sys.stdin.read())
@@ -309,15 +317,19 @@ export class PythonBridge {
     };
   }
 
-  /** Resolve a bare interpreter name to a validated executable file against the parent process PATH (never the contained PATH). */
-  async #resolveOnParentPath(name: string): Promise<string | null> {
-    if (name.startsWith('/')) return name;
-    const directories = (process.env.PATH ?? '').split(':').filter(part => part.length > 0);
+  /** Resolve a bare interpreter name to validated executable files across the parent PATH and allowlist. */
+  async #resolveCandidates(name: string): Promise<string[]> {
+    if (name.startsWith('/')) return (await this.#validatedExecutable(name)) ? [name] : [];
+    const seen = new Set<string>();
+    const matches: string[] = [];
+    const directories = `${process.env.PATH ?? ''}:${this.#pathAllowlist}`.split(':').filter(part => part.length > 0);
     for (const directory of directories) {
       const candidate = join(directory, name);
-      if (await this.#validatedExecutable(candidate)) return candidate;
+      if (seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (await this.#validatedExecutable(candidate)) matches.push(candidate);
     }
-    return null;
+    return matches;
   }
 
   /** A candidate must be a regular executable file after resolving symlinks; anything else is skipped. */
@@ -336,27 +348,32 @@ export class PythonBridge {
     this.#interpreter ??= (async () => {
       const candidates: readonly string[] = this.#configuredExecutable !== null ? [this.#configuredExecutable] : AUTO_CANDIDATES;
       const failures: string[] = [];
+      const probed = new Set<string>();
       for (const candidate of candidates) {
-        const executable = await this.#resolveOnParentPath(candidate);
-        if (executable === null) { failures.push(`${candidate}: not found`); continue; }
-        try {
-          const outcome = await this.#contained(executable, ['-B', '-c', PRELUDE_CODE], { timeoutMs: Math.min(this.#defaultTimeoutMs, 30000) });
-          if (outcome.timedOut) { failures.push(`${candidate}: probe timed out`); continue; }
-          if (outcome.exitCode !== 0) { failures.push(`${candidate}: probe exited ${outcome.exitCode}`); continue; }
-          let probe: { version?: unknown; modules?: unknown };
-          try { probe = JSON.parse(outcome.stdout) as typeof probe; } catch { failures.push(`${candidate}: unreadable probe output`); continue; }
-          if (typeof probe.version !== 'string' || !minorVersionAtLeast(probe.version, 3, 10)) { failures.push(`${candidate}: python >= 3.10 required, found ${String(probe.version)}`); continue; }
-          if (!Array.isArray(probe.modules)) { failures.push(`${candidate}: probe omitted module inventory`); continue; }
-          const modules: string[] = [];
-          for (const required of ['packaging', 'yaml', 'requests']) {
-            if (!probe.modules.includes(required)) { failures.push(`${candidate}: required site package ${required} is missing`); break; }
-            modules.push(required);
+        const executables = await this.#resolveCandidates(candidate);
+        if (executables.length === 0) { failures.push(`${candidate}: not found`); continue; }
+        for (const executable of executables) {
+          if (probed.has(executable)) continue;
+          probed.add(executable);
+          try {
+            const outcome = await this.#contained(executable, ['-B', '-c', PRELUDE_CODE], { timeoutMs: Math.min(this.#defaultTimeoutMs, 30000) });
+            if (outcome.timedOut) { failures.push(`${executable}: probe timed out`); continue; }
+            if (outcome.exitCode !== 0) { failures.push(`${executable}: probe exited ${outcome.exitCode}`); continue; }
+            let probe: { version?: unknown; modules?: unknown };
+            try { probe = JSON.parse(outcome.stdout) as typeof probe; } catch { failures.push(`${executable}: unreadable probe output`); continue; }
+            if (typeof probe.version !== 'string' || !minorVersionAtLeast(probe.version, 3, 10)) { failures.push(`${executable}: python >= 3.10 required, found ${String(probe.version)}`); continue; }
+            if (!Array.isArray(probe.modules)) { failures.push(`${executable}: probe omitted module inventory`); continue; }
+            const modules: string[] = [];
+            for (const required of ['packaging', 'yaml', 'requests']) {
+              if (!probe.modules.includes(required)) { failures.push(`${executable}: required site package ${required} is missing`); break; }
+              modules.push(required);
+            }
+            if (modules.length < 3) continue;
+            return { executable, version: probe.version, modules };
+          } catch (error) {
+            if (error instanceof RunnerTaskpackError && (error.code === 'PYTHON_BOUNDARY' || error.code === 'PYTHON_TIMEOUT')) { failures.push(`${executable}: ${error.message}`); continue; }
+            throw error;
           }
-          if (modules.length < 3) continue;
-          return { executable, version: probe.version, modules };
-        } catch (error) {
-          if (error instanceof RunnerTaskpackError && (error.code === 'PYTHON_BOUNDARY' || error.code === 'PYTHON_TIMEOUT')) { failures.push(`${candidate}: ${error.message}`); continue; }
-          throw error;
         }
       }
       throw pythonUnavailable(`no candidate interpreter satisfies python >= 3.10 with packaging, yaml, and requests (${failures.join('; ')})`);
@@ -462,12 +479,18 @@ export class PythonBridge {
     const root = verification.root;
     const probe = await this.run(PYTEST_PROBE_CODE, { timeoutMs: Math.min(this.#defaultTimeoutMs, 30000) });
     let hasPytest = false;
+    let hasXdist = false;
     if (probe.exitCode === 0) {
-      try { hasPytest = (JSON.parse(probe.stdout) as { pytest?: unknown }).pytest === true; } catch { hasPytest = false; }
+      try {
+        const parsed = JSON.parse(probe.stdout) as { pytest?: unknown; xdist?: unknown };
+        hasPytest = parsed.pytest === true;
+        hasXdist = parsed.xdist === true;
+      } catch { hasPytest = false; }
     }
     if (hasPytest) {
       const { executable } = await this.#resolvedInterpreter();
-      const outcome = await this.#contained(executable, ['-B', '-m', 'pytest', join(root, 'tests', 'auto_sync'), '-q', '-p', 'no:cacheprovider', '--color', 'no'],
+      const xdistArgs = hasXdist ? ['-n', 'auto'] : [];
+      const outcome = await this.#contained(executable, ['-B', '-m', 'pytest', join(root, 'tests', 'auto_sync'), '-q', '-p', 'no:cacheprovider', '--color', 'no', ...xdistArgs],
         { cwd: root, timeoutMs: options.timeoutMs ?? FROZEN_SUITE_TIMEOUT_MS });
       return { runner: 'pytest', passed: !outcome.timedOut && outcome.exitCode === 0, exitCode: outcome.timedOut ? -1 : outcome.exitCode, summary: (outcome.stdout.trim().split('\n').at(-1) ?? outcome.stderr.trim().split('\n').at(-1) ?? '').slice(0, 256) };
     }

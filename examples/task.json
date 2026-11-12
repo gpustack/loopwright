@@ -1,9 +1,6 @@
 {
   "apiVersion": "loopwright.dev/v1alpha1",
   "kind": "TaskContract",
-  "metadata": {
-    "id": "example-update"
-  },
   "spec": {
     "goal": "Update the pinned package",
     "taskpack": "package-update",

@@ -1,4 +1,4 @@
-import { lstat, realpath } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 /** Diagnostic codes carried by closure matrix refusals; exit mapping in main.ts stays deterministic. */
 export const CLOSURE_FALSIFICATION_FORBIDDEN = 'CLOSURE_FALSIFICATION_FORBIDDEN';
@@ -174,11 +174,11 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
   EXTERNAL('external-build-and-accelerator-matrix', 'External build and accelerator matrix', 'external-build-matrix', '@loopwright/controller', 'blocked_external', 'blocked',
     'A qualified external build host must reproduce the accelerator matrix with attestations.',
     'No local host can close the multi-architecture accelerator matrix.',
-    'Provision a multi-architecture build host with physical accelerators and attach a hash-bound qualification receipt.', ['docs/pi-runtime-evaluation.md']),
+    'Provision a multi-architecture build host with physical accelerators and attach a hash-bound qualification receipt.', ['docs/configuration/sandbox-backends.md']),
   EXTERNAL('remote-host-loss-and-durable-wake', 'Remote host loss and durable wake', 'remote-durability', '@loopwright/state', 'blocked_external', 'not_run',
     'A remote host loss with durable wake must retain fenced state across the outage.',
     'Local crash tests park owned children; remote loss stays unprovisioned.',
-    'Provision a remote host with durable storage and run the wake qualification against it.', ['docs/state.md']),
+    'Provision a remote host with durable storage and run the wake qualification against it.', ['docs/contribute/state.md']),
   EXTERNAL('interactive-mcp-oauth-browser-flow', 'Interactive MCP OAuth browser flow', 'interactive-oauth', '@loopwright/github-app', 'deferred_owned', 'blocked',
     'Interactive browser OAuth flows are refused pre-admission and stay deferred.',
     'No browser, loopback listener, or anonymous fallback exists in the control plane.',
@@ -186,11 +186,11 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
   EXTERNAL('deployed-github-app-and-webhook-ingress', 'Deployed GitHub App and webhook ingress', 'deployed-ingress', '@loopwright/github-app', 'blocked_external', 'not_run',
     'Deployed GitHub App webhook ingress must verify signatures under the deployed control plane.',
     'The loopback service double cannot prove deployed ingress.',
-    'Deploy the GitHub App control plane with a reachable webhook endpoint and attach the deployment receipt.', ['packages/github-app/src/webhook.ts', 'docs/github-app.md']),
+    'Deploy the GitHub App control plane with a reachable webhook endpoint and attach the deployment receipt.', ['packages/github-app/src/webhook.ts', 'docs/contribute/github-app-internals.md']),
   EXTERNAL('live-provider-billing-and-effort-attestation', 'Live provider billing and effort attestation', 'provider-attestation', '@loopwright/agent-pi', 'deferred_owned', 'not_run',
     'Live provider billing and effort attestation require provider-side statements.',
     'Local accounting proves bounds, not provider billing.',
-    'Attach a provider billing attestation covering the qualified model matrix.', ['packages/core/src/usage.ts', 'docs/pi-runtime-evaluation.md']),
+    'Attach a provider billing attestation covering the qualified model matrix.', ['packages/core/src/usage.ts', 'docs/configuration/sandbox-backends.md']),
   CLOSED('reviewed-memory-and-cas-compaction', 'Reviewed memory and CAS compaction', 'memory-compaction', '@loopwright/memory', 'unit_and_integration',
     'Reviewed memory proposals verify, apply under CAS, and compact only past safe boundaries.',
     'Cross-repository memory federation is out of scope.', ['packages/memory/src/compaction.ts', 'packages/memory/src/cas.ts', 'packages/memory/test/compaction.test.ts']),
@@ -218,8 +218,42 @@ export async function verifyClosureLedgerIntegrity(repoRoot: string, entries: re
   } catch {
     return { ok: false, checkedFiles: 0, failures: [{ capabilityId: null, path: '.', code: CLOSURE_EVIDENCE_UNTRUSTED, detail: 'repository root is missing or not a real directory' }] };
   }
-  try { await lstat(join(root, '.github', 'workflows')); failures.push({ capabilityId: null, path: '.github/workflows', code: CLOSURE_EVIDENCE_UNTRUSTED, detail: '.github/workflows must not exist in the audited repository root' }); }
-  catch { /* absent workflows directory is required. */ }
+  const workflowsDir = join(root, '.github', 'workflows');
+  let wfStats;
+  try {
+    wfStats = await lstat(workflowsDir);
+  } catch {
+    wfStats = null;
+  }
+  if (wfStats !== null) {
+    let workflowsValid = !wfStats.isSymbolicLink() && wfStats.isDirectory();
+    if (workflowsValid) {
+      try {
+        const wfEntries = await readdir(workflowsDir);
+        for (const name of wfEntries) {
+          if (!name.endsWith('.yml') && !name.endsWith('.yaml')) {
+            workflowsValid = false;
+            break;
+          }
+          const entryStats = await lstat(join(workflowsDir, name));
+          if (entryStats.isSymbolicLink() || !entryStats.isFile()) {
+            workflowsValid = false;
+            break;
+          }
+        }
+      } catch {
+        workflowsValid = false;
+      }
+    }
+    if (!workflowsValid) {
+      failures.push({
+        capabilityId: null,
+        path: '.github/workflows',
+        code: CLOSURE_EVIDENCE_UNTRUSTED,
+        detail: '.github/workflows must be a real directory containing only regular YAML workflow files',
+      });
+    }
+  }
   for (const entry of entries) for (const candidate of entry.evidencePaths) {
     if (!isRelativeEvidencePath(candidate)) { failures.push({ capabilityId: entry.id, path: candidate, code: CLOSURE_EVIDENCE_UNTRUSTED, detail: 'path must be relative without dot-dot segments' }); continue; }
     let stats;

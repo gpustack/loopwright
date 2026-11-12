@@ -74,7 +74,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
     const roles: PlannedRole[] = [], neededCredentials = new Set<string>();
     for (const role of task.spec.roles) {
       const selected = config.spec.profiles.roles.find(item => item.roleId === role.id), profile = registry.roleProfiles.find(item => item.id === selected?.profileRef);
-      if (!profile || role.adapter !== 'pi' || !same(profile.selection, { provider: role.provider, model: role.model, thinking: role.thinking, api: 'anthropic-messages' }) || role.tools.some(tool => !profile.tools.includes(tool))) refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
+      if (!profile || role.adapter !== 'pi' || profile.selection.provider !== role.provider || profile.selection.model !== role.model || profile.selection.thinking !== role.thinking || role.tools.some(tool => !profile.tools.includes(tool))) refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
       const runtime = registry.runtimeProfiles.find(item => item.id === profile.runtimeRef);
       if (!runtime || runtime.identity.sdkIntegrity !== files.sdkIntegrity || !same(runtime.identity.graphDigest, graphDigest) || !same(runtime.identity.configDigest, files.restrictionDigest)) refuse('CONFIG_REFERENCE', '/registry/spec/runtimeProfiles', 'compile');
       const active = orderedDAG.some(node => node.roleId === role.id);

@@ -128,17 +128,21 @@ for label, fn in [
     ("raw_connect", lambda: _socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((bytearray(b"192.0.2.1"), 80))),
     ("sendto_bytes", lambda: s.sendto(b"leak", (b"192.0.2.1", 80))),
     ("sendto_str", lambda: s.sendto(b"leak", ("192.0.2.1", 80))),
+    ("getfqdn_ext", lambda: socket.getfqdn("192.0.2.1")),
 ]:
     try:
         code = fn()
-        results.append(label + ":CONNECTED" if code is None or code == 0 else label + ":BLOCKED")
+        results.append(label + ":CONNECTED" if code is None or code == 0 or isinstance(code, str) else label + ":BLOCKED")
     except (PermissionError, OSError):
         results.append(label + ":BLOCKED")
+results.append("getfqdn_loopback:" + socket.getfqdn("127.0.0.1"))
 print(";".join(results))`;
     const outcome = await bridge().run(code, { timeoutMs: 10000 });
     assert.equal(outcome.exitCode, 0, outcome.stderr);
-    for (const part of outcome.stdout.trim().split(';')) {
-      assert.match(part, /(connect_ex|raw_connect|sendto_bytes|sendto_str|bytes_connect):BLOCKED/, `escape hatch not blocked: ${part}`);
+    const parts = outcome.stdout.trim().split(';');
+    assert.equal(parts.pop(), 'getfqdn_loopback:localhost');
+    for (const part of parts) {
+      assert.match(part, /(connect_ex|raw_connect|sendto_bytes|sendto_str|bytes_connect|getfqdn_ext):BLOCKED/, `escape hatch not blocked: ${part}`);
     }
   });
 

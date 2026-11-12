@@ -18,7 +18,23 @@ async function birth(pid: number): Promise<string | null> {
   try { const result = await exec('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 2000, maxBuffer: 1024, env: environment }); const value = result.stdout.trim(); if (!value || value.length > 128 || result.stderr) refuse('RECOVERY_REQUIRED'); return value; }
   catch (error) { const value = error as { code?: unknown; stdout?: unknown; stderr?: unknown }; if (value.code === 1 && value.stdout === '' && value.stderr === '') return null; throw error; }
 }
-async function boot(): Promise<string> { const result = await exec('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 2000, maxBuffer: 1024, env: environment }); if (!/^\{ sec = \d+, usec = \d+ \} [^\r\n]+\n$/.test(result.stdout) || result.stderr) refuse('RECOVERY_REQUIRED'); return result.stdout.trim(); }
+async function boot(): Promise<string> {
+  if (process.platform === 'linux' && (process.arch === 'arm64' || process.arch === 'x64')) {
+    let file: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      file = await open('/proc/sys/kernel/random/boot_id', constants.O_RDONLY | constants.O_NOFOLLOW);
+      const buffer = Buffer.alloc(64);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      const raw = buffer.subarray(0, bytesRead).toString('utf8');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n$/.test(raw)) refuse('RECOVERY_REQUIRED');
+      return raw.trim();
+    } catch { refuse('RECOVERY_REQUIRED'); }
+    finally { await file?.close(); }
+  }
+  const result = await exec('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 2000, maxBuffer: 1024, env: environment });
+  if (!/^\{ sec = \d+, usec = \d+ \} [^\r\n]+\n$/.test(result.stdout) || result.stderr) refuse('RECOVERY_REQUIRED');
+  return result.stdout.trim();
+}
 /** Lifetime exclusion is separate from S02 authority. Only verified owner death can begin orphan recovery. */
 export class ExecutionLease {
   #fd: Awaited<ReturnType<typeof open>> | null = null; #tail = Promise.resolve(); #released = false; #releasing: Promise<void> | null = null;

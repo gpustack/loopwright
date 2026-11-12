@@ -1,43 +1,81 @@
 {{ define "main" }}
-  <p class="section-label">Loopwright</p>
-  <h1>Bounded, verified repository work</h1>
-  {{ .Content }}
-  <p><a href="#getting-started">Get started</a> · <a href="{{ "docs/getting-started/architecture/" | relLangURL }}">Read the architecture</a></p>
+  <section class="hero-banner">
+    <div class="hero-banner-inner">
+      <div class="hero-brand">
+        {{ $logo := resources.Get "images/logo.png" }}
+        {{ $heroLogo := $logo.Resize "224x224 png" | fingerprint }}
+        <div class="hero-emblem-wrap">
+          <img class="hero-emblem" src="{{ $heroLogo.RelPermalink }}" alt="Loopwright circular celestial artisan emblem" width="112" height="112">
+        </div>
+      </div>
+      <div class="hero-content">
+        <span class="hero-badge">Loopwright Control Plane</span>
+        <h1 class="hero-title">Bounded, verified work</h1>
+        <p class="hero-subtitle">
+          Run simple single-file repository taskpacks or fine-grained operator-pinned controller pipelines inside native OS sandboxes with lease-fenced state and independent gate receipts.
+        </p>
+        <div class="hero-actions">
+          <a class="btn-primary" href="{{ "docs/getting-started/installation/" | relLangURL }}">Get Started</a>
+          <a class="btn-secondary" href="{{ "docs/walkthroughs/declarative-taskpack/" | relLangURL }}">Declarative Taskpack</a>
+          <a class="btn-secondary" href="{{ "docs/walkthroughs/managed-controller/" | relLangURL }}">Managed Controller</a>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <h2 id="architecture">Architecture</h2>
-  {{ with resources.Get "images/architecture-flow.svg" }}<img src="{{ .RelPermalink }}" alt="Loopwright architecture flow from intake to closure" width="1272" height="560" style="width: 100%; height: auto; display: block; margin: 1.25rem 0;">{{ end }}
-  <ol>
-    <li><strong>Intake:</strong> Validate scope, author TaskContract, and compile trusted configuration.</li>
+  {{ with resources.Get "images/architecture-flow.svg" }}<img src="{{ .RelPermalink }}" alt="Loopwright architecture flow from intake to closure" width="1200" height="880" style="width: 100%; height: auto; display: block; margin: 1.25rem 0;">{{ end }}
+  <ol class="architecture-steps">
+    <li><strong>Intake:</strong> Validate scope, author or compile TaskContract, and lock trusted configuration.</li>
     <li><strong>State:</strong> Reserve authority in the fenced SQLite StateStore before physical dispatch.</li>
     <li><strong>Execute:</strong> Run isolated Pi adapter with optional System-One decision advisory.</li>
     <li><strong>Verify &amp; Gate:</strong> Bind independent check evidence to candidate digests and enforce authenticated gates.</li>
     <li><strong>Publish &amp; Compact:</strong> Reconcile external effect receipts and compact reviewed memory into CAS stores.</li>
   </ol>
 
-  <h2 id="modules">Modules</h2>
-  <div class="directory">
-    <div><a href="{{ "docs/contracts/" | relLangURL }}">Task Contracts</a><p>Bounded task contracts, schemas, and evidence structures.</p></div>
-    <div><a href="{{ "docs/state/" | relLangURL }}">Persistent State Store</a><p>Fenced SQLite state store with monotonic clock fencing.</p></div>
-    <div><a href="{{ "docs/pi-adapter/" | relLangURL }}">Isolated Pi Adapter</a><p>Isolated runtime adapter and containerized tool containment.</p></div>
-    <div><a href="{{ "docs/controller/" | relLangURL }}">Bounded Controller</a><p>Execution controller, repair loop, and supervisor dispatch.</p></div>
-    <div><a href="{{ "docs/runner-taskpack/" | relLangURL }}">Runner Taskpack</a><p>Declarative taskpack intake and offline runner parity.</p></div>
-    <div><a href="{{ "docs/memory/" | relLangURL }}">Reviewed Memory</a><p>Reviewed memory compaction and content-addressable storage.</p></div>
-    <div><a href="{{ "docs/decisions/" | relLangURL }}">Decision Routing</a><p>Calibrated System-One advisory routing and candidate selection.</p></div>
-    <div><a href="{{ "docs/github-app/" | relLangURL }}">GitHub App Control Plane</a><p>Webhook receiver, intake gates, and Action workflows.</p></div>
-    <div><a href="{{ "docs/closure-matrix/" | relLangURL }}">Closure Matrix</a><p>Capability closure ledger, failure semantics, and verification audit.</p></div>
+  <h2 id="sections">Documentation Sections</h2>
+  <div class="pillars-grid">
+    <div class="pillar-card">
+      <h3><a href="{{ "docs/getting-started/architecture/" | relLangURL }}">Getting Started</a></h3>
+      <p>Architecture foundations, two operating modes, runtime baseline, and installation.</p>
+      <ul>
+        <li><a href="{{ "docs/getting-started/architecture/" | relLangURL }}">Architecture</a></li>
+        <li><a href="{{ "docs/getting-started/installation/" | relLangURL }}">Installation</a></li>
+      </ul>
+    </div>
+    <div class="pillar-card">
+      <h3><a href="{{ "docs/operations/github-action/" | relLangURL }}">Operations</a></h3>
+      <p>Operate Loopwright across GitHub Actions, GitHub Apps, and local CLI environments.</p>
+      <ul>
+        <li><a href="{{ "docs/operations/github-action/" | relLangURL }}">GitHub Action</a></li>
+        <li><a href="{{ "docs/operations/github-app/" | relLangURL }}">GitHub App</a></li>
+        <li><a href="{{ "docs/operations/cli/" | relLangURL }}">CLI</a></li>
+      </ul>
+    </div>
+    <div class="pillar-card">
+      <h3><a href="{{ "docs/walkthroughs/declarative-taskpack/" | relLangURL }}">Walkthroughs</a></h3>
+      <p>Choose between zero-boilerplate repository taskpacks and fine-grained controller governance.</p>
+      <ul>
+        <li><a href="{{ "docs/walkthroughs/declarative-taskpack/" | relLangURL }}">Declarative Taskpack</a></li>
+        <li><a href="{{ "docs/walkthroughs/managed-controller/" | relLangURL }}">Managed Controller</a></li>
+      </ul>
+    </div>
+    <div class="pillar-card">
+      <h3><a href="{{ "docs/configuration/taskpack/" | relLangURL }}">Configuration</a></h3>
+      <p>Complete Pretty YAML schemas and field dictionaries for both operating modes.</p>
+      <ul>
+        <li><a href="{{ "docs/configuration/taskpack/" | relLangURL }}">Taskpack</a></li>
+        <li><a href="{{ "docs/configuration/task-contract/" | relLangURL }}">Task Contract</a></li>
+        <li><a href="{{ "docs/configuration/controller-and-registry/" | relLangURL }}">Controller and Registry</a></li>
+        <li><a href="{{ "docs/configuration/sandbox-backends/" | relLangURL }}">Sandbox Backends</a></li>
+        <li><a href="{{ "docs/configuration/decision-routing/" | relLangURL }}">Decision Routing</a></li>
+      </ul>
+    </div>
   </div>
 
-  <h2 id="getting-started">Getting Started</h2>
-  <p>Run Loopwright locally via the CLI, reusable GitHub Action, or GitHub App control plane.</p>
-  {{ $cliCmd := `loopwright closure --verify-failures` }}
-  {{ partial "code-block.html" (dict "lang" "bash" "content" (highlight $cliCmd "bash" "")) }}
-  <p>See <a href="{{ "docs/operate/cli/" | relLangURL }}">CLI operations</a>, <a href="{{ "docs/operate/github-action/" | relLangURL }}">GitHub Action configuration</a>, and <a href="{{ "docs/operate/github-app/" | relLangURL }}">GitHub App deployment</a>.</p>
-
-  <h2 id="operations">Operations &amp; Walkthroughs</h2>
-  <div class="directory">
-    <div><a href="{{ "docs/walkthroughs/declarative-taskpack/" | relLangURL }}">Declarative Taskpack</a><p>Author and run a declarative repository taskpack.</p></div>
-    <div><a href="{{ "docs/operate/github-action/" | relLangURL }}">GitHub Action</a><p>Configure reusable Action steps with verified gate evidence.</p></div>
-    <div><a href="{{ "docs/operate/github-app/" | relLangURL }}">GitHub App</a><p>Deploy the control plane webhook server and intake gate.</p></div>
-    <div><a href="{{ "docs/development/" | relLangURL }}">Development</a><p>Build, test, and qualify packages across the monorepo.</p></div>
-  </div>
+  <h2 id="getting-started">Bootstrap or Migrate with One Prompt</h2>
+  <p>Paste this prompt into any coding agent inside your repository to initialize <code>.loopwright/taskpack.yaml</code> or migrate an existing automatic synchronized workflow interactively via <a href="{{ "llms.txt" | relLangURL }}"><code>llms.txt</code></a>:</p>
+  {{ $promptText := "Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Declarative Taskpack, Taskpack, and GitHub Action. Inspect this repository (including existing automatic synchronized workflows, scripts, version tables, and directory layout), confirm my upstream sources, writable/protected scope, verification checks, and PR settings with me, then generate .loopwright/taskpack.yaml and .github/workflows/loopwright.yml (apiVersion: loopwright.dev/v1alpha1) without hardcoding secrets." }}
+  {{ partial "code-block.html" (dict "lang" "text" "content" (highlight $promptText "text" "")) }}
+  <p>Or install the laptop CLI globally: <code>npm install -g --ignore-scripts @gpustack/loopwright</code> — see <a href="{{ "docs/getting-started/installation/" | relLangURL }}">Installation</a> and <a href="{{ "docs/walkthroughs/managed-controller/" | relLangURL }}">Managed Controller</a>.</p>
 {{ end }}

@@ -1,4 +1,5 @@
-export { DecisionError, DEFAULT_DECISION_POLICY, DECISION_ENDPOINT, DECISION_PROVIDER_DEFAULTS, DECISION_PROVIDER_API_KEY_ENV,
+export { DecisionError, DEFAULT_DECISION_POLICY, DECISION_ENDPOINT, DECISION_POLICY_DOCUMENT_API_VERSION,
+  DECISION_POLICY_MAX_BYTES, DECISION_PROVIDER_DEFAULTS, DECISION_PROVIDER_API_KEY_ENV,
   DECISION_MAX_QUESTIONS, DECISION_MAX_OPTIONS, DECISION_MIN_CRITERIA, DECISION_MAX_CRITERIA, DECISION_MAX_STATE_DEPTH,
   DECISION_MAX_STATE_BYTES, DECISION_MAX_PUBLIC_METADATA_CHARS, DECISION_INPUT_COST_PER_MTOK_USD,
   DECISION_OUTPUT_COST_PER_MTOK_USD, DECISION_MAX_IMAGE_BASE64_CHARS, DECISION_MAX_IMAGES, DECISION_IMAGE_MEDIA_TYPES,
@@ -18,7 +19,10 @@ export type {
   DecisionBenchmarkFixture, DecisionBenchmarkCase, DecisionBenchmarkArmSummary, DecisionBenchmarkReport,
   DecisionClientOptions, DecisionSdkRequest, DecisionSdkAdapter,
 } from './types.js';
-export { isPlainObject, validateDecisionPolicy, validateDecisionQuestions } from './schema.js';
+export {
+  isPlainObject, loadDecisionPolicyFile, parseDecisionPolicyDocument,
+  validateDecisionPolicy, validateDecisionQuestions,
+} from './schema.js';
 export { sanitizeDecisionState, validateDecisionImages } from './redaction.js';
 export type { DecisionScrubber } from './redaction.js';
 export { classifyConfidenceZone, classifyQuestionOutcome, formatProviderRequest, parseAndValidateProviderResponse, providerRequestHeaders } from './primitives.js';

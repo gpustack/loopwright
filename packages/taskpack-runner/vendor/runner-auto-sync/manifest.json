@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "sourceRepository": "gpustack/runner",
+  "sourceRepository": "example-org/runtime-runner",
   "sourceRevision": "9b422c8bdbd31414ada7df8c4b55070b04957f44",
   "files": [
     {
       "path": "README.md",
-      "sha256": "fdd5ff82ed16356afa4dfd06dc74d88e5fa22e3ba3f63182a66c47d2ffe83538",
-      "bytes": 4526,
+      "sha256": "121183262b863ae23cabbd17814ac3e3bd70f1f8dae436b15dd2056a0b2a2401",
+      "bytes": 4571,
       "executable": false
     },
     {
@@ -19,12 +19,6 @@
       "path": "docs/supported-runners.md",
       "sha256": "e8eacd288f9414ef9dc1441ae826603d983fd74be96c791bd04e64ff52dda3ef",
       "bytes": 10442,
-      "executable": false
-    },
-    {
-      "path": "gpustack_runner/runner.py.json",
-      "sha256": "7e00351645e604251e2f2e3ec70def0493ad039fe8ba7bd51964e18f08cbed1b",
-      "bytes": 147821,
       "executable": false
     },
     {
@@ -47,8 +41,14 @@
     },
     {
       "path": "pyproject.toml",
-      "sha256": "da98e00796d68a872711146a2c07f65268fe02ea622001004ee13e960d79614f",
-      "bytes": 1273,
+      "sha256": "301fc4a132027bb9a2588d3fbef52be03cc1649de60fe0f136175dedc5437fd2",
+      "bytes": 1280,
+      "executable": false
+    },
+    {
+      "path": "runtime_runner/runner.py.json",
+      "sha256": "58e411895c0d6e5bc52a0361275b8b8ea9bd1aac2928cf0bb1f71f5145507019",
+      "bytes": 152232,
       "executable": false
     },
     {
@@ -65,14 +65,14 @@
     },
     {
       "path": "tests/auto_sync/fixtures/proposals/analysis.json",
-      "sha256": "744dbbc42a4e322566aadff85a2212ce3d521e9ccb571f698c7bee2a2106f2df",
-      "bytes": 3605,
+      "sha256": "5e666afc76d70b8d263d8392b4d8da54f0ea86dc6a9f12bcf2febea1f1b2258e",
+      "bytes": 3616,
       "executable": false
     },
     {
       "path": "tests/auto_sync/fixtures/proposals/ready.json",
-      "sha256": "3001244f1d14858aedd8f07a38a8fbb7587d1c6cdb76245e74587659e7c3ac29",
-      "bytes": 4107,
+      "sha256": "2da310915c7f542133b818ba6860e9210abf3780aaa59c9c0d4225c2da3d52fb",
+      "bytes": 4118,
       "executable": false
     },
     {
@@ -83,20 +83,20 @@
     },
     {
       "path": "tests/auto_sync/test_check_draft.py",
-      "sha256": "85e8a2c189d1fcd64ecc5b49032a3c9d1e5bc776a66d53d5c3b471f1773c1220",
-      "bytes": 9743,
+      "sha256": "50c9ae36933b0f3be71868b6a565c4469df8a45a45afec40af69dd621e2404a1",
+      "bytes": 9754,
       "executable": false
     },
     {
       "path": "tests/auto_sync/test_checks.py",
-      "sha256": "713a75f68a80aa2c0a288cbb554a05d83d5924a0859e243f045db70b269dbd29",
-      "bytes": 39742,
+      "sha256": "307a3d378f1dbc4c8f25952b12f6edf816d297e3b74ea8719f0f69c0b59c2714",
+      "bytes": 39748,
       "executable": false
     },
     {
       "path": "tests/auto_sync/test_discovery.py",
-      "sha256": "2d34e35d0d55f60a3bae6c802d8486461bc06651687757c51fdb08a957526c01",
-      "bytes": 27680,
+      "sha256": "52fc97adbcae48aa527c08ba36d2edcac2b8c6d85a55efb665aa577656f19600",
+      "bytes": 27699,
       "executable": false
     },
     {
@@ -107,14 +107,14 @@
     },
     {
       "path": "tests/auto_sync/test_publish.py",
-      "sha256": "bb54a5764b9741c7662f04208fc72891ae8e4a9d2b0fb4cf7aa295dc05a726c8",
-      "bytes": 38413,
+      "sha256": "e3b946010a1b68eafe961c9dabdd41a9d94ab6cadde766aa0e7367c3b0741e3a",
+      "bytes": 38424,
       "executable": false
     },
     {
       "path": "tests/auto_sync/test_summary.py",
-      "sha256": "206cbe2be4a5e401b3973311cadcd277f6114a948f76c3e8ee14a3de0671f9bb",
-      "bytes": 3453,
+      "sha256": "e12281f253374b5be4d86f76afc8173b8314188b403d59a9197b4fd31ac05628",
+      "bytes": 3475,
       "executable": false
     },
     {
@@ -143,8 +143,8 @@
     },
     {
       "path": "tools/auto_sync/discovery.py",
-      "sha256": "f3b4ccafa4cae132543d3e2c8b183b04e937b45481e23b00b1887ecd445542b7",
-      "bytes": 27981,
+      "sha256": "14f7bb9ff09fd1efa72f1a6da56594b1f965457e057677f5c3024f07fd940bec",
+      "bytes": 27980,
       "executable": false
     },
     {

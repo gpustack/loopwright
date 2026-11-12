@@ -3,8 +3,8 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gpustack-runner"
-description = "GPUStack Runner is library for registering runnable accelerated backends and services in GPUStack."
+name = "runtime-runner"
+description = "Runtime Runner is library for registering runnable accelerated backends and services in GPUStack."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "GPUStack Authors", email = "contact@gpustack.ai"}]
@@ -26,10 +26,10 @@ dependencies = [
 dynamic = ["version"]
 
 [project.scripts]
-gpustack-runner = "gpustack_runner.__main__:main"
+runtime-runner = "runtime_runner.__main__:main"
 
 [project.urls]
-"Homepage" = "https://github.com/gpustack/runner"
+"Homepage" = "https://github.com/example-org/runtime-runner"
 "Bug Tracker" = "https://github.com/gpustack/gpustack/issues"
 
 [dependency-groups]

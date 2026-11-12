@@ -45,7 +45,7 @@ function selectorInput(store: MemoryStoreIndex, overrides: Record<string, unknow
   return { store, contract, nowMs: 1500, currentCodeFingerprint: hex('fingerprint'), currentUpstreamVersions: { npm: '1.0.0' }, targetCell: null, ...overrides };
 }
 const contract = {
-  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'contract.demo' },
+  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
   spec: {
     goal: 'demo goal', taskpack: 'demo',
     target: { repository: 'org/repo', baseRevision: 'b'.repeat(40), sourceRevision: 'c'.repeat(40), matrix: null },

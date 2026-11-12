@@ -5,8 +5,8 @@ Type: Feature
 
 ## Summary
 
-Add a private `@loopwright/taskpack-runner` workspace package that wraps the frozen GPUStack Runner Auto Sync domain
-validators and publisher (`gpustack/runner` commit `9b422c8bdbd31414ada7df8c4b55070b04957f44`) behind Loopwright's
+Add a private `@loopwright/taskpack-runner` workspace package that wraps the frozen Runtime Runner Auto Sync domain
+validators and publisher (`example-org/runtime-runner` commit `9b422c8bdbd31414ada7df8c4b55070b04957f44`) behind Loopwright's
 trusted configuration, authenticated `gate.v1` verification protocol, and controlled `pull_request` publication
 boundary. Verify deterministic offline parity between legacy Runner entrypoints and Loopwright cycles across discovery,
 maintainer `/auto-sync` comment revision, `pack-run-url` failure diagnosis, candidate patch and compatibility-group
@@ -28,8 +28,8 @@ external gates, controlled `pull_request` publication, and explicit operator rec
 [`packages/controller/src/publication.ts`](../packages/controller/src/publication.ts),
 [`packages/controller/src/reconcile.ts`](../packages/controller/src/reconcile.ts)).
 
-The first production workload targeted by Loopwright is GPUStack Runner Auto Sync
-(`https://github.com/gpustack/runner/tree/9b422c8bdbd31414ada7df8c4b55070b04957f44`). Runner Auto Sync already
+The first production workload targeted by Loopwright is Runtime Runner Auto Sync
+(`https://github.com/example-org/runtime-runner/tree/9b422c8bdbd31414ada7df8c4b55070b04957f44`). Runner Auto Sync already
 separates untrusted research from credential-free candidate validation and pre-publication revalidation:
 
 1. `tools/auto_sync/discovery.py` evaluates fixed upstream release lists (`vllm-project/vllm`, `sgl-project/sglang`) and
@@ -118,9 +118,9 @@ accepted-group set is verified and any behavioral difference is explicitly accou
 
 #### 1. Hash-Pinned Frozen Runner Corpus and Contained Python Bridge (`corpus.ts`, `python-bridge.ts`)
 
-- `packages/taskpack-runner/vendor/runner-auto-sync/` contains the exact frozen files from `gpustack/runner` commit
+- `packages/taskpack-runner/vendor/runner-auto-sync/` contains the exact frozen files from `example-org/runtime-runner` commit
   `9b422c8bdbd31414ada7df8c4b55070b04957f44` together with a committed `manifest.json` recording `sourceRepository`
-  (`gpustack/runner`), `sourceRevision` (`9b422c8bdbd31414ada7df8c4b55070b04957f44`), and `{ path, sha256, bytes, executable }`
+  (`example-org/runtime-runner`), `sourceRevision` (`9b422c8bdbd31414ada7df8c4b55070b04957f44`), and `{ path, sha256, bytes, executable }`
   for every vendored file:
   - Domain modules: `tools/auto_sync/{discovery,proposal,assemble,check_draft,checks,publish,summary,agent,model,progress}.py`,
     `tool-versions.json`, and `prompts/{analysis,proposal,repair}.md`. (The frozen upstream revision has no
@@ -130,7 +130,7 @@ accepted-group set is verified and any behavioral difference is explicitly accou
     module closure importable.)
   - Dockerfile/matrix helpers required by `checks.py`: `pack/resolve_dockerfile.sh` (`0o755`), `pack/expand_matrix.sh`
     (`0o755`), `pack/matrix.yaml`, `docs/supported-runners.md`, `docs/support-records.md`,
-    `gpustack_runner/runner.py.json`, and `pyproject.toml`.
+    `runtime_runner/runner.py.json`, and `pyproject.toml`.
   - Offline parity fixtures and frozen unit tests: `tests/auto_sync/fixtures/discovery/legacy-support.md`,
     `tests/auto_sync/fixtures/proposals/{analysis,ready}.json`, `tests/auto_sync/fixtures/github/service.py`, and
     `tests/auto_sync/test_{discovery,proposal,assemble,check_draft,checks,publish,summary}.py`.
@@ -186,7 +186,7 @@ accepted-group set is verified and any behavioral difference is explicitly accou
   `loadTrustedConfiguration` and `compilePlan` in `@loopwright/controller`:
   - **Scope & Protected Paths**:
     - `task.spec.scope.writable` permits only Runner's allowed candidate paths (`pack`, `docs/supported-runners.md`,
-      `docs/support-records.md`, `gpustack_runner/runner.py.json`, and `.autosync/proposal.json`).
+      `docs/support-records.md`, `runtime_runner/runner.py.json`, and `.autosync/proposal.json`).
     - `task.spec.scope.protected` protects `.github`, `tools/auto_sync`, `tests`, `.agents`, `.claude`, `AGENTS.md`, and
       `CLAUDE.md`.
   - **DAG & Acceptance Mapping**:
@@ -370,7 +370,7 @@ packages/
         tools/auto_sync/        # Frozen discovery, proposal, assemble, check_draft, checks, publish, summary, prompts
         pack/                   # Frozen resolve_dockerfile.sh, expand_matrix.sh, matrix.yaml
         docs/                   # Frozen supported-runners.md, support-records.md
-        gpustack_runner/        # Frozen runner.py.json metadata
+        runtime_runner/        # Frozen runner.py.json metadata
         tests/auto_sync/        # Frozen fixtures and reference unit tests
     src/
       corpus.ts                 # Frozen manifest & file-mode verifier

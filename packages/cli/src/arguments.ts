@@ -1,5 +1,5 @@
 export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
-export interface Arguments { readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure'; readonly values: ReadonlyMap<string, string>; readonly flags: ReadonlySet<string> }
+export interface Arguments { readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve'; readonly values: ReadonlyMap<string, string>; readonly flags: ReadonlySet<string> }
 const commands = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'] },
@@ -9,6 +9,7 @@ const commands = {
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
   inspect: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id', 'output'], flags: ['json'] },
   closure: { required: [], values: ['repo', 'output'], flags: ['json', 'verify-failures'] },
+  'app-serve': { required: ['config'], values: ['config', 'repo'], flags: ['json'] },
 };
 export function parseArguments(argv: readonly string[]): Arguments {
   if (argv.length > 32 || argv.some(arg => arg.length > 4096 || /[\0\r\n]/.test(arg))) throw new UsageError();

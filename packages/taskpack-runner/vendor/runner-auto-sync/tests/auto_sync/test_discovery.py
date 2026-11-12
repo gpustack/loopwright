@@ -75,7 +75,7 @@ def catalog_row(**changes):
         "service": "vllm",
         "service_version": "0.29.0",
         "platform": "linux/amd64",
-        "docker_image": "gpustack/runner:example",
+        "docker_image": "example-org/runtime-runner:example",
         **changes,
     }
 
@@ -125,8 +125,8 @@ def default_matrix(*, retired=()):
 
 
 def repository(tmp_path, *, rows="", catalog=None, matrix=None):
-    (tmp_path / "gpustack_runner").mkdir()
-    (tmp_path / "gpustack_runner/runner.py.json").write_text(json.dumps(catalog or []))
+    (tmp_path / "runtime_runner").mkdir()
+    (tmp_path / "runtime_runner/runner.py.json").write_text(json.dumps(catalog or []))
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs/support-records.md").write_text(HEADER.format(rows=rows))
     (tmp_path / "docs/supported-runners.md").write_text(HISTORY)
@@ -445,7 +445,7 @@ def test_raw_mentions_other_engine_backend_do_not_match(tmp_path, upstream, pair
 )
 def test_failed_source_never_reports_unchanged(tmp_path, upstream, pairs, broken):
     repo = repository(tmp_path, rows=support_row(), catalog=[catalog_row()])
-    catalog = repo / "gpustack_runner/runner.py.json"
+    catalog = repo / "runtime_runner/runner.py.json"
     records = repo / "docs/support-records.md"
     history = repo / "docs/supported-runners.md"
     matrix = repo / "pack/matrix.yaml"
@@ -625,7 +625,7 @@ def test_catalog_can_resolve_unknown_historical_plugin(tmp_path, upstream, pairs
 def cann_promote_job():
     return {
         "platform_tag": "cann9.1-910b-vllm0.27.1-linux-amd64",
-        "tag": "gpustack/runner:cann9.1-910b-vllm0.27.1-linux-amd64",
+        "tag": "example-org/runtime-runner:cann9.1-910b-vllm0.27.1-linux-amd64",
         "backend": "cann",
         "backend_version": "9.1",
         "service": "vllm",

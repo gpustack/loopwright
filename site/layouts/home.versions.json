@@ -1,0 +1,4 @@
+{{- $ver := .Site.Params.version -}}
+{{- $kind := .Site.Params.releaseKind -}}
+{{- $aliases := cond (eq $kind "stable") (slice "latest") (slice) -}}
+{{- slice (dict "version" $ver "title" $ver "aliases" $aliases) | jsonify -}}

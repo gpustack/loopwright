@@ -34,11 +34,10 @@ function publicationBlock(raw: unknown): PublicationConfig {
   return { mode: 'pull_request', endpointRef: value.endpointRef as string, targetBranch: value.targetBranch as string, headBranchPrefix: value.headBranchPrefix as string, titleTemplate: value.titleTemplate as string };
 }
 function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<string, unknown> } {
-  const top = record(raw, ['apiVersion', 'kind', 'metadata', 'spec']);
+  const top = record(raw, ['apiVersion', 'kind', 'spec']);
   if (top.apiVersion !== CONTROLLER_API_VERSION || top.kind !== 'ControllerConfig') refuse('CONFIG_SCHEMA');
-  id(record(top.metadata, ['id'], '/metadata').id, '/metadata/id');
   const spec = record(top.spec, ['task', 'registry', 'profiles', 'credentials', 'controls', ...(Object.hasOwn(top.spec as object, 'publication') ? ['publication' as const] : [])], '/spec');
-  const binding = record(spec.registry, ['id', 'digest'], '/spec/registry'); id(binding.id); digestValue(binding.digest);
+  const binding = record(spec.registry, ['name', 'digest'], '/spec/registry'); id(binding.name, '/spec/registry/name'); digestValue(binding.digest);
   const profiles = record(spec.profiles, ['roles', 'steps'], '/spec/profiles');
   for (const [kind, identity, reference] of [['roles', 'roleId', 'profileRef'], ['steps', 'stepId', 'handlerRef']] as const) {
     const selected = list(profiles[kind], '/spec/profiles/' + kind, 16).map((item, i) => { const fields = record(item, [identity, reference], '/spec/profiles/' + kind + '/' + i); id(fields[identity]); id(fields[reference]); return fields[identity]; });
@@ -65,7 +64,7 @@ export function loadConfiguration(unowned: LoadConfigurationInput, ports: Config
     const registry = validateRegistry(parseDocumentBytes(registryBytes, format(registryPath)));
     const source = await readBoundedFile(configPath, DOCUMENT_BYTES, false), raw = parseDocumentBytes(source, format(configPath));
     const shape = authoring(raw), registryBinding = shape.spec.registry;
-    if (!same(registryBinding, { id: registry.metadata.id, digest: registryDigest })) refuse('CONFIG_REFERENCE', '/spec/registry');
+    if (!same(registryBinding, { name: registry.metadata.name, digest: registryDigest })) refuse('CONFIG_REFERENCE', '/spec/registry');
     const declarations = credentialDeclarations(shape.spec.credentials, registry);
     const environment = new Map<string, string | undefined>();
     const expanded = interpolate(raw, registry, name => { if (!environment.has(name)) environment.set(name, ports.environment(name)); return environment.get(name); });

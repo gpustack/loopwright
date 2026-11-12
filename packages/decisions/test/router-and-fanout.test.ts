@@ -21,7 +21,7 @@ interface RouterRequestBase {
 }
 
 function base(overrides: Partial<RouterRequestBase> = {}): RouterRequestBase {
-  return { policy: policy(), state: { taskId: 'task.one' }, budget: new DecisionBudgetTracker(), ...overrides };
+  return { policy: policy(), state: { taskId: 'task.one' }, budget: new DecisionBudgetTracker(), apiKey: 'fixture-decision-key', ...overrides };
 }
 
 function policy(overrides: Partial<Record<string, unknown>> = {}): DecisionPolicyConfig {

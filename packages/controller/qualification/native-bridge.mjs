@@ -28,8 +28,8 @@ export function prepareBridgeLeaf(input) {
     if(!/^[a-z0-9._-]{1,128}$/.test(item.runId)||runs.has(item.runId)||typeof item.static!=='boolean'||!item.revision||[item.repository,item.runRoot].some(value=>typeof value!=='string'||!value.startsWith('/')))fail('QUALIFICATION_RECIPE_CASE');
     runs.add(item.runId);
     const config=JSON.parse(checkedRef(item.config)),registry=JSON.parse(checkedRef(item.registry)),script=JSON.parse(checkedRef(item.script));checkedRef(item.initial);
-    if(config.spec.task.metadata.id!=='native-'+item.id||config.spec.task.spec.target.sourceRevision!==item.revision||config.spec.task.spec.target.baseRevision!==item.revision
-      ||config.spec.registry.digest.hex!==item.registry.sha256||config.spec.registry.id!==registry.metadata.id||!Array.isArray(script)||script.length<1||script.length>16)fail('QUALIFICATION_RECIPE_BINDING');
+    if(config.spec.task.spec.taskpack!=='native-'+item.id||config.spec.task.spec.target.sourceRevision!==item.revision||config.spec.task.spec.target.baseRevision!==item.revision
+      ||config.spec.registry.digest.hex!==item.registry.sha256||config.spec.registry.name!==registry.metadata.name||!Array.isArray(script)||script.length<1||script.length>16)fail('QUALIFICATION_RECIPE_BINDING');
     if(input.mode==='native'&&item.static)fail('QUALIFICATION_STATIC_NATIVE');
     const responses=JSON.parse(checkedRef(item.sse));if(!Array.isArray(responses)||responses.length!==script.length)fail('QUALIFICATION_RECIPE_SSE');
     for(let index=0;index<script.length;index++)if(sha(checkedRef(responses[index]))!==sha(fixtureReply(script[index],index+1)))fail('QUALIFICATION_RECIPE_SSE');

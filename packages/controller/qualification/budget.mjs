@@ -1,5 +1,5 @@
 /* global process */
-import { mkdirSync, writeFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, openSync, fsyncSync, closeSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { qualificationMaxima } from './schedule.mjs';
@@ -33,4 +33,5 @@ export function persist(path, value) {
   try { fsyncSync(parent); } finally { closeSync(parent); }
 }
 
-export const owner = { pid: process.pid, version: 1, birth: execFileSync('/bin/ps', ['-p', String(process.pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 2000 }).trim(), boot: execFileSync('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 2000 }).trim() };
+const hostBoot = () => process.platform === 'linux' ? readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim() : execFileSync('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 2000 }).trim();
+export const owner = { pid: process.pid, version: 1, birth: execFileSync('/bin/ps', ['-p', String(process.pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 2000 }).trim(), boot: hostBoot() };

@@ -280,7 +280,7 @@ def _catalog_records(value):
 
 def _read_sources(repo):
     catalog = _catalog_records(
-        json.loads((repo / "gpustack_runner/runner.py.json").read_text()),
+        json.loads((repo / "runtime_runner/runner.py.json").read_text()),
     )
     records, history = (
         repo / "docs/support-records.md",

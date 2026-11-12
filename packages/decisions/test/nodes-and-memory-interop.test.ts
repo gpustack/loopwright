@@ -34,7 +34,7 @@ function transportFor(payload: () => Record<string, unknown>): import('../src/ty
 }
 
 function base(overrides: Partial<DecisionRequestBase> = {}): DecisionRequestBase {
-  return { policy: policy(), state: {}, budget: new DecisionBudgetTracker(), ...overrides };
+  return { policy: policy(), state: {}, budget: new DecisionBudgetTracker(), apiKey: 'fixture-decision-key', ...overrides };
 }
 
 describe('assertDecisionAuthorityBoundary', () => {

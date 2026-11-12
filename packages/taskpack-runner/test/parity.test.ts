@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { defaultCorpusRoot, verifyFrozenCorpus } from '../src/corpus.js';
@@ -15,23 +15,32 @@ import type { RunnerParityScenario } from '../src/parity.js';
 
 const run = promisify(execFile);
 
-describe('parity harness: legacy-side execution over the vendored frozen functions', () => {
+describe('parity harness: legacy-side execution over the vendored frozen functions', { concurrency: 3 }, () => {
   const bridge = new PythonBridge();
   const roots: string[] = [];
+  let templateFixture: { path: string; headSha: string } | null = null;
+  let tmpReal = '';
+  before(async () => {
+    await bridge.preflight();
+    tmpReal = await realpath(tmpdir());
+    templateFixture = await buildParityFixtureRepository();
+    roots.push(templateFixture.path);
+  });
   after(async () => {
     await bridge.dispose();
-    for (const root of roots) await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    await Promise.all(roots.map(root => rm(root, { recursive: true, force: true }).catch(() => undefined)));
   });
 
   async function freshFixture(): Promise<{ repo: string; fake: string; headSha: string }> {
     const corpusRoot = defaultCorpusRoot();
-    if (corpusRoot === null) throw new Error('vendored corpus absent');
-    const fixture = await buildParityFixtureRepository();
-    const fakeParent = await mkdtemp(join(await realpath(tmpdir()), 'parity-fake-'));
-    const fake = join(fakeParent, 'repository');
-    roots.push(fixture.path, fakeParent);
-    await run('/usr/bin/git', ['clone', '-q', '--no-hardlinks', fixture.path, fake], { env: { HOME: fixture.path, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
-    return { repo: fixture.path, fake, headSha: fixture.headSha };
+    if (corpusRoot === null || templateFixture === null) throw new Error('vendored corpus absent');
+    const parent = await mkdtemp(join(tmpReal, 'parity-fake-'));
+    const repo = join(parent, 'source');
+    const fake = join(parent, 'repository');
+    roots.push(parent);
+    await cp(templateFixture.path, repo, { recursive: true });
+    await run('/usr/bin/git', ['clone', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-q', '--no-hardlinks', repo, fake], { env: { HOME: repo, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+    return { repo, fake, headSha: templateFixture.headSha };
   }
 
   async function legacy(scenario: RunnerParityScenario): Promise<Awaited<ReturnType<typeof runLegacyScenario>>> {

@@ -1,18 +1,18 @@
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles } from '@loopwright/agent-pi';
 import { validateDocument, type TaskContract } from '@loopwright/core';
 import { CONTROLLER_API_VERSION, installedHandlerDigests, type ControllerConfiguration, type TrustedRegistry } from '@loopwright/controller';
-import { normalizeRelativePath, parseTaskpackDocument, validateTaskpackManifest, type Json } from './schema.js';
-import { effectiveProtectedPaths } from './schema.js';
+import { effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument, validateTaskpackManifest, type Json } from './schema.js';
+import { loadPiModelsJson, resolveTaskpackModelSelection } from './models-config.js';
+import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
 import {
   AUTHORIZED_ASSOCIATIONS, GitHubAppError, TASKPACK_MANIFEST_BYTES,
   type CompiledTaskpack, type HostGateEndpointPlan, type HostTaskpackBindings, type ParsedCommentCommand,
-  type TaskpackCommentCommand, type TaskpackIntakeInput, type TaskpackIntakeOutcome, type TaskpackManifest,
-  type TaskpackRunDiagnostic,
+  type PiModelSelection, type TaskpackCommentCommand, type TaskpackIntakeInput, type TaskpackIntakeOutcome,
+  type TaskpackManifest, type TaskpackRunDiagnostic,
 } from './types.js';
 
 /** Default controller budgets for host bindings that do not pin their own (mirrors the runner research stage). */
@@ -75,31 +75,10 @@ export async function loadDeclarativeTaskpack(input: { manifestPath: string; rep
       manifestInvalid('manifest escapes the repository root', '/');
     }
   }
-  const before = await lstat(full).catch(() => null);
-  if (before === null || before.isSymbolicLink() || !before.isFile()) manifestInvalid('manifest must be a regular non-symlink file', '/');
-  if (before.size > TASKPACK_MANIFEST_BYTES) manifestInvalid(`manifest exceeds ${TASKPACK_MANIFEST_BYTES} bytes`, '/');
   const format = extname(full).toLowerCase();
   if (format !== '.yaml' && format !== '.yml' && format !== '.json') manifestInvalid('manifest extension must be .yaml, .yml, or .json', '/');
-  const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
-  const handle = await open(full, constants.O_RDONLY | noFollow).catch(() => null);
-  if (handle === null) manifestInvalid('manifest could not be opened', '/');
-  try {
-    const info = await handle.stat();
-    if (!info.isFile() || info.size !== before.size || info.size > TASKPACK_MANIFEST_BYTES) {
-      manifestInvalid('manifest changed size while loading or exceeds the byte limit', '/');
-    }
-    const bytes = Buffer.alloc(info.size + 1);
-    let size = 0;
-    while (size < bytes.length) {
-      const read = await handle.read(bytes, size, bytes.length - size, size);
-      if (!read.bytesRead) break;
-      size += read.bytesRead;
-    }
-    if (size !== info.size) manifestInvalid('manifest changed while loading', '/');
-    return validateTaskpackManifest(parseTaskpackDocument(bytes.subarray(0, size), format === '.json' ? 'json' : 'yaml'));
-  } finally {
-    await handle.close();
-  }
+  const bytes = await readBoundedRegularFile(full, TASKPACK_MANIFEST_BYTES, message => manifestInvalid(message, '/'));
+  return validateTaskpackManifest(parseTaskpackDocument(bytes, format === '.json' ? 'json' : 'yaml'));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,9 +119,11 @@ function requireEnvName(value: string | undefined, what: string): string {
 export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bindings: HostTaskpackBindings): Promise<CompiledTaskpack> {
   const mode = bindings.mode;
   const candidate = mode === 'candidate';
-  const resourceVersion = bindings.resourceVersion ?? `${manifest.metadata.id}-${manifest.metadata.version}`;
+  const resourceVersion = bindings.resourceVersion ?? `taskpack-${manifest.metadata.name}`;
   if (!REVISION_PATTERN.test(resourceVersion)) bindingInvalid('resourceVersion is not a valid revision identifier');
   if (bindings.budgets.wallTimeMs <= DRAIN_RESERVE_MS) bindingInvalid(`budget wallTimeMs must exceed the ${DRAIN_RESERVE_MS}ms drain reserve`);
+  const modelsConfig = bindings.modelsJsonPath === undefined ? undefined : await loadPiModelsJson(bindings.modelsJsonPath);
+  const { selection } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
   const providerEnv = requireEnvName(bindings.credentialEnvMap.provider, 'provider');
   const runtime = await runtimeIdentity();
   const installed = await installedHandlerDigests();
@@ -207,7 +188,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   if (candidate) {
     const required = activeChecks.filter((_, index) => index < manifest.spec.verification.localChecks.length || gates[index - manifest.spec.verification.localChecks.length]?.required === true).map(check => check.id);
     if (required.length === 0) bindingInvalid('candidate mode requires at least one required check');
-    return assemble({ manifest, bindings, mode: 'candidate', resourceVersion, authorPrompt, runtime, installed, providerEnv, gateEnv, publicationEnv, activeChecks, steps, required: [...required], authorStepId, gatePlans, publicationEndpoint });
+    return assemble({ manifest, bindings, selection, mode: 'candidate', resourceVersion, authorPrompt, runtime, installed, providerEnv, gateEnv, publicationEnv, activeChecks, steps, required: [...required], authorStepId, gatePlans, publicationEndpoint });
   }
   const noChangeCheck: ActiveCheck = {
     id: 'taskpack-no-change', implementation: 'no-change.v1',
@@ -218,7 +199,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     { id: noChangeCheck.id, kind: 'check' as const, uses: noChangeCheck.id, roleId: null, dependsOn: [authorStepId] },
   ];
   return assemble({
-    manifest, bindings, mode: 'no-change', resourceVersion, authorPrompt, runtime, installed, providerEnv,
+    manifest, bindings, selection, mode: 'no-change', resourceVersion, authorPrompt, runtime, installed, providerEnv,
     gateEnv: null, publicationEnv: null, activeChecks: [noChangeCheck], steps: noChangeSteps,
     required: [noChangeCheck.id], authorStepId, gatePlans: [], publicationEndpoint: undefined,
   });
@@ -227,6 +208,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
 interface AssembleInput {
   readonly manifest: TaskpackManifest;
   readonly bindings: HostTaskpackBindings;
+  readonly selection: PiModelSelection;
   readonly mode: 'candidate' | 'no-change';
   readonly resourceVersion: string;
   readonly authorPrompt: string;
@@ -244,10 +226,10 @@ interface AssembleInput {
 }
 
 function assemble(input: AssembleInput): CompiledTaskpack {
-  const { manifest, bindings, runtime, installed } = input;
+  const { manifest, bindings, selection, runtime, installed } = input;
   const candidate = input.mode === 'candidate';
   const digestOf = (bytes: Buffer) => ({ algorithm: 'sha256' as const, hex: createHash('sha256').update(bytes).digest('hex') });
-  const registryId = `taskpack-${manifest.metadata.id}`;
+  const registryName = `taskpack-${manifest.metadata.name}`;
   const gateEndpoints = input.gatePlans.map(plan => ({
     id: plan.id, url: plan.url, signingCredentialRef: plan.signingCredentialRef,
     authCredentialRef: plan.authCredentialRef ?? null,
@@ -261,7 +243,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     timeoutMs: input.publicationEndpoint.timeoutMs ?? 30_000,
   }];
   const credentialBindings: { id: string; consumer: 'provider' | 'gate' | 'publisher'; destinationRef: string; environmentNames: readonly string[]; template: string }[] = [
-    { id: 'taskpack-provider-token', consumer: 'provider', destinationRef: bindings.roleSelection.provider, environmentNames: [input.providerEnv], template: `\${${input.providerEnv}}` },
+    { id: 'taskpack-provider-token', consumer: 'provider', destinationRef: selection.provider, environmentNames: [input.providerEnv], template: `\${${input.providerEnv}}` },
   ];
   const gateBindingId = input.gateEnv === null ? null : [...new Set(input.gatePlans.map(plan => plan.signingCredentialRef))][0] ?? 'taskpack-gate-signing';
   if (input.gateEnv !== null && gateBindingId !== null) {
@@ -296,15 +278,12 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     },
   ];
   const registry: TrustedRegistry = {
-    apiVersion: CONTROLLER_API_VERSION, kind: 'TrustedRegistry', metadata: { id: registryId },
+    apiVersion: CONTROLLER_API_VERSION, kind: 'TrustedRegistry', metadata: { name: registryName },
     spec: {
       version: 1 as const, resourceVersion: input.resourceVersion, handlers,
       roleProfiles: [{
         id: 'taskpack-author-role',
-        selection: {
-          provider: bindings.roleSelection.provider, model: bindings.roleSelection.model,
-          thinking: bindings.roleSelection.thinking, api: 'anthropic-messages' as const,
-        },
+        selection,
         tools: ['read', 'write', 'edit', 'bash'],
         context: {
           mode: 'estimated_guard' as const, estimator: 'lw-pi-final-json-bytes-v1', proofId: null, version: 1,
@@ -328,19 +307,18 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       credentialBindings, environmentBindings, gateEndpoints, publicationEndpoints,
     },
   };
-  const registryBytes = Buffer.from(JSON.stringify(registry));
+  const registryBytes = Buffer.from(serializePrettyYaml(registry), 'utf8');
   const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
   const task = {
     apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'TaskContract' as const,
-    metadata: { id: manifest.metadata.id },
     spec: {
       goal: candidate ? manifest.spec.goal.candidate : manifest.spec.goal.noChange,
-      taskpack: manifest.metadata.id,
+      taskpack: manifest.metadata.name,
       target: { repository: bindings.repository, baseRevision: bindings.baseRevision, sourceRevision: bindings.sourceRevision, matrix: null },
       scope: { writable: [...manifest.spec.scope.writable], protected: [...effectiveProtectedPaths(manifest.spec.scope.protected)] },
       roles: [{
-        id: 'author', adapter: 'pi', provider: bindings.roleSelection.provider, model: bindings.roleSelection.model,
-        thinking: bindings.roleSelection.thinking, tools: ['read', 'write', 'edit', 'bash'],
+        id: 'author', adapter: 'pi', provider: selection.provider, model: selection.model,
+        thinking: selection.thinking, tools: ['read', 'write', 'edit', 'bash'],
       }],
       trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: [] },
       budgets: bindings.budgets,
@@ -356,9 +334,9 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     throw new GitHubAppError('TASKPACK_HOST_BINDING_INVALID', `compiled task contract failed validation: ${JSON.stringify(validated.errors).slice(0, 256)}`);
   }
   const config: ControllerConfiguration = {
-    apiVersion: CONTROLLER_API_VERSION, kind: 'ControllerConfig', metadata: { id: `${manifest.metadata.id}-config` },
+    apiVersion: CONTROLLER_API_VERSION, kind: 'ControllerConfig',
     spec: {
-      task: validated.value, registry: { id: registryId, digest: digestOf(registryBytes) },
+      task: validated.value, registry: { name: registryName, digest: digestOf(registryBytes) },
       profiles: {
         roles: [{ roleId: 'author', profileRef: 'taskpack-author-role' }],
         steps: input.steps.map(step => ({ stepId: step.id, handlerRef: step.uses })),

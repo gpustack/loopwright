@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "26.13.0" },
+  "engines": { "node": "26.x" },
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "dependencies": {
     "@loopwright/core": "0.0.0",

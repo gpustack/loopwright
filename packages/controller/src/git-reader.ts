@@ -1,4 +1,4 @@
-import { writeSync } from 'node:fs';
+import { readSync, writeSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 /** A fixed trusted reader waits until its PID/birth intent is durable, then execs Git with the same PID. */
@@ -12,15 +12,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (!isAbsolute(input.repository) || /[\0\r\n]/.test(input.repository) || !Array.isArray(input.args) || input.args.length > 8
     || input.args.some(arg => typeof arg !== 'string' || arg.length > 1024 || /[\0\r\n]/.test(arg))
     || !['rev-parse', 'ls-tree', 'cat-file', '--version'].includes(input.args[0] ?? '')) process.exit(2);
-  const timer = setTimeout(() => process.exit(2), 5000); let request = '';
   writeSync(3, JSON.stringify({ version: 1, nonce, pid: process.pid }) + '\n');
-  process.stdin.on('data', part => {
-    request += part.toString(); if (request.length > 128) process.exit(2);
-    if (!request.endsWith('\n')) return;
-    if (request !== nonce + '\n') process.exit(2); clearTimeout(timer);
-    process.execve!('/usr/bin/git', ['git', '--no-pager', '--no-optional-locks', '--literal-pathspecs',
-      '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
-      '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-C', input.repository, ...input.args], GIT_ENVIRONMENT);
-  });
-  process.stdin.once('end', () => process.exit(2));
+  // Read fd 0 via blocking POSIX readSync so libuv never leaves O_NONBLOCK set across execve.
+  const requestBuffer = Buffer.alloc(129);
+  let requestBytes = 0;
+  while (requestBytes < requestBuffer.length) {
+    let chunk = 0;
+    try { chunk = readSync(0, requestBuffer, requestBytes, 1, null); } catch { process.exit(2); }
+    if (chunk <= 0) process.exit(2);
+    requestBytes += chunk;
+    if (requestBuffer[requestBytes - 1] === 10) break;
+  }
+  if (requestBuffer.subarray(0, requestBytes).toString('utf8') !== nonce + '\n') process.exit(2);
+  process.execve!('/usr/bin/git', ['git', '--no-pager', '--no-optional-locks', '--literal-pathspecs',
+    '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
+    '-c', 'credential.helper=', '-c', 'protocol.allow=never', '-C', input.repository, ...input.args], GIT_ENVIRONMENT);
 }

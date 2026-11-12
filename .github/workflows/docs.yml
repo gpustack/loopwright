@@ -1,0 +1,99 @@
+name: Docs
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "**.md"
+      - "docs/**"
+      - "site/**"
+      - "scripts/check-docs.mjs"
+      - "scripts/site.mjs"
+      - "LICENSE"
+      - ".agents/skills/**"
+      - ".opencodereview/rule.json"
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "**.md"
+      - "docs/**"
+      - "site/**"
+      - "scripts/check-docs.mjs"
+      - "scripts/site.mjs"
+      - "LICENSE"
+      - ".agents/skills/**"
+      - ".opencodereview/rule.json"
+      - ".github/workflows/docs.yml"
+      - ".github/workflows/site.yml"
+
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.152.2'
+          extended: true
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Lint documentation
+        run: npm run lint:docs
+      - name: Verify closure ledger evidence paths
+        run: node packages/cli/dist/main.js closure
+      - name: Verify relative links in .github markdown templates
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            import { proseLinks, getAnchors } from "./scripts/check-docs.mjs";
+            const root = process.cwd();
+            const files = [];
+            function walk(dir) {
+              for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) walk(full);
+                else if (e.name.endsWith(".md")) files.push(full);
+              }
+            }
+            walk(path.join(root, ".github"));
+            let errs = 0;
+            for (const f of files) {
+              const txt = fs.readFileSync(f, "utf8");
+              for (const l of proseLinks(txt)) {
+                const raw = l.target.trim();
+                if (/^(?:https?:\/\/|mailto:|javascript:)/i.test(raw)) continue;
+                const [t, a] = raw.split("#");
+                const res = t ? path.resolve(path.dirname(f), t) : f;
+                if (!fs.existsSync(res)) { console.error(`${f}: broken link -> ${raw}`); errs++; continue; }
+                if (a && res.endsWith(".md") && !getAnchors(res).has(a)) { console.error(`${f}: broken anchor #${a}`); errs++; }
+              }
+            }
+            if (errs > 0) process.exit(1);
+          '
+      - name: Build and verify Hugo site
+        run: HUGO_PARAMS_VERSION=main HUGO_PARAMS_SOURCEREF=${{ github.sha }} npm run site
+      - name: Run documentation and site tests
+        run: npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/cli/test/check-docs-rules.test.js .test-build/packages/cli/test/docs-and-site.test.js

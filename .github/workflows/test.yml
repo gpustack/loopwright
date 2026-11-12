@@ -1,0 +1,72 @@
+name: Test
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}"
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "v*-dev"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "**.png"
+      - "**.svg"
+  pull_request:
+    branches:
+      - main
+      - "v*-dev"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "**.png"
+      - "**.svg"
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+      - name: Install Python bridge dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-packaging python3-yaml python3-requests python3-pytest python3-pytest-xdist
+      - name: Setup Python (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python bridge dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: python -m pip install --disable-pip-version-check --no-input packaging pyyaml requests pytest pytest-xdist
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Run unit and integration tests
+        run: mkdir -p .claude/s04-qualification && npm test

@@ -1,6 +1,6 @@
 {
   "name": "@loopwright/cli", "version": "0.0.0", "private": true, "type": "module",
-  "engines": { "node": "26.13.0" },
+  "engines": { "node": "26.x" },
   "bin": { "loopwright": "./dist/main.js" },
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
@@ -14,6 +14,7 @@
     "@loopwright/github-app": "0.0.0",
     "@loopwright/memory": "0.0.0",
     "@loopwright/state": "0.0.0",
-    "@loopwright/taskpack-runner": "0.0.0"
+    "@loopwright/taskpack-runner": "0.0.0",
+    "yaml": "2.9.0"
   }
 }

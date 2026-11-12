@@ -22,7 +22,7 @@ function store(entries: readonly MemoryEntry[]): MemoryStoreIndex {
   return { ...base, storeDigest: storeDigestOf(base) };
 }
 const contract = {
-  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'contract.demo' },
+  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
   spec: { goal: 'demo goal', taskpack: 'demo',
     target: { repository: 'org/repo', baseRevision: 'b'.repeat(40), sourceRevision: 'c'.repeat(40), matrix: null },
     scope: { writable: ['src/**'], protected: [] }, roles: [], trustedContext: { revision: 'rev', discovery: 'disabled', resources: [] },

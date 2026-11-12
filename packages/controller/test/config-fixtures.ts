@@ -19,7 +19,7 @@ export async function configurationFixture() {
   task.spec.roles[0]!.model = 'claude-sonnet-5.5'; task.spec.roles[0]!.thinking = 'xhigh'; task.spec.roles[0]!.tools = ['read'];
   task.spec.budgets.wallTimeMs = 600000; task.spec.budgets.perCallOutputTokens = 1024; task.spec.budgets.totalTokens = 100000;
   const validated = validateDocument(task, 'TaskContract'); assert.equal(validated.ok, true); if (!validated.ok) throw new Error('fixture');
-  const registry: TrustedRegistry = { apiVersion: 'loopwright.dev/controller/v1alpha1', kind: 'TrustedRegistry', metadata: { id: 'operator' }, spec: {
+  const registry: TrustedRegistry = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'TrustedRegistry', metadata: { name: 'operator' }, spec: {
     version: 1, resourceVersion: 'context-1', handlers: [
       { id: 'package.patch', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Produce one structured submission for the frozen candidate.', purpose: 'task' }, capabilities: ['pi'] },
       { id: 'tests', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'tests', path: 'result.json', required: ['ok'], equals: { ok: true } }, capabilities: ['inert_bytes', 'read_only'] },
@@ -33,8 +33,8 @@ export async function configurationFixture() {
     environmentBindings: [{ name: 'PROVIDER_TOKEN', classification: 'credential', paths: ['/spec/credentials/0/template'] }],
     gateEndpoints: [], publicationEndpoints: [],
   } };
-  const config: ControllerConfiguration = { apiVersion: 'loopwright.dev/controller/v1alpha1', kind: 'ControllerConfig', metadata: { id: 'task' }, spec: {
-    task: structuredClone(validated.value), registry: { id: 'operator', digest: hash('') }, profiles: { roles: [{ roleId: 'builder', profileRef: 'builder' }], steps: [{ stepId: 'build', handlerRef: 'package.patch' }] },
+  const config: ControllerConfiguration = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ControllerConfig', spec: {
+    task: structuredClone(validated.value), registry: { name: 'operator', digest: hash('') }, profiles: { roles: [{ roleId: 'builder', profileRef: 'builder' }], steps: [{ stepId: 'build', handlerRef: 'package.patch' }] },
     credentials: [{ ref: 'copilot', template: '${PROVIDER_TOKEN}' }], controls: { maxAttempts: 3, drainReserveMs: 120000, repeatFailureLimit: 2, submission: { mode: 'artifact_or_assistant', path: null } },
     publication: { mode: 'disabled' },
   } };
@@ -42,7 +42,7 @@ export async function configurationFixture() {
   const environment: Record<string, string | undefined> = { PROVIDER_TOKEN: TOKEN }, lookedUp: string[] = [];
   const save = async () => {
     const bytes = JSON.stringify(registry); input.registrySha256 = hash(bytes).hex;
-    (config.spec as { registry: ControllerConfiguration['spec']['registry'] }).registry = { id: registry.metadata.id, digest: hash(bytes) };
+    (config.spec as { registry: ControllerConfiguration['spec']['registry'] }).registry = { name: registry.metadata.name, digest: hash(bytes) };
     await writeFile(input.registryPath, bytes, { mode: 0o600 }); await writeFile(input.configPath, JSON.stringify(config), { mode: 0o600 });
   };
   await save();

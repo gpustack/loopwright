@@ -60,7 +60,7 @@ test('contract declared collection caps accept the limit and reject one extra', 
 });
 
 test('contract scalar caps and deterministic version/unknown precedence', () => {
-  const input = contract(); input.metadata.id = 'a'.repeat(LIMITS.identifier); input.spec.goal = 'x'.repeat(LIMITS.goal);
+  const input = contract(); input.spec.taskpack = 'a'.repeat(LIMITS.identifier); input.spec.goal = 'x'.repeat(LIMITS.goal);
   input.spec.roles[0]!.tools = ['x'.repeat(LIMITS.toolName)];
   assert.equal(validateDocument(input, 'TaskContract').ok, true);
   input.spec.roles[0]!.tools = ['x'.repeat(LIMITS.toolName + 1)];

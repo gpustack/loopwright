@@ -83,8 +83,8 @@ def candidate(tmp_path):
     )
     (repo / "docs").mkdir()
     (repo / SUPPORT).write_text(SUPPORT_START + support_row("0.29.0") + SUPPORT_END)
-    (repo / "gpustack_runner").mkdir()
-    (repo / "gpustack_runner/runner.py.json").write_text("[]\n")
+    (repo / "runtime_runner").mkdir()
+    (repo / "runtime_runner/runner.py.json").write_text("[]\n")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "fixture")
     proposal = json.loads(FIXTURE.read_text())
@@ -249,7 +249,7 @@ def test_additional_package_alias_collision_is_rejected(candidate):
         ".qwen/settings.json",
         ".env",
         "tools/auto_sync/checks.py",
-        "gpustack_runner/runner.py.json",
+        "runtime_runner/runner.py.json",
         "pack/dependencies.json",
         "pack/dtk/Dockerfile.vllm",
         "pack/cuda/Dockerfile.sglang",
@@ -658,8 +658,8 @@ def retirement(tmp_path):
     )
     (repo / "docs").mkdir()
     (repo / SUPPORT).write_text(SUPPORT_START + CANN_SGLANG_SUPPORT + SUPPORT_END)
-    (repo / "gpustack_runner").mkdir()
-    (repo / "gpustack_runner/runner.py.json").write_text("[]\n")
+    (repo / "runtime_runner").mkdir()
+    (repo / "runtime_runner/runner.py.json").write_text("[]\n")
     git(repo, "add", ".")
     git(repo, "commit", "-qm", "fixture")
     return repo, git(repo, "rev-parse", "HEAD")
@@ -698,7 +698,7 @@ def cann_sglang_proposal(sha, patch):
     return {
         "schema_version": 1,
         "identity": {
-            "repository": "gpustack/runner",
+            "repository": "example-org/runtime-runner",
             "default_sha": sha,
             "head_sha": sha,
             "mode": "discover",

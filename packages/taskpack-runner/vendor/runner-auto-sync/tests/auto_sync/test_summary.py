@@ -86,9 +86,9 @@ def test_publication_links_to_actual_pull_request():
             "reason": "Published.",
             "pr_number": 42,
         },
-        {"identity": {"repository": "gpustack/runner"}},
+        {"identity": {"repository": "example-org/runtime-runner"}},
     )
-    assert "https://github.com/gpustack/runner/pull/42" in markdown
+    assert "https://github.com/example-org/runtime-runner/pull/42" in markdown
     assert "[#42]" in markdown
 
 

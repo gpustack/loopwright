@@ -1,4 +1,5 @@
 import type { PiHost, PiHostV2, AdapterPolicyV2 } from '@loopwright/agent-pi';
+import { resolveProviderDestination } from '@loopwright/agent-pi/catalog';
 import { refuse } from './errors.js';
 import { canonical, id, list, record, text } from './schema.js';
 import type { TrustedRegistry } from './types.js';
@@ -43,8 +44,10 @@ export function createVault(expanded: unknown, registry: TrustedRegistry): Crede
     bind: (scope: Parameters<CredentialVault['bind']>[0]) => {
       const provider: PiHost['resolveCredential'] = async binding => {
         const approved = registry.spec.credentialBindings.find(item => item.id === scope.providerCredentialRef);
+        let expectedDestination = '';
+        try { expectedDestination = resolveProviderDestination(scope.selection); } catch { refuse('CONFIG_CREDENTIAL_INVALID', '', 'execution'); }
         if (!approved || approved.consumer !== 'provider' || approved.destinationRef !== scope.selection.provider || binding.provider !== scope.selection.provider || binding.model !== scope.selection.model
-          || binding.destination !== 'https://api.individual.githubcopilot.com/v1/messages?beta=true' || binding.runId !== scope.runId || binding.roleId !== scope.roleId || binding.stepId !== scope.stepId || binding.signal.aborted) refuse('CONFIG_CREDENTIAL_INVALID', '', 'execution');
+          || binding.destination !== expectedDestination || binding.runId !== scope.runId || binding.roleId !== scope.roleId || binding.stepId !== scope.stepId || binding.signal.aborted) refuse('CONFIG_CREDENTIAL_INVALID', '', 'execution');
         const token = tokens.get(approved.id); if (!token) refuse('CONFIG_CREDENTIAL_INVALID', '', 'execution'); return { bearerToken: token };
       };
       const mcp: PiHostV2['resolveMcpCredential'] = async binding => {

@@ -1,5 +1,5 @@
 import { DatabaseSync as Database } from 'node:sqlite';
-import { canonical, hash } from './boundary.js';
+import { hash } from './boundary.js';
 const safe=(name:string)=>`${name} INTEGER NOT NULL CHECK(${name} BETWEEN 0 AND 9007199254740991)`;
 const json=(name:string,max:number)=>`${name} TEXT NOT NULL CHECK(length(CAST(${name} AS BLOB))<=${max})`;
 const digest=(name:string)=>`${name} TEXT NOT NULL CHECK(length(${name})=64 AND ${name} NOT GLOB '*[^0-9a-f]*')`;
@@ -12,7 +12,12 @@ CREATE TABLE operations(${key('operation_id')} PRIMARY KEY,sequence INTEGER NOT 
 CREATE TABLE checkpoints(${key('checkpoint_id')} PRIMARY KEY,sequence INTEGER NOT NULL UNIQUE CHECK(sequence BETWEEN 1 AND 64),${json('input_json',65536)},${digest('input_digest')},${json('checkpoint_json',65536)},${digest('checkpoint_digest')}) STRICT;
 `;
 export const PROFILE=Object.freeze({page_size:4096,journal_mode:'delete',synchronous:3,fullfsync:1,checkpoint_fullfsync:1,locking_mode:'normal',foreign_keys:1,busy_timeout:250,trusted_schema:0,cache_size:-2048,mmap_size:0,max_page_count:65536});
-export const ENGINE=Object.freeze({platform:'darwin',architecture:'arm64',node:'v26.13.0',sqlite:'3.54.1'});
+export type EngineProfile=Readonly<{platform:string;architecture:string;node:string;sqlite:string}>;
+export function currentEngine():EngineProfile {
+  return Object.freeze({platform:process.platform,architecture:process.arch,node:process.version,sqlite:process.versions.sqlite??''});
+}
+export const ENGINE:EngineProfile=currentEngine();
+const QUALIFIED_HOST_TARGETS=new Set(['darwin:arm64','linux:arm64','linux:x64']);
 export function schemaIdentity(db:Database):string {
   return hash('identity',db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").all().map(row=>({...row,sql:typeof row.sql==='string'?row.sql.replace(/\s+/g,' ').trim():row.sql}))).hex;
 }
@@ -20,5 +25,8 @@ let expected:string|undefined;
 export function expectedSchema():string {
   if(expected===undefined){const db=new Database(':memory:');try{db.exec(DDL);expected=schemaIdentity(db);}finally{db.close();}}return expected;
 }
-export function matchesEngine(profile:Readonly<Record<keyof typeof ENGINE,string|undefined>>):boolean {return canonical(ENGINE)===canonical(profile);}
+export function matchesEngine(profile:Readonly<Record<keyof EngineProfile,string|undefined>>):boolean {
+  return typeof profile.platform==='string'&&typeof profile.architecture==='string'&&QUALIFIED_HOST_TARGETS.has(`${profile.platform}:${profile.architecture}`)
+    &&typeof profile.node==='string'&&/^v26\.\d+\.\d+$/.test(profile.node)&&typeof profile.sqlite==='string'&&/^3\.\d+\.\d+$/.test(profile.sqlite);
+}
 export function engineMatches():boolean {return matchesEngine({platform:process.platform,architecture:process.arch,node:process.version,sqlite:process.versions.sqlite});}

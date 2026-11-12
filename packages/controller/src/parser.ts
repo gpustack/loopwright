@@ -37,7 +37,7 @@ function json(source: string, collectionLimit = 128, nodeLimit = 8192): Json {
     }
     const literal = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(source.slice(offset));
     if (!literal) refuse('CONFIG_SYNTAX'); offset += literal[0].length;
-    if (!['true', 'false', 'null'].includes(literal[0])) { const number = Number(literal[0]); if (!Number.isSafeInteger(number) || Object.is(number, -0)) refuse('CONFIG_LIMIT'); }
+    if (!['true', 'false', 'null'].includes(literal[0])) { const number = Number(literal[0]); if (!Number.isFinite(number) || Math.abs(number) > Number.MAX_SAFE_INTEGER || Object.is(number, -0)) refuse('CONFIG_LIMIT'); }
   };
   value(1); space(); if (offset !== source.length) refuse('CONFIG_SYNTAX');
   try { return JSON.parse(source) as Json; } catch { refuse('CONFIG_SYNTAX'); }
@@ -67,7 +67,7 @@ function yaml(source: string): Json {
     } else if (isSeq(node)) { if (node.items.length > 128) refuse('CONFIG_LIMIT'); for (const child of node.items) visit(child, depth + 1); }
     else {
       if (!isScalar(node) || node.value !== null && !['string', 'boolean', 'number'].includes(typeof node.value)) refuse('CONFIG_SYNTAX');
-      if (typeof node.value === 'string' && node.value.length > 16384 || typeof node.value === 'number' && (!Number.isSafeInteger(node.value) || Object.is(node.value, -0))) refuse('CONFIG_LIMIT');
+      if (typeof node.value === 'string' && node.value.length > 16384 || typeof node.value === 'number' && (!Number.isFinite(node.value) || Math.abs(node.value) > Number.MAX_SAFE_INTEGER || Object.is(node.value, -0))) refuse('CONFIG_LIMIT');
     }
   }
   visit(document.contents, 1); return document.toJS({ maxAliasCount: 0 }) as Json;

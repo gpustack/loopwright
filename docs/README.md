@@ -2,20 +2,21 @@
 
 ## Reading paths
 
-- [GitHub Action](operate/github-action.md) and [taskpack walkthrough](walkthroughs/declarative-taskpack.md)
-- [GitHub App deployment](operate/github-app.md)
-- [CLI operations and closure](operate/cli.md)
-- [SDK architecture](getting-started/architecture.md) and [decision routing](decisions.md)
-- [Development](development.md) and [internals](contribute/internals.md)
+- [Installation](getting-started/installation.md) and [Architecture](getting-started/architecture.md)
+- [Declarative Taskpack](walkthroughs/declarative-taskpack.md), [Taskpack](configuration/taskpack.md), and [GitHub Action](operations/github-action.md)
+- [Managed Controller](walkthroughs/managed-controller.md), [Task Contract](configuration/task-contract.md), and [Controller and Registry](configuration/controller-and-registry.md)
+- [GitHub App](operations/github-app.md) and [CLI](operations/cli.md)
+- [Sandbox Backends](configuration/sandbox-backends.md) and [Decision Routing](configuration/decision-routing.md)
+- [Development](development.md) and [Internals](contribute/internals.md)
 
 ## Module map
 
 ### Contracts and Evidence
 
 - ID: contracts
-- Use for: contracts and evidence
+- Use for: author task contracts and bind verification evidence
 - Aliases: contracts
-- Guides: [contracts.md](contracts.md), [identity.md](identity.md), [evidence.md](evidence.md)
+- Guides: [configuration/task-contract.md](configuration/task-contract.md), [contribute/identity.md](contribute/identity.md), [contribute/evidence.md](contribute/evidence.md)
 - Specs: [Specification](../specs/2026-11-05-task-contracts-and-evidence.md)
 - Code: [core](../packages/core/)
 - Related: [state](#persistent-state-store), [controller](#bounded-controller-and-cli)
@@ -24,9 +25,9 @@
 ### Persistent State Store
 
 - ID: state
-- Use for: persistent state store
+- Use for: retain fenced authority, budgets, and recovery state
 - Aliases: state
-- Guides: [state.md](state.md)
+- Guides: [contribute/state.md](contribute/state.md)
 - Specs: [Specification](../specs/2026-11-05-persistent-state-and-admission.md)
 - Code: [state](../packages/state/)
 - Related: [contracts](#contracts-and-evidence), [pi-adapter](#isolated-pi-adapter)
@@ -35,9 +36,9 @@
 ### Isolated Pi Adapter
 
 - ID: pi-adapter
-- Use for: isolated pi adapter
+- Use for: run admitted Pi roles under isolation
 - Aliases: pi-adapter
-- Guides: [pi-adapter.md](pi-adapter.md), [pi-runtime-evaluation.md](pi-runtime-evaluation.md)
+- Guides: [configuration/sandbox-backends.md](configuration/sandbox-backends.md), [contribute/pi-adapter.md](contribute/pi-adapter.md)
 - Specs: [Specification](../specs/2026-11-05-isolated-pi-adapter.md)
 - Code: [agent-pi](../packages/agent-pi/)
 - Related: [state](#persistent-state-store), [controller](#bounded-controller-and-cli)
@@ -46,9 +47,9 @@
 ### Bounded Controller and CLI
 
 - ID: controller
-- Use for: bounded controller and cli
+- Use for: compile trusted configuration and coordinate bounded runs
 - Aliases: controller
-- Guides: [controller.md](controller.md), [operate/cli.md](operate/cli.md), [closure-matrix.md](closure-matrix.md)
+- Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [operations/cli.md](operations/cli.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
 - Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md)
 - Code: [controller](../packages/controller/), [cli](../packages/cli/)
 - Related: [contracts](#contracts-and-evidence), [state](#persistent-state-store)
@@ -57,9 +58,9 @@
 ### Declarative Taskpacks and Runner Parity
 
 - ID: taskpacks
-- Use for: declarative taskpacks and runner parity
+- Use for: author taskpacks and assess offline runner parity
 - Aliases: taskpacks
-- Guides: [runner-taskpack.md](runner-taskpack.md), [walkthroughs/declarative-taskpack.md](walkthroughs/declarative-taskpack.md)
+- Guides: [walkthroughs/declarative-taskpack.md](walkthroughs/declarative-taskpack.md), [configuration/taskpack.md](configuration/taskpack.md), [contribute/runner-taskpack.md](contribute/runner-taskpack.md)
 - Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md)
 - Code: [taskpack-runner](../packages/taskpack-runner/)
 - Related: [github-app](#github-app-and-action-control-plane), [controller](#bounded-controller-and-cli)
@@ -68,9 +69,9 @@
 ### Reviewed Memory and Compaction
 
 - ID: memory
-- Use for: reviewed memory and compaction
+- Use for: review memory proposals and compact retained context
 - Aliases: memory
-- Guides: [memory.md](memory.md)
+- Guides: [contribute/memory.md](contribute/memory.md)
 - Specs: [Specification](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md)
 - Code: [memory](../packages/memory/)
 - Related: [controller](#bounded-controller-and-cli), [decisions](#system-one-decision-routing)
@@ -79,9 +80,9 @@
 ### GitHub App and Action Control Plane
 
 - ID: github-app
-- Use for: github app and action
+- Use for: configure App intake, Action execution, and sandboxes
 - Aliases: github-app
-- Guides: [github-app.md](github-app.md), [operate/github-app.md](operate/github-app.md), [operate/github-action.md](operate/github-action.md)
+- Guides: [operations/github-action.md](operations/github-action.md), [operations/github-app.md](operations/github-app.md), [contribute/github-app-internals.md](contribute/github-app-internals.md)
 - Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md)
 - Code: [github-app](../packages/github-app/)
 - Related: [taskpacks](#declarative-taskpacks-and-runner-parity), [controller](#bounded-controller-and-cli)
@@ -90,9 +91,9 @@
 ### System-One Decision Routing
 
 - ID: decisions
-- Use for: system-one decision routing
+- Use for: route bounded advisory decisions
 - Aliases: decisions
-- Guides: [decisions.md](decisions.md)
+- Guides: [configuration/decision-routing.md](configuration/decision-routing.md)
 - Specs: [Specification](../specs/2026-11-11-jev-decision-routing-and-controlled-benchmark.md)
 - Code: [decisions](../packages/decisions/)
 - Related: [memory](#reviewed-memory-and-compaction), [controller](#bounded-controller-and-cli)
@@ -101,7 +102,7 @@
 ### Development and Release
 
 - ID: development
-- Use for: development and documentation
+- Use for: build, verify, document, and release the workspace
 - Aliases: development
 - Guides: [development.md](development.md), [contribute/internals.md](contribute/internals.md)
 - Specs: [Specification](../specs/2026-11-11-agents-skills-connected-docs-and-hugo-site.md)
@@ -125,6 +126,7 @@
 | [2026-11-11-jev-decision-routing-and-controlled-benchmark.md](../specs/2026-11-11-jev-decision-routing-and-controlled-benchmark.md) | jev decision routing and controlled benchmark |
 | [2026-11-11-native-os-sandbox-execution-backends.md](../specs/2026-11-11-native-os-sandbox-execution-backends.md) | native os sandbox execution backends |
 | [2026-11-11-reviewed-memory-and-cas-compaction.md](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md) | reviewed memory and cas compaction |
+| [2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md](../specs/2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md) | YAML configuration, connected guides, and branded site |
 
 ## All pages
 
@@ -132,49 +134,47 @@
 
 | Page | Description |
 | --- | --- |
-| [Loopwright Architecture](getting-started/architecture.md) | Loopwright Architecture reference |
+| [Architecture](getting-started/architecture.md) | Execution stages, trust boundaries, and configuration map |
+| [Installation](getting-started/installation.md) | Install the CLI on a laptop or wire the GitHub Action |
 
 ### Operations
 
 | Page | Description |
 | --- | --- |
-| [GitHub Action Configuration](operate/github-action.md) | GitHub Action Configuration reference |
-| [GitHub App Deployment](operate/github-app.md) | GitHub App Deployment reference |
-| [CLI Operations](operate/cli.md) | CLI Operations reference |
+| [GitHub Action](operations/github-action.md) | Configure and run the reusable GitHub Action |
+| [GitHub App](operations/github-app.md) | Deploy and configure the GitHub App control plane |
+| [CLI](operations/cli.md) | Generate drafts, inspect runs, reconcile, and audit closure |
 
 ### Walkthroughs
 
 | Page | Description |
 | --- | --- |
-| [Declarative Taskpack Walkthrough](walkthroughs/declarative-taskpack.md) | Declarative Taskpack Walkthrough reference |
+| [Declarative Taskpack](walkthroughs/declarative-taskpack.md) | Author or migrate a single-file repository taskpack |
+| [Managed Controller](walkthroughs/managed-controller.md) | Configure out-of-repo registries, contracts, and CLI runs |
 
-### Modules
+### Configuration
 
 | Page | Description |
 | --- | --- |
-| [Task Contracts and Schemas](contracts.md) | Task Contracts and Schemas reference |
-| [Canonical Identity and Digests](identity.md) | Canonical Identity and Digests reference |
-| [Verification Evidence and Authority](evidence.md) | Verification Evidence and Authority reference |
-| [Persistent Local State Store](state.md) | Persistent Local State Store reference |
-| [Isolated Pi Runtime Adapter](pi-adapter.md) | Isolated Pi Runtime Adapter reference |
-| [Pi Runtime Evaluation](pi-runtime-evaluation.md) | Pi Runtime Evaluation reference |
-| [Bounded Controller and Repair Loop](controller.md) | Bounded Controller and Repair Loop reference |
-| [Runner Taskpack and Offline Parity](runner-taskpack.md) | Runner Taskpack and Offline Parity reference |
-| [Reviewed Memory and CAS Compaction](memory.md) | Reviewed Memory and CAS Compaction reference |
-| [GitHub App Control Plane and Taskpack Intake](github-app.md) | GitHub App Control Plane and Taskpack Intake reference |
-| [System-One Decision Routing](decisions.md) | System-One Decision Routing reference |
-| [Capability Closure Matrix and Failure Semantics](closure-matrix.md) | Capability Closure Matrix and Failure Semantics reference |
+| [Taskpack](configuration/taskpack.md) | Configure every field and enum in .loopwright/taskpack.yaml |
+| [Task Contract](configuration/task-contract.md) | Configure task goals, scope, roles, budgets, DAGs, and evidence |
+| [Controller and Registry](configuration/controller-and-registry.md) | Configure approved handlers, profiles, credentials, and controls |
+| [Sandbox Backends](configuration/sandbox-backends.md) | Select OS or container sandboxes and required capabilities |
+| [Decision Routing](configuration/decision-routing.md) | Configure advisory routing policies, providers, and thresholds |
 
 ### Contribute
 
 | Page | Description |
 | --- | --- |
-| [Development and Verification](development.md) | Development and Verification reference |
-| [Workspace Internals and Boundaries](contribute/internals.md) | Workspace Internals and Boundaries reference |
-
-### Architecture Decisions
-
-| Page | Description |
-| --- | --- |
-| [ADR 0001: Local State Authority](adr/0001-local-state-authority.md) | ADR 0001: Local State Authority reference |
-| [ADR 0002: Isolated Pi SDK](adr/0002-isolated-pi-sdk.md) | ADR 0002: Isolated Pi SDK reference |
+| [Development and Verification](development.md) | Build, test, lint, and verify workspace changes |
+| [Workspace Internals and Boundaries](contribute/internals.md) | Navigate package layers, code ownership, and invariants |
+| [Canonical Identity and Digests](contribute/identity.md) | Implement RFC 8785 JCS canonicalization and SHA-256 digests |
+| [Verification Evidence and Authority](contribute/evidence.md) | Implement independent check hooks and HMAC gate receipts |
+| [Persistent Local State Store](contribute/state.md) | Implement SQLite WAL lease fencing and monotonic clock guards |
+| [Isolated Pi Runtime Adapter](contribute/pi-adapter.md) | Implement isolated Pi sessions, brokers, and secret scrubbing |
+| [Runner Taskpack and Offline Parity](contribute/runner-taskpack.md) | Maintain runner parity and frozen taskpack fixtures |
+| [Reviewed Memory and CAS Compaction](contribute/memory.md) | Implement CAS reviewed memory proposals and compaction |
+| [GitHub App Control Plane Internals](contribute/github-app-internals.md) | Implement webhook verification, intake gates, and compilation |
+| [Capability Closure Matrix and Failure Semantics](contribute/closure-matrix.md) | Maintain capability closure ledger and failure injection suites |
+| [ADR 0001: Local State Authority](contribute/adr/0001-local-state-authority.md) | Record the fenced local SQLite authority decision |
+| [ADR 0002: Isolated Pi SDK](contribute/adr/0002-isolated-pi-sdk.md) | Record the isolated Pi runtime boundary decision |

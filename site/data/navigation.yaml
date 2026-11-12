@@ -2,56 +2,34 @@ groups:
   - name: Getting Started
     items:
       - /docs/getting-started/architecture/
+      - /docs/getting-started/installation/
   - name: Operations
     items:
-      - /docs/operate/github-action/
-      - /docs/operate/github-app/
-      - /docs/operate/cli/
+      - /docs/operations/github-action/
+      - /docs/operations/github-app/
+      - /docs/operations/cli/
   - name: Walkthroughs
     items:
       - /docs/walkthroughs/declarative-taskpack/
-  - name: Modules
+      - /docs/walkthroughs/managed-controller/
+  - name: Configuration
     items:
-      - /docs/contracts/
-      - /docs/identity/
-      - /docs/evidence/
-      - /docs/state/
-      - /docs/pi-adapter/
-      - /docs/pi-runtime-evaluation/
-      - /docs/controller/
-      - /docs/runner-taskpack/
-      - /docs/memory/
-      - /docs/github-app/
-      - /docs/decisions/
-      - /docs/closure-matrix/
-  - name: Contribute
-    items:
-      - /docs/development/
-      - /docs/contribute/internals/
-  - name: Architecture Decisions
-    items:
-      - /docs/adr/0001-local-state-authority/
-      - /docs/adr/0002-isolated-pi-sdk/
+      - /docs/configuration/taskpack/
+      - /docs/configuration/task-contract/
+      - /docs/configuration/controller-and-registry/
+      - /docs/configuration/sandbox-backends/
+      - /docs/configuration/decision-routing/
 
 labels:
   /docs/getting-started/architecture/: Architecture
-  /docs/operate/github-action/: GitHub Action
-  /docs/operate/github-app/: GitHub App
-  /docs/operate/cli/: CLI Operations
+  /docs/getting-started/installation/: Installation
+  /docs/operations/github-action/: GitHub Action
+  /docs/operations/github-app/: GitHub App
+  /docs/operations/cli/: CLI
   /docs/walkthroughs/declarative-taskpack/: Declarative Taskpack
-  /docs/contracts/: Contracts
-  /docs/identity/: Identity
-  /docs/evidence/: Evidence
-  /docs/state/: State Store
-  /docs/pi-adapter/: Pi Adapter
-  /docs/pi-runtime-evaluation/: Runtime Evaluation
-  /docs/controller/: Controller
-  /docs/runner-taskpack/: Runner Taskpack
-  /docs/memory/: Memory
-  /docs/github-app/: Control Plane
-  /docs/decisions/: Decision Routing
-  /docs/closure-matrix/: Closure Matrix
-  /docs/development/: Development
-  /docs/contribute/internals/: Internals
-  /docs/adr/0001-local-state-authority/: "ADR 0001: Local State"
-  /docs/adr/0002-isolated-pi-sdk/: "ADR 0002: Isolated Pi SDK"
+  /docs/walkthroughs/managed-controller/: Managed Controller
+  /docs/configuration/taskpack/: Taskpack
+  /docs/configuration/task-contract/: Task Contract
+  /docs/configuration/controller-and-registry/: Controller and Registry
+  /docs/configuration/sandbox-backends/: Sandbox Backends
+  /docs/configuration/decision-routing/: Decision Routing

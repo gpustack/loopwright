@@ -126,6 +126,7 @@ export interface InstallationTokenBrokerOptions {
   readonly privateKeyPem: string;
   readonly transport: InstallationTokenTransport;
   readonly refreshMarginMs?: number;
+  readonly maxTtlMs?: number | undefined;
   readonly nowSeconds?: () => number;
   readonly scrubber?: SecretScrubber;
 }
@@ -143,6 +144,7 @@ export class InstallationTokenBroker {
   readonly #jwtPrivateKey: KeyObject;
   readonly #transport: InstallationTokenTransport;
   readonly #refreshMarginMs: number;
+  readonly #maxTtlMs: number | undefined;
   readonly #nowSeconds: () => number;
   readonly #scrubber: SecretScrubber;
   readonly #cache = new Map<string, CachedToken>();
@@ -157,6 +159,12 @@ export class InstallationTokenBroker {
     this.#refreshMarginMs = options.refreshMarginMs ?? DEFAULT_TOKEN_REFRESH_MARGIN_MS;
     if (!Number.isSafeInteger(this.#refreshMarginMs) || this.#refreshMarginMs < 0 || this.#refreshMarginMs > INSTALLATION_TOKEN_TTL_LIMIT_MS) {
       throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `refreshMarginMs must be within 0..${INSTALLATION_TOKEN_TTL_LIMIT_MS}`);
+    }
+    if (options.maxTtlMs !== undefined) {
+      if (typeof options.maxTtlMs !== 'number' || !Number.isSafeInteger(options.maxTtlMs) || options.maxTtlMs < 1_000 || options.maxTtlMs > INSTALLATION_TOKEN_TTL_LIMIT_MS) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `maxTtlMs must be within 1000..${INSTALLATION_TOKEN_TTL_LIMIT_MS}`);
+      }
+      this.#maxTtlMs = options.maxTtlMs;
     }
     this.#nowSeconds = options.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
     this.#scrubber = options.scrubber ?? new SecretScrubber();
@@ -197,9 +205,12 @@ export class InstallationTokenBroker {
     if (!Number.isSafeInteger(response.expiresAtMs) || ttlMs <= 0 || ttlMs > INSTALLATION_TOKEN_TTL_LIMIT_MS) {
       throw new GitHubAppError('TOKEN_TTL_EXCEEDED', `installation token TTL ${ttlMs}ms must be positive and at most ${INSTALLATION_TOKEN_TTL_LIMIT_MS}ms`);
     }
+    const effectiveExpiresAtMs = this.#maxTtlMs === undefined
+      ? response.expiresAtMs
+      : Math.min(response.expiresAtMs, nowMs + this.#maxTtlMs);
     this.#scrubber.register(response.token);
-    this.#cache.set(cacheKey, { token: response.token, expiresAtMs: response.expiresAtMs, profile, repositoryId: tenant.repositoryId });
-    return { token: response.token, expiresAtMs: response.expiresAtMs, profile, installationId: tenant.installationId, repositoryId: tenant.repositoryId };
+    this.#cache.set(cacheKey, { token: response.token, expiresAtMs: effectiveExpiresAtMs, profile, repositoryId: tenant.repositoryId });
+    return { token: response.token, expiresAtMs: effectiveExpiresAtMs, profile, installationId: tenant.installationId, repositoryId: tenant.repositoryId };
   }
 
   revokeInstallationTokens(installationId: number): number {
@@ -253,4 +264,92 @@ export function assertCleanArtifact(value: string | Uint8Array | object, scrubbe
     return;
   }
   scrubber.assertClean(value, path);
+}
+
+export interface GitHubRestTokenTransportOptions {
+  readonly appId: number;
+  readonly privateKeyPem: string;
+  readonly apiBaseUrl?: string | undefined;
+  readonly fetchImpl?: typeof fetch | undefined;
+  readonly nowSeconds?: (() => number) | undefined;
+}
+
+/**
+ * Create a GitHub REST API `InstallationTokenTransport` that signs an RS256 App JWT and calls
+ * `POST ${baseUrl}/app/installations/${installationId}/access_tokens`.
+ */
+export function createGitHubRestTokenTransport(options: GitHubRestTokenTransportOptions): InstallationTokenTransport {
+  if (typeof options.appId !== 'number' || !Number.isSafeInteger(options.appId) || options.appId <= 0) {
+    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'appId must be a positive integer');
+  }
+  parsePrivateKey(options.privateKeyPem);
+  const rawBaseUrl = options.apiBaseUrl ?? 'https://api.github.com';
+  let parsedBaseUrl: URL;
+  try {
+    parsedBaseUrl = new URL(rawBaseUrl);
+  } catch {
+    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'apiBaseUrl must be a valid URL');
+  }
+  const isLoopback = parsedBaseUrl.hostname === '127.0.0.1'
+    || parsedBaseUrl.hostname === 'localhost'
+    || parsedBaseUrl.hostname === '[::1]'
+    || parsedBaseUrl.hostname === '::1';
+  if (parsedBaseUrl.protocol !== 'https:' && !(parsedBaseUrl.protocol === 'http:' && isLoopback)) {
+    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'apiBaseUrl must use https:// (or loopback http:// for local tests)');
+  }
+  const baseUrl = rawBaseUrl.replace(/\/+$/, '');
+  const fetchFn = options.fetchImpl ?? globalThis.fetch;
+  const nowSeconds = options.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+
+  return {
+    async createInstallationToken(request: InstallationTokenRequest) {
+      const jwt = createGitHubAppJwt({
+        appId: options.appId,
+        privateKeyPem: options.privateKeyPem,
+        nowSeconds: nowSeconds(),
+      });
+      let response: Response;
+      try {
+        response = await fetchFn(`${baseUrl}/app/installations/${request.installationId}/access_tokens`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${jwt}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            repository_ids: [...request.repositoryIds],
+            permissions: request.permissions,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `failed to reach GitHub installation token endpoint for installation ${request.installationId}`);
+      }
+      if (!response.ok) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `GitHub installation token endpoint returned HTTP ${response.status} for installation ${request.installationId}`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = await response.json();
+      } catch {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub installation token response was not valid JSON');
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub installation token response must be a JSON object');
+      }
+      const record = parsed as Record<string, unknown>;
+      const token = record['token'];
+      const expiresAtRaw = record['expires_at'];
+      if (typeof token !== 'string' || token.length === 0 || typeof expiresAtRaw !== 'string' || expiresAtRaw.length === 0) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub installation token response missing token or expires_at');
+      }
+      const expiresAtMs = Date.parse(expiresAtRaw);
+      if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub installation token response contains invalid expires_at timestamp');
+      }
+      return { token, expiresAtMs };
+    },
+  };
 }

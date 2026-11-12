@@ -65,7 +65,7 @@ function recorder(): Recorder {
 }
 function contractFixture(totalTokens = 1000): Record<string, unknown> {
   return {
-    apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'update' },
+    apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
     spec: {
       goal: 'Update the pinned package', taskpack: 'package-update',
       target: { repository: 'team/repository', baseRevision: 'base-1', sourceRevision: 'source-1', matrix: null },
@@ -97,7 +97,7 @@ async function scenarioOne(): Promise<IntegratedFailureScenarioResult> {
   const brokenCore = validateDocument('{"metadata":', 'TaskContract');
   r.expect(brokenCore.ok ? '' : brokenCore.errors[0]!.code, 'JSON_SYNTAX', 'core refuses truncated JSON with JSON_SYNTAX');
   const root = await scratchDirectory('lw-fm-json-');
-  const registry = { apiVersion: 'loopwright.dev/controller/v1alpha1', kind: 'TrustedRegistry', metadata: { id: 'operator' }, spec: { version: 1, resourceVersion: 'context-draft', handlers: [], roleProfiles: [], runtimeProfiles: [], resources: [], credentialBindings: [], environmentBindings: [] } };
+  const registry = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'TrustedRegistry', metadata: { name: 'operator' }, spec: { version: 1, resourceVersion: 'context-draft', handlers: [], roleProfiles: [], runtimeProfiles: [], resources: [], credentialBindings: [], environmentBindings: [] } };
   const registryBytes = Buffer.from(JSON.stringify(registry));
   const operator = join(root, 'operator'), task = join(root, 'task');
   await mkdir(operator, { mode: 0o700 }); await mkdir(task, { mode: 0o700 });
@@ -105,7 +105,7 @@ async function scenarioOne(): Promise<IntegratedFailureScenarioResult> {
     const duplicatedRegistry = JSON.stringify(registry).replace('"spec":{', '"spec":{"version":1,');
     const duplicatedBytes = Buffer.from(duplicatedRegistry);
     await writeFile(join(operator, 'duplicated-registry.json'), duplicatedBytes, { mode: 0o600 });
-    await writeFile(join(task, 'config.json'), '{"apiVersion":"loopwright.dev/controller/v1alpha1"}', { mode: 0o600 });
+    await writeFile(join(task, 'config.json'), '{"apiVersion":"loopwright.dev/v1alpha1"}', { mode: 0o600 });
     const duplicateLoaded = await loadTrustedConfiguration({ configPath: join(task, 'config.json'), registryPath: join(operator, 'duplicated-registry.json'), registrySha256: createHash('sha256').update(duplicatedBytes).digest('hex'), untrustedRoots: [task] });
     r.expect(duplicateLoaded.ok ? '' : duplicateLoaded.error.code, 'CONFIG_DUPLICATE_KEY', 'controller refuses duplicate-key JSON with CONFIG_DUPLICATE_KEY');
     await writeFile(join(operator, 'registry.json'), registryBytes, { mode: 0o600 });
@@ -224,13 +224,13 @@ async function scenarioFive(): Promise<IntegratedFailureScenarioResult> {
     const budget = new DecisionBudgetTracker({ maxInputTokens: 1000 });
     const fallbacks: string[] = [];
     const result = await evaluateDecision({ policy: decisionPolicy(), state: { question: 'ship' }, budget, questions: [{ type: 'noul', id: 'q1', prompt: 'Proceed?' }],
-      transport: hangingTransport, fallback: context => { fallbacks.push(context.fallbackReason); return 'deterministic-default'; } });
+      apiKey: 'fixture-decision-key', transport: hangingTransport, fallback: context => { fallbacks.push(context.fallbackReason); return 'deterministic-default'; } });
     r.expect(String(result.fallbackReason), 'deadline_exceeded', 'a hanging provider transport routes to the deterministic fallback');
     r.expect(String(result.transportCalls), '1', 'exactly one transport call was attempted');
     r.expect(String(budget.snapshot().unknownUsageRetained), 'true', 'the deadline retains unknown usage in the budget ledger');
     r.expect(fallbacks.join(','), 'deadline_exceeded', 'the fallback handler receives the deadline reason');
     let thrown: string | null = null;
-    try { await evaluateDecision({ policy: decisionPolicy(), state: {}, budget: new DecisionBudgetTracker({}), questions: [{ type: 'noul', id: 'q2', prompt: 'Proceed?' }], transport: hangingTransport }); }
+    try { await evaluateDecision({ policy: decisionPolicy(), state: {}, budget: new DecisionBudgetTracker({}), questions: [{ type: 'noul', id: 'q2', prompt: 'Proceed?' }], apiKey: 'fixture-decision-key', transport: hangingTransport }); }
     catch (error) { thrown = error instanceof DecisionError ? error.code : 'WRONG_ERROR'; }
     r.expect(thrown ?? '', 'DECISION_DEADLINE_EXCEEDED', 'without a fallback the deadline surfaces DECISION_DEADLINE_EXCEEDED');
   } finally { clearInterval(keepAlive); }
@@ -342,9 +342,9 @@ async function scenarioTen(): Promise<IntegratedFailureScenarioResult> {
     const candidateDigest = (await computeRunnerCandidateDigest({ repositorySnapshot: fixture.path, headSha: fixture.headSha, proposalJson })).digest;
     service = await startRunnerTaskpackService({ gateSecret, publicationSecret, corpusRoot, fakeRepositorySnapshot: fixture.path });
     await service.registerCandidate({ storeId: 'store-1', runId: 'run-1', candidateDigest, proposalJson,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [] });
-    const gate = await post(service.gateUrl, gateSecret, { version: 1, kind: 'gate_request', gateId: 'runner-candidate-validation', checkId: 'runner-candidate-validation', candidateDigest, subject: { repository: 'gpustack/runner', candidateDigest }, storeId: 'store-1', runId: 'run-1', lockHash: 'a'.repeat(64), operationId: 'op.1', dispatchId: 'dispatch-1', dispatchGeneration: 1, requestDigest: 'b'.repeat(64) });
+    const gate = await post(service.gateUrl, gateSecret, { version: 1, kind: 'gate_request', gateId: 'runner-candidate-validation', checkId: 'runner-candidate-validation', candidateDigest, subject: { repository: 'example-org/runtime-runner', candidateDigest }, storeId: 'store-1', runId: 'run-1', lockHash: 'a'.repeat(64), operationId: 'op.1', dispatchId: 'dispatch-1', dispatchGeneration: 1, requestDigest: 'b'.repeat(64) });
     r.expect(String(gate.document.status), 'approved', 'the registered candidate passes the frozen gate validators');
     const published = await post(service.publicationUrl, publicationSecret, { version: 1, kind: 'publication_request', storeId: 'store-1', runId: 'run-1', lockHash: 'a'.repeat(64), operationId: 'publish.1', dispatchId: 'dispatch-2', dispatchGeneration: 1, idempotencyKey: 'pub.initial', targetBranch: 'main', headBranch: 'loopwright-runner-run-1', title: 'runner: sync upstream runtime support', candidateDigest, baseRevision: fixture.headSha, sourceRevision: fixture.headSha, requestDigest: 'c'.repeat(64) });
     r.expect(String(published.document.outcome), 'succeeded', 'the initial publication lands the managed pull request');
@@ -362,9 +362,9 @@ async function scenarioTen(): Promise<IntegratedFailureScenarioResult> {
     const reviseJson = JSON.stringify(reviseProposal);
     const reviseDigest = (await computeRunnerCandidateDigest({ repositorySnapshot: fixture.path, headSha: fixture.headSha, proposalJson: reviseJson })).digest;
     await service.registerCandidate({ storeId: 'store-1', runId: 'run-revise', candidateDigest: reviseDigest, proposalJson: reviseJson,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 99, commandDigest, prHeadSha: prHead },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 99, commandDigest, prHeadSha: prHead },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [], reviseCommentBody: guidance });
-    const reviseGate = await post(service.gateUrl, gateSecret, { version: 1, kind: 'gate_request', gateId: 'runner-candidate-validation', checkId: 'runner-candidate-validation', candidateDigest: reviseDigest, subject: { repository: 'gpustack/runner', candidateDigest: reviseDigest }, storeId: 'store-1', runId: 'run-revise', lockHash: 'a'.repeat(64), operationId: 'op.2', dispatchId: 'dispatch-3', dispatchGeneration: 1, requestDigest: 'd'.repeat(64) });
+    const reviseGate = await post(service.gateUrl, gateSecret, { version: 1, kind: 'gate_request', gateId: 'runner-candidate-validation', checkId: 'runner-candidate-validation', candidateDigest: reviseDigest, subject: { repository: 'example-org/runtime-runner', candidateDigest: reviseDigest }, storeId: 'store-1', runId: 'run-revise', lockHash: 'a'.repeat(64), operationId: 'op.2', dispatchId: 'dispatch-3', dispatchGeneration: 1, requestDigest: 'd'.repeat(64) });
     r.expect(String(reviseGate.document.status), 'approved', 'the pinned revise candidate passes the gate');
     await service.fakeHumanCommit('README.md', '# Human edit on PR branch\n');
     const refused = await post(service.publicationUrl, publicationSecret, { version: 1, kind: 'publication_request', storeId: 'store-1', runId: 'run-revise', lockHash: 'a'.repeat(64), operationId: 'publish.2', dispatchId: 'dispatch-4', dispatchGeneration: 1, idempotencyKey: 'pub.revise', targetBranch: 'main', headBranch: 'loopwright-runner-run-revise', title: 'runner: sync upstream runtime support', candidateDigest: reviseDigest, baseRevision: fixture.headSha, sourceRevision: fixture.headSha, requestDigest: 'e'.repeat(64) });
@@ -393,7 +393,7 @@ function memoryIndex(entries: readonly MemoryEntry[]): MemoryStoreIndex {
   return { ...base, storeDigest: storeDigestOf(base) };
 }
 const memoryContract = {
-  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'contract.demo' },
+  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
   spec: { goal: 'demo goal', taskpack: 'demo',
     target: { repository: 'org/repo', baseRevision: 'b'.repeat(40), sourceRevision: 'c'.repeat(40), matrix: null },
     scope: { writable: ['src/**'], protected: [] },
@@ -455,11 +455,9 @@ async function scenarioTwelve(): Promise<IntegratedFailureScenarioResult> {
   return outcome(id, started, r.claims(), r.failed(), 'COMPACTION_AUTHORITY_VIOLATION');
 }
 const VALID_MANIFEST_YAML = `apiVersion: loopwright.dev/v1alpha1
-kind: TaskpackManifest
+kind: Taskpack
 metadata:
-  id: docs-sync
-  name: Documentation sync
-  version: '1.0.0'
+  name: docs-sync
 spec:
   goal:
     candidate: Refresh documentation from upstream sources and pass every local check.
@@ -507,12 +505,22 @@ spec:
 async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
   const id = 'untrusted_taskpack_and_oauth_boundary_refusal', started = performance.now(), r = recorder();
   const manifest = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
-  r.expect(String(manifest.metadata.id), 'docs-sync', 'the declarative taskpack manifest parses and validates');
+  r.expect(String(manifest.metadata.name), 'docs-sync', 'the declarative taskpack manifest parses and validates');
   const escalated = structuredClone(manifest) as unknown as Record<string, unknown>;
   ((escalated.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows', 'docs'], protected: [] };
   let scopeCode: string | null = null;
   try { validateTaskpackManifest(escalated as never); } catch (error) { scopeCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
   r.expect(scopeCode ?? '', 'TASKPACK_SCOPE_VIOLATION', 'protected-path escalation refuses with TASKPACK_SCOPE_VIOLATION');
+  for (const oauthProvider of ['github-copilot', 'openai-codex', 'claude-code', 'gemini']) {
+    const withOauthModel = structuredClone(manifest) as unknown as Record<string, unknown>;
+    (withOauthModel.spec as Record<string, unknown>).models = [
+      { provider: 'zai', id: 'glm-5.3', thinking: 'high' },
+      { provider: oauthProvider, id: 'glm-5.3', thinking: 'high' },
+    ];
+    let modelCode: string | null = null;
+    try { validateTaskpackManifest(withOauthModel as never); } catch (error) { modelCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+    r.expect(modelCode ?? '', 'PROVIDER_OAUTH_UNSUPPORTED', `OAuth Pi model provider "${oauthProvider}" refuses with PROVIDER_OAUTH_UNSUPPORTED`);
+  }
   const oauth = validateMcpAuthConfiguration({ servers: [{ serverId: 'workspace', auth: { type: 'oauth' } }] });
   r.expect(String(oauth.ok ? '' : oauth.code), 'MCP_OAUTH_UNSUPPORTED', 'interactive OAuth configuration refuses with MCP_OAUTH_UNSUPPORTED');
   const challenge = validateMcpAuthConfiguration({ servers: [{ serverId: 'workspace' }], transportChallenge: { status: 401, wwwAuthenticate: 'Bearer realm="control-plane"' } });
@@ -549,7 +557,7 @@ async function scenarioFourteen(): Promise<IntegratedFailureScenarioResult> {
   r.expect(disclosureCode ?? '', 'DECISION_DISCLOSURE_VIOLATION', 'secret-bearing state refuses with DECISION_DISCLOSURE_VIOLATION');
   let calls = 0;
   const countingTransport = { async send(): Promise<never> { calls += 1; return new Promise<never>(() => { /* unreachable: refusal precedes transport. */ }); } };
-  const result = await evaluateDecision({ policy: decisionPolicy(), state: { note: 'Bearer abcdef' }, budget: new DecisionBudgetTracker({}), questions: [{ type: 'noul', id: 'q3', prompt: 'Proceed?' }], transport: countingTransport, fallback: () => 'deterministic-default' });
+  const result = await evaluateDecision({ policy: decisionPolicy(), state: { note: 'Bearer abcdef' }, budget: new DecisionBudgetTracker({}), questions: [{ type: 'noul', id: 'q3', prompt: 'Proceed?' }], apiKey: 'fixture-decision-key', transport: countingTransport, fallback: () => 'deterministic-default' });
   r.expect(String(result.fallbackReason), 'disclosure_violation', 'secret-bearing state routes to the disclosure fallback');
   r.expect(String(calls), '0', 'no transport call ever leaves the boundary');
   r.expect(String(result.transportCalls), '0', 'the evaluation reports zero transport calls');

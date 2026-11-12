@@ -234,23 +234,57 @@ const versionPicker = document.querySelector(".version-picker");
 if (versionPicker) {
   const status = document.getElementById("version-status");
   const note = versionPicker.querySelector(".picker-note");
-  const root = new URL(versionPicker.dataset.root);
-  const currentPath = versionPicker.dataset.page.slice(root.pathname.length);
-  // Keep the language and article path when another version contains that page.
-  const articlePath = currentPath.slice(currentPath.indexOf("/") + 1);
+  const currentRow = versionPicker.querySelector(".picker-row.is-current");
+  const rawRoot = versionPicker.dataset.root.endsWith("/")
+    ? versionPicker.dataset.root
+    : `${versionPicker.dataset.root}/`;
+  const root = new URL(rawRoot, window.location.origin);
+  const homePath = versionPicker.dataset.home || root.pathname;
+  const pagePath = window.location.pathname || versionPicker.dataset.page || homePath;
+  // Preserve the relative article path across version switches regardless of subpath depth.
+  let articlePath = "";
+  if (pagePath.startsWith(homePath)) {
+    articlePath = pagePath.slice(homePath.length).replace(/^\/+/, "");
+  } else if (pagePath.startsWith(root.pathname)) {
+    const rest = pagePath.slice(root.pathname.length);
+    const slashIndex = rest.indexOf("/");
+    articlePath = slashIndex === -1 ? "" : rest.slice(slashIndex + 1);
+  }
+  const normalizeEntry = raw => {
+    const id = String(raw.version ?? raw.name ?? "").trim();
+    const aliases = Array.isArray(raw.aliases) ? raw.aliases.map(String) : [];
+    const isLatest = aliases.includes("latest");
+    const baseTitle = String(raw.title ?? raw.label ?? id).trim();
+    const label = isLatest && !baseTitle.includes("(latest)")
+      ? `${baseTitle} (latest)`
+      : id === "main" && baseTitle === "main"
+        ? "main (development)"
+        : id === "local" && baseTitle === "local"
+          ? "local (development)"
+          : baseTitle;
+    const rawPath = raw.path ?? (isLatest ? "latest/" : `${id}/`);
+    const versionPath = String(rawPath).endsWith("/") ? String(rawPath) : `${rawPath}/`;
+    return { id, label, path: versionPath };
+  };
   note.textContent = "Loading versions…";
   fetch(new URL("versions.json", root), { cache: "no-store" }).then(response => {
     if (!response.ok) throw new Error("Version index unavailable");
     return response.json();
   }).then(index => {
-    if (!Array.isArray(index.versions)) throw new Error("Version index malformed");
-    for (const version of index.versions) {
-      if (version.name === versionPicker.dataset.version) continue;
+    const rawList = Array.isArray(index) ? index : Array.isArray(index?.versions) ? index.versions : null;
+    if (!rawList) throw new Error("Version index malformed");
+    for (const raw of rawList) {
+      const entry = normalizeEntry(raw);
+      if (!entry.id) continue;
+      if (entry.id === versionPicker.dataset.version) {
+        if (currentRow) currentRow.textContent = entry.label;
+        continue;
+      }
       const row = document.createElement("button");
       row.type = "button";
       row.className = "picker-row version-row";
-      row.textContent = version.name === "main" ? "main (development)" : version.name;
-      row.dataset.home = new URL(version.path, root).href;
+      row.textContent = entry.label;
+      row.dataset.home = new URL(entry.path, root).href;
       row.dataset.target = new URL(articlePath, row.dataset.home).href;
       note.before(row);
     }

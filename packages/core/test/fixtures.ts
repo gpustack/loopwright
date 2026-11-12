@@ -14,7 +14,7 @@ export function code(result: Result<unknown>): string {
 }
 export function contract() {
   return {
-    apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'update' },
+    apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
     spec: {
       goal: 'Update the pinned package', taskpack: 'package-update',
       target: { repository: 'team/repository', baseRevision: 'base-1', sourceRevision: 'source-1', matrix: null as null | { id: string; platform: string; variant: string }[] },

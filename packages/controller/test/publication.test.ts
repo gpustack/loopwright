@@ -208,17 +208,25 @@ test('Publication.run clamps to the permit lease and demotes a response that arr
   // Parked at publication_pre via the real bootstrap + graph, then Publication.run is driven directly.
   const parked = async function (runId: string, url: string) {
     const f = await publicationFixture(url);
-    const context = await createCycle(input(f, runId), {});
-    const cycle = new Cycle(context);
-    await cycle.bootstrap();
-    await cycle.graph();
-    const endpoint = f.loaded.registry.spec.publicationEndpoints[0]!;
-    const bound = bindSubject(context.lock, cycle.candidate.manifest); assert.ok(bound.ok); if (!bound.ok) throw new Error('fixture');
-    const view = stateValue(context.store.inspect());
-    const prepared = preparePublication(context.plan, context.lock, view.storeId, endpoint, bound.value);
-    await cycle.events.push('publication', null);
-    await cycle.publish({ ...cycle.draft, stage: { ...cycle.draft.stage, kind: 'publication_pre' as const }, publication: { status: 'pending' as const, operationId: prepared.operationId, receipt: null } }, 'publication.pre');
-    return { f, context, cycle, endpoint, prepared };
+    let context: Awaited<ReturnType<typeof createCycle>> | undefined;
+    try {
+      context = await createCycle(input(f, runId), {});
+      const cycle = new Cycle(context);
+      await cycle.bootstrap();
+      await cycle.graph();
+      const endpoint = f.loaded.registry.spec.publicationEndpoints[0]!;
+      const bound = bindSubject(context.lock, cycle.candidate.manifest); assert.ok(bound.ok); if (!bound.ok) throw new Error('fixture');
+      const view = stateValue(context.store.inspect());
+      const prepared = preparePublication(context.plan, context.lock, view.storeId, endpoint, bound.value);
+      await cycle.events.push('publication', null);
+      await cycle.publish({ ...cycle.draft, stage: { ...cycle.draft.stage, kind: 'publication_pre' as const }, publication: { status: 'pending' as const, operationId: prepared.operationId, receipt: null } }, 'publication.pre');
+      return { f, context, cycle, endpoint, prepared };
+    } catch (error) {
+      context?.store.close();
+      await context?.owner.release().catch(() => {});
+      await f.cleanup().catch(() => {});
+      throw error;
+    }
   };
   // Permit-lease clamp: notAfter forced to now + 2400ms clamps timeoutMs 60000 to ~400ms against a 1500ms publisher.
   {
@@ -226,9 +234,11 @@ test('Publication.run clamps to the permit lease and demotes a response that arr
     const slow = createServer((request: IncomingMessage, response: ServerResponse) => {
       void (async () => { for await (const chunk of request) void chunk; hits++; await new Promise(resolve => setTimeout(resolve, 1500)); try { response.writeHead(200, { 'content-type': 'application/json', connection: 'close' }).end('{"late":true}'); } catch { /* gone */ } })().catch(() => {});
     });
-    await new Promise<void>(resolve => slow.listen(0, '127.0.0.1', resolve));
-    const { f, context, cycle, endpoint, prepared } = await parked('run-permit-clamp', 'http://127.0.0.1:' + (slow.address() as { port: number }).port + '/publish');
+    let state: Awaited<ReturnType<typeof parked>> | undefined;
     try {
+      await new Promise<void>(resolve => slow.listen(0, '127.0.0.1', resolve));
+      state = await parked('run-permit-clamp', 'http://127.0.0.1:' + (slow.address() as { port: number }).port + '/publish');
+      const { context, cycle, endpoint, prepared } = state;
       const original = context.store.authorizeOperationDispatch.bind(context.store);
       (context.store as unknown as Record<string, unknown>).authorizeOperationDispatch = (authority: unknown, operationId: string) => {
         const dispatched = original(authority as never, operationId);
@@ -243,7 +253,13 @@ test('Publication.run clamps to the permit lease and demotes a response that arr
       assert.equal(execution.kind, 'unresolved');
       assert.equal(execution.reason, 'timeout');
       assert.equal(hits, 1);
-    } finally { await f.cleanup(); slow.closeAllConnections(); slow.close(); }
+    } finally {
+      state?.context.store.close();
+      await state?.context.owner.release().catch(() => {});
+      await state?.f.cleanup();
+      slow.closeAllConnections();
+      slow.close();
+    }
   }
   // Post-fetch permit-expiry demotion: an immediate succeeded response is demoted because the post-fetch view reads sampledNow >= notAfter.
   {
@@ -262,9 +278,11 @@ test('Publication.run clamps to the permit lease and demotes a response that arr
         response.end(bytes);
       })().catch(() => { try { response.writeHead(500).end(); } catch { /* socket already gone */ } });
     });
-    await new Promise<void>(resolve => publisher.listen(0, '127.0.0.1', resolve));
-    const { f, context, cycle, endpoint, prepared } = await parked('run-permit-expired', 'http://127.0.0.1:' + (publisher.address() as { port: number }).port + '/publish');
+    let state: Awaited<ReturnType<typeof parked>> | undefined;
     try {
+      await new Promise<void>(resolve => publisher.listen(0, '127.0.0.1', resolve));
+      state = await parked('run-permit-expired', 'http://127.0.0.1:' + (publisher.address() as { port: number }).port + '/publish');
+      const { context, cycle, endpoint, prepared } = state;
       let forcedNotAfter: string | null = null;
       const originalInspect = context.store.inspect.bind(context.store);
       (context.store as unknown as Record<string, unknown>).inspect = () => {
@@ -293,6 +311,12 @@ test('Publication.run clamps to the permit lease and demotes a response that arr
       const proof = JSON.parse(await readFile(proofPath, 'utf8')) as { receipt: string | null; evidence: string | null };
       assert.equal(proof.receipt, null);
       assert.equal(proof.evidence, null);
-    } finally { await f.cleanup(); publisher.closeAllConnections(); publisher.close(); }
+    } finally {
+      state?.context.store.close();
+      await state?.context.owner.release().catch(() => {});
+      await state?.f.cleanup();
+      publisher.closeAllConnections();
+      publisher.close();
+    }
   }
 });

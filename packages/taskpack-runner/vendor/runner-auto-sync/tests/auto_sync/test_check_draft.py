@@ -15,7 +15,7 @@ from tools.auto_sync.check_draft import ADVISORY_NOTE, main
 
 REVISION = "c" * 40
 IDENTITY = {
-    "repository": "gpustack/runner",
+    "repository": "example-org/runtime-runner",
     "default_sha": "a" * 40,
     "head_sha": "a" * 40,
     "mode": "discover",

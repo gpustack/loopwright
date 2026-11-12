@@ -25,9 +25,26 @@ export async function processBirth(pid: number): Promise<string | null> {
   }
 }
 export async function bootIdentity(): Promise<string> {
-  if (process.platform !== 'darwin' || process.arch !== 'arm64') refuse('CAPABILITY_UNSUPPORTED', '', 'admission');
-  const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 2000, maxBuffer: 1024, env: processEnvironment });
-  if (!/^\{ sec = \d+, usec = \d+ \} [^\r\n]+\n$/.test(result.stdout) || result.stderr) refuse('RECOVERY_REQUIRED', '', 'recovery'); return result.stdout.trim();
+  if (process.platform === 'darwin' && process.arch === 'arm64') {
+    const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 2000, maxBuffer: 1024, env: processEnvironment });
+    if (!/^\{ sec = \d+, usec = \d+ \} [^\r\n]+\n$/.test(result.stdout) || result.stderr) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    return result.stdout.trim();
+  }
+  if (process.platform === 'linux' && (process.arch === 'arm64' || process.arch === 'x64')) {
+    let file: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      file = await open('/proc/sys/kernel/random/boot_id', constants.O_RDONLY | constants.O_NOFOLLOW);
+      const buffer = Buffer.alloc(64);
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      const raw = buffer.subarray(0, bytesRead).toString('utf8');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n$/.test(raw)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      return raw.trim();
+    } catch (error) {
+      if (error instanceof ControllerFailure) throw error;
+      refuse('RECOVERY_REQUIRED', '', 'recovery');
+    } finally { await file?.close(); }
+  }
+  refuse('CAPABILITY_UNSUPPORTED', '', 'admission');
 }
 async function syncDirectory(path: string): Promise<void> { const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { await file.sync(); } finally { await file.close(); } }
 /** Private observation port; never accepted by configuration or exported at the package root. */

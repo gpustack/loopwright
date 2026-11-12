@@ -11,6 +11,7 @@ export interface ControlPlaneHandle {
   readonly host: string;
   readonly port: number;
   readonly url: string;
+  readonly webhookPath: string;
   readonly queue: TenantAdmissionQueue;
   readonly deliveryStore: WebhookDeliveryStore;
   close(): Promise<void>;
@@ -19,6 +20,8 @@ export interface ControlPlaneHandle {
 export interface ControlPlaneOptions {
   readonly port?: number | undefined;
   readonly host?: string | undefined;
+  readonly webhookPath?: string | undefined;
+  readonly maxPayloadBytes?: number | undefined;
   readonly webhookSecret: string;
   readonly deliveryStore?: WebhookDeliveryStore | undefined;
   readonly queue?: TenantAdmissionQueue | undefined;
@@ -126,6 +129,8 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
   const queueSummary = { enqueued: 0, coalesced: 0, leased: 0, settled: 0, revoked: 0 };
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 0;
+  const webhookPath = options.webhookPath ?? '/webhooks/github';
+  const maxPayloadBytes = options.maxPayloadBytes ?? 1_048_576;
 
   const respond = (response: ServerResponse, status: number, payload: unknown, deliverRaw?: { readonly marker: string; readonly value: string }): void => {
     // Scrub before computing content-length: tracked secrets shrink the body. A deliberate raw field
@@ -144,7 +149,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     let size = 0;
     for await (const chunk of request) {
       size += (chunk as Buffer).byteLength;
-      if (size > 1_048_576) return { ok: false };
+      if (size > maxPayloadBytes) return { ok: false };
       chunks.push(chunk as Buffer);
     }
     return { ok: true, bytes: Buffer.concat(chunks) };
@@ -152,7 +157,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
 
   const parseJsonBody = async (request: IncomingMessage): Promise<{ readonly ok: true; readonly body: Record<string, unknown> } | { readonly ok: false; readonly status: number; readonly detail: string }> => {
     const raw = await readBody(request);
-    if (!raw.ok) return { ok: false, status: 413, detail: 'request body exceeds 1048576 bytes' };
+    if (!raw.ok) return { ok: false, status: 413, detail: `request body exceeds ${maxPayloadBytes} bytes` };
     try {
       const parsed: unknown = JSON.parse(raw.bytes.toString('utf8'));
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -200,10 +205,10 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       return respond(response, 200, { ok: true, queue: { ...queueSummary }, deliveries: deliveryStore.counts() });
     }
 
-    if (url.pathname === '/webhooks/github') {
+    if (url.pathname === webhookPath) {
       if (method !== 'POST') return respond(response, 405, { error: { code: 'SERVICE_FAULT', message: 'method not allowed' } });
       const raw = await readBody(request);
-      if (!raw.ok) return respond(response, 413, { error: { code: 'WEBHOOK_PAYLOAD_TOO_LARGE', message: 'webhook body exceeds 1048576 bytes' } });
+      if (!raw.ok) return respond(response, 413, { error: { code: 'WEBHOOK_PAYLOAD_TOO_LARGE', message: `webhook body exceeds ${maxPayloadBytes} bytes` } });
       const outcome: WebhookIntakeOutcome = intakeWebhookDelivery({
         rawBody: raw.bytes,
         signatureHeader: request.headers['x-hub-signature-256'] as string | undefined,
@@ -349,7 +354,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
   const boundPort = typeof address === 'object' && address !== null ? address.port : port;
 
   return {
-    host, port: boundPort, url: `http://${host}:${boundPort}`, queue, deliveryStore,
+    host, port: boundPort, url: `http://${host}:${boundPort}`, webhookPath, queue, deliveryStore,
     close: async () => new Promise<void>((resolveClose, rejectClose) => {
       server.close(error => (error === undefined ? resolveClose() : rejectClose(error)));
     }),

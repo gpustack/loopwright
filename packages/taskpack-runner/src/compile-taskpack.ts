@@ -7,7 +7,7 @@ import { installedHandlerDigests, type ControllerConfiguration, type TrustedRegi
 import { RunnerTaskpackError } from './types.js';
 
 /** Runner's candidate patch surface: exactly the paths the frozen validators allow a proposal to touch. */
-export const RUNNER_WRITABLE_PATHS = ['pack', 'docs/supported-runners.md', 'docs/support-records.md', 'gpustack_runner/runner.py.json', '.autosync/proposal.json'] as const;
+export const RUNNER_WRITABLE_PATHS = ['pack', 'docs/supported-runners.md', 'docs/support-records.md', 'runtime_runner/runner.py.json', '.autosync/proposal.json'] as const;
 /** Runner's protected automation surface: candidate patches must never touch these paths. */
 export const RUNNER_PROTECTED_PATHS = ['.github', 'tools', 'tests', '.agents', '.claude', 'AGENTS.md', 'CLAUDE.md'] as const;
 /** Runner research stage budget mapped onto controller pre-admitted caps: tokens soft, everything else hard. */
@@ -47,9 +47,8 @@ export interface RunnerPublicationEndpointPlan {
 export interface RunnerRoleSelection {
   readonly provider?: string;
   readonly model?: string;
-  readonly thinking?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
-  /** The frozen controller policy accepts only the anthropic-messages send path. */
-  readonly api?: 'anthropic-messages';
+  readonly thinking?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  readonly api?: 'anthropic-messages' | 'openai-completions' | 'openai-responses';
 }
 
 export interface RunnerRuntimeOptions {
@@ -155,9 +154,9 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   const activeChecks = options.mode === 'candidate' ? candidateChecks : noChangeChecks;
 
   const registry: TrustedRegistry = {
-    apiVersion: 'loopwright.dev/controller/v1alpha1' as const,
+    apiVersion: 'loopwright.dev/v1alpha1' as const,
     kind: 'TrustedRegistry' as const,
-    metadata: { id: registryId },
+    metadata: { name: registryId },
     spec: {
       version: 1 as const,
       resourceVersion,
@@ -184,7 +183,7 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
         identity: { sdkIntegrity: runtime.sdkIntegrity, graphDigest: runtime.graphDigest, imageDigest: runtimeOptions.imageDigest, configDigest: runtime.configDigest, profile: runtimeOptions.profile },
       }],
       credentialBindings: [
-        { id: 'runner-provider-token', consumer: 'provider', destinationRef: 'github-copilot', environmentNames: ['RUNNER_PROVIDER_TOKEN'], template: '${RUNNER_PROVIDER_TOKEN}' },
+        { id: 'runner-provider-token', consumer: 'provider', destinationRef: roleSelection.provider, environmentNames: ['RUNNER_PROVIDER_TOKEN'], template: '${RUNNER_PROVIDER_TOKEN}' },
         ...(options.mode === 'candidate' ? [{ id: options.gateEndpoint.signingCredentialRef, consumer: 'gate' as const, destinationRef: 'runner-gate-signing', environmentNames: ['RUNNER_GATE_SIGNING_SECRET'], template: '${RUNNER_GATE_SIGNING_SECRET}' }] : []),
         ...(publicationEndpoint === undefined ? [] : [{ id: publicationEndpoint.signingCredentialRef, consumer: 'publisher' as const, destinationRef: 'runner-publication-signing', environmentNames: ['RUNNER_PUBLICATION_SIGNING_SECRET'], template: '${RUNNER_PUBLICATION_SIGNING_SECRET}' }]),
       ],
@@ -225,7 +224,6 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   const task = {
     apiVersion: 'loopwright.dev/v1alpha1' as const,
     kind: 'TaskContract' as const,
-    metadata: { id: 'runner-auto-sync' },
     spec: {
       goal: options.mode === 'candidate'
         ? 'Assess upstream updates, assemble the candidate patch and proposal document, and pass external candidate validation so the managed publication boundary can publish it.'
@@ -266,12 +264,11 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   const validated = validateDocument(task, 'TaskContract');
   if (!validated.ok) throw new RunnerTaskpackError('CONFIG_INVALID', `compiled task contract failed validation: ${JSON.stringify(validated.errors).slice(0, 256)}`);
   const config: ControllerConfiguration = {
-    apiVersion: 'loopwright.dev/controller/v1alpha1',
+    apiVersion: 'loopwright.dev/v1alpha1',
     kind: 'ControllerConfig',
-    metadata: { id: 'runner-auto-sync-config' },
     spec: {
       task: validated.value,
-      registry: { id: registryId, digest: digestOf(registryBytes) },
+      registry: { name: registryId, digest: digestOf(registryBytes) },
       profiles: {
         roles: [{ roleId: 'author', profileRef: 'runner-author-role' }],
         steps: (options.mode === 'candidate'

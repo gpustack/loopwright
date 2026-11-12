@@ -20,7 +20,7 @@ from tools.auto_sync.publish import BRANCH, GitHub, prepare_context, publish
 
 SUPPORT = "docs/support-records.md"
 BOT = "runner-sync[bot]"
-REPOSITORY = "gpustack/runner"
+REPOSITORY = "example-org/runtime-runner"
 
 
 def git(repo, *args):

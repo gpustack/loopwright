@@ -102,6 +102,16 @@ export function document<const K extends string, T>(kind: K, spec: Schema<T>) {
     return shape(value, path);
   };
 }
+export function configDocument<const K extends string, T>(kind: K, spec: Schema<T>) {
+  const shape = record({ apiVersion: enumeration(API_VERSION), kind: enumeration(kind), spec });
+  return (value: Json, path: string): Infer<typeof shape> => {
+    const input = object(value, path);
+    if (!Object.hasOwn(input, 'apiVersion')) fail('FIELD_REQUIRED', `${path}/apiVersion`);
+    if (input.apiVersion !== API_VERSION) fail('VERSION_UNSUPPORTED', `${path}/apiVersion`);
+    if (input.kind !== kind) fail('KIND_MISMATCH', `${path}/kind`);
+    return shape(value, path);
+  };
+}
 export const evidenceLevel = enumeration('static_inspection', 'synthetic_fixture', 'local_execution', 'external_service', 'hardware_execution');
 export type EvidenceLevel = Infer<typeof evidenceLevel>;
 export const checkStatus = enumeration('passed', 'failed', 'blocked', 'not_run');
@@ -114,7 +124,7 @@ const budgets = record({
   enforcement: record({ wallTime: mode, tokens: mode, modelCalls: mode, concurrency: mode,
     formatRepairs: mode, implementationRepairs: mode, transportRetries: mode }),
 });
-const taskShape = document('TaskContract', record({
+const taskShape = configDocument('TaskContract', record({
   goal: text(1, LIMITS.goal), taskpack: identifier,
   target: record({ repository, baseRevision: revision, sourceRevision: revision,
     matrix: nullable(arrayOf(record({ id: identifier, platform: label, variant: label }), 1, LIMITS.targets)) }),

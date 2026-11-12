@@ -103,7 +103,7 @@ from tools.auto_sync.checks import validate_candidate
 work = Path(tempfile.mkdtemp(prefix="runner-gate-"))
 try:
     repo = work / "target"
-    subprocess.run(["git", "clone", "-q", "--no-hardlinks", config["repository"], str(repo)], check=True)
+    subprocess.run(["git", "clone", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-q", "--no-hardlinks", config["repository"], str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "-B", "pr-head", config["identity"]["head_sha"]], check=True)
     for path, b64 in config["candidateFilesB64"]:
         if config["identity"].get("mode") == "revise" and not path.startswith(".autosync/"):
@@ -137,7 +137,7 @@ from tools.auto_sync.publish import GitHub, prepare_context, publish
 work = Path(tempfile.mkdtemp(prefix="runner-publish-"))
 try:
     repo = work / "target"
-    subprocess.run(["git", "clone", "-q", "--no-hardlinks", config["snapshotPath"], str(repo)], check=True)
+    subprocess.run(["git", "clone", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-q", "--no-hardlinks", config["snapshotPath"], str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "-B", "pr-head", config["headSha"]], check=True)
     artifact = config["checked"]
     api = GitHub("fake-write-token", config["bot"], api_url=config["fakeUrl"])
@@ -372,13 +372,13 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
   const ownedBridge = options.bridge === undefined;
   const scratch = await mkdtemp(join(await (await import('node:fs/promises')).realpath(tmpdir()), 'runner-service-'));
   await chmod(scratch, 0o700);
-  await verifyFrozenCorpus(options.corpusRoot);
+  const verifiedCorpus = await verifyFrozenCorpus(options.corpusRoot);
   const gateSecret = options.gateSecret, publicationSecret = options.publicationSecret;
   const registrations = new Map<string, RunnerCandidateRegistration>();
   const checkedCache = new Map<string, CheckedEntry>();
   const idempotentReceipts = new Map<string, { requestDigest: string; bytes: Buffer; signature: string }>();
   const replayBindings = new Map<string, string>();
-  const fakeRepository = options.fakeRepository ?? 'gpustack/runner';
+  const fakeRepository = options.fakeRepository ?? 'example-org/runtime-runner';
 
   if (options.stateFilePath !== undefined) {
     try {
@@ -395,28 +395,74 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
   const fakeServerScript = join(scratch, 'fake-server.py');
   await writeFile(fakeServerScript, FAKE_SERVER_DRIVER, { mode: 0o600 });
   const fakeDoubles = new Map<string, { child: import('node:child_process').ChildProcess; fakeUrl: string; controlPort: number; source: string; fakeRepoDir: string }>();
+  const trackedChildren = new Set<import('node:child_process').ChildProcess>();
   let activeFakeKey: string | null = null;
+
+  function terminateResidentChild(child: import('node:child_process').ChildProcess): Promise<void> {
+    trackedChildren.delete(child);
+    child.removeAllListeners('exit');
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+    return new Promise<void>(resolve => {
+      const done = (): void => { clearTimeout(killTimer); resolve(); };
+      child.once('exit', done);
+      try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGTERM'); else child.kill('SIGTERM'); } catch { child.kill('SIGTERM'); }
+      const killTimer = setTimeout(() => {
+        try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { child.kill('SIGKILL'); }
+        done();
+      }, 250);
+      killTimer.unref();
+    });
+  }
 
   async function ensureFakeDouble(snapshotPath: string): Promise<void> {
     const existing = fakeDoubles.get(snapshotPath);
     if (existing !== undefined) { activeFakeKey = snapshotPath; return; }
     const gitEnv = { HOME: scratch, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
     const fakeRepoDir = join(await mkdtemp(join(scratch, 'fake-repo-')), 'repository');
-    await execFileAsync('/usr/bin/git', ['clone', '-q', '--no-hardlinks', snapshotPath, fakeRepoDir], { env: gitEnv, encoding: 'utf8' });
+    await execFileAsync('/usr/bin/git', ['clone', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-q', '--no-hardlinks', snapshotPath, fakeRepoDir], { env: gitEnv, encoding: 'utf8' });
     const child = await bridge.residentSpawn([fakeServerScript], {
-      stdin: JSON.stringify({ vendorRoot: (await verifyFrozenCorpus(options.corpusRoot)).root, repoDir: fakeRepoDir, repository: fakeRepository, bot: 'runner-sync[bot]' }),
+      stdin: JSON.stringify({ vendorRoot: verifiedCorpus.root, repoDir: fakeRepoDir, repository: fakeRepository, bot: 'runner-sync[bot]' }),
     });
-    const readyJson = await new Promise<string>((resolve, reject) => {
-      let buffered = '';
-      const timer = setTimeout(() => reject(new RunnerTaskpackError('SERVICE_FAULT', 'github service double did not become ready')), 30000);
-      child.stdout!.on('data', chunk => {
-        buffered += chunk.toString('utf8');
-        if (buffered.includes('\n')) { clearTimeout(timer); resolve(buffered.slice(0, buffered.indexOf('\n'))); }
+    trackedChildren.add(child);
+    child.stderr?.resume();
+    let ready: { fakePort: number; controlPort: number };
+    try {
+      const readyJson = await new Promise<string>((resolve, reject) => {
+        let buffered = '';
+        const cleanup = (): void => {
+          clearTimeout(timer);
+          child.stdout?.off('data', onData);
+          child.off('exit', onExit);
+        };
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new RunnerTaskpackError('SERVICE_FAULT', 'github service double did not become ready'));
+        }, 30000);
+        const onData = (chunk: Buffer): void => {
+          buffered += chunk.toString('utf8');
+          if (buffered.includes('\n')) {
+            cleanup();
+            resolve(buffered.slice(0, buffered.indexOf('\n')));
+          }
+        };
+        const onExit = (code: number | null): void => {
+          cleanup();
+          reject(new RunnerTaskpackError('SERVICE_FAULT', `github service double exited early (${String(code)})`));
+        };
+        child.stdout!.on('data', onData);
+        child.once('exit', onExit);
       });
-      child.on('exit', code => { clearTimeout(timer); reject(new RunnerTaskpackError('SERVICE_FAULT', `github service double exited early (${String(code)})`)); });
-    });
-    const ready = JSON.parse(readyJson) as { fakePort: number; controlPort: number };
-    child.removeAllListeners('exit');
+      ready = JSON.parse(readyJson) as { fakePort: number; controlPort: number };
+    } catch (error) {
+      await terminateResidentChild(child);
+      throw error;
+    }
+    child.stdout?.resume();
+    (child.stdout as unknown as { unref?: () => void })?.unref?.();
+    (child.stderr as unknown as { unref?: () => void })?.unref?.();
+    child.unref();
     fakeDoubles.set(snapshotPath, { child, fakeUrl: `http://127.0.0.1:${ready.fakePort}`, controlPort: ready.controlPort, source: snapshotPath, fakeRepoDir });
     activeFakeKey = snapshotPath;
   }
@@ -700,6 +746,7 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
   const address = server.address();
   if (address === null || typeof address === 'string') throw new RunnerTaskpackError('SERVICE_FAULT', 'loopback listener failed to bind');
   const boundPort = address.port;
+  let closed = false;
 
   return {
     gateUrl: `http://127.0.0.1:${boundPort}/gate`,
@@ -758,17 +805,13 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
       return { bytes, signature };
     },
     async close() {
+      if (closed) return;
+      closed = true;
+      server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)));
-      for (const instance of fakeDoubles.values()) {
-        instance.child.removeAllListeners('exit');
-        try { if (instance.child.pid !== undefined) process.kill(-instance.child.pid, 'SIGTERM'); } catch { instance.child.kill('SIGTERM'); }
-        if (instance.child.exitCode === null) {
-          const child = instance.child;
-          setTimeout(() => {
-            try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
-          }, 250).unref();
-        }
-      }
+      const children = new Set<import('node:child_process').ChildProcess>([...trackedChildren, ...[...fakeDoubles.values()].map(instance => instance.child)]);
+      await Promise.all([...children].map(child => terminateResidentChild(child)));
+      fakeDoubles.clear();
       if (ownedBridge) await bridge.dispose();
       await rm(scratch, { recursive: true, force: true });
     },

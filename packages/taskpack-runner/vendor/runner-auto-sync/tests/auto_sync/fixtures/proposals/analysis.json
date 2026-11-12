@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "identity": {
-    "repository": "gpustack/runner",
+    "repository": "example-org/runtime-runner",
     "default_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "mode": "discover",

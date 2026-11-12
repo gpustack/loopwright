@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { SecretScrubber } from '@loopwright/core';
-import { validateDecisionPolicy, validateDecisionQuestions } from '../src/schema.js';
+import {
+  DECISION_POLICY_DOCUMENT_API_VERSION, loadDecisionPolicyFile, parseDecisionPolicyDocument,
+  validateDecisionPolicy, validateDecisionQuestions,
+} from '../src/schema.js';
 import { sanitizeDecisionState, type DecisionScrubber } from '../src/redaction.js';
 
 function throwsCode(run: () => unknown, code: string): void {
@@ -262,5 +268,134 @@ describe('sanitizeDecisionState', () => {
     throwsCode(() => sanitizeDecisionState({ note: 'x'.repeat(513) }, metadataPolicy), 'DECISION_DISCLOSURE_VIOLATION');
     assert.equal(sanitizeDecisionState({ note: 'x'.repeat(512) }, metadataPolicy), JSON.stringify({ note: 'x'.repeat(512) }));
     assert.equal(sanitizeDecisionState({ note: 'x'.repeat(513) }, approvedPolicy()), JSON.stringify({ note: 'x'.repeat(513) }));
+  });
+});
+
+describe('parseDecisionPolicyDocument and loadDecisionPolicyFile (AC-4)', () => {
+  const envelopeYaml = `apiVersion: ${DECISION_POLICY_DOCUMENT_API_VERSION}
+kind: DecisionPolicy
+spec:
+  enabled: true
+  provider: startlux-decision
+  disclosurePolicy: repo-approved-redacted-evidence
+  minConfidence: 0.85
+  confirmThreshold: 0.65
+  hardDeadlineMs: 4000
+  maxAttempts: 2
+  fallbackRole: deterministic
+  onFallbackUnavailable: blocked
+  allowImages: false
+  startluxOptions:
+    thinkMode: auto
+    thinkBudget: 512
+    gate: 0.5
+`;
+
+  const flatYaml = `enabled: true
+provider: typesafe-jev
+disclosurePolicy: public-metadata-only
+minConfidence: 0.8
+confirmThreshold: 0.6
+hardDeadlineMs: 5000
+maxAttempts: 1
+`;
+
+  it('parses envelope and flat YAML and JSON policy documents identically', () => {
+    const fromEnvelopeYaml = parseDecisionPolicyDocument(Buffer.from(envelopeYaml, 'utf8'), 'yaml');
+    assert.equal(fromEnvelopeYaml.enabled, true);
+    assert.equal(fromEnvelopeYaml.provider, 'startlux-decision');
+    assert.equal(fromEnvelopeYaml.minConfidence, 0.85);
+    assert.equal(fromEnvelopeYaml.confirmThreshold, 0.65);
+    assert.equal(fromEnvelopeYaml.startluxOptions?.thinkBudget, 512);
+
+    const fromEnvelopeJson = parseDecisionPolicyDocument(
+      Buffer.from(JSON.stringify({
+        apiVersion: DECISION_POLICY_DOCUMENT_API_VERSION,
+        kind: 'DecisionPolicy',
+        spec: {
+          enabled: true,
+          provider: 'startlux-decision',
+          disclosurePolicy: 'repo-approved-redacted-evidence',
+          minConfidence: 0.85,
+          confirmThreshold: 0.65,
+          hardDeadlineMs: 4000,
+          maxAttempts: 2,
+          fallbackRole: 'deterministic',
+          onFallbackUnavailable: 'blocked',
+          allowImages: false,
+          startluxOptions: { thinkMode: 'auto', thinkBudget: 512, gate: 0.5 },
+        },
+      }), 'utf8'),
+      'json',
+    );
+    assert.deepEqual(fromEnvelopeJson, fromEnvelopeYaml);
+
+    const fromFlatYaml = parseDecisionPolicyDocument(Buffer.from(flatYaml, 'utf8'), 'yaml');
+    assert.equal(fromFlatYaml.enabled, true);
+    assert.equal(fromFlatYaml.provider, 'typesafe-jev');
+    assert.equal(fromFlatYaml.disclosurePolicy, 'public-metadata-only');
+  });
+
+  it('rejects duplicate keys, YAML anchors/aliases/tags, tabs, prototype-pollution keys, and unknown fields', () => {
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('enabled: true\nenabled: false\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('{"enabled":true,"enabled":false}', 'utf8'), 'json'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('enabled: &anchor true\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('enabled: *alias\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('enabled: !tag true\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('\tenabled: true\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('__proto__: polluted\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('{"constructor": {}}', 'utf8'), 'json'),
+      'DECISION_POLICY_INVALID',
+    );
+    throwsCode(
+      () => parseDecisionPolicyDocument(Buffer.from('enabled: true\nunknownField: 123\n', 'utf8'), 'yaml'),
+      'DECISION_POLICY_INVALID',
+    );
+  });
+
+  it('loads decisions.yaml from disk and refuses symlinks or .. traversal', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'lw-decisions-policy-')));
+    try {
+      const yamlPath = join(root, 'decisions.yaml');
+      await writeFile(yamlPath, envelopeYaml, { mode: 0o600 });
+      const loaded = await loadDecisionPolicyFile(yamlPath);
+      assert.equal(loaded.enabled, true);
+      assert.equal(loaded.provider, 'startlux-decision');
+
+      const linkPath = join(root, 'linked-decisions.yaml');
+      await symlink(yamlPath, linkPath);
+      await assert.rejects(
+        loadDecisionPolicyFile(linkPath),
+        (error: { code?: string }) => error.code === 'DECISION_POLICY_INVALID',
+      );
+      await assert.rejects(
+        loadDecisionPolicyFile(`${root}/sub/../decisions.yaml`),
+        (error: { code?: string }) => error.code === 'DECISION_POLICY_INVALID',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

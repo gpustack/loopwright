@@ -111,6 +111,8 @@ export const DEFAULT_DECISION_POLICY: DecisionPolicyConfig = Object.freeze({
 });
 
 export const DECISION_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
+export const DECISION_POLICY_DOCUMENT_API_VERSION = 'loopwright.dev/v1alpha1' as const;
+export const DECISION_POLICY_MAX_BYTES = 65_536;
 export const DECISION_MAX_QUESTIONS = 100;
 export const DECISION_MAX_OPTIONS = 255;
 export const DECISION_MIN_CRITERIA = 2;

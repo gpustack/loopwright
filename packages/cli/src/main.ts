@@ -1,11 +1,21 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, reconcileCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
+import { startConfiguredGitHubApp } from '@loopwright/github-app';
 import { parseArguments, UsageError } from './arguments.js';
 import { initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
-const HELP = `loopwright 0.0.0\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+function resolveCliVersion(): string {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: unknown };
+    if (typeof raw.version === 'string' && raw.version.length > 0) return raw.version;
+  } catch { /* fallback */ }
+  return '0.0.0';
+}
+const CLI_VERSION = resolveCliVersion();
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -46,7 +56,7 @@ export function closureExitCode(report: ClosureMatrixReport, verifyFailures: boo
 }
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
-  if (argv.length === 1 && argv[0] === '--version') { await stdout('0.0.0\n'); return 0; }
+  if (argv.length === 1 && argv[0] === '--version') { await stdout(`${CLI_VERSION}\n`); return 0; }
   let sequence = 0, runId: string | null = null, json = argv.includes('--json');
   const emit = async (kind: Envelope['kind'], data: unknown, summary?: string) => { const envelope: Envelope = { version: 1, kind, sequence: ++sequence, runId, data }; if (!json && kind === 'diagnostic') { await stderr(encoded(summary ?? kind) + '\n'); return; } await stdout(json ? encoded(envelope) + '\n' : encoded(summary ?? kind) + '\n'); };
   try {
@@ -59,6 +69,32 @@ export async function main(argv: readonly string[]): Promise<number> {
       const matrix = report.failureMatrix === null ? '' : `; failure matrix ${report.failureMatrix.passed}/${report.failureMatrix.total} passed`;
       await emit('closure', report, `closure: ${report.summary.closedLocal} closed local, ${report.summary.unprovisionedExternal} unprovisioned external; integrity ${report.integrity.ok ? 'ok' : 'failed'}; ${report.falsificationDetected ? 'falsification detected' : 'no falsification'}${matrix}`);
       return closureExitCode(report, args.flags.has('verify-failures'));
+    }
+    if (args.command === 'app-serve') {
+      let handle;
+      try {
+        handle = await startConfiguredGitHubApp(resolve(get('config')), {
+          env: process.env,
+          repoRoot: args.values.has('repo') ? resolve(get('repo')) : undefined,
+        });
+      } catch (err) {
+        if (err !== null && typeof err === 'object' && 'code' in err && typeof (err as { code: unknown }).code === 'string') {
+          const code = (err as { code: string }).code;
+          const message = err instanceof Error ? err.message : code;
+          await emit('diagnostic', { version: 1, code, message }, code);
+          return 2;
+        }
+        throw err;
+      }
+      await emit('status', { host: handle.host, port: handle.port, url: handle.url, webhookPath: handle.webhookPath }, `listening: ${handle.url}${handle.webhookPath}`);
+      const caughtSignal = await new Promise<'SIGINT' | 'SIGTERM'>(resolveSignal => {
+        const onSigint = () => { process.off('SIGINT', onSigint); process.off('SIGTERM', onSigterm); resolveSignal('SIGINT'); };
+        const onSigterm = () => { process.off('SIGINT', onSigint); process.off('SIGTERM', onSigterm); resolveSignal('SIGTERM'); };
+        process.on('SIGINT', onSigint);
+        process.on('SIGTERM', onSigterm);
+      });
+      await handle.close();
+      return caughtSignal === 'SIGTERM' ? 143 : 130;
     }
     if (args.command === 'status' || args.command === 'inspect') {
       runId = get('run-id'); const input = { runRoot: get('run-root'), runId };

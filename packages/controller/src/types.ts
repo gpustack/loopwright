@@ -1,7 +1,7 @@
 import type { ArtifactRef, Digest, TaskContract, Subject } from '@loopwright/core';
 import type { AdapterPolicyV2, AdapterPolicy, RuntimeIdentity } from '@loopwright/agent-pi';
 import type { Json, Scalar } from './schema.js';
-export const CONTROLLER_API_VERSION = 'loopwright.dev/controller/v1alpha1' as const;
+export const CONTROLLER_API_VERSION = 'loopwright.dev/v1alpha1' as const;
 export type Implementation = 'pi.agent.v1' | 'pi.compact.v1' | 'scope.v1' | 'json-artifact.v1' | 'no-change.v1' | 'gate.v1';
 export interface Handler {
   readonly id: string; readonly version: 1; readonly digest: Digest; readonly kind: 'agent' | 'check'; readonly implementation: Implementation;
@@ -25,7 +25,7 @@ export interface PublicationEndpoint {
 export type PublicationConfig = { readonly mode: 'disabled' }
   | { readonly mode: 'pull_request'; readonly endpointRef: string; readonly targetBranch: string; readonly headBranchPrefix: string; readonly titleTemplate: string };
 export interface TrustedRegistry {
-  readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'TrustedRegistry'; readonly metadata: { readonly id: string };
+  readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'TrustedRegistry'; readonly metadata: { readonly name: string };
   readonly spec: { readonly version: 1; readonly resourceVersion: string; readonly handlers: readonly Handler[]; readonly roleProfiles: readonly RoleProfile[];
     readonly resources: readonly RegistryResource[]; readonly runtimeProfiles: readonly RuntimeProfile[];
     readonly credentialBindings: readonly CredentialBinding[]; readonly environmentBindings: readonly EnvironmentBinding[];
@@ -36,8 +36,8 @@ export interface Controls {
   readonly submission: { readonly mode: 'artifact_or_assistant'; readonly path: string | null };
 }
 export interface ControllerConfiguration {
-  readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'ControllerConfig'; readonly metadata: { readonly id: string };
-  readonly spec: { readonly task: TaskContract; readonly registry: { readonly id: string; readonly digest: Digest };
+  readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'ControllerConfig';
+  readonly spec: { readonly task: TaskContract; readonly registry: { readonly name: string; readonly digest: Digest };
     readonly profiles: { readonly roles: readonly { readonly roleId: string; readonly profileRef: string }[]; readonly steps: readonly { readonly stepId: string; readonly handlerRef: string }[] };
     /** Original approved templates, never their expansions. */
     readonly credentials: readonly { readonly ref: string; readonly template: string }[]; readonly controls: Controls; readonly publication: PublicationConfig };

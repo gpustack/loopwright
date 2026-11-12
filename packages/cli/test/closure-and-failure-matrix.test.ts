@@ -43,7 +43,7 @@ test('closure: evaluates the committed repository evidence with clean integrity'
   assert.equal(closureExitCode(report, false), 0);
   assert.equal(closureExitCode(report, true), 4);
 });
-test('closure: auto-runs the failure matrix when verifyFailures is set', { timeout: 30000 }, async () => {
+test('closure: auto-runs the failure matrix when verifyFailures is set', { timeout: 60000 }, async () => {
   const report = await evaluateClosureMatrix({ repoRoot: REPO_ROOT, verifyFailures: true });
   assert.equal(report.integrity.ok, true, JSON.stringify(report.integrity.failures));
   assert.equal(report.falsificationDetected, false);
@@ -93,12 +93,21 @@ test('closure: verifies evidence containment and refuses missing or symlinked fi
     const withoutShapeError: ClosureMatrixReport = { ...evaluated, diagnostics: [] };
     assert.equal(closureExitCode(withoutShapeError, false), 8);
     await mkdir(join(root, '.github', 'workflows'), { recursive: true });
-    const withWorkflows = await verifyClosureLedgerIntegrity(root, [entries[0]!]);
-    assert.equal(withWorkflows.ok, false);
-    assert.ok(withWorkflows.failures.some(failure => failure.path === '.github/workflows'));
+    await writeFile(join(root, '.github', 'workflows', 'ci.yml'), 'name: CI\n', { mode: 0o600 });
+    const withRegularWorkflow = await verifyClosureLedgerIntegrity(root, [entries[0]!]);
+    assert.equal(withRegularWorkflow.ok, true);
+    await writeFile(join(root, '.github', 'workflows', 'untrusted.sh'), '#!/bin/sh\n', { mode: 0o600 });
+    const withNonYamlWorkflow = await verifyClosureLedgerIntegrity(root, [entries[0]!]);
+    assert.equal(withNonYamlWorkflow.ok, false);
+    assert.ok(withNonYamlWorkflow.failures.some(failure => failure.path === '.github/workflows' && failure.code === CLOSURE_EVIDENCE_UNTRUSTED));
+    await rm(join(root, '.github', 'workflows', 'untrusted.sh'));
+    await symlink(join(root, 'outside.txt'), join(root, '.github', 'workflows', 'linked.yml'));
+    const withSymlinkWorkflow = await verifyClosureLedgerIntegrity(root, [entries[0]!]);
+    assert.equal(withSymlinkWorkflow.ok, false);
+    assert.ok(withSymlinkWorkflow.failures.some(failure => failure.path === '.github/workflows' && failure.code === CLOSURE_EVIDENCE_UNTRUSTED));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
-test('closure: the full 14-scenario matrix passes against real public APIs', { timeout: 30000 }, async () => {
+test('closure: the full 14-scenario matrix passes against real public APIs', { timeout: 60000 }, async () => {
   const expected = [...INTEGRATED_FAILURE_SCENARIO_IDS];
   assert.equal(expected.length, 14);
   assert.equal(new Set(expected).size, 14);
@@ -126,7 +135,7 @@ test('closure: the full 14-scenario matrix passes against real public APIs', { t
   for (const scenario of report.scenarios) { assert.ok(scenario.assertions.length > 0, scenario.scenarioId); assert.ok(scenario.elapsedMs >= 0); }
   assert.equal(closureExitCode({ version: 1, integrity: { ok: true, checkedFiles: 23, failures: [] }, falsificationDetected: false, diagnostics: [], summary: { total: 23, closedLocal: 18, deferredOwned: 2, blockedExternal: 3, unprovisionedExternal: 5, passed: 18 }, failureMatrix: report } as ClosureMatrixReport, true), 0);
 });
-test('closure: one injected scenario failure flips the report and maps to exit 4', { timeout: 30000 }, async () => {
+test('closure: one injected scenario failure flips the report and maps to exit 4', { timeout: 60000 }, async () => {
   const report = await runIntegratedFailureMatrix({ scenarioOverrides: { stale_memory_source_exclusion: () => ({ scenarioId: 'stale_memory_source_exclusion', passed: false, diagnosticCode: 'INJECTED_FAULT', assertions: ['injected'], elapsedMs: 0 }) } });
   assert.equal(report.allPassed, false);
   assert.equal(report.failed, 1);

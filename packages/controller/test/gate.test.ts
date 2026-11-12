@@ -148,17 +148,17 @@ test('the poll window caps at the remaining task budget after drain reserve, set
   let f: Awaited<ReturnType<typeof gateCycleFixture>> | null = null;
   try {
     f = await gateCycleFixture(gate.url, 90000);
-    // wallTimeMs 122500 leaves ~500ms of poll window after the 120s drain reserve and its 2s margin.
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'wallTimeMs'], 122500);
+    // wallTimeMs 128000 leaves ~6s of poll window after the 120s drain reserve and its 2s margin.
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'wallTimeMs'], 128000);
     await f.save(); const loaded = await f.load(); assert.ok(loaded.ok); if (!loaded.ok) return;
     f.loaded = loaded.value;
     const seen: ControllerEvent[] = [], started = Date.now(), execution = await cycle(input(f, 'run-gate-budget-cap', async event => { seen.push(event); }));
     assert.equal(execution.kind, 'result'); if (execution.kind !== 'result') return;
     assert.equal(execution.result.spec.status, 'blocked');
     assert.equal(execution.result.spec.verification.spec.required.find(row => row.checkId === 'approval')?.detail, 'GATE_TIMEOUT');
-    assert.ok(Date.now() - started < 5000);
+    assert.ok(Date.now() - started < 12000);
     const waiting = seen.filter(event => event.stage === 'gate_waiting');
-    assert.ok(waiting.length >= 1 && waiting.every(event => event.gate !== null && event.gate.deadlineMs <= 58000 && event.gate.deadlineMs >= 0));
+    assert.ok(waiting.length >= 1 && waiting.every(event => event.gate !== null && event.gate.deadlineMs <= 6000 && event.gate.deadlineMs >= 0));
   } finally { if (f) await f.cleanup(); await gate.close(); }
 });
 test('resume replays the retained gate receipt, never sends a replacement request, and an interrupted poll fails closed', async () => {

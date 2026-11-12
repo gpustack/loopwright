@@ -7,8 +7,8 @@ branding:
   icon: 'refresh-cw'
   color: 'purple'
 
-# This file intentionally lives at the repository root, never under .github/workflows/:
-# the Loopwright repository ships zero CI workflow files.
+# This file lives at the repository root alongside `.github/workflows/`:
+# `.github/workflows/` must maintain least-privilege permissions and remain strictly protected against untrusted taskpack and sandbox writes.
 
 inputs:
   taskpack-path:
@@ -37,14 +37,30 @@ inputs:
     required: false
     default: 'actions-basic'
   provider:
-    description: 'Model provider for the author role.'
+    description: 'Token-authenticated Pi model provider for the author role (e.g. zai, zai-coding-cn, anthropic, openai, openrouter, deepseek).'
     required: false
   model:
-    description: 'Model identifier for the author role.'
+    description: 'Pi model identifier for the author role (e.g. glm-5.3, claude-sonnet-4-6, gpt-5.4).'
     required: false
   thinking:
-    description: 'Thinking budget tier (minimal, low, medium, high, xhigh).'
+    description: 'Pi thinking level (off, minimal, low, medium, high, xhigh, max).'
     required: false
+  api:
+    description: 'Optional Pi wire API override (anthropic-messages, openai-completions, openai-responses).'
+    required: false
+  base-url:
+    description: 'Optional HTTPS base URL override for custom or proxy Pi model endpoints.'
+    required: false
+  provider-token-env:
+    description: 'Environment variable name carrying the provider API token (defaults to standard Pi variable or LOOPWRIGHT_PROVIDER_TOKEN).'
+    required: false
+  models-json:
+    description: 'Optional path to a trusted Pi models.json file defining custom compatible providers or model overrides.'
+    required: false
+  allow-custom-base-url:
+    description: "Permit spec.models[].baseUrl from .loopwright/taskpack.yaml when 'true'."
+    required: false
+    default: 'false'
   dry-run:
     description: "Compile without invoking the controller delegate when 'true'."
     required: false
@@ -59,7 +75,39 @@ inputs:
 outputs:
   result:
     description: 'Structured JSON result of the entrypoint run.'
+    value: ${{ steps.loopwright-entrypoint.outputs.result }}
 
 runs:
-  using: 'node20'
-  main: 'packages/github-app/dist/action.js'
+  using: 'composite'
+  steps:
+    - name: Setup Node.js 26
+      uses: actions/setup-node@v4
+      with:
+        node-version: '26'
+    - name: Run Loopwright Taskpack Entrypoint
+      id: loopwright-entrypoint
+      shell: bash
+      env:
+        INPUT_TASKPACK-PATH: ${{ inputs.taskpack-path }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_EVENT-NAME: ${{ inputs.event-name }}
+        INPUT_EVENT-PATH: ${{ inputs.event-path }}
+        INPUT_RUN-ROOT: ${{ inputs.run-root }}
+        INPUT_RUN-ID: ${{ inputs.run-id }}
+        INPUT_STORAGE-PROFILE: ${{ inputs.storage-profile }}
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_THINKING: ${{ inputs.thinking }}
+        INPUT_API: ${{ inputs.api }}
+        INPUT_BASE-URL: ${{ inputs.base-url }}
+        INPUT_PROVIDER-TOKEN-ENV: ${{ inputs.provider-token-env }}
+        INPUT_MODELS-JSON: ${{ inputs.models-json }}
+        INPUT_ALLOW-CUSTOM-BASE-URL: ${{ inputs.allow-custom-base-url }}
+        INPUT_DRY-RUN: ${{ inputs.dry-run }}
+        INPUT_GATE-ENDPOINT-URL: ${{ inputs.gate-endpoint-url }}
+        INPUT_PUBLICATION-ENDPOINT-URL: ${{ inputs.publication-endpoint-url }}
+      run: |
+        if [[ ! -f "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js" ]]; then
+          npm --prefix "${GITHUB_ACTION_PATH}" ci --no-audit --no-fund && npm --prefix "${GITHUB_ACTION_PATH}" run build
+        fi
+        node "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js"

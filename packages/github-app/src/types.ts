@@ -1,13 +1,16 @@
 import type { Digest, TaskContract } from '@loopwright/core';
 import type { ClockBasis, ClockSample } from '@loopwright/state';
+import type {
+  PiCustomModelCompat, PiCustomProviderConfig, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
+} from '@loopwright/agent-pi';
 import type { ControllerConfiguration, TrustedRegistry } from '@loopwright/controller';
 
-export type { ClockBasis, ClockSample };
+export type { ClockBasis, ClockSample, PiCustomModelCompat, PiCustomProviderConfig, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi };
 
 /** Closed set of matchable failure codes for @loopwright/github-app diagnostics. */
 export const GITHUB_APP_ERROR_CODES = Object.freeze([
   'TASKPACK_MANIFEST_INVALID', 'TASKPACK_UNTRUSTED_INTERPOLATION', 'TASKPACK_SCOPE_VIOLATION',
-  'TASKPACK_HOST_BINDING_INVALID',
+  'TASKPACK_HOST_BINDING_INVALID', 'PROVIDER_OAUTH_UNSUPPORTED',
   'WEBHOOK_SIGNATURE_INVALID', 'WEBHOOK_PAYLOAD_TOO_LARGE', 'WEBHOOK_DELIVERY_CONFLICT', 'WEBHOOK_DELIVERY_INVALID',
   'WEBHOOK_ACTOR_UNAUTHORIZED', 'WEBHOOK_GUIDANCE_INVALID',
   'TENANT_IDENTITY_INVALID', 'TENANT_BOUNDARY_VIOLATION',
@@ -17,6 +20,7 @@ export const GITHUB_APP_ERROR_CODES = Object.freeze([
   'MCP_OAUTH_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED',
   'SANDBOX_POLICY_INVALID', 'SANDBOX_BACKEND_UNAVAILABLE',
   'SANDBOX_CAPABILITY_INSUFFICIENT', 'SANDBOX_EXECUTION_FAILED',
+  'GITHUB_APP_CONFIG_INVALID',
   'ACTION_INPUT_INVALID', 'SERVICE_FAULT',
 ] as const);
 export type GitHubAppErrorCode = typeof GITHUB_APP_ERROR_CODES[number];
@@ -70,8 +74,8 @@ export interface TaskpackExternalGateDeclaration {
 
 export interface TaskpackManifest {
   readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
-  readonly kind: 'TaskpackManifest';
-  readonly metadata: { readonly id: string; readonly name: string; readonly version: string };
+  readonly kind: 'Taskpack';
+  readonly metadata: { readonly name: string };
   readonly spec: {
     readonly goal: { readonly candidate: string; readonly noChange: string };
     readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
@@ -88,7 +92,91 @@ export interface TaskpackManifest {
       readonly commentPrefixes: readonly string[];
     };
     readonly sandbox?: TaskpackSandboxDeclaration | undefined;
+    readonly decisions?: TaskpackDecisionsDeclaration | undefined;
+    readonly models?: readonly TaskpackModelDeclaration[] | undefined;
   };
+}
+
+export const MAX_TASKPACK_MODEL_CANDIDATES = 8;
+export const MAX_EXPANDED_MODEL_CANDIDATES = 16;
+
+export interface TaskpackModelDeclaration {
+  readonly provider: string;
+  readonly id: string;
+  readonly thinking?: PiThinkingLevel | undefined;
+  readonly api?: PiWireApi | undefined;
+  readonly apiKeyEnv?: string | undefined;
+  readonly baseUrl?: string | undefined;
+  readonly authHeader?: boolean | undefined;
+  readonly headers?: Readonly<Record<string, string>> | undefined;
+  readonly contextWindow?: number | undefined;
+  readonly maxTokens?: number | undefined;
+  readonly reasoning?: boolean | undefined;
+  readonly thinkingLevelMap?: Readonly<Record<string, string | null>> | undefined;
+  readonly samplingParams?: PiSamplingParams | undefined;
+  readonly samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>> | undefined;
+  readonly compat?: PiCustomModelCompat | undefined;
+}
+
+export type TaskpackDecisionProviderKind =
+  | 'typesafe-jev'
+  | 'openai-decisions'
+  | 'startlux-decision'
+  | 'microsoft-decision'
+  | 'perplexity-decider'
+  | 'cloudflare-clef'
+  | 'liquid-d1';
+
+export type TaskpackDecisionDisclosurePolicy =
+  | 'disabled'
+  | 'repo-approved-redacted-evidence'
+  | 'public-metadata-only';
+
+export interface TaskpackDecisionsDeclaration {
+  readonly enabled: boolean;
+  readonly provider?: TaskpackDecisionProviderKind | undefined;
+  readonly disclosurePolicy?: TaskpackDecisionDisclosurePolicy | undefined;
+  readonly minConfidence?: number | undefined;
+  readonly confirmThreshold?: number | undefined;
+  readonly hardDeadlineMs?: number | undefined;
+  readonly maxAttempts?: 1 | 2 | undefined;
+  readonly allowImages?: boolean | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Declarative GitHub App configuration (github-app.yaml)
+// ---------------------------------------------------------------------------
+
+export const GITHUB_APP_CONFIG_API_VERSION = 'loopwright.dev/v1alpha1' as const;
+export const GITHUB_APP_CONFIG_BYTES = 65_536;
+
+export interface GitHubAppListenConfig {
+  readonly enabled?: boolean | undefined;
+  readonly host: string;
+  readonly port: number;
+  readonly webhookPath?: string | undefined;
+}
+
+export interface GitHubAppConfigDocument {
+  readonly apiVersion: typeof GITHUB_APP_CONFIG_API_VERSION;
+  readonly kind: 'GitHubAppConfig';
+  readonly spec: {
+    readonly appId: string;
+    readonly webhookSecretEnv: string;
+    readonly privateKeyEnv: string;
+    readonly apiBaseUrl?: string | undefined;
+    readonly listen?: GitHubAppListenConfig | undefined;
+    readonly tokenTtlSeconds?: number | undefined;
+    readonly maxPayloadBytes?: number | undefined;
+    readonly taskpackPath?: string | undefined;
+    readonly operatorAllowlist?: readonly string[] | undefined;
+  };
+}
+
+export interface LoadedGitHubAppConfig {
+  readonly document: GitHubAppConfigDocument;
+  readonly webhookSecret?: string | undefined;
+  readonly privateKeyPem?: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -201,9 +289,12 @@ export interface SandboxedCommandResult {
 export interface TargetMatrixCell { readonly id: string; readonly platform: string; readonly variant: string }
 
 export interface HostRoleSelection {
-  readonly provider: string;
-  readonly model: string;
-  readonly thinking: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  readonly provider?: string | undefined;
+  readonly model?: string | undefined;
+  readonly thinking?: PiThinkingLevel | undefined;
+  readonly api?: PiWireApi | undefined;
+  readonly baseUrl?: string | undefined;
+  readonly customProvider?: PiCustomProviderConfig | undefined;
 }
 
 export interface HostRuntimeOptions {
@@ -251,7 +342,10 @@ export interface HostTaskpackBindings {
    * matrix, so the emitted contract always carries `matrix: null`; this record rides on intake outcomes.
    */
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
-  readonly roleSelection: HostRoleSelection;
+  readonly roleSelection?: HostRoleSelection | undefined;
+  readonly candidateIndex?: number | undefined;
+  readonly allowManifestCustomBaseUrl?: boolean | undefined;
+  readonly modelsJsonPath?: string | undefined;
   readonly runtimeOptions?: HostRuntimeOptions | undefined;
   readonly budgets: TaskContract['spec']['budgets'];
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
@@ -581,6 +675,39 @@ export type McpAuthValidation =
 // Reusable Action entrypoint
 // ---------------------------------------------------------------------------
 
+export interface ResolvedModelCandidate {
+  readonly index: number;
+  readonly manifestIndex: number;
+  readonly selection: PiModelSelection;
+  readonly apiKeyEnv?: string | undefined;
+  readonly providerEnvName: string;
+  readonly token?: string | undefined;
+  readonly usesActiveTokenEnv: boolean;
+}
+
+export interface ModelCandidateProbeAttempt {
+  readonly index: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly api: PiWireApi;
+  readonly ok: boolean;
+  readonly status: number | null;
+  readonly reason: string;
+}
+
+export interface ModelCandidateSelectionResult {
+  readonly selected: ResolvedModelCandidate;
+  readonly index: number;
+  readonly probed: boolean;
+  readonly attempts: readonly ModelCandidateProbeAttempt[];
+}
+
+export interface ActionDelegateOutcome {
+  readonly ok: boolean;
+  readonly detail: string;
+  readonly retryableProviderFailure?: boolean | undefined;
+}
+
 export interface ActionEntrypointInput {
   readonly repositoryRoot: string;
   readonly taskpackPath?: string | undefined;
@@ -596,7 +723,12 @@ export interface ActionEntrypointInput {
   readonly filesystemType?: string | undefined;
   readonly provider?: string | undefined;
   readonly model?: string | undefined;
-  readonly thinking?: HostRoleSelection['thinking'] | undefined;
+  readonly thinking?: PiThinkingLevel | undefined;
+  readonly api?: PiWireApi | undefined;
+  readonly baseUrl?: string | undefined;
+  readonly providerTokenEnv?: string | undefined;
+  readonly modelsJsonPath?: string | undefined;
+  readonly allowManifestCustomBaseUrl?: boolean | undefined;
   readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   readonly budgets?: TaskContract['spec']['budgets'] | undefined;
@@ -613,8 +745,11 @@ export interface ActionEntrypointInput {
   readonly previousClockSample?: ClockSample | undefined;
   readonly currentClockSample?: ClockSample | undefined;
   readonly probeDirectory?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+  readonly probeFetch?: typeof globalThis.fetch | undefined;
+  readonly probeTimeoutMs?: number | undefined;
   readonly dryRun?: boolean | undefined;
-  readonly delegate?: (compiled: WrittenCompiledTaskpack) => Promise<{ readonly ok: boolean; readonly detail: string }>;
+  readonly delegate?: (compiled: WrittenCompiledTaskpack) => Promise<ActionDelegateOutcome>;
 }
 
 export interface WrittenCompiledTaskpack extends CompiledTaskpack {
@@ -627,7 +762,7 @@ export interface WrittenCompiledTaskpack extends CompiledTaskpack {
 export type ActionEntrypointResult =
   | {
     readonly kind: 'refused';
-    readonly code: 'HOST_PROFILE_UNQUALIFIED' | 'HOST_CLOCK_UNTRUSTED' | 'STORAGE_PROFILE_INSUFFICIENT' | 'MCP_OAUTH_UNSUPPORTED' | 'MCP_AUTHENTICATION_REQUIRED';
+    readonly code: 'HOST_PROFILE_UNQUALIFIED' | 'HOST_CLOCK_UNTRUSTED' | 'STORAGE_PROFILE_INSUFFICIENT' | 'MCP_OAUTH_UNSUPPORTED' | 'MCP_AUTHENTICATION_REQUIRED' | 'PROVIDER_OAUTH_UNSUPPORTED';
     readonly reason: string;
     readonly recommendedRunStatus?: 'reconcile_required' | undefined;
   }

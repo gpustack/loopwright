@@ -4,7 +4,7 @@ import { chmod, mkdtemp, readFile, realpath, rm, writeFile, mkdir } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { evaluateCommentPayload, runGitHubActionEntrypoint } from '../src/action.js';
+import { evaluateCommentPayload, runActionCli, runGitHubActionEntrypoint } from '../src/action.js';
 import { startGitHubAppControlPlane, type ControlPlaneOptions } from '../src/service.js';
 import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
 import { dirname } from 'node:path';
@@ -23,11 +23,9 @@ const TENANT: TenantIdentity = { installationId: 42, repositoryId: 7, repository
 const BASE_REVISION = 'd'.repeat(40);
 
 const MANIFEST = `apiVersion: loopwright.dev/v1alpha1
-kind: TaskpackManifest
+kind: Taskpack
 metadata:
-  id: docs-sync
-  name: Documentation sync
-  version: '1.0.0'
+  name: docs-sync
 spec:
   goal:
     candidate: Refresh documentation from upstream sources and pass every local check.
@@ -418,11 +416,13 @@ describe('reusable Action entrypoint (AC-6)', () => {
       });
       assert.equal(result.kind, 'compiled');
       if (result.kind === 'compiled') {
-        assert.equal(result.manifest.metadata.id, TASKPACK_ID);
+        assert.equal(result.manifest.metadata.name, TASKPACK_ID);
         assert.equal(result.intake.disposition, 'ready');
         assert.equal(result.delegateOutcome, null, 'dry runs must not invoke a delegate');
         const outside = !result.taskpack.trustedDirectory.startsWith(await realpath(root));
         assert.equal(outside, true);
+        assert.equal(result.taskpack.registryPath.endsWith('registry.yaml'), true);
+        assert.equal(result.taskpack.configPath.endsWith('config.yaml'), true);
         const registryOnDisk = await readFile(result.taskpack.registryPath);
         assert.equal(registryOnDisk.equals(result.taskpack.registryBytes), true);
         const scrubbed = new TextDecoder().decode(registryOnDisk);
@@ -448,7 +448,7 @@ describe('reusable Action entrypoint (AC-6)', () => {
         upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
         delegate: async taskpack => {
           delegateCalls += 1;
-          assert.equal(taskpack.config.spec.task.metadata.id, TASKPACK_ID);
+          assert.equal(taskpack.config.spec.task.spec.taskpack, TASKPACK_ID);
           // The delegate is the controller: prove the written artifacts load without REGISTRY_UNTRUSTED.
           const loaded = await loadTrustedConfiguration({
             configPath: taskpack.configPath, registryPath: taskpack.registryPath,
@@ -528,14 +528,156 @@ describe('reusable Action entrypoint (AC-6)', () => {
     }
   });
 
-  it('ships zero .github/workflows files in the repository', () => {
+  it('ships the 5 gpustack-aligned .github/workflows files alongside root action.yml', () => {
     const repoRoot = findRepositoryRoot();
-    assert.equal(existsSync(join(repoRoot, '.github', 'workflows')), false, 'the Loopwright repository must contain no CI workflow directory');
+    for (const wf of ['ci.yml', 'test.yml', 'docs.yml', 'code-review.yml', 'site.yml']) {
+      assert.equal(existsSync(join(repoRoot, '.github', 'workflows', wf)), true, `.github/workflows/${wf} must exist`);
+    }
   });
 
-  it('keeps the root action.yml outside .github/workflows', async () => {
+  it('keeps the root action.yml outside .github/workflows as a composite Node 26 Action and writes GITHUB_OUTPUT in runActionCli', async () => {
     const actionYml = await readFile(join(findRepositoryRoot(), 'action.yml'), 'utf8');
     assert.match(actionYml, /name: 'Loopwright Taskpack Action'/);
-    assert.match(actionYml, /using: 'node20'/);
+    assert.match(actionYml, /using: 'composite'/);
+    assert.match(actionYml, /node-version: '26'/);
+    assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.result \}\}/);
+
+    withEnv('LOOPWRIGHT_PROVIDER_TOKEN', 'provider-token-value');
+    withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+    const { root, runRoot } = await makeTargetRepository();
+    const outputFile = join(runRoot, 'github-output.txt');
+    try {
+      const code = await runActionCli({
+        GITHUB_WORKSPACE: root,
+        LOOPWRIGHT_REPOSITORY: 'octocat/target',
+        GITHUB_SHA: BASE_REVISION,
+        'INPUT_MODE': 'no-change',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'run-cli-out-1',
+        'INPUT_DRY-RUN': 'true',
+        GITHUB_OUTPUT: outputFile,
+      });
+      assert.equal(code, 0);
+      const outputText = await readFile(outputFile, 'utf8');
+      assert.match(outputText, /^result<<LOOPWRIGHT_EOF\n.+\nLOOPWRIGHT_EOF\n$/);
+      const jsonLine = outputText.split('\n')[1]!;
+      const parsed = JSON.parse(jsonLine) as { kind: string; reason?: string };
+      assert.equal(parsed.kind, 'no_change');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses OAuth Pi providers with PROVIDER_OAUTH_UNSUPPORTED in runGitHubActionEntrypoint', async () => {
+    const { root, runRoot } = await makeTargetRepository();
+    try {
+      for (const provider of ['github-copilot', 'gemini', 'claude-code', 'openai-codex']) {
+        const result = await runGitHubActionEntrypoint({
+          repositoryRoot: root,
+          repositoryFullName: 'octocat/target',
+          baseRevision: BASE_REVISION,
+          mode: 'candidate',
+          eventName: 'workflow_dispatch',
+          runRoot,
+          runId: `run-oauth-${provider}`,
+          provider,
+          model: 'glm-5.3',
+          dryRun: true,
+        });
+        assert.equal(result.kind, 'refused');
+        if (result.kind === 'refused') {
+          assert.equal(result.code, 'PROVIDER_OAUTH_UNSUPPORTED');
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('probes multi-token / multi-provider spec.models candidates and rotates to a fresh session on mid-run quota exhaustion', async () => {
+    withEnv('ZAI_API_KEY', 'zai_exhausted_tok_0001,zai_midrun_tok_0002');
+    withEnv('ZAI_CODING_CN_API_KEY', 'zai_cn_backup_tok_0003');
+    withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+    const { root, runRoot } = await makeTargetRepository();
+    await writeFile(join(root, '.loopwright', 'taskpack.yaml'), `${MANIFEST}  models:
+    - provider: zai
+      id: glm-5.3
+      thinking: high
+      apiKeyEnv: ZAI_API_KEY
+    - provider: zai-coding-cn
+      id: glm-5.3
+      thinking: high
+      apiKeyEnv: ZAI_CODING_CN_API_KEY
+`);
+
+    const seenDelegateProviders: string[] = [];
+    const seenTrustedDirs: string[] = [];
+    try {
+      const result = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'schedule',
+        runRoot,
+        runId: 'run-multi-fallback-1',
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+        probeFetch: async (_url, init) => {
+          const headers = init?.headers as Record<string, string>;
+          const auth = headers['authorization'] ?? '';
+          if (auth.includes('zai_exhausted_tok_0001')) {
+            return new Response(JSON.stringify({ error: { code: '1113', message: 'quota exhausted' } }), {
+              status: 400,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+        delegate: async taskpack => {
+          const activeProvider = taskpack.registry.spec.roleProfiles[0]!.selection.provider;
+          seenDelegateProviders.push(activeProvider);
+          seenTrustedDirs.push(taskpack.trustedDirectory);
+          const loaded = await loadTrustedConfiguration({
+            configPath: taskpack.configPath,
+            registryPath: taskpack.registryPath,
+            registrySha256: taskpack.registrySha256,
+            untrustedRoots: [root],
+          });
+          assert.equal(loaded.ok, true, `loadTrustedConfiguration failed: ${loaded.ok ? '' : loaded.error.code}`);
+          if (loaded.ok) {
+            const plan = await compilePlan(loaded.value);
+            assert.equal(plan.ok, true);
+          }
+          if (activeProvider === 'zai') {
+            // Simulate mid-run quota exhaustion after initial probe succeeded on token #2
+            return { ok: false, detail: 'PROVIDER_RESPONSE_INVALID: http_402 insufficient_quota', retryableProviderFailure: true };
+          }
+          return { ok: true, detail: `completed with ${activeProvider}` };
+        },
+      });
+
+      assert.equal(result.kind, 'compiled');
+      if (result.kind === 'compiled') {
+        assert.deepEqual(seenDelegateProviders, ['zai', 'zai-coding-cn']);
+        assert.equal(seenTrustedDirs.length, 2);
+        assert.notEqual(seenTrustedDirs[0], seenTrustedDirs[1], 'fallback attempt must compile into a fresh isolated directory');
+        assert.deepEqual(result.delegateOutcome, { ok: true, detail: 'completed with zai-coding-cn' });
+        assert.equal(result.taskpack.registry.spec.roleProfiles[0]?.selection.provider, 'zai-coding-cn');
+        const registryText = (await readFile(result.taskpack.registryPath)).toString('utf8');
+        for (const secret of ['zai_exhausted_tok_0001', 'zai_midrun_tok_0002', 'zai_cn_backup_tok_0003']) {
+          assert.equal(registryText.includes(secret), false, 'raw tokens must never be written to disk');
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
   });
 });

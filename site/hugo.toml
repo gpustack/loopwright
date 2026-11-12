@@ -17,7 +17,7 @@ defaultContentLanguageInSubdir = false
   releaseKind = "development"
 
 [outputs]
-  home = ["HTML", "JSON", "LLMS", "Markdown", "Version"]
+  home = ["HTML", "JSON", "LLMS", "Markdown", "Version", "Versions"]
   page = ["HTML", "Markdown"]
   section = ["HTML", "Markdown"]
 
@@ -42,6 +42,12 @@ defaultContentLanguageInSubdir = false
   isPlainText = true
   notAlternative = true
 
+[outputFormats.Versions]
+  mediaType = "application/json"
+  baseName = "versions"
+  isPlainText = true
+  notAlternative = true
+
 [markup]
   [markup.highlight]
     style = "github"
@@ -59,7 +65,7 @@ defaultContentLanguageInSubdir = false
   [[module.mounts]]
     source = "../docs"
     target = "content/docs"
-    excludeFiles = ["README.md", "assets/**"]
+    excludeFiles = ["README.md", "assets/**", "development.md", "contribute/**"]
   [[module.mounts]]
     source = "../docs/assets"
     target = "static/docs/assets"

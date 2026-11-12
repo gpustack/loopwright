@@ -18,8 +18,15 @@ Core owns contracts and evidence; state owns fenced local authority; the adapter
 
 ## Architecture decisions
 
-[Local state authority](../adr/0001-local-state-authority.md) records the storage and fencing decision. [Isolated Pi SDK](../adr/0002-isolated-pi-sdk.md) records runtime isolation and its limitations. Specifications retain rationale and measurements; current source determines implementation.
+The public site contains 9 pages; [Development](../development.md) and this guide remain repository-only. Run `npm run lint:docs`, `node scripts/check-docs.mjs --report`, and `npm run site` after documentation changes.
 
-**See also**: [Development](../development.md)
+YAML-first configuration uses `yaml@2.9.0` with the core schema. Repository issue and PR templates live under `.github/`; the five `.agents/skills/loopwright-*` guides cover overview, docs, code review, issue and PR preparation, and releases.
 
-**Next**: [Module map](../README.md#module-map)
+[Local state authority](adr/0001-local-state-authority.md) records the storage and fencing decision. [Isolated Pi SDK](adr/0002-isolated-pi-sdk.md) records runtime isolation and its limitations. Specifications retain rationale and measurements; current source determines implementation.
+
+
+---
+
+**See also** — [Development and Verification](../development.md) (build and verification commands)
+
+**Next** → [Canonical Identity and Digests](identity.md) — trace canonical identities and their digests.

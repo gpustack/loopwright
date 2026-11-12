@@ -1,75 +1,91 @@
 {{ $darkPalette := `
 color-scheme: dark;
-  --bg: #15171a;
-  --bg-soft: #1a1d21;
-  --bg-subtle: #23262b;
-  --bg-sidebar: #1a1d21;
-  --code-bg: #15171a;
-  --diagram-bg: #f0f1f3;
-  --text: #e4e6e9;
-  --text-strong: #f2f3f5;
-  --muted: #9aa1a9;
-  --faint: #8d949c;
-  --line: #2a2e33;
-  --line-strong: #464b52;
-  --line-input: #3a3f45;
-  --quote-border: #3a4048;
-  --quote-text: #a5abb2;
-  --link: #58a0f5;
-  --link-hover: #7db4f8;
-  --button-bg: #2563c9;
-  --button-fg: #ffffff;
-  --row-emphasis-bg: #1b2738;
-  --row-emphasis-border: #58a0f5;
-  --row-hover-bg: #1e2228;
-  --row-current-bg: #24292f;
-  --row-current-fg: #ffffff;
-  --panel-shadow: 0 8px 24px rgba(0, 0, 0, .5);
-  --code-tag: #79c0ff;
-  --code-string: #a5d6ff;
+  --bg-primary: #0f1021;
+  --bg-secondary: #171930;
+  --bg: #0f1021;
+  --bg-soft: #171930;
+  --bg-subtle: #212442;
+  --bg-sidebar: #131428;
+  --code-bg: #14162b;
+  --diagram-bg: #171930;
+  --text-primary: #f1f0fa;
+  --text-secondary: #b4b1d1;
+  --text: #f1f0fa;
+  --text-strong: #ffffff;
+  --muted: #b4b1d1;
+  --faint: #8884ab;
+  --line: #292d52;
+  --line-strong: #3f4577;
+  --line-input: #343a69;
+  --quote-border: #8f7ee6;
+  --quote-text: #b4b1d1;
+  --link: #8f7ee6;
+  --link-hover: #ada0f0;
+  --button-bg: #8f7ee6;
+  --button-fg: #0f1021;
+  --accent: #8f7ee6;
+  --accent-hover: #ada0f0;
+  --accent-teal: #4fb3ce;
+  --accent-gold: #e4a853;
+  --row-emphasis-bg: #202347;
+  --row-emphasis-border: #8f7ee6;
+  --row-hover-bg: #1d203d;
+  --row-current-bg: #8f7ee6;
+  --row-current-fg: #0f1021;
+  --panel-shadow: 0 8px 24px rgba(0, 0, 0, .6);
+  --code-tag: #8f7ee6;
+  --code-string: #4fb3ce;
   --diff-add-fg: #7ee787;
-  --diff-add-bg: #11301f;
+  --diff-add-bg: #123321;
   --diff-del-fg: #ffa198;
-  --diff-del-bg: #3c1618;
-  --scrollbar-thumb: #3a4048;
+  --diff-del-bg: #3f191f;
+  --scrollbar-thumb: #3f4577;
 ` }}
 :root {
   color-scheme: light;
   --topbar-h: 3.5rem;
   --sidebar-w: 17.5rem;
   --sidebar-toggle-left: calc(var(--sidebar-w) - 2.85rem);
-  --bg: #ffffff;
-  --bg-soft: #f6f7f8;
-  --bg-subtle: #eff1f3;
-  --bg-sidebar: #f7f8f9;
-  --code-bg: #ffffff;
-  --diagram-bg: #ffffff;
-  --text: #24292f;
-  --text-strong: #171b1f;
-  --muted: #59616a;
-  --faint: #646b73;
-  --line: #e3e5e8;
-  --line-strong: #a9b0b8;
-  --line-input: #c6ccd3;
-  --quote-border: #c9d1d9;
-  --quote-text: #59616a;
-  --link: #1763ed;
-  --link-hover: #0f4fc0;
-  --button-bg: #1257d2;
+  --bg-primary: #fbfbfe;
+  --bg-secondary: #f3f2fa;
+  --bg: #fbfbfe;
+  --bg-soft: #f3f2fa;
+  --bg-subtle: #eae8f5;
+  --bg-sidebar: #f6f5fc;
+  --code-bg: #f6f5fc;
+  --diagram-bg: #fbfbfe;
+  --text-primary: #19172e;
+  --text-secondary: #4a4668;
+  --text: #19172e;
+  --text-strong: #0d0c18;
+  --muted: #4a4668;
+  --faint: #6c688c;
+  --line: #dedbe8;
+  --line-strong: #b8b3cc;
+  --line-input: #c7c2db;
+  --quote-border: #5b4b9e;
+  --quote-text: #4a4668;
+  --link: #5b4b9e;
+  --link-hover: #483a82;
+  --button-bg: #5b4b9e;
   --button-fg: #ffffff;
-  --row-emphasis-bg: #eef4ff;
-  --row-emphasis-border: #1763ed;
-  --row-hover-bg: #f6f8fa;
-  --row-current-bg: #24292f;
+  --accent: #5b4b9e;
+  --accent-hover: #483a82;
+  --accent-teal: #2e7d9b;
+  --accent-gold: #c98732;
+  --row-emphasis-bg: #f0edf8;
+  --row-emphasis-border: #5b4b9e;
+  --row-hover-bg: #f4f2f9;
+  --row-current-bg: #5b4b9e;
   --row-current-fg: #ffffff;
-  --panel-shadow: 0 8px 24px rgba(23, 27, 31, .13);
-  --code-tag: #0550ae;
-  --code-string: #116329;
-  --diff-add-fg: #116329;
-  --diff-add-bg: #dafbe1;
-  --diff-del-fg: #82071e;
-  --diff-del-bg: #ffebe9;
-  --scrollbar-thumb: #c6ccd3;
+  --panel-shadow: 0 8px 24px rgba(25, 23, 46, .12);
+  --code-tag: #5b4b9e;
+  --code-string: #206d52;
+  --diff-add-fg: #1d6a48;
+  --diff-add-bg: #dff5e8;
+  --diff-del-fg: #992336;
+  --diff-del-bg: #fbe6e9;
+  --scrollbar-thumb: #c7c2db;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 1.56;
@@ -592,3 +608,178 @@ input:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
   article table { font-size: .75rem; }
   article th, article td { padding: .38rem .5rem; }
 }
+
+/* Celestial-Artisan Hero Banner & Feature Cards */
+.hero-banner {
+  position: relative;
+  overflow: hidden;
+  margin: 0 0 2.5rem;
+  padding: 2.2rem 1.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background:
+    radial-gradient(ellipse 60% 70% at 20% 30%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 70%),
+    radial-gradient(ellipse 50% 60% at 75% 30%, color-mix(in srgb, var(--accent-teal) 12%, transparent), transparent 70%),
+    radial-gradient(ellipse 45% 55% at 50% 90%, color-mix(in srgb, var(--accent-gold) 10%, transparent), transparent 70%),
+    var(--bg-soft);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, .05);
+}
+.hero-banner-inner {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  flex-wrap: wrap;
+}
+.hero-brand {
+  flex-shrink: 0;
+}
+.hero-emblem-wrap {
+  display: inline-flex;
+  padding: 0.4rem;
+  border-radius: 50%;
+  background: radial-gradient(circle at center, color-mix(in srgb, var(--accent) 15%, transparent), transparent 70%);
+  filter: drop-shadow(0 4px 14px color-mix(in srgb, var(--accent) 25%, transparent));
+}
+.hero-emblem {
+  display: block;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+}
+.hero-content {
+  flex: 1 1 20rem;
+  min-width: 0;
+}
+.hero-badge {
+  display: inline-block;
+  margin-bottom: 0.6rem;
+  padding: 0.2rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 1rem;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 0.76rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.hero-title {
+  margin: 0 0 0.6rem;
+  font-size: clamp(1.8rem, 2.5vw, 2.3rem);
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  color: var(--text-strong);
+}
+.hero-subtitle {
+  margin: 0 0 1.25rem;
+  max-width: 52ch;
+  color: var(--muted);
+  font-size: 0.98rem;
+  line-height: 1.55;
+}
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: center;
+}
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border-radius: 0.375rem;
+  background: var(--button-bg);
+  color: var(--button-fg);
+  font-weight: 600;
+  font-size: 0.88rem;
+  text-decoration: none;
+  transition: opacity .15s ease, transform .12s ease;
+}
+.btn-primary:hover {
+  opacity: 0.92;
+  color: var(--button-fg);
+  text-decoration: none;
+}
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.48rem 0.95rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.375rem;
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 550;
+  font-size: 0.88rem;
+  text-decoration: none;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.btn-secondary:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Documentation Pillars Grid */
+.pillars-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 2.5rem;
+}
+.pillar-card {
+  padding: 1.2rem 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--bg-soft);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.pillar-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .05);
+}
+.pillar-card h3 {
+  margin: 0 0 0.45rem;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+.pillar-card h3 a {
+  color: var(--text-strong);
+  text-decoration: none;
+}
+.pillar-card h3 a:hover {
+  color: var(--link);
+  text-decoration: underline;
+}
+.pillar-card p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.48;
+}
+.pillar-card ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+}
+.pillar-card li {
+  margin: 0.2rem 0;
+}
+.pillar-card li a {
+  color: var(--link);
+  text-decoration: none;
+}
+.pillar-card li a:hover {
+  text-decoration: underline;
+}
+
+/* Architecture steps */
+.architecture-steps {
+  margin: 1rem 0 2rem;
+  padding-left: 1.4rem;
+  line-height: 1.6;
+}
+.architecture-steps li {
+  margin: 0.35rem 0;
+}
+

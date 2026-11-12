@@ -30,7 +30,7 @@ Use strict ESM NodeNext, explicit public boundaries and no `any`. Validate untru
 
 ### Authority and security conventions
 
-Preserve lease fencing and monotonic clock guards, secret scrubbing, least privilege, non-delegable authority, and unknown outcomes. Never silently retry uncertain external effects. Do not add repository `.github/workflows/` files.
+Preserve lease fencing and monotonic clock guards, secret scrubbing, least privilege, non-delegable authority, and unknown outcomes. Never silently retry uncertain external effects. Keep `.github/workflows/` protected from untrusted taskpack and sandbox writes.
 
 ### Testing conventions
 

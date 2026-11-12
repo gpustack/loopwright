@@ -4,37 +4,28 @@ title: Documentation
 
 # Documentation
 
-Run Loopwright in GitHub Actions, deploy the GitHub App control plane, run CLI closure audits, or integrate the TypeScript SDK.
+Loopwright supports two operating modes sharing one verification kernel: **Declarative Taskpack** (single-file automated repository sync via GitHub Action or App) and **Managed Controller** (fine-grained out-of-repo `TrustedRegistry` and `TaskContract` governance via the CLI).
 
-## Getting started
+## Getting Started
 
-- [Architecture](getting-started/architecture/) explains the execution chain and core vocabulary.
+- [Architecture](getting-started/architecture/) explains the four-stage execution chain, the two operating modes, and the runtime baseline.
+- [Installation](getting-started/installation/) installs `@gpustack/loopwright`, wires GitHub Actions, and provides `llms.txt` bootstrap prompts.
 
-## Operations and walkthroughs
+## Operations
 
-- [GitHub Action](operate/github-action/) configures the reusable Action in workflows.
-- [GitHub App](operate/github-app/) deploys the webhook and intake control plane.
-- [CLI Operations](operate/cli/) runs local inspection, qualification and closure verification.
-- [Declarative Taskpack](walkthroughs/declarative-taskpack/) configures declarative taskpacks end to end.
+- [GitHub Action](operations/github-action/) configures the reusable Action and secret bindings in workflows.
+- [GitHub App](operations/github-app/) deploys the webhook and token-brokering control plane.
+- [CLI](operations/cli/) runs local compilation, execution, inspection, reconciliation, and closure audits.
 
-## Modules
+## Walkthroughs
 
-- [Contracts](contracts/) describes task contracts and schema definitions.
-- [Identity](identity/) covers canonical identities and content hashing.
-- [Evidence](evidence/) details verification evidence and non-delegable authority.
-- [State Store](state/) explains fenced SQLite persistence.
-- [Pi Adapter](pi-adapter/) covers isolated coding-agent runtime boundaries.
-- [Runtime Evaluation](pi-runtime-evaluation/) describes runtime qualification.
-- [Controller](controller/) explains the repair loop and bounded control.
-- [Runner Taskpack](runner-taskpack/) covers runner intake and offline parity.
-- [Memory](memory/) details reviewed memory and CAS compaction.
-- [Control Plane](github-app/) describes the intake gate and GitHub App service.
-- [Decision Routing](decisions/) details System-One advisory routing.
-- [Closure Matrix](closure-matrix/) documents demonstrated capabilities and failure semantics.
+- [Declarative Taskpack](walkthroughs/declarative-taskpack/) walks through simple single-file repository automation and automatic synchronized workflow migration.
+- [Managed Controller](walkthroughs/managed-controller/) walks through fine-grained out-of-repo `TrustedRegistry`, `ControllerConfig`, and CLI execution.
 
-## Contribute and decisions
+## Configuration
 
-- [Development](development/) outlines building, testing and verifying the harness.
-- [Internals](contribute/internals/) details package structure and boundary invariants.
-- [ADR 0001: Local State](adr/0001-local-state-authority/) records local state authority decisions.
-- [ADR 0002: Isolated Pi SDK](adr/0002-isolated-pi-sdk/) records isolated Pi SDK decisions.
+- [Taskpack](configuration/taskpack/) documents every field and enum in `.loopwright/taskpack.yaml` (`Taskpack`).
+- [Task Contract](configuration/task-contract/) documents every field, budget, step, and evidence tier in `TaskContract`.
+- [Controller and Registry](configuration/controller-and-registry/) documents every handler, profile, credential, endpoint, and control in `TrustedRegistry` and `ControllerConfig`.
+- [Sandbox Backends](configuration/sandbox-backends/) covers native OS and container sandbox policies and capabilities.
+- [Decision Routing](configuration/decision-routing/) details System-One advisory confidence zones, providers, and disclosure policies.

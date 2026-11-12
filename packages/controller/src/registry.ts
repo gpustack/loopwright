@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path';
 import { isIP } from 'node:net';
 import { digestArtifact } from '@loopwright/core';
+import { validateSelection } from '@loopwright/agent-pi/catalog';
 import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation, type GateEndpoint, type PublicationEndpoint } from './types.js';
 import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
@@ -69,8 +70,16 @@ function mcp(raw: unknown, tools: readonly string[], path: string): void {
 function role(raw: unknown, path: string): RoleProfile {
   const value = record(raw, ['id', 'selection', 'tools', 'context', 'runtimeRef', 'providerCredentialRef', 'mcp'], path);
   id(value.id, path + '/id'); id(value.runtimeRef, path + '/runtimeRef'); if (value.providerCredentialRef !== null) id(value.providerCredentialRef, path + '/providerCredentialRef');
-  const selection = record(value.selection, ['provider', 'model', 'thinking', 'api'], path + '/selection');
-  if (selection.provider !== 'github-copilot' || selection.api !== 'anthropic-messages' || !['claude-sonnet-5.5', 'claude-opus-5.5'].includes(String(selection.model)) || selection.thinking !== (selection.model === 'claude-sonnet-5.5' ? 'xhigh' : 'high')) refuse('CAPABILITY_UNSUPPORTED', path + '/selection');
+  if (!value.selection || typeof value.selection !== 'object' || Array.isArray(value.selection)) refuse('CONFIG_SCHEMA', path + '/selection');
+  const hasCustom = Object.hasOwn(value.selection, 'customProvider');
+  record(value.selection, hasCustom ? ['provider', 'model', 'thinking', 'api', 'customProvider'] : ['provider', 'model', 'thinking', 'api'], path + '/selection');
+  try { validateSelection(value.selection, path + '/selection'); }
+  catch (err) {
+    const detailCode = err && typeof err === 'object' && 'detail' in err && err.detail && typeof err.detail === 'object' && 'code' in err.detail
+      ? String((err.detail as { code: unknown }).code)
+      : err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+    refuse(detailCode === 'INPUT_INVALID' ? 'CONFIG_SCHEMA' : 'CAPABILITY_UNSUPPORTED', path + '/selection');
+  }
   const tools = list(value.tools, path + '/tools', 6).map(item => text(item, path + '/tools', 128));
   if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
   const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp'); return { ...(raw as RoleProfile), context: checkedContext };
@@ -103,7 +112,7 @@ function publicationEndpoint(raw: unknown, path: string): PublicationEndpoint {
 export function validateRegistry(raw: unknown): TrustedRegistry {
   const top = record(raw, ['apiVersion', 'kind', 'metadata', 'spec'], '/registry');
   if (top.apiVersion !== CONTROLLER_API_VERSION || top.kind !== 'TrustedRegistry') refuse('CONFIG_SCHEMA', '/registry');
-  id(record(top.metadata, ['id'], '/registry/metadata').id, '/registry/metadata/id');
+  id(record(top.metadata, ['name'], '/registry/metadata').name, '/registry/metadata/name');
   const spec = top.spec as Record<string, unknown>, hasGate = Object.hasOwn(spec, 'gateEndpoints'), hasPublication = Object.hasOwn(spec, 'publicationEndpoints');
   const value = record(top.spec, ['version', 'resourceVersion', 'handlers', 'roleProfiles', 'resources', 'runtimeProfiles', 'credentialBindings', 'environmentBindings',
     ...(hasGate ? ['gateEndpoints' as const] : []), ...(hasPublication ? ['publicationEndpoints' as const] : [])], '/registry/spec');

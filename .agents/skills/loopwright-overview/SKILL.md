@@ -1,18 +1,75 @@
 ---
 name: loopwright-overview
-description: Route Loopwright architecture and source questions.
+description: >-
+  Route Loopwright architecture, YAML-first configuration surfaces, nine-package
+  boundaries, and repository skill workflows to their owning docs/, specs/, and
+  packages/ entry points.
 ---
 
 # Loopwright Overview
 
-## Architecture in brief
+Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, independently verified repository automation.
 
-The nine packages are [core](../../../packages/core/), [state](../../../packages/state/), [agent-pi](../../../packages/agent-pi/), [controller](../../../packages/controller/), [taskpack-runner](../../../packages/taskpack-runner/), [memory](../../../packages/memory/), [decisions](../../../packages/decisions/), [github-app](../../../packages/github-app/), [cli](../../../packages/cli/). Read [architecture](../../../docs/getting-started/architecture.md) for the execution and verification chain.
+## Architecture in Brief
 
-## Routing
+1. **1. Admit**: Webhook or CLI intake validates collaborator authority, parses the `TaskContract`, and acquires a monotonic SQLite WAL lease fence (`@loopwright/core`, `@loopwright/state`, `@loopwright/github-app`).
+2. **2. Execute**: An isolated Pi session executes inside a native OS or container sandbox (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, or `direct-dedicated`) with physical send admission and optional System-One decision routing (`@loopwright/agent-pi`, `@loopwright/decisions`).
+3. **3. Verify**: Independent verification hooks run against a clean base checkout and mint cryptographic HMAC `gate.v1` receipts (`@loopwright/controller`, `@loopwright/taskpack-runner`).
+4. **4. Publish & Remember**: Head-pinned pull requests (or `no_change` outcomes) publish safely, reviewed proposals compact into CAS memory (`@loopwright/memory`), and `loopwright closure` audits capability evidence (`@loopwright/cli`).
 
-Use the [module map](../../../docs/README.md#module-map): [contracts](../../../docs/README.md#contracts-and-evidence), [state](../../../docs/README.md#persistent-state-store), [pi-adapter](../../../docs/README.md#isolated-pi-adapter), [controller](../../../docs/README.md#bounded-controller-and-cli), [taskpacks](../../../docs/README.md#declarative-taskpacks-and-runner-parity), [memory](../../../docs/README.md#reviewed-memory-and-compaction), [github-app](../../../docs/README.md#github-app-and-action-control-plane), [decisions](../../../docs/README.md#system-one-decision-routing), and [development](../../../docs/README.md#development-and-release).
+Read [Architecture](../../../docs/getting-started/architecture.md) for the four-stage execution flow and [the shared module map](../../../docs/README.md#module-map) for source routing.
 
-## Contributor invariants
+## Nine Workspace Packages
 
-Use strict ESM NodeNext and zero `any`; validate null-prototype boundaries. Preserve SQLite lease fencing and monotonic clock guards. System-One has three decision zones and six non-delegable intents; keep deterministic authority. Scrub secrets and keep zero `.github/workflows/` files in this repository.
+| Package | Directory | Responsibility |
+| --- | --- | --- |
+| `@loopwright/core` | [packages/core](../../../packages/core/) | Schemas (`TaskContract`, `VerificationProfile`, `AttemptReceipt`), RFC 8785 JCS canonical digests, and evidence binding |
+| `@loopwright/state` | [packages/state](../../../packages/state/) | SQLite WAL persistence, monotonic lease fencing, clock skew guards, and `unknown` effect accounting |
+| `@loopwright/agent-pi` | [packages/agent-pi](../../../packages/agent-pi/) | Isolated Pi subprocess adapter, physical send admission, secret scrubbing, and native OS/container sandboxes |
+| `@loopwright/controller` | [packages/controller](../../../packages/controller/) | Trusted configuration (`loadTrustedConfiguration`), bounded repair loop, independent verification, and HMAC `gate.v1` tokens |
+| `@loopwright/taskpack-runner` | [packages/taskpack-runner](../../../packages/taskpack-runner/) | Frozen taskpack corpus execution and offline runner parity |
+| `@loopwright/memory` | [packages/memory](../../../packages/memory/) | Reviewed memory proposals, compare-and-swap (CAS) compaction, and retention limits |
+| `@loopwright/decisions` | [packages/decisions](../../../packages/decisions/) | System-One 3-zone decision routing (`act`, `confirm`, `escalate`), 6 non-delegable intents, and `decisions.yaml` policy loader |
+| `@loopwright/github-app` | [packages/github-app](../../../packages/github-app/) | Webhook intake, collaborator permission checks, `.loopwright/taskpack.yaml` compiler, `github-app.yaml` loader, and Action entrypoint |
+| `@loopwright/cli` | [packages/cli](../../../packages/cli/) | Local operator CLI (`init`, `validate`, `run`, `inspect`, `reconcile`, `closure`, `app-serve`) and YAML draft generator |
+
+## YAML-First Configuration Surfaces
+
+Loopwright uses deterministic two-space Pretty YAML (YAML 1.2 core schema, rejecting anchors, aliases, merge keys, and duplicate keys) across all human configuration surfaces while retaining backward-compatible `.json` loading:
+
+| Configuration File | Kind / Envelope | Owning Package & Guide |
+| --- | --- | --- |
+| `controller.draft.yaml` | `kind: ControllerConfig` (`apiVersion`, `kind`, `spec`; generated by `loopwright init`) | `@loopwright/cli`, `@loopwright/controller` — [Controller and Registry](../../../docs/configuration/controller-and-registry.md), [CLI](../../../docs/operations/cli.md) |
+| `registry.draft.yaml` | `kind: TrustedRegistry` (`metadata.name` + SHA-256 pinned in `controller.draft.yaml` `spec.registry`) | `@loopwright/cli`, `@loopwright/controller` — [Controller and Registry](../../../docs/configuration/controller-and-registry.md) |
+| `.loopwright/taskpack.yaml` | `kind: Taskpack` (`metadata.name` + `spec.scope`, `spec.models`, `spec.sandbox`, `spec.decisions`, `spec.verification`, `spec.proposal`) | `@loopwright/github-app`, `@loopwright/taskpack-runner` — [Declarative Taskpack](../../../docs/walkthroughs/declarative-taskpack.md), [Taskpack](../../../docs/configuration/taskpack.md) |
+| `github-app.yaml` | `kind: GitHubAppConfig` (`apiVersion`, `kind`, `spec`; `loadGitHubAppConfig`) | `@loopwright/github-app` — [GitHub App](../../../docs/operations/github-app.md) |
+| `decisions.yaml` | `kind: DecisionPolicy` (`apiVersion`, `kind`, `spec`; `loadDecisionPolicyFile`) | `@loopwright/decisions` — [Decision Routing](../../../docs/configuration/decision-routing.md) |
+| `examples/task.yaml` | `kind: TaskContract` (`apiVersion`, `kind`, `spec`; `loopwright check` / `loopwright run`) | `@loopwright/core`, `@loopwright/cli` — [Task Contract](../../../docs/configuration/task-contract.md) |
+
+## Module Map & Skill Routing
+
+Use the [module map](../../../docs/README.md#module-map) to jump to any domain:
+[contracts](../../../docs/README.md#contracts-and-evidence),
+[state](../../../docs/README.md#persistent-state-store),
+[pi-adapter](../../../docs/README.md#isolated-pi-adapter),
+[controller](../../../docs/README.md#bounded-controller-and-cli),
+[taskpacks](../../../docs/README.md#declarative-taskpacks-and-runner-parity),
+[memory](../../../docs/README.md#reviewed-memory-and-compaction),
+[github-app](../../../docs/README.md#github-app-and-action-control-plane),
+[decisions](../../../docs/README.md#system-one-decision-routing), and
+[development](../../../docs/README.md#development-and-release).
+
+| Task | Repository Skill |
+| --- | --- |
+| Route architecture, packages, and YAML configuration surfaces | [loopwright-overview](SKILL.md) |
+| Author or review `docs/`, `README.md`, `examples/*.md`, or `site/` navigation | [loopwright-docs](../loopwright-docs/SKILL.md) ([conventions](../loopwright-docs/references/conventions.md), [page-map](../loopwright-docs/references/page-map.md)) |
+| Review a branch or pull-request diff (`Standards` + `Spec`) | [loopwright-code-review](../loopwright-code-review/SKILL.md) |
+| File a GitHub issue or open a pull request | [loopwright-issue-pr](../loopwright-issue-pr/SKILL.md) |
+| Run explicit-only SemVer2 release preflight, tagging, or publication | [loopwright-release](../loopwright-release/SKILL.md) |
+
+## Contributor Invariants
+
+- Use strict ESM NodeNext (`tsc --noEmit`) with explicit public types and zero `any`; validate null-prototype records at every boundary.
+- Preserve SQLite lease fencing, monotonic clock skew guards, `O_NOFOLLOW` non-symlink file checks, and `unknown` external outcome accounting (never silently retry uncertain external mutations).
+- Preserve System-One's three decision zones (`act`, `confirm`, `escalate`) and six non-delegable safety intents.
+- Scrub secrets across logs, state, and evidence; ensure `.github/workflows/` maintains least-privilege `permissions` and remains strictly protected against untrusted taskpack and sandbox writes.

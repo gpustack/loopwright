@@ -36,7 +36,7 @@ function ledgerFixture(caps = { provider: 2, mcp: 2, containers: 4 }, fault) {
 function stateFixture() {
   const directory = mkdtempSync(join(root, 'state-'));
   let resultOrdinal = 0;
-  const task = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'unit-task' }, spec: {
+  const task = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', spec: {
     goal: 'offline guard input', taskpack: 'offline', target: { repository: 'unit/repo', baseRevision: 'base-1', sourceRevision: 'source-1', matrix: null }, scope: { writable: ['packages/**'], protected: [] },
     roles: [{ id: 'builder', adapter: 'pi', provider: 'github-copilot', model: 'unit-model', thinking: 'high', tools: ['read'] }], trustedContext: { revision: 'unit-context', discovery: 'disabled', resources: [] },
     budgets: { wallTimeMs: 10000, totalTokens: 1000, perCallOutputTokens: 20, maxModelCalls: 3, maxConcurrency: 1, maxFormatRepairs: 0, maxImplementationRepairs: 0, maxTransportRetries: 0,

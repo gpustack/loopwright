@@ -1,0 +1,6 @@
+interface:
+  display_name: "Loopwright Release"
+  short_description: "Run explicit-only SemVer2 release verification and tagging for Loopwright"
+  default_prompt: "Run the Loopwright release preflight and verification checklist for version vX.Y.Z."
+policy:
+  allow_implicit_invocation: false

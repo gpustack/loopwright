@@ -39,7 +39,7 @@ describe('frozen corpus verification', () => {
   it('verifies the pristine vendored corpus from the default root', async () => {
     const verification = await verifyFrozenCorpus();
     assert.equal(verification.manifest.version, 1);
-    assert.equal(verification.manifest.sourceRepository, 'gpustack/runner');
+    assert.equal(verification.manifest.sourceRepository, 'example-org/runtime-runner');
     assert.equal(verification.manifest.sourceRevision, '9b422c8bdbd31414ada7df8c4b55070b04957f44');
     assert.equal(verification.fileCount, 33);
     assert.equal(verification.manifest.files.length, verification.fileCount);
@@ -98,8 +98,8 @@ describe('frozen corpus verification', () => {
 
   it('rejects a missing manifest-listed file', async () => {
     await withCopiedCorpus(async root => {
-      await rm(join(root, 'gpustack_runner', 'runner.py.json'));
-      await assert.rejects(verifyFrozenCorpus(root), tamperError('gpustack_runner/runner.py.json'));
+      await rm(join(root, 'runtime_runner', 'runner.py.json'));
+      await assert.rejects(verifyFrozenCorpus(root), tamperError('runtime_runner/runner.py.json'));
     });
   });
 
@@ -176,7 +176,7 @@ describe('frozen corpus verification', () => {
 describe('runner intake: revise authorization and guidance guards', () => {
   const base = {
     mode: 'revise' as const,
-    repository: 'gpustack/runner',
+    repository: 'example-org/runtime-runner',
     defaultSha: 'd'.repeat(40),
     headSha: 'a'.repeat(40),
     prNumber: 17,
@@ -250,18 +250,18 @@ describe('runner intake: revise authorization and guidance guards', () => {
 });
 
 describe('runner intake: pack-run-url diagnosis bounds', () => {
-  const managed = 'gpustack/runner';
+  const managed = 'example-org/runtime-runner';
 
   it('parses run and job URLs including trailing slashes', () => {
-    const run = parsePackRunUrl('https://github.com/gpustack/runner/actions/runs/12345', managed);
+    const run = parsePackRunUrl('https://github.com/example-org/runtime-runner/actions/runs/12345', managed);
     assert.ok(run.ok && run.repository === managed && run.runId === '12345' && run.jobId === null);
-    const job = parsePackRunUrl('https://github.com/gpustack/runner/actions/runs/12345/job/9876/', managed);
+    const job = parsePackRunUrl('https://github.com/example-org/runtime-runner/actions/runs/12345/job/9876/', managed);
     assert.ok(job.ok && job.jobId === '9876');
   });
 
   it('rejects non-matching URLs and cross-repository targets', () => {
     assert.equal(parsePackRunUrl('https://example.com/actions/runs/1', managed).ok, false);
-    assert.equal(parsePackRunUrl('https://github.com/gpustack/runner/actions/runs/abc', managed).ok, false);
+    assert.equal(parsePackRunUrl('https://github.com/example-org/runtime-runner/actions/runs/abc', managed).ok, false);
     const cross = parsePackRunUrl('https://github.com/other/project/actions/runs/1', managed);
     assert.ok(!cross.ok && cross.reason === 'unknown_repository_url');
   });

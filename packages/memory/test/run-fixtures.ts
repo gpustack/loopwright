@@ -4,7 +4,7 @@ import { admitTask, bindSubject, constructRunResult, digestArtifact, type Artifa
 export const BASE_REVISION = 'b'.repeat(40);
 export const SOURCE_REVISION = 'c'.repeat(40);
 export const CONTRACT: TaskContract = {
-  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract', metadata: { id: 'contract.demo' },
+  apiVersion: 'loopwright.dev/v1alpha1', kind: 'TaskContract',
   spec: {
     goal: 'demo goal', taskpack: 'demo',
     target: { repository: 'org/repo', baseRevision: BASE_REVISION, sourceRevision: SOURCE_REVISION, matrix: null },

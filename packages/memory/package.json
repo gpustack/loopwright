@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "26.13.0" },
+  "engines": { "node": "26.x" },
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "scripts": { "pretest": "tsc -p ../../tsconfig.test.json", "test": "node --test --test-concurrency=1 ../../.test-build/packages/memory/test/*.test.js" },
   "dependencies": {

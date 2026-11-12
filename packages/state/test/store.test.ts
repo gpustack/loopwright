@@ -54,7 +54,7 @@ test('changed policy, lock, store and compatibility cannot reset the run',()=>{
 });
 
 test('versions, added schema, missing authoritative rows and modified stored facts fail closed',()=>{
-  for(const mutation of ["PRAGMA user_version=99","CREATE INDEX unexpected ON run(revision)","DELETE FROM run","UPDATE run SET deadline_ms=deadline_ms+1","UPDATE run SET ledger_json='{}'"]){
+  for(const mutation of ["PRAGMA user_version=99","CREATE INDEX unexpected ON run(revision)","DELETE FROM run","UPDATE run SET deadline_ms=deadline_ms+1","UPDATE run SET ledger_json='{}'","UPDATE store_meta SET engine_identity='{}'"]){
     const f=fixture();try{const store=f.create();store.close();const db=new DatabaseSync(f.path);db.exec(mutation);db.close();errorCode(reopenLocalRun(f.input),mutation.includes('user_version')?'FORMAT_UNSUPPORTED':'STORE_CORRUPT');}finally{f.cleanup();}
   }
 });
@@ -74,7 +74,15 @@ test('adapter binding order is deterministic for all valid core labels',()=>{con
 
 import { chmodSync } from 'node:fs';
 import { ENGINE, matchesEngine } from '../src/schema.js';
-test('runtime allowlist rejects unqualified platform, architecture, Node and SQLite profiles',()=>{assert.equal(matchesEngine(ENGINE),true);for(const patch of [{platform:'linux'},{architecture:'x64'},{node:'v26.13.1'},{sqlite:'3.54.2'},{sqlite:undefined}])assert.equal(matchesEngine({...ENGINE,...patch}),false);});
+test('runtime allowlist rejects unqualified platform, architecture, Node and SQLite profiles',()=>{
+  assert.equal(matchesEngine(ENGINE),true);
+  for(const ok of [
+    {platform:'darwin',architecture:'arm64',node:'v26.13.1',sqlite:'3.54.1'},
+    {platform:'linux',architecture:'arm64',node:'v26.13.0',sqlite:'3.54.1'},
+    {platform:'linux',architecture:'x64',node:'v26.13.1',sqlite:'3.54.2'},
+  ])assert.equal(matchesEngine(ok),true);
+  for(const patch of [{platform:'win32'},{platform:'darwin',architecture:'x64'},{node:'v25.0.0'},{sqlite:'2.8.17'},{sqlite:undefined}])assert.equal(matchesEngine({...ENGINE,...patch}),false);
+});
 test('actual unavailable local-file access remains distinct from exhaustion and missing authority',()=>{assert.notEqual(process.getuid?.(),0,'permission fixture requires the qualified non-root local user');const f=fixture();try{const before=f.create();const deadline=good(before.inspect()).deadlineMs;before.close();chmodSync(f.path,0);try{errorCode(reopenLocalRun(f.input),'STORE_UNAVAILABLE');}finally{chmodSync(f.path,0o600);}const reopened=good(reopenLocalRun(f.input));assert.equal(good(reopened.inspect()).deadlineMs,deadline);reopened.close();}finally{if(existsSync(f.path))chmodSync(f.path,0o600);f.cleanup();}});
 
 test('direct API errors own and freeze diagnostics independently of transport serialization',()=>{const f=fixture();try{const s=f.create();try{const result=s.getRequest('missing');errorCode(result,'RECORD_NOT_FOUND');assert(Object.isFrozen(result));if(!result.ok){assert(Object.isFrozen(result.error));assert(Object.isFrozen(result.error.diagnostics));assert.throws(()=>{(result.error.diagnostics as unknown[]).push({});},TypeError);}}finally{s.close();}}finally{f.cleanup();}});

@@ -1,23 +1,26 @@
+import { CST, isAlias, isMap, isScalar, isSeq, Lexer, parseDocument } from 'yaml';
 import {
   GitHubAppError, DEFAULT_COMMENT_PREFIXES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
   TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES,
   type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
-  type TaskpackCommentCommand, type TaskpackManifest, type TaskpackSandboxDeclaration,
+  type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
+  type TaskpackDecisionsDeclaration, type TaskpackManifest, type TaskpackModelDeclaration, type TaskpackSandboxDeclaration,
   type TaskpackUpstreamDescriptor,
 } from './types.js';
+import { validateTaskpackModelsDeclaration } from './models-config.js';
 
 export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
-const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const TARGET_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const COMMENT_PREFIX_PATTERN = /^\/[A-Za-z0-9_-]{0,31}$/;
 const FIELD_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const YAML_INDICATOR_PREFIXES = new Set(['&', '*', '!', '|', '>', '%', '@', '`']);
-const MAX_YAML_LINES = 2048;
+// Twin yaml@2.9.0 AST traversal caps shared with packages/decisions/src/schema.ts (4096 nodes, depth 16, 512 collection items, 8192 string chars).
 const MAX_NODES = 4096;
 const MAX_DEPTH = 16;
 const MAX_COLLECTION = 512;
 const MAX_STRING = 8192;
+const DEFAULT_DECISION_MIN_CONFIDENCE = 0.8;
+const DEFAULT_DECISION_CONFIRM_THRESHOLD = 0.6;
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type { Json };
@@ -58,7 +61,7 @@ function parseJsonSubset(source: string): Json {
     const char = charAt(offset);
     if (char === '{') {
       offset++;
-      const output: Record<string, Json> = Object.create(null), keys = new Set<string>();
+      const output: Record<string, Json> = {}, keys = new Set<string>();
       skipSpace();
       if (charAt(offset) === '}') { offset++; return output; }
       while (true) {
@@ -110,216 +113,67 @@ function parseJsonSubset(source: string): Json {
 }
 
 // ---------------------------------------------------------------------------
-// Strict bounded YAML subset (block maps, block sequences, flow collections)
+// Strict YAML 1.2 core-schema parser via `yaml` (rejecting anchors/aliases/merge/duplicate keys)
 // ---------------------------------------------------------------------------
 
-interface YamlLine { readonly indent: number; readonly text: string }
-
-function stripYamlComment(line: string, number: number): string {
-  let quote: '"' | "'" | null = null;
-  for (let position = 0; position < line.length; position++) {
-    const char = line.charAt(position);
-    if (quote !== null) {
-      if (char === quote) quote = null;
-      else if (char === '\\' && quote === '"') position++;
-      continue;
+function parseYamlDocument(source: string): Json {
+  let flow = 0, tokens = 0, scalar = false, inlineSequence = 0;
+  for (const token of new Lexer().lex(source)) {
+    if (scalar) { scalar = false; continue; }
+    const kind = CST.tokenType(token);
+    if (kind === 'scalar') scalar = true;
+    if (kind === 'newline') inlineSequence = 0;
+    if (kind === 'seq-item-ind' && ++inlineSequence > 32) manifestInvalid('YAML inline sequence exceeds depth limits', '/');
+    if (kind === 'flow-map-start' || kind === 'flow-seq-start') { if (++flow > 32) manifestInvalid('YAML flow collection exceeds depth limits', '/'); }
+    if (kind === 'flow-map-end' || kind === 'flow-seq-end') flow--;
+    if (!['space', 'newline', 'comment'].includes(kind ?? '') && ++tokens > 65536) manifestInvalid('YAML document exceeds token limits', '/');
+  }
+  const document = parseDocument(source, { version: '1.2', schema: 'core', uniqueKeys: true, merge: false, strict: true, customTags: [] });
+  if (document.errors.length > 0) {
+    manifestInvalid(document.errors[0]?.message ?? 'invalid YAML syntax', '/');
+  }
+  let nodes = 0;
+  function visit(node: unknown, depth: number, path: string): void {
+    if (++nodes > MAX_NODES || depth > MAX_DEPTH) manifestInvalid('YAML document exceeds node or depth limits', path);
+    if (node === null) return;
+    if (
+      isAlias(node) || !node || typeof node !== 'object' ||
+      ('tag' in node && node.tag !== undefined) ||
+      ('anchor' in node && node.anchor !== undefined)
+    ) {
+      manifestInvalid('YAML aliases, anchors, and tags are unsupported', path);
     }
-    if (char === '"' || char === "'") { quote = char; continue; }
-    if (char === '#' && (position === 0 || /[\t ]/.test(line.charAt(position - 1)))) return line.slice(0, position);
-    // Control characters other than tab are never valid in this subset.
-    if (char !== '\t' && char !== '' && char < '\x20') manifestInvalid(`control character in manifest line ${number + 1}`, '/');
-  }
-  return line;
-}
-
-function parsePlainScalar(text: string, path: string): Json {
-  if (text === '~') return null;
-  if (text === 'true') return true;
-  if (text === 'false') return false;
-  if (text === 'null' || text.length === 0) return null;
-  if (/^[+-]?[0-9]+$/.test(text)) {
-    const number = Number(text);
-    if (!Number.isSafeInteger(number)) manifestInvalid('integer scalar exceeds safe range', path);
-    return number;
-  }
-  if (/^["']/.test(text)) manifestInvalid('unterminated quoted scalar', path);
-  if (YAML_INDICATOR_PREFIXES.has(text[0]!)) manifestInvalid(`unsupported YAML indicator "${text[0]}"`, path);
-  if (/:(?:\s|$)/.test(text) || text.endsWith(':')) manifestInvalid('plain scalar must not contain a colon', path);
-  if (/\s#/.test(text)) manifestInvalid('plain scalar must not contain a comment marker', path);
-  if (text.length > MAX_STRING) manifestInvalid('scalar exceeds length limits', path);
-  return text;
-}
-
-function parseQuotedScalar(text: string, path: string): string {
-  if (text.startsWith('"')) {
-    if (!/^"(?:[^"\\\n]|\\.)*"$/.test(text)) manifestInvalid('unterminated or multiline double-quoted scalar', path);
-    let decoded: unknown;
-    try { decoded = JSON.parse(text); } catch { manifestInvalid('invalid escape in double-quoted scalar', path); }
-    if (typeof decoded !== 'string' || decoded.length > MAX_STRING) manifestInvalid('quoted scalar out of bounds', path);
-    return decoded;
-  }
-  if (!/^'(?:[^'\n]|'')*'$/.test(text)) manifestInvalid('unterminated or multiline single-quoted scalar', path);
-  const decoded = text.slice(1, -1).replaceAll("''", "'");
-  if (decoded.length > MAX_STRING) manifestInvalid('quoted scalar out of bounds', path);
-  return decoded;
-}
-
-function scalarValue(text: string, path: string): Json {
-  if (text.startsWith('"') || text.startsWith("'")) return parseQuotedScalar(text, path);
-  return parsePlainScalar(text, path);
-}
-
-function parseFlowDocument(source: string, path: string): Json {
-  let position = 0;
-  const charAt = (index: number): string => source.charAt(index);
-  const skipSpace = () => { while (position < source.length && /[\t ]/.test(charAt(position))) position++; };
-  const flowKeyEnd = () => {
-    // Flow keys never contain a colon; bound the key scan to the next ',' ']' '}' or ':'.
-    let end = position;
-    while (end < source.length && !/[,\]}:]/.test(charAt(end))) end++;
-    return end;
-  };
-  const value = (depth: number): Json => {
-    if (depth > MAX_DEPTH) manifestInvalid('flow collection exceeds depth limits', path);
-    skipSpace();
-    const char = charAt(position);
-    if (char === '[') {
-      position++;
-      const items: Json[] = [];
-      skipSpace();
-      if (charAt(position) === ']') { position++; return items; }
-      while (true) {
-        if (items.length >= MAX_COLLECTION) manifestInvalid('flow sequence exceeds collection limits', path);
-        items.push(value(depth + 1));
-        skipSpace();
-        const delimiter = charAt(position++);
-        if (delimiter === ']') return items;
-        if (delimiter !== ',') manifestInvalid('expected "," or "]" in flow sequence', path);
-        skipSpace();
-        if (charAt(position) === ']') { position++; return items; }
+    if (isMap(node)) {
+      if (node.items.length > MAX_COLLECTION) manifestInvalid('YAML mapping exceeds collection limits', path);
+      const seen = new Set<string>();
+      for (const pair of node.items) {
+        if (!isScalar(pair.key) || typeof pair.key.value !== 'string' || pair.key.value === '<<' || pair.key.value.length > MAX_STRING) {
+          manifestInvalid('YAML mapping key must be a valid string', path);
+        }
+        const key = pair.key.value;
+        if (FORBIDDEN_KEYS.has(key)) manifestInvalid(`forbidden key "${key}"`, path);
+        if (seen.has(key)) manifestInvalid(`duplicate key "${key}"`, `${path}/${key}`);
+        seen.add(key);
+        visit(pair.key, depth + 1, `${path}/${key}`);
+        visit(pair.value, depth + 1, `${path}/${key}`);
+      }
+    } else if (isSeq(node)) {
+      if (node.items.length > MAX_COLLECTION) manifestInvalid('YAML sequence exceeds collection limits', path);
+      for (const [idx, child] of node.items.entries()) visit(child, depth + 1, `${path}/${idx}`);
+    } else {
+      if (!isScalar(node) || (node.value !== null && !['string', 'boolean', 'number'].includes(typeof node.value))) {
+        manifestInvalid('unsupported YAML scalar value', path);
+      }
+      if (typeof node.value === 'string' && node.value.length > MAX_STRING) {
+        manifestInvalid('YAML string exceeds length limits', path);
+      }
+      if (typeof node.value === 'number' && (!Number.isFinite(node.value) || Object.is(node.value, -0))) {
+        manifestInvalid('YAML number out of bounds', path);
       }
     }
-    if (char === '{') {
-      position++;
-      const output: Record<string, Json> = Object.create(null), keys = new Set<string>();
-      skipSpace();
-      if (charAt(position) === '}') { position++; return output; }
-      while (true) {
-        skipSpace();
-        const keyMatch = /^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[^:,\]}\t ][^,\]}\t ]*)\s*:/.exec(source.slice(position, flowKeyEnd()));
-        if (keyMatch === null) manifestInvalid('expected "key:" in flow mapping', path);
-        const key = keyMatch[1]!.startsWith('"') || keyMatch[1]!.startsWith("'") ? parseQuotedScalar(keyMatch[1]!, path) : keyMatch[1]!.trim();
-        if (keys.has(key)) manifestInvalid(`duplicate flow key "${key}"`, path);
-        if (FORBIDDEN_KEYS.has(key)) manifestInvalid(`forbidden flow key "${key}"`, path);
-        keys.add(key);
-        position += keyMatch[0].length;
-        output[key] = value(depth + 1);
-        skipSpace();
-        const delimiter = charAt(position++);
-        if (delimiter === '}') return output;
-        if (delimiter !== ',') manifestInvalid('expected "," or "}" in flow mapping', path);
-        skipSpace();
-        if (charAt(position) === '}') { position++; return output; }
-      }
-    }
-    if (char === '"' || char === "'") {
-      const match = /^"(?:[^"\\]|\\.)*"|^'(?:[^']|'')*'/.exec(source.slice(position));
-      if (match === null) manifestInvalid('unterminated quoted scalar in flow collection', path);
-      position += match[0].length;
-      return parseQuotedScalar(match[0], path);
-    }
-    const plain = /^[^,\]}\t ][^,\]}]*/.exec(source.slice(position));
-    if (plain === null || plain[0].length === 0) manifestInvalid('expected a flow scalar', path);
-    position += plain[0].length;
-    return parsePlainScalar(plain[0].trim(), path);
-  };
-  const parsed = value(1);
-  skipSpace();
-  if (position !== source.length) manifestInvalid('trailing content after flow collection', path);
-  return parsed;
-}
-
-function isSequenceItem(text: string): boolean {
-  return text === '-' || text.startsWith('- ');
-}
-
-function parseYamlSubset(source: string): Json {
-  const rawLines = source.split('\n');
-  if (rawLines.length > MAX_YAML_LINES) manifestInvalid('manifest exceeds line limits', '/');
-  const lines: YamlLine[] = [];
-  for (const [number, rawLine] of rawLines.entries()) {
-    const line = stripYamlComment(rawLine.replace(/\r$/, ''), number);
-    if (line.trim().length === 0) continue;
-    const indent = /^ */.exec(line)![0].length;
-    const text = line.slice(indent);
-    if (text.includes('\t')) manifestInvalid(`tab in indentation on manifest line ${number + 1}`, '/');
-    if (text === '---' || text === '...' || text.startsWith('%')) {
-      if (number === 0 && text === '---') continue;
-      manifestInvalid('multi-document or directive YAML is unsupported', '/');
-    }
-    lines.push({ indent, text });
   }
-  let index = 0;
-  const peek = (): YamlLine | null => index < lines.length ? lines[index]! : null;
-  const parseNode = (minIndent: number, path: string): Json => {
-    const line = peek();
-    if (line === null || line.indent < minIndent) return null;
-    if (isSequenceItem(line.text)) return parseSequence(line.indent, path);
-    return parseMapping(line.indent, path);
-  };
-  const parseSequence = (indent: number, path: string): Json[] => {
-    const items: Json[] = [];
-    while (true) {
-      const line = peek();
-      if (line === null || line.indent !== indent || !isSequenceItem(line.text)) break;
-      if (items.length >= MAX_COLLECTION) manifestInvalid('sequence exceeds collection limits', path);
-      const rest = line.text === '-' ? '' : line.text.slice(2);
-      const keyMatch = /^(".*"|'.*'|[A-Za-z_][A-Za-z0-9_.-]*)\s*:(?:[ ].*)?$/.exec(rest);
-      if (rest.trim() === '') {
-        index++;
-        items.push(parseNode(indent + 1, `${path}/${items.length}`));
-      } else if (keyMatch !== null) {
-        // Rewrite the item line as the first line of a nested mapping, then parse at that indent.
-        lines[index] = { indent: indent + (line.text.length - rest.length), text: rest };
-        items.push(parseMapping(indent + (line.text.length - rest.length), `${path}/${items.length}`));
-      } else {
-        index++;
-        items.push(scalarValue(rest.trim(), `${path}/${items.length}`));
-      }
-    }
-    return items;
-  };
-  const parseMapping = (indent: number, path: string): Record<string, Json> => {
-    const output: Record<string, Json> = Object.create(null), keys = new Set<string>();
-    while (true) {
-      const line = peek();
-      if (line === null || line.indent !== indent || isSequenceItem(line.text)) break;
-      const match = /^(".*"|'.*'|[A-Za-z_][A-Za-z0-9_.-]*)\s*:(?:[ ](.*))?$/.exec(line.text);
-      if (match === null) manifestInvalid(`expected "key: value" entry, found "${line.text}"`, path);
-      const key = match[1]!.startsWith('"') || match[1]!.startsWith("'") ? parseQuotedScalar(match[1]!, path) : match[1]!;
-      if (keys.has(key)) manifestInvalid(`duplicate key "${key}"`, path);
-      if (FORBIDDEN_KEYS.has(key)) manifestInvalid(`forbidden key "${key}"`, path);
-      keys.add(key);
-      index++;
-      const inline = match[2];
-      if (inline !== undefined && inline.trim() !== '') {
-        const trimmed = inline.trim();
-        if (trimmed.startsWith('[') || trimmed.startsWith('{')) output[key] = parseFlowDocument(trimmed, `${path}/${key}`);
-        else output[key] = scalarValue(trimmed, `${path}/${key}`);
-      } else {
-        const next = peek();
-        if (next !== null && next.indent === indent && isSequenceItem(next.text)) output[key] = parseSequence(indent, `${path}/${key}`);
-        else output[key] = parseNode(indent + 1, `${path}/${key}`);
-      }
-    }
-    if (keys.size === 0) manifestInvalid('empty mapping block', path);
-    return output;
-  };
-  if (lines.length === 0) manifestInvalid('manifest is empty', '/');
-  const parsed = parseNode(0, '/');
-  const remaining = peek();
-  if (remaining !== null) manifestInvalid(`unexpected content at indentation ${remaining.indent}`, '/');
-  return parsed;
+  visit(document.contents, 1, '/');
+  return document.toJS({ maxAliasCount: 0 }) as Json;
 }
 
 /** Parse manifest bytes in the named format; oversized or non-UTF-8 input is refused before parsing. */
@@ -332,7 +186,7 @@ export function parseTaskpackDocument(bytes: Uint8Array, format: 'json' | 'yaml'
   if (source.includes('${')) {
     throw new GitHubAppError('TASKPACK_UNTRUSTED_INTERPOLATION', 'manifest contains a ${...} interpolation expression', '/');
   }
-  return format === 'json' ? parseJsonSubset(source) : parseYamlSubset(source);
+  return format === 'json' ? parseJsonSubset(source) : parseYamlDocument(source);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,15 +295,11 @@ function pathInsideWritable(candidate: string, writable: readonly string[], prot
 export function validateTaskpackManifest(value: Json): TaskpackManifest {
   const root = requireObject(value, '/', ['apiVersion', 'kind', 'metadata', 'spec']);
   if (root['apiVersion'] !== TASKPACK_MANIFEST_API_VERSION) manifestInvalid('unsupported apiVersion', '/apiVersion');
-  if (root['kind'] !== 'TaskpackManifest') manifestInvalid('kind must be TaskpackManifest', '/kind');
-  const metadata = requireObject(root['metadata'], '/metadata', ['id', 'name', 'version']);
-  const id = requireIdentifier(metadata['id'], '/metadata/id');
-  const name = requireString(metadata['name'], '/metadata/name', 1, 128);
-  if (/[\t\v\f]/.test(name)) manifestInvalid('name contains forbidden whitespace', '/metadata/name');
-  const version = requireString(metadata['version'], '/metadata/version', 1, 64);
-  if (!VERSION_PATTERN.test(version)) manifestInvalid('version must match [A-Za-z0-9][A-Za-z0-9._+-]*', '/metadata/version');
+  if (root['kind'] !== 'Taskpack') manifestInvalid('kind must be Taskpack', '/kind');
+  const metadata = requireObject(root['metadata'], '/metadata', ['name']);
+  const name = requireIdentifier(metadata['name'], '/metadata/name');
 
-  const spec = requireObject(root['spec'], '/spec', ['goal', 'scope', 'upstreams', 'proposal', 'verification', 'publication', 'memory', 'triggers', 'sandbox']);
+  const spec = requireObject(root['spec'], '/spec', ['goal', 'scope', 'upstreams', 'proposal', 'verification', 'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models']);
   const goal = requireObject(spec['goal'], '/spec/goal', ['candidate', 'noChange']);
   const goalCandidate = requireString(goal['candidate'], '/spec/goal/candidate', 1, 1024);
   const goalNoChange = requireString(goal['noChange'], '/spec/goal/noChange', 1, 1024);
@@ -498,6 +348,9 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
   const proposal = requireObject(spec['proposal'], '/spec/proposal', ['path', 'requiredFields', 'schemaVersion']);
   const proposalPath = normalizeRelativePath(proposal['path'], '/spec/proposal/path');
   pathInsideWritable(proposalPath, writable, protectedPaths, '/spec/proposal/path');
+  if (!/\.(?:yaml|yml|json)$/i.test(proposalPath)) {
+    manifestInvalid('spec.proposal.path must end in .yaml, .yml, or .json', '/spec/proposal/path');
+  }
   const requiredFields = requireStringList(proposal['requiredFields'], '/spec/proposal/requiredFields', 1, 32);
   for (const [index, field] of requiredFields.entries()) {
     if (!FIELD_NAME_PATTERN.test(field)) manifestInvalid(`required field "${field}" is not a valid field name`, `/spec/proposal/requiredFields/${index}`);
@@ -558,7 +411,7 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
 
   const memory = requireObject(spec['memory'], '/spec/memory', ['directory', 'apply', 'onNoModelBudget']);
   const memoryDirectory = normalizeRelativePath(memory['directory'], '/spec/memory/directory');
-  const memoryRoot = `.loopwright/memory/${id}`;
+  const memoryRoot = `.loopwright/memory/${name}`;
   if (!pathCoveredBy(memoryDirectory, memoryRoot)) {
     throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `memory directory must be under ${memoryRoot}`, '/spec/memory/directory');
   }
@@ -659,33 +512,107 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
     sandbox = Object.freeze(sandboxObj);
   }
 
-  const specRecord: TaskpackManifest['spec'] = sandbox === undefined
-    ? Object.freeze({
-      goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
-      scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
-      upstreams: Object.freeze(upstreams),
-      proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
-      verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
-      publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
-      memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
-      triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
-    })
-    : Object.freeze({
-      goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
-      scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
-      upstreams: Object.freeze(upstreams),
-      proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
-      verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
-      publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
-      memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
-      triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
-      sandbox,
-    });
+  let decisions: TaskpackDecisionsDeclaration | undefined;
+  if (spec['decisions'] !== undefined) {
+    const rawDecisions = requireObject(spec['decisions'], '/spec/decisions', [
+      'enabled', 'provider', 'disclosurePolicy', 'minConfidence', 'confirmThreshold',
+      'hardDeadlineMs', 'maxAttempts', 'allowImages',
+    ]);
+    const enabled = requireBoolean(rawDecisions['enabled'], '/spec/decisions/enabled');
+    const allowedProviders: readonly TaskpackDecisionProviderKind[] = [
+      'typesafe-jev', 'openai-decisions', 'startlux-decision', 'microsoft-decision',
+      'perplexity-decider', 'cloudflare-clef', 'liquid-d1',
+    ];
+    const allowedDisclosures: readonly TaskpackDecisionDisclosurePolicy[] = [
+      'disabled', 'repo-approved-redacted-evidence', 'public-metadata-only',
+    ];
+    const decisionsObj: {
+      enabled: boolean;
+      provider?: TaskpackDecisionProviderKind;
+      disclosurePolicy?: TaskpackDecisionDisclosurePolicy;
+      minConfidence?: number;
+      confirmThreshold?: number;
+      hardDeadlineMs?: number;
+      maxAttempts?: 1 | 2;
+      allowImages?: boolean;
+    } = { enabled };
+    if (rawDecisions['provider'] !== undefined) {
+      const providerStr = requireString(rawDecisions['provider'], '/spec/decisions/provider', 1, 64);
+      if (!(allowedProviders as readonly string[]).includes(providerStr)) {
+        manifestInvalid(`unsupported decisions provider "${providerStr}"`, '/spec/decisions/provider');
+      }
+      decisionsObj.provider = providerStr as TaskpackDecisionProviderKind;
+    }
+    if (rawDecisions['disclosurePolicy'] !== undefined) {
+      const disclosureStr = requireString(rawDecisions['disclosurePolicy'], '/spec/decisions/disclosurePolicy', 1, 64);
+      if (!(allowedDisclosures as readonly string[]).includes(disclosureStr)) {
+        manifestInvalid(`unsupported decisions disclosurePolicy "${disclosureStr}"`, '/spec/decisions/disclosurePolicy');
+      }
+      decisionsObj.disclosurePolicy = disclosureStr as TaskpackDecisionDisclosurePolicy;
+    }
+    if (rawDecisions['minConfidence'] !== undefined) {
+      const minConf = rawDecisions['minConfidence'];
+      if (typeof minConf !== 'number' || !Number.isFinite(minConf) || minConf < 0.5 || minConf > 1) {
+        manifestInvalid('decisions.minConfidence must be a finite number in [0.5, 1.0]', '/spec/decisions/minConfidence');
+      }
+      decisionsObj.minConfidence = minConf;
+    }
+    if (rawDecisions['confirmThreshold'] !== undefined) {
+      const confirmThresh = rawDecisions['confirmThreshold'];
+      if (typeof confirmThresh !== 'number' || !Number.isFinite(confirmThresh) || confirmThresh < 0 || confirmThresh > 1) {
+        manifestInvalid('decisions.confirmThreshold must be a finite number in [0.0, 1.0]', '/spec/decisions/confirmThreshold');
+      }
+      decisionsObj.confirmThreshold = confirmThresh;
+    }
+    const effectiveConfirmThresh = decisionsObj.confirmThreshold ?? DEFAULT_DECISION_CONFIRM_THRESHOLD;
+    const effectiveMinConf = decisionsObj.minConfidence ?? DEFAULT_DECISION_MIN_CONFIDENCE;
+    if (effectiveConfirmThresh > effectiveMinConf) {
+      manifestInvalid('decisions.confirmThreshold must not exceed minConfidence', '/spec/decisions/confirmThreshold');
+    }
+    if (rawDecisions['hardDeadlineMs'] !== undefined) {
+      const deadline = rawDecisions['hardDeadlineMs'];
+      if (typeof deadline !== 'number' || !Number.isSafeInteger(deadline) || deadline < 100 || deadline > 30_000) {
+        manifestInvalid('decisions.hardDeadlineMs must be an integer in [100, 30000]', '/spec/decisions/hardDeadlineMs');
+      }
+      decisionsObj.hardDeadlineMs = deadline;
+    }
+    if (rawDecisions['maxAttempts'] !== undefined) {
+      const attempts = rawDecisions['maxAttempts'];
+      if (attempts !== 1 && attempts !== 2) {
+        manifestInvalid('decisions.maxAttempts must be 1 or 2', '/spec/decisions/maxAttempts');
+      }
+      decisionsObj.maxAttempts = attempts;
+    }
+    if (rawDecisions['allowImages'] !== undefined) {
+      decisionsObj.allowImages = requireBoolean(rawDecisions['allowImages'], '/spec/decisions/allowImages');
+    }
+    decisions = Object.freeze(decisionsObj);
+  }
+
+  let models: readonly TaskpackModelDeclaration[] | undefined;
+  if (spec['models'] !== undefined) {
+    models = validateTaskpackModelsDeclaration(spec['models'], '/spec/models');
+  }
+
+  const baseSpec = {
+    goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
+    scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
+    upstreams: Object.freeze(upstreams),
+    proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
+    verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
+    publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
+    memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
+    triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(decisions === undefined ? {} : { decisions }),
+    ...(models === undefined ? {} : { models }),
+  };
+  const specRecord: TaskpackManifest['spec'] = Object.freeze(baseSpec);
 
   return Object.freeze({
     apiVersion: TASKPACK_MANIFEST_API_VERSION,
-    kind: 'TaskpackManifest',
-    metadata: Object.freeze({ id, name, version }),
+    kind: 'Taskpack',
+    metadata: Object.freeze({ name }),
     spec: specRecord,
   });
 }

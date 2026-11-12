@@ -9,11 +9,11 @@
     "subject": {
       "lockHash": {
         "algorithm": "sha256",
-        "hex": "0ba5d3dc19f5b1e017c7e1a4150ea95857f25782959571452523d015f6b74bb9"
+        "hex": "fb14b337ba0b1aa2dac818713a8345996f75d36a192186aaefadcf5f83e1abdc"
       },
       "contractHash": {
         "algorithm": "sha256",
-        "hex": "9ada67e414f91c58e52a9a21801606baf2616e80dafa713efd3a95f955a211a3"
+        "hex": "50ff0166f1b905ce01e363fe3973e0f7b9eac021770805e46a9d02362a798d1c"
       },
       "repository": "team/repository",
       "baseRevision": "base-1",
@@ -34,11 +34,11 @@
         "subject": {
           "lockHash": {
             "algorithm": "sha256",
-            "hex": "0ba5d3dc19f5b1e017c7e1a4150ea95857f25782959571452523d015f6b74bb9"
+            "hex": "fb14b337ba0b1aa2dac818713a8345996f75d36a192186aaefadcf5f83e1abdc"
           },
           "contractHash": {
             "algorithm": "sha256",
-            "hex": "9ada67e414f91c58e52a9a21801606baf2616e80dafa713efd3a95f955a211a3"
+            "hex": "50ff0166f1b905ce01e363fe3973e0f7b9eac021770805e46a9d02362a798d1c"
           },
           "repository": "team/repository",
           "baseRevision": "base-1",

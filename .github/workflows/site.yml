@@ -1,0 +1,127 @@
+name: Site
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "main or an existing release tag (e.g. v0.1.0)"
+        default: main
+        required: true
+        type: string
+
+jobs:
+  publish:
+    if: github.repository == 'gpustack/loopwright' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: "${{ steps.deployment.outputs.page_url }}"
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - name: Checkout gh-pages archive branch
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${RUNNER_TEMP}/gh-pages"
+          else
+            mkdir -p "${RUNNER_TEMP}/gh-pages"
+            git -C "${RUNNER_TEMP}/gh-pages" init -b gh-pages
+            git -C "${RUNNER_TEMP}/gh-pages" remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v3
+        with:
+          hugo-version: '0.152.2'
+          extended: true
+      - name: Install dependencies
+        run: npm ci
+      - name: Build single version and merge into gh-pages
+        env:
+          REQUESTED_REF: ${{ inputs.ref || github.ref_name }}
+          SITE_ROOT: ${{ steps.pages.outputs.base_url }}/
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          GH_PAGES_DIR="${RUNNER_TEMP}/gh-pages"
+          if [[ "${REQUESTED_REF}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            DOC_VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            RELEASE_KIND="stable"
+          elif [[ "${REQUESTED_REF}" == "main" || "${REQUESTED_REF}" == "refs/heads/main" ]]; then
+            DOC_VERSION="main"
+            RELEASE_KIND="development"
+          else
+            echo "Skipping non-stable ref: ${REQUESTED_REF}"
+            exit 0
+          fi
+
+          rm -rf "${GH_PAGES_DIR:?}/${DOC_VERSION}"
+          SITE_BASE_URL="${SITE_ROOT}${DOC_VERSION}/" \
+          HUGO_PARAMS_SITEROOT="${SITE_ROOT}" \
+          HUGO_PARAMS_VERSION="${DOC_VERSION}" \
+          HUGO_PARAMS_RELEASEKIND="${RELEASE_KIND}" \
+          HUGO_PARAMS_SOURCEREF="${SOURCE_SHA}" \
+          node -e 'import("./scripts/site.mjs").then(m => m.buildSite(process.cwd(), { destination: process.argv[1] }))' "${GH_PAGES_DIR}/${DOC_VERSION}"
+
+          SYNC_JSON="$(node -e 'import("./scripts/site.mjs").then(m => console.log(JSON.stringify(m.syncGhPagesRoot(process.argv[1]))))' "${GH_PAGES_DIR}")"
+          LATEST_VERSION="$(node -e 'console.log(JSON.parse(process.argv[1]).latestVersion ?? "")' "${SYNC_JSON}")"
+
+          if [[ "${LATEST_VERSION}" == "${DOC_VERSION}" ]]; then
+            rm -rf "${GH_PAGES_DIR}/latest"
+            SITE_BASE_URL="${SITE_ROOT}latest/" \
+            HUGO_PARAMS_SITEROOT="${SITE_ROOT}" \
+            HUGO_PARAMS_VERSION="${DOC_VERSION}" \
+            HUGO_PARAMS_RELEASEKIND="${RELEASE_KIND}" \
+            HUGO_PARAMS_SOURCEREF="${SOURCE_SHA}" \
+            node -e 'import("./scripts/site.mjs").then(m => m.buildSite(process.cwd(), { destination: process.argv[1] }))' "${GH_PAGES_DIR}/latest"
+            node scripts/site.mjs sync-gh-pages "${GH_PAGES_DIR}"
+          fi
+      - name: Push updated archive to gh-pages branch
+        run: |
+          cd "${RUNNER_TEMP}/gh-pages"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -s -m "docs(site): deploy ${REQUESTED_REF} (${GITHUB_SHA::7})"
+            git push origin gh-pages
+          fi
+        env:
+          REQUESTED_REF: ${{ inputs.ref || github.ref_name }}
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/gh-pages
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

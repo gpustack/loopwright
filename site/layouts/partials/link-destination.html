@@ -21,7 +21,7 @@
       {{- else if hasPrefix $source "site/content/" -}}
         {{- $destination = strings.TrimPrefix "site/content/" $source | relURL -}}
       {{- else -}}
-        {{- $destination = printf "https://github.com/thxcode/loopwright/blob/%s/%s" $.page.Site.Params.sourceRef $source -}}
+        {{- $destination = printf "https://github.com/gpustack/loopwright/blob/%s/%s" $.page.Site.Params.sourceRef $source -}}
       {{- end -}}
     {{- end -}}
   {{- end -}}

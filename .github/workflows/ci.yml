@@ -1,0 +1,149 @@
+name: CI
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "v*-dev"
+    tags:
+      - "v*"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "**.png"
+      - "**.svg"
+  pull_request:
+    branches:
+      - main
+      - "v*-dev"
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+      - "**.png"
+      - "**.svg"
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: 'npm'
+      - name: Install Python bridge dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-packaging python3-yaml python3-requests
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Typecheck and lint
+        run: |
+          npm run typecheck &
+          PID_TYPECHECK=$!
+          npm run lint &
+          PID_LINT=$!
+          wait "${PID_TYPECHECK}"
+          wait "${PID_LINT}"
+      - name: Verify closure matrix and failure scenarios
+        run: node packages/cli/dist/main.js closure --verify-failures
+      - name: Package release bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p dist-release
+          node scripts/pack-npm.mjs --version "${GITHUB_REF_NAME#v}" --out-dir dist-release
+          BUNDLE="dist-release/loopwright-${GITHUB_REF_NAME}.tar.gz"
+          tar -czf "${BUNDLE}" \
+            action.yml \
+            LICENSE \
+            README.md \
+            package.json \
+            package-lock.json \
+            packages/*/package.json \
+            packages/*/dist
+          sha256sum "${BUNDLE}" > "${BUNDLE}.sha256"
+      - name: Upload release bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: dist-release/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'gpustack/loopwright'
+    needs:
+      - verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: dist-release
+      - name: Build changelog
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-release/*
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-alpha') || contains(github.ref, '-beta') }}
+          body: ${{ steps.build_changelog.outputs.changelog }}
+
+  publish-npm:
+    # Temporarily disabled until @gpustack/loopwright is bootstrapped on npmjs.com.
+    if: false && startsWith(github.ref, 'refs/tags/v') && github.repository == 'gpustack/loopwright'
+    needs:
+      - verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Ensure npm supports Trusted Publishers (>= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Download release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle
+          path: dist-release
+      # Idempotent publish aligned with gpustack/core-ui: uses npm Trusted Publishers (OIDC id-token: write,
+      # zero NPM_TOKEN secret) and succeeds cleanly on workflow re-runs if the version is already on the registry.
+      - name: Publish @gpustack/loopwright to npmjs.com
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "@gpustack/loopwright@${VERSION}" version --prefer-online >/dev/null 2>&1; then
+            echo "@gpustack/loopwright@${VERSION} is already published; nothing to do."
+            exit 0
+          fi
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            DIST_TAG="next"
+          else
+            DIST_TAG="latest"
+          fi
+          npm publish "dist-release/gpustack-loopwright-${VERSION}.tgz" --provenance --access public --ignore-scripts --tag "${DIST_TAG}"

@@ -51,7 +51,7 @@ describe('runner taskpack compiler', () => {
     await withSandbox(async paths => {
       const bundle = await compileRunnerTaskpack({
         mode: 'candidate',
-        repository: 'gpustack/runner',
+        repository: 'example-org/runtime-runner',
         baseRevision: 'b'.repeat(40),
         sourceRevision: 'c'.repeat(40),
         gateEndpoint: { id: 'runner-validation-gate', url: 'http://127.0.0.1:47001/gate', signingCredentialRef: 'runner-gate-signing' },
@@ -85,7 +85,7 @@ describe('runner taskpack compiler', () => {
     await withSandbox(async paths => {
       const bundle = await compileRunnerTaskpack({
         mode: 'no-change',
-        repository: 'gpustack/runner',
+        repository: 'example-org/runtime-runner',
         baseRevision: 'b'.repeat(40),
         sourceRevision: 'c'.repeat(40),
         gateEndpoint: { id: 'runner-validation-gate', url: 'http://127.0.0.1:47003/gate', signingCredentialRef: 'runner-gate-signing' },
@@ -107,7 +107,7 @@ describe('runner taskpack compiler', () => {
     await withSandbox(async paths => {
       const bundle = await compileRunnerTaskpack({
         mode: 'candidate',
-        repository: 'gpustack/runner',
+        repository: 'example-org/runtime-runner',
         baseRevision: 'b'.repeat(40),
         sourceRevision: 'c'.repeat(40),
         gateEndpoint: { id: 'runner-validation-gate', url: 'http://127.0.0.1:47004/gate', signingCredentialRef: 'runner-gate-signing' },
@@ -136,7 +136,7 @@ describe('runner taskpack compiler', () => {
   it('rejects a candidate bundle whose publication endpoint is missing', async () => {
     await assert.rejects(compileRunnerTaskpack({
       mode: 'candidate',
-      repository: 'gpustack/runner',
+      repository: 'example-org/runtime-runner',
       baseRevision: 'b'.repeat(40),
       sourceRevision: 'c'.repeat(40),
       gateEndpoint: { id: 'runner-validation-gate', url: 'http://127.0.0.1:47006/gate', signingCredentialRef: 'runner-gate-signing' },
@@ -151,7 +151,7 @@ describe('runner taskpack compiler', () => {
     await withSandbox(async paths => {
       const bundle = await compileRunnerTaskpack({
         mode: 'candidate',
-        repository: 'gpustack/runner',
+        repository: 'example-org/runtime-runner',
         baseRevision: 'b'.repeat(40),
         sourceRevision: 'c'.repeat(40),
         gateEndpoint: { id: 'runner-validation-gate', url: 'http://127.0.0.1:47007/gate', signingCredentialRef: 'runner-gate-signing' },
@@ -243,7 +243,7 @@ describe('authenticated loopback gate and publication service', () => {
   function gateRequest(candidateDigest: string): Record<string, unknown> {
     return {
       version: 1, kind: 'gate_request', gateId: 'runner-candidate-validation', checkId: 'runner-candidate-validation',
-      candidateDigest, subject: { repository: 'gpustack/runner', candidateDigest }, storeId: 'store-1', runId: 'run-1', lockHash: 'a'.repeat(64),
+      candidateDigest, subject: { repository: 'example-org/runtime-runner', candidateDigest }, storeId: 'store-1', runId: 'run-1', lockHash: 'a'.repeat(64),
       operationId: 'op.1', dispatchId: 'dispatch-1', dispatchGeneration: 1, requestDigest: 'b'.repeat(64),
     };
   }
@@ -275,7 +275,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const unsigned = await fetch(service.gateUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(gateRequest(candidateDigest)) });
@@ -309,7 +309,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: JSON.stringify({ broken: true }),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const denied = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));
@@ -336,7 +336,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: zeroProposal,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const denied = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));
@@ -357,7 +357,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const request = publishRequest(candidateDigest, 'pub.key-1', fixture.headSha);
@@ -388,7 +388,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const approved = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));
@@ -422,7 +422,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const gate = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));
@@ -439,7 +439,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-revise-head', candidateDigest: reviseDigest,
       proposalJson: reviseProposal,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 99, commandDigest, prHeadSha: prHead },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 99, commandDigest, prHeadSha: prHead },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
       reviseCommentBody: guidance,
     });
@@ -469,7 +469,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const gate = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));
@@ -486,7 +486,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-revise-dup', candidateDigest: reviseDigest,
       proposalJson: reviseProposal,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 100, commandDigest, prHeadSha: prHead },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 100, commandDigest, prHeadSha: prHead },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
       reviseCommentBody: guidance,
     });
@@ -502,7 +502,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-revise-dup', candidateDigest: reviseDigest,
       proposalJson: reviseProposal,
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 100, commandDigest, prHeadSha: newPrHead },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'revise', prNumber: 1, commandId: 100, commandDigest, prHeadSha: newPrHead },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
       reviseCommentBody: guidance,
     });
@@ -524,7 +524,7 @@ describe('authenticated loopback gate and publication service', () => {
     await service.registerCandidate({
       storeId: 'store-1', runId: 'run-1', candidateDigest,
       proposalJson: await proposalFor(corpusRoot, fixture.headSha),
-      identity: { repository: 'gpustack/runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
+      identity: { repository: 'example-org/runtime-runner', defaultSha: fixture.headSha, headSha: fixture.headSha, mode: 'discover', prNumber: null, commandId: null, commandDigest: null },
       repositorySnapshot: fixture.path, upstreamSources: {}, ascendPairs: {}, enginePrereleases: [], prereleasePackages: [],
     });
     const approved = await post(service.gateUrl, GATE_SECRET, gateRequest(candidateDigest));

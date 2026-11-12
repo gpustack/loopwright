@@ -7,7 +7,7 @@ import { attempt, fail, StateFailure, type StateErrorCode } from './errors.js';
 import { storedRequest, storedOperation, validateLinks } from './admission.js';
 import { storedCheckpoint } from './checkpoint.js';
 import { summaries, type Data } from './model.js';
-import { DDL, ENGINE, engineMatches, expectedSchema, PROFILE, schemaIdentity } from './schema.js';
+import { currentEngine, DDL, engineMatches, expectedSchema, PROFILE, schemaIdentity } from './schema.js';
 import type { Authority, ClockSample, LocalRunIdentity, RunView } from './types.js';
 
 type Row=Record<string,SQLOutputValue>;
@@ -64,7 +64,7 @@ export class Connection {
       const meta=this.prepare('SELECT * FROM store_meta').all();const runs=this.prepare('SELECT * FROM run').all();
       if(meta.length!==1||runs.length!==1)fail('STORE_CORRUPT');const m=meta[0]!,r=runs[0]!;
       if(m.format_version!==1)fail('FORMAT_UNSUPPORTED');
-      if(m.schema_digest!==expectedSchema()||m.engine_identity!==canonical(ENGINE)||m.profile_json!==canonical(PROFILE))fail('STORE_CORRUPT');
+      if(m.schema_digest!==expectedSchema()||m.engine_identity!==canonical(currentEngine())||m.profile_json!==canonical(PROFILE))fail('STORE_CORRUPT');
       const copy={...r};delete copy.record_digest;if(r.record_digest!==stateHash(copy as WriteRow))fail('STORE_CORRUPT');
       const body=record(parse(r.identity_json,1114112),['storeId','lock','policy','binding']);
       const saved=identity({directory:this.expected.directory,...body});const savedBody=identityBody(saved);
@@ -180,7 +180,7 @@ export function openInternal(input:unknown,mode:'create'|'reopen',dependencies:D
         const now=clockSample((dependencies.clock??systemClock)());const basis=makeBasis(expected.binding.clockEpoch,now,expected.lock.spec.contract.spec.budgets.wallTimeMs);
         const body=identityBody(expected);const base={identity:body,requests:[],operations:[],checkpoints:[]};
         const data:Data={...base,identityDigest:hash('identity',body),startedAtMs:now.wallMs,deadlineMs:checkedAdd(now.wallMs,expected.lock.spec.contract.spec.budgets.wallTimeMs),revision:0,owner:{generation:0,ownerId:null,nonce:null,mode:null,leaseUntilMs:null,leaseGrantedMonotonicMs:null,leaseUntilMonotonicMs:null},basis,last:now,...summaries(base)};
-        insert(db,'store_meta',{singleton:1,format_version:1,store_id:expected.storeId,engine_identity:canonical(ENGINE),profile_json:canonical(PROFILE),schema_digest:expectedSchema()});insert(db,'run',runRow(data));initialCommitAttempted=true;db.exec('COMMIT');
+        insert(db,'store_meta',{singleton:1,format_version:1,store_id:expected.storeId,engine_identity:canonical(currentEngine()),profile_json:canonical(PROFILE),schema_digest:expectedSchema()});insert(db,'run',runRow(data));initialCommitAttempted=true;db.exec('COMMIT');
       }catch(error){if(initialCommitAttempted)fail('COMMIT_UNKNOWN');try{if(db.isTransaction)db.exec('ROLLBACK');}catch{fail('COMMIT_UNKNOWN');}throw error;}
     }
     requireHeader(db);const integrity=db.prepare('PRAGMA quick_check(1)').all();if(integrity.length!==1||Object.values(integrity[0]!)[0]!=='ok')fail('STORE_CORRUPT');
