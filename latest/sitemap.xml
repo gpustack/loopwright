@@ -2,34 +2,34 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/configuration/controller-and-registry/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/configuration/controller-and-registry/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/configuration/decision-routing/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/configuration/decision-routing/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/configuration/sandbox-backends/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/configuration/sandbox-backends/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/configuration/task-contract/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/configuration/task-contract/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/configuration/taskpack/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/configuration/taskpack/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/getting-started/architecture/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/getting-started/architecture/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/getting-started/installation/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/getting-started/installation/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/operations/cli/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/operations/cli/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/operations/github-action/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/operations/github-action/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/operations/github-app/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/operations/github-app/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/walkthroughs/declarative-taskpack/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/walkthroughs/declarative-taskpack/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/walkthroughs/managed-controller/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/walkthroughs/managed-controller/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/docs/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/docs/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/</loc>
   </url><url>
-    <loc>http://docs.gpustack.ai/loopwright/latest/search/</loc>
+    <loc>https://docs.gpustack.ai/loopwright/latest/search/</loc>
   </url>
 </urlset>
