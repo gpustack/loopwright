@@ -340,19 +340,24 @@
       <article>
         
   <h1 id="github-action">GitHub Action</h1>
-<p>GitHub Action mode is the primary zero-server entry point for consumer repositories. Use <code>gpustack/loopwright@main</code> for scheduled, manual, and <code>/loopwright</code> comment triggers.</p>
+<p>The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It discovers upstream changes, verifies candidates, and can publish a managed pull request.</p>
 <h2 id="contents">Contents</h2>
 <ul>
 <li><a href="#workflow">Workflow</a>
 </li>
+<li><a href="#execution-and-publication">Execution and publication</a>
+</li>
 <li><a href="#secrets-and-environment">Secrets and environment</a>
 </li>
-<li><a href="#inputs-and-output">Inputs and output</a>
+<li><a href="#inputs">Inputs</a>
 </li>
-<li><a href="#taskpack-and-triggers">Taskpack and triggers</a>
+<li><a href="#outputs">Outputs</a>
+</li>
+<li><a href="#triggers">Triggers</a>
 </li>
 </ul>
 <h2 id="workflow">Workflow</h2>
+<p>Install a taskpack and configure the provider and App secrets before enabling this workflow. The App installation needs repository contents and pull request write permissions for native publication.</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright</span><span class="w">
@@ -369,119 +374,99 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">runs-on</span><span class="p">:</span><span class="w"> </span><span class="l">ubuntu-latest</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">steps</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">actions/checkout@v4</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">actions/create-github-app-token@v1</span><span class="w"> </span><span class="c"># Optional when minting App PR tokens</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">app-token</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">fetch-depth</span><span class="p">:</span><span class="w"> </span><span class="m">0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">persist-credentials</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">gpustack/loopwright@main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional (defaults to .loopwright/taskpack.yaml)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w"> </span><span class="c"># Optional (defaults to GITHUB_EVENT_NAME)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w"> </span><span class="c"># Optional for schedule/manual; needed on comments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w"> </span><span class="c"># Optional override (omit to use spec.models pool)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w"> </span><span class="c"># Optional override (defaults to glm-5.3)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional override</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">publication-endpoint-url</span><span class="p">:</span><span class="w"> </span><span class="l">https://publish.internal.example/pr</span><span class="w"> </span><span class="c"># Optional when publication is disabled</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dry-run</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;true&#39;</span><span class="w"> </span><span class="c"># Optional (defaults to &#39;false&#39;)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-installation-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="l">json,github-step-summary</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">env</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GH_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">${{ steps.app-token.outputs.token }}</span><span class="w"> </span><span class="c"># Optional in dry-run mode</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span><span class="w"> </span><span class="c"># Optional in dry-run mode</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_GATE_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when externalGates is empty</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_PUBLICATION_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_PUBLICATION_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when publication is disabled</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Minimal setup</strong>: Every <code>with:</code> input on <code>gpustack/loopwright@main</code> has a default when running <code>schedule</code> or <code>workflow_dispatch</code> with <code>publication.mode: disabled</code>; conditional inputs (<code>event-path</code>, <code>publication-endpoint-url</code>, <code>gate-endpoint-url</code>) become mandatory when their corresponding features are enabled.</li>
-<li><strong>Runtime provisioning</strong>: The composite Action provisions the required <a href="/loopwright/main/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
- automatically and builds the workspace when <code>dist/action.js</code> is absent.</li>
-<li><strong>Dry-run vs. live execution</strong>: Standalone <code>runActionCli</code> compiles and scrubs artifacts outside the checkout (<code>dry-run: 'true'</code> skips any host controller delegate). Never commit provider or signing secrets to the repository.</li>
+<li><strong>Taskpack</strong>: Set publication to <code>pull_request</code> to enable native PR publication, or <code>disabled</code> to omit it.</li>
+<li><strong>Provider</strong>: Set the token variable for the selected model, not necessarily <code>ZAI_API_KEY</code>.</li>
+<li><strong>Runtime</strong>: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.</li>
+<li><strong>Dry run</strong>: Set <code>dry-run: 'true'</code> to compile without running the controller.</li>
 </ul>
-<h2 id="secrets-and-environment">Secrets and environment</h2>
-<p><code>compileDeclarativeTaskpack</code> writes literal <code>${LOOPWRIGHT_*}</code> templates—never raw secret values—into <code>registry.yaml</code> and <code>config.yaml</code>, and <code>SecretScrubber</code> verifies zero secret bytes appear on disk. During live execution, <code>@loopwright/controller</code> resolves those approved variable names from <code>env</code> in memory for each bound consumer (<code>provider</code>, <code>gate</code>, or <code>publisher</code>).</p>
-<h3 id="github-app-secrets">GitHub App secrets</h3>
-<p>Configure repository or organization secrets when using <code>actions/create-github-app-token@v1</code>:</p>
+<h2 id="execution-and-publication">Execution and publication</h2>
+<p>A live Action resolves repository identity and revisions, discovers upstreams, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, then runs the controller for admitted work.</p>
 <table>
   <thead>
       <tr>
-          <th>Secret</th>
-          <th>Required</th>
-          <th>Consumer step</th>
+          <th>Stage</th>
+          <th>Behavior</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td>Discover</td>
+          <td>Read GitHub releases, Git tags or commits, HTTP JSON, or custom tables; compare versions with the proposal.</td>
+      </tr>
+      <tr>
+          <td>Execute</td>
+          <td>Author a candidate and verify scope and configured checks; eligible failures can enter bounded repair.</td>
+      </tr>
+      <tr>
+          <td>Publish</td>
+          <td>For <code>pull_request</code> mode, create or update a managed PR after verification.</td>
+      </tr>
+  </tbody>
+</table>
+<p>Use <code>upstream-records</code> to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as <code>no_change</code>. Unavailable upstreams can block execution.</p>
+<p>Native publication uses a detached <code>git worktree</code>, a signed-off diff-only commit, and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
+<p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.</p>
+<p>On GitHub Actions, an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. This uses host process isolation, not a container security boundary. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
+ for isolation tradeoffs.</p>
+<p>Protected paths override writable paths. Workflow files and taskpack control assets remain protected. See <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
+ for scope, instructions, and check configuration.</p>
+<h2 id="secrets-and-environment">Secrets and environment</h2>
+<p>Pass a token with <code>github-token</code>, or provide all three App inputs to mint an installation token inside the Action. A nonempty <code>github-token</code> takes precedence, followed by <code>GITHUB_TOKEN</code>; either prevents App token minting. <code>GH_TOKEN</code> is not the Action token fallback.</p>
+<p>The App ID and installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub&rsquo;s App event rules.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Credential</th>
           <th>Purpose</th>
       </tr>
   </thead>
   <tbody>
       <tr>
-          <td><code>LOOPWRIGHT_APP_ID</code></td>
-          <td>Conditional</td>
-          <td><code>create-github-app-token</code></td>
-          <td>Required when minting an App installation token; GitHub App numeric ID</td>
+          <td><code>github-token</code> or <code>GITHUB_TOKEN</code></td>
+          <td>GitHub discovery and native PR publication; permissions depend on the operations used.</td>
       </tr>
       <tr>
-          <td><code>LOOPWRIGHT_APP_PRIVATE_KEY</code></td>
-          <td>Conditional</td>
-          <td><code>create-github-app-token</code></td>
-          <td>Required when minting an App installation token; GitHub App RSA private key PEM</td>
-      </tr>
-  </tbody>
-</table>
-<h3 id="step-environment">Step environment</h3>
-<p>Pass runtime credentials and optional overrides via <code>env:</code> on the <code>gpustack/loopwright</code> step:</p>
-<table>
-  <thead>
-      <tr>
-          <th>Variable</th>
-          <th>Required</th>
-          <th>Condition and default</th>
-          <th>Runtime usage</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>GH_TOKEN</code></td>
-          <td>Conditional</td>
-          <td>Required for live GitHub API / PR writes</td>
-          <td>Receives <code>steps.app-token.outputs.token</code> so managed PRs trigger downstream CI</td>
+          <td><code>github-app-id</code>, <code>github-app-private-key</code>, <code>github-app-installation-id</code></td>
+          <td>Mint an installation token when no direct token is supplied.</td>
       </tr>
       <tr>
-          <td><code>ZAI_API_KEY</code> / <code>LOOPWRIGHT_PROVIDER_TOKEN</code></td>
-          <td>Conditional</td>
-          <td>Required for live controller model calls</td>
-          <td>Standard Pi provider env var or <code>LOOPWRIGHT_PROVIDER_TOKEN</code> (accepts comma-separated token pools)</td>
+          <td>Provider token environment</td>
+          <td>Authenticate live model calls; token variables can contain comma-separated token pools.</td>
       </tr>
       <tr>
           <td><code>LOOPWRIGHT_GATE_SIGNING_SECRET</code></td>
-          <td>Conditional</td>
-          <td>Required when <code>externalGates</code> is non-empty</td>
-          <td>Bound to <code>consumer: gate</code> to HMAC-SHA256 sign gate requests and verify receipts</td>
+          <td>Sign external gate requests when a gate endpoint is configured.</td>
       </tr>
       <tr>
           <td><code>LOOPWRIGHT_PUBLICATION_SIGNING_SECRET</code></td>
-          <td>Conditional</td>
-          <td>Required when <code>publication.mode</code> is <code>pull_request</code></td>
-          <td>Bound to <code>consumer: publisher</code> to HMAC-SHA256 sign PR dispatches and verify receipts</td>
-      </tr>
-      <tr>
-          <td><code>LOOPWRIGHT_OPERATOR_ALLOWLIST</code></td>
-          <td>No</td>
-          <td>Unset (collaborators only)</td>
-          <td>Comma-separated extra GitHub logins authorized for <code>/loopwright</code> slash commands</td>
-      </tr>
-      <tr>
-          <td><code>LOOPWRIGHT_REPOSITORY</code></td>
-          <td>No</td>
-          <td><code>GITHUB_REPOSITORY</code></td>
-          <td>Explicit <code>owner/repo</code> override when <code>GITHUB_REPOSITORY</code> is unset</td>
+          <td>Sign requests to an external publication endpoint.</td>
       </tr>
   </tbody>
 </table>
-<h2 id="inputs-and-output">Inputs and output</h2>
-<h3 id="action-inputs">Action inputs</h3>
+<p>Local command gates and native publication use ephemeral loopback credentials. They do not require external endpoint signing secrets. Generated registry and controller files contain secret references, not raw credentials. Never commit secrets to the repository.</p>
+<h2 id="inputs">Inputs</h2>
+<p>All Action inputs are optional. Conditional credentials, endpoint bindings, and event payloads depend on the taskpack and trigger.</p>
 <table>
   <thead>
       <tr>
           <th>Input</th>
-          <th>Required</th>
           <th>Default</th>
           <th>Purpose</th>
       </tr>
@@ -489,156 +474,175 @@
   <tbody>
       <tr>
           <td><code>taskpack-path</code></td>
-          <td>No</td>
           <td><code>.loopwright/taskpack.yaml</code></td>
-          <td>Repository-relative manifest path</td>
+          <td>Repository-relative manifest path, including a custom control directory.</td>
       </tr>
       <tr>
           <td><code>mode</code></td>
-          <td>No</td>
           <td><code>candidate</code></td>
-          <td>Execution mode (<code>candidate</code> or <code>no-change</code>)</td>
+          <td><code>candidate</code> or <code>no-change</code> cycle mode.</td>
       </tr>
       <tr>
           <td><code>event-name</code></td>
-          <td>No</td>
-          <td><code>GITHUB_EVENT_NAME</code> (<code>workflow_dispatch</code>)</td>
-          <td>Triggering GitHub event name</td>
+          <td><code>workflow_dispatch</code></td>
+          <td>GitHub event name; pass <code>github.event_name</code> for other triggers.</td>
       </tr>
       <tr>
           <td><code>event-path</code></td>
-          <td>Conditional</td>
           <td>Unset</td>
-          <td>Absolute JSON event payload path; <strong>required</strong> for <code>issue_comment</code> and <code>pull_request_review</code></td>
-      </tr>
-      <tr>
-          <td><code>publication-endpoint-url</code></td>
-          <td>Conditional</td>
-          <td>Unset</td>
-          <td>Managed PR endpoint URL; <strong>required</strong> when <code>mode: candidate</code> and <code>publication.mode: pull_request</code></td>
-      </tr>
-      <tr>
-          <td><code>gate-endpoint-url</code></td>
-          <td>Conditional</td>
-          <td>Unset</td>
-          <td>External <code>gate.v1</code> URL (bound as <code>id: default</code>); <strong>required</strong> when <code>externalGates</code> is non-empty</td>
+          <td>Event payload path; pass <code>github.event_path</code> for comment and review events.</td>
       </tr>
       <tr>
           <td><code>run-root</code></td>
-          <td>No</td>
-          <td><code>RUNNER_TEMP</code> (<code>../.loopwright-runs</code>)</td>
-          <td>Trusted artifact root outside the repository checkout</td>
+          <td><code>RUNNER_TEMP</code> or <code>../.loopwright-runs</code></td>
+          <td>Trusted artifact root outside the checkout.</td>
       </tr>
       <tr>
           <td><code>run-id</code></td>
-          <td>No</td>
-          <td><code>GITHUB_RUN_ID</code> (<code>local</code>)</td>
-          <td>Stable identifier for state and receipts</td>
+          <td><code>GITHUB_RUN_ID</code> or <code>local</code></td>
+          <td>Stable run identifier.</td>
       </tr>
       <tr>
           <td><code>storage-profile</code></td>
-          <td>No</td>
           <td><code>actions-basic</code></td>
-          <td>Host storage profile (<code>actions-basic</code> or <code>durable</code>)</td>
+          <td>Host storage profile: <code>actions-basic</code> or <code>durable</code>.</td>
       </tr>
       <tr>
-          <td><code>provider</code></td>
-          <td>No</td>
-          <td><code>spec.models[0].provider</code> (<code>zai</code>)</td>
-          <td>Pins one token-based Pi provider (omit to probe <code>spec.models</code> in order)</td>
+          <td><code>provider</code>, <code>model</code>, <code>thinking</code></td>
+          <td>Taskpack model pool</td>
+          <td>Override author model selection; thinking levels range from <code>off</code> to <code>max</code>.</td>
       </tr>
       <tr>
-          <td><code>model</code></td>
-          <td>No</td>
-          <td><code>spec.models[0].id</code> (<code>glm-5.3</code>)</td>
-          <td>Pins one coding/authoring model ID (see <a href="/loopwright/main/docs/configuration/taskpack/#model-configuration">Model configuration</a>
-)</td>
-      </tr>
-      <tr>
-          <td><code>thinking</code></td>
-          <td>No</td>
-          <td><code>spec.models[0].thinking</code> (<code>high</code>)</td>
-          <td>Pi reasoning level (<code>off</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>)</td>
-      </tr>
-      <tr>
-          <td><code>api</code></td>
-          <td>Conditional</td>
-          <td>Inferred</td>
-          <td>Wire protocol (<code>anthropic-messages</code>, <code>openai-completions</code>, <code>openai-responses</code>); <strong>required</strong> with <code>base-url</code></td>
-      </tr>
-      <tr>
-          <td><code>base-url</code></td>
-          <td>No</td>
-          <td>Unset</td>
-          <td>Trusted host override for custom compatible API <code>baseUrl</code></td>
+          <td><code>api</code>, <code>base-url</code></td>
+          <td>Inferred, unset</td>
+          <td>Wire API and trusted HTTPS endpoint override; <code>base-url</code> requires <code>api</code>.</td>
       </tr>
       <tr>
           <td><code>provider-token-env</code></td>
-          <td>No</td>
-          <td>Pi provider default</td>
-          <td>Host env var name holding provider API key or comma-separated token pool</td>
+          <td>Provider default</td>
+          <td>Environment variable containing a provider token or comma-separated pool.</td>
       </tr>
       <tr>
           <td><code>models-json</code></td>
-          <td>No</td>
           <td>Unset</td>
-          <td>Path to trusted Pi <code>models.json</code> file (<code>$ENV_VAR</code> <code>apiKey</code> refs only; <code>!command</code> refused)</td>
+          <td>Trusted Pi model configuration path; shell credential resolvers are refused.</td>
       </tr>
       <tr>
           <td><code>allow-custom-base-url</code></td>
-          <td>No</td>
-          <td><code>'false'</code></td>
-          <td>Set <code>'true'</code> to permit <code>spec.models[].baseUrl</code> declared inside <code>.loopwright/taskpack.yaml</code></td>
+          <td><code>false</code></td>
+          <td>Set <code>true</code> to permit model base URLs declared in the taskpack.</td>
       </tr>
       <tr>
           <td><code>dry-run</code></td>
-          <td>No</td>
-          <td><code>'false'</code></td>
-          <td>Set <code>'true'</code> to compile and validate without invoking a host controller delegate</td>
+          <td><code>false</code></td>
+          <td>Set <code>true</code> to compile without executing the controller.</td>
+      </tr>
+      <tr>
+          <td><code>gate-endpoint-url</code></td>
+          <td>Unset</td>
+          <td>External gate endpoint, bound as <code>default</code>.</td>
+      </tr>
+      <tr>
+          <td><code>publication-endpoint-url</code></td>
+          <td>Unset</td>
+          <td>External managed publication endpoint; otherwise native PR publication is available.</td>
+      </tr>
+      <tr>
+          <td><code>output</code></td>
+          <td>Taskpack formats or <code>json</code></td>
+          <td>Comma-separated output formats; overrides <code>spec.output.formats</code>.</td>
+      </tr>
+      <tr>
+          <td><code>github-token</code></td>
+          <td><code>GITHUB_TOKEN</code> or unset</td>
+          <td>GitHub token for discovery, opted-in checks, and publication.</td>
+      </tr>
+      <tr>
+          <td><code>github-app-id</code></td>
+          <td>Unset</td>
+          <td>App ID for installation token minting.</td>
+      </tr>
+      <tr>
+          <td><code>github-app-private-key</code></td>
+          <td>Unset</td>
+          <td>App PEM private key for installation token minting.</td>
+      </tr>
+      <tr>
+          <td><code>github-app-installation-id</code></td>
+          <td>Unset</td>
+          <td>Installation ID for token minting.</td>
+      </tr>
+      <tr>
+          <td><code>upstream-records</code></td>
+          <td>Unset</td>
+          <td>JSON array of precomputed upstream acquisition records.</td>
       </tr>
   </tbody>
 </table>
-<p>Interactive OAuth and CLI providers (<code>github-copilot</code>, <code>gemini</code>, <code>google</code>, <code>claude-code</code>, <code>openai-codex</code>, <code>google-gemini-cli</code>, <code>google-antigravity</code>) fail closed with <code>PROVIDER_OAUTH_UNSUPPORTED</code>.</p>
-<h3 id="result-statuses">Result statuses</h3>
-<p><code>runActionCli</code> writes the structured JSON <code>result</code> object to stdout and <code>GITHUB_OUTPUT</code>. In standalone mode, it compiles and validates trusted artifacts outside the checkout unless a host controller delegate is wired via <code>runGitHubActionEntrypoint</code>.</p>
+<p>Interactive OAuth and CLI providers are unsupported. Model options and token-based provider configuration are listed in <a href="/loopwright/main/docs/configuration/taskpack/#model-configuration">Taskpack</a>
+.</p>
+<h2 id="outputs">Outputs</h2>
+<p>The Action always writes a scrubbed structured <code>result</code> JSON value to stdout and <code>GITHUB_OUTPUT</code>. A <code>compiled</code> result alone does not establish successful publication. Inspect the delegate outcome and run report.</p>
 <table>
   <thead>
       <tr>
-          <th>Status</th>
-          <th>Exit code</th>
+          <th>Output</th>
           <th>Meaning</th>
       </tr>
   </thead>
   <tbody>
       <tr>
-          <td><code>compiled</code></td>
-          <td><code>0</code></td>
-          <td>Manifest and trusted configuration compiled cleanly</td>
+          <td><code>result</code></td>
+          <td>Structured entrypoint result, including the delegate outcome when available.</td>
       </tr>
       <tr>
-          <td><code>no_change</code></td>
-          <td><code>0</code></td>
-          <td>Discovery or verification settled with no repository update</td>
+          <td><code>pr-url</code></td>
+          <td>Published PR URL when available; otherwise empty.</td>
       </tr>
       <tr>
-          <td><code>refused</code></td>
-          <td><code>1</code></td>
-          <td>Signature, actor authorization, scope, or sandbox policy refused intake</td>
+          <td><code>total-tokens</code></td>
+          <td>Known token subtotal, or <code>0</code> when usage is unavailable.</td>
       </tr>
       <tr>
-          <td><code>blocked</code></td>
-          <td><code>1</code></td>
-          <td>Host qualification or external prerequisite blocked execution</td>
+          <td><code>cost-usd</code></td>
+          <td>Six-decimal USD known subtotal when cost provenance is <code>reported</code> or <code>estimated</code>; otherwise omitted.</td>
       </tr>
   </tbody>
 </table>
-<p>A <code>compiled</code> status alone does not confirm remote publication.</p>
-<h2 id="taskpack-and-triggers">Taskpack and triggers</h2>
-<p><code>runGitHubActionEntrypoint</code> combines the manifest with trusted host bindings and writes <code>registry.yaml</code> and <code>config.yaml</code> outside the checkout. It scrubs generated artifacts before invoking an optional host delegate.</p>
-<p>Configure writable and protected scope, checks, publication, triggers, and optional <code>spec.sandbox</code> preferences (<code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, <code>docker</code>) in <a href="/loopwright/main/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
-. When a taskpack declares <code>spec.sandbox</code>, backend negotiation (<code>negotiateSandboxBackend</code>) fails closed if the runner lacks the required OS sandbox binary or isolation capabilities.</p>
-<p>Scheduled, manual, repository dispatch, release, issue comment and pull request review events are supported by intake subject to taskpack policy. Install a workflow in each consumer repository. The resident listener is disabled by default; see <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
- for opt-in centralized queuing and token brokering.</p>
+<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. Known subtotals need not represent complete usage. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Format</th>
+          <th>Destination</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>json</code></td>
+          <td>Structured Action result remains on stdout and <code>GITHUB_OUTPUT</code>.</td>
+      </tr>
+      <tr>
+          <td><code>github-step-summary</code></td>
+          <td>Markdown report appended to <code>GITHUB_STEP_SUMMARY</code> when available.</td>
+      </tr>
+      <tr>
+          <td><code>markdown</code></td>
+          <td>Human-readable report on stderr.</td>
+      </tr>
+      <tr>
+          <td><code>text</code></td>
+          <td>Plain-text report on stderr.</td>
+      </tr>
+  </tbody>
+</table>
+<p><code>totalTokens</code> is the primary usage metric across sinks, with <code>inputTokens</code> and <code>outputTokens</code> breakdowns when available.
+Human-readable summaries show cost only for <code>reported</code> or <code>estimated</code> provenance.
+Reports include usage provenance when available. Output is scrubbed and workflow command text is neutralized. Local and fixture tests do not qualify live GitHub publication or provider billing.</p>
+<h2 id="triggers">Triggers</h2>
+<p>Intake supports schedule, manual dispatch, repository dispatch, release, issue comment, and pull request review events, subject to taskpack policy. Pass the event name and payload explicitly as shown above. Comment commands also require actor authorization.</p>
+<p>Install a workflow in each consumer repository. For centralized webhook intake and token brokering, see <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
+.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -660,19 +664,11 @@
   <ul>
     <li><a href="#contents">Contents</a></li>
     <li><a href="#workflow">Workflow</a></li>
-    <li><a href="#secrets-and-environment">Secrets and environment</a>
-      <ul>
-        <li><a href="#github-app-secrets">GitHub App secrets</a></li>
-        <li><a href="#step-environment">Step environment</a></li>
-      </ul>
-    </li>
-    <li><a href="#inputs-and-output">Inputs and output</a>
-      <ul>
-        <li><a href="#action-inputs">Action inputs</a></li>
-        <li><a href="#result-statuses">Result statuses</a></li>
-      </ul>
-    </li>
-    <li><a href="#taskpack-and-triggers">Taskpack and triggers</a></li>
+    <li><a href="#execution-and-publication">Execution and publication</a></li>
+    <li><a href="#secrets-and-environment">Secrets and environment</a></li>
+    <li><a href="#inputs">Inputs</a></li>
+    <li><a href="#outputs">Outputs</a></li>
+    <li><a href="#triggers">Triggers</a></li>
   </ul>
 </nav>
         

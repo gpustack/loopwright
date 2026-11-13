@@ -119,6 +119,8 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `resources[].path` | Conditional | Relative path (`1..1024` chars) | **Required** per item; path resolved under `TrustedRegistry` directory |
 | `resources[].digest` | Conditional | `{ algorithm: 'sha256', hex }` | **Required** per item; 64-char lowercase SHA-256 hex digest |
 
+Turnkey taskpacks protect `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` by default.
+
 ## Roles and steps
 
 ### Role and step fields
@@ -131,13 +133,16 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `roles[].provider` | Yes | Label (`1..128` chars) | Token-based Pi provider or custom provider ID (matches `RoleProfile.selection.provider`) |
 | `roles[].model` | Yes | Label (`1..128` chars) | Coding model ID (for example `glm-5.3`; see [Model configuration](/loopwright/latest/docs/configuration/taskpack/index.md#model-configuration)) |
 | `roles[].thinking` | Yes | Label (`1..128` chars) | Pi reasoning level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
-| `roles[].tools` | Yes | Tool list (`0..128` unique) | Allowed tools (`read`, `write`, `edit`, `bash`, `codemode`, `mcp__workspace__read_file`) |
+| `roles[].tools` | Yes | Tool list (`0..128` unique) | Allowed tools include `read`, `write`, `edit`, `bash`, `delete`, `mcp`, `codemode`, and `mcp__workspace__read_file` |
 | `spec.steps` | Yes | Object list (`1..256` nodes) | Acyclic execution graph (`<= 2048` edges) of authoring and check steps |
 | `steps[].id` | Yes | Identifier (`1..64` chars) | Unique step node ID bound via `ControllerConfig.spec.profiles.steps` |
 | `steps[].kind` | Yes | `'agent'` or `'check'` | Selects isolated role execution or independent verification |
 | `steps[].uses` | Yes | Identifier (`1..64` chars) | Logical operation label mapped to an approved `TrustedRegistry` handler |
 | `steps[].roleId` | Yes (`null` for check) | Identifier or `null` | Non-null `roles[].id` when `kind: agent`; must be `null` when `kind: check` |
 | `steps[].dependsOn` | Yes | Identifier list | Upstream `steps[].id` nodes that must succeed first (pass `[]` for roots) |
+
+The Pi adapter restricts its runtime tool names further.
+For MCP access, it accepts `mcp__workspace__read_file`, not the generic `mcp` name.
 
 ### Step kinds
 
@@ -174,6 +179,17 @@ Configure `spec.budgets.enforcement.<dimension>` for each of the seven dimension
 | `soft_accounting` | Records actual post-call usage and halts subsequent calls once ceiling is reached | Used for `tokens` because exact output token counts are only known after model generation |
 
 ## Acceptance and evidence
+
+### Artifact manifests
+
+An `ArtifactManifest` uses one of two mutually exclusive `spec` shapes.
+Classic `{ entries }` supports up to 256 entries.
+Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
+Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.
+
+Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }`.
+The baseline supports up to 65,536 regular files.
+The overlay supports up to 128 added or modified entries, 128 deleted paths, and 4 MiB of aggregate entry bytes.
 
 ### Acceptance fields
 

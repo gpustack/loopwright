@@ -1,6 +1,6 @@
 # Taskpack
 
-`Taskpack` (`.loopwright/taskpack.yaml`) powers Loopwright's simple automated mode. You declare repository intent in one bounded YAML document (`<= 64 KiB`), and the host compiles runtime contracts, handler SHA-256 digests, and credential bindings automatically.
+`Taskpack` powers Loopwright's automated mode. Declare repository intent in a bounded YAML document (`<= 64 KiB`), such as `.loopwright/taskpack.yaml` or `.auto-sync/taskpack.yaml`. The host compiles runtime contracts, handler SHA-256 digests, and credential bindings.
 
 For multi-step DAGs or operator-owned `TrustedRegistry` files stored outside the repository, use Managed Controller mode ([Task Contract](/loopwright/latest/docs/configuration/task-contract/index.md) and [Controller and Registry](/loopwright/latest/docs/configuration/controller-and-registry/index.md)).
 
@@ -14,16 +14,19 @@ For multi-step DAGs or operator-owned `TrustedRegistry` files stored outside the
 - [Verification checks](#verification-checks)
 - [Publication and memory](#publication-and-memory)
 - [Triggers and policies](#triggers-and-policies)
+- [Output formats](#output-formats)
 
 ## Compilation model
 
-When a GitHub Action or App processes `.loopwright/taskpack.yaml`, `compileDeclarativeTaskpack` generates three runtime artifacts without manual authoring:
+When a GitHub Action or App processes a taskpack, `compileDeclarativeTaskpack` generates three runtime artifacts:
 
 | Generated artifact | Manifest inputs | Compiler defaults |
 | --- | --- | --- |
-| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.verification` | Appends built-in protected paths (`.github`, `.loopwright/policies`, `AGENTS.md`, `CLAUDE.md`) and default budgets (`wallTimeMs: 3300000`, `maxModelCalls: 12`) |
+| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.verification` | Adds protected paths and default budgets (`wallTimeMs: 3300000`, `maxModelCalls: 12`) |
 | `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
 | `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 3`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
+
+Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']`.
 
 ## Taskpack
 
@@ -36,12 +39,14 @@ spec:
   goal:
     candidate: Update catalog manifests from upstream releases and pass checks.
     noChange: Confirm upstream versions match current manifests and settle cleanly.
-  scope:
-    writable:
+  scope: # Optional whitelist and blacklist
+    writable: # Optional (defaults to repository-wide writes)
       - manifests
       - docs/versions.md
-    protected:
+    protected: # Optional blacklist
       - manifests/frozen-policy.yaml
+  instructions: # Optional protected UTF-8 instruction files
+    - .loopwright/instructions.md
   upstreams:
     - id: engine-release
       kind: github-release
@@ -61,7 +66,15 @@ spec:
         implementation: json-artifact.v1
         parameters: # Optional scalar overrides
           release_channel: stable
-    externalGates: # Optional remote gate.v1 checks (use [] when none)
+      - id: static-check
+        implementation: command.v1
+        parameters:
+          script: .loopwright/checks/verify.sh
+          timeoutSeconds: 30 # Optional (defaults to 30)
+          allowReadOnlyGitHubToken: false # Optional (defaults to false)
+          env: # Optional safe environment variable names
+            - CHECK_MODE
+    externalGates:
       - id: ci-smoke
         gateId: catalog-smoke
         endpointId: primary-gate
@@ -90,10 +103,19 @@ spec:
       id: glm-5.3
       thinking: high # Optional (defaults to high)
       apiKeyEnv: ZAI_API_KEY # Optional (defaults to provider token env)
+      cost: # Optional USD per million tokens
+        input: 1
+        output: 2
+        cacheRead: 0.1 # Optional
+        cacheWrite: 1.25 # Optional
     - provider: zai-coding-cn # Optional fallback candidate on quota exhaustion
       id: glm-5.3
       thinking: high # Optional
       apiKeyEnv: ZAI_CODING_CN_API_KEY # Optional
+  output: # Optional (defaults to json)
+    formats:
+      - json
+      - github-step-summary
   sandbox: # Optional host isolation policy
     preferredBackends: # Optional
       - macos-seatbelt
@@ -121,7 +143,11 @@ spec:
 ```
 
 - **Strict YAML 1.2**: The parser rejects symlinks (`O_NOFOLLOW`), `..` traversal, duplicate keys, YAML anchors/aliases, and `${NAME}` interpolation (`TASKPACK_UNTRUSTED_INTERPOLATION`; see [Environment interpolation](/loopwright/latest/docs/configuration/controller-and-registry/index.md#environment-interpolation)).
-- **Built-in masks**: `.github`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` remain protected even if omitted from `spec.scope.protected`.
+- **Control root**: Set Action `taskpack-path` to select a manifest. Its parent becomes the control root.
+- **Root fallback**: Root-level manifests and raw bytes use `.loopwright` as the control root.
+- **Built-in masks**: `PROTECTED_AUTOMATION_PATHS` protects `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
+- **Control root mask**: The active control root also remains protected.
+- **Protected assets**: The exact manifest path, instruction files, and command scripts also remain protected.
 
 ## Metadata and scope
 
@@ -129,11 +155,17 @@ spec:
 | --- | --- | --- | --- |
 | `apiVersion` | Yes | `'loopwright.dev/v1alpha1'` | Unified Loopwright schema version |
 | `kind` | Yes | `'Taskpack'` | Selects declarative taskpack validation (`<= 64 KiB`) |
-| `metadata.name` | Yes | Identifier (`1..64` chars) | Unique lowercase slug (`[a-z][a-z0-9._-]*`); scopes tenant queue, `TaskContract.spec.taskpack`, and `.loopwright/memory/<name>` |
+| `metadata.name` | Yes | Identifier (`1..64` chars) | Unique lowercase slug (`[a-z][a-z0-9._-]*`); scopes tenant queue and `TaskContract.spec.taskpack` |
 | `spec.goal.candidate` | Yes | String (`1..1024` chars) | Prompt objective compiled when candidate edits are expected |
 | `spec.goal.noChange` | Yes | String (`1..1024` chars) | Prompt objective compiled when verifying `no_change` eligibility |
-| `spec.scope.writable` | Yes | String list (`1..128` paths) | Relative repo paths open for agent writes; cannot overlap protected paths |
-| `spec.scope.protected` | Yes | String list (`0..128` paths) | Relative repo paths masked read-only (pass `[]` when relying on built-in masks) |
+| `spec.scope` | No | Object | Writable whitelist and protected blacklist; both fields may be omitted |
+| `spec.scope.writable` | No | String list (`1..128` paths) | Relative paths open for writes; omission allows the repository subject to protected paths |
+| `spec.scope.protected` | No | String list (`0..128` paths) | Relative paths excluded from writes in addition to built-in masks |
+| `spec.instructions` | No | Relative path or list (`1..16` paths) | UTF-8 files compiled as SHA-256-pinned `instruction` trusted resources; aggregate size `<= 24576` bytes |
+
+Scope paths name a file or directory and include descendants. Raw globs, traversal, and spaces are not accepted. Protected paths always win, so a writable ancestor may contain protected descendants. A writable path covered by a protected path is rejected. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.
+
+Instruction files must be regular files without symlinks in the path. The manifest path also rejects symlinked ancestors.
 
 ## Model configuration
 
@@ -192,10 +224,13 @@ spec:
 | `models[].headers` | No | String map (`<= 32` headers) | Non-auth static headers (`Authorization`, `x-api-key`, and `!command` refused) |
 | `models[].contextWindow` / `maxTokens` | No | Integers (`1024..10000000` / `1..1048576`) | Custom model context window and output token caps (defaults `128000` / `16384`) |
 | `models[].reasoning` | No | Boolean (defaults `true` when `thinking != 'off'`) | Declares whether custom model accepts reasoning parameters |
+| `models[].cost` | No | Object (`input`, `output`, optional `cacheRead`, `cacheWrite`) | USD per million tokens; each rate is `0..1000`; `input` and `output` are required |
 | `models[].thinkingLevelMap` | No | Map of level to wire effort or `null` | Custom Pi `thinkingLevelMap` (`null` marks a level unsupported) |
 | `models[].samplingParams` | No | `{ temperature, top_p, top_k, min_p, presence_penalty, repetition_penalty }` | Default Pi sampling parameters forwarded on outbound model requests |
 | `models[].samplingParamsByThinkingLevel` | No | Map of thinking level to `samplingParams` | Per-thinking-level sampling parameter overrides |
 | `models[].compat` | No | Object (`thinkingFormat`, `maxTokensField`, `zaiToolStream`, booleans) | OpenAI-compatible dialect flags matching Pi `models.json` `compat` |
+
+Provider-reported cost retains `reported` provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains `unknown`.
 
 ## Upstreams and proposal
 
@@ -232,7 +267,7 @@ spec:
 | `verification.localChecks` | Yes | Object list (`0..32` items) | In-host verifiers (`candidate` mode requires `>= 1` local or required gate check) |
 | `localChecks[].id` | Yes | Identifier (`1..64` chars) | Unique check ID (cannot use reserved `scope`, `no-change`, `taskpack-author`, `taskpack-no-change`) |
 | `localChecks[].implementation` | Yes | Enum (see table below) | Built-in verifier bound by compiler to its installed SHA-256 digest |
-| `localChecks[].parameters` | No | Scalar map (unset by default) | Extra scalar expectations (`string <= 1024` chars, `number`, `boolean`, `null`) |
+| `localChecks[].parameters` | Conditional | Object | Scalar expectations for built-in checks; `command.v1` requires its own parameters below |
 | `verification.externalGates` | Yes | Object list (`0..32` items) | Remote authenticated `gate.v1` checks (pass `[]` when unused) |
 | `externalGates[].id` | Conditional | Identifier (`1..64` chars) | **Required** per gate item; unique check ID recorded in acceptance evidence |
 | `externalGates[].gateId` | Conditional | Identifier (`1..64` chars) | **Required** per gate item; remote gate policy identifier |
@@ -244,8 +279,22 @@ spec:
 | Implementation | Compiler parameters | Verification check |
 | --- | --- | --- |
 | `json-artifact.v1` | Binds `proposal.path`, `requiredFields`, and `schema_version` | Parses structured candidate artifact and checks required keys and scalars |
-| `scope.v1` | Binds `checkId` (compiler also runs implicit `scope` guard) | Verifies every modified file stays inside `writable` and outside `protected` |
+| `scope.v1` | Binds `checkId` (compiler also runs implicit `scope` guard) | Verifies modified and deleted paths stay inside `writable` and outside `protected` |
 | `no-change.v1` | Binds `checkId` (used automatically in `no-change` mode) | Confirms candidate tree equals base tree when settling as `no_change` |
+| `command.v1` | Pins script SHA-256 and compiles an authenticated local `gate.v1` | Runs a protected script against a retained candidate copy |
+
+### Command parameters
+
+| Parameter | Required | Type and bounds | Meaning |
+| --- | --- | --- | --- |
+| `script` | Yes | Relative file path, `<= 262144` bytes | Protected regular script with no symlink ancestors; SHA-256 is checked again before execution |
+| `timeoutSeconds` | No | Integer (`1..55`, default `30`) | Maximum script execution time |
+| `allowReadOnlyGitHubToken` | No | Boolean (default `false`) | Passes the resolved GitHub token when available; the flag does not reduce its permissions |
+| `env` | No | List (`0..16` names) | Safe uppercase host environment variable names to pass to the script |
+
+The script runs with a minimal environment and `LOOPWRIGHT_CANDIDATE_DIR` pointing to a temporary candidate copy. Exit `0` approves the check; nonzero exit denies it. Diagnostics are scrubbed and bounded.
+
+The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `LD_*`, `DYLD_*`, and `GIT_*`. It also rejects `GH_TOKEN`, `GITHUB_TOKEN`, `BASH_ENV`, `ENV`, and `NODE_OPTIONS`.
 
 ## Publication and memory
 
@@ -255,7 +304,7 @@ spec:
 | `publication.targetBranch` | Yes | Branch name (`1..128` chars) | Base branch targeted by generated pull requests (required even when `disabled`) |
 | `publication.headBranchPrefix` | Yes | Prefix (`1..64` chars, no `//`) | Branch prefix for head-pinned PRs (for example `loopwright/catalog-sync-`) |
 | `publication.titleTemplate` | Yes | String (`1..256` chars) | Pull request title string |
-| `memory.directory` | Yes | Path under `.loopwright/memory/<name>` | Storage directory for reviewed CAS memory; must not overlap `writable` |
+| `memory.directory` | Yes | `<controlRoot>/memory` or descendant | Storage directory for reviewed CAS memory, protected even inside a writable ancestor |
 | `memory.apply` | Yes | `'separate-pull-request'` | Proposes memory updates in a separate PR outside candidate changes |
 | `memory.onNoModelBudget` | Yes | `'deterministic-observations-only'` | Records deterministic run facts without extra LLM calls when budget ends |
 
@@ -280,6 +329,22 @@ spec:
 | `retry` | `/loopwright retry` | Re-runs bounded upstream discovery and candidate execution |
 | `revise` | `/loopwright revise` | Passes bounded reviewer guidance (`<= 40` lines, `<= 2048` bytes) into next attempt |
 | `status` | `/loopwright status` | Reports active queue lease, run status, or last receipt summary |
+
+A bare prefix on the first line followed by non-empty guidance on later lines also invokes `revise`. The `revise` command must be enabled.
+
+## Output formats
+
+`spec.output` accepts a format string, a list, or an object with a `formats` list. Omission defaults to `json`.
+Action `output` overrides the taskpack default. The managed CLI selects formats separately with `--output-format`.
+
+| Format | Destination | Content |
+| --- | --- | --- |
+| `json` | Action stdout or CLI | Machine-readable JSON |
+| `github-step-summary` | Summary file when available | Markdown run summary |
+| `markdown` | Action stderr or CLI stdout | Markdown run summary |
+| `text` | Action stderr or CLI stdout | Plain-text run summary |
+
+Summaries include status, checks, token counts, elapsed time, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. CLI JSON remains NDJSON when the step summary uses a file.
 
 ---
 

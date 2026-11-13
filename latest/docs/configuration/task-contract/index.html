@@ -565,6 +565,7 @@
       </tr>
   </tbody>
 </table>
+<p>Turnkey taskpacks protect <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code> by default.</p>
 <h2 id="roles-and-steps">Roles and steps</h2>
 <h3 id="role-and-step-fields">Role and step fields</h3>
 <table>
@@ -618,7 +619,7 @@
           <td><code>roles[].tools</code></td>
           <td>Yes</td>
           <td>Tool list (<code>0..128</code> unique)</td>
-          <td>Allowed tools (<code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>codemode</code>, <code>mcp__workspace__read_file</code>)</td>
+          <td>Allowed tools include <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code>, <code>mcp</code>, <code>codemode</code>, and <code>mcp__workspace__read_file</code></td>
       </tr>
       <tr>
           <td><code>spec.steps</code></td>
@@ -658,6 +659,8 @@
       </tr>
   </tbody>
 </table>
+<p>The Pi adapter restricts its runtime tool names further.
+For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the generic <code>mcp</code> name.</p>
 <h3 id="step-kinds">Step kinds</h3>
 <table>
   <thead>
@@ -773,6 +776,14 @@
   </tbody>
 </table>
 <h2 id="acceptance-and-evidence">Acceptance and evidence</h2>
+<h3 id="artifact-manifests">Artifact manifests</h3>
+<p>An <code>ArtifactManifest</code> uses one of two mutually exclusive <code>spec</code> shapes.
+Classic <code>{ entries }</code> supports up to 256 entries.
+Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
+Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
+<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code>.
+The baseline supports up to 65,536 regular files.
+The overlay supports up to 128 added or modified entries, 128 deleted paths, and 4 MiB of aggregate entry bytes.</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>
   <thead>
@@ -884,6 +895,7 @@
     </li>
     <li><a href="#acceptance-and-evidence">Acceptance and evidence</a>
       <ul>
+        <li><a href="#artifact-manifests">Artifact manifests</a></li>
         <li><a href="#acceptance-fields">Acceptance fields</a></li>
         <li><a href="#evidence-levels">Evidence levels</a></li>
       </ul>

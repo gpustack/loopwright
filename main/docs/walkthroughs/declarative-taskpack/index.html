@@ -375,8 +375,8 @@
   <tbody>
       <tr>
           <td>Work scope</td>
-          <td>Declare <code>writable</code> and <code>protected</code> paths</td>
-          <td>Adds built-in <code>.github</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code> masks</td>
+          <td>Optionally declare <code>writable</code> and <code>protected</code> paths</td>
+          <td>Adds control paths and built-in masks; protected paths take precedence</td>
       </tr>
       <tr>
           <td>Execution</td>
@@ -408,7 +408,7 @@
 </div>
 <p>Through normal back-and-forth conversation, the agent reads the live Loopwright specification from <code>llms.txt</code>, maps your existing sync logic into <code>upstreams</code>, <code>scope</code>, <code>proposal</code>, and <code>verification</code>, and tells you which GitHub Secrets to configure.</p>
 <h2 id="step-1-author-taskpack">Step 1: Author taskpack</h2>
-<p>Create <code>.loopwright/taskpack.yaml</code> in the target repository (<code>metadata.name</code> identifies the taskpack across tenant queues, contracts, and <code>.loopwright/memory/&lt;name&gt;</code>):</p>
+<p>Create <code>.auto-sync/taskpack.yaml</code> in the target repository. Loopwright derives <code>.auto-sync</code> as the control root.</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -419,11 +419,11 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Refresh documentation from upstream releases and pass local checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream documentation needs no update and settle as no change.</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/protected-notes.md</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.auto-sync/prompts/instructions.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">engine</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
@@ -441,6 +441,11 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">localChecks</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs-proposal-json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">json-artifact.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">verify-docs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">command.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/checks/verify.sh</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="c"># Optional remote gate checks</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">pull_request</span><span class="w">
@@ -448,7 +453,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">headBranchPrefix</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright-docs-</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">titleTemplate</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;docs - sync upstream documentation&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">memory</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/memory/docs-sync</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/memory/docs-sync</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">apply</span><span class="p">:</span><span class="w"> </span><span class="l">separate-pull-request</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">onNoModelBudget</span><span class="p">:</span><span class="w"> </span><span class="l">deterministic-observations-only</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">triggers</span><span class="p">:</span><span class="w">
@@ -470,21 +475,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sandbox</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host isolation policy</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">macos-seatbelt</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">linux-bwrap</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">linux-landlock</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docker</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">networkMode</span><span class="p">:</span><span class="w"> </span><span class="l">none</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemReadContainment</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemWriteContainment</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">protectedPathReadOnlyMask</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">networkIsolation</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">processTreeCleanup</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">~/.ssh</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional System-One triage policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
@@ -498,8 +492,9 @@
 <ul>
 <li><strong>Field dictionary</strong>: Inspect every field, bound, and enum in <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
 .</li>
-<li><strong>Scope</strong>: Writable paths must never overlap <code>protected</code> paths or <code>.loopwright/memory/&lt;name&gt;</code>.</li>
-<li><strong>Proposal</strong>: <code>spec.proposal.path</code> must reside inside <code>spec.scope.writable</code> and end in <code>.yaml</code>, <code>.yml</code>, or <code>.json</code>.</li>
+<li><strong>Scope</strong>: Omitted <code>writable</code> permits <code>**</code>, except effective protected paths. Protected paths always win.</li>
+<li><strong>Inputs</strong>: Create the instruction file and verification script before running. Loopwright pins and protects both files.</li>
+<li><strong>Proposal</strong>: The proposal must be writable and end in <code>.yaml</code>, <code>.yml</code>, or <code>.json</code>.</li>
 <li><strong>Secrets</strong>: Never place tokens or <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; the parser rejects untrusted interpolation.</li>
 </ul>
 <h2 id="step-2-validate-taskpack">Step 2: Validate taskpack</h2>
@@ -533,16 +528,14 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">gpustack/loopwright@main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional (defaults to .loopwright/taskpack.yaml)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional custom control root</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-token</span><span class="p">:</span><span class="w"> </span><span class="l">${{ steps.app-token.outputs.token }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w"> </span><span class="c"># Optional (defaults to GITHUB_EVENT_NAME)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w"> </span><span class="c"># Optional for schedule/manual; needed on comments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">publication-endpoint-url</span><span class="p">:</span><span class="w"> </span><span class="l">https://publish.internal.example/pr</span><span class="w"> </span><span class="c"># Optional when publication is disabled</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dry-run</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional (defaults to &#39;false&#39;)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">env</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GH_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">${{ steps.app-token.outputs.token }}</span><span class="w"> </span><span class="c"># Optional in dry-run mode</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span><span class="w"> </span><span class="c"># Optional in dry-run mode</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_GATE_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when externalGates is empty</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_PUBLICATION_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_PUBLICATION_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when publication is disabled</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_GATE_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when externalGates is empty</span></span></span></code></pre></div>
 </div>
 <ul>
 <li><strong>Action inputs and secrets</strong>: Review every input, output, and secret variable in <a href="/loopwright/main/docs/operations/github-action/">GitHub Action</a>
@@ -551,6 +544,7 @@
 .</li>
 </ul>
 <h2 id="step-4-review-outcomes">Step 4: Review outcomes</h2>
+<p>Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.</p>
 <ol>
 <li><strong>Candidate pull request</strong>: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching <code>headBranchPrefix</code>.</li>
 <li><strong>Verified no-change</strong>: When no update is needed, the compiled <code>no-change.v1</code> check verifies an untouched tree and settles cleanly without opening an empty PR.</li>

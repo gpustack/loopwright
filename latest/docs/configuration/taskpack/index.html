@@ -340,7 +340,7 @@
       <article>
         
   <h1 id="taskpack">Taskpack</h1>
-<p><code>Taskpack</code> (<code>.loopwright/taskpack.yaml</code>) powers Loopwright&rsquo;s simple automated mode. You declare repository intent in one bounded YAML document (<code>&lt;= 64 KiB</code>), and the host compiles runtime contracts, handler SHA-256 digests, and credential bindings automatically.</p>
+<p><code>Taskpack</code> powers Loopwright&rsquo;s automated mode. Declare repository intent in a bounded YAML document (<code>&lt;= 64 KiB</code>), such as <code>.loopwright/taskpack.yaml</code> or <code>.auto-sync/taskpack.yaml</code>. The host compiles runtime contracts, handler SHA-256 digests, and credential bindings.</p>
 <p>For multi-step DAGs or operator-owned <code>TrustedRegistry</code> files stored outside the repository, use Managed Controller mode (<a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
  and <a href="/loopwright/latest/docs/configuration/controller-and-registry/">Controller and Registry</a>
 ).</p>
@@ -362,9 +362,11 @@
 </li>
 <li><a href="#triggers-and-policies">Triggers and policies</a>
 </li>
+<li><a href="#output-formats">Output formats</a>
+</li>
 </ul>
 <h2 id="compilation-model">Compilation model</h2>
-<p>When a GitHub Action or App processes <code>.loopwright/taskpack.yaml</code>, <code>compileDeclarativeTaskpack</code> generates three runtime artifacts without manual authoring:</p>
+<p>When a GitHub Action or App processes a taskpack, <code>compileDeclarativeTaskpack</code> generates three runtime artifacts:</p>
 <table>
   <thead>
       <tr>
@@ -377,7 +379,7 @@
       <tr>
           <td><code>TaskContract</code></td>
           <td><code>metadata.name</code>, <code>spec.goal</code>, <code>spec.scope</code>, <code>spec.verification</code></td>
-          <td>Appends built-in protected paths (<code>.github</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code>) and default budgets (<code>wallTimeMs: 3300000</code>, <code>maxModelCalls: 12</code>)</td>
+          <td>Adds protected paths and default budgets (<code>wallTimeMs: 3300000</code>, <code>maxModelCalls: 12</code>)</td>
       </tr>
       <tr>
           <td><code>TrustedRegistry</code></td>
@@ -391,6 +393,7 @@
       </tr>
   </tbody>
 </table>
+<p>Turnkey compilation grants author roles <code>['read', 'write', 'edit', 'bash', 'delete']</code>.</p>
 <h2 id="taskpack-1">Taskpack</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -402,12 +405,14 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Update catalog manifests from upstream releases and pass checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream versions match current manifests and settle cleanly.</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional whitelist and blacklist</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/versions.md</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests/frozen-policy.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.loopwright/instructions.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">engine-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
@@ -427,7 +432,15 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">json-artifact.v1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional scalar overrides</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">release_channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional remote gate.v1 checks (use [] when none)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">static-check</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">command.v1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/checks/verify.sh</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional (defaults to 30)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allowReadOnlyGitHubToken</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional safe environment variable names</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">CHECK_MODE</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">ci-smoke</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">gateId</span><span class="p">:</span><span class="w"> </span><span class="l">catalog-smoke</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">endpointId</span><span class="p">:</span><span class="w"> </span><span class="l">primary-gate</span><span class="w">
@@ -456,10 +469,19 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional (defaults to high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional (defaults to provider token env)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">cost</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional USD per million tokens</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">input</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">cacheRead</span><span class="p">:</span><span class="w"> </span><span class="m">0.1</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">cacheWrite</span><span class="p">:</span><span class="w"> </span><span class="m">1.25</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate on quota exhaustion</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sandbox</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host isolation policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">macos-seatbelt</span><span class="w">
@@ -488,7 +510,11 @@
 <ul>
 <li><strong>Strict YAML 1.2</strong>: The parser rejects symlinks (<code>O_NOFOLLOW</code>), <code>..</code> traversal, duplicate keys, YAML anchors/aliases, and <code>${NAME}</code> interpolation (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>; see <a href="/loopwright/latest/docs/configuration/controller-and-registry/#environment-interpolation">Environment interpolation</a>
 ).</li>
-<li><strong>Built-in masks</strong>: <code>.github</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code> remain protected even if omitted from <code>spec.scope.protected</code>.</li>
+<li><strong>Control root</strong>: Set Action <code>taskpack-path</code> to select a manifest. Its parent becomes the control root.</li>
+<li><strong>Root fallback</strong>: Root-level manifests and raw bytes use <code>.loopwright</code> as the control root.</li>
+<li><strong>Built-in masks</strong>: <code>PROTECTED_AUTOMATION_PATHS</code> protects <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code>.</li>
+<li><strong>Control root mask</strong>: The active control root also remains protected.</li>
+<li><strong>Protected assets</strong>: The exact manifest path, instruction files, and command scripts also remain protected.</li>
 </ul>
 <h2 id="metadata-and-scope">Metadata and scope</h2>
 <table>
@@ -517,7 +543,7 @@
           <td><code>metadata.name</code></td>
           <td>Yes</td>
           <td>Identifier (<code>1..64</code> chars)</td>
-          <td>Unique lowercase slug (<code>[a-z][a-z0-9._-]*</code>); scopes tenant queue, <code>TaskContract.spec.taskpack</code>, and <code>.loopwright/memory/&lt;name&gt;</code></td>
+          <td>Unique lowercase slug (<code>[a-z][a-z0-9._-]*</code>); scopes tenant queue and <code>TaskContract.spec.taskpack</code></td>
       </tr>
       <tr>
           <td><code>spec.goal.candidate</code></td>
@@ -532,19 +558,33 @@
           <td>Prompt objective compiled when verifying <code>no_change</code> eligibility</td>
       </tr>
       <tr>
+          <td><code>spec.scope</code></td>
+          <td>No</td>
+          <td>Object</td>
+          <td>Writable whitelist and protected blacklist; both fields may be omitted</td>
+      </tr>
+      <tr>
           <td><code>spec.scope.writable</code></td>
-          <td>Yes</td>
+          <td>No</td>
           <td>String list (<code>1..128</code> paths)</td>
-          <td>Relative repo paths open for agent writes; cannot overlap protected paths</td>
+          <td>Relative paths open for writes; omission allows the repository subject to protected paths</td>
       </tr>
       <tr>
           <td><code>spec.scope.protected</code></td>
-          <td>Yes</td>
+          <td>No</td>
           <td>String list (<code>0..128</code> paths)</td>
-          <td>Relative repo paths masked read-only (pass <code>[]</code> when relying on built-in masks)</td>
+          <td>Relative paths excluded from writes in addition to built-in masks</td>
+      </tr>
+      <tr>
+          <td><code>spec.instructions</code></td>
+          <td>No</td>
+          <td>Relative path or list (<code>1..16</code> paths)</td>
+          <td>UTF-8 files compiled as SHA-256-pinned <code>instruction</code> trusted resources; aggregate size <code>&lt;= 24576</code> bytes</td>
       </tr>
   </tbody>
 </table>
+<p>Scope paths name a file or directory and include descendants. Raw globs, traversal, and spaces are not accepted. Protected paths always win, so a writable ancestor may contain protected descendants. A writable path covered by a protected path is rejected. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.</p>
+<p>Instruction files must be regular files without symlinks in the path. The manifest path also rejects symlinked ancestors.</p>
 <h2 id="model-configuration">Model configuration</h2>
 <p>Loopwright inherits <code>provider</code>, <code>model</code>, <code>thinking</code>, wire <code>api</code>, and custom <code>models.json</code> semantics from the <a href="https://pi.dev/models">Pi model catalog</a>
  and Pi&rsquo;s <a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md">providers</a>
@@ -667,6 +707,12 @@
           <td>Declares whether custom model accepts reasoning parameters</td>
       </tr>
       <tr>
+          <td><code>models[].cost</code></td>
+          <td>No</td>
+          <td>Object (<code>input</code>, <code>output</code>, optional <code>cacheRead</code>, <code>cacheWrite</code>)</td>
+          <td>USD per million tokens; each rate is <code>0..1000</code>; <code>input</code> and <code>output</code> are required</td>
+      </tr>
+      <tr>
           <td><code>models[].thinkingLevelMap</code></td>
           <td>No</td>
           <td>Map of level to wire effort or <code>null</code></td>
@@ -692,6 +738,7 @@
       </tr>
   </tbody>
 </table>
+<p>Provider-reported cost retains <code>reported</code> provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains <code>unknown</code>.</p>
 <h2 id="upstreams-and-proposal">Upstreams and proposal</h2>
 <h3 id="upstream-and-proposal-fields">Upstream and proposal fields</h3>
 <table>
@@ -829,9 +876,9 @@
       </tr>
       <tr>
           <td><code>localChecks[].parameters</code></td>
-          <td>No</td>
-          <td>Scalar map (unset by default)</td>
-          <td>Extra scalar expectations (<code>string &lt;= 1024</code> chars, <code>number</code>, <code>boolean</code>, <code>null</code>)</td>
+          <td>Conditional</td>
+          <td>Object</td>
+          <td>Scalar expectations for built-in checks; <code>command.v1</code> requires its own parameters below</td>
       </tr>
       <tr>
           <td><code>verification.externalGates</code></td>
@@ -883,15 +930,59 @@
       <tr>
           <td><code>scope.v1</code></td>
           <td>Binds <code>checkId</code> (compiler also runs implicit <code>scope</code> guard)</td>
-          <td>Verifies every modified file stays inside <code>writable</code> and outside <code>protected</code></td>
+          <td>Verifies modified and deleted paths stay inside <code>writable</code> and outside <code>protected</code></td>
       </tr>
       <tr>
           <td><code>no-change.v1</code></td>
           <td>Binds <code>checkId</code> (used automatically in <code>no-change</code> mode)</td>
           <td>Confirms candidate tree equals base tree when settling as <code>no_change</code></td>
       </tr>
+      <tr>
+          <td><code>command.v1</code></td>
+          <td>Pins script SHA-256 and compiles an authenticated local <code>gate.v1</code></td>
+          <td>Runs a protected script against a retained candidate copy</td>
+      </tr>
   </tbody>
 </table>
+<h3 id="command-parameters">Command parameters</h3>
+<table>
+  <thead>
+      <tr>
+          <th>Parameter</th>
+          <th>Required</th>
+          <th>Type and bounds</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>script</code></td>
+          <td>Yes</td>
+          <td>Relative file path, <code>&lt;= 262144</code> bytes</td>
+          <td>Protected regular script with no symlink ancestors; SHA-256 is checked again before execution</td>
+      </tr>
+      <tr>
+          <td><code>timeoutSeconds</code></td>
+          <td>No</td>
+          <td>Integer (<code>1..55</code>, default <code>30</code>)</td>
+          <td>Maximum script execution time</td>
+      </tr>
+      <tr>
+          <td><code>allowReadOnlyGitHubToken</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>false</code>)</td>
+          <td>Passes the resolved GitHub token when available; the flag does not reduce its permissions</td>
+      </tr>
+      <tr>
+          <td><code>env</code></td>
+          <td>No</td>
+          <td>List (<code>0..16</code> names)</td>
+          <td>Safe uppercase host environment variable names to pass to the script</td>
+      </tr>
+  </tbody>
+</table>
+<p>The script runs with a minimal environment and <code>LOOPWRIGHT_CANDIDATE_DIR</code> pointing to a temporary candidate copy. Exit <code>0</code> approves the check; nonzero exit denies it. Diagnostics are scrubbed and bounded.</p>
+<p>The <code>env</code> list rejects <code>LOOPWRIGHT_*</code>, <code>INPUT_*</code>, <code>GITHUB_APP_*</code>, <code>ACTIONS_*</code>, <code>LD_*</code>, <code>DYLD_*</code>, and <code>GIT_*</code>. It also rejects <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>BASH_ENV</code>, <code>ENV</code>, and <code>NODE_OPTIONS</code>.</p>
 <h2 id="publication-and-memory">Publication and memory</h2>
 <table>
   <thead>
@@ -930,8 +1021,8 @@
       <tr>
           <td><code>memory.directory</code></td>
           <td>Yes</td>
-          <td>Path under <code>.loopwright/memory/&lt;name&gt;</code></td>
-          <td>Storage directory for reviewed CAS memory; must not overlap <code>writable</code></td>
+          <td><code>&lt;controlRoot&gt;/memory</code> or descendant</td>
+          <td>Storage directory for reviewed CAS memory, protected even inside a writable ancestor</td>
       </tr>
       <tr>
           <td><code>memory.apply</code></td>
@@ -1032,6 +1123,42 @@
       </tr>
   </tbody>
 </table>
+<p>A bare prefix on the first line followed by non-empty guidance on later lines also invokes <code>revise</code>. The <code>revise</code> command must be enabled.</p>
+<h2 id="output-formats">Output formats</h2>
+<p><code>spec.output</code> accepts a format string, a list, or an object with a <code>formats</code> list. Omission defaults to <code>json</code>.
+Action <code>output</code> overrides the taskpack default. The managed CLI selects formats separately with <code>--output-format</code>.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Format</th>
+          <th>Destination</th>
+          <th>Content</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>json</code></td>
+          <td>Action stdout or CLI</td>
+          <td>Machine-readable JSON</td>
+      </tr>
+      <tr>
+          <td><code>github-step-summary</code></td>
+          <td>Summary file when available</td>
+          <td>Markdown run summary</td>
+      </tr>
+      <tr>
+          <td><code>markdown</code></td>
+          <td>Action stderr or CLI stdout</td>
+          <td>Markdown run summary</td>
+      </tr>
+      <tr>
+          <td><code>text</code></td>
+          <td>Action stderr or CLI stdout</td>
+          <td>Plain-text run summary</td>
+      </tr>
+  </tbody>
+</table>
+<p>Summaries include status, checks, token counts, elapsed time, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. CLI JSON remains NDJSON when the step summary uses a file.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -1070,6 +1197,7 @@
       <ul>
         <li><a href="#check-and-gate-fields">Check and gate fields</a></li>
         <li><a href="#local-implementations">Local implementations</a></li>
+        <li><a href="#command-parameters">Command parameters</a></li>
       </ul>
     </li>
     <li><a href="#publication-and-memory">Publication and memory</a></li>
@@ -1079,6 +1207,7 @@
         <li><a href="#comment-commands">Comment commands</a></li>
       </ul>
     </li>
+    <li><a href="#output-formats">Output formats</a></li>
   </ul>
 </nav>
         

@@ -392,9 +392,15 @@
 </div>
 <ul>
 <li><strong>Priority order</strong>: Loopwright probes <code>preferredBackends</code> in order and picks the first backend supporting every listed <code>requiredCapabilities</code> item.</li>
-<li><strong>Default network isolation</strong>: Omitting <code>networkMode</code> defaults to <code>none</code> (all network sockets blocked).</li>
+<li><strong>Declared policy</strong>: Omitting <code>networkMode</code> in an explicit sandbox policy defaults to <code>none</code>.</li>
 <li><strong>Additive path masks</strong>: <code>deniedReadPaths</code> supplements built-in <code>.github</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code> protections.</li>
 </ul>
+<p>When <code>GITHUB_ACTIONS=true</code> and <code>spec.sandbox</code> is omitted, <code>resolveEffectiveTaskpackSandboxPolicy</code> selects <code>direct-dedicated</code>.
+It sets <code>allow-outbound</code>, requires <code>processTreeCleanup</code>, and enables <code>allowDedicatedDirectOverride</code>.
+GitHub-hosted runner VMs isolate jobs, but direct execution does not add filesystem or network masks.
+The same default applies to self-hosted Actions runners; confirm their isolation before use.</p>
+<p>The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>.</p>
+<p>Without <code>GITHUB_ACTIONS=true</code>, an omitted policy selects fail-closed <code>macos-seatbelt</code>, <code>linux-bwrap</code>, or <code>linux-landlock</code> negotiation.</p>
 <h2 id="policy-fields">Policy fields</h2>
 <p><code>spec.sandbox</code> itself is <strong>optional</strong> inside <code>Taskpack</code>, and every subfield inside <code>spec.sandbox</code> is also optional:</p>
 <table>
@@ -473,7 +479,7 @@
       <tr>
           <td><code>direct-dedicated</code></td>
           <td>Disposable dedicated runner</td>
-          <td>Explicit opt-in only; provides <code>processTreeCleanup</code> without filesystem/network masks</td>
+          <td>Actions default for omitted policy; otherwise explicit host opt-in; no filesystem/network masks</td>
       </tr>
   </tbody>
 </table>
@@ -491,7 +497,7 @@
       <tr>
           <td><code>none</code></td>
           <td>Blocks all outbound and loopback sockets</td>
-          <td>Default when <code>networkMode</code> is omitted</td>
+          <td>Default for an explicit policy without <code>networkMode</code></td>
       </tr>
       <tr>
           <td><code>loopback-only</code></td>
@@ -501,7 +507,7 @@
       <tr>
           <td><code>allow-outbound</code></td>
           <td>Permits outbound network connections</td>
-          <td>Requires explicit policy opt-in</td>
+          <td>Actions omitted-policy default or explicit policy opt-in</td>
       </tr>
   </tbody>
 </table>

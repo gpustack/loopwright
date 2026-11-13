@@ -428,6 +428,10 @@
 </span></span><span class="line"><span class="cl">loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo</span></span></code></pre></div>
 </div>
 <p>Use <code>resume</code> for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.</p>
+<p><code>run</code>, <code>resume</code>, and <code>reconcile</code> accept <code>--output-format &lt;csv&gt;</code> with <code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, and <code>text</code>.
+Use <code>--step-summary-file &lt;path&gt;</code> to select the summary file.
+With <code>--json</code>, stdout stays pure NDJSON. The CLI does not emit selected Markdown or text reports in this mode.
+Use <code>--step-summary-file</code> to write a separate Markdown summary. Without <code>--json</code>, selected reports go to stdout.</p>
 <h2 id="step-5-inspect-recovery">Step 5: Inspect recovery</h2>
 <p><span class="diagram-scroll"><img src="/loopwright/main/docs/assets/diagrams/reconcile-closure-flow.svg" alt="Recovery, receipt reconciliation, and closure audit" decoding="async"></span></p>
 <!-- flowchart LR
@@ -498,7 +502,7 @@
       <tr>
           <td><code>run</code></td>
           <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
-          <td><code>--json</code></td>
+          <td><code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
           <td>Execute a bounded controller run</td>
       </tr>
       <tr>
@@ -510,7 +514,7 @@
       <tr>
           <td><code>resume</code></td>
           <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
-          <td><code>--json</code></td>
+          <td><code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
           <td>Resume an existing run under identical trusted bindings</td>
       </tr>
       <tr>
@@ -528,7 +532,7 @@
       <tr>
           <td><code>reconcile</code></td>
           <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code>, <code>--receipt</code></td>
-          <td><code>--output</code>, <code>--json</code></td>
+          <td><code>--output</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
           <td>Settle an unknown external outcome with an authenticated receipt</td>
       </tr>
       <tr>

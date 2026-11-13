@@ -25,7 +25,7 @@ Declarative taskpack mode eliminates manual boilerplate while preserving every L
 
 | Responsibility | Authored in taskpack | Compiled by Loopwright |
 | --- | --- | --- |
-| Work scope | Declare `writable` and `protected` paths | Adds built-in `.github`, `.loopwright/policies`, `AGENTS.md`, `CLAUDE.md` masks |
+| Work scope | Optionally declare `writable` and `protected` paths | Adds control paths and built-in masks; protected paths take precedence |
 | Execution | Declare `upstreams` and `proposal` artifact | Compiles `TaskContract`, `ControllerConfig`, and `TrustedRegistry` (`0600`) |
 | Digests | None required | Computes SHA-256 digests for installed handlers and `package-lock.json` |
 | Secrets | Pass GitHub Secrets to Action or App env | Generates scoped `${ENV}` credential bindings and scrubs logs |
@@ -43,7 +43,7 @@ Through normal back-and-forth conversation, the agent reads the live Loopwright 
 
 ## Step 1: Author taskpack
 
-Create `.loopwright/taskpack.yaml` in the target repository (`metadata.name` identifies the taskpack across tenant queues, contracts, and `.loopwright/memory/<name>`):
+Create `.auto-sync/taskpack.yaml` in the target repository. Loopwright derives `.auto-sync` as the control root.
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -54,11 +54,11 @@ spec:
   goal:
     candidate: Refresh documentation from upstream releases and pass local checks.
     noChange: Confirm upstream documentation needs no update and settle as no change.
-  scope:
-    writable:
-      - docs
+  scope: # Optional
     protected:
       - docs/protected-notes.md
+  instructions: # Optional
+    - .auto-sync/prompts/instructions.md
   upstreams:
     - id: engine
       kind: github-release
@@ -76,6 +76,11 @@ spec:
     localChecks:
       - id: docs-proposal-json
         implementation: json-artifact.v1
+      - id: verify-docs
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/verify.sh
+          timeoutSeconds: 30 # Optional
     externalGates: [] # Optional remote gate checks
   publication:
     mode: pull_request
@@ -83,7 +88,7 @@ spec:
     headBranchPrefix: loopwright-docs-
     titleTemplate: "docs - sync upstream documentation"
   memory:
-    directory: .loopwright/memory/docs-sync
+    directory: .auto-sync/memory/docs-sync
     apply: separate-pull-request
     onNoModelBudget: deterministic-observations-only
   triggers:
@@ -105,21 +110,10 @@ spec:
       id: glm-5.3
       thinking: high # Optional
       apiKeyEnv: ZAI_CODING_CN_API_KEY # Optional
-  sandbox: # Optional host isolation policy
-    preferredBackends: # Optional
-      - macos-seatbelt
-      - linux-bwrap
-      - linux-landlock
-      - docker
-    networkMode: none # Optional
-    requiredCapabilities: # Optional
-      - filesystemReadContainment
-      - filesystemWriteContainment
-      - protectedPathReadOnlyMask
-      - networkIsolation
-      - processTreeCleanup
-    deniedReadPaths: # Optional
-      - ~/.ssh
+  output: # Optional
+    formats:
+      - json
+      - github-step-summary
   decisions: # Optional System-One triage policy
     enabled: true
     provider: typesafe-jev # Optional
@@ -132,8 +126,9 @@ spec:
 ```
 
 - **Field dictionary**: Inspect every field, bound, and enum in [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md).
-- **Scope**: Writable paths must never overlap `protected` paths or `.loopwright/memory/<name>`.
-- **Proposal**: `spec.proposal.path` must reside inside `spec.scope.writable` and end in `.yaml`, `.yml`, or `.json`.
+- **Scope**: Omitted `writable` permits `**`, except effective protected paths. Protected paths always win.
+- **Inputs**: Create the instruction file and verification script before running. Loopwright pins and protects both files.
+- **Proposal**: The proposal must be writable and end in `.yaml`, `.yml`, or `.json`.
 - **Secrets**: Never place tokens or `${ENV}` templates inside `taskpack.yaml`; the parser rejects untrusted interpolation.
 
 ## Step 2: Validate taskpack
@@ -170,22 +165,22 @@ jobs:
           private-key: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
       - uses: gpustack/loopwright@main
         with:
-          taskpack-path: .loopwright/taskpack.yaml # Optional (defaults to .loopwright/taskpack.yaml)
+          taskpack-path: .auto-sync/taskpack.yaml # Optional custom control root
+          github-token: ${{ steps.app-token.outputs.token }}
           event-name: ${{ github.event_name }} # Optional (defaults to GITHUB_EVENT_NAME)
           event-path: ${{ github.event_path }} # Optional for schedule/manual; needed on comments
-          publication-endpoint-url: https://publish.internal.example/pr # Optional when publication is disabled
           dry-run: 'false' # Optional (defaults to 'false')
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }} # Optional in dry-run mode
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }} # Optional in dry-run mode
           LOOPWRIGHT_GATE_SIGNING_SECRET: ${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }} # Optional when externalGates is empty
-          LOOPWRIGHT_PUBLICATION_SIGNING_SECRET: ${{ secrets.LOOPWRIGHT_PUBLICATION_SIGNING_SECRET }} # Optional when publication is disabled
 ```
 
 - **Action inputs and secrets**: Review every input, output, and secret variable in [GitHub Action](/loopwright/latest/docs/operations/github-action/index.md).
 - **Centralized webhook server**: Deploy a multi-repository intake server via [GitHub App](/loopwright/latest/docs/operations/github-app/index.md).
 
 ## Step 4: Review outcomes
+
+Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.
 
 1. **Candidate pull request**: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching `headBranchPrefix`.
 2. **Verified no-change**: When no update is needed, the compiled `no-change.v1` check verifies an untouched tree and settles cleanly without opening an empty PR.

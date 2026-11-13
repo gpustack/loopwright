@@ -48,8 +48,17 @@ spec:
 ```
 
 - **Priority order**: Loopwright probes `preferredBackends` in order and picks the first backend supporting every listed `requiredCapabilities` item.
-- **Default network isolation**: Omitting `networkMode` defaults to `none` (all network sockets blocked).
+- **Declared policy**: Omitting `networkMode` in an explicit sandbox policy defaults to `none`.
 - **Additive path masks**: `deniedReadPaths` supplements built-in `.github`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` protections.
+
+When `GITHUB_ACTIONS=true` and `spec.sandbox` is omitted, `resolveEffectiveTaskpackSandboxPolicy` selects `direct-dedicated`.
+It sets `allow-outbound`, requires `processTreeCleanup`, and enables `allowDedicatedDirectOverride`.
+GitHub-hosted runner VMs isolate jobs, but direct execution does not add filesystem or network masks.
+The same default applies to self-hosted Actions runners; confirm their isolation before use.
+
+The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`.
+
+Without `GITHUB_ACTIONS=true`, an omitted policy selects fail-closed `macos-seatbelt`, `linux-bwrap`, or `linux-landlock` negotiation.
 
 ## Policy fields
 
@@ -73,7 +82,7 @@ Configure `spec.sandbox.preferredBackends[]` in priority order:
 | `linux-bwrap` | Linux namespaces and seccomp (`bwrap`) | Qualified Linux host with `/usr/bin/bwrap` |
 | `linux-landlock` | Linux Landlock LSM rules | Linux kernel with Landlock ABI support |
 | `docker` | Rootless or daemon container | Qualified Docker binary and verified daemon socket |
-| `direct-dedicated` | Disposable dedicated runner | Explicit opt-in only; provides `processTreeCleanup` without filesystem/network masks |
+| `direct-dedicated` | Disposable dedicated runner | Actions default for omitted policy; otherwise explicit host opt-in; no filesystem/network masks |
 
 ## Network and capabilities
 
@@ -81,9 +90,9 @@ Configure `spec.sandbox.preferredBackends[]` in priority order:
 
 | Mode | Traffic policy | Constraint |
 | --- | --- | --- |
-| `none` | Blocks all outbound and loopback sockets | Default when `networkMode` is omitted |
+| `none` | Blocks all outbound and loopback sockets | Default for an explicit policy without `networkMode` |
 | `loopback-only` | Permits `127.0.0.1` and `::1` traffic only | Used for local loopback MCP or runner bridges |
-| `allow-outbound` | Permits outbound network connections | Requires explicit policy opt-in |
+| `allow-outbound` | Permits outbound network connections | Actions omitted-policy default or explicit policy opt-in |
 
 ### Sandbox capabilities
 
