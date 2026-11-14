@@ -14,6 +14,7 @@ import { TenantAdmissionQueue } from '../src/tenant-queue.js';
 import type { InstallationTokenRequest, TenantIdentity } from '../src/types.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const PRIVATE_KEY_PEM = privateKey.export({ type: 'pkcs1', format: 'pem' }).toString();
@@ -537,6 +538,10 @@ describe('reusable Action entrypoint (AC-6)', () => {
 
   it('keeps the root action.yml outside .github/workflows as a composite Node 26 Action and writes GITHUB_OUTPUT in runActionCli', async () => {
     const actionYml = await readFile(join(findRepositoryRoot(), 'action.yml'), 'utf8');
+    const parsedAction = parseYaml(actionYml, { uniqueKeys: true }) as Record<string, unknown>;
+    assert.equal(parsedAction['name'], 'Loopwright Taskpack Action');
+    assert.equal(typeof parsedAction['description'], 'string');
+    assert.ok((parsedAction['description'] as string).includes('Run the Loopwright declarative taskpack cycle'));
     assert.match(actionYml, /name: 'Loopwright Taskpack Action'/);
     assert.match(actionYml, /using: 'composite'/);
     assert.match(actionYml, /node-version: '26'/);

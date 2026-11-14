@@ -4,6 +4,15 @@ export type { AdapterPolicyV2, HttpMcpPolicy, McpCredentialBinding, PiHostV2, Pi
 export { describePiAdapterFiles, type PiAdapterFiles } from './descriptor.js';
 export { decodePiCapture, type PiCaptureDecodeInput, type PiDecodedCapture } from './decode-capture.js';
 export type {
+  CallExternalMcpToolOptions,
+  ConnectHostMcpOptions,
+  ConnectedMcpServerSummary,
+  ExternalMcpHttpServerConfig,
+  ExternalMcpServerConfig,
+  ExternalMcpStdioServerConfig,
+  ExternalMcpToolSchema,
+} from './external-mcp.js';
+export type {
   AdapterPolicy, PiAdapter, PiBaselineEntry, PiCandidateBaseline, PiCapabilities, PiCapture, PiCommand, PiCustomModelCompat, PiCustomProviderConfig,
   PiError, PiErrorCode, PiEvent, PiContextRecord, PiContextAssessment, PiHost, PiLimits, PiModelCost, PiModelSelection,
   PiOpenInput, PiOutcome, PiResult, PiSamplingParams, PiThinkingLevel, PiWireApi, ResourceIdentity, RuntimeIdentity,

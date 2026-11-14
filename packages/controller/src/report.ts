@@ -25,7 +25,16 @@ export interface ReportModelInfo {
   readonly provider: string;
   readonly model: string;
   readonly thinking?: string | null | undefined;
+  readonly contextWindow?: number | undefined;
   readonly tokenRotations?: number | undefined;
+}
+
+export interface ReportMcpServerInfo {
+  readonly id: string;
+  readonly transport: 'stdio' | 'http';
+  readonly status: 'connected' | 'failed';
+  readonly toolCount: number;
+  readonly error?: string | null | undefined;
 }
 
 export interface RunReportInput {
@@ -33,9 +42,11 @@ export interface RunReportInput {
   readonly status: string;
   readonly reasonCode?: string | null | undefined;
   readonly phase?: string | null | undefined;
+  readonly detail?: string | null | undefined;
   readonly discovery?: ReportDiscoveryInfo | null | undefined;
   readonly checks?: readonly ReportCheckItem[] | undefined;
   readonly model?: ReportModelInfo | null | undefined;
+  readonly mcpServers?: readonly ReportMcpServerInfo[] | undefined;
   readonly usage?: UsageSummary | null | undefined;
   readonly elapsedMs?: number | null | undefined;
   readonly externalUrl?: string | null | undefined;
@@ -94,6 +105,76 @@ export function formatCostUsd(costMicrousd: number): string {
   const whole = Math.floor(costMicrousd / 1_000_000);
   const frac = String(costMicrousd % 1_000_000).padStart(6, '0');
   return `${whole}.${frac}`;
+}
+
+function trimFixed(value: number, decimals: number): string {
+  const fixed = value.toFixed(decimals);
+  if (!fixed.includes('.')) return fixed;
+  return fixed.replace(/\.?0+$/, '');
+}
+
+/** Format a non-negative token count using K / M / B units (e.g. 850, 1.25K, 14.2K, 1.28M, 2.1B). */
+export function formatTokenCount(count: number): string {
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new RangeError(`count must be a non-negative safe integer, got ${String(count)}`);
+  }
+  if (count < 1_000) return String(count);
+  if (count < 1_000_000) {
+    const scaled = Math.round((count / 1_000) * 100) / 100;
+    if (scaled >= 1_000) return '1M';
+    return `${trimFixed(scaled, 2)}K`;
+  }
+  if (count < 1_000_000_000) {
+    const scaled = Math.round((count / 1_000_000) * 100) / 100;
+    if (scaled >= 1_000) return '1B';
+    return `${trimFixed(scaled, 2)}M`;
+  }
+  return `${trimFixed(count / 1_000_000_000, 2)}B`;
+}
+
+/** Format a non-negative duration in milliseconds using ms / s / m / h units (e.g. 420ms, 8.4s, 2m 28s, 1h 12m). */
+export function formatDurationMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    throw new RangeError(`ms must be a non-negative finite number, got ${String(ms)}`);
+  }
+  if (ms < 1_000) {
+    const rounded = Math.round(ms);
+    return rounded >= 1_000 ? '1s' : `${rounded}ms`;
+  }
+  if (ms < 60_000) {
+    const tenths = Math.round(ms / 100);
+    if (tenths >= 600) return '1m';
+    return `${trimFixed(tenths / 10, 1)}s`;
+  }
+  const totalSeconds = Math.round(ms / 1_000);
+  if (totalSeconds < 3_600) {
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+/** Format a non-negative byte count using B / KB / MB / GB units (e.g. 512 B, 64 KB, 1.5 MB, 2 GB). */
+export function formatByteCount(bytes: number): string {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new RangeError(`bytes must be a non-negative safe integer, got ${String(bytes)}`);
+  }
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) {
+    const kb = Math.round((bytes / 1_024) * 10) / 10;
+    if (kb >= 1_024) return '1 MB';
+    return `${trimFixed(kb, 1)} KB`;
+  }
+  if (bytes < 1_073_741_824) {
+    const mb = Math.round((bytes / 1_048_576) * 10) / 10;
+    if (mb >= 1_024) return '1 GB';
+    return `${trimFixed(mb, 1)} MB`;
+  }
+  return `${trimFixed(bytes / 1_073_741_824, 2)} GB`;
 }
 
 function stripAnsiAndControl(input: string): string {
@@ -175,9 +256,26 @@ function formatDiscoverySummary(discovery: ReportDiscoveryInfo, clean: (text: st
 
 function formatModelSummary(model: ReportModelInfo, clean: (text: string) => string): string {
   let summary = `${clean(model.provider)}/${clean(model.model)}`;
-  if (model.thinking != null && model.thinking.length > 0) summary += ` (thinking: ${clean(model.thinking)})`;
+  const attrs: string[] = [];
+  if (model.thinking != null && model.thinking.length > 0) attrs.push(`thinking: ${clean(model.thinking)}`);
+  if (model.contextWindow !== undefined && Number.isSafeInteger(model.contextWindow) && model.contextWindow >= 0) {
+    attrs.push(`contextWindow=${formatTokenCount(model.contextWindow)}`);
+  }
+  if (attrs.length > 0) summary += ` (${attrs.join(', ')})`;
   if (model.tokenRotations !== undefined) summary += ` [rotations: ${model.tokenRotations}]`;
   return summary;
+}
+
+function formatMcpServersSummary(servers: readonly ReportMcpServerInfo[], clean: (text: string) => string): string {
+  return servers
+    .map(server => {
+      if (server.status === 'connected') {
+        return `${clean(server.id)} (${clean(server.transport)}, ${server.toolCount} tools)`;
+      }
+      const errSuffix = server.error != null && server.error.length > 0 ? `: ${clean(server.error)}` : '';
+      return `${clean(server.id)} (${clean(server.transport)}, failed${errSuffix})`;
+    })
+    .join('; ');
 }
 
 /** Render a sanitized, deterministic run report in JSON, Markdown/Step Summary, or plain text format. */
@@ -193,6 +291,7 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
       status: clean(input.status),
       reasonCode: input.reasonCode != null ? clean(input.reasonCode) : null,
       phase: input.phase != null ? clean(input.phase) : null,
+      ...(input.detail !== undefined ? { detail: input.detail != null ? clean(input.detail) : null } : {}),
       discovery: input.discovery
         ? {
             disposition: clean(input.discovery.disposition),
@@ -211,15 +310,35 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
             provider: clean(input.model.provider),
             model: clean(input.model.model),
             thinking: input.model.thinking != null ? clean(input.model.thinking) : null,
+            ...(input.model.contextWindow !== undefined && Number.isSafeInteger(input.model.contextWindow) && input.model.contextWindow >= 0
+              ? {
+                  contextWindow: input.model.contextWindow,
+                  formattedContextWindow: formatTokenCount(input.model.contextWindow),
+                }
+              : {}),
             ...(input.model.tokenRotations !== undefined ? { tokenRotations: input.model.tokenRotations } : {}),
           }
         : null,
+      ...(input.mcpServers !== undefined
+        ? {
+            mcpServers: input.mcpServers.map(server => ({
+              id: clean(server.id),
+              transport: clean(server.transport),
+              status: clean(server.status),
+              toolCount: server.toolCount,
+              error: server.error != null ? clean(server.error) : null,
+            })),
+          }
+        : {}),
       usage: usage
         ? {
             requestCount: usage.requests.length,
             inputTokens: usage.inputTokens.knownSubtotal,
             outputTokens: usage.outputTokens.knownSubtotal,
             totalTokens: usage.totalTokens.knownSubtotal,
+            formattedInputTokens: formatTokenCount(usage.inputTokens.knownSubtotal),
+            formattedOutputTokens: formatTokenCount(usage.outputTokens.knownSubtotal),
+            formattedTotalTokens: formatTokenCount(usage.totalTokens.knownSubtotal),
             tokenProvenance: usage.totalTokens.provenance,
             tokenCompleteness: usage.totalTokens.completeness,
             tokenUnknownCount: usage.totalTokens.unknownCount,
@@ -231,6 +350,7 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
           }
         : null,
       elapsedMs: input.elapsedMs ?? null,
+      formattedElapsed: input.elapsedMs != null ? formatDurationMs(input.elapsedMs) : null,
       externalUrl: input.externalUrl != null ? clean(input.externalUrl) : null,
     };
     return JSON.stringify(payload);
@@ -255,14 +375,18 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
     ];
     if (input.reasonCode != null && input.reasonCode.length > 0) lines.push(`| Reason | ${cell(input.reasonCode)} |`);
     if (input.phase != null && input.phase.length > 0) lines.push(`| Phase | ${cell(input.phase)} |`);
+    if (input.detail != null && input.detail.length > 0) lines.push(`| Detail | ${cell(input.detail)} |`);
     if (input.discovery) lines.push(`| Discovery | ${formatDiscoverySummary(input.discovery, cell)} |`);
     if (input.model) lines.push(`| Model | ${formatModelSummary(input.model, cell)} |`);
+    if (input.mcpServers && input.mcpServers.length > 0) {
+      lines.push(`| MCP Servers | ${formatMcpServersSummary(input.mcpServers, cell)} |`);
+    }
     if (usage != null) {
       const tokenPrefix = usage.totalTokens.completeness === 'partial' ? '>= ' : '';
       const tokenSuffix =
         usage.totalTokens.completeness === 'partial' ? `, partial: ${usage.totalTokens.unknownCount} unknown` : '';
       lines.push(
-        `| Tokens | ${tokenPrefix}${usage.totalTokens.knownSubtotal} total (${usage.inputTokens.knownSubtotal} in / ${usage.outputTokens.knownSubtotal} out, ${usage.totalTokens.provenance}${tokenSuffix}) |`,
+        `| Tokens | ${tokenPrefix}${formatTokenCount(usage.totalTokens.knownSubtotal)} total (${formatTokenCount(usage.inputTokens.knownSubtotal)} in / ${formatTokenCount(usage.outputTokens.knownSubtotal)} out, ${usage.totalTokens.provenance}${tokenSuffix}) |`,
       );
     } else {
       lines.push('| Tokens | unavailable |');
@@ -273,7 +397,7 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
         usage.costMicrousd.completeness === 'partial' ? `, partial: ${usage.costMicrousd.unknownCount} unknown` : '';
       lines.push(`| Cost (USD) | ${costPrefix}$${costUsd} (${usage.costMicrousd.provenance}${costSuffix}) |`);
     }
-    if (input.elapsedMs != null) lines.push(`| Elapsed | ${input.elapsedMs}ms |`);
+    if (input.elapsedMs != null) lines.push(`| Elapsed | ${formatDurationMs(input.elapsedMs)} |`);
     if (input.externalUrl != null && input.externalUrl.length > 0) lines.push(`| External URL | ${cell(input.externalUrl)} |`);
 
     if (input.checks && input.checks.length > 0) {
@@ -293,14 +417,18 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
     if (input.reasonCode != null && input.reasonCode.length > 0) statusAnnotations.push(`reason=${cleanLine(input.reasonCode)}`);
     if (input.phase != null && input.phase.length > 0) statusAnnotations.push(`phase=${cleanLine(input.phase)}`);
     lines.push(statusAnnotations.length > 0 ? `Status: ${cleanLine(input.status)} (${statusAnnotations.join(', ')})` : `Status: ${cleanLine(input.status)}`);
+    if (input.detail != null && input.detail.length > 0) lines.push(`Detail: ${cleanLine(input.detail)}`);
     if (input.discovery) lines.push(`Discovery: ${formatDiscoverySummary(input.discovery, cleanLine)}`);
     if (input.model) lines.push(`Model: ${formatModelSummary(input.model, cleanLine)}`);
+    if (input.mcpServers && input.mcpServers.length > 0) {
+      lines.push(`MCP Servers: ${formatMcpServersSummary(input.mcpServers, cleanLine)}`);
+    }
     if (usage != null) {
       const tokenPrefix = usage.totalTokens.completeness === 'partial' ? '>= ' : '';
       const tokenSuffix =
         usage.totalTokens.completeness === 'partial' ? `, partial: ${usage.totalTokens.unknownCount} unknown` : '';
       lines.push(
-        `Tokens: ${tokenPrefix}${usage.totalTokens.knownSubtotal} total (${usage.inputTokens.knownSubtotal} in / ${usage.outputTokens.knownSubtotal} out${tokenSuffix})`,
+        `Tokens: ${tokenPrefix}${formatTokenCount(usage.totalTokens.knownSubtotal)} total (${formatTokenCount(usage.inputTokens.knownSubtotal)} in / ${formatTokenCount(usage.outputTokens.knownSubtotal)} out${tokenSuffix})`,
       );
     } else {
       lines.push('Tokens: unavailable');
@@ -321,7 +449,7 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
       }
     }
     if (input.externalUrl != null && input.externalUrl.length > 0) lines.push(`External URL: ${cleanLine(input.externalUrl)}`);
-    if (input.elapsedMs != null) lines.push(`Elapsed: ${input.elapsedMs}ms`);
+    if (input.elapsedMs != null) lines.push(`Elapsed: ${formatDurationMs(input.elapsedMs)}`);
     return lines.join('\n');
   }
 

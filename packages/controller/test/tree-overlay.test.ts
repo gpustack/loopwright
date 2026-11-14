@@ -2010,17 +2010,17 @@ test('T3 materializeBaseline deadline and abort handling, non-UTF-8 admission re
       (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'DEADLINE',
     );
 
-    // 5. Child process timeout mapped to DEADLINE (remainingMs = 20ms while afterGitExec sleeps 80ms)
+    // 5. Child process timeout mapped to DEADLINE (remainingMs = 150ms while afterGitExec sleeps 400ms)
     const timeoutDir = join(f.root, 'owner-timeout');
     await mkdir(timeoutDir, { mode: 0o700 });
     const timeoutOwner = await ControllerOwner.acquire(timeoutDir, 'run-timeout', f.plan.planDigest, {
       afterGitExec: async () => {
-        await new Promise(resolve => setTimeout(resolve, 80));
+        await new Promise(resolve => setTimeout(resolve, 400));
       },
     });
     try {
       await assert.rejects(
-        timeoutOwner.materializeGitBatch(frozen.directory, frozen.baselineEntries ?? [], join(f.root, 'mat-timeout'), new AbortController().signal, 20),
+        timeoutOwner.materializeGitBatch(frozen.directory, frozen.baselineEntries ?? [], join(f.root, 'mat-timeout'), new AbortController().signal, 150),
         (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'DEADLINE',
       );
     } finally {

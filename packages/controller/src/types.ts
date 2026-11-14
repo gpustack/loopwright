@@ -10,6 +10,7 @@ export interface Handler {
 export interface RoleProfile {
   readonly id: string; readonly selection: AdapterPolicy['selection']; readonly tools: readonly string[]; readonly context: AdapterPolicy['context'];
   readonly runtimeRef: string; readonly providerCredentialRef: string | null; readonly mcp: AdapterPolicyV2['mcp'];
+  readonly limits?: Partial<AdapterPolicy['limits']> | undefined;
 }
 export interface RegistryResource { readonly id: string; readonly kind: 'instruction' | 'skill' | 'document'; readonly path: string; readonly digest: Digest }
 export interface RuntimeProfile { readonly id: string; readonly identity: RuntimeIdentity; readonly dockerExecutable: string; readonly dockerSocket: string }

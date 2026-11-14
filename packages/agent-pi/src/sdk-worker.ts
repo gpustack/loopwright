@@ -1,12 +1,14 @@
 import { createAgentSession, ModelRuntime, SessionManager, type ExtensionFactory, type ToolDefinition, type FileEntry, type AgentSession } from '@earendil-works/pi-coding-agent';
+import type { Context } from '@earendil-works/pi-ai';
 import { mkdtemp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Channel, type ChannelMessage } from './protocol.js';
 import { compileTrustedFactories } from './factory-bootstrap.js';
 import { toolArgumentsDigest } from './usage.js';
-import { bridgedTools, type LocalToolName, type ToolResult } from './tools.js';
+import { bridgedTools, type BridgedToolName, type ToolResult } from './tools.js';
 import { parseBoundedJson } from './context.js';
+import { isExternalMcpToolName, type ExternalMcpToolSchema } from './external-mcp.js';
 import { nativeMcpFactories, OwnerMcpTransport } from './mcp-transport.js';
 import { parseJsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { AdapterPolicy } from './types.js';
@@ -15,13 +17,170 @@ import { SnapshotTransfer } from './snapshot-transfer.js';
 import { rowBytes, NativeSnapshot, type SnapshotPolicy } from './snapshot.js';
 import { verifyNativeCompletion } from './lifecycle.js';
 import type { NativeCompletion } from './lifecycle.js';
+
+function sliceCodepoints(text: string, maxChars: number): string {
+  return Array.from(text).slice(0, maxChars).join('');
+}
+
+function compactToolArguments<T extends Record<string, unknown>>(args: T, maxStrChars: number): T {
+  let modified = false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    if (typeof v === 'string' && v.length > maxStrChars + 64) {
+      out[k] = sliceCodepoints(v, maxStrChars) + '...[compacted]';
+      modified = true;
+    } else {
+      out[k] = v;
+    }
+  }
+  return modified ? (out as T) : args;
+}
+
+/**
+ * Compact older bulky toolResult / non-signed thinking blocks in a shallow-cloned outbound Context
+ * when multi-turn history approaches the finalized request byte budget, leaving SessionManager untouched.
+ */
+export function pruneContextForBudget(context: Context, maxBodyBytes: number, api: string): Context {
+  if (maxBodyBytes < 8192 || !context.messages.some(msg => msg.role === 'toolResult')) return context;
+  const toolCount = context.tools?.length ?? 0;
+  const wireHeadroom = Math.min(9_216, Math.max(4_096, Math.floor(maxBodyBytes / 7) + toolCount * 48));
+  const rawTargetBytes = Math.max(4_096, maxBodyBytes - wireHeadroom);
+  const baseBytes = Buffer.byteLength(JSON.stringify({ ...context, messages: [] }));
+  const minWireMargin = Math.min(4_096, 512 + toolCount * 40);
+  const targetBytes = baseBytes + 2_048 > rawTargetBytes
+    ? Math.max(rawTargetBytes, maxBodyBytes - minWireMargin)
+    : rawTargetBytes;
+  if (Buffer.byteLength(JSON.stringify(context)) <= targetBytes) return context;
+
+  const availableMessageBytes = Math.max(1_024, targetBytes - baseBytes);
+
+  const messages = structuredClone(context.messages);
+  const candidate = (): Context => ({ ...context, messages });
+  const withinBudget = (): boolean => Buffer.byteLength(JSON.stringify(candidate())) <= targetBytes;
+
+  const toolResultIndices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]?.role === 'toolResult') toolResultIndices.push(i);
+  }
+  // Pass 1: compact older tool results first while keeping the 2 most recent tool results intact.
+  const olderIndices = toolResultIndices.length > 2 ? toolResultIndices.slice(0, -2) : [];
+  for (const idx of olderIndices) {
+    const msg = messages[idx];
+    if (!msg || msg.role !== 'toolResult') continue;
+    let changed = false;
+    for (const block of msg.content) {
+      if (block.type === 'text' && block.text.length > 360) {
+        block.text = sliceCodepoints(block.text, 220) + '\n...[earlier tool output compacted to fit context budget; re-read specific lines with offset/limit if needed]...';
+        changed = true;
+      }
+    }
+    if (changed && withinBudget()) return candidate();
+  }
+
+  // Pass 2: on APIs without signed thinking blocks, compact older assistant reasoning traces.
+  let lastAssistant = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'assistant') { lastAssistant = i; break; }
+  }
+  if (api !== 'anthropic-messages') {
+    for (let i = 0; i < lastAssistant; i++) {
+      const msg = messages[i];
+      if (!msg || msg.role !== 'assistant') continue;
+      let changed = false;
+      for (const block of msg.content) {
+        if (block.type === 'thinking' && block.thinking.length > 200) {
+          block.thinking = sliceCodepoints(block.thinking, 120) + '...';
+          changed = true;
+        }
+      }
+      if (changed && withinBudget()) return candidate();
+    }
+  }
+
+  // Pass 3: if still above budget (e.g. parallel large reads or heavy MCP tool schemas on a tight window),
+  // size recent tool results against availableMessageBytes after subtracting fixed tools + systemPrompt overhead.
+  const recentIndices = toolResultIndices.slice(-2);
+  const perRecentChars = Math.max(240, Math.floor((availableMessageBytes / 3) / Math.max(1, recentIndices.length)));
+  for (const idx of recentIndices) {
+    const msg = messages[idx];
+    if (!msg || msg.role !== 'toolResult') continue;
+    let changed = false;
+    for (const block of msg.content) {
+      if (block.type === 'text' && block.text.length > perRecentChars + 120) {
+        block.text = sliceCodepoints(block.text, perRecentChars) + '\n...[tool output compacted to fit context budget; use smaller limit or filter output]...';
+        changed = true;
+      }
+    }
+    if (changed && withinBudget()) return candidate();
+  }
+
+  // Pass 4 fallback: tighten remaining toolResult stubs (160 chars) and compact older non-final assistant blocks/arguments
+  // so outbound context stays within targetBytes whenever baseBytes < targetBytes.
+  if (!withinBudget()) {
+    for (const idx of toolResultIndices) {
+      const msg = messages[idx];
+      if (!msg || msg.role !== 'toolResult') continue;
+      let changed = false;
+      for (const block of msg.content) {
+        if (block.type === 'text' && block.text.length > 180) {
+          block.text = sliceCodepoints(block.text, 160) + '\n...[compacted]...';
+          changed = true;
+        }
+      }
+      if (changed && withinBudget()) return candidate();
+    }
+    for (let i = 0; i < lastAssistant; i++) {
+      const msg = messages[i];
+      if (!msg || msg.role !== 'assistant') continue;
+      let changed = false;
+      for (const block of msg.content) {
+        if (block.type === 'text' && block.text.length > 180) {
+          block.text = sliceCodepoints(block.text, 160) + '...';
+          changed = true;
+        } else if (block.type === 'thinking' && api !== 'anthropic-messages' && block.thinking.length > 0) {
+          block.thinking = '';
+          changed = true;
+        } else if (block.type === 'toolCall' && block.arguments && typeof block.arguments === 'object') {
+          const compactedArgs = compactToolArguments(block.arguments, 160);
+          if (compactedArgs !== block.arguments) {
+            block.arguments = compactedArgs;
+            changed = true;
+          }
+        }
+      }
+      if (changed && withinBudget()) return candidate();
+    }
+    // If many accumulated turns still exceed targetBytes while baseBytes < targetBytes,
+    // drop the oldest complete (assistant + matching toolResult*) turn groups, preserving at least the last 2 turns.
+    if (!withinBudget() && baseBytes + 512 < targetBytes) {
+      let safety = 64;
+      while (!withinBudget() && safety-- > 0) {
+        const assistantIndices = messages
+          .map((m, i) => (m?.role === 'assistant' ? i : -1))
+          .filter(i => i >= 0);
+        if (assistantIndices.length <= 2) break;
+        const dropStart = assistantIndices[0]!;
+        let dropEnd = dropStart + 1;
+        while (dropEnd < messages.length && messages[dropEnd]?.role === 'toolResult') {
+          dropEnd++;
+        }
+        // Only drop a clean paired assistant + toolResult+ span so role alternation and callId pairing stay intact.
+        if (dropEnd <= dropStart + 1) break;
+        messages.splice(dropStart, dropEnd - dropStart);
+      }
+    }
+  }
+
+  return candidate();
+}
+
 /** Internal trusted constructor; fixture tools are supplied only by separate test entrypoints. */
 export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinition[]; onSettled?: () => unknown; onToolCall?: () => void; onAgentEnd?: (session: AgentSession) => Promise<void> } = {}): void {
   const channel = new Channel(nonce, process.stdin, process.stdout), snapshots = new SnapshotTransfer(channel);
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | null = null;
   let runtime: ModelRuntime, active = false, outputTokens = 1024, ordinal = 0, toolOrdinal = 0, commandOrdinal = 0;
   let receipts: Promise<void>[] = [];
-  let toolResultBytes = 65536, sessionBytes = 8388608, safeSnapshot = false; let snapshotPolicy: SnapshotPolicy | null = null;
+  let toolArgsBytes = 65536, toolResultBytes = 65536, sessionBytes = 8388608, safeSnapshot = false; let snapshotPolicy: SnapshotPolicy | null = null;
   let native: Omit<NativeCompletion, 'idle' | 'invocations' | 'pending'> = { agentEnds: 0, agentSettles: 0, aborted: false, compactionEnds: 0, compacted: false, parserAcks: 0 };
   let queued = 0, restoredEntries: FileEntry[] | null = null, restoring = false;
   const invocationWaiters = new Map<number, { resolve: (slot: string) => void; reject: (error: Error) => void }>();
@@ -39,7 +198,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     const parent = event.parentToolCallId ?? event.toolCallId, producer = roots.get(parent);
     if (!producer) return { block: true, reason: 'No admitted model parent' };
     const query = ++toolOrdinal, call = { invocation: producer.invocation, slot: producer.slot, callId: event.toolCallId, name: event.toolName, parentId: event.parentToolCallId ?? null };
-    const args = Buffer.from(JSON.stringify(event.input)); if (args.length > 65536) return { block: true, reason: 'Argument bound' };
+    const args = Buffer.from(JSON.stringify(event.input)); if (args.length > toolArgsBytes) return { block: true, reason: 'Argument bound' };
     const answer = new Promise<boolean>(resolve => { toolWaiters.set(query, resolve); });
     await channel.sendBytes('root-tool', { query, ...call }, args);
     if (!await answer) return { block: true, reason: 'Model parent not admitted' };
@@ -57,9 +216,9 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     try { await channel.sendBytes('native-result', { query, invocation: producer.invocation, slot: producer.slot, callId: event.toolCallId, name: event.toolName, parentId: null }, body); await answer; }
     finally { nativeWaiters.delete(query); codemodeRoots.delete(event.toolCallId); }
   }); };
-  const executeTool = async (name: LocalToolName, id: string, args: unknown, signal?: AbortSignal): Promise<ToolResult> => {
+  const executeTool = async (name: BridgedToolName, id: string, args: unknown, signal?: AbortSignal): Promise<ToolResult> => {
     const producer = roots.get(id); if (!active || !producer || executionWaiters.size >= 32) throw new Error('No admitted tool parent');
-    const bytes = Buffer.from(JSON.stringify(args)); if (bytes.length > 65536) throw new Error('Tool argument bound');
+    const bytes = Buffer.from(JSON.stringify(args)); if (bytes.length > toolArgsBytes) throw new Error('Tool argument bound');
     const query = ++toolOrdinal, answer = new Promise<ToolResult>((resolve, reject) => { executionWaiters.set(query, { resolve, reject }); }); void answer.catch(() => {});
     const call = { invocation: producer.invocation, slot: producer.slot, callId: id, name, parentId: producer.parentId }, cancel = () => { void channel.send('tool-cancel', call).catch(() => channel.fail()); }; signal?.addEventListener('abort', cancel, { once: true });
     try { await channel.sendBytes('tool', { query, ...call }, bytes); if (signal?.aborted) cancel(); return await answer; }
@@ -74,7 +233,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     if (message.kind === 'restore-start') {
       if (session || active || restoring || restoredEntries) throw new Error('Duplicate restore'); restoring = true;
       const value = message.body as { selection: AdapterPolicy['selection']; sessionBytes: number; toolNames: string[] };
-      if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 8388608) throw new Error('Restore bound');
+      if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 67108864) throw new Error('Restore bound');
       const validator = new NativeSnapshot({ selection: value.selection, tools: value.toolNames, limits: { sessionBytes: value.sessionBytes } }), expected = snapshots.expect(async bytes => { validator.push(bytes); }, value.sessionBytes, 90000);
       void expected.done.then(async () => { restoredEntries = validator.finish(); restoring = false; await channel.send('restore-complete', null); }).catch(() => channel.fail());
       await channel.send('restore-ready', null); return;
@@ -88,11 +247,36 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     }
     if (message.kind === 'init') {
       if (session || restoring) throw new Error('duplicate init');
-      const value = message.body as { selection: AdapterPolicy['selection']; systemPrompt: string; outputTokens: number; toolNames: string[]; mcp: AdapterPolicy['mcp']; toolResultBytes: number; sessionBytes: number };
-      if (!Array.isArray(value.toolNames) || value.toolNames.length > 8 || new Set(value.toolNames).size !== value.toolNames.length || value.toolNames.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name))) throw new Error('Tool allowlist');
-      if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 8388608) throw new Error('Session bound'); sessionBytes = value.sessionBytes; snapshotPolicy = { selection: value.selection, tools: value.toolNames, limits: { sessionBytes } };
-      if (!Number.isSafeInteger(value.toolResultBytes) || value.toolResultBytes < 1 || value.toolResultBytes > 65536) throw new Error('Tool result bound'); toolResultBytes = value.toolResultBytes;
-      if (!Number.isSafeInteger(value.outputTokens) || value.outputTokens < 1 || value.outputTokens > 1024) throw new Error('output bound'); outputTokens = value.outputTokens;
+      const value = message.body as {
+        selection: AdapterPolicy['selection'];
+        systemPrompt: string;
+        outputTokens: number;
+        toolNames: string[];
+        mcp: AdapterPolicy['mcp'];
+        toolArgsBytes?: number;
+        toolResultBytes: number;
+        sessionBytes: number;
+        contextPolicy?: Partial<AdapterPolicy['context']>;
+        externalMcpTools?: readonly ExternalMcpToolSchema[];
+      };
+      if (
+        !Array.isArray(value.toolNames)
+        || value.toolNames.length > 128
+        || new Set(value.toolNames).size !== value.toolNames.length
+        || value.toolNames.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name) && !isExternalMcpToolName(name))
+      ) throw new Error('Tool allowlist');
+      if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 67108864) throw new Error('Session bound'); sessionBytes = value.sessionBytes; snapshotPolicy = { selection: value.selection, tools: value.toolNames, limits: { sessionBytes } };
+      const initToolArgsBytes = value.toolArgsBytes ?? 65536;
+      if (!Number.isSafeInteger(initToolArgsBytes) || initToolArgsBytes < 1 || initToolArgsBytes > 4194304) throw new Error('Tool argument bound'); toolArgsBytes = initToolArgsBytes;
+      if (!Number.isSafeInteger(value.toolResultBytes) || value.toolResultBytes < 1 || value.toolResultBytes > 4194304) throw new Error('Tool result bound'); toolResultBytes = value.toolResultBytes;
+      if (!Number.isSafeInteger(value.outputTokens) || value.outputTokens < 1 || value.outputTokens > 262144) throw new Error('output bound'); outputTokens = value.outputTokens;
+      const maxRequestBytes = value.contextPolicy?.maxRequestBytes ?? 65536;
+      const workingWindowCeiling = value.contextPolicy?.workingWindowCeiling ?? 98304;
+      const serviceMargin = value.contextPolicy?.serviceMargin ?? 32768;
+      const toolReserve = value.contextPolicy?.toolReserve ?? 16384;
+      if (!Number.isSafeInteger(maxRequestBytes) || maxRequestBytes < 1 || maxRequestBytes > 16777216) throw new Error('request byte bound');
+      if (!Number.isSafeInteger(workingWindowCeiling) || workingWindowCeiling < 1 || workingWindowCeiling > 16777216) throw new Error('window bound');
+      if (!Number.isSafeInteger(serviceMargin) || serviceMargin < 32768 || !Number.isSafeInteger(toolReserve) || toolReserve < 16384) throw new Error('margin bound');
       const directory = await mkdtemp(join(process.env.TMPDIR || '/tmp', 'loopwright-sdk-'));
       runtime = await ModelRuntime.create({ credentials: { read: async () => ({ type: 'api_key', key: 'loopwright-non-secret-placeholder' }), list: async () => [], modify: async () => undefined, delete: async () => {} }, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
       if (value.selection.customProvider) {
@@ -126,7 +310,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
       const model = runtime.getModel(value.selection.provider, value.selection.model);
       if (!model || model.api !== value.selection.api) { await channel.send('refused', { code: 'MODEL_UNAVAILABLE' }); return; }
       const compiled = await compileTrustedFactories([{ name: 'loopwright-authorization', factory: authorization }, ...(value.toolNames.includes('codemode') || value.mcp.names.length ? nativeMcpFactories({ tools: value.toolNames, mcp: value.mcp }, mcp) : [])], value.systemPrompt);
-      const customTools = options.customTools ?? bridgedTools(value.toolNames, executeTool);
+      const customTools = options.customTools ?? bridgedTools(value.toolNames, executeTool, value.externalMcpTools ?? []);
       const created = await createAgentSession({ cwd: '/workspace/candidate', agentDir: directory, modelRuntime: runtime, model, thinkingLevel: value.selection.thinking as never, tools: options.customTools ? customTools.map(tool => tool.name) : value.toolNames, customTools,
         resourceLoader: compiled.loader, settingsManager: compiled.settings, sessionManager: SessionManager.inMemory('/workspace/candidate', undefined, restoredEntries ?? undefined) });
       session = created.session; safeSnapshot = restoredEntries !== null; restoredEntries = null;
@@ -138,6 +322,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
       });
       if (created.extensionsResult !== compiled.extensions || created.extensionsResult.runtime !== compiled.extensions.runtime) throw new Error('native runtime binding');
       if (session.thinkingLevel !== value.selection.thinking || session.model?.id !== model.id) { await channel.send('refused', { code: 'THINKING_UNSUPPORTED' }); return; }
+      const maxBodyBytes = Math.min(maxRequestBytes, Math.min(model.contextWindow, workingWindowCeiling) - serviceMargin - outputTokens - toolReserve);
       session.agent.streamFunction = (selectedModel, context, streamOptions = {}) => {
         historyBound(); const invocation = ++ordinal; let used = false, slot: string | null = null;
         const grant = new Promise<string>((resolve, reject) => { invocationWaiters.set(invocation, { resolve, reject }); });
@@ -145,7 +330,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
         void channel.send('invoke', { invocation, provider: value.selection.provider, model: value.selection.model, thinking: value.selection.thinking, api: value.selection.api }).catch(() => channel.fail());
         const fetch = async (url: unknown, init: { body?: unknown; method?: string; headers?: HeadersInit } | undefined): Promise<Response> => {
           if (used || !active || pendingFetch) throw new Error('unadmitted fetch'); used = true; slot = await grant;
-          if (typeof init?.body !== 'string') throw new Error('unsupported final body'); const bytes = Buffer.from(init.body); if (bytes.length > 65536) throw new Error('request bytes');
+          if (typeof init?.body !== 'string') throw new Error('unsupported final body'); const bytes = Buffer.from(init.body); if (bytes.length > maxRequestBytes) throw new Error('request bytes');
           const headers = new Headers(init.headers);
           const auth = headers.get('authorization');
           if (auth && auth !== 'Bearer loopwright-non-secret-placeholder') throw new Error('unexpected SDK credential');
@@ -159,7 +344,8 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
         const restStreamOptions = { ...streamOptions };
         delete restStreamOptions.reasoning;
         const reasoningPart = value.selection.thinking === 'off' ? {} : { reasoning: value.selection.thinking as Exclude<typeof value.selection.thinking, 'off'> };
-        const native = runtime.streamSimple(selectedModel, context, { ...restStreamOptions, ...reasoningPart, fetch: fetch as typeof globalThis.fetch, apiKey: 'loopwright-non-secret-placeholder', env: {}, maxTokens: outputTokens, maxRetries: 0, cacheRetention: 'short' });
+        const sendContext = pruneContextForBudget(context, maxBodyBytes, value.selection.api);
+        const native = runtime.streamSimple(selectedModel, sendContext, { ...restStreamOptions, ...reasoningPart, fetch: fetch as typeof globalThis.fetch, apiKey: 'loopwright-non-secret-placeholder', env: {}, maxTokens: outputTokens, maxRetries: 0, cacheRetention: 'short' });
         const receipt = native.result().then(async message => {
           const toolCalls = message.content.filter(block => block.type === 'toolCall').map(call => ({ id: call.id, name: call.name, argumentsDigest: toolArgumentsDigest(call.arguments) }));
           if (slot) for (const call of toolCalls) roots.set(call.id, { invocation, slot, parentId: null });
@@ -188,8 +374,8 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     if (message.kind === 'mcp-message') { const value = message.body as { bytes: Uint8Array }; if (value.bytes.length > 65536) throw new Error('MCP message bound'); mcp.receive(parseJsonRpcMessage(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(value.bytes)))); return; }
     if (message.kind === 'mcp-refused') { mcp.refused(); return; }
     if (message.kind === 'tool-response') {
-      const value = message.body as { metadata: { query: number }; bytes: Uint8Array }, waiter = executionWaiters.get(value.metadata.query); if (!waiter || value.bytes.length > 65536) throw new Error('Unknown or oversized tool result');
-      executionWaiters.delete(value.metadata.query); waiter.resolve(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(value.bytes)) as unknown as ToolResult); return;
+      const value = message.body as { metadata: { query: number }; bytes: Uint8Array }, waiter = executionWaiters.get(value.metadata.query); if (!waiter || value.bytes.length > Math.max(65536, toolResultBytes * 2)) throw new Error('Unknown or oversized tool result');
+      executionWaiters.delete(value.metadata.query); waiter.resolve(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(value.bytes), { nodes: 262144, array: 4096, properties: 512 }) as unknown as ToolResult); return;
     }
     if (message.kind === 'tool-denied') { const value = message.body as { query: number }, waiter = executionWaiters.get(value.query); if (!waiter) throw new Error('Unknown tool denial'); executionWaiters.delete(value.query); waiter.reject(new Error('Owner refused tool execution')); return; }
     if (message.kind === 'response') {

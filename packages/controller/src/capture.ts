@@ -48,9 +48,9 @@ export async function adoptRoleCapture(store: LocalRunStore, artifacts: Artifact
   if (!requests.length || lastObservation?.outcome !== 'succeeded' || expectedRequests !== undefined && !same(expectedRequests, requestIds)
     || operations.some(item => item.state !== 'confirmed' || item.intent.nodeId !== attempt.nativeStepId || item.intent.effect === 'external_write'
       || item.linkedRequestId !== null && !requestIds.includes(item.linkedRequestId))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const command = await artifacts.read(attempt.command, 16384);
+  const command = await artifacts.read(attempt.command, 1048576);
   const decoded = await decodePiCapture({ version: 1, lock, policy: role.policy, checkpoint, sessionId: attempt.sessionId, roleId: role.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession, bytes: await artifacts.read(checkpoint.privateSession, 2097152) },
+    workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession, bytes: await artifacts.read(checkpoint.privateSession, 67108864) },
     command: attempt.purpose === 'compaction' ? null : { textDigest: hash(command), requestIds } });
   if (!decoded.ok) refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: decoded.error.code });
   const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(decoded.value.candidate));
@@ -59,6 +59,6 @@ export async function adoptRoleCapture(store: LocalRunStore, artifacts: Artifact
   const originalManifest = await artifacts.json('native-manifest', decoded.value.candidate, 32768), manifest = await artifacts.json('manifest', canonicalManifest.value.manifest, 32768);
   const submission = decoded.value.submission === null ? null : await artifacts.put('submission', decoded.value.submission, 1048576);
   const wrapper = await artifacts.json('role-outcome', { version: 1, attemptId: attempt.id, command: attempt.command, roleId: role.roleId, nodeId: attempt.nodeId, stepId: attempt.nativeStepId, sessionId: attempt.sessionId, checkpointId,
-    originalManifest, manifest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, journal: { requestIds, operationIds } }, 1048576);
+    originalManifest, manifest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, journal: { requestIds, operationIds } }, 4194304);
   return { checkpointId, outcome: wrapper, originalManifest, manifest, digest: canonicalManifest.value.digest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, artifacts: decoded.value.artifacts };
 }

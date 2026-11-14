@@ -4100,4 +4100,205 @@ spec:
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('discovers newer prereleases when allowPrerelease is true, populates recentVersions, and injects upstream/revise context into authorPrompt', async () => {
+    const work = await mkdtemp(join(tmpdir(), 'lw-prerelease-prompt-'));
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    let server: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      await mkdir(join(repo, '.loopwright'), { recursive: true });
+      await writeFile(join(repo, '.loopwright', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: runner-sync
+spec:
+  goal:
+    candidate: Sync runner upstreams.
+    noChange: Verify no upstream drift.
+  scope:
+    writable:
+      - .autosync
+    protected:
+      - .github
+      - .loopwright
+  upstreams:
+    - id: vllm-ascend
+      kind: github-release
+      source: vllm-project/vllm-ascend
+      allowPrerelease: true
+      watchedPaths: [".autosync/proposal.json"]
+    - id: vllm
+      kind: github-release
+      source: vllm-project/vllm
+      watchedPaths: [".autosync/proposal.json"]
+  proposal:
+    path: .autosync/proposal.json
+    requiredFields: [schema_version]
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+    externalGates: []
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: auto-sync/
+    titleTemplate: "chore: sync"
+  memory:
+    directory: .loopwright/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: [revise, retry, status]
+    commentPrefixes: ["/auto-sync"]
+`);
+
+      server = await startHttpServer((req, res) => {
+        const url = req.url ?? '';
+        if (url === '/api/repos/vllm-project/vllm-ascend/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.16.0', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-ascend/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { tag_name: 'v0.19.0-draft', prerelease: true, draft: true },
+            { tag_name: 'v0.18.0rc1', prerelease: true, draft: false },
+            { tag_name: 'v0.17.0rc2', prerelease: true, draft: false },
+            { tag_name: 'v0.16.0', prerelease: false, draft: false },
+          ]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.19.1', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { tag_name: 'v0.20.0rc1', prerelease: true, draft: false },
+            { tag_name: 'v0.19.1', prerelease: false, draft: false },
+            { tag_name: 'v0.19.0', prerelease: false, draft: false },
+          ]));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: join(repo, '.loopwright', 'taskpack.yaml'),
+        repositoryRoot: repo,
+      });
+      const discovered = await discoverTaskpackUpstreams(manifest, {
+        repositoryRoot: repo,
+        apiBaseUrl: `${server.url}/api`,
+        githubToken: 'ghp_test_prerelease_secret',
+      });
+      assert.deepEqual(discovered, [
+        {
+          upstreamId: 'vllm-ascend',
+          status: 'available',
+          version: 'v0.18.0rc1',
+          recentVersions: ['v0.18.0rc1', 'v0.17.0rc2', 'v0.16.0'],
+        },
+        {
+          upstreamId: 'vllm',
+          status: 'available',
+          version: 'v0.19.1',
+          recentVersions: ['v0.19.1', 'v0.19.0'],
+        },
+      ]);
+
+      const prevToken = process.env['LOOPWRIGHT_PROVIDER_TOKEN'];
+      const prevPubSecret = process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'];
+      process.env['LOOPWRIGHT_PROVIDER_TOKEN'] = 'sk-prompt-inject-test-1234';
+      process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'] = 'pub-sign-secret-1234';
+      try {
+        const discoverCompiled = await runGitHubActionEntrypoint({
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          baseRevision: 'a'.repeat(40),
+          mode: 'candidate',
+          eventName: 'workflow_dispatch',
+          runRoot,
+          runId: 'run-prompt-discover',
+          dryRun: true,
+          upstreamRecords: discovered,
+          publicationEndpoint: {
+            id: 'pub',
+            url: 'https://publisher.example.test/publish',
+            signingCredentialRef: 'pub-signing',
+          },
+          env: {
+            ...process.env,
+            PACK_RUN_URL: 'https://github.com/gpustack/runner/actions/runs/43573667865',
+          },
+        });
+        assert.equal(discoverCompiled.kind, 'compiled');
+        if (discoverCompiled.kind === 'compiled') {
+          const authorHandler = discoverCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
+          const promptText = String(authorHandler?.parameters['prompt'] ?? '');
+          assert.ok(promptText.includes('v0.18.0rc1'), promptText);
+          assert.ok(promptText.includes('v0.19.1'), promptText);
+          assert.ok(promptText.includes('https://github.com/gpustack/runner/actions/runs/43573667865'), promptText);
+          assert.equal(promptText.includes('sk-prompt-inject-test-1234'), false);
+        }
+
+        const reviseCompiled = await runGitHubActionEntrypoint({
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          baseRevision: 'a'.repeat(40),
+          sourceRevision: 'b'.repeat(40),
+          mode: 'candidate',
+          eventName: 'issue_comment',
+          eventPayload: {
+            action: 'created',
+            issue: { number: 420, pull_request: { head: { sha: 'b'.repeat(40) } } },
+            comment: {
+              id: 778899,
+              body: '/auto-sync revise\nKeep CUDA vLLM at 0.19.0 and drop ROCm changes.',
+              author_association: 'MEMBER',
+              user: { login: 'thxcode', type: 'User' },
+            },
+          },
+          runRoot,
+          runId: 'run-prompt-revise',
+          dryRun: true,
+          publicationEndpoint: {
+            id: 'pub',
+            url: 'https://publisher.example.test/publish',
+            signingCredentialRef: 'pub-signing',
+          },
+          env: {
+            ...process.env,
+            PACK_RUN_URL: 'https://github.com/evil/other/actions/runs/999',
+          },
+        });
+        assert.equal(reviseCompiled.kind, 'compiled');
+        if (reviseCompiled.kind === 'compiled') {
+          const authorHandler = reviseCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
+          const promptText = String(authorHandler?.parameters['prompt'] ?? '');
+          assert.ok(promptText.includes('<operator_guidance>'), promptText);
+          assert.ok(promptText.includes('Keep CUDA vLLM at 0.19.0 and drop ROCm changes.'), promptText);
+          assert.equal(promptText.includes('evil/other'), false, 'cross-repository PACK_RUN_URL must never be injected');
+        }
+      } finally {
+        if (prevToken === undefined) delete process.env['LOOPWRIGHT_PROVIDER_TOKEN'];
+        else process.env['LOOPWRIGHT_PROVIDER_TOKEN'] = prevToken;
+        if (prevPubSecret === undefined) delete process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'];
+        else process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'] = prevPubSecret;
+      }
+    } finally {
+      await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
 });

@@ -5,9 +5,10 @@ import {
   TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS,
   type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
   type TaskpackCheckDeclaration, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
-  type TaskpackDecisionsDeclaration, type TaskpackManifest, type TaskpackModelDeclaration,
+  type TaskpackDecisionsDeclaration, type TaskpackHttpMcpServerDeclaration, type TaskpackLimitsDeclaration, type TaskpackManifest,
+  type TaskpackMcpDeclaration, type TaskpackMcpServerDeclaration, type TaskpackModelDeclaration,
   type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackSandboxDeclaration,
-  type TaskpackUpstreamDescriptor,
+  type TaskpackStdioMcpServerDeclaration, type TaskpackUpstreamDescriptor,
 } from './types.js';
 import { validateTaskpackModelsDeclaration } from './models-config.js';
 
@@ -18,6 +19,8 @@ const FIELD_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const PATH_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+$/;
 const RESERVED_DEVICE_NAME_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const COMMAND_ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const MCP_SERVER_ID_PATTERN = /^[a-z][a-z0-9_]*(?:-[a-z0-9_]+)*$/;
+const HTTP_HEADER_NAME_PATTERN = /^[A-Za-z0-9-]+$/;
 const RESERVED_COMMAND_ENV_NAMES = new Set([
   'GH_TOKEN', 'GITHUB_TOKEN', 'BASH_ENV', 'ENV', 'NODE_OPTIONS',
   'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LLM_TOKEN',
@@ -340,6 +343,280 @@ function isReservedCommandEnvName(name: string): boolean {
   return RESERVED_COMMAND_ENV_PREFIXES.some(prefix => name.startsWith(prefix));
 }
 
+function requireSafeIntInRange(value: unknown, path: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || Object.is(value, -0) || value < min || value > max) {
+    manifestInvalid(`expected an integer in ${min}..${max}`, path);
+  }
+  return value;
+}
+
+export function validateTaskpackLimitsDeclaration(value: unknown, path: string): TaskpackLimitsDeclaration {
+  const raw = requireObject(value, path, [
+    'wallTimeSeconds', 'wallTimeMs', 'totalTokens', 'contextWindow', 'maxOutputTokens', 'perCallOutputTokens',
+    'maxModelCalls', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
+    'toolTimeoutSeconds', 'toolWallMs', 'commandTimeoutSeconds', 'responseBytes', 'toolResultBytes',
+    'toolArgsBytes', 'promptBytes', 'maxRequestBytes', 'workingWindowBytes', 'fileBytes',
+    'sessionBytes', 'candidateEntries',
+  ]);
+  const out: Record<string, number> = {};
+  const setOpt = (key: string, min: number, max: number): void => {
+    if (raw[key] !== undefined) {
+      out[key] = requireSafeIntInRange(raw[key], `${path}/${key}`, min, max);
+    }
+  };
+  setOpt('wallTimeSeconds', 60, 21_600);
+  setOpt('wallTimeMs', 60_000, 21_600_000);
+  if (out['wallTimeSeconds'] !== undefined && out['wallTimeMs'] !== undefined && out['wallTimeSeconds'] * 1000 !== out['wallTimeMs']) {
+    manifestInvalid('wallTimeSeconds and wallTimeMs conflict', `${path}/wallTimeMs`);
+  }
+  setOpt('totalTokens', 1_000, 1_000_000_000);
+  setOpt('contextWindow', 1_024, 10_000_000);
+  setOpt('maxOutputTokens', 256, 262_144);
+  setOpt('perCallOutputTokens', 256, 262_144);
+  if (out['maxOutputTokens'] !== undefined && out['perCallOutputTokens'] !== undefined && out['maxOutputTokens'] !== out['perCallOutputTokens']) {
+    manifestInvalid('maxOutputTokens and perCallOutputTokens conflict', `${path}/perCallOutputTokens`);
+  }
+  setOpt('maxModelCalls', 1, 1_024);
+  setOpt('maxAttempts', 1, 16);
+  setOpt('maxFormatRepairs', 0, 8);
+  setOpt('maxImplementationRepairs', 0, 8);
+  setOpt('maxTransportRetries', 0, 8);
+  setOpt('toolTimeoutSeconds', 1, 1_800);
+  setOpt('toolWallMs', 1_000, 1_800_000);
+  if (out['toolTimeoutSeconds'] !== undefined && out['toolWallMs'] !== undefined && out['toolTimeoutSeconds'] * 1000 !== out['toolWallMs']) {
+    manifestInvalid('toolTimeoutSeconds and toolWallMs conflict', `${path}/toolWallMs`);
+  }
+  setOpt('commandTimeoutSeconds', 1, 3_600);
+  setOpt('responseBytes', 65_536, 67_108_864);
+  setOpt('toolResultBytes', 16_384, 4_194_304);
+  setOpt('toolArgsBytes', 16_384, 4_194_304);
+  setOpt('promptBytes', 4_096, 1_048_576);
+  setOpt('maxRequestBytes', 65_536, 16_777_216);
+  setOpt('workingWindowBytes', 131_072, 16_777_216);
+  setOpt('fileBytes', 65_536, 67_108_864);
+  setOpt('sessionBytes', 524_288, 67_108_864);
+  setOpt('candidateEntries', 16, 4_096);
+  return Object.freeze(out) as TaskpackLimitsDeclaration;
+}
+
+export interface ValidateMcpServersOptions {
+  readonly allowLoopbackHttp?: boolean | undefined;
+}
+
+export function validateMcpServerDeclarations(
+  value: unknown,
+  path: string,
+  options: ValidateMcpServersOptions = {},
+): readonly TaskpackMcpServerDeclaration[] {
+  if (!Array.isArray(value) || value.length > 16) {
+    manifestInvalid('mcp.servers must be an array of 0..16 server declarations', path);
+  }
+  const seenIds = new Set<string>();
+  const servers: TaskpackMcpServerDeclaration[] = [];
+
+  for (const [idx, item] of value.entries()) {
+    const serverPath = `${path}/${idx}`;
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      manifestInvalid('expected an MCP server declaration object', serverPath);
+    }
+    const rawAny = item as Record<string, unknown>;
+    if (rawAny['oauth'] !== undefined) {
+      throw new GitHubAppError('MCP_OAUTH_UNSUPPORTED', 'MCP OAuth authentication is unsupported', `${serverPath}/oauth`);
+    }
+    if (rawAny['auth'] !== undefined && rawAny['auth'] !== null && typeof rawAny['auth'] === 'object') {
+      const authType = (rawAny['auth'] as Record<string, unknown>)['type'];
+      if (typeof authType === 'string' && authType.trim().toLowerCase() === 'oauth') {
+        throw new GitHubAppError('MCP_OAUTH_UNSUPPORTED', 'MCP OAuth authentication is unsupported', `${serverPath}/auth`);
+      }
+    }
+    const transportRaw = rawAny['transport'];
+    if (transportRaw !== 'stdio' && transportRaw !== 'http') {
+      manifestInvalid('mcp server transport must be "stdio" or "http"', `${serverPath}/transport`);
+    }
+    const serverId = requireString(rawAny['id'], `${serverPath}/id`, 1, 24);
+    if (!MCP_SERVER_ID_PATTERN.test(serverId) || serverId === 'workspace') {
+      manifestInvalid('mcp server id must match ^[a-z][a-z0-9_]*(?:-[a-z0-9_]+)*$ and must not be "workspace"', `${serverPath}/id`);
+    }
+    if (seenIds.has(serverId)) {
+      manifestInvalid(`duplicate mcp server id "${serverId}"`, `${serverPath}/id`);
+    }
+    seenIds.add(serverId);
+
+    if (transportRaw === 'stdio') {
+      const raw = requireObject(item, serverPath, [
+        'id', 'transport', 'command', 'args', 'env', 'envFrom', 'timeoutSeconds', 'includeTools', 'readOnly', 'required',
+      ]);
+      const command = requireString(raw['command'], `${serverPath}/command`, 1, 512);
+      const isBareCommand = !command.includes('/') && !command.includes('\\');
+      const isAbsoluteCommand = command.startsWith('/') && !command.includes('..') && !command.includes('\\');
+      if (!isBareCommand && !isAbsoluteCommand) {
+        manifestInvalid('stdio mcp command must be a bare executable name on PATH or an absolute path', `${serverPath}/command`);
+      }
+      let args: readonly string[] | undefined;
+      if (raw['args'] !== undefined) {
+        if (!Array.isArray(raw['args']) || raw['args'].length > 64) {
+          manifestInvalid('stdio mcp args must be an array of 0..64 strings', `${serverPath}/args`);
+        }
+        args = Object.freeze(raw['args'].map((arg, aIdx) => requireString(arg, `${serverPath}/args/${aIdx}`, 0, 1024)));
+      }
+      let env: Readonly<Record<string, string>> | undefined;
+      if (raw['env'] !== undefined) {
+        if (raw['env'] === null || typeof raw['env'] !== 'object' || Array.isArray(raw['env'])) {
+          manifestInvalid('stdio mcp env must be an object of string entries', `${serverPath}/env`);
+        }
+        const entries = Object.entries(raw['env'] as Record<string, unknown>);
+        if (entries.length > 32) manifestInvalid('stdio mcp env exceeds 32 entries', `${serverPath}/env`);
+        const envOut: Record<string, string> = {};
+        for (const [k, v] of entries) {
+          if (FORBIDDEN_KEYS.has(k) || !COMMAND_ENV_NAME_PATTERN.test(k)) {
+            manifestInvalid(`invalid env variable name "${k}"`, `${serverPath}/env/${k}`);
+          }
+          envOut[k] = requireString(v, `${serverPath}/env/${k}`, 0, 2048);
+        }
+        env = Object.freeze(envOut);
+      }
+      let envFrom: Readonly<Record<string, string>> | undefined;
+      if (raw['envFrom'] !== undefined) {
+        if (raw['envFrom'] === null || typeof raw['envFrom'] !== 'object' || Array.isArray(raw['envFrom'])) {
+          manifestInvalid('stdio mcp envFrom must be an object mapping target env names to host env names', `${serverPath}/envFrom`);
+        }
+        const entries = Object.entries(raw['envFrom'] as Record<string, unknown>);
+        if (entries.length > 32) manifestInvalid('stdio mcp envFrom exceeds 32 entries', `${serverPath}/envFrom`);
+        const envFromOut: Record<string, string> = {};
+        for (const [targetName, sourceName] of entries) {
+          if (FORBIDDEN_KEYS.has(targetName) || !COMMAND_ENV_NAME_PATTERN.test(targetName)) {
+            manifestInvalid(`invalid target env variable name "${targetName}"`, `${serverPath}/envFrom/${targetName}`);
+          }
+          const src = requireString(sourceName, `${serverPath}/envFrom/${targetName}`, 1, 64);
+          if (!COMMAND_ENV_NAME_PATTERN.test(src) && !/^INPUT_[A-Z0-9_-]{1,63}$/.test(src)) {
+            manifestInvalid(`invalid source env variable name "${src}"`, `${serverPath}/envFrom/${targetName}`);
+          }
+          envFromOut[targetName] = src;
+        }
+        envFrom = Object.freeze(envFromOut);
+      }
+      const timeoutSeconds = raw['timeoutSeconds'] === undefined ? undefined : requireSafeIntInRange(raw['timeoutSeconds'], `${serverPath}/timeoutSeconds`, 1, 600);
+      const includeTools = raw['includeTools'] === undefined ? undefined : requireStringList(raw['includeTools'], `${serverPath}/includeTools`, 1, 64);
+      const readOnly = raw['readOnly'] === undefined ? undefined : requireBoolean(raw['readOnly'], `${serverPath}/readOnly`);
+      const required = raw['required'] === undefined ? undefined : requireBoolean(raw['required'], `${serverPath}/required`);
+      const decl: TaskpackStdioMcpServerDeclaration = Object.freeze({
+        id: serverId,
+        transport: 'stdio',
+        command,
+        ...(args === undefined ? {} : { args }),
+        ...(env === undefined ? {} : { env }),
+        ...(envFrom === undefined ? {} : { envFrom }),
+        ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        ...(includeTools === undefined ? {} : { includeTools }),
+        ...(readOnly === undefined ? {} : { readOnly }),
+        ...(required === undefined ? {} : { required }),
+      });
+      servers.push(decl);
+    } else {
+      const raw = requireObject(item, serverPath, [
+        'id', 'transport', 'url', 'headers', 'headersFrom', 'bearerTokenEnv', 'timeoutSeconds', 'includeTools', 'readOnly', 'required',
+      ]);
+      const urlStr = requireString(raw['url'], `${serverPath}/url`, 1, 2048);
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(urlStr);
+      } catch {
+        manifestInvalid('http mcp url is not a valid URL', `${serverPath}/url`);
+      }
+      if (parsedUrl.username !== '' || parsedUrl.password !== '' || parsedUrl.hash !== '') {
+        manifestInvalid('http mcp url must not contain credentials or fragments', `${serverPath}/url`);
+      }
+      const isLoopback = parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === '[::1]' || parsedUrl.hostname === 'localhost';
+      if (parsedUrl.protocol !== 'https:' && !(options.allowLoopbackHttp === true && parsedUrl.protocol === 'http:' && isLoopback)) {
+        manifestInvalid('http mcp url must use https://', `${serverPath}/url`);
+      }
+      let headers: Readonly<Record<string, string>> | undefined;
+      if (raw['headers'] !== undefined) {
+        if (raw['headers'] === null || typeof raw['headers'] !== 'object' || Array.isArray(raw['headers'])) {
+          manifestInvalid('http mcp headers must be an object of string entries', `${serverPath}/headers`);
+        }
+        const entries = Object.entries(raw['headers'] as Record<string, unknown>);
+        if (entries.length > 32) manifestInvalid('http mcp headers exceeds 32 entries', `${serverPath}/headers`);
+        const headersOut: Record<string, string> = {};
+        for (const [k, v] of entries) {
+          if (FORBIDDEN_KEYS.has(k) || !HTTP_HEADER_NAME_PATTERN.test(k)) {
+            manifestInvalid(`invalid header name "${k}"`, `${serverPath}/headers/${k}`);
+          }
+          if (k.toLowerCase() === 'authorization') {
+            manifestInvalid('use bearerTokenEnv or headersFrom instead of literal authorization header', `${serverPath}/headers/${k}`);
+          }
+          headersOut[k] = requireString(v, `${serverPath}/headers/${k}`, 0, 2048);
+        }
+        headers = Object.freeze(headersOut);
+      }
+      let headersFrom: Readonly<Record<string, string>> | undefined;
+      if (raw['headersFrom'] !== undefined) {
+        if (raw['headersFrom'] === null || typeof raw['headersFrom'] !== 'object' || Array.isArray(raw['headersFrom'])) {
+          manifestInvalid('http mcp headersFrom must be an object mapping header names to host env names', `${serverPath}/headersFrom`);
+        }
+        const entries = Object.entries(raw['headersFrom'] as Record<string, unknown>);
+        if (entries.length > 32) manifestInvalid('http mcp headersFrom exceeds 32 entries', `${serverPath}/headersFrom`);
+        const headersFromOut: Record<string, string> = {};
+        for (const [headerName, sourceName] of entries) {
+          if (FORBIDDEN_KEYS.has(headerName) || !HTTP_HEADER_NAME_PATTERN.test(headerName)) {
+            manifestInvalid(`invalid header name "${headerName}"`, `${serverPath}/headersFrom/${headerName}`);
+          }
+          const src = requireString(sourceName, `${serverPath}/headersFrom/${headerName}`, 1, 64);
+          if (!COMMAND_ENV_NAME_PATTERN.test(src) && !/^INPUT_[A-Z0-9_-]{1,63}$/.test(src)) {
+            manifestInvalid(`invalid source env variable name "${src}"`, `${serverPath}/headersFrom/${headerName}`);
+          }
+          headersFromOut[headerName] = src;
+        }
+        headersFrom = Object.freeze(headersFromOut);
+      }
+      let bearerTokenEnv: string | undefined;
+      if (raw['bearerTokenEnv'] !== undefined) {
+        const src = requireString(raw['bearerTokenEnv'], `${serverPath}/bearerTokenEnv`, 1, 64);
+        if (!COMMAND_ENV_NAME_PATTERN.test(src) && !/^INPUT_[A-Z0-9_-]{1,63}$/.test(src)) {
+          manifestInvalid(`invalid bearerTokenEnv "${src}"`, `${serverPath}/bearerTokenEnv`);
+        }
+        bearerTokenEnv = src;
+      }
+      const timeoutSeconds = raw['timeoutSeconds'] === undefined ? undefined : requireSafeIntInRange(raw['timeoutSeconds'], `${serverPath}/timeoutSeconds`, 1, 600);
+      const includeTools = raw['includeTools'] === undefined ? undefined : requireStringList(raw['includeTools'], `${serverPath}/includeTools`, 1, 64);
+      const readOnly = raw['readOnly'] === undefined ? undefined : requireBoolean(raw['readOnly'], `${serverPath}/readOnly`);
+      const required = raw['required'] === undefined ? undefined : requireBoolean(raw['required'], `${serverPath}/required`);
+      const decl: TaskpackHttpMcpServerDeclaration = Object.freeze({
+        id: serverId,
+        transport: 'http',
+        url: urlStr,
+        ...(headers === undefined ? {} : { headers }),
+        ...(headersFrom === undefined ? {} : { headersFrom }),
+        ...(bearerTokenEnv === undefined ? {} : { bearerTokenEnv }),
+        ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        ...(includeTools === undefined ? {} : { includeTools }),
+        ...(readOnly === undefined ? {} : { readOnly }),
+        ...(required === undefined ? {} : { required }),
+      });
+      servers.push(decl);
+    }
+  }
+  return Object.freeze(servers);
+}
+
+export function collectMcpReferencedEnvNames(servers: readonly TaskpackMcpServerDeclaration[] | undefined): ReadonlySet<string> {
+  const names = new Set<string>();
+  if (!servers) return names;
+  for (const server of servers) {
+    if (server.transport === 'stdio' && server.envFrom !== undefined) {
+      for (const src of Object.values(server.envFrom)) names.add(src);
+    } else if (server.transport === 'http') {
+      if (server.headersFrom !== undefined) {
+        for (const src of Object.values(server.headersFrom)) names.add(src);
+      }
+      if (server.bearerTokenEnv !== undefined) {
+        names.add(server.bearerTokenEnv);
+      }
+    }
+  }
+  return names;
+}
+
 export interface ValidateTaskpackManifestOptions {
   readonly controlRoot?: string | undefined;
   readonly manifestPath?: string | undefined;
@@ -361,8 +638,11 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
 
   const spec = requireObject(root['spec'], '/spec', [
     'goal', 'scope', 'instructions', 'upstreams', 'proposal', 'verification',
-    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'output',
+    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'output',
   ]);
+  const limits: TaskpackLimitsDeclaration | undefined = spec['limits'] === undefined
+    ? undefined
+    : validateTaskpackLimitsDeclaration(spec['limits'], '/spec/limits');
   const goal = requireObject(spec['goal'], '/spec/goal', ['candidate', 'noChange']);
   const goalCandidate = requireString(goal['candidate'], '/spec/goal/candidate', 1, 1024);
   const goalNoChange = requireString(goal['noChange'], '/spec/goal/noChange', 1, 1024);
@@ -473,13 +753,13 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
       if (!protectedPaths.some(protectedPath => pathCoveredBy(script, protectedPath))) {
         throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `command.v1 script "${script}" must reside inside a protected path`, `${paramPath}/script`);
       }
-      let timeoutSeconds = 30;
+      let explicitTimeoutSeconds: number | undefined;
       if (params['timeoutSeconds'] !== undefined) {
         const rawTimeout = params['timeoutSeconds'];
-        if (typeof rawTimeout !== 'number' || !Number.isSafeInteger(rawTimeout) || rawTimeout < 1 || rawTimeout > 55) {
-          manifestInvalid('command.v1 timeoutSeconds must be an integer in 1..55', `${paramPath}/timeoutSeconds`);
+        if (typeof rawTimeout !== 'number' || !Number.isSafeInteger(rawTimeout) || rawTimeout < 1 || rawTimeout > 3_600) {
+          manifestInvalid('command.v1 timeoutSeconds must be an integer in 1..3600', `${paramPath}/timeoutSeconds`);
         }
-        timeoutSeconds = rawTimeout;
+        explicitTimeoutSeconds = rawTimeout;
       }
       const allowReadOnlyGitHubToken = params['allowReadOnlyGitHubToken'] === undefined
         ? false
@@ -500,7 +780,12 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
       return Object.freeze({
         id: checkId,
         implementation: 'command.v1' as const,
-        parameters: Object.freeze({ script, timeoutSeconds, allowReadOnlyGitHubToken, env }),
+        parameters: Object.freeze({
+          script,
+          ...(explicitTimeoutSeconds !== undefined ? { timeoutSeconds: explicitTimeoutSeconds } : {}),
+          allowReadOnlyGitHubToken,
+          env,
+        }),
       });
     }
     const parametersKey = Object.hasOwn(check, 'parameters') ? 'parameters' : '';
@@ -758,6 +1043,34 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     }
   }
 
+  let mcp: TaskpackMcpDeclaration | undefined;
+  if (spec['mcp'] !== undefined) {
+    const rawMcp = Array.isArray(spec['mcp'])
+      ? { servers: spec['mcp'] }
+      : requireObject(spec['mcp'], '/spec/mcp', ['servers']);
+    const servers = validateMcpServerDeclarations(
+      rawMcp['servers'],
+      Array.isArray(spec['mcp']) ? '/spec/mcp' : '/spec/mcp/servers',
+    );
+    mcp = Object.freeze({ servers });
+    const mcpSecretEnvs = collectMcpReferencedEnvNames(servers);
+    if (mcpSecretEnvs.size > 0) {
+      for (const [checkIdx, check] of localChecks.entries()) {
+        if (check.implementation !== 'command.v1') continue;
+        const envList = check.parameters?.['env'];
+        if (!Array.isArray(envList)) continue;
+        for (const [envIdx, envName] of envList.entries()) {
+          if (typeof envName === 'string' && mcpSecretEnvs.has(envName)) {
+            manifestInvalid(
+              `command.v1 env "${envName}" conflicts with spec.mcp secret env binding`,
+              `/spec/verification/localChecks/${checkIdx}/parameters/env/${envIdx}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
   let output: TaskpackOutputDeclaration | undefined;
   if (spec['output'] !== undefined) {
     const parseOutputFormats = (rawFormats: unknown, fmtPath: string): readonly TaskpackOutputFormat[] => {
@@ -825,6 +1138,8 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),
     ...(models === undefined ? {} : { models }),
+    ...(mcp === undefined ? {} : { mcp }),
+    ...(limits === undefined ? {} : { limits }),
     ...(output === undefined ? {} : { output }),
   };
   const specRecord: TaskpackManifest['spec'] = Object.freeze(baseSpec);

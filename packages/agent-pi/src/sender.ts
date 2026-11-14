@@ -51,7 +51,7 @@ export class Sender implements RuntimeBroker {
     try {
       if (bytes.byteLength > this.input.policy.limits.toolArgsBytes) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
       let args: unknown;
-      try { args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { refuse('TOOL_DENIED', '', { phase: 'tool' }); }
+      try { args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 262144, array: 4096 }); } catch { refuse('TOOL_DENIED', '', { phase: 'tool' }); }
       const key = identity.invocation + ':' + identity.callId;
       if (!this.#tools || turn.executedCalls.has(key) || !await this.rootTool({ ...identity, argumentsDigest: toolArgumentsDigest(args) }) || !slot.final) refuse('TOOL_DENIED', '', { phase: 'tool' });
       await this.#events('tool_start', { requestId: slot.final.requestId, digest: digest(bytes) });
@@ -72,7 +72,7 @@ export class Sender implements RuntimeBroker {
     this.#destination = resolveProviderDestination(input.policy.selection);
     this.#authHeader = resolveProviderAuthHeaderName(input.policy.selection);
     this.#modelCost = resolveCatalogModel(input.policy.selection).record.cost;
-    this.#admission = new Admission(host, { destination: this.#destination, fetch: ports.fetch });
+    this.#admission = new Admission(host, { destination: this.#destination, fetch: ports.fetch, maxRequestBytes: input.policy.context.maxRequestBytes });
     this.#catalog = freeze(structuredClone(ports.catalog ?? selectedCatalog(input)));
   }
   begin(kind: 'execute' | 'compact', input: unknown): void {
@@ -116,7 +116,7 @@ export class Sender implements RuntimeBroker {
         const view = stateValue(this.host.store.inspect());
         if (view.counts.requests >= this.input.policy.limits.requests || view.counts.operations >= this.input.policy.limits.operations) refuse('REQUEST_REFUSED');
         const remaining = view.clock.remainingTaskMs.safeValue; if (remaining === null || remaining <= 0) refuse('DEADLINE');
-        const signal = AbortSignal.any([turn.abort.signal, AbortSignal.timeout(Math.min(90000, remaining))]);
+        const signal = AbortSignal.any([turn.abort.signal, AbortSignal.timeout(Math.min(300000, remaining))]);
         const credential = await this.#credential(turn, signal);
         if (bytes.includes(Buffer.from(credential))) refuse('PAYLOAD_MISMATCH', '', { phase: 'admission' });
         const attemptAssessment = assessFinalRequestContext(bytes, this.input.policy.context, contextSelection);
@@ -232,7 +232,7 @@ export class Sender implements RuntimeBroker {
     if (slot.turn !== this.#turn || slot.turn.failure || slot.turn.abort.signal.aborted || !slot.parsedDone || !slot.final?.committed || !this.input.policy.tools.includes(input.name)) return false;
     if (input.argumentsBytes) {
       if (input.argumentsBytes.byteLength > this.input.policy.limits.toolArgsBytes) return false;
-      try { if (canonical(toolArgumentsDigest(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(input.argumentsBytes)))) !== canonical(input.argumentsDigest)) return false; } catch { return false; }
+      try { if (canonical(toolArgumentsDigest(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(input.argumentsBytes), { nodes: 262144, array: 4096 }))) !== canonical(input.argumentsDigest)) return false; } catch { return false; }
     }
     const root = slot.final.raw?.toolCalls.find(call => call.id === (input.parentId ?? input.callId));
     if (!root) return false;
@@ -256,7 +256,7 @@ export class Sender implements RuntimeBroker {
     const key = identity.invocation + ':' + identity.callId, parent = this.#native.get(key);
     try {
       if (!parent || parent.identity.slot !== identity.slot || identity.parentId !== null || identity.name !== 'codemode' || bytes.length > this.input.policy.limits.toolResultBytes) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
-      const value = object(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), ['argumentsDigest', 'result']);
+      const value = object(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 262144, array: 4096 }), ['argumentsDigest', 'result']);
       const root = parent.slot.final!.raw!.toolCalls.find(call => call.id === identity.callId); if (!root || canonical(root.argumentsDigest) !== canonical(value.argumentsDigest)) refuse('PAYLOAD_MISMATCH', '', { phase: 'tool' });
       const result = value.result as { content?: { type: string; text: string }[]; isError?: unknown };
       if (!Array.isArray(result.content) || result.content.length > 16 || result.content.some(block => block.type !== 'text' || typeof block.text !== 'string') || typeof result.isError !== 'boolean') refuse('TOOL_DENIED', '', { phase: 'tool' });

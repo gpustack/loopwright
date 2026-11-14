@@ -1286,7 +1286,7 @@ spec:
     );
   });
 
-  it('validates, SHA-256-pins, and stages nested spec.instructions while enforcing the 24576-byte aggregate limit', async () => {
+  it('validates, SHA-256-pins, and stages nested spec.instructions while enforcing the 262144-byte aggregate limit', async () => {
     await withSandbox(async root => {
       withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
       withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
@@ -1340,8 +1340,13 @@ spec:
       }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' });
       assert.deepEqual(singleInstr.spec.instructions, ['.auto-sync/prompts/a.md']);
 
-      // Aggregate > 24576 bytes is refused
-      await writeFile(join(root, '.auto-sync', 'prompts', 'b.md'), 'x'.repeat(24_570), 'utf8');
+      // 40 KB instruction file compiles cleanly under the 262144-byte aggregate ceiling
+      await writeFile(join(root, '.auto-sync', 'prompts', 'b.md'), 'x'.repeat(40_960), 'utf8');
+      const compiled40k = await compileDeclarativeTaskpack(manifest, bindingsFor(manifest, { repositoryRoot: root }));
+      assert.equal(compiled40k.instructionResources?.[1]?.bytes.byteLength, 40_960);
+
+      // Aggregate > 262144 bytes is refused
+      await writeFile(join(root, '.auto-sync', 'prompts', 'b.md'), 'x'.repeat(262_140), 'utf8');
       await assert.rejects(
         compileDeclarativeTaskpack(manifest, bindingsFor(manifest, { repositoryRoot: root })),
         (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
@@ -1384,8 +1389,16 @@ spec:
         (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
       );
 
-      // Invalid timeoutSeconds & reserved env vars are refused with TASKPACK_MANIFEST_INVALID
-      for (const badTimeout of [0, 56, 1.5]) {
+      // Multi-minute timeoutSeconds (e.g. 600s and 3600s) are accepted, while [0, 3601, 1.5] are refused
+      const longTimeoutManifest = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', timeoutSeconds: 600 } }],
+          externalGates: [],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' });
+      assert.equal(longTimeoutManifest.spec.verification.localChecks[0]?.parameters?.['timeoutSeconds'], 600);
+
+      for (const badTimeout of [0, 3601, 1.5]) {
         assert.throws(
           () => validateTaskpackManifest(editedManifest(base, draft => {
             (draft['spec'] as Record<string, unknown>)['verification'] = {

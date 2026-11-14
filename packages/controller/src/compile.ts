@@ -69,8 +69,10 @@ export function compilePlan(loaded: LoadedConfiguration) {
     const capacity = checkpointCapacity(config.spec.controls.maxAttempts, orderedDAG.filter(node => node.kind === 'agent' && node.handler.implementation !== 'pi.compact.v1').length, task.spec.budgets.maxImplementationRepairs, verifierSlots.length, publication.mode === 'pull_request');
     const description = await describePiAdapterFiles(); if (!description.ok) refuse('CAPABILITY_UNSUPPORTED', '', 'compile', { piCode: description.error.code });
     const files = description.value, publicationOps = publication.mode === 'pull_request' ? 1 : 0;
-    if (task.spec.budgets.maxModelCalls > files.limits.requests || task.spec.budgets.maxModelCalls + capacity.J + publicationOps + 3 * capacity.A > files.limits.operations) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
-    const graphDigest = hash(await readBoundedFile(fileURLToPath(new URL('../../../package-lock.json', import.meta.resolve('@loopwright/agent-pi'))), 1048576, false));
+    const storeMaxRequests = Math.min(files.limits.requests, 1024);
+    const storeMaxOperations = Math.min(files.limits.operations, 2048);
+    if (task.spec.budgets.maxModelCalls > storeMaxRequests || task.spec.budgets.maxModelCalls + capacity.J + publicationOps + 3 * capacity.A > storeMaxOperations) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
+    const graphDigest = hash(await readBoundedFile(fileURLToPath(new URL('../../../package-lock.json', import.meta.resolve('@loopwright/agent-pi'))), 8388608, false));
     const roles: PlannedRole[] = [], neededCredentials = new Set<string>();
     for (const role of task.spec.roles) {
       const selected = config.spec.profiles.roles.find(item => item.roleId === role.id), profile = registry.roleProfiles.find(item => item.id === selected?.profileRef);
@@ -91,11 +93,28 @@ export function compilePlan(loaded: LoadedConfiguration) {
         if (!credential || credential.consumer !== 'mcp' || credential.destinationRef !== mcp.destinationRef) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
         neededCredentials.add(credential.id);
       } else if (!('transport' in mcp) && !same(mcp.scriptDigest, files.localMcpScriptDigest)) refuse('CONFIG_REFERENCE', '/registry/spec/roleProfiles', 'compile');
+      if (profile.limits) {
+        for (const [limitKey, limitVal] of Object.entries(profile.limits)) {
+          const maxVal = files.limits[limitKey as keyof typeof files.limits];
+          if (typeof limitVal === 'number' && typeof maxVal === 'number' && limitVal > maxVal) {
+            refuse('CONFIG_LIMIT', '/registry/spec/roleProfiles', 'compile');
+          }
+        }
+      }
+      const maxAvailableOps = storeMaxOperations - capacity.J - publicationOps;
+      const roleLimits = {
+        ...files.limits,
+        sessionBytes: 2097152,
+        ...(profile.limits ?? {}),
+        requests: Math.min(profile.limits?.requests ?? storeMaxRequests, storeMaxRequests),
+        operations: Math.min(profile.limits?.operations ?? maxAvailableOps, maxAvailableOps),
+      };
+      if (active && task.spec.budgets.maxModelCalls > roleLimits.requests) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
       roles.push({ roleId: role.id, profileRef: profile.id, providerCredentialRef: profile.providerCredentialRef, runtime,
         policy: { version: 2, policyId: 'controller.' + loaded.registryDigest.hex.slice(0, 32), resourceVersion: registry.resourceVersion, adapterId: 'pi', adapterVersion: '0.0.0', runtime: runtime.identity,
           selection: profile.selection, resources: [files.preamble, ...task.spec.trustedContext.resources], tools: role.tools, mcp,
           context: profile.context, accounting: 'soft_only', retry: 'sender_only', extensions: [], privateArtifacts: true,
-          limits: { ...files.limits, sessionBytes: 2097152, operations: files.limits.operations - capacity.J - publicationOps } } });
+          limits: roleLimits } });
     }
     for (const item of networkCredentials) neededCredentials.add(item.ref);
     if (!same([...neededCredentials].sort(), state.vault.references)) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
@@ -109,7 +128,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
       capabilities: [{ component: 'controller.serial', disposition: 'supported' as const, readiness: 'not_checked' as const }],
       evidenceNeeds: task.spec.acceptance.checks.map(check => ({ checkId: check.id, levels: check.allowedEvidenceLevels })) };
     state.vault.assertClean(plan);
-    if (Buffer.byteLength(canonical(plan)) > 1048576) refuse('CONFIG_LIMIT', '', 'compile');
+    if (Buffer.byteLength(canonical(plan)) > 4194304) refuse('CONFIG_LIMIT', '', 'compile');
     return freeze({ ...plan, planDigest: hash('loopwright.dev/controller/plan/v1\0' + canonical(plan)) });
   }, 'compile');
 }

@@ -16,13 +16,13 @@ function evaluateOpenAiCompletionsResponse(input: string, status: number): RawRe
   let stop: string | null = null;
   const calls = new Map<number, { id: string; name: string; arguments: string }>();
   for (const frame of input.split('\n\n').filter(Boolean)) {
-    if (done || Buffer.byteLength(frame) > 1048576) return fail();
+    if (done || Buffer.byteLength(frame) > 16777216) return fail();
     const dataLines = frame.split('\n').filter(line => !line.startsWith(':'));
     if (dataLines.length === 0) continue;
     if (dataLines.some(line => !line.startsWith('data: '))) return fail();
     const payload = dataLines.map(line => line.slice(6)).join('\n').trim();
     if (payload === '[DONE]') { done = true; continue; }
-    const chunk = parseBoundedJson(payload) as {
+    const chunk = parseBoundedJson(payload, { nodes: 262144, array: 4096 }) as {
       choices?: { finish_reason?: string | null; delta?: { tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
     };
     if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) return fail();
@@ -36,7 +36,7 @@ function evaluateOpenAiCompletionsResponse(input: string, status: number): RawRe
         if (typeof tc.function?.name === 'string' && tc.function.name.length > 0) existing.name += tc.function.name;
         if (typeof tc.function?.arguments === 'string') {
           existing.arguments += tc.function.arguments;
-          if (Buffer.byteLength(existing.arguments) > 65536) return fail();
+          if (Buffer.byteLength(existing.arguments) > 4194304) return fail();
         }
         calls.set(idx, existing);
       }
@@ -49,7 +49,7 @@ function evaluateOpenAiCompletionsResponse(input: string, status: number): RawRe
   const toolCalls: { id: string; name: string }[] = [];
   for (const [, entry] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
     if (!entry.id || !entry.name) return fail();
-    const args = parseBoundedJson(entry.arguments || '{}');
+    const args = parseBoundedJson(entry.arguments || '{}', { nodes: 262144, array: 4096 });
     if (!args || Array.isArray(args) || typeof args !== 'object') return fail();
     toolCalls.push({ id: entry.id, name: entry.name });
   }
@@ -70,12 +70,12 @@ function evaluateOpenAiResponsesResponse(input: string, status: number): RawResp
   let failedEvent = false;
   const toolCalls: { id: string; name: string }[] = [];
   for (const frame of input.split('\n\n').filter(Boolean)) {
-    if (Buffer.byteLength(frame) > 1048576) return fail();
+    if (Buffer.byteLength(frame) > 16777216) return fail();
     const dataLine = frame.split('\n').find(line => line.startsWith('data: '));
     if (!dataLine) continue;
     const payload = dataLine.slice(6).trim();
     if (payload === '[DONE]') continue;
-    const item = parseBoundedJson(payload) as {
+    const item = parseBoundedJson(payload, { nodes: 262144, array: 4096 }) as {
       type?: string;
       response?: { status?: string; incomplete_details?: { reason?: string }; output?: { type?: string; call_id?: string; id?: string; name?: string; arguments?: string }[] };
     };
@@ -88,7 +88,7 @@ function evaluateOpenAiResponsesResponse(input: string, status: number): RawResp
         if (out.type === 'function_call') {
           const callId = out.call_id ?? out.id ?? '';
           if (!callId || !out.name) return fail();
-          const args = parseBoundedJson(out.arguments || '{}');
+          const args = parseBoundedJson(out.arguments || '{}', { nodes: 262144, array: 4096 });
           if (!args || Array.isArray(args) || typeof args !== 'object') return fail();
           toolCalls.push({ id: callId, name: out.name });
         }
@@ -105,7 +105,7 @@ function evaluateOpenAiResponsesResponse(input: string, status: number): RawResp
 export function evaluateRawResponse(bytes: Uint8Array, status: number, api: PiWireApi = 'anthropic-messages'): RawResponseResult {
   const fail = (code: 'CONTEXT_LIMIT' | 'OUTPUT_LIMIT' | 'MODEL_FAILED' = 'MODEL_FAILED', terminalComplete = false): RawResponseResult => ({ ok: false, code, ...(terminalComplete ? { terminalComplete: true as const } : {}) });
   try {
-    if (bytes.byteLength > 1048576) return fail();
+    if (bytes.byteLength > 67108864) return fail();
     const input = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes).replace(/\r\n/g, '\n');
     if (api === 'openai-completions') return evaluateOpenAiCompletionsResponse(input, status);
     if (api === 'openai-responses') return evaluateOpenAiResponsesResponse(input, status);
@@ -117,12 +117,12 @@ export function evaluateRawResponse(bytes: Uint8Array, status: number, api: PiWi
     let started = false, ended = false, stop: string | undefined, usage = false;
     const blocks = new Map<number, { type: string; id: string | undefined; name: string | undefined; arguments: string; closed: boolean }>();
     for (const frame of input.split('\n\n').filter(Boolean)) {
-      if (ended || Buffer.byteLength(frame) > 1048576) return fail();
+      if (ended || Buffer.byteLength(frame) > 16777216) return fail();
       const lines = frame.split('\n');
       const data = lines.filter(line => line.startsWith('data: '));
       const event = lines.filter(line => line.startsWith('event: '));
       if (data.length !== 1 || event.length !== 1 || lines.length !== 2) return fail();
-      const value = parseBoundedJson(data[0]!.slice(6));
+      const value = parseBoundedJson(data[0]!.slice(6), { nodes: 262144, array: 4096 });
       if (!value || Array.isArray(value) || typeof value !== 'object' || value.type !== event[0]!.slice(7)) return fail();
       const item = value as Record<string, unknown>;
       switch (item.type) {
@@ -145,13 +145,13 @@ export function evaluateRawResponse(bytes: Uint8Array, status: number, api: PiWi
           if (!block || block.closed || stop) return fail();
           if (delta.type === 'input_json_delta') {
             if (block.type !== 'tool_use' || typeof delta.partial_json !== 'string') return fail();
-            block.arguments += delta.partial_json; if (Buffer.byteLength(block.arguments) > 65536) return fail();
+            block.arguments += delta.partial_json; if (Buffer.byteLength(block.arguments) > 4194304) return fail();
           } else if (!['text_delta', 'thinking_delta', 'signature_delta'].includes(delta.type ?? '')) return fail();
           break;
         }
         case 'content_block_stop': {
           const block = blocks.get(item.index as number); if (!block || block.closed) return fail(); block.closed = true;
-          if (block.type === 'tool_use') { const args = parseBoundedJson(block.arguments || '{}'); if (!args || Array.isArray(args) || typeof args !== 'object') return fail(); }
+          if (block.type === 'tool_use') { const args = parseBoundedJson(block.arguments || '{}', { nodes: 262144, array: 4096 }); if (!args || Array.isArray(args) || typeof args !== 'object') return fail(); }
           break;
         }
         case 'message_delta': {

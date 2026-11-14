@@ -22,7 +22,7 @@ export async function privateDirectory(path: string, excluded: readonly string[]
 }
 export interface ArtifactReader { read(ref: ArtifactRef, maximum?: number): Promise<Uint8Array> }
 export async function readArtifact(directory: string, unowned: ArtifactRef, maximum = 8388608): Promise<Uint8Array> {
-  const ref = checkedRef(unowned); if (ref.name.length > 128 || ref.byteLength > maximum || maximum > 8388608) refuse('ARTIFACT_INVALID', '', 'recovery');
+  const ref = checkedRef(unowned); if (ref.name.length > 128 || ref.byteLength > maximum || maximum > 67108864) refuse('ARTIFACT_INVALID', '', 'recovery');
   try {
     const bytes = await readBoundedFile(join(directory, ref.name), maximum, true), actual = digestArtifact(ref.name, bytes);
     if (!actual.ok || !same(actual.value, ref)) refuse('ARTIFACT_INVALID', '', 'recovery'); return new Uint8Array(bytes);
@@ -32,7 +32,7 @@ export class ArtifactStore {
   constructor(readonly directory: string, readonly owner: ControllerOwner, readonly vault: CredentialVault) {}
   async put(kind: string, bytes: Uint8Array, maximum = 8388608): Promise<ArtifactRef> {
     await this.owner.assertCurrent();
-    if (!/^[a-z][a-z0-9-]{0,23}$/.test(kind) || bytes.byteLength > maximum || maximum > 8388608) refuse('OUTPUT_LIMIT', '', 'execution');
+    if (!/^[a-z][a-z0-9-]{0,23}$/.test(kind) || bytes.byteLength > maximum || maximum > 67108864) refuse('OUTPUT_LIMIT', '', 'execution');
     this.vault.assertClean(bytes);
     const name = kind + '-' + hash('loopwright.dev/controller/artifact/' + kind + '/v1\0' + hash(bytes).hex).hex + '.bin';
     const ref = digestArtifact(name, bytes); if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');

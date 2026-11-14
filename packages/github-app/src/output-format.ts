@@ -2,11 +2,15 @@ import { constants as fsConstants, lstatSync } from 'node:fs';
 import { mkdir, open } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import {
+  formatByteCount,
   formatCostUsd,
+  formatDurationMs,
   formatRunReport,
+  formatTokenCount,
   parseReportOutputFormats,
   REPORT_OUTPUT_FORMATS,
   sanitizeReportText,
+  type ReportMcpServerInfo,
   type ReportOutputFormat,
   type RunReportInput,
 } from '@loopwright/controller';
@@ -14,11 +18,15 @@ import { SecretScrubber } from './token-broker.js';
 import { GitHubAppError, type TaskpackManifest } from './types.js';
 
 export {
+  formatByteCount,
   formatCostUsd,
+  formatDurationMs,
   formatRunReport,
+  formatTokenCount,
   parseReportOutputFormats,
   REPORT_OUTPUT_FORMATS,
   sanitizeReportText,
+  type ReportMcpServerInfo,
   type ReportOutputFormat,
   type RunReportInput,
 };
@@ -32,6 +40,7 @@ export interface WriteActionOutputSinksOptions {
   readonly scrubber?: SecretScrubber | undefined;
   readonly includeExtendedGithubOutputs?: boolean | undefined;
   readonly logSink?: ((chunk: string) => void) | undefined;
+  readonly alwaysLogTextSummary?: boolean | undefined;
 }
 
 export interface WrittenActionOutputs {
@@ -110,6 +119,14 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
       const renderedText = rendered[sinkFormat] ?? formatRunReport(effectiveReport, sinkFormat);
       emitLog(renderedText.endsWith('\n') ? renderedText : `${renderedText}\n`);
     }
+  }
+  if (
+    options.alwaysLogTextSummary === true
+    && !options.formats.includes('markdown')
+    && !options.formats.includes('text')
+  ) {
+    const fallbackText = formatRunReport(effectiveReport, 'text');
+    emitLog(fallbackText.endsWith('\n') ? fallbackText : `${fallbackText}\n`);
   }
 
   let stepSummaryWritten = false;

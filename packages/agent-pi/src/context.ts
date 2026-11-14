@@ -52,7 +52,7 @@ function integer(value: number, min: number, max = Number.MAX_SAFE_INTEGER): num
   return value;
 }
 /** Parse bounded JSON without losing duplicate keys or following schema references. */
-export function parseBoundedJson(input: string, limits: { readonly nodes?: number; readonly array?: number; readonly schemaReferences?: boolean } = {}): Json {
+export function parseBoundedJson(input: string, limits: { readonly nodes?: number; readonly array?: number; readonly properties?: number; readonly schemaReferences?: boolean } = {}): Json {
   let index = 0, nodes = 0;
   const space = () => { while (/[ \t\r\n]/.test(input[index] ?? '') && index < input.length) index++; };
   const string = (): string => {
@@ -81,7 +81,7 @@ export function parseBoundedJson(input: string, limits: { readonly nodes?: numbe
       if (input[index] === '}') { index++; return object; }
       let properties = 0;
       while (index < input.length) {
-        space(); if (input[index] !== '"' || ++properties > 128) unsafe(); const key = string();
+        space(); if (input[index] !== '"' || ++properties > (limits.properties ?? 256)) unsafe(); const key = string();
         if (Object.hasOwn(object, key)) unsafe(); space(); if (input[index++] !== ':') unsafe();
         object[key] = value(depth + 1);
         if (limits.schemaReferences !== false && key === '$ref' && (typeof object[key] !== 'string' || !object[key].startsWith('#'))) unsafe();
@@ -163,11 +163,12 @@ function validateBody(value: Json, selection: ContextSelection, output: number):
   }
   if (pending.size) unsafe();
 }
-function validateTokenProviderBody(value: Json, selection: ContextSelection, output: number): void {
+function validateTokenProviderBody(value: Json, selection: ContextSelection, output: number): number {
   const body = record(value);
   if (body.model !== selection.modelId || body.stream !== true) unsafe();
   if (selection.api === 'anthropic-messages') {
-    if (body.max_tokens !== output) unsafe();
+    if (typeof body.max_tokens !== 'number') unsafe();
+    const effectiveOutput = integer(body.max_tokens, 1, output);
     const definitions = new Set<string>();
     for (const tool of body.tools === undefined ? [] : array(body.tools)) {
       const item = record(tool);
@@ -177,11 +178,13 @@ function validateTokenProviderBody(value: Json, selection: ContextSelection, out
       record(item.input_schema);
     }
     if (!Array.isArray(body.messages) || body.messages.length === 0) unsafe();
-    return;
+    return effectiveOutput;
   }
   if (selection.api === 'openai-completions') {
+    if (body.max_tokens !== undefined && body.max_completion_tokens !== undefined && body.max_tokens !== body.max_completion_tokens) unsafe();
     const cap = body.max_tokens ?? body.max_completion_tokens;
-    if (cap !== output) unsafe();
+    if (typeof cap !== 'number') unsafe();
+    const effectiveOutput = integer(cap, 1, output);
     const definitions = new Set<string>();
     for (const tool of body.tools === undefined ? [] : array(body.tools)) {
       const item = record(tool);
@@ -193,10 +196,14 @@ function validateTokenProviderBody(value: Json, selection: ContextSelection, out
       record(fn.parameters);
     }
     if (!Array.isArray(body.messages) || body.messages.length === 0) unsafe();
-    return;
+    return effectiveOutput;
   }
   if (selection.api === 'openai-responses') {
-    if (body.max_output_tokens !== undefined && body.max_output_tokens !== output) unsafe();
+    let effectiveOutput = output;
+    if (body.max_output_tokens !== undefined) {
+      if (typeof body.max_output_tokens !== 'number') unsafe();
+      effectiveOutput = integer(body.max_output_tokens, 1, output);
+    }
     const definitions = new Set<string>();
     for (const tool of body.tools === undefined ? [] : array(body.tools)) {
       const item = record(tool);
@@ -207,29 +214,41 @@ function validateTokenProviderBody(value: Json, selection: ContextSelection, out
       record(item.parameters);
     }
     if (!Array.isArray(body.input) || body.input.length === 0) unsafe();
-    return;
+    return effectiveOutput;
   }
   unsafe();
 }
-export function checkRequestBytes(bytes: Uint8Array): boolean {
-  return bytes instanceof Uint8Array && !(bytes.buffer instanceof SharedArrayBuffer) && bytes.byteLength <= 65536;
+export function checkRequestBytes(bytes: Uint8Array, maxBytes = 65536): boolean {
+  if (!(bytes instanceof Uint8Array) || bytes.buffer instanceof SharedArrayBuffer) return false;
+  return maxBytes === 65536 ? bytes.byteLength <= 65536 : bytes.byteLength <= maxBytes;
 }
 export function assessFinalRequestContext(bytes: Uint8Array, policy: ContextPolicy, selection: ContextSelection): ContextResult {
   let assessment: ContextAssessment | undefined;
   try {
-    if (policy.mode !== 'estimated_guard' || !checkRequestBytes(bytes)) unsafe();
-    const ceiling = integer(policy.maxRequestBytes ?? 65536, 1, 65536);
+    const ceiling = integer(policy.maxRequestBytes ?? 65536, 1, 16777216);
+    if (policy.mode !== 'estimated_guard' || !checkRequestBytes(bytes, ceiling)) unsafe();
     const margin = integer(policy.serviceMargin ?? 32768, 32768), reserve = integer(policy.toolReserve ?? 16384, 16384);
-    const window = Math.min(integer(selection.contextWindow, 1), integer(policy.workingWindowCeiling ?? 98304, 1, 98304));
-    const output = Math.min(integer(selection.perCallOutputTokens, 1), integer(policy.maxOutputTokens ?? 1024, 1, 1024));
+    const window = Math.min(integer(selection.contextWindow, 1), integer(policy.workingWindowCeiling ?? 98304, 1, 16777216));
+    const output = Math.min(integer(selection.perCallOutputTokens, 1), integer(policy.maxOutputTokens ?? 1024, 1, 262144));
     const owned = Uint8Array.prototype.slice.call(bytes) as Uint8Array;
     const input = integer(owned.byteLength + margin, 1), total = integer(input + output, 1);
     assessment = { mode: 'estimated_guard', estimator: 'lw-pi-final-json-bytes-v1', version: 1, provenance: 'estimated', contextFit: 'unproven', bodyBytes: owned.byteLength, inputReservation: input, outputReservation: output, totalReservation: total, serviceMargin: margin, toolReserve: reserve, workingWindow: window, bodyDigest: createHash('sha256').update('loopwright.dev/pi-context/v1\0').update(owned).digest('hex'), withinByteLimit: owned.byteLength <= ceiling, withinWindow: integer(total + reserve, 1) <= window, coverage: 'unsupported' };
-    const parsed = parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(owned));
+    const parsed = parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(owned), { nodes: 1048576, array: 16384, properties: 1024 });
     const isLegacyCopilot = (!selection.api || selection.api === 'anthropic-messages') && (!selection.provider || selection.provider === 'github-copilot');
-    if (isLegacyCopilot) validateBody(parsed, selection, output);
-    else validateTokenProviderBody(parsed, selection, output);
-    assessment = { ...assessment, coverage: 'complete' };
+    if (isLegacyCopilot) {
+      validateBody(parsed, selection, output);
+      assessment = { ...assessment, coverage: 'complete' };
+    } else {
+      const effectiveOutput = validateTokenProviderBody(parsed, selection, output);
+      const effectiveTotal = integer(input + effectiveOutput, 1);
+      assessment = {
+        ...assessment,
+        outputReservation: effectiveOutput,
+        totalReservation: effectiveTotal,
+        withinWindow: integer(effectiveTotal + reserve, 1) <= window,
+        coverage: 'complete',
+      };
+    }
     if (!assessment.withinByteLimit || !assessment.withinWindow) unsafe();
     return { ok: true, value: assessment };
   } catch { return assessment ? { ok: false, code: 'CONTEXT_UNSAFE', assessment } : { ok: false, code: 'CONTEXT_UNSAFE' }; }

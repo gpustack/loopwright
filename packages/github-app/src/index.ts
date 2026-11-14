@@ -2,13 +2,15 @@ export { GitHubAppError, GITHUB_APP_ERROR_CODES, MAX_EXPANDED_MODEL_CANDIDATES, 
 export type * from './types.js';
 export {
   IDENTIFIER_PATTERN, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy,
-  effectiveProtectedPaths, validateTaskpackManifest, type Json,
+  effectiveProtectedPaths, validateTaskpackManifest, validateTaskpackLimitsDeclaration,
+  validateMcpServerDeclarations, collectMcpReferencedEnvNames, type Json,
 } from './schema.js';
 export {
-  ACTIONS_RUN_URL_PATTERN, authorizeRepositoryActor, boundDiagnosticLog, compileDeclarativeTaskpack,
-  DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES,
-  GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL, loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand,
-  prepareTaskpackIntake, validateCommentGuidance,
+  ACTIONS_RUN_URL_PATTERN, applyLimitsToBudgets, authorizeRepositoryActor, boundDiagnosticLog,
+  compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT,
+  GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL,
+  INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionsRunUrl,
+  parseCommentCommand, parseEnvAndInputLimitsOverride, prepareTaskpackIntake, validateCommentGuidance,
 } from './taskpack.js';
 export {
   intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore,
@@ -31,7 +33,8 @@ export {
   TRUSTED_PYTHON_PATHS, TRUSTED_SEATBELT_PATHS, type ResolveTaskpackSandboxOptions,
 } from './sandbox.js';
 export {
-  runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload,
+  buildDefaultAuthorPrompt, runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload,
+  mergeMcpServerDeclarations, parseMcpServersOverride, serializeActionResultSummary,
   type TurnkeyActionEntrypointInput, type TurnkeyActionExecutionReport,
 } from './action.js';
 export {
@@ -44,13 +47,14 @@ export {
   type ResolveRepositoryAndRevisionsOptions,
 } from './upstreams.js';
 export {
-  formatCostUsd, formatRunReport, parseReportOutputFormats, REPORT_OUTPUT_FORMATS,
-  resolveActionOutputFormats, sanitizeReportText, writeActionOutputSinks,
-  type ReportOutputFormat, type RunReportInput, type WriteActionOutputSinksOptions,
-  type WrittenActionOutputs,
+  formatByteCount, formatCostUsd, formatDurationMs, formatRunReport, formatTokenCount,
+  parseReportOutputFormats, REPORT_OUTPUT_FORMATS, resolveActionOutputFormats,
+  sanitizeReportText, writeActionOutputSinks,
+  type ReportMcpServerInfo, type ReportOutputFormat, type RunReportInput,
+  type WriteActionOutputSinksOptions, type WrittenActionOutputs,
 } from './output-format.js';
 export {
-  createTurnkeyCycleDelegate, executeTurnkeyActionCycle, makeAttemptRunId,
+  buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle, makeAttemptRunId,
   normalizeControllerRunId, startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type ExecuteTurnkeyActionCycleOptions, type LocalCommandGateServer,
   type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,

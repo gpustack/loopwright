@@ -44,7 +44,7 @@ function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<s
     if (new Set(selected).size !== selected.length) refuse('CONFIG_REFERENCE', '/spec/profiles/' + kind);
   }
   const controls = record(spec.controls, ['drainReserveMs', 'maxAttempts', 'repeatFailureLimit', 'submission'], '/spec/controls');
-  integer(controls.drainReserveMs, 120000, 300000, '/spec/controls/drainReserveMs'); integer(controls.maxAttempts, 1, 16, '/spec/controls/maxAttempts'); integer(controls.repeatFailureLimit, 2, 2, '/spec/controls/repeatFailureLimit');
+  integer(controls.drainReserveMs, 5000, 600000, '/spec/controls/drainReserveMs'); integer(controls.maxAttempts, 1, 16, '/spec/controls/maxAttempts'); integer(controls.repeatFailureLimit, 2, 2, '/spec/controls/repeatFailureLimit');
   const submission = record(controls.submission, ['mode', 'path'], '/spec/controls/submission');
   if (submission.mode !== 'artifact_or_assistant' || submission.path !== null && !digestArtifact(text(submission.path), new Uint8Array()).ok) refuse('CONFIG_SCHEMA', '/spec/controls/submission');
   spec.publication = publicationBlock(spec.publication === undefined ? { mode: 'disabled' } : spec.publication);
@@ -81,8 +81,8 @@ export function loadConfiguration(unowned: LoadConfigurationInput, ports: Config
     for (const requested of validated.value.spec.trustedContext.resources) {
       const resource = registry.spec.resources.find(item => item.id === requested.id);
       if (!resource || !same(resource, requested)) refuse('CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
-      const bytes = await readBoundedFile(resolve(dirname(registryPath), resource.path), 1048576, true); resourceBytes += bytes.byteLength;
-      if (resourceBytes > 1048576 || hash(bytes).hex !== resource.digest.hex) refuse(resourceBytes > 1048576 ? 'CONFIG_LIMIT' : 'CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
+      const bytes = await readBoundedFile(resolve(dirname(registryPath), resource.path), 4194304, true); resourceBytes += bytes.byteLength;
+      if (resourceBytes > 4194304 || hash(bytes).hex !== resource.digest.hex) refuse(resourceBytes > 4194304 ? 'CONFIG_LIMIT' : 'CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
       vault.assertClean(bytes);
       const ref = digestArtifact(resource.path, bytes); if (!ref.ok) refuse('CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
       resources.push({ id: resource.id, kind: resource.kind, ref: ref.value, bytes: new Uint8Array(bytes) });

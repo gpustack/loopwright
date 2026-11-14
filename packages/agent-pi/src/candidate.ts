@@ -1,6 +1,6 @@
-import { constants } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { LIMITS, digestArtifact, isWritablePath, type ArtifactRef, type ArtifactManifest } from '@loopwright/core';
 import { canonical, freeze, object, list } from './boundary.js';
@@ -13,6 +13,14 @@ export interface CandidateChange {
   readonly after: ArtifactRef | null;
   readonly deleted?: boolean;
 }
+
+export type CandidateReadInspection =
+  | { readonly kind: 'file'; readonly path: string; readonly ref: ArtifactRef }
+  | { readonly kind: 'error'; readonly targetPath: string; readonly message: string };
+
+export type CandidateMutationPreparation =
+  | { readonly kind: 'change'; readonly change: CandidateChange }
+  | { readonly kind: 'error'; readonly targetPath: string; readonly message: string };
 
 export interface BaselineStatFingerprint {
   readonly mode: number;
@@ -301,6 +309,117 @@ export class Candidate {
     this.#writable(name);
   }
 
+  isWritable(name: string): boolean {
+    const contract = this.input.lock.spec.contract, allowed = isWritablePath(contract, name);
+    // Retain core glob semantics and add conservative protection for aliases on case-insensitive hosts.
+    const protectedOnly = { ...contract, spec: { ...contract.spec, scope: { writable: ['**'], protected: contract.spec.scope.protected.map(pattern => pattern.toLowerCase()) } } };
+    const folded = isWritablePath(protectedOnly, name.toLowerCase());
+    return Boolean(allowed.ok && allowed.value && folded.ok && folded.value);
+  }
+
+  #scopeDeniedError(verb: 'write' | 'edit' | 'delete', path: string): CandidateMutationPreparation {
+    const scope = this.input.lock.spec.contract.spec.scope;
+    const writableList = scope.writable.length > 0 ? scope.writable.join(', ') : '(none)';
+    const protectedList = scope.protected.length > 0 ? scope.protected.join(', ') : '(none)';
+    return freeze({
+      kind: 'error' as const,
+      targetPath: path,
+      message: `Cannot ${verb} ${path}: path is outside writable scope (writable: ${writableList}; protected: ${protectedList}).`,
+    });
+  }
+
+  #hasTopLevelCandidateEntry(): boolean {
+    for (const key of this.#files.keys()) {
+      if (key === 'candidate' || key.startsWith('candidate/')) return true;
+    }
+    if (!this.#deleted.has('candidate') && this.#baseline.has('candidate')) {
+      return true;
+    }
+    if (this.#activeBaselineDirs().has('candidate')) {
+      return true;
+    }
+    if (this.root.length > 0 && existsSync(join(this.root, 'candidate'))) {
+      return true;
+    }
+    return false;
+  }
+
+  #matchSiblingToolScratchCandidate(raw: string, requireTrailingSlash: boolean): string | null {
+    if (this.root.length === 0) return null;
+    const resolvedRoot = resolve(this.root);
+    const parentDir = resolve(resolvedRoot, '..');
+    const bases = [parentDir];
+    if (basename(parentDir) === 'sdk-' + this.input.sessionId) {
+      bases.push(resolve(parentDir, '..'));
+    }
+    for (const base of bases) {
+      const toolPrefix = base === '/' ? '/tool-' : base + '/tool-';
+      if (!raw.startsWith(toolPrefix)) continue;
+      const rest = raw.slice(toolPrefix.length);
+      const slashIdx = rest.indexOf('/');
+      if (slashIdx <= 0) continue;
+      const seg = rest.slice(0, slashIdx);
+      if (seg === '.' || seg === '..' || seg.includes('\0')) continue;
+      const afterSeg = rest.slice(slashIdx);
+      if (afterSeg.startsWith('/scratch/candidate/')) {
+        return afterSeg.slice('/scratch/candidate/'.length);
+      }
+      if (!requireTrailingSlash && afterSeg === '/scratch/candidate') {
+        return '';
+      }
+    }
+    return null;
+  }
+
+  #stripCandidateRootPrefix(raw: string): { readonly rest: string; readonly stripped: boolean } {
+    if (raw.startsWith('/workspace/candidate/')) {
+      return { rest: raw.slice('/workspace/candidate/'.length), stripped: true };
+    }
+    if (raw.startsWith('/scratch/candidate/')) {
+      return { rest: raw.slice('/scratch/candidate/'.length), stripped: true };
+    }
+    if (this.root.length > 0) {
+      const rootPrefix = resolve(this.root) + '/';
+      if (raw.startsWith(rootPrefix)) {
+        return { rest: raw.slice(rootPrefix.length), stripped: true };
+      }
+      const scratchRel = this.#matchSiblingToolScratchCandidate(raw, true);
+      if (scratchRel !== null) {
+        return { rest: scratchRel, stripped: true };
+      }
+    }
+    return { rest: raw, stripped: false };
+  }
+
+  #isRootCandidateDirectoryAlias(raw: string): boolean {
+    if (
+      raw === '.'
+      || raw === './'
+      || raw === '/workspace/candidate'
+      || raw === '/workspace/candidate/'
+      || raw === '/scratch/candidate'
+      || raw === '/scratch/candidate/'
+    ) {
+      return true;
+    }
+    if (this.root.length > 0) {
+      const resolvedRoot = resolve(this.root);
+      if (raw === resolvedRoot || raw === resolvedRoot + '/') {
+        return true;
+      }
+      if (this.#matchSiblingToolScratchCandidate(raw, false) === '') {
+        return true;
+      }
+    }
+    if (
+      (raw === 'candidate' || raw === './candidate' || raw === 'candidate/' || raw === './candidate/')
+      && !this.#hasTopLevelCandidateEntry()
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   async captureBaselineStats(): Promise<void> {
     if (!this.#isOverlay) return;
     this.#baselineStats.clear();
@@ -331,7 +450,17 @@ export class Candidate {
 
   normalize(raw: string): string {
     if (typeof raw !== 'string') refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-    const name = raw.startsWith('/workspace/candidate/') ? raw.slice('/workspace/candidate/'.length) : raw;
+    const { rest, stripped } = this.#stripCandidateRootPrefix(raw);
+    let name = rest;
+    while (name.startsWith('./')) {
+      name = name.slice(2);
+    }
+    if (!stripped && name.startsWith('candidate/') && !this.#hasTopLevelCandidateEntry()) {
+      name = name.slice('candidate/'.length);
+      while (name.startsWith('./')) {
+        name = name.slice(2);
+      }
+    }
     artifact(name, new Uint8Array());
     for (const segment of name.split('/')) {
       if (segment.toLowerCase() === '.git' || Buffer.byteLength(segment, 'utf8') > 255) {
@@ -342,11 +471,7 @@ export class Candidate {
   }
 
   #writable(name: string): void {
-    const contract = this.input.lock.spec.contract, allowed = isWritablePath(contract, name);
-    // Retain core glob semantics and add conservative protection for aliases on case-insensitive hosts.
-    const protectedOnly = { ...contract, spec: { ...contract.spec, scope: { writable: ['**'], protected: contract.spec.scope.protected.map(pattern => pattern.toLowerCase()) } } };
-    const folded = isWritablePath(protectedOnly, name.toLowerCase());
-    if (!allowed.ok || !allowed.value || !folded.ok || !folded.value) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    if (!this.isWritable(name)) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
   }
 
   #directoryProtected(name: string): void {
@@ -509,10 +634,74 @@ export class Candidate {
     }
   }
 
+  async #listDirectoryEntries(dirPath: string): Promise<string> {
+    await this.#directory(dirPath);
+    const entries = await readdir(dirPath);
+    if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
+    const visible = entries.filter(entry => entry.toLowerCase() !== '.git').sort(compareUtf16);
+    const shown = visible.slice(0, 200);
+    const formatted: string[] = [];
+    for (const entry of shown) {
+      const childInfo = await lstat(join(dirPath, entry));
+      if (childInfo.isSymbolicLink()) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      formatted.push(childInfo.isDirectory() ? entry + '/' : entry);
+    }
+    if (visible.length > shown.length) {
+      formatted.push(`... (${visible.length - shown.length} more entries)`);
+    }
+    return formatted.length > 0 ? formatted.join('\n') : '(empty directory)';
+  }
+
   async checkRead(raw: string): Promise<{ readonly path: string; readonly ref: ArtifactRef }> {
     const path = this.normalize(raw), bytes = await this.#current(path);
     if (!bytes) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     return freeze({ path, ref: artifact(path, bytes) });
+  }
+
+  async inspectReadTarget(raw: string): Promise<CandidateReadInspection> {
+    if (typeof raw !== 'string') refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    if (this.#isRootCandidateDirectoryAlias(raw)) {
+      const listing = await this.#listDirectoryEntries(this.root);
+      return freeze({
+        kind: 'error' as const,
+        targetPath: '.',
+        message: `Path "." is a directory, not a file. Entries:\n${listing}`,
+      });
+    }
+    const hadTrailingSlash = raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
+    const path = this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+    const knownOverlay = this.#files.get(path);
+    const baseEntry = this.#isOverlay && !this.#deleted.has(path) ? this.#baseline.get(path) : undefined;
+    const isKnown = knownOverlay !== undefined || baseEntry !== undefined;
+    const parent = await this.#parent(path, false);
+    const leaf = path.split('/').at(-1)!;
+    if (parent === null || !await this.#entry(parent, leaf)) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return freeze({ kind: 'error' as const, targetPath: path, message: `File not found: ${path}` });
+    }
+    const fullPath = join(this.root, path);
+    const info = await lstat(fullPath, { bigint: true });
+    if (info.isSymbolicLink() || Number(info.uid) !== process.getuid?.()) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    if (info.isDirectory()) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      const listing = await this.#listDirectoryEntries(fullPath);
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Path "${path}" is a directory, not a file. Entries:\n${listing}`,
+      });
+    }
+    if (hadTrailingSlash) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Path "${path}" is a file, not a directory.`,
+      });
+    }
+    const checked = await this.checkRead(path);
+    return freeze({ kind: 'file' as const, path: checked.path, ref: checked.ref });
   }
 
   #prepare(path: string, before: Buffer | null, bytes: Buffer): CandidateChange {
@@ -619,6 +808,209 @@ export class Candidate {
     const change = freeze({ path, before: old, after: null, deleted: true });
     this.#deleteChanges.add(change);
     return change;
+  }
+
+  async tryPrepareWrite(
+    raw: string,
+    content: string,
+    options?: { readonly softScopeError?: boolean | undefined },
+  ): Promise<CandidateMutationPreparation> {
+    if (typeof content !== 'string' || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(content)) !== content) {
+      refuse('TOOL_DENIED', '/content', { phase: 'tool' });
+    }
+    const hadTrailingSlash = typeof raw === 'string' && raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
+    const path = this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+    if (!this.isWritable(path)) {
+      if (options?.softScopeError) return this.#scopeDeniedError('write', path);
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    if (!options?.softScopeError) {
+      if (hadTrailingSlash) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      return freeze({ kind: 'change' as const, change: await this.prepareWrite(path, content) });
+    }
+    const knownOverlay = this.#files.get(path);
+    const baseEntry = this.#isOverlay && !this.#deleted.has(path) ? this.#baseline.get(path) : undefined;
+    const isKnown = knownOverlay !== undefined || baseEntry !== undefined;
+    const parent = await this.#parent(path, false);
+    const leaf = path.split('/').at(-1)!;
+    if (parent !== null && await this.#entry(parent, leaf)) {
+      const targetStat = await lstat(join(this.root, path));
+      if (!targetStat.isSymbolicLink() && targetStat.isDirectory()) {
+        if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+        return freeze({
+          kind: 'error' as const,
+          targetPath: path,
+          message: `Cannot write ${path}: path is a directory, not a file.`,
+        });
+      }
+    }
+    if (hadTrailingSlash) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot write ${path}: path is a directory, not a file.`,
+      });
+    }
+    return freeze({ kind: 'change' as const, change: this.#prepare(path, await this.#current(path), Buffer.from(content)) });
+  }
+
+  async tryPrepareEdit(
+    raw: string,
+    input: unknown,
+    options?: { readonly softScopeError?: boolean | undefined },
+  ): Promise<CandidateMutationPreparation> {
+    const hadTrailingSlash = typeof raw === 'string' && raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
+    const path = this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+    const items = list(input, 32, '/edits');
+    const validatedEntries = items.map(value => {
+      const entry = object(value, ['oldText', 'newText'], '/edits');
+      if (typeof entry.oldText !== 'string' || typeof entry.newText !== 'string' || Buffer.from(entry.newText).toString('utf8') !== entry.newText) {
+        refuse('TOOL_DENIED', '/edits', { phase: 'tool' });
+      }
+      return { oldText: entry.oldText, newText: entry.newText };
+    });
+    if (!this.isWritable(path)) {
+      if (options?.softScopeError) return this.#scopeDeniedError('edit', path);
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    const knownOverlay = this.#files.get(path);
+    const baseEntry = this.#isOverlay && !this.#deleted.has(path) ? this.#baseline.get(path) : undefined;
+    const isKnown = knownOverlay !== undefined || baseEntry !== undefined;
+    const parent = await this.#parent(path, false);
+    const leaf = path.split('/').at(-1)!;
+    if (parent === null || !await this.#entry(parent, leaf)) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot edit ${path}: file does not exist (use write to create new files).`,
+      });
+    }
+    const targetStat = await lstat(join(this.root, path));
+    if (!targetStat.isSymbolicLink() && targetStat.isDirectory()) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot edit ${path}: path is a directory, not a file.`,
+      });
+    }
+    if (hadTrailingSlash) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot edit ${path}: trailing slash is not allowed for file paths.`,
+      });
+    }
+    const before = await this.#current(path);
+    if (!before) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot edit ${path}: file does not exist (use write to create new files).`,
+      });
+    }
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(before);
+    } catch {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot edit ${path}: file is not valid UTF-8 text.`,
+      });
+    }
+    if (validatedEntries.length === 0) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Edit failed on ${path}: edits list must not be empty.`,
+      });
+    }
+    const ranges: { start: number; end: number; replacement: string }[] = [];
+    for (const [editIndex, entry] of validatedEntries.entries()) {
+      if (entry.oldText.length === 0) {
+        return freeze({
+          kind: 'error' as const,
+          targetPath: path,
+          message: `Edit failed on ${path}: edits[${editIndex}].oldText must not be empty.`,
+        });
+      }
+      const index = text.indexOf(entry.oldText);
+      if (index < 0) {
+        return freeze({
+          kind: 'error' as const,
+          targetPath: path,
+          message: `Edit failed on ${path}: edits[${editIndex}].oldText was not found in the file. Read the target lines and retry with exact text.`,
+        });
+      }
+      if (text.indexOf(entry.oldText, index + 1) >= 0) {
+        return freeze({
+          kind: 'error' as const,
+          targetPath: path,
+          message: `Edit failed on ${path}: edits[${editIndex}].oldText matched multiple locations. Include more surrounding lines so oldText is unique.`,
+        });
+      }
+      ranges.push({ start: index, end: index + entry.oldText.length, replacement: entry.newText });
+    }
+    ranges.sort((a, b) => a.start - b.start);
+    if (ranges.some((range, index) => index > 0 && ranges[index - 1]!.end > range.start)) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Edit failed on ${path}: multiple edits overlap. Merge overlapping edits and retry.`,
+      });
+    }
+    let offset = 0;
+    let result = '';
+    for (const range of ranges) {
+      result += text.slice(offset, range.start) + range.replacement;
+      offset = range.end;
+    }
+    result += text.slice(offset);
+    return freeze({ kind: 'change' as const, change: this.#prepare(path, before, Buffer.from(result)) });
+  }
+
+  async tryPrepareDelete(
+    raw: string,
+    options?: { readonly softScopeError?: boolean | undefined },
+  ): Promise<CandidateMutationPreparation> {
+    const hadTrailingSlash = typeof raw === 'string' && raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
+    const path = this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+    if (!this.isWritable(path)) {
+      if (options?.softScopeError) return this.#scopeDeniedError('delete', path);
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    const knownOverlay = this.#files.get(path);
+    const baseEntry = this.#isOverlay && !this.#deleted.has(path) ? this.#baseline.get(path) : undefined;
+    const isKnown = knownOverlay !== undefined || baseEntry !== undefined;
+    const parent = await this.#parent(path, false);
+    const leaf = path.split('/').at(-1)!;
+    if (parent === null || !await this.#entry(parent, leaf)) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot delete ${path}: file does not exist.`,
+      });
+    }
+    const targetStat = await lstat(join(this.root, path));
+    if (!targetStat.isSymbolicLink() && targetStat.isDirectory()) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot delete ${path}: path is a directory, not a file.`,
+      });
+    }
+    if (hadTrailingSlash) {
+      return freeze({
+        kind: 'error' as const,
+        targetPath: path,
+        message: `Cannot delete ${path}: trailing slash is not allowed for file paths.`,
+      });
+    }
+    return freeze({ kind: 'change' as const, change: await this.prepareDelete(path) });
   }
 
   async #withUnlockedAncestors<T>(

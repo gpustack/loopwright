@@ -64,8 +64,8 @@ async function candidateFiles(saved: Snapshot, head: ProgressHead) {
   if (!attempt) refuse('EVIDENCE_UNAVAILABLE', '', 'inspection');
   const checkpoint = saved.records.checkpoints.find(cp => cp.checkpointId === attempt.finished!.nativeCheckpointId)!, role = saved.plan.roles.find(role => role.roleId === saved.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
   const decoded = await decodePiCapture({ version: 1, lock: saved.lock, policy: attempt.repair === 'format' ? formatPolicy(role.policy) : role.policy, checkpoint, sessionId: attempt.sessionId, roleId: role.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await saved.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await saved.artifacts.read(checkpoint.privateSession!, 2097152) },
-    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await saved.artifacts.read(attempt.command, 16384)), requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId) } });
+    workspace: { ref: checkpoint.workspace, bytes: await saved.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await saved.artifacts.read(checkpoint.privateSession!, 67108864) },
+    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await saved.artifacts.read(attempt.command, 1048576)), requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId) } });
   if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('ARTIFACT_INVALID', '', 'inspection'); return decoded.value.artifacts;
 }
 export interface InspectRunInput extends RetainedRunInput { readonly output?: string }

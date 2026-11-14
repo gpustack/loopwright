@@ -254,6 +254,7 @@ export function parseUpstreamRecordsJson(rawJson: string): readonly TaskpackUpst
     const upstreamId = entry['upstreamId'];
     const status = entry['status'];
     const version = entry['version'];
+    const recentVersions = entry['recentVersions'];
     const reason = entry['reason'];
     if (typeof upstreamId !== 'string' || upstreamId.trim().length === 0) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].upstreamId must be a non-empty string`);
@@ -264,6 +265,12 @@ export function parseUpstreamRecordsJson(rawJson: string): readonly TaskpackUpst
     if (version !== undefined && typeof version !== 'string') {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].version must be a string`);
     }
+    if (
+      recentVersions !== undefined
+      && (!Array.isArray(recentVersions) || recentVersions.some(item => typeof item !== 'string' || item.length === 0))
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].recentVersions must be an array of non-empty strings`);
+    }
     if (reason !== undefined && typeof reason !== 'string') {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].reason must be a string`);
     }
@@ -271,6 +278,7 @@ export function parseUpstreamRecordsJson(rawJson: string): readonly TaskpackUpst
       upstreamId,
       status: status as UpstreamAcquisitionStatus,
       ...(version !== undefined ? { version } : {}),
+      ...(recentVersions !== undefined ? { recentVersions: Object.freeze([...(recentVersions as string[])]) } : {}),
       ...(reason !== undefined ? { reason } : {}),
     });
   }
@@ -446,7 +454,17 @@ async function runGitLsRemote(
   return stdout;
 }
 
-async function resolveSingleUpstreamVersion(
+function extractReleaseTag(record: Record<string, unknown>): string | undefined {
+  if (typeof record['tag_name'] === 'string' && record['tag_name'].length > 0) {
+    return record['tag_name'];
+  }
+  if (typeof record['name'] === 'string' && record['name'].length > 0) {
+    return record['name'];
+  }
+  return undefined;
+}
+
+async function resolveSingleUpstreamDetails(
   upstream: TaskpackUpstreamDescriptor,
   context: {
     readonly repositoryRoot?: string | undefined;
@@ -456,7 +474,7 @@ async function resolveSingleUpstreamVersion(
     readonly timeoutMs: number;
     readonly scrubber: SecretScrubber;
   },
-): Promise<string> {
+): Promise<{ readonly version: string; readonly recentVersions?: readonly string[] | undefined }> {
   const { apiBaseUrl, githubHeaders, fetchImpl, timeoutMs, scrubber } = context;
 
   switch (upstream.kind) {
@@ -464,31 +482,59 @@ async function resolveSingleUpstreamVersion(
       if (!REPOSITORY_FULL_NAME_PATTERN.test(upstream.source)) {
         throw new GitHubAppError('ACTION_INPUT_INVALID', `github-release upstream "${upstream.id}" source "${upstream.source}" must be owner/repo`);
       }
-      const latestUrl = `${apiBaseUrl}/repos/${upstream.source}/releases/latest`;
-      const latest = await fetchJson(latestUrl, fetchImpl, githubHeaders, timeoutMs, scrubber);
-      if (latest.ok && isPlainRecord(latest.data)) {
-        const tag = typeof latest.data['tag_name'] === 'string' && latest.data['tag_name'].length > 0
-          ? latest.data['tag_name']
-          : typeof latest.data['name'] === 'string' && latest.data['name'].length > 0
-            ? latest.data['name']
-            : undefined;
-        if (tag !== undefined && (upstream.allowPrerelease === true || latest.data['prerelease'] !== true)) {
-          return tag;
-        }
-      }
+      const list30Url = `${apiBaseUrl}/repos/${upstream.source}/releases?per_page=30`;
       if (upstream.allowPrerelease === true) {
+        const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
+        if (list30.ok && Array.isArray(list30.data)) {
+          const tags: string[] = [];
+          for (const item of list30.data) {
+            if (!isPlainRecord(item) || item['draft'] === true) continue;
+            const itemTag = extractReleaseTag(item);
+            if (itemTag !== undefined && !tags.includes(itemTag)) tags.push(itemTag);
+          }
+          if (tags.length > 0) {
+            return { version: tags[0]!, recentVersions: Object.freeze(tags.slice(0, 20)) };
+          }
+        }
+        const latestUrl = `${apiBaseUrl}/repos/${upstream.source}/releases/latest`;
+        const latest = await fetchJson(latestUrl, fetchImpl, githubHeaders, timeoutMs, scrubber);
+        if (latest.ok && isPlainRecord(latest.data)) {
+          const latestTag = extractReleaseTag(latest.data);
+          if (latestTag !== undefined) return { version: latestTag };
+        }
         const listUrl = `${apiBaseUrl}/repos/${upstream.source}/releases?per_page=1`;
         const list = await fetchJson(listUrl, fetchImpl, githubHeaders, timeoutMs, scrubber);
         if (list.ok && Array.isArray(list.data) && list.data.length > 0 && isPlainRecord(list.data[0])) {
-          const first = list.data[0];
-          const tag = typeof first['tag_name'] === 'string' && first['tag_name'].length > 0
-            ? first['tag_name']
-            : typeof first['name'] === 'string' && first['name'].length > 0
-              ? first['name']
-              : undefined;
-          if (tag !== undefined) return tag;
+          const firstTag = extractReleaseTag(list.data[0]);
+          if (firstTag !== undefined) return { version: firstTag };
         }
         throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub releases lookup failed (${list.status}) for ${upstream.source}`);
+      }
+
+      const latestUrl = `${apiBaseUrl}/repos/${upstream.source}/releases/latest`;
+      const latest = await fetchJson(latestUrl, fetchImpl, githubHeaders, timeoutMs, scrubber);
+      if (latest.ok && isPlainRecord(latest.data) && latest.data['prerelease'] !== true) {
+        const latestTag = extractReleaseTag(latest.data);
+        if (latestTag !== undefined) {
+          let recentVersions: readonly string[] | undefined;
+          try {
+            const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
+            if (list30.ok && Array.isArray(list30.data)) {
+              const tags: string[] = [];
+              for (const item of list30.data) {
+                if (!isPlainRecord(item) || item['draft'] === true || item['prerelease'] === true) continue;
+                const itemTag = extractReleaseTag(item);
+                if (itemTag !== undefined && !tags.includes(itemTag)) tags.push(itemTag);
+              }
+              if (tags.length > 0) {
+                recentVersions = Object.freeze([latestTag, ...tags.filter(item => item !== latestTag)].slice(0, 20));
+              }
+            }
+          } catch {
+            // Best-effort history enrichment; primary /releases/latest result stands.
+          }
+          return recentVersions !== undefined ? { version: latestTag, recentVersions } : { version: latestTag };
+        }
       }
       throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub release lookup failed (${latest.status}) for ${upstream.source}`);
     }
@@ -515,9 +561,9 @@ async function resolveSingleUpstreamVersion(
         }
         if (tagNames.length > 0) {
           tagNames.sort(compareVersionTags);
-          return tagNames[tagNames.length - 1]!;
+          return { version: tagNames[tagNames.length - 1]! };
         }
-        if (fallbackSha !== undefined) return fallbackSha;
+        if (fallbackSha !== undefined) return { version: fallbackSha };
         throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub tags payload lacked tag name for ${upstream.source}`);
       }
       const sourceKind = validateGitRemoteSource(upstream.source, context.repositoryRoot);
@@ -539,7 +585,7 @@ async function resolveSingleUpstreamVersion(
         throw new GitHubAppError('ACTION_INPUT_INVALID', `git ls-remote returned no tags for ${upstream.source}`);
       }
       tags.sort(compareVersionTags);
-      return tags[tags.length - 1]!;
+      return { version: tags[tags.length - 1]! };
     }
 
     case 'git-commit': {
@@ -550,7 +596,7 @@ async function resolveSingleUpstreamVersion(
           throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub commits lookup failed (${res.status}) for ${upstream.source}`);
         }
         const sha = res.data[0]['sha'];
-        if (typeof sha === 'string' && sha.length > 0) return sha;
+        if (typeof sha === 'string' && sha.length > 0) return { version: sha };
         throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub commits payload lacked sha for ${upstream.source}`);
       }
       const sourceKind = validateGitRemoteSource(upstream.source, context.repositoryRoot);
@@ -580,7 +626,7 @@ async function resolveSingleUpstreamVersion(
       if (sha === undefined) {
         throw new GitHubAppError('ACTION_INPUT_INVALID', `git ls-remote returned no HEAD for ${upstream.source}`);
       }
-      return sha;
+      return { version: sha };
     }
 
     case 'http-json': {
@@ -598,11 +644,11 @@ async function resolveSingleUpstreamVersion(
         for (const key of ['version', 'tag_name', 'latest', 'sha'] as const) {
           const candidate = res.data[key];
           if (typeof candidate === 'string' && candidate.trim().length > 0) {
-            return candidate.trim();
+            return { version: candidate.trim() };
           }
         }
       }
-      return createHash('sha256').update(res.rawText, 'utf8').digest('hex').slice(0, 16);
+      return { version: createHash('sha256').update(res.rawText, 'utf8').digest('hex').slice(0, 16) };
     }
 
     case 'custom-table': {
@@ -644,12 +690,12 @@ async function resolveSingleUpstreamVersion(
       try {
         const parsed = JSON.parse(rawBytes.toString('utf8')) as unknown;
         if (isPlainRecord(parsed) && typeof parsed['version'] === 'string' && parsed['version'].trim().length > 0) {
-          return parsed['version'].trim();
+          return { version: parsed['version'].trim() };
         }
       } catch {
         // Non-JSON custom table: hash content below.
       }
-      return createHash('sha256').update(rawBytes).digest('hex').slice(0, 16);
+      return { version: createHash('sha256').update(rawBytes).digest('hex').slice(0, 16) };
     }
   }
 }
@@ -697,7 +743,7 @@ export async function discoverTaskpackUpstreams(
   const records: TaskpackUpstreamRecord[] = [];
   for (const upstream of manifest.spec.upstreams) {
     try {
-      const version = await resolveSingleUpstreamVersion(upstream, {
+      const resolved = await resolveSingleUpstreamDetails(upstream, {
         repositoryRoot: options.repositoryRoot,
         apiBaseUrl,
         githubHeaders,
@@ -706,13 +752,14 @@ export async function discoverTaskpackUpstreams(
         scrubber,
       });
       const baseline = baselines.get(upstream.id);
-      const status: UpstreamAcquisitionStatus = baseline !== undefined && baseline === version
+      const status: UpstreamAcquisitionStatus = baseline !== undefined && baseline === resolved.version
         ? 'up_to_date'
         : 'available';
       records.push({
         upstreamId: upstream.id,
         status,
-        version,
+        version: resolved.version,
+        ...(resolved.recentVersions !== undefined ? { recentVersions: resolved.recentVersions } : {}),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

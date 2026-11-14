@@ -6,8 +6,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
+import { openPiHostSessionAdapterV2, type HostSessionProgressEvent } from '@loopwright/agent-pi/host-session';
+import type { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import {
+  formatDurationMs,
+  formatTokenCount,
   inspectRun,
   loadTrustedConfiguration,
   runCycleWithPorts,
@@ -1084,6 +1087,7 @@ export interface LocalCommandGateServerOptions {
   readonly signingSecret?: string | undefined;
   readonly scratchRoot?: string | undefined;
   readonly forbiddenEnvNames?: ReadonlySet<string> | undefined;
+  readonly onLog?: ((line: string) => void) | undefined;
 }
 
 export interface LocalCommandGateServer {
@@ -1258,15 +1262,23 @@ export async function startLocalCommandGateServer(
         options.forbiddenEnvNames,
       );
 
+      options.onLog?.(scrubber.scrub(
+        `check ${gate.checkId}: running ${gate.script} (timeout ${formatDurationMs(gate.timeoutSeconds * 1000)})`,
+      ));
+      const cmdStarted = performance.now();
       const result = await runCommandScript(scriptCopyPath, candidateDir, childEnv, gate.timeoutSeconds * 1000);
+      const cmdElapsed = Math.max(1, Math.round(performance.now() - cmdStarted));
       if (!result.timedOut && result.exitCode === 0) {
+        options.onLog?.(scrubber.scrub(`check ${gate.checkId}: passed (${formatDurationMs(cmdElapsed)})`));
         writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('approved', null));
       } else {
         const prefix = result.timedOut
           ? `command timed out after ${gate.timeoutSeconds}s`
           : `command exited with status ${result.exitCode ?? 'signal'}`;
         const rawReason = result.output.length > 0 ? `${prefix}: ${result.output}` : prefix;
-        writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('denied', sanitizeFailureReason(rawReason)));
+        const sanitizedReason = sanitizeFailureReason(rawReason);
+        options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed (${formatDurationMs(cmdElapsed)}) — ${sanitizedReason}`));
+        writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('denied', sanitizedReason));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1288,7 +1300,8 @@ export async function startLocalCommandGateServer(
   }
 
   const url = `http://${host}:${address.port}/${LOCAL_COMMAND_GATE_ENDPOINT_ID}`;
-  const timeoutMs = maxTimeoutSeconds * 1000 + 5_000;
+  const timeoutMs = Math.min(3_600_000, Math.max(35_000, maxTimeoutSeconds * 1000 + 15_000));
+  const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
 
   return {
     url,
@@ -1299,7 +1312,7 @@ export async function startLocalCommandGateServer(
       signingCredentialRef: 'taskpack-local-command-signing',
       authCredentialRef: null,
       timeoutMs,
-      maxPollMs: timeoutMs + 15_000,
+      maxPollMs,
       pollInitialMs: 100,
       pollMaxMs: 500,
       jitter: 0,
@@ -1319,6 +1332,7 @@ export interface NativePullRequestPublisherOptions {
   readonly repositoryFullName: string;
   readonly targetBranch: string;
   readonly headBranchPrefix: string;
+  readonly proposalPath?: string | undefined;
   readonly titleTemplate?: string | undefined;
   readonly openManagedPr?: ManagedPullRequestInfo | null | undefined;
   readonly remoteUrl?: string | undefined;
@@ -1441,6 +1455,157 @@ function buildGitAuthEnv(gitWriteToken: string | undefined): Record<string, stri
     });
   }
   return buildCleanGitEnv();
+}
+
+const MAX_PROPOSAL_JSON_BYTES = 2 * 1024 * 1024;
+const MAX_PR_BODY_CODEPOINTS = 32_000;
+const MAX_PR_TABLE_CELL_CODEPOINTS = 500;
+
+function stripDisallowedControls(text: string, allowNewline: boolean): string {
+  let out = '';
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code === 10 && allowNewline) {
+      out += '\n';
+    } else if (code === 9 || code === 10 || code === 13) {
+      out += ' ';
+    } else if (code <= 31 || (code >= 127 && code <= 159)) {
+      continue;
+    } else {
+      out += text[i]!;
+    }
+  }
+  return out;
+}
+
+function escapeMarkdownTableCell(value: unknown): string {
+  if (value === null || value === undefined) return '-';
+  const raw = typeof value === 'string'
+    ? value
+    : typeof value === 'number' || typeof value === 'boolean'
+      ? String(value)
+      : '';
+  const cleaned = stripDisallowedControls(raw, false)
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length === 0) return '-';
+  const bounded = truncateCodePoints(cleaned, MAX_PR_TABLE_CELL_CODEPOINTS);
+  return bounded.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+}
+
+function sanitizeProposalLeadText(raw: string): string {
+  return stripDisallowedControls(raw.replace(/\r\n?/g, '\n'), true).trim();
+}
+
+export function buildNativePullRequestBody(options: {
+  readonly runId: string;
+  readonly candidateDigest: string;
+  readonly proposalPath?: string | undefined;
+  readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly stagedPaths?: ReadonlySet<string> | undefined;
+  readonly scrubber: SecretScrubber;
+}): string {
+  const provenanceFooter = options.scrubber.scrub(
+    `Automated Loopwright update for run \`${options.runId}\` (\`${options.candidateDigest.slice(0, 12)}\`).`,
+  );
+  if (options.proposalPath === undefined || options.proposalPath.trim().length === 0) {
+    return provenanceFooter;
+  }
+
+  let cleanProposalPath: string;
+  try {
+    cleanProposalPath = normalizeCandidateRelativePath(options.proposalPath.trim().replace(/^(?:\.\/)+/, ''));
+  } catch {
+    return provenanceFooter;
+  }
+
+  if (options.stagedPaths !== undefined && !options.stagedPaths.has(cleanProposalPath)) {
+    return provenanceFooter;
+  }
+  const proposalFile = options.files.find(file => file.name === cleanProposalPath);
+  if (
+    proposalFile === undefined
+    || proposalFile.bytes.byteLength === 0
+    || proposalFile.bytes.byteLength > MAX_PROPOSAL_JSON_BYTES
+  ) {
+    return provenanceFooter;
+  }
+
+  let parsed: unknown;
+  try {
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(proposalFile.bytes);
+    parsed = JSON.parse(decoded);
+  } catch {
+    return provenanceFooter;
+  }
+  if (!isPlainRecord(parsed)) {
+    return provenanceFooter;
+  }
+
+  const sections: string[] = [];
+  if (typeof parsed['summary'] === 'string') {
+    const cleanSummary = sanitizeProposalLeadText(parsed['summary']);
+    if (cleanSummary.length > 0) {
+      sections.push(cleanSummary);
+    }
+  }
+
+  const rawSubscriptions = parsed['subscriptions'];
+  const subRows: Array<{ readonly name: string; readonly entry: Record<string, unknown> }> = [];
+  if (isPlainRecord(rawSubscriptions)) {
+    for (const [key, entry] of Object.entries(rawSubscriptions)) {
+      if (key.trim().length > 0 && isPlainRecord(entry)) {
+        subRows.push({ name: key.trim(), entry });
+      }
+    }
+  } else if (Array.isArray(rawSubscriptions)) {
+    for (const item of rawSubscriptions) {
+      if (!isPlainRecord(item)) continue;
+      const rawName = typeof item['subscription'] === 'string' && item['subscription'].trim().length > 0
+        ? item['subscription'].trim()
+        : typeof item['id'] === 'string' && item['id'].trim().length > 0
+          ? item['id'].trim()
+          : typeof item['name'] === 'string' && item['name'].trim().length > 0
+            ? item['name'].trim()
+            : null;
+      if (rawName !== null) {
+        subRows.push({ name: rawName, entry: item });
+      }
+    }
+  }
+
+  if (subRows.length > 0) {
+    const tableLines: string[] = [
+      '| Subscription | Status | Engine | Plugin | Reason |',
+      '| --- | --- | --- | --- | --- |',
+    ];
+    for (const { name, entry } of subRows) {
+      const subCell = escapeMarkdownTableCell(name);
+      const statusCell = escapeMarkdownTableCell(entry['status']);
+      const engineCell = escapeMarkdownTableCell(
+        entry['engine_version'] ?? entry['engineVersion'] ?? entry['engine'],
+      );
+      const pluginCell = escapeMarkdownTableCell(
+        entry['plugin_version'] ?? entry['pluginVersion'] ?? entry['plugin'],
+      );
+      const reasonCell = escapeMarkdownTableCell(entry['reason']);
+      tableLines.push(`| ${subCell} | ${statusCell} | ${engineCell} | ${pluginCell} | ${reasonCell} |`);
+    }
+    sections.push(tableLines.join('\n'));
+  }
+
+  if (sections.length === 0) {
+    return provenanceFooter;
+  }
+
+  const scrubbedLead = options.scrubber.scrub(sections.join('\n\n')).trim();
+  if (scrubbedLead.length === 0) {
+    return provenanceFooter;
+  }
+  const footerCodePoints = Array.from(provenanceFooter).length;
+  const maxLeadCodePoints = Math.max(1, MAX_PR_BODY_CODEPOINTS - footerCodePoints - 2);
+  const boundedLead = truncateCodePoints(scrubbedLead, maxLeadCodePoints);
+  return `${boundedLead}\n\n${provenanceFooter}`;
 }
 
 /**
@@ -1790,7 +1955,15 @@ export async function startNativePullRequestPublisherServer(
         if (options.gitWriteToken) {
           apiHeaders['authorization'] = `Bearer ${options.gitWriteToken}`;
         }
-        const prBody = `Automated Loopwright update for run \`${runId}\` (\`${candidateDigest.slice(0, 12)}\`).`;
+        const stagedPathSet = new Set(stagedFiles.map(entry => entry.path));
+        const prBody = buildNativePullRequestBody({
+          runId,
+          candidateDigest,
+          proposalPath: options.proposalPath,
+          files: snapshot.files,
+          stagedPaths: stagedPathSet,
+          scrubber,
+        });
         const isUpdate = options.openManagedPr !== undefined && options.openManagedPr !== null;
         const prUrl = isUpdate
           ? `${apiBaseUrl}/repos/${options.repositoryFullName}/pulls/${options.openManagedPr!.number}`
@@ -1892,6 +2065,8 @@ export interface TurnkeyCycleDelegateOptions {
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly ephemeralEnv?: Readonly<Record<string, string>> | undefined;
   readonly scrubber?: SecretScrubber | undefined;
+  readonly mcpRegistry?: HostMcpRegistry | undefined;
+  readonly onLog?: ((line: string) => void) | undefined;
   readonly onAttemptSettled?: ((summary: TurnkeyCycleAttemptSummary) => void) | undefined;
   readonly signal?: AbortSignal | undefined;
 }
@@ -1942,6 +2117,14 @@ async function withTemporaryProcessEnv<T>(
       }
     }
   }
+}
+
+function formatPiErrorDetail(
+  error: { readonly code: string; readonly phase: string; readonly path?: string | undefined },
+  prefix = '',
+): string {
+  const pathSuffix = typeof error.path === 'string' && error.path.length > 0 ? ` ${error.path}` : '';
+  return `${prefix}${error.code} (${error.phase}${pathSuffix})`;
 }
 
 function isRetryablePiFailure(error: {
@@ -2138,6 +2321,9 @@ export async function executeTurnkeyActionCycle(
 
   let observedRetryablePiFailure = false;
   let observedPiErrorDetail: string | null = null;
+  let roleAttemptSeq = 0;
+  let formatRepairDispatches = 0;
+  let implRepairDispatches = 0;
 
   const ports: ControllerPorts = {
     openAdapter: async (host: OpenAdapterHost, adapterInput: OpenAdapterInput) => {
@@ -2170,9 +2356,44 @@ export async function executeTurnkeyActionCycle(
         },
       };
 
-      const opened = await openPiHostSessionAdapterV2(wrappedHost, adapterInput);
+      const progressHandler = options.onLog === undefined
+        ? undefined
+        : (event: HostSessionProgressEvent): void => {
+          if (event.kind === 'request_start') {
+            options.onLog!(scrubber.scrub(
+              `turn #${event.turn}: dispatching request to ${event.provider}/${event.model}`,
+            ));
+          } else if (event.kind === 'request_settled') {
+            const inTok = formatTokenCount(event.inputTokens);
+            const outTok = formatTokenCount(event.outputTokens);
+            const suffix = event.toolCallNames.length > 0
+              ? `tools=[${event.toolCallNames.join(', ')}]`
+              : `stop=${event.stopReason}`;
+            options.onLog!(scrubber.scrub(
+              `turn #${event.turn}: settled in ${formatDurationMs(event.elapsedMs)} — in ${inTok} / out ${outTok} tokens, ${suffix}`,
+            ));
+          } else if (event.kind === 'tool_end') {
+            if (event.errorCode !== undefined) {
+              const detail = event.errorPath !== undefined && event.errorPath.length > 0
+                ? `${event.errorCode} ${event.errorPath}`
+                : event.errorCode;
+              options.onLog!(scrubber.scrub(
+                `tool ${event.name}: denied (${detail}) — ${formatDurationMs(event.elapsedMs)}`,
+              ));
+            } else {
+              options.onLog!(scrubber.scrub(
+                `tool ${event.name}: ${event.isError ? 'error' : 'ok'} (${formatDurationMs(event.elapsedMs)})`,
+              ));
+            }
+          }
+        };
+
+      const opened = await openPiHostSessionAdapterV2(wrappedHost, adapterInput, {
+        ...(options.mcpRegistry !== undefined ? { mcpRegistry: options.mcpRegistry } : {}),
+        ...(progressHandler !== undefined ? { onProgress: progressHandler } : {}),
+      });
       if (!opened.ok) {
-        observedPiErrorDetail = `${opened.error.code} (${opened.error.phase})`;
+        observedPiErrorDetail = formatPiErrorDetail(opened.error);
         if (isRetryablePiFailure(opened.error)) {
           observedRetryablePiFailure = true;
         }
@@ -2188,7 +2409,7 @@ export async function executeTurnkeyActionCycle(
           capture: async input => {
             const res = await inner.capture(input);
             if (!res.ok) {
-              observedPiErrorDetail = `capture:${res.error.code} (${res.error.phase})`;
+              observedPiErrorDetail = formatPiErrorDetail(res.error, 'capture:');
             }
             return res;
           },
@@ -2197,12 +2418,12 @@ export async function executeTurnkeyActionCycle(
           compact: async input => {
             const res = await inner.compact(input);
             if (!res.ok) {
-              observedPiErrorDetail = `${res.error.code} (${res.error.phase})`;
+              observedPiErrorDetail = formatPiErrorDetail(res.error);
               if (isRetryablePiFailure(res.error)) {
                 observedRetryablePiFailure = true;
               }
             } else if (res.value.error !== null) {
-              observedPiErrorDetail = `${res.value.error.code} (${res.value.error.phase})`;
+              observedPiErrorDetail = formatPiErrorDetail(res.value.error);
               if (isRetryablePiFailure(res.value.error)) {
                 observedRetryablePiFailure = true;
               }
@@ -2216,14 +2437,27 @@ export async function executeTurnkeyActionCycle(
             return res;
           },
           execute: async input => {
+            roleAttemptSeq += 1;
+            const isFormatRepair = input.repair === 'format' || adapterInput.policy.tools.length === 0;
+            if (roleAttemptSeq > 1) {
+              if (isFormatRepair) {
+                formatRepairDispatches += 1;
+                options.onLog?.(scrubber.scrub(`role dispatch #${roleAttemptSeq}: format repair (tools disabled)`));
+              } else if (input.repair === 'implementation') {
+                implRepairDispatches += 1;
+                options.onLog?.(scrubber.scrub(`role dispatch #${roleAttemptSeq}: implementation repair`));
+              } else {
+                options.onLog?.(scrubber.scrub(`role dispatch #${roleAttemptSeq}: retry dispatch`));
+              }
+            }
             const res = await inner.execute(input);
             if (!res.ok) {
-              observedPiErrorDetail = `${res.error.code} (${res.error.phase})`;
+              observedPiErrorDetail = formatPiErrorDetail(res.error);
               if (isRetryablePiFailure(res.error)) {
                 observedRetryablePiFailure = true;
               }
             } else if (res.value.error !== null) {
-              observedPiErrorDetail = `${res.value.error.code} (${res.value.error.phase})`;
+              observedPiErrorDetail = formatPiErrorDetail(res.value.error);
               if (isRetryablePiFailure(res.value.error)) {
                 observedRetryablePiFailure = true;
               }
@@ -2254,6 +2488,7 @@ export async function executeTurnkeyActionCycle(
     });
     if (!loaded.ok) {
       return {
+        kind: 'early_failure' as const,
         ok: false as const,
         code: loaded.error.code,
         detail: scrubber.scrub(`loadTrustedConfiguration failed: ${loaded.error.code}`),
@@ -2272,6 +2507,7 @@ export async function executeTurnkeyActionCycle(
     );
     if (!cycleResult.ok) {
       return {
+        kind: 'early_failure' as const,
         ok: false as const,
         code: cycleResult.error.code,
         detail: scrubber.scrub(`runCycle failed: ${cycleResult.error.code} (${cycleResult.error.phase})`),
@@ -2281,6 +2517,7 @@ export async function executeTurnkeyActionCycle(
     const execution = cycleResult.value;
     if (execution.kind === 'incident') {
       return {
+        kind: 'early_failure' as const,
         ok: false as const,
         code: execution.incident.code,
         detail: scrubber.scrub(
@@ -2293,10 +2530,58 @@ export async function executeTurnkeyActionCycle(
 
     const runResultStatus = execution.result.spec.status;
     const passed = runResultStatus === 'completed' || runResultStatus === 'no_change';
+    let observationsDiagnostic: string | null = null;
+    let requestedStatus: string | null = null;
+    let requestedStatusSource: string | null = null;
+    let publicationDiagnostic: string | null = null;
+    if (!passed && execution.observations !== null && /^[a-z0-9._-]+$/i.test(execution.observations.name)) {
+      try {
+        const obsRaw = JSON.parse(
+          await readFile(join(runRoot, attemptRunId, 'artifacts', execution.observations.name), 'utf8'),
+        ) as unknown;
+        if (isPlainRecord(obsRaw)) {
+          if (typeof obsRaw['diagnostic'] === 'string' && obsRaw['diagnostic'].length > 0) {
+            observationsDiagnostic = obsRaw['diagnostic'];
+          }
+          if (typeof obsRaw['requestedStatus'] === 'string' && obsRaw['requestedStatus'].length > 0) {
+            requestedStatus = obsRaw['requestedStatus'];
+          }
+          if (typeof obsRaw['requestedStatusSource'] === 'string' && obsRaw['requestedStatusSource'].length > 0) {
+            requestedStatusSource = obsRaw['requestedStatusSource'];
+          }
+          if (isPlainRecord(obsRaw['publication'])) {
+            const pubStatus = obsRaw['publication']['status'];
+            const pubReason = obsRaw['publication']['reason'];
+            if (typeof pubStatus === 'string' && (pubStatus === 'failed' || pubStatus === 'unresolved')) {
+              publicationDiagnostic = typeof pubReason === 'string' && pubReason.length > 0
+                ? `${pubStatus}:${pubReason}`
+                : pubStatus;
+            }
+          }
+        }
+      } catch {
+        // Best-effort observations read for operator diagnostic detail.
+      }
+    }
+    const rawSpecReason = (execution.result.spec as Record<string, unknown>)['reason'];
+    const specReason = typeof rawSpecReason === 'string' && rawSpecReason.trim().length > 0
+      ? rawSpecReason.trim()
+      : null;
     return {
+      kind: 'settled_result' as const,
       ok: passed,
       code: passed ? null : runResultStatus.toUpperCase(),
       detail: `run ${attemptRunId} settled as ${runResultStatus}`,
+      settledStatus: passed ? null : runResultStatus,
+      specReason,
+      observationsDiagnostic,
+      requestedStatus,
+      requestedStatusSource,
+      publicationDiagnostic,
+      maxAttempts: options.taskpack.config.spec.controls.maxAttempts,
+      maxFormatRepairs: options.taskpack.config.spec.task.spec.budgets.maxFormatRepairs,
+      maxImplRepairs: options.taskpack.config.spec.task.spec.budgets.maxImplementationRepairs,
+      maxModelCalls: options.taskpack.config.spec.task.spec.budgets.maxModelCalls,
     };
   });
 
@@ -2307,6 +2592,11 @@ export async function executeTurnkeyActionCycle(
   let inspectedStatus = cycleOutcome.ok ? 'completed' : 'failed';
   let externalUrl: string | null = null;
   let usage: UsageSummary | null = null;
+  let inspectedLedger: {
+    readonly formatRepairs: number;
+    readonly implementationRepairs: number;
+    readonly modelCalls: number;
+  } | null = null;
   let extraInfo: { readonly externalWriteDispatched: boolean; readonly checks: readonly ReportCheckItem[] } = {
     externalWriteDispatched: true,
     checks: [],
@@ -2318,10 +2608,75 @@ export async function executeTurnkeyActionCycle(
       inspectedStatus = inspected.value.status.status ?? inspectedStatus;
       externalUrl = inspected.value.externalUrl;
       usage = inspected.value.usage;
+      if (inspected.value.status.currentState !== null) {
+        inspectedLedger = {
+          formatRepairs: inspected.value.status.currentState.ledger.formatRepairs,
+          implementationRepairs: inspected.value.status.currentState.ledger.implementationRepairs,
+          modelCalls: inspected.value.status.currentState.ledger.admittedCalls,
+        };
+      }
       extraInfo = await inspectRunChecksAndExternalWrites(runRoot, attemptRunId, tempInspectDir);
     }
   } finally {
     await rm(summaryHolder, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  let effectiveDetail = cycleOutcome.detail;
+  if (!cycleOutcome.ok && cycleOutcome.kind === 'settled_result' && cycleOutcome.settledStatus !== null) {
+    const diagParts: string[] = [];
+    if (cycleOutcome.specReason !== null) {
+      diagParts.push(`reason=${cycleOutcome.specReason}`);
+    }
+    if (cycleOutcome.observationsDiagnostic !== null) {
+      diagParts.push(`diagnostic=${cycleOutcome.observationsDiagnostic}`);
+    }
+    const fmtRepairs = Math.max(inspectedLedger?.formatRepairs ?? 0, formatRepairDispatches);
+    const impRepairs = Math.max(inspectedLedger?.implementationRepairs ?? 0, implRepairDispatches);
+    diagParts.push(`attempts=${roleAttemptSeq}/${cycleOutcome.maxAttempts}`);
+    if (fmtRepairs > 0 || cycleOutcome.requestedStatusSource === 'unavailable') {
+      diagParts.push(`formatRepairs=${fmtRepairs}/${cycleOutcome.maxFormatRepairs}`);
+    }
+    if (impRepairs > 0) {
+      diagParts.push(`implRepairs=${impRepairs}/${cycleOutcome.maxImplRepairs}`);
+    }
+    if (inspectedLedger !== null && (cycleOutcome.settledStatus === 'exhausted' || inspectedLedger.modelCalls >= cycleOutcome.maxModelCalls)) {
+      diagParts.push(`modelCalls=${inspectedLedger.modelCalls}/${cycleOutcome.maxModelCalls}`);
+    }
+    if (cycleOutcome.requestedStatusSource === 'unavailable') {
+      diagParts.push('submission=unavailable');
+    } else if (cycleOutcome.requestedStatus === 'blocked' || cycleOutcome.requestedStatus === 'failed') {
+      diagParts.push(`requestedStatus=${cycleOutcome.requestedStatus}`);
+    }
+    if (cycleOutcome.publicationDiagnostic !== null) {
+      diagParts.push(`publication=${cycleOutcome.publicationDiagnostic}`);
+    }
+    const nonPassingChecks = extraInfo.checks.filter(c => c.status === 'failed' || c.status === 'blocked');
+    if (nonPassingChecks.length > 0) {
+      const checkSummary = nonPassingChecks
+        .slice(0, 3)
+        .map(c => {
+          const why = typeof c.detail === 'string' && c.detail.length > 0
+            ? `:${truncateCodePoints(c.detail, 120)}`
+            : '';
+          return `${c.checkId}=${c.status}${why}`;
+        })
+        .join(', ');
+      diagParts.push(`checks=[${checkSummary}]`);
+    }
+    if (observedPiErrorDetail !== null) {
+      diagParts.push(`pi=${observedPiErrorDetail}`);
+    }
+    if (diagParts.length > 0) {
+      const sanitizedDiag = sanitizeReportText(diagParts.join(', '), {
+        scrub: text => scrubber.scrub(text),
+        singleLine: true,
+      });
+      if (sanitizedDiag.length > 0) {
+        effectiveDetail = scrubber.scrub(
+          `run ${attemptRunId} settled as ${cycleOutcome.settledStatus} (${truncateCodePoints(sanitizedDiag, 512)})`,
+        );
+      }
+    }
   }
 
   const retryableProviderFailure = !cycleOutcome.ok
@@ -2334,13 +2689,16 @@ export async function executeTurnkeyActionCycle(
     ok: cycleOutcome.ok,
     status: inspectedStatus,
     reasonCode: cycleOutcome.code,
-    detail: cycleOutcome.detail,
+    detail: effectiveDetail,
     externalUrl,
     usage,
     checks: extraInfo.checks,
     elapsedMs: Math.max(1, Math.round(performance.now() - startedMs)),
     retryableProviderFailure,
   };
+  options.onLog?.(scrubber.scrub(
+    `attempt ${summary.attemptRunId}: ${summary.status} in ${formatDurationMs(summary.elapsedMs)}${summary.externalUrl ? ` — PR ${summary.externalUrl}` : ''}${!summary.ok ? ` (${summary.detail})` : ''}`,
+  ));
   options.onAttemptSettled?.(summary);
 
   return {

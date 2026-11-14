@@ -2,6 +2,7 @@ import { isAbsolute } from 'node:path';
 import { isIP } from 'node:net';
 import { digestArtifact } from '@loopwright/core';
 import { validateSelection } from '@loopwright/agent-pi/catalog';
+import { isExternalMcpToolName } from '@loopwright/agent-pi/mcp';
 import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation, type GateEndpoint, type PublicationEndpoint } from './types.js';
 import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
@@ -45,8 +46,8 @@ function context(raw: unknown, path: string): RoleProfile['context'] {
   if (!hasMode) value.mode = 'proven_bound';
   enumValue(value.mode, ['proven_bound', 'estimated_guard'], path + '/mode');
   if (value.estimator !== 'lw-pi-final-json-bytes-v1' || value.proofId !== null || value.version !== 1 || value.evidence !== 'estimated') refuse('CAPABILITY_UNSUPPORTED', path);
-  integer(value.workingWindowCeiling, 1, 98304, path); integer(value.maxRequestBytes, 1, 65536, path); integer(value.serviceMargin, 32768, Number.MAX_SAFE_INTEGER, path);
-  integer(value.toolReserve, 16384, Number.MAX_SAFE_INTEGER, path); integer(value.maxOutputTokens, 1, 1024, path);
+  integer(value.workingWindowCeiling, 1, 16777216, path); integer(value.maxRequestBytes, 1, 16777216, path); integer(value.serviceMargin, 32768, Number.MAX_SAFE_INTEGER, path);
+  integer(value.toolReserve, 16384, Number.MAX_SAFE_INTEGER, path); integer(value.maxOutputTokens, 1, 262144, path);
   return value as unknown as RoleProfile['context'];
 }
 function mcp(raw: unknown, tools: readonly string[], path: string): void {
@@ -67,8 +68,22 @@ function mcp(raw: unknown, tools: readonly string[], path: string): void {
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1' && url.port && addresses.every(address => address === '127.0.0.1'))) refuse('CAPABILITY_UNSUPPORTED', path);
   if (url.protocol === 'https:' && (isIP(url.hostname) || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(url.hostname) || url.hostname.includes('..') || url.hostname.endsWith('.'))) refuse('CAPABILITY_UNSUPPORTED', path);
 }
+const ROLE_LIMIT_KEYS = [
+  'promptBytes', 'diagnosticBytes', 'responseBytes', 'frameBytes', 'eventBytes', 'eventQueue',
+  'eventQueueBytes', 'pendingResponseBytes', 'toolArgsBytes', 'toolResultBytes', 'sessionBytes',
+  'artifactBytes', 'candidateEntries', 'fileBytes', 'toolWallMs', 'requests', 'operations', 'checkpoints',
+] as const;
+function roleLimits(raw: unknown, path: string): NonNullable<RoleProfile['limits']> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('CONFIG_SCHEMA', path);
+  const keys = Object.keys(raw);
+  if (keys.some(key => !ROLE_LIMIT_KEYS.includes(key as (typeof ROLE_LIMIT_KEYS)[number]))) refuse('CONFIG_SCHEMA', path);
+  const value = record(raw, keys, path);
+  for (const key of keys) integer(value[key], 1, Number.MAX_SAFE_INTEGER, path + '/' + key);
+  return value as unknown as NonNullable<RoleProfile['limits']>;
+}
 function role(raw: unknown, path: string): RoleProfile {
-  const value = record(raw, ['id', 'selection', 'tools', 'context', 'runtimeRef', 'providerCredentialRef', 'mcp'], path);
+  const hasLimits = raw !== null && typeof raw === 'object' && Object.hasOwn(raw, 'limits');
+  const value = record(raw, ['id', 'selection', 'tools', 'context', 'runtimeRef', 'providerCredentialRef', 'mcp', ...(hasLimits ? ['limits' as const] : [])], path);
   id(value.id, path + '/id'); id(value.runtimeRef, path + '/runtimeRef'); if (value.providerCredentialRef !== null) id(value.providerCredentialRef, path + '/providerCredentialRef');
   if (!value.selection || typeof value.selection !== 'object' || Array.isArray(value.selection)) refuse('CONFIG_SCHEMA', path + '/selection');
   const hasCustom = Object.hasOwn(value.selection, 'customProvider');
@@ -80,9 +95,11 @@ function role(raw: unknown, path: string): RoleProfile {
       : err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
     refuse(detailCode === 'INPUT_INVALID' ? 'CONFIG_SCHEMA' : 'CAPABILITY_UNSUPPORTED', path + '/selection');
   }
-  const tools = list(value.tools, path + '/tools', 8).map(item => text(item, path + '/tools', 128));
-  if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
-  const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp'); return { ...(raw as RoleProfile), context: checkedContext };
+  const tools = list(value.tools, path + '/tools', 128).map(item => text(item, path + '/tools', 128));
+  if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name) && !isExternalMcpToolName(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
+  const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp');
+  const checkedLimits = hasLimits ? roleLimits(value.limits, path + '/limits') : undefined;
+  return { ...(raw as RoleProfile), context: checkedContext, ...(checkedLimits !== undefined ? { limits: checkedLimits } : {}) };
 }
 /** Outbound endpoints accept exact https URLs or explicit-port loopback http; credentials, query strings and fragments never pass. */
 function endpointUrl(raw: unknown, path: string): string {
@@ -97,7 +114,7 @@ function gateEndpoint(raw: unknown, path: string): GateEndpoint {
   const value = record(raw, ['id', 'url', 'signingCredentialRef', 'authCredentialRef', 'timeoutMs', 'maxPollMs', 'pollInitialMs', 'pollMaxMs', 'jitter'], path);
   id(value.id, path + '/id'); endpointUrl(value.url, path + '/url'); id(value.signingCredentialRef, path + '/signingCredentialRef');
   if (value.authCredentialRef !== null) id(value.authCredentialRef, path + '/authCredentialRef');
-  integer(value.timeoutMs, 1000, 60000, path + '/timeoutMs'); integer(value.maxPollMs, 1000, 600000, path + '/maxPollMs');
+  integer(value.timeoutMs, 1000, 3600000, path + '/timeoutMs'); integer(value.maxPollMs, 1000, 3600000, path + '/maxPollMs');
   integer(value.pollInitialMs, 100, 30000, path + '/pollInitialMs'); integer(value.pollMaxMs, value.pollInitialMs as number, value.maxPollMs as number, path + '/pollMaxMs');
   integer(value.jitter, 0, 1000, path + '/jitter');
   return raw as GateEndpoint;
@@ -106,7 +123,7 @@ function publicationEndpoint(raw: unknown, path: string): PublicationEndpoint {
   const value = record(raw, ['id', 'url', 'signingCredentialRef', 'authCredentialRef', 'timeoutMs'], path);
   id(value.id, path + '/id'); endpointUrl(value.url, path + '/url'); id(value.signingCredentialRef, path + '/signingCredentialRef');
   if (value.authCredentialRef !== null) id(value.authCredentialRef, path + '/authCredentialRef');
-  integer(value.timeoutMs, 1000, 60000, path + '/timeoutMs');
+  integer(value.timeoutMs, 1000, 300000, path + '/timeoutMs');
   return raw as PublicationEndpoint;
 }
 export function validateRegistry(raw: unknown): TrustedRegistry {

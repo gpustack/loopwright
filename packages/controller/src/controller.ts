@@ -51,6 +51,15 @@ async function exclusiveJson(path: string, value: unknown): Promise<void> {
   const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
   const parent = await open(resolve(path, '..'), constants.O_RDONLY | constants.O_NOFOLLOW); try { await parent.sync(); } finally { await parent.close(); }
 }
+export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: CompiledPlan): number {
+  let maxEndpointTimeoutMs = 0;
+  for (const slot of plan.verifierSlots) {
+    if (slot.handler.implementation !== 'gate.v1') continue;
+    const ep = configuration.registry.spec.gateEndpoints.find(item => item.id === slot.handler.parameters.endpointRef);
+    if (ep && ep.timeoutMs > maxEndpointTimeoutMs) maxEndpointTimeoutMs = ep.timeoutMs;
+  }
+  return maxEndpointTimeoutMs > 58000 ? Math.min(3700000, maxEndpointTimeoutMs + 30000) : 60000;
+}
 export async function createCycle(input: RunCycleInput, ports: ControllerPorts): Promise<CycleContext> {
   const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error); const plan = compiled.value;
   const runId = id(input.runId), root = resolve(text(input.runRoot)), repository = resolve(text(input.repository)), directory = join(root, runId);
@@ -68,9 +77,9 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
     for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
-    const planRef = await artifacts.json('plan', plan, 1048576), lockRef = await artifacts.json('task-lock', lock, 1048576);
+    const planRef = await artifacts.json('plan', plan, 4194304), lockRef = await artifacts.json('task-lock', lock, 4194304);
     const identity: LocalRunIdentity = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + runId).hex.slice(0, 40), lock,
-      policy: { version: 1, leaseMs: 60000, cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }],
+      policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }],
         resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
     const descriptor: RunDescriptor = { version: 1, identity, plan: planRef, source: source.inventory, sourceWorkspace: source.workspace,
       configuration: { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 }, repository };
@@ -251,8 +260,8 @@ export class Cycle {
     const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal), sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy);
     const configured = purpose === 'compaction' ? '' : text(loaded.registry.spec.handlers.find(handler => handler.id === node.handler.id)?.parameters.prompt);
     if (purpose !== 'compaction' && node.handler.parameters.prompt !== '[private command sha256:' + hash(configured).hex + ']') refuse('RECOVERY_REQUIRED', '', 'execution');
-    const commandText = retained ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, 16384)) : prompt ?? configured;
-    const command = await artifacts.put('command', Buffer.from(commandText), Math.min(16384, role.policy.limits.promptBytes));
+    const commandText = retained ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, 1048576)) : prompt ?? configured;
+    const command = await artifacts.put('command', Buffer.from(commandText), Math.min(1048576, role.policy.limits.promptBytes));
     const originalSubmission = this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
     const originalState = await schedulingSnapshot(store, authority, lock, artifacts, this.candidate, this.draft.candidate);
     observeParentExhaustion(this.deadline.assert(), lock);
@@ -268,11 +277,11 @@ export class Cycle {
     if (purpose === 'compaction' || repair === 'implementation') {
       const prior = this.draft.attempts.slice(0, -1).filter(item => item.nativeStepId === nativeStepId && item.sessionId === sessionId && item.finished?.nativeCheckpointId).at(-1);
       if (prior) {
-        const wrapper = parsePrivateJson(await artifacts.read(prior.finished!.outcome, 1048576), 1048576) as Record<string, unknown>;
+        const wrapper = parsePrivateJson(await artifacts.read(prior.finished!.outcome, 4194304), 4194304, 16384) as Record<string, unknown>;
         const checkpoint = stateValue(store.getCheckpoint(prior.finished!.nativeCheckpointId!));
         if (same(checkpoint.subject.candidateDigest, this.draft.candidate.digest)) {
           const identified = identifyManifest(parsePrivateJson(await artifacts.read(checkedRef(wrapper.originalManifest), 32768), 32768)); if (!identified.ok) refuse('RECOVERY_REQUIRED', '', 'recovery'); nativeManifest = identified.value.manifest;
-          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 2097152) } };
+          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 67108864) } };
         }
       }
       if (purpose === 'compaction' && restore === null) refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
@@ -307,7 +316,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       if (!executed.ok) { noEffectBudget = isNoEffectBudgetRefusal(executed.error);
         if (executed.error.code === 'MCP_AUTHENTICATION_REQUIRED' && executed.error.effect === 'none') noEffectMcpAuth = true;
         refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: executed.error.code, stateCode: executed.error.stateErrorCode, effect: executed.error.effect }); }
-      const outcome: PiOutcomeV2 = executed.value; nativeOutcome = await artifacts.json('native-outcome', { version: 1, attemptId: commandId, outcome }, 65536);
+      const outcome: PiOutcomeV2 = executed.value; nativeOutcome = await artifacts.json('native-outcome', { version: 1, attemptId: commandId, outcome }, 524288);
       noEffectBudget = outcome.error !== null && isNoEffectBudgetRefusal(outcome.error) && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       noEffectMcpAuth = outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.error?.effect === 'none' && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
@@ -362,7 +371,12 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
   async repairFormat(nodeId: string): Promise<void> {
     const raw = this.draft.submission; this.repairBound('format', raw !== null);
     if (!raw) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-    const prompt = formatPrompt(await this.context.artifacts.read(raw, 1048576)); await this.role(nodeId, 'format', prompt);
+    const node = this.context.plan.orderedDAG.find(item => item.id === nodeId);
+    const role = this.context.plan.roles.find(item => item.roleId === node?.roleId);
+    const maxPromptBytes = role ? Math.min(16384, role.policy.limits.promptBytes) : 16384;
+    const allowedCheckIds = this.context.plan.task.spec.acceptance.checks.map(item => item.id);
+    const prompt = formatPrompt(await this.context.artifacts.read(raw, 1048576), allowedCheckIds, maxPromptBytes);
+    await this.role(nodeId, 'format', prompt);
   }
   currentChecks(): readonly VerifiedCheck[] { return [...this.checks.values()].filter(check => check.generation === this.generation); }
   currentRefusals(): readonly PreflightRefusal[] { return [...this.refusals.values()].filter(item => item.generation === this.generation); }

@@ -31,7 +31,7 @@ export function journal(store: LocalRunStore) {
     do {
       const page: Page<T> = stateValue(reader({ limit: 100, cursor }));
       if (revision !== -1 && revision !== page.revision) refuse('RECOVERY_REQUIRED', '', 'recovery'); revision = page.revision; items.push(...page.items); cursor = page.next;
-      if (items.length > 2048) refuse('OUTPUT_LIMIT', '', 'recovery');
+      if (items.length > 16384) refuse('OUTPUT_LIMIT', '', 'recovery');
     } while (cursor !== null);
     return { revision, items };
   };
@@ -40,7 +40,7 @@ export function journal(store: LocalRunStore) {
   if ([requests.revision, operations.revision, checkpoints.revision].some(revision => revision !== view.revision)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return { view, requests: requests.items, operations: operations.items, checkpoints: checkpoints.items };
 }
-function watermarks(raw: unknown): void { const value = record(raw, ['requests', 'operations']); integer(value.requests, 0, 1024); integer(value.operations, 0, 2048); }
+function watermarks(raw: unknown): void { const value = record(raw, ['requests', 'operations']); integer(value.requests, 0, 4096); integer(value.operations, 0, 16384); }
 function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
   const hasPublication = Object.hasOwn(raw as object, 'publication'), value = record(raw, ['version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints', 'submission', 'publication', 'candidate', 'failures', 'verifierReceipts', 'verifierRefusals', 'eventSequence', 'terminalIntent']);
   if (value.version !== 2 || value.runId !== lock.spec.runId || !same(value.lockHash, lock.spec.lockHash)) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -168,9 +168,9 @@ export class ProgressStore {
     return manifest;
   }
   async read(): Promise<ProgressHead | null> {
-    if (!same(parsePrivateJson(await this.artifacts.read(this.planRef, 1048576), 1048576), this.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    if (!same(parsePrivateJson(await this.artifacts.read(this.planRef, 4194304), 4194304), this.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const verified = new Set<string>(), wrappers = new Set<string>(), manifests = new Map<string, ArtifactManifest>(), negativeAnchors = new Set<string>();
-    const verify = async (ref: ArtifactRef, maximum = 8388608): Promise<void> => {
+    const verify = async (ref: ArtifactRef, maximum = 67108864): Promise<void> => {
       if (ref.byteLength > maximum) refuse('ARTIFACT_INVALID', '', 'recovery');
       const key = canonical(ref); if (!verified.has(key)) { await this.artifacts.read(ref, maximum); verified.add(key); }
     };
@@ -180,7 +180,7 @@ export class ProgressStore {
       if (!phase || emitted.includes(phase) || !same(checkpoint.clockBasis, before.view.clock.basis)) refuse('RECOVERY_REQUIRED', '', 'recovery'); emitted.push(phase);
       if (phase.endsWith('.native')) {
         if (checkpoint.additionalArtifacts.length !== 0 || checkpoint.privateSession === null || !emitted.includes(phase.replace('.native', '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-        await verify(checkpoint.workspace); await verify(checkpoint.privateSession, 2097152); continue;
+        await verify(checkpoint.workspace); await verify(checkpoint.privateSession, 67108864); continue;
       }
       if (checkpoint.additionalArtifacts.length !== 4 || !same(checkpoint.additionalArtifacts.slice(2), [this.planRef, this.sourceRef])) refuse('RECOVERY_REQUIRED', '', 'recovery');
       const ref = checkpoint.additionalArtifacts[0]!, progress = validateProgress(parsePrivateJson(await this.artifacts.read(ref, 65536), 65536), this.plan, this.lock);
@@ -204,13 +204,13 @@ export class ProgressStore {
       const index = await this.index(progress);
       const actualIndex = parsePrivateJson(await this.artifacts.read(checkpoint.additionalArtifacts[1]!, 65536), 65536);
       if (!same(index, actualIndex)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-      await verify(checkpoint.workspace); if (checkpoint.privateSession) await verify(checkpoint.privateSession, 2097152);
+      await verify(checkpoint.workspace); if (checkpoint.privateSession) await verify(checkpoint.privateSession, 67108864);
       for (const entry of index.entries) await verify(entry.ref);
       for (const attempt of progress.attempts) {
-        await verify(attempt.command, 16384); if (!attempt.finished) continue;
-        await verify(attempt.finished.outcome, 1048576); const wrapperKey = attempt.id + '\0' + canonical(attempt.finished.outcome);
+        await verify(attempt.command, 1048576); if (!attempt.finished) continue;
+        await verify(attempt.finished.outcome, 4194304); const wrapperKey = attempt.id + '\0' + canonical(attempt.finished.outcome);
         if (attempt.finished.nativeCheckpointId === null || wrappers.has(wrapperKey)) continue;
-        const wrapper = record(parsePrivateJson(await this.artifacts.read(attempt.finished.outcome, 1048576), 1048576, 2048), ['version', 'attemptId', 'command', 'roleId', 'nodeId', 'stepId', 'sessionId', 'checkpointId', 'originalManifest', 'manifest', 'workspace', 'session', 'submission', 'journal']);
+        const wrapper = record(parsePrivateJson(await this.artifacts.read(attempt.finished.outcome, 4194304), 4194304, 16384), ['version', 'attemptId', 'command', 'roleId', 'nodeId', 'stepId', 'sessionId', 'checkpointId', 'originalManifest', 'manifest', 'workspace', 'session', 'submission', 'journal']);
         const native = before.checkpoints.find(cp => cp.checkpointId === attempt.finished!.nativeCheckpointId), node = this.plan.orderedDAG.find(node => node.id === attempt.nodeId)!;
         if (!native || native.sequence > checkpoint.sequence || !same(attempt.finished.after, { requests: native.counts.requests, operations: native.counts.operations }) || wrapper.version !== 1 || wrapper.attemptId !== attempt.id || wrapper.nodeId !== attempt.nodeId || wrapper.roleId !== node.roleId
           || wrapper.stepId !== attempt.nativeStepId || wrapper.sessionId !== attempt.sessionId || wrapper.checkpointId !== native.checkpointId || !same(wrapper.command, attempt.command)

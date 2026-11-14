@@ -3,27 +3,40 @@ import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/prom
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles } from '@loopwright/agent-pi';
+import { resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { validateDocument, type TaskContract } from '@loopwright/core';
 import { CONTROLLER_API_VERSION, installedHandlerDigests, type ControllerConfiguration, type TrustedRegistry } from '@loopwright/controller';
-import { effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy, validateTaskpackManifest, type Json } from './schema.js';
+import {
+  collectMcpReferencedEnvNames, effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument,
+  pathCoveredBy, validateTaskpackLimitsDeclaration, validateTaskpackManifest, type Json,
+} from './schema.js';
 import { loadPiModelsJson, resolveTaskpackModelCandidates, resolveTaskpackModelSelection } from './models-config.js';
 import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
 import {
   AUTHORIZED_ASSOCIATIONS, DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID, TASKPACK_MANIFEST_BYTES,
   type CompiledInstructionResource, type CompiledLocalCommandGate, type CompiledTaskpack, type HostGateEndpointPlan,
   type HostTaskpackBindings, type ParsedCommentCommand, type PiModelSelection, type TaskpackCommentCommand,
-  type TaskpackIntakeInput, type TaskpackIntakeOutcome, type TaskpackManifest, type TaskpackRunDiagnostic,
+  type TaskpackIntakeInput, type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration, type TaskpackManifest,
+  type TaskpackRunDiagnostic,
 } from './types.js';
 
-/** Default controller budgets for host bindings that do not pin their own (mirrors the runner research stage). */
+/** Default controller budgets for host bindings that do not pin their own. */
 export const DEFAULT_HOST_BUDGETS: TaskContract['spec']['budgets'] = Object.freeze({
-  wallTimeMs: 3_300_000, totalTokens: 20_000_000, perCallOutputTokens: 1024, maxModelCalls: 12, maxConcurrency: 1,
-  maxFormatRepairs: 2, maxImplementationRepairs: 2, maxTransportRetries: 2,
+  wallTimeMs: 3_600_000, totalTokens: 20_000_000, perCallOutputTokens: 32_768, maxModelCalls: 256, maxConcurrency: 1,
+  maxFormatRepairs: 3, maxImplementationRepairs: 3, maxTransportRetries: 3,
   enforcement: Object.freeze({
     wallTime: 'hard_admission', tokens: 'soft_accounting', modelCalls: 'hard_admission', concurrency: 'hard_admission',
     formatRepairs: 'hard_admission', implementationRepairs: 'hard_admission', transportRetries: 'hard_admission',
   }),
 });
+
+/** Default author prompt header declaring the required submission.v1 final assistant response contract. */
+export const DEFAULT_AUTHOR_PROMPT_HEAD = [
+  'Inspect the repository snapshot and produce one structured submission with the candidate patch and proposal document.',
+  'After inspecting/updating the candidate workspace, your final assistant message MUST be ONLY one raw UTF-8 JSON object (no surrounding prose, no Markdown summary, and no bare ``` code fence) matching:',
+  '{"version":1,"status":"completed"|"no_change"|"failed"|"blocked","checks":[],"reason":"<single-line printable summary or null>"}',
+  'where "checks" is [] (host verifiers run independently after your turn) and "reason" is either null or a non-empty single-line printable string (1..4096 chars, no \\n, \\r, \\t, or control characters).',
+].join(' ');
 
 /** Guidance bounds mirroring the committed @loopwright/taskpack-runner intake constants. */
 export const GUIDANCE_MAX_LINES = 40;
@@ -36,8 +49,123 @@ export const ACTIONS_RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DRAIN_RESERVE_MS = 120_000;
-const INSTRUCTION_MAX_AGGREGATE_BYTES = 24_576;
+export const INSTRUCTION_MAX_AGGREGATE_BYTES = 262_144;
 const COMMAND_SCRIPT_MAX_BYTES = 262_144;
+
+export function parseEnvAndInputLimitsOverride(env: NodeJS.ProcessEnv): TaskpackLimitsDeclaration {
+  const raw: Record<string, number> = {};
+  const parseEnvInt = (envKey: string): number | undefined => {
+    const val = env[envKey]?.trim();
+    if (val === undefined || val === '') return undefined;
+    if (!/^-?\d+$/.test(val)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid integer in ${envKey}: "${val}"`, envKey);
+    }
+    const parsed = Number(val);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `integer out of range in ${envKey}: "${val}"`, envKey);
+    }
+    return parsed;
+  };
+  const pick = (targetField: string, ...envKeys: string[]): void => {
+    for (const key of envKeys) {
+      const val = parseEnvInt(key);
+      if (val !== undefined) {
+        raw[targetField] = val;
+        return;
+      }
+    }
+  };
+  // Precedence: INPUT_* > LOOPWRIGHT_*
+  const inputWallSec = parseEnvInt('INPUT_WALL-TIME-SECONDS');
+  const envWallMs = parseEnvInt('LOOPWRIGHT_WALL_TIME_MS');
+  const envWallSec = parseEnvInt('LOOPWRIGHT_WALL_TIME_SECONDS');
+  if (inputWallSec !== undefined) raw['wallTimeSeconds'] = inputWallSec;
+  else if (envWallMs !== undefined) raw['wallTimeMs'] = envWallMs;
+  else if (envWallSec !== undefined) raw['wallTimeSeconds'] = envWallSec;
+
+  pick('totalTokens', 'INPUT_TOTAL-TOKENS', 'LOOPWRIGHT_TOTAL_TOKENS');
+  pick('contextWindow', 'INPUT_CONTEXT-WINDOW', 'LOOPWRIGHT_CONTEXT_WINDOW');
+  pick('maxOutputTokens', 'INPUT_MAX-OUTPUT-TOKENS', 'LOOPWRIGHT_MAX_OUTPUT_TOKENS', 'LOOPWRIGHT_PER_CALL_OUTPUT_TOKENS');
+  pick('maxModelCalls', 'INPUT_MAX-MODEL-CALLS', 'LOOPWRIGHT_MAX_MODEL_CALLS');
+  pick('maxAttempts', 'INPUT_MAX-ATTEMPTS', 'LOOPWRIGHT_MAX_ATTEMPTS');
+  pick('maxFormatRepairs', 'LOOPWRIGHT_MAX_FORMAT_REPAIRS');
+  pick('maxImplementationRepairs', 'LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS');
+  pick('maxTransportRetries', 'LOOPWRIGHT_MAX_TRANSPORT_RETRIES');
+
+  const inputToolSec = parseEnvInt('INPUT_TOOL-TIMEOUT-SECONDS');
+  const envToolWallMs = parseEnvInt('LOOPWRIGHT_TOOL_WALL_MS');
+  const envToolSec = parseEnvInt('LOOPWRIGHT_TOOL_TIMEOUT_SECONDS');
+  if (inputToolSec !== undefined) raw['toolTimeoutSeconds'] = inputToolSec;
+  else if (envToolWallMs !== undefined) raw['toolWallMs'] = envToolWallMs;
+  else if (envToolSec !== undefined) raw['toolTimeoutSeconds'] = envToolSec;
+
+  pick('commandTimeoutSeconds', 'INPUT_COMMAND-TIMEOUT-SECONDS', 'LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS');
+  pick('responseBytes', 'LOOPWRIGHT_RESPONSE_BYTES');
+  pick('toolResultBytes', 'LOOPWRIGHT_TOOL_RESULT_BYTES');
+  pick('toolArgsBytes', 'LOOPWRIGHT_TOOL_ARGS_BYTES');
+  pick('promptBytes', 'LOOPWRIGHT_PROMPT_BYTES');
+  pick('maxRequestBytes', 'LOOPWRIGHT_MAX_REQUEST_BYTES');
+  pick('workingWindowBytes', 'LOOPWRIGHT_WORKING_WINDOW_BYTES');
+  pick('fileBytes', 'LOOPWRIGHT_FILE_BYTES');
+  pick('sessionBytes', 'LOOPWRIGHT_SESSION_BYTES');
+  pick('candidateEntries', 'LOOPWRIGHT_CANDIDATE_ENTRIES');
+
+  if (Object.keys(raw).length === 0) return Object.freeze({});
+  try {
+    return validateTaskpackLimitsDeclaration(raw, '/env/limits');
+  } catch (error) {
+    if (error instanceof GitHubAppError) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', error.message, error.path);
+    }
+    throw error;
+  }
+}
+
+export function mergeTaskpackLimits(
+  base: TaskpackLimitsDeclaration | undefined,
+  override: TaskpackLimitsDeclaration | undefined,
+): TaskpackLimitsDeclaration {
+  if (!base && !override) return Object.freeze({});
+  const out: Record<string, number> = {};
+  if (base) {
+    for (const [k, v] of Object.entries(base)) {
+      if (typeof v === 'number') out[k] = v;
+    }
+  }
+  if (override) {
+    for (const [k, v] of Object.entries(override)) {
+      if (typeof v === 'number') {
+        out[k] = v;
+        if (k === 'wallTimeSeconds') delete out['wallTimeMs'];
+        if (k === 'wallTimeMs') delete out['wallTimeSeconds'];
+        if (k === 'maxOutputTokens') delete out['perCallOutputTokens'];
+        if (k === 'perCallOutputTokens') delete out['maxOutputTokens'];
+        if (k === 'toolTimeoutSeconds') delete out['toolWallMs'];
+        if (k === 'toolWallMs') delete out['toolTimeoutSeconds'];
+      }
+    }
+  }
+  return Object.freeze(out) as TaskpackLimitsDeclaration;
+}
+
+export function applyLimitsToBudgets(
+  baseBudgets: TaskContract['spec']['budgets'],
+  limits: TaskpackLimitsDeclaration | undefined,
+): TaskContract['spec']['budgets'] {
+  if (!limits) return baseBudgets;
+  const wallTimeMs = limits.wallTimeMs ?? (limits.wallTimeSeconds !== undefined ? limits.wallTimeSeconds * 1000 : baseBudgets.wallTimeMs);
+  const perCallOutputTokens = limits.maxOutputTokens ?? limits.perCallOutputTokens ?? baseBudgets.perCallOutputTokens;
+  return Object.freeze({
+    ...baseBudgets,
+    wallTimeMs,
+    totalTokens: limits.totalTokens ?? baseBudgets.totalTokens,
+    perCallOutputTokens,
+    maxModelCalls: limits.maxModelCalls ?? baseBudgets.maxModelCalls,
+    maxFormatRepairs: limits.maxFormatRepairs ?? baseBudgets.maxFormatRepairs,
+    maxImplementationRepairs: limits.maxImplementationRepairs ?? baseBudgets.maxImplementationRepairs,
+    maxTransportRetries: limits.maxTransportRetries ?? baseBudgets.maxTransportRetries,
+  });
+}
 
 function manifestInvalid(message: string, path: string | null): never {
   throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', message, path);
@@ -239,7 +367,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   const providerEnv = requireEnvName(bindings.credentialEnvMap.provider, 'provider');
   const runtime = await runtimeIdentity();
   const installed = await installedHandlerDigests();
-  const authorPrompt = bindings.authorPrompt ?? 'Inspect the repository snapshot and produce one structured submission with the candidate patch and proposal document.';
+  const authorPrompt = bindings.authorPrompt ?? DEFAULT_AUTHOR_PROMPT_HEAD;
   const { controlRoot, manifestPath } = resolveManifestControlRoot(manifest, bindings.taskpackPath);
   const memoryRoot = `${controlRoot}/memory`;
   if (!pathCoveredBy(manifest.spec.memory.directory, memoryRoot)) {
@@ -290,6 +418,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
   }
 
+  const mergedLimits = mergeTaskpackLimits(manifest.spec.limits, bindings.limits);
   const commandGateMetaByCheckId = new Map<string, CompiledLocalCommandGate>();
   const commandScripts: string[] = [];
   const hasCommandChecks = manifest.spec.verification.localChecks.some(c => c.implementation === 'command.v1');
@@ -315,6 +444,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       ...(manifest.spec.models === undefined
         ? []
         : manifest.spec.models.map(m => m.apiKeyEnv).filter((v): v is string => v !== undefined)),
+      ...collectMcpReferencedEnvNames(manifest.spec.mcp?.servers),
     ]);
     for (const [index, declared] of manifest.spec.verification.localChecks.entries()) {
       if (declared.implementation !== 'command.v1') continue;
@@ -350,7 +480,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         const gateId = `cmd-${index}-${declared.id.slice(0, 40)}-${scriptSha256.slice(0, 16)}`;
         const timeoutSeconds = typeof declared.parameters?.['timeoutSeconds'] === 'number'
           ? declared.parameters['timeoutSeconds']
-          : 30;
+          : (mergedLimits.commandTimeoutSeconds ?? 30);
         const allowReadOnlyGitHubToken = declared.parameters?.['allowReadOnlyGitHubToken'] === true;
         const env = Array.isArray(declared.parameters?.['env'])
           ? Object.freeze([...(declared.parameters['env'] as readonly string[])])
@@ -451,13 +581,16 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   if (candidate && localCommandGates.length > 0) {
     let localPlan = gatePlans.find(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
     if (localPlan === undefined) {
+      const maxCmdSec = Math.max(30, ...localCommandGates.map(g => g.timeoutSeconds));
+      const localTimeoutMs = Math.min(3_600_000, Math.max(58_000, maxCmdSec * 1000 + 15_000));
+      const localMaxPollMs = Math.min(3_600_000, Math.max(120_000, localTimeoutMs + 15_000));
       localPlan = {
         id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
         url: 'http://127.0.0.1:65535/loopwright-local-command',
         signingCredentialRef: 'taskpack-local-command-signing',
         authCredentialRef: null,
-        timeoutMs: 58_000,
-        maxPollMs: 120_000,
+        timeoutMs: localTimeoutMs,
+        maxPollMs: localMaxPollMs,
         pollInitialMs: 200,
         pollMaxMs: 5_000,
         jitter: 100,
@@ -626,6 +759,83 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       digest: { ...installed['no-change.v1']! }, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
     },
   ];
+  const catalogRecord = resolveCatalogModel(selection).record;
+  const mergedLimits = mergeTaskpackLimits(manifest.spec.limits, bindings.limits);
+  const baseBudgetsWithManifest = bindings.budgets === DEFAULT_HOST_BUDGETS
+    ? applyLimitsToBudgets(DEFAULT_HOST_BUDGETS, manifest.spec.limits)
+    : bindings.budgets;
+  const requestedBudgets = applyLimitsToBudgets(baseBudgetsWithManifest, bindings.limits);
+  const defaultWorkingWindow = Math.min(16_777_216, Math.max(8_388_608, catalogRecord.contextWindow));
+  const workingWindowCeiling = mergedLimits.workingWindowBytes ?? defaultWorkingWindow;
+  const maxRequestBytes = Math.min(mergedLimits.maxRequestBytes ?? 8_388_608, workingWindowCeiling);
+  const serviceMargin = Math.min(32_768, Math.floor(workingWindowCeiling / 4));
+  const toolReserve = Math.min(16_384, Math.floor(workingWindowCeiling / 8));
+  const usableWindow = Math.min(catalogRecord.contextWindow, workingWindowCeiling) - serviceMargin - toolReserve;
+  const externalToolCount = bindings.externalMcpTools?.length ?? 0;
+  const instructionBytes = input.instructionResources.reduce((sum, r) => sum + r.bytes.byteLength, 0);
+  const promptBytesEst = Buffer.byteLength(input.authorPrompt, 'utf8');
+  const baseInputHeadroom = usableWindow > 8_192
+    ? Math.min(65_536, Math.floor(usableWindow * 0.8))
+    : 4_096;
+  const estimatedFixedInput = externalToolCount > 0 || instructionBytes > 8_192
+    ? 12_288 + instructionBytes + promptBytesEst + externalToolCount * 1_600 + 8_192
+    : 0;
+  const maxInputHeadroom = usableWindow >= 24_576
+    ? usableWindow - 8_192
+    : Math.max(0, usableWindow - Math.max(1_024, Math.floor(usableWindow * 0.2)));
+  const inputHeadroom = usableWindow > 8_192
+    ? Math.min(maxInputHeadroom, Math.max(baseInputHeadroom, estimatedFixedInput))
+    : 4_096;
+  const maxWindowOutput = Math.max(1, usableWindow - inputHeadroom);
+  const effectiveOutputTokens = Math.min(requestedBudgets.perCallOutputTokens, catalogRecord.maxTokens, maxWindowOutput, 262_144);
+
+  const hasPublication = candidate && publicationEndpoints.length > 0;
+  const verifierSlotCount = input.activeChecks.length + 2;
+  const calcD = (attempts: number, implRepairs: number): number =>
+    4 + 3 * attempts + 2 * verifierSlotCount * (1 + Math.min(attempts, 1 + implRepairs)) + (hasPublication ? 3 : 0);
+  let effectiveMaxAttempts = mergedLimits.maxAttempts ?? 5;
+  let effectiveImplRepairs = requestedBudgets.maxImplementationRepairs;
+  while (effectiveMaxAttempts > 1 && calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
+    effectiveMaxAttempts -= 1;
+  }
+  while (effectiveImplRepairs > 0 && calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
+    effectiveImplRepairs -= 1;
+  }
+  if (calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
+    manifestInvalid('verification check count exceeds controller 64-checkpoint schedule capacity', '/spec/verification');
+  }
+  // Ensure total operation capacity fits LocalRunStore's 2048-operation lifetime cap.
+  const capV = 1 + Math.min(effectiveMaxAttempts, 1 + effectiveImplRepairs);
+  const capJ = verifierSlotCount * capV;
+  const maxAllowedModelCalls = Math.max(1, Math.min(1024, 2048 - capJ - (hasPublication ? 1 : 0) - 3 * effectiveMaxAttempts));
+  const effectiveModelCalls = Math.min(requestedBudgets.maxModelCalls, maxAllowedModelCalls);
+
+  const effectiveBudgets: TaskContract['spec']['budgets'] = {
+    ...requestedBudgets,
+    perCallOutputTokens: effectiveOutputTokens,
+    maxImplementationRepairs: effectiveImplRepairs,
+    maxModelCalls: effectiveModelCalls,
+  };
+  const drainReserveMs = effectiveBudgets.wallTimeMs >= 300_000
+    ? DRAIN_RESERVE_MS
+    : Math.max(5_000, Math.floor(effectiveBudgets.wallTimeMs / 5));
+
+  const authorTools = Object.freeze([
+    'read', 'write', 'edit', 'bash', 'delete',
+    ...(bindings.externalMcpTools ?? []),
+  ]);
+  const roleLimits = {
+    promptBytes: mergedLimits.promptBytes ?? 262_144,
+    responseBytes: mergedLimits.responseBytes ?? 67_108_864,
+    toolArgsBytes: mergedLimits.toolArgsBytes ?? 1_048_576,
+    toolResultBytes: mergedLimits.toolResultBytes ?? 1_048_576,
+    sessionBytes: mergedLimits.sessionBytes ?? 33_554_432,
+    artifactBytes: 268_435_456,
+    candidateEntries: mergedLimits.candidateEntries ?? 4_096,
+    fileBytes: mergedLimits.fileBytes ?? 33_554_432,
+    toolWallMs: mergedLimits.toolWallMs ?? (mergedLimits.toolTimeoutSeconds !== undefined ? mergedLimits.toolTimeoutSeconds * 1000 : 300_000),
+  };
+
   const registry: TrustedRegistry = {
     apiVersion: CONTROLLER_API_VERSION, kind: 'TrustedRegistry', metadata: { name: registryName },
     spec: {
@@ -633,12 +843,13 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       roleProfiles: [{
         id: 'taskpack-author-role',
         selection,
-        tools: ['read', 'write', 'edit', 'bash', 'delete'],
+        tools: authorTools,
         context: {
           mode: 'estimated_guard' as const, estimator: 'lw-pi-final-json-bytes-v1', proofId: null, version: 1,
-          evidence: 'estimated' as const, workingWindowCeiling: 98_304, maxRequestBytes: 65_536, serviceMargin: 32_768,
-          toolReserve: 16_384, maxOutputTokens: bindings.budgets.perCallOutputTokens,
+          evidence: 'estimated' as const, workingWindowCeiling, maxRequestBytes, serviceMargin,
+          toolReserve, maxOutputTokens: effectiveOutputTokens,
         },
+        limits: roleLimits,
         runtimeRef: 'taskpack-runtime', providerCredentialRef: 'taskpack-provider-token',
         mcp: { serverId: 'workspace', scriptDigest: runtime.localMcpScriptDigest, names: [], effects: [], idleTimeoutSeconds: 2, absoluteTimeoutSeconds: 10 },
       }],
@@ -687,10 +898,10 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       },
       roles: [{
         id: 'author', adapter: 'pi', provider: selection.provider, model: selection.model,
-        thinking: selection.thinking, tools: ['read', 'write', 'edit', 'bash', 'delete'],
+        thinking: selection.thinking, tools: [...authorTools],
       }],
       trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: compiledResources },
-      budgets: bindings.budgets,
+      budgets: effectiveBudgets,
       steps: input.steps.map(step => ({ ...step, dependsOn: [...step.dependsOn] })),
       acceptance: {
         required: [...input.required],
@@ -711,7 +922,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         steps: input.steps.map(step => ({ stepId: step.id, handlerRef: step.uses })),
       },
       credentials: credentialBindings.map(binding => ({ ref: binding.id, template: binding.template })),
-      controls: { drainReserveMs: DRAIN_RESERVE_MS, maxAttempts: 3, repeatFailureLimit: 2, submission: { mode: 'artifact_or_assistant', path: null } },
+      controls: { drainReserveMs, maxAttempts: effectiveMaxAttempts, repeatFailureLimit: 2, submission: { mode: 'artifact_or_assistant', path: null } },
       publication: candidate && publicationEndpoints.length > 0
         ? {
           mode: 'pull_request', endpointRef: publicationEndpoints[0]!.id,

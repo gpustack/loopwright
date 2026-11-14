@@ -6,7 +6,7 @@ import { Channel, type ChannelMessage } from './protocol.js';
 import { parseBoundedJson } from './context.js';
 import { canonical, digest, integer } from './boundary.js';
 import { PiFailure, refuse } from './errors.js';
-import type { ToolResult } from './tools.js';
+import { clampToolResultBytes, type ToolResult } from './tools.js';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 function textResult(value: AgentToolResult<unknown>): ToolResult {
   return { content: value.content.map(block => { if (block.type !== 'text') refuse('TOOL_DENIED'); return { type: 'text', text: block.text }; }),
@@ -21,9 +21,9 @@ export function runToolWorker(nonce: string): void {
     if (message.kind === 'close') { stop(); return; }
     if (message.kind !== 'execute-tool' || used) throw new Error('Unsupported tool command'); used = true;
     const envelope = message.body as { metadata: { name: string; path: string | null; fileDigest: string | null; fileBytes: number; resultBytes: number; wallMs: number }; bytes: Uint8Array }, meta = envelope.metadata;
-    integer(meta.fileBytes, 1, 8388608); integer(meta.resultBytes, 1, 65536); integer(meta.wallMs, 1, 10000);
-    if (envelope.bytes.length > 65536) refuse('OUTPUT_LIMIT');
-    const args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(envelope.bytes)) as Record<string, unknown>;
+    integer(meta.fileBytes, 1, 67108864); integer(meta.resultBytes, 1, 4194304); integer(meta.wallMs, 1, 1800000);
+    if (envelope.bytes.length > 4194304) refuse('OUTPUT_LIMIT');
+    const args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(envelope.bytes), { nodes: 262144, array: 4096 }) as Record<string, unknown>;
     let result: ToolResult, produced = 0, overflow = false, code: string | null = null;
     try {
       if (meta.name === 'read') {
@@ -37,7 +37,11 @@ export function runToolWorker(nonce: string): void {
             const data = bytes.subarray(0, offset); if (offset !== info.size || digest(data).hex !== meta.fileDigest) refuse('RECOVERY_REQUIRED'); new TextDecoder('utf-8', { fatal: true }).decode(data); return data;
           } finally { await fd.close(); }
         } } });
-        result = textResult(await read.execute('owned-read', { ...args, path: meta.path } as Parameters<typeof read.execute>[1], cancel.signal));
+        result = clampToolResultBytes(
+          textResult(await read.execute('owned-read', { ...args, path: meta.path } as Parameters<typeof read.execute>[1], cancel.signal)),
+          meta.resultBytes,
+          { tool: 'read', offset: args.offset },
+        );
       } else if (meta.name === 'bash') {
         const native = createLocalBashOperations({ shellPath: '/bin/bash' }), output = new AbortController();
         const bash = createBashTool('/scratch', { exposeSessionEnvironment: false, shellPath: '/bin/bash', operations: { exec: async (command, cwd, options) => {
@@ -45,7 +49,8 @@ export function runToolWorker(nonce: string): void {
           const signal = AbortSignal.any([cancel.signal, output.signal, ...(options.signal ? [options.signal] : [])]);
           return native.exec(command, cwd, { ...options, signal, timeout: meta.wallMs / 1000, onData: bytes => { produced += bytes.length; if (produced > meta.resultBytes) { overflow = true; output.abort(); return; } options.onData(bytes); } });
         } } });
-        result = textResult(await bash.execute('owned-bash', args as Parameters<typeof bash.execute>[1], cancel.signal));
+        const rawBash = textResult(await bash.execute('owned-bash', args as Parameters<typeof bash.execute>[1], cancel.signal));
+        result = overflow ? rawBash : clampToolResultBytes(rawBash, meta.resultBytes, { tool: 'bash' });
       } else refuse('TOOL_DENIED');
       if (overflow || Buffer.byteLength(canonical(result)) > meta.resultBytes || result.content.some(item => item.type !== 'text')) refuse('OUTPUT_LIMIT');
     } catch (error) {

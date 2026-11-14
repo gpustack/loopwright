@@ -28,6 +28,10 @@
     "./host-session": {
       "types": "./dist/host-session.d.ts",
       "import": "./dist/host-session.js"
+    },
+    "./mcp": {
+      "types": "./dist/external-mcp.d.ts",
+      "import": "./dist/external-mcp.js"
     }
   }
 }

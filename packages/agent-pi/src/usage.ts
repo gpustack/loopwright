@@ -50,7 +50,7 @@ function inspectOpenAiCompletions(bytes: Uint8Array, source: string, status: num
     if (dataLines.length === 0) continue;
     const payload = dataLines.map(line => line.slice(6)).join('\n').trim();
     if (payload === '[DONE]') { done = true; continue; }
-    const chunk = parseBoundedJson(payload) as {
+    const chunk = parseBoundedJson(payload, { nodes: 262144, array: 4096 }) as {
       choices?: { finish_reason?: string | null; delta?: { tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] } }[];
       usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cost_microusd?: unknown; prompt_tokens_details?: { cached_tokens?: unknown } | null } | null;
     };
@@ -93,7 +93,7 @@ function inspectOpenAiCompletions(bytes: Uint8Array, source: string, status: num
   }
   if (admission.ok) {
     for (const [, entry] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
-      toolCalls.push({ id: entry.id, name: entry.name, argumentsDigest: toolArgumentsDigest(parseBoundedJson(entry.arguments || '{}')) });
+      toolCalls.push({ id: entry.id, name: entry.name, argumentsDigest: toolArgumentsDigest(parseBoundedJson(entry.arguments || '{}', { nodes: 262144, array: 4096 })) });
     }
   }
   return result();
@@ -121,7 +121,7 @@ function inspectOpenAiResponses(bytes: Uint8Array, source: string, status: numbe
     if (!dataLine) continue;
     const payload = dataLine.slice(6).trim();
     if (payload === '[DONE]') continue;
-    const item = parseBoundedJson(payload) as {
+    const item = parseBoundedJson(payload, { nodes: 262144, array: 4096 }) as {
       type?: string;
       response?: {
         status?: string;
@@ -156,7 +156,7 @@ function inspectOpenAiResponses(bytes: Uint8Array, source: string, status: numbe
             toolCalls.push({
               id: out.call_id ?? out.id ?? '',
               name: out.name ?? '',
-              argumentsDigest: toolArgumentsDigest(parseBoundedJson(out.arguments || '{}')),
+              argumentsDigest: toolArgumentsDigest(parseBoundedJson(out.arguments || '{}', { nodes: 262144, array: 4096 })),
             });
           }
         }
@@ -179,7 +179,7 @@ export function inspectRawResponse(
   const usage: { inputTokens: Quantity; outputTokens: Quantity; costMicrousd: Quantity } = { inputTokens: unknown(), outputTokens: unknown(), costMicrousd: unknown() };
   const toolCalls: RawToolCall[] = [], result = (): RawInspection => ({ termination, rawStop, responseDigest: digest(bytes), usage, admission, toolCalls });
   try {
-    if (bytes.byteLength > 1048576) return result();
+    if (bytes.byteLength > 67108864) return result();
     const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
     if (api === 'openai-completions') return inspectOpenAiCompletions(bytes, source, status, admission, modelCost);
     if (api === 'openai-responses') return inspectOpenAiResponses(bytes, source, status, admission, modelCost);
@@ -208,9 +208,9 @@ export function inspectRawResponse(
       }
     };
     for (const frame of normalized.split('\n\n').filter(Boolean)) {
-      if (Buffer.byteLength(frame) > 1048576 || stopped) throw new Error('unsupported frame');
+      if (Buffer.byteLength(frame) > 16777216 || stopped) throw new Error('unsupported frame');
       const lines = frame.split('\n'); if (lines.length !== 2 || !lines[0]!.startsWith('event: ') || !lines[1]!.startsWith('data: ')) throw new Error('unsupported frame');
-      const event = parseBoundedJson(lines[1]!.slice(6)) as Record<string, unknown>;
+      const event = parseBoundedJson(lines[1]!.slice(6), { nodes: 262144, array: 4096 }) as Record<string, unknown>;
       if (!event || event.type !== lines[0]!.slice(7)) throw new Error('event mismatch');
       if (event.type === 'message_start') {
         if (started) throw new Error('duplicate start'); started = true; const message = event.message as Record<string, unknown>;
@@ -225,7 +225,7 @@ export function inspectRawResponse(
         if (block?.type === 'tool_use') { if (typeof block.id !== 'string' || typeof block.name !== 'string' || !number(event.index) || blocks.has(event.index)) throw new Error('tool identity'); blocks.set(event.index, { id: block.id, name: block.name, arguments: '' }); }
       } else if (event.type === 'content_block_delta') {
         const delta = event.delta as { type?: unknown; partial_json?: unknown };
-        if (delta?.type === 'input_json_delta') { const block = blocks.get(event.index as number); if (!block || typeof delta.partial_json !== 'string') throw new Error('tool arguments'); block.arguments += delta.partial_json; if (Buffer.byteLength(block.arguments) > 65536) throw new Error('arguments limit'); }
+        if (delta?.type === 'input_json_delta') { const block = blocks.get(event.index as number); if (!block || typeof delta.partial_json !== 'string') throw new Error('tool arguments'); block.arguments += delta.partial_json; if (Buffer.byteLength(block.arguments) > 4194304) throw new Error('arguments limit'); }
       } else if (!['content_block_stop', 'ping'].includes(event.type as string)) throw new Error('unknown event');
     }
     const knownStops = ['end_turn', 'tool_use', 'max_tokens', 'model_context_window_exceeded', 'pause_turn', 'stop_sequence', 'refusal', 'sensitive'];

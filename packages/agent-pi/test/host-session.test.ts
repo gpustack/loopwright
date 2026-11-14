@@ -14,6 +14,7 @@ import {
   isSupportedHostSessionPlatform,
   openPiHostSessionAdapter,
   openPiHostSessionAdapterV2,
+  type HostSessionProgressEvent,
 } from '../src/host-session.js';
 import { MAX_LIMITS } from '../src/policy.js';
 import type { PiHostV2, PiOpenInputV2 } from '../src/types-v2.js';
@@ -969,7 +970,7 @@ test('HostRuntimeSession tree_overlay refuses wrong-mode, extra-file, or hardlin
 });
 
 test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> fileBytes), refuses read with TOOL_DENIED, and captures sibling edits/deletes', { skip: !isSupportedHostSessionPlatform() }, async () => {
-  const oversizeBytes = Buffer.alloc(9 * 1024 * 1024, 0x41);
+  const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 1024, 0x41);
   const keepBytes = Buffer.from('export const keep = 1;\n');
   const toDeleteBytes = Buffer.from('delete me\n');
 
@@ -1272,5 +1273,382 @@ test('HostRuntimeSession Linux Landlock bootstrap grants read-only access to can
       // ignore cleanup chmod failure
     }
     rmSync(ownedRoot, { recursive: true, force: true });
+  }
+});
+
+test('openPiHostSessionAdapterV2 paginates quote-heavy >140KB JSON read cleanly without OUTPUT_LIMIT and pruneContextForBudget compacts older tool results', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  const { pruneContextForBudget } = await import('../src/sdk-worker.js');
+  const syntheticHistory = {
+    systemPrompt: 'system',
+    messages: [
+      { role: 'user' as const, content: 'sync upstream releases', timestamp: 1 },
+      ...Array.from({ length: 6 }, (_, idx) => ([
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'toolCall' as const, id: `call-${idx}`, name: 'read', arguments: { path: `file-${idx}.json` } }],
+          api: 'openai-completions' as const,
+          provider: 'custom-glm',
+          model: 'glm-5.3',
+          usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: 'toolUse' as const,
+          timestamp: idx * 2 + 2,
+        },
+        {
+          role: 'toolResult' as const,
+          toolCallId: `call-${idx}`,
+          toolName: 'read',
+          content: [{ type: 'text' as const, text: `line-${idx}-` + 'y'.repeat(16000) }],
+          isError: false,
+          timestamp: idx * 2 + 3,
+        },
+      ])).flat(),
+    ],
+  };
+  const compacted = pruneContextForBudget(syntheticHistory, 62464, 'openai-completions');
+  assert.ok(Buffer.byteLength(JSON.stringify(compacted)) <= 62464 - 8192);
+  // Original context remains unmutated and recent tool results stay intact when older compaction suffices.
+  const origFirstTool = syntheticHistory.messages.find(m => m.role === 'toolResult');
+  assert.equal(origFirstTool?.role === 'toolResult' && origFirstTool.content[0]?.type === 'text' && origFirstTool.content[0].text.length > 16000, true);
+  const compactedToolResults = compacted.messages.filter(m => m.role === 'toolResult');
+  const firstBlock = compactedToolResults[0]?.content[0];
+  const lastBlock = compactedToolResults.at(-1)?.content[0];
+  assert.equal(firstBlock?.type === 'text' && firstBlock.text.includes('compacted to fit context budget'), true);
+  assert.equal(lastBlock?.type === 'text' && lastBlock.text.length > 16000, true);
+
+  // Live host-session read on a 150 KB quote-dense JSON catalog (mirrors gpustack_runner/runner.py.json)
+  const jsonRows = Array.from({ length: 1800 }, (_, i) => `  "runner_${i}": { "backend": "cuda", "version": "0.${i}.0", "image": "gpustack/runner:cuda-${i}" }`);
+  const largeJsonBytes = Buffer.from(`{\n${jsonRows.join(',\n')}\n}\n`, 'utf8');
+  assert.ok(largeJsonBytes.byteLength > 140000);
+
+  let callCount = 0;
+  let observedToolText = '';
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { messages?: Array<{ role?: string; content?: unknown }> };
+    callCount++;
+    let body: string;
+    if (callCount === 1) {
+      body = sseToolCall('glm-5.3', 'call-big-json', 'read', { path: 'gpustack_runner/runner.py.json' });
+    } else {
+      const toolMsg = parsed.messages?.find(m => m.role === 'tool');
+      observedToolText = typeof toolMsg?.content === 'string' ? toolMsg.content : JSON.stringify(toolMsg?.content ?? '');
+      body = sseStop('glm-5.3', 'Read paginated catalog cleanly.');
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('server listen failed');
+
+  const fixture = await createHostSessionFixture({
+    baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+    candidate: {
+      manifest: {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'ArtifactManifest',
+        metadata: { id: 'candidate' },
+        spec: { entries: [coreGood(digestArtifact('gpustack_runner/runner.py.json', largeJsonBytes))] },
+      },
+      baseRevision: 'base-1',
+      sourceRevision: 'source-1',
+      artifacts: [{ name: 'gpustack_runner/runner.py.json', bytes: largeJsonBytes }],
+    },
+  });
+  try {
+    const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-big-json', text: 'Inspect runner.py.json', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+      assert.ok(observedToolText.includes('runner_0'));
+      assert.ok(observedToolText.includes('truncated to fit tool result byte limit'));
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    fixture.cleanup();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('openPiHostSessionAdapterV2 recovers across missing-file/directory read, mismatched edit, missing delete, and exposes read-only $CANDIDATE_DIR + ./candidate in bash while keeping traversal/protected paths hard-denied', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  const observedToolOutputs: string[] = [];
+  let turn = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { messages?: Array<{ role?: string; content?: unknown }> };
+    const latestTool = [...(parsed.messages ?? [])].reverse().find(m => m.role === 'tool');
+    if (latestTool) {
+      observedToolOutputs.push(typeof latestTool.content === 'string' ? latestTool.content : JSON.stringify(latestTool.content));
+    }
+    turn++;
+    let body: string;
+    if (turn === 1) {
+      body = sseToolCall('glm-5.3', 'call-rec-1', 'read', { path: '.autosync/proposal.json' });
+    } else if (turn === 2) {
+      body = sseToolCall('glm-5.3', 'call-rec-2', 'read', { path: 'packages' });
+    } else if (turn === 3) {
+      body = sseToolCall('glm-5.3', 'call-rec-3', 'edit', {
+        path: 'packages/example.ts',
+        edits: [{ oldText: 'value = 999999', newText: 'value = 2' }],
+      });
+    } else if (turn === 4) {
+      body = sseToolCall('glm-5.3', 'call-rec-4', 'delete', { path: 'packages/does-not-exist.ts' });
+    } else if (turn === 5) {
+      body = sseToolCall('glm-5.3', 'call-rec-5', 'bash', {
+        command: [
+          'echo "FROM_ENV=$(cat "$CANDIDATE_DIR/packages/example.ts" | tr -d "\\n")"',
+          'echo "FROM_REL=$(cat ./candidate/packages/example.ts | tr -d "\\n")"',
+          '(echo nope > ./candidate/packages/pwn.ts) 2>/dev/null && echo REL_WRITE=allowed || echo REL_WRITE=denied',
+        ].join('; '),
+      });
+    } else if (turn === 6) {
+      body = sseToolCall('glm-5.3', 'call-rec-6', 'edit', {
+        path: './packages/example.ts',
+        edits: [{ oldText: 'value = 1', newText: 'value = 77' }],
+      });
+    } else {
+      body = sseStop('glm-5.3', 'Recovered and updated candidate cleanly.');
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('server listen failed');
+
+  const fixture = await createHostSessionFixture({
+    baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+    tools: ['read', 'bash', 'write', 'edit', 'delete'],
+  });
+  try {
+    const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-recover-tools', text: 'Inspect and update packages/example.ts', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+      assert.equal(turn, 7);
+      assert.ok(observedToolOutputs[0]?.includes('File not found: .autosync/proposal.json'), observedToolOutputs[0] ?? 'missing[0]');
+      assert.ok(observedToolOutputs[1]?.includes('Path "packages" is a directory, not a file.'), observedToolOutputs[1] ?? 'missing[1]');
+      assert.ok(observedToolOutputs[1]?.includes('example.ts'), observedToolOutputs[1] ?? 'missing[1]');
+      assert.ok(observedToolOutputs[2]?.includes('oldText was not found'), observedToolOutputs[2] ?? 'missing[2]');
+      assert.ok(observedToolOutputs[3]?.includes('Cannot delete packages/does-not-exist.ts: file does not exist.'), observedToolOutputs[3] ?? 'missing[3]');
+      assert.ok(observedToolOutputs[4]?.includes('FROM_ENV=export const value = 1;'), observedToolOutputs[4] ?? 'missing[4]');
+      assert.ok(observedToolOutputs[4]?.includes('FROM_REL=export const value = 1;'), observedToolOutputs[4] ?? 'missing[4]');
+      assert.ok(observedToolOutputs[4]?.includes('REL_WRITE=denied'), observedToolOutputs[4] ?? 'missing[4]');
+
+      const candidateDir = join(fixture.runtimeDir, 'sdk-' + fixture.inputV2.sessionId, 'candidate');
+      assert.equal(readFileSync(join(candidateDir, 'packages/example.ts'), 'utf8'), 'export const value = 77;\n');
+      assert.equal(statSync(candidateDir).mode & 0o777, 0o555);
+      assert.equal(statSync(join(candidateDir, 'packages')).mode & 0o777, 0o555);
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    fixture.cleanup();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+
+  // Negative check: path traversal on read still fails closed with TOOL_DENIED
+  const denyServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(sseToolCall('glm-5.3', 'call-traversal', 'read', { path: 'packages/../escape.txt' }));
+  });
+  await new Promise<void>(resolve => denyServer.listen(0, '127.0.0.1', resolve));
+  const denyAddr = denyServer.address();
+  if (!denyAddr || typeof denyAddr === 'string') throw new Error('denyServer listen failed');
+  const denyFixture = await createHostSessionFixture({ baseUrl: `http://127.0.0.1:${denyAddr.port}/v1` });
+  try {
+    const opened = await openPiHostSessionAdapterV2(denyFixture.hostV2, denyFixture.inputV2);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-deny-traversal', text: 'Try traversal', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true);
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'failed');
+      assert.equal(executed.value.error?.code, 'TOOL_DENIED');
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    denyFixture.cleanup();
+    await new Promise<void>(resolve => denyServer.close(() => resolve()));
+  }
+});
+
+test('openPiHostSessionAdapterV2 normalizes bash candidate path aliases, supports edit { path, oldText, newText } shorthand, returns soft scope errors without unlocking 0o555 dirs, and emits tool_end errorCode/errorPath on hard TOOL_DENIED', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  const observedToolOutputs: string[] = [];
+  const progressEvents: HostSessionProgressEvent[] = [];
+  let turn = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { messages?: Array<{ role?: string; content?: unknown }> };
+    const latestTool = [...(parsed.messages ?? [])].reverse().find(m => m.role === 'tool');
+    if (latestTool) {
+      observedToolOutputs.push(typeof latestTool.content === 'string' ? latestTool.content : JSON.stringify(latestTool.content));
+    }
+    turn += 1;
+    let body: string;
+    if (turn === 1) {
+      body = sseToolCall('glm-5.3', 'call-alias-1', 'edit', {
+        path: './candidate/README.md',
+        oldText: 'old',
+        newText: 'new',
+      });
+    } else if (turn === 2) {
+      body = sseToolCall('glm-5.3', 'call-alias-2', 'write', {
+        path: '/scratch/candidate/packages/policy/settings.ts',
+        content: 'PWNED',
+      });
+    } else if (turn === 3) {
+      body = sseToolCall('glm-5.3', 'call-alias-3', 'read', {
+        path: './candidate',
+      });
+    } else if (turn === 4) {
+      body = sseToolCall('glm-5.3', 'call-alias-4', 'write', {
+        path: './candidate/packages/temp.ts',
+        content: 'export const temp = 1;\n',
+      });
+    } else if (turn === 5) {
+      body = sseToolCall('glm-5.3', 'call-alias-5', 'edit', {
+        path: '/scratch/candidate/packages/example.ts',
+        oldText: 'value = 1',
+        newText: 'value = 99',
+      });
+    } else if (turn === 6) {
+      body = sseToolCall('glm-5.3', 'call-alias-6', 'delete', {
+        path: 'candidate/packages/temp.ts',
+      });
+    } else {
+      body = sseStop('glm-5.3', 'Updated candidate via normalized aliases and shorthand edit.');
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('server listen failed');
+
+  const exampleBytes = Buffer.from('export const value = 1;\n', 'utf8');
+  const protectedBytes = Buffer.from('export const policyLocked = true;\n', 'utf8');
+  const fixture = await createHostSessionFixture({
+    baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+    tools: ['read', 'bash', 'write', 'edit', 'delete'],
+    candidate: {
+      manifest: {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'ArtifactManifest',
+        metadata: { id: 'candidate' },
+        spec: {
+          entries: [
+            coreGood(digestArtifact('packages/example.ts', exampleBytes)),
+            coreGood(digestArtifact('packages/policy/settings.ts', protectedBytes)),
+          ],
+        },
+      },
+      baseRevision: 'base-1',
+      sourceRevision: 'source-1',
+      artifacts: [
+        { name: 'packages/example.ts', bytes: exampleBytes },
+        { name: 'packages/policy/settings.ts', bytes: protectedBytes },
+      ],
+    },
+  });
+  try {
+    const opened = await openPiHostSessionAdapterV2(
+      fixture.hostV2,
+      fixture.inputV2,
+      { onProgress: event => progressEvents.push(event) },
+    );
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-alias-shorthand', text: 'Update packages/example.ts', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+      assert.equal(turn, 7);
+      assert.match(observedToolOutputs[0] ?? '', /Cannot edit README\.md: path is outside writable scope/);
+      assert.match(observedToolOutputs[1] ?? '', /Cannot write packages\/policy\/settings\.ts: path is outside writable scope/);
+      assert.match(observedToolOutputs[2] ?? '', /packages\//);
+
+      const candidateDir = join(fixture.runtimeDir, 'sdk-' + fixture.inputV2.sessionId, 'candidate');
+      assert.equal(readFileSync(join(candidateDir, 'packages/example.ts'), 'utf8'), 'export const value = 99;\n');
+      assert.equal(readFileSync(join(candidateDir, 'packages/policy/settings.ts'), 'utf8'), 'export const policyLocked = true;\n');
+      assert.equal(existsSync(join(candidateDir, 'packages/temp.ts')), false);
+      assert.equal(statSync(candidateDir).mode & 0o777, 0o555);
+      assert.equal(statSync(join(candidateDir, 'packages')).mode & 0o777, 0o555);
+      assert.equal(statSync(join(candidateDir, 'packages/policy')).mode & 0o777, 0o555);
+
+      const toolEnds = progressEvents.filter((e): e is Extract<HostSessionProgressEvent, { kind: 'tool_end' }> => e.kind === 'tool_end');
+      assert.equal(toolEnds.length, 6);
+      assert.equal(toolEnds[0]?.isError, true);
+      assert.equal(toolEnds[0]?.errorCode, undefined);
+      assert.equal(toolEnds[1]?.isError, true);
+      assert.equal(toolEnds[1]?.errorCode, undefined);
+      assert.equal(toolEnds[4]?.isError, false);
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    fixture.cleanup();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+
+  // Negative check: hard TOOL_DENIED on path traversal emits tool_end with errorCode + errorPath and fails closed
+  const denyEvents: HostSessionProgressEvent[] = [];
+  const denyServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(sseToolCall('glm-5.3', 'call-edit-traversal', 'edit', {
+      path: './candidate/../escape.txt',
+      oldText: 'a',
+      newText: 'b',
+    }));
+  });
+  await new Promise<void>(resolve => denyServer.listen(0, '127.0.0.1', resolve));
+  const denyAddr = denyServer.address();
+  if (!denyAddr || typeof denyAddr === 'string') throw new Error('denyServer listen failed');
+  const denyFixture = await createHostSessionFixture({ baseUrl: `http://127.0.0.1:${denyAddr.port}/v1` });
+  try {
+    const opened = await openPiHostSessionAdapterV2(
+      denyFixture.hostV2,
+      denyFixture.inputV2,
+      { onProgress: event => denyEvents.push(event) },
+    );
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-edit-traversal', text: 'Try traversal edit', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true);
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'failed');
+      assert.equal(executed.value.error?.code, 'TOOL_DENIED');
+      assert.equal(executed.value.error?.path, '/path');
+
+      const toolStarts = denyEvents.filter(e => e.kind === 'tool_start');
+      const toolEnds = denyEvents.filter((e): e is Extract<HostSessionProgressEvent, { kind: 'tool_end' }> => e.kind === 'tool_end');
+      assert.equal(toolStarts.length, 1);
+      assert.equal(toolEnds.length, 1);
+      assert.equal(toolEnds[0]?.name, 'edit');
+      assert.equal(toolEnds[0]?.isError, true);
+      assert.equal(toolEnds[0]?.errorCode, 'TOOL_DENIED');
+      assert.equal(toolEnds[0]?.errorPath, '/path');
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    denyFixture.cleanup();
+    await new Promise<void>(resolve => denyServer.close(() => resolve()));
   }
 });

@@ -115,21 +115,30 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `github-app-private-key` | Unset | App PEM private key for installation token minting. |
 | `github-app-installation-id` | Unset | Installation ID for token minting. |
 | `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
+| `mcp-servers` | Taskpack `spec.mcp.servers` | JSON or YAML MCP server declarations merged by `id` (`LOOPWRIGHT_MCP_SERVERS` fallback). |
+| `wall-time-seconds` | `3600` | Run wall-time limit override in seconds (`60..21600`; `LOOPWRIGHT_WALL_TIME_SECONDS`). |
+| `total-tokens` | `20000000` | Total token ceiling across model calls (`1000..1000000000`; `LOOPWRIGHT_TOTAL_TOKENS`). |
+| `context-window` | Model catalog or `128000` | Model context window token override (`1024..10000000`; `LOOPWRIGHT_CONTEXT_WINDOW`). |
+| `max-output-tokens` | `32768` | Per-call output token ceiling (`256..262144`; `LOOPWRIGHT_MAX_OUTPUT_TOKENS`). |
+| `max-model-calls` | `256` | Maximum model call count per run (`1..1024`; `LOOPWRIGHT_MAX_MODEL_CALLS`). |
+| `max-attempts` | `4` | Maximum controller attempt count (`1..16`; `LOOPWRIGHT_MAX_ATTEMPTS`). |
+| `tool-timeout-seconds` | `300` | Per-tool execution timeout in seconds (`5..1800`; `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS`). |
+| `command-timeout-seconds` | `30` (`<= 3600`) | `command.v1` local check timeout override (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
 
-Interactive OAuth and CLI providers are unsupported. Model options and token-based provider configuration are listed in [Taskpack](../configuration/taskpack.md#model-configuration).
+Limit overrides apply in strict order (`INPUT_*` > `LOOPWRIGHT_*` > `spec.limits` > compiler defaults). Additional byte and session ceilings (`LOOPWRIGHT_RESPONSE_BYTES`, `LOOPWRIGHT_TOOL_RESULT_BYTES`, `LOOPWRIGHT_FILE_BYTES`, `LOOPWRIGHT_SESSION_BYTES`) also accept environment overrides. Interactive OAuth and CLI providers or MCP servers are unsupported. Model and MCP options are listed in [Taskpack](../configuration/taskpack.md#model-configuration).
 
 ## Outputs
 
-The Action always writes a scrubbed structured `result` JSON value to stdout and `GITHUB_OUTPUT`. A `compiled` result alone does not establish successful publication. Inspect the delegate outcome and run report.
+The Action writes a compact, scrubbed `result` JSON summary (with SHA-256 digests and byte lengths rather than raw binary buffers) to stdout and `GITHUB_OUTPUT`. Live runs stream `[loopwright]` progress lines (upstream discovery, connected MCP servers, per-turn token/duration metrics, tool calls, and check outcomes) plus a plain-text run summary to stderr. A `compiled` result alone does not establish successful publication; inspect `delegateOutcome` and the run report.
 
 | Output | Meaning |
 | --- | --- |
-| `result` | Structured entrypoint result, including the delegate outcome when available. |
+| `result` | Compact structured entrypoint summary and `delegateOutcome` (`ok`, `detail`). |
 | `pr-url` | Published PR URL when available; otherwise empty. |
-| `total-tokens` | Known token subtotal, or `0` when usage is unavailable. |
+| `total-tokens` | Exact integer token subtotal, or `0` when usage is unavailable. |
 | `cost-usd` | Six-decimal USD known subtotal when cost provenance is `reported` or `estimated`; otherwise omitted. |
 
-Extended outputs are written for live runs, or for dry runs with an explicit `output` input. Known subtotals need not represent complete usage. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.
+Extended outputs are written for live runs, or for dry runs with an explicit `output` input. Step summaries and human-readable reports format token counts using `K`/`M`/`B` and elapsed durations using `ms`/`s`/`m`/`h`, while `total-tokens` and JSON reports preserve exact integer counts. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.
 
 | Format | Destination |
 | --- | --- |

@@ -47,5 +47,5 @@ assert.ok(Object.isFrozen(files) && Object.isFrozen(files.limits));
 assert.equal(files.version, 1);
 assert.equal(files.localMcpScriptDigest.hex, createHash('sha256').update(await readFile('packages/agent-pi/dist/workspace-mcp.js')).digest('hex'));
 assert.equal(files.restrictionDigest.algorithm, 'sha256');
-assert.equal(files.limits.artifactBytes, 16777216);
+assert.equal(files.limits.artifactBytes, 268435456);
 console.log(JSON.stringify({ status: 'passed', case: 'parser-descriptor', positive: 2, denied: denied.length, descriptor: files, evidenceLevel: 'static_inspection', runtimeReady: 'not_checked' }));

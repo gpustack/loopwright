@@ -19,7 +19,7 @@ import { freeze, hash, record, same, text } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
 import { Gate, prepareGate } from './gate.js';
 import { Publication, preparePublication } from './publication.js';
-import { executeCycleContext, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
+import { executeCycleContext, resolveStoreLeaseMs, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
 import type { CycleExecution, ControllerIncident } from './finalize.js';
 
 async function restoredCandidate(context: CycleContext, head: ProgressHead | null): Promise<ByteInventory> {
@@ -33,8 +33,8 @@ async function restoredCandidate(context: CycleContext, head: ProgressHead | nul
   const policy = attempt.repair === 'format' ? formatPolicy(originalRole.policy) : originalRole.policy;
   const interval = journal(context.store).requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests);
   const decoded = await decodePiCapture({ version: 1, lock: context.lock, policy, checkpoint, sessionId: attempt.sessionId, roleId: originalRole.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await context.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await context.artifacts.read(checkpoint.privateSession!, 2097152) },
-    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await context.artifacts.read(attempt.command, 16384)), requestIds: interval.map(row => row.admission.requestId) } });
+    workspace: { ref: checkpoint.workspace, bytes: await context.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await context.artifacts.read(checkpoint.privateSession!, 67108864) },
+    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await context.artifacts.read(attempt.command, 1048576)), requestIds: interval.map(row => row.admission.requestId) } });
   if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   assertCanonicalMinimalOverlay(head.manifest, decoded.value.artifacts, context.source, 'recovery');
   return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.value.artifacts, baselineProofs: context.source.baselineProofs };
@@ -86,7 +86,7 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
     if (!admitted.ok || !same(admitted.value, lock) || !same(plan, retained.plan) || descriptor.repository !== resolve(input.repository)
       || !same(descriptor.configuration, { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 })) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const expected = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + input.runId).hex.slice(0, 40), lock,
-      policy: { version: 1, leaseMs: 60000, cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
+      policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
     if (!same(descriptor.identity, expected)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null, handedOff = false;
     try {

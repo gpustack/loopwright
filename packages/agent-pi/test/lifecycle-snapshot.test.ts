@@ -17,7 +17,7 @@ test('native snapshot rejects duplicate IDs, absent graph parents and changed mo
 });
 test('native snapshot rejects row/aggregate overflow, malformed and truncated JSON rather than skipping it', () => {
   assert.throws(() => snapshotRow(Buffer.from('{"type":"session","type":"message"}')), PiFailure);
-  assert.throws(() => rowBytes({ text: 'X'.repeat(1048576) }), PiFailure);
+  assert.throws(() => rowBytes({ text: 'X'.repeat(8388608) }), PiFailure);
   const native = new NativeSnapshot(sessionInput().policy, 64); assert.throws(() => native.push(rowBytes(header)), PiFailure);
   const partial = new NativeSnapshot(sessionInput().policy); partial.push(rowBytes(header)); partial.push(Buffer.from('{"type":')); assert.throws(() => partial.finish(), PiFailure);
 });

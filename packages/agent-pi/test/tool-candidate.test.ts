@@ -8,6 +8,7 @@ import { digestArtifact } from '@loopwright/core';
 import { Candidate, gitBlobOid, materializeCandidateDirectory, pruneEmptyDirectories, setDirectoryTreeMode } from '../src/candidate.js';
 import { PiFailure } from '../src/errors.js';
 import { canonical } from '../src/boundary.js';
+import { MAX_LIMITS } from '../src/policy.js';
 import { sessionInput } from './session-fixtures.js';
 async function fixture() {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-candidate-')), root = join(directory, 'candidate'), input = sessionInput();
@@ -478,7 +479,7 @@ test('candidate relocks unlocked ancestors on midway unlock refusal and locks cr
 });
 
 test('tree_overlay allows untouched oversize baseline entry (> policy.limits.fileBytes) while refusing read/edit with TOOL_DENIED before reading', async () => {
-  const oversizeBytes = Buffer.alloc(9 * 1024 * 1024, 0x41);
+  const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 1024, 0x41);
   const f = await overlayFixture({
     objectFormat: 'sha256',
     extraFiles: [{ name: 'packages/large.bin', content: oversizeBytes as unknown as string }],
@@ -499,6 +500,198 @@ test('tree_overlay allows untouched oversize baseline entry (> policy.limits.fil
     const manifest = await f.candidate.manifest();
     assert.deepEqual(manifest.spec.entries.map(e => e.name), ['packages/README.md']);
     assert.deepEqual(manifest.spec.deleted, ['packages/nested/deep/old.ts']);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('candidate normalizes bash-visible path aliases, preserves real top-level candidate/ entries, and rejects traversal/host paths', async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.candidate.normalize('./candidate/packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize('candidate/packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize('././candidate/./packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize('./packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize('/workspace/candidate/packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize('/scratch/candidate/packages/example.ts'), 'packages/example.ts');
+    assert.equal(f.candidate.normalize(join(f.root, 'packages/example.ts')), 'packages/example.ts');
+    assert.equal(
+      f.candidate.normalize(join(f.directory, 'tool-op-123/scratch/candidate/packages/example.ts')),
+      'packages/example.ts',
+    );
+
+    for (const rootAlias of [
+      'candidate',
+      './candidate',
+      'candidate/',
+      './candidate/',
+      '/scratch/candidate',
+      '/scratch/candidate/',
+      join(f.directory, 'tool-op-123/scratch/candidate'),
+      join(f.directory, 'tool-op-123/scratch/candidate/'),
+    ]) {
+      const target = await f.candidate.inspectReadTarget(rootAlias);
+      assert.equal(target.kind, 'error', `expected directory listing error for ${rootAlias}`);
+      if (target.kind === 'error') {
+        assert.equal(target.targetPath, '.');
+        assert.equal(target.message, 'Path "." is a directory, not a file. Entries:\npackages/');
+      }
+    }
+
+    const pkgTarget = await f.candidate.inspectReadTarget('./candidate/packages/');
+    assert.equal(pkgTarget.kind, 'error');
+    if (pkgTarget.kind === 'error') {
+      assert.equal(pkgTarget.targetPath, 'packages');
+      assert.equal(pkgTarget.message, 'Path "packages" is a directory, not a file. Entries:\nexample.ts\npolicy/');
+    }
+
+    // HostRuntimeSession layout: <hostDir>/sdk-<sessionId>/candidate vs <hostDir>/tool-<opId>/scratch/candidate/...
+    const hostLayoutDir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-sdk-alias-'));
+    try {
+      const sdkInput = sessionInput();
+      const sdkRoot = join(hostLayoutDir, `sdk-${sdkInput.sessionId}`, 'candidate');
+      for (const file of sdkInput.candidate.artifacts) {
+        await mkdir(join(sdkRoot, file.name, '..'), { recursive: true });
+        await writeFile(join(sdkRoot, file.name), file.bytes, { mode: 0o444 });
+      }
+      const sdkCandidate = new Candidate(sdkRoot, sdkInput);
+      assert.equal(
+        sdkCandidate.normalize(join(hostLayoutDir, 'tool-op-99/scratch/candidate/packages/example.ts')),
+        'packages/example.ts',
+      );
+      const sdkRootListing = await sdkCandidate.inspectReadTarget(join(hostLayoutDir, 'tool-op-99/scratch/candidate'));
+      assert.equal(sdkRootListing.kind, 'error');
+      if (sdkRootListing.kind === 'error') {
+        assert.equal(sdkRootListing.targetPath, '.');
+      }
+    } finally {
+      await rm(hostLayoutDir, { recursive: true, force: true });
+    }
+
+    // Repository with a genuine top-level candidate/ directory must NOT strip bare 'candidate/...'
+    const realCandDir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-real-cand-'));
+    try {
+      const base = sessionInput();
+      const realBytes = Buffer.from('export const real = true;\n');
+      const realRef = digestArtifact('candidate/real.ts', realBytes);
+      assert.equal(realRef.ok, true);
+      if (!realRef.ok) throw new Error('realRef');
+      const raw = structuredClone(base) as unknown as {
+        candidate: { artifacts: { name: string; bytes: Uint8Array }[]; manifest: { spec: { entries: unknown[] } } };
+      };
+      raw.candidate.artifacts.push({ name: realRef.value.name, bytes: realBytes });
+      raw.candidate.manifest.spec.entries.push(realRef.value);
+      const realRoot = join(realCandDir, 'candidate');
+      for (const file of raw.candidate.artifacts) {
+        await mkdir(join(realRoot, file.name, '..'), { recursive: true });
+        await writeFile(join(realRoot, file.name), file.bytes, { mode: 0o444 });
+      }
+      const repoWithCand = new Candidate(realRoot, raw as unknown as typeof base);
+      assert.equal(repoWithCand.normalize('candidate/real.ts'), 'candidate/real.ts');
+      assert.equal(repoWithCand.normalize('./candidate/real.ts'), 'candidate/real.ts');
+      assert.equal(repoWithCand.normalize('/scratch/candidate/candidate/real.ts'), 'candidate/real.ts');
+      const subListing = await repoWithCand.inspectReadTarget('candidate');
+      assert.equal(subListing.kind, 'error');
+      if (subListing.kind === 'error') {
+        assert.equal(subListing.targetPath, 'candidate');
+        assert.equal(subListing.message, 'Path "candidate" is a directory, not a file. Entries:\nreal.ts');
+      }
+    } finally {
+      await rm(realCandDir, { recursive: true, force: true });
+    }
+
+    // Hard TOOL_DENIED refusals on traversal, mid-path dot segments, .git, malformed tool scratch, and host paths
+    for (const bad of [
+      'packages/../escape.txt',
+      './candidate/../escape.txt',
+      '/scratch/candidate/../escape.txt',
+      'packages/./example.ts',
+      'packages/.git/config',
+      '/tmp/host-canary',
+      join(f.directory, 'tool-../scratch/candidate/packages/example.ts'),
+      join(f.directory, 'tool-/scratch/candidate/packages/example.ts'),
+      join(f.directory, 'tool-a/b/scratch/candidate/packages/example.ts'),
+    ]) {
+      assert.throws(
+        () => f.candidate.normalize(bad),
+        err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED' && err.detail.path === '/path',
+        `expected TOOL_DENIED (/path) for ${bad}`,
+      );
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('tryPrepareWrite, tryPrepareEdit, and tryPrepareDelete return soft scope/directory errors when softScopeError is enabled while default calls throw TOOL_DENIED', async () => {
+  const f = await fixture();
+  try {
+    const outOfScopeWrite = await f.candidate.tryPrepareWrite('./candidate/README.md', 'NOPE', { softScopeError: true });
+    assert.equal(outOfScopeWrite.kind, 'error');
+    if (outOfScopeWrite.kind === 'error') {
+      assert.equal(outOfScopeWrite.targetPath, 'README.md');
+      assert.match(outOfScopeWrite.message, /Cannot write README\.md: path is outside writable scope/);
+    }
+
+    const protectedWrite = await f.candidate.tryPrepareWrite('/scratch/candidate/packages/policy/settings.ts', 'NOPE', { softScopeError: true });
+    assert.equal(protectedWrite.kind, 'error');
+    if (protectedWrite.kind === 'error') {
+      assert.equal(protectedWrite.targetPath, 'packages/policy/settings.ts');
+      assert.match(protectedWrite.message, /Cannot write packages\/policy\/settings\.ts: path is outside writable scope/);
+    }
+
+    const caseFoldedProtectedWrite = await f.candidate.tryPrepareWrite('packages/POLICY/settings.ts', 'NOPE', { softScopeError: true });
+    assert.equal(caseFoldedProtectedWrite.kind, 'error');
+
+    const trailingSlashDirWrite = await f.candidate.tryPrepareWrite('packages/', 'NOPE', { softScopeError: true });
+    assert.equal(trailingSlashDirWrite.kind, 'error');
+    if (trailingSlashDirWrite.kind === 'error') {
+      assert.equal(trailingSlashDirWrite.targetPath, 'packages');
+      assert.match(trailingSlashDirWrite.message, /is a directory, not a file/);
+    }
+
+    const existingDirWrite = await f.candidate.tryPrepareWrite('packages', 'NOPE', { softScopeError: true });
+    assert.equal(existingDirWrite.kind, 'error');
+    if (existingDirWrite.kind === 'error') {
+      assert.equal(existingDirWrite.targetPath, 'packages');
+      assert.match(existingDirWrite.message, /is a directory, not a file/);
+    }
+
+    const protectedEdit = await f.candidate.tryPrepareEdit(
+      './candidate/packages/policy/settings.ts',
+      [{ oldText: 'PROTECTED_ORIGINAL', newText: 'PWN' }],
+      { softScopeError: true },
+    );
+    assert.equal(protectedEdit.kind, 'error');
+    if (protectedEdit.kind === 'error') {
+      assert.equal(protectedEdit.targetPath, 'packages/policy/settings.ts');
+      assert.match(protectedEdit.message, /Cannot edit packages\/policy\/settings\.ts: path is outside writable scope/);
+    }
+
+    const protectedDelete = await f.candidate.tryPrepareDelete(
+      '/scratch/candidate/packages/policy/settings.ts',
+      { softScopeError: true },
+    );
+    assert.equal(protectedDelete.kind, 'error');
+    if (protectedDelete.kind === 'error') {
+      assert.equal(protectedDelete.targetPath, 'packages/policy/settings.ts');
+      assert.match(protectedDelete.message, /Cannot delete packages\/policy\/settings\.ts: path is outside writable scope/);
+    }
+
+    // Default (softScopeError omitted/false) still throws hard TOOL_DENIED, and traversal with softScopeError: true STILL throws hard TOOL_DENIED
+    await assert.rejects(
+      f.candidate.tryPrepareEdit('packages/policy/settings.ts', [{ oldText: 'PROTECTED_ORIGINAL', newText: 'PWN' }]),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+    await assert.rejects(
+      f.candidate.tryPrepareDelete('packages/policy/settings.ts'),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+    await assert.rejects(
+      f.candidate.tryPrepareWrite('../outside/escape.ts', 'NOPE', { softScopeError: true }),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+    assert.equal(await readFile(join(f.root, 'packages/policy/settings.ts'), 'utf8'), 'PROTECTED_ORIGINAL');
   } finally {
     await f.cleanup();
   }

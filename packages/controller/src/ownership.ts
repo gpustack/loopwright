@@ -252,7 +252,10 @@ export class ControllerOwner {
         void exited.then(() => reject(new Error('reader-exited')));
       });
       if (!child.pid || ready.version !== 1 || ready.nonce !== nonce || ready.pid !== child.pid) refuse('RECOVERY_REQUIRED', '', phase);
-      const birth = await processBirth(child.pid); if (!birth) refuse('RECOVERY_REQUIRED', '', phase);
+      const birth = await processBirth(child.pid);
+      if (signal.aborted) refuse('CANCELLED', '', phase);
+      if (timedOut) refuse('DEADLINE', '', phase);
+      if (!birth) refuse('RECOVERY_REQUIRED', '', phase);
       await this.#append({ type: 'started', nonce, pid: child.pid, birth }); await this.assertCurrent();
       if (signal.aborted) refuse('CANCELLED', '', phase);
       if (this.ports.afterGitExec) {

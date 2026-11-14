@@ -17,6 +17,7 @@ import { parsePrivateJson } from './parser.js';
 import { canonical, freeze, hash, record, same, text } from './schema.js';
 import { preparePublication, verifyPublicationReceipt } from './publication.js';
 import { verifySignedPayload } from './gate.js';
+import { resolveStoreLeaseMs } from './controller.js';
 import type { LoadedConfiguration } from './types.js';
 export interface ReconcileCycleInput { readonly configuration: LoadedConfiguration; readonly runRoot: string; readonly runId: string; readonly receipt: string; readonly signal?: AbortSignal }
 export type ReconcileExecution =
@@ -62,7 +63,7 @@ async function admit(input: ReconcileCycleInput, plan: import('./types.js').Comp
   if (!admitted.ok || !same(admitted.value, lock) || !same(plan, retained.plan)
     || !same(descriptor.configuration, { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 })) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const expected = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + input.runId).hex.slice(0, 40), lock,
-    policy: { version: 1, leaseMs: 60000, cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
+    policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
   if (!same(descriptor.identity, expected)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return { retained, directory, descriptor, lock, state };
 }

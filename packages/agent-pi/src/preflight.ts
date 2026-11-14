@@ -16,7 +16,7 @@ function byteView(input: unknown, path: string): Uint8Array {
   const buffer = intrinsic('buffer').call(input) as ArrayBuffer;
   if (types.isSharedArrayBuffer(buffer)) refuse('INPUT_INVALID', path);
   const length = intrinsic('byteLength').call(input) as number;
-  if (length > 8388608) refuse('OUTPUT_LIMIT', path);
+  if (length > 67108864) refuse('OUTPUT_LIMIT', path);
   return new Uint8Array(buffer, intrinsic('byteOffset').call(input) as number, length);
 }
 function validateCandidateBaseline(
@@ -118,14 +118,14 @@ export function prepareInput(input: unknown): PiOpenInput {
   const top = object(input, ['version', 'lock', 'roleId', 'stepId', 'sessionId', 'policy', 'candidate', 'resources', 'restore']);
   const hasBaselineKey = top.candidate !== null && typeof top.candidate === 'object' && !types.isProxy(top.candidate) && Object.hasOwn(top.candidate, 'baseline');
   const candidate = object(top.candidate, hasBaselineKey ? ['manifest', 'baseRevision', 'sourceRevision', 'artifacts', 'baseline'] : ['manifest', 'baseRevision', 'sourceRevision', 'artifacts'], '/candidate');
-  const artifacts = list(candidate.artifacts, 256, '/candidate/artifacts').map((item, index) => object(item, ['name', 'bytes'], '/candidate/artifacts/' + index));
+  const artifacts = list(candidate.artifacts, 4096, '/candidate/artifacts').map((item, index) => object(item, ['name', 'bytes'], '/candidate/artifacts/' + index));
   const resources = list(top.resources, 128, '/resources').map((item, index) => object(item, ['id', 'kind', 'ref', 'bytes'], '/resources/' + index));
   const restore = top.restore === null ? null : object(top.restore, ['checkpointId', 'workspace', 'session'], '/restore');
   const workspace = restore ? object(restore.workspace, ['ref', 'bytes'], '/restore/workspace') : null;
   const session = restore ? object(restore.session, ['ref', 'bytes'], '/restore/session') : null;
   const slots = [...artifacts, ...resources, ...(workspace && session ? [workspace, session] : [])];
   const views = slots.map((item, index) => byteView(item.bytes, '/artifacts/' + index));
-  if (views.reduce((sum, view) => sum + view.byteLength, 0) > 16777216) refuse('OUTPUT_LIMIT', '/artifacts');
+  if (views.reduce((sum, view) => sum + view.byteLength, 0) > 268435456) refuse('OUTPUT_LIMIT', '/artifacts');
   const metadata = snapshot({ version: top.version, lock: top.lock, roleId: top.roleId, stepId: top.stepId, sessionId: top.sessionId, policy: top.policy,
     candidate: { manifest: candidate.manifest, baseRevision: candidate.baseRevision, sourceRevision: candidate.sourceRevision, artifacts: artifacts.map(item => ({ name: item.name })) },
     resources: resources.map(item => ({ id: item.id, kind: item.kind, ref: item.ref })), restore: restore ? { checkpointId: restore.checkpointId, workspace: { ref: workspace!.ref }, session: { ref: session!.ref } } : null });

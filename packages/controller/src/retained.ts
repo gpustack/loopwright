@@ -25,7 +25,7 @@ export async function readRetained(input: RetainedRunInput) {
   const descriptor: RunDescriptor = { version: 1, identity: identity as unknown as LocalRunIdentity, plan: checkedRef(raw.plan), source: checkedRef(raw.source), sourceWorkspace: checkedRef(raw.sourceWorkspace),
     configuration: configuration as unknown as RunDescriptor['configuration'], repository: text(raw.repository) };
   const artifacts: ArtifactReader = { read: (ref, maximum) => readArtifact(join(directory, 'artifacts'), ref, maximum) };
-  const plan = parsePrivateJson(await artifacts.read(descriptor.plan, 1048576), 1048576) as unknown as CompiledPlan;
+  const plan = parsePrivateJson(await artifacts.read(descriptor.plan, 4194304), 4194304) as unknown as CompiledPlan;
   if (plan.version !== 1 || !same(plan.task, lock.value.spec.contract)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return { directory, descriptor, plan, lock: lock.value, artifacts };
 }

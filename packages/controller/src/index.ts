@@ -17,7 +17,24 @@ export { reconcileCycle } from './reconcile.js';
 export type { ReconcileCycleInput, ReconcileExecution } from './reconcile.js';
 export { readStatus, inspectRun } from './inspect.js';
 export type { RunStatus, CurrentState, InspectRunInput, InspectRunValue } from './inspect.js';
-export { REPORT_OUTPUT_FORMATS, parseReportOutputFormats, formatCostUsd, sanitizeReportText, formatRunReport } from './report.js';
-export type { ReportOutputFormat, SanitizeReportTextOptions, ReportCheckItem, ReportDiscoveryInfo, ReportModelInfo, RunReportInput } from './report.js';
+export {
+  REPORT_OUTPUT_FORMATS,
+  parseReportOutputFormats,
+  formatCostUsd,
+  formatTokenCount,
+  formatDurationMs,
+  formatByteCount,
+  sanitizeReportText,
+  formatRunReport,
+} from './report.js';
+export type {
+  ReportOutputFormat,
+  SanitizeReportTextOptions,
+  ReportCheckItem,
+  ReportDiscoveryInfo,
+  ReportModelInfo,
+  ReportMcpServerInfo,
+  RunReportInput,
+} from './report.js';
 export type { RetainedRunInput } from './retained.js';
 export type { ExportManifest, ExportEntry } from './bundle.js';

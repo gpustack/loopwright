@@ -1,8 +1,8 @@
 name: 'Loopwright Taskpack Action'
-description:
-  'Run the Loopwright declarative taskpack cycle for a target repository: qualify the deployment host,'
-  ' load .loopwright/taskpack.yaml, compile the trusted registry and controller configuration outside the'
-  ' checkout, and invoke the controller cycle through an optional delegate.'
+description: >-
+  Run the Loopwright declarative taskpack cycle for a target repository: qualify the deployment host,
+  load .loopwright/taskpack.yaml, compile the trusted registry and controller configuration outside the
+  checkout, and invoke the controller cycle through an optional delegate.
 branding:
   icon: 'refresh-cw'
   color: 'purple'
@@ -89,6 +89,33 @@ inputs:
   upstream-records:
     description: 'Optional JSON array of precomputed upstream acquisition records.'
     required: false
+  mcp-servers:
+    description: 'Optional JSON or YAML array of MCP server declarations overriding or extending spec.mcp.servers by id.'
+    required: false
+  wall-time-seconds:
+    description: 'Optional total run wall-time limit override in seconds (60..21600).'
+    required: false
+  total-tokens:
+    description: 'Optional total token budget override across all model calls (1024..200000000).'
+    required: false
+  context-window:
+    description: 'Optional model context window token override (1024..10000000).'
+    required: false
+  max-output-tokens:
+    description: 'Optional per-call maximum output token limit override (256..262144).'
+    required: false
+  max-model-calls:
+    description: 'Optional maximum model call count override per run (1..1024).'
+    required: false
+  max-attempts:
+    description: 'Optional maximum attempt count override (1..16).'
+    required: false
+  tool-timeout-seconds:
+    description: 'Optional per-tool execution timeout override in seconds (5..1800).'
+    required: false
+  command-timeout-seconds:
+    description: 'Optional command.v1 local check timeout ceiling override in seconds (1..3600).'
+    required: false
 
 outputs:
   result:
@@ -139,6 +166,15 @@ runs:
         INPUT_GITHUB-APP-PRIVATE-KEY: ${{ inputs.github-app-private-key }}
         INPUT_GITHUB-APP-INSTALLATION-ID: ${{ inputs.github-app-installation-id }}
         INPUT_UPSTREAM-RECORDS: ${{ inputs.upstream-records }}
+        INPUT_MCP-SERVERS: ${{ inputs.mcp-servers }}
+        INPUT_WALL-TIME-SECONDS: ${{ inputs.wall-time-seconds }}
+        INPUT_TOTAL-TOKENS: ${{ inputs.total-tokens }}
+        INPUT_CONTEXT-WINDOW: ${{ inputs.context-window }}
+        INPUT_MAX-OUTPUT-TOKENS: ${{ inputs.max-output-tokens }}
+        INPUT_MAX-MODEL-CALLS: ${{ inputs.max-model-calls }}
+        INPUT_MAX-ATTEMPTS: ${{ inputs.max-attempts }}
+        INPUT_TOOL-TIMEOUT-SECONDS: ${{ inputs.tool-timeout-seconds }}
+        INPUT_COMMAND-TIMEOUT-SECONDS: ${{ inputs.command-timeout-seconds }}
       run: |
         if [[ ! -f "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js" ]]; then
           npm --prefix "${GITHUB_ACTION_PATH}" ci --no-audit --no-fund && npm --prefix "${GITHUB_ACTION_PATH}" run build

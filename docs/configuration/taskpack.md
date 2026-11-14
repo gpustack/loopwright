@@ -10,6 +10,7 @@ For multi-step DAGs or operator-owned `TrustedRegistry` files stored outside the
 - [Taskpack](#taskpack)
 - [Metadata and scope](#metadata-and-scope)
 - [Model configuration](#model-configuration)
+- [MCP and limits](#mcp-and-limits)
 - [Upstreams and proposal](#upstreams-and-proposal)
 - [Verification checks](#verification-checks)
 - [Publication and memory](#publication-and-memory)
@@ -22,11 +23,11 @@ When a GitHub Action or App processes a taskpack, `compileDeclarativeTaskpack` g
 
 | Generated artifact | Manifest inputs | Compiler defaults |
 | --- | --- | --- |
-| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.verification` | Adds protected paths and default budgets (`wallTimeMs: 3300000`, `maxModelCalls: 12`) |
-| `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
-| `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 3`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
+| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.verification`, `spec.limits` | Adds protected paths and default budgets (`wallTimeMs: 3600000`, `maxModelCalls: 256`) |
+| `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication`, `spec.mcp` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
+| `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 4`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
 
-Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']`.
+Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']` plus discovered `mcp__<id>__<tool>` tools.
 
 ## Taskpack
 
@@ -112,6 +113,29 @@ spec:
       id: glm-5.3
       thinking: high # Optional
       apiKeyEnv: ZAI_CODING_CN_API_KEY # Optional
+  mcp: # Optional host MCP servers
+    servers:
+      - id: github
+        transport: stdio
+        command: github-mcp-server
+        args: # Optional command arguments
+          - stdio
+          - --read-only
+          - --toolsets
+          - repos,pull_requests,issues
+        envFrom: # Optional secret env mapping
+          GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
+        timeoutSeconds: 60 # Optional (defaults to 60)
+      - id: deepwiki
+        transport: http
+        url: https://mcp.deepwiki.com/mcp
+  limits: # Optional execution ceiling overrides
+    wallTimeSeconds: 3600 # Optional (defaults to 3600)
+    totalTokens: 20000000 # Optional (defaults to 20000000)
+    contextWindow: 200000 # Optional model context window override
+    maxOutputTokens: 32768 # Optional (defaults to 32768)
+    maxModelCalls: 256 # Optional (defaults to 256)
+    toolTimeoutSeconds: 300 # Optional (defaults to 300)
   output: # Optional (defaults to json)
     formats:
       - json
@@ -161,7 +185,7 @@ spec:
 | `spec.scope` | No | Object | Writable whitelist and protected blacklist; both fields may be omitted |
 | `spec.scope.writable` | No | String list (`1..128` paths) | Relative paths open for writes; omission allows the repository subject to protected paths |
 | `spec.scope.protected` | No | String list (`0..128` paths) | Relative paths excluded from writes in addition to built-in masks |
-| `spec.instructions` | No | Relative path or list (`1..16` paths) | UTF-8 files compiled as SHA-256-pinned `instruction` trusted resources; aggregate size `<= 24576` bytes |
+| `spec.instructions` | No | Relative path or list (`1..16` paths) | UTF-8 files compiled as SHA-256-pinned `instruction` trusted resources; aggregate size `<= 262144` bytes |
 
 Scope paths name a file or directory and include descendants. Raw globs, traversal, and spaces are not accepted. Protected paths always win, so a writable ancestor may contain protected descendants. A writable path covered by a protected path is rejected. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.
 
@@ -232,6 +256,26 @@ spec:
 
 Provider-reported cost retains `reported` provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains `unknown`.
 
+## MCP and limits
+
+`spec.mcp.servers` connects `stdio` and Streamable `http` MCP servers on the host and exposes tools as `mcp__<id>__<tool>`. OAuth MCP declarations fail closed (`MCP_OAUTH_UNSUPPORTED`). `spec.limits` raises or lowers execution ceilings; Action inputs and `LOOPWRIGHT_*` variables override manifest values.
+
+| Field path | Required | Type and bounds | Meaning |
+| --- | --- | --- | --- |
+| `mcp.servers` | No | Object list (`0..16` items) | Host MCP servers (`id`: `1..24` chars, never `workspace`) |
+| `servers[].transport` | Conditional | `'stdio'` \| `'http'` | **Required** per server; selects local process or Streamable HTTP |
+| `servers[].command` / `args` | Conditional | Executable / string list (`0..32`) | `stdio` binary resolved on trusted host `PATH` and fixed CLI arguments |
+| `servers[].env` / `envFrom` | No | String maps (`<= 32` entries) | Non-secret `stdio` env values and host secret env bindings (scrubbed automatically) |
+| `servers[].url` | Conditional | `https://` URL | **Required** for `http` servers (loopback `http://` requires custom base URL opt-in) |
+| `servers[].headersFrom` / `bearerTokenEnv` | No | Header map / env name | Host secret env bindings for HTTP headers or `Authorization: Bearer` |
+| `servers[].includeTools` / `timeoutSeconds` | No | Tool list (`1..64`) / `5..600` | Optional upstream tool allowlist and per-call timeout in seconds (default `60`) |
+| `limits.wallTimeSeconds` | No | Integer (`60..21600`, default `3600`) | Total run wall-time budget in seconds (`wallTimeMs` also accepted) |
+| `limits.totalTokens` | No | Integer (`1000..1000000000`, default `20000000`) | Aggregate input + output token ceiling across all model calls |
+| `limits.contextWindow` | No | Integer (`1024..10000000`) | Model context window override (`LOOPWRIGHT_CONTEXT_WINDOW` or `context-window` overrides) |
+| `limits.maxOutputTokens` | No | Integer (`256..262144`, default `32768`) | Per-call output token ceiling (`perCallOutputTokens` alias supported) |
+| `limits.maxModelCalls` / `maxAttempts` | No | `1..1024` (`256`) / `1..16` (`4`) | Model turn ceiling and controller attempt ceiling |
+| `limits.toolTimeoutSeconds` | No | Integer (`5..1800`, default `300`) | Per-tool wall-time ceiling in seconds; `toolResultBytes` (`65536..4194304`) also configurable |
+
 ## Upstreams and proposal
 
 ### Upstream and proposal fields
@@ -288,7 +332,7 @@ Provider-reported cost retains `reported` provenance. When billing is absent and
 | Parameter | Required | Type and bounds | Meaning |
 | --- | --- | --- | --- |
 | `script` | Yes | Relative file path, `<= 262144` bytes | Protected regular script with no symlink ancestors; SHA-256 is checked again before execution |
-| `timeoutSeconds` | No | Integer (`1..55`, default `30`) | Maximum script execution time |
+| `timeoutSeconds` | No | Integer (`1..3600`, default `30`) | Maximum script execution time |
 | `allowReadOnlyGitHubToken` | No | Boolean (default `false`) | Passes the resolved GitHub token when available; the flag does not reduce its permissions |
 | `env` | No | List (`0..16` names) | Safe uppercase host environment variable names to pass to the script |
 
@@ -344,7 +388,7 @@ Action `output` overrides the taskpack default. The managed CLI selects formats 
 | `markdown` | Action stderr or CLI stdout | Markdown run summary |
 | `text` | Action stderr or CLI stdout | Plain-text run summary |
 
-Summaries include status, checks, token counts, elapsed time, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. CLI JSON remains NDJSON when the step summary uses a file.
+Summaries include status, connected MCP servers, checks, `K`/`M`/`B` token counts, `ms`/`s`/`m`/`h` elapsed durations, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. JSON outputs preserve exact integer counts alongside formatted strings.
 
 ---
 

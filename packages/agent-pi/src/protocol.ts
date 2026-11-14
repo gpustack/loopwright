@@ -27,12 +27,12 @@ export class Channel extends EventEmitter {
     output.once('error', () => this.fail());
   }
   #accept(bytes: Buffer): void {
-    const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+    const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes), { nodes: 524288, array: 16384, properties: 1024 });
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('frame object');
     if (Object.keys(value).sort().join(',') !== 'body,kind,nonce,sequence,version' || value.version !== 1 || value.nonce !== this.nonce || value.sequence !== ++this.#readSequence || typeof value.kind !== 'string') throw new Error('frame identity');
     const body = value.body as Record<string, unknown>;
     if (value.kind === 'begin') {
-      if (this.#assembly || !body || Object.keys(body).sort().join(',') !== 'digest,encoding,kind,length,metadata' || !['json', 'binary'].includes(body.encoding as string) || typeof body.kind !== 'string' || !Number.isSafeInteger(body.length) || (body.length as number) < 0 || (body.length as number) > 1048576 || typeof body.digest !== 'string' || !/^[a-f0-9]{64}$/.test(body.digest)) throw new Error('assembly');
+      if (this.#assembly || !body || Object.keys(body).sort().join(',') !== 'digest,encoding,kind,length,metadata' || !['json', 'binary'].includes(body.encoding as string) || typeof body.kind !== 'string' || !Number.isSafeInteger(body.length) || (body.length as number) < 0 || (body.length as number) > 67108864 || typeof body.digest !== 'string' || !/^[a-f0-9]{64}$/.test(body.digest)) throw new Error('assembly');
       this.#assembly = { kind: body.kind, length: body.length as number, digest: body.digest, encoding: body.encoding as string, metadata: body.metadata, chunks: [], bytes: 0, index: 0 }; return;
     }
     if (value.kind === 'data') {
@@ -46,7 +46,7 @@ export class Channel extends EventEmitter {
       if (!state || body !== null || state.bytes !== state.length) throw new Error('end');
       const data = Buffer.concat(state.chunks); if (createHash('sha256').update(data).digest('hex') !== state.digest) throw new Error('digest');
       this.#assembly = null;
-      this.emit('message', { kind: state.kind, body: state.encoding === 'json' ? parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data)) : { metadata: state.metadata, bytes: data } } satisfies ChannelMessage); return;
+      this.emit('message', { kind: state.kind, body: state.encoding === 'json' ? parseBoundedJson(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data), { nodes: 524288, array: 16384, properties: 1024 }) : { metadata: state.metadata, bytes: data } } satisfies ChannelMessage); return;
     }
     throw new Error('opcode');
   }
@@ -59,7 +59,7 @@ export class Channel extends EventEmitter {
   async send(kind: string, body: unknown): Promise<void> { await this.sendBytes(kind, null, Buffer.from(JSON.stringify(body)), 'json'); }
   async sendBytes(kind: string, metadata: unknown, bytes: Uint8Array, encoding = 'binary', beforeCommit?: () => void): Promise<void> {
     const queued = this.#pendingMessages > 0;
-    if (this.#closed || bytes.length > 1048576 || this.#pendingMessages >= 8 || queued && this.#queuedBytes + bytes.length > 262144) throw new Error('message or pending-channel bound');
+    if (this.#closed || bytes.length > 67108864 || this.#pendingMessages >= 8 || queued && this.#queuedBytes + bytes.length > 262144) throw new Error('message or pending-channel bound');
     this.#pendingMessages++; if (queued) this.#queuedBytes += bytes.length;
     const send = this.#tail.then(async () => {
       if (queued) this.#queuedBytes -= bytes.length;

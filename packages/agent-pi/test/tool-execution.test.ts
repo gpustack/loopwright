@@ -168,3 +168,73 @@ test('pre-guard failure records not_executed with deleted:false while post-guard
     );
   } finally { await execution.close(); await f.cleanup(); }
 });
+
+test('execution accepts single-edit { path, oldText, newText } shorthand, records read_only soft scope errors when softScopeErrors is enabled, and rejects mixed or extra edit keys', async () => {
+  const f = await fixture(['delete']);
+  const softActor = new Execution(f.host, f.input, f.candidate, {
+    process: () => { throw new Error('Host mutations must not run an interpreter'); },
+    softScopeErrors: true,
+  });
+  const operations: string[] = [];
+  const signal = new AbortController().signal;
+  try {
+    // Soft scope errors record read_only intents and return isError: true without mutating candidate
+    const softWrite = await softActor.invoke(
+      { ...identity, callId: 'call-soft-scope-w', name: 'write' },
+      Buffer.from(JSON.stringify({ path: './candidate/README.md', content: 'DENIED' })),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(softWrite.isError, true);
+    assert.match(softWrite.content[0]?.text ?? '', /Cannot write README\.md: path is outside writable scope/);
+
+    const softEdit = await softActor.invoke(
+      { ...identity, callId: 'call-soft-scope-e', name: 'edit' },
+      Buffer.from(JSON.stringify({ path: '/scratch/candidate/packages/policy/settings.ts', oldText: 'a', newText: 'b' })),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(softEdit.isError, true);
+    assert.match(softEdit.content[0]?.text ?? '', /Cannot edit packages\/policy\/settings\.ts: path is outside writable scope/);
+
+    for (const opId of operations) {
+      const record = stateGood(f.host.store.getOperation(opId));
+      assert.equal(record.intent.effect, 'read_only');
+      assert.equal(record.state, 'confirmed');
+    }
+
+    // Valid single-edit shorthand { path, oldText, newText } commits cleanly
+    const shorthandArgs = { path: './candidate/packages/example.ts', oldText: 'value = 1', newText: 'value = 42' };
+    const shorthandRes = await softActor.invoke(
+      { ...identity, callId: 'call-shorthand-ok', name: 'edit' },
+      Buffer.from(JSON.stringify(shorthandArgs)),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(shorthandRes.isError, undefined);
+    assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 42;\n');
+    const shorthandRecord = stateGood(f.host.store.getOperation(operations.at(-1)!));
+    assert.equal(shorthandRecord.intent.effect, 'local_write');
+
+    // Reject mixed { edits, oldText, newText }, extra keys, missing newText, or non-string oldText
+    for (const [idx, badArgs] of [
+      { path: 'packages/example.ts', edits: [{ oldText: '42', newText: '43' }], oldText: '42', newText: '43' },
+      { path: 'packages/example.ts', oldText: '42', newText: '43', extra: true },
+      { path: 'packages/example.ts', oldText: '42' },
+      { path: 'packages/example.ts', oldText: 42, newText: '43' },
+    ].entries()) {
+      assert.throws(
+        () => softActor.invoke(
+          { ...identity, callId: `call-bad-edit-${idx}`, name: 'edit' },
+          Buffer.from(JSON.stringify(badArgs)),
+          signal,
+          () => {},
+        ),
+        error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED',
+      );
+    }
+  } finally {
+    await softActor.close();
+    await f.cleanup();
+  }
+});

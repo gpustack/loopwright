@@ -8,22 +8,39 @@ import { canonical, digest, object, integer, freeze } from './boundary.js';
 import { stateValue } from './admission.js';
 import { PiFailure, refuse } from './errors.js';
 import { guardLocalOperation, recordLocalOperation } from './operation.js';
+import { isExternalMcpToolName } from './external-mcp.js';
 import type { PiHost, PiOpenInput } from './types.js';
-import type { ToolExecutor, ToolIdentity, ToolResult } from './tools.js';
+import { clampToolResultBytes, type ToolExecutor, type ToolIdentity, type ToolResult } from './tools.js';
 export interface AdmittedToolIdentity extends ToolIdentity { readonly parentRequestId: string; readonly nativeParentAdmitted?: true }
-export interface ExecutionPorts { readonly process: (operationId: string, signal: AbortSignal) => ToolProcessPort }
+export interface ExternalMcpExecutorPort {
+  hasTool(name: string): boolean;
+  targetIdentityFor(name: string): string | null;
+  callTool(
+    name: string,
+    args: Readonly<Record<string, unknown>>,
+    options: { readonly signal?: AbortSignal | undefined; readonly maxResultBytes: number },
+  ): Promise<ToolResult>;
+}
+export interface ExecutionPorts {
+  readonly process: (operationId: string, signal: AbortSignal) => ToolProcessPort;
+  readonly mcpExecutor?: ExternalMcpExecutorPort | undefined;
+  readonly softScopeErrors?: boolean | undefined;
+}
 /** Serial owner mutations and one disposable tool container at a time. Scratch never promotes itself. */
 export class Execution implements ToolExecutor {
   readonly candidate: Candidate; readonly #abort = new AbortController();
   #pending = 0; #closed = false; #unresolved = false; #tail: Promise<void> = Promise.resolve(); #active: ToolProcessPort | null = null;
-  readonly #seen = new Set<string>(); readonly #ports: ExecutionPorts;
+  readonly #seen = new Set<string>(); readonly #ports: ExecutionPorts; readonly #softScopeErrors: boolean;
   constructor(readonly host: PiHost, readonly input: PiOpenInput, candidate: string, ports?: ExecutionPorts) {
     this.candidate = new Candidate(candidate, input);
     this.#ports = ports ?? { process: (operationId, signal) => new ToolProcess(host, input, join(host.directory, 'tool-' + operationId), candidate, operationId, signal) };
+    this.#softScopeErrors = ports?.softScopeErrors === true;
   }
   invoke(identity: AdmittedToolIdentity, bytes: Uint8Array, signal: AbortSignal, onOperation: (id: string) => void): Promise<ToolResult> {
     if (this.#closed || this.#pending >= 32 || this.#seen.size >= this.input.policy.limits.operations) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
-    if (!this.input.policy.tools.includes(identity.name) || !['read', 'bash', 'write', 'edit', 'delete'].includes(identity.name) || identity.parentId !== null && identity.nativeParentAdmitted !== true) refuse('TOOL_DENIED', '', { phase: 'tool' });
+    const allowedLocal = ['read', 'bash', 'write', 'edit', 'delete'].includes(identity.name);
+    const allowedExternalMcp = isExternalMcpToolName(identity.name) && this.#ports.mcpExecutor?.hasTool(identity.name) === true;
+    if (!this.input.policy.tools.includes(identity.name) || (!allowedLocal && !allowedExternalMcp) || identity.parentId !== null && identity.nativeParentAdmitted !== true) refuse('TOOL_DENIED', '', { phase: 'tool' });
     if (bytes.byteLength > this.input.policy.limits.toolArgsBytes) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
     const ownedBytes = Buffer.from(bytes), args = this.#arguments(identity.name, ownedBytes);
     const operationId = 'tool-' + digest(Buffer.from(canonical({ runId: this.input.lock.spec.runId, sessionId: this.input.sessionId, parent: identity.parentRequestId, invocation: identity.invocation, callId: identity.callId, name: identity.name }))).hex.slice(0, 32);
@@ -34,16 +51,39 @@ export class Execution implements ToolExecutor {
     return action.finally(() => { this.#pending--; });
   }
   #arguments(name: string, bytes: Uint8Array): Record<string, unknown> {
-    let value: unknown; try { value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { refuse('TOOL_DENIED', '/arguments', { phase: 'tool' }); }
+    let value: unknown; try { value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 262144, array: 4096, properties: 512 }); } catch { refuse('TOOL_DENIED', '/arguments', { phase: 'tool' }); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
-    const keys = Object.keys(value), allowed = name === 'read' ? ['path', 'offset', 'limit'] : name === 'bash' ? ['command', 'timeout'] : name === 'write' ? ['path', 'content'] : name === 'delete' ? ['path'] : ['path', 'edits'];
+    const keys = Object.keys(value);
+    if (isExternalMcpToolName(name)) {
+      return object(value, keys);
+    }
+    if (name === 'edit') {
+      const isArrayForm = keys.every(key => key === 'path' || key === 'edits') && keys.includes('edits');
+      const isShorthandForm = !keys.includes('edits')
+        && keys.every(key => key === 'path' || key === 'oldText' || key === 'newText')
+        && keys.includes('oldText')
+        && keys.includes('newText');
+      if (!isArrayForm && !isShorthandForm) refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
+      const args = object(value, keys);
+      if (typeof args.path !== 'string' || !args.path) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      if (isShorthandForm) {
+        if (typeof args.oldText !== 'string' || typeof args.newText !== 'string') {
+          refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
+        }
+        return { path: args.path, edits: [{ oldText: args.oldText, newText: args.newText }] };
+      }
+      if (!Array.isArray(args.edits)) refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
+      return args;
+    }
+    const allowed = name === 'read' ? ['path', 'offset', 'limit'] : name === 'bash' ? ['command', 'timeout'] : name === 'write' ? ['path', 'content'] : ['path'];
     if (keys.some(key => !allowed.includes(key))) refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
     const args = object(value, keys); if (name === 'bash') {
       if (typeof args.command !== 'string' || !args.command || args.command.includes('\0')) refuse('TOOL_DENIED', '/command', { phase: 'tool' });
-      if (args.timeout !== undefined) integer(args.timeout, 1, 10, '/timeout');
+      const maxTimeoutSec = Math.max(60, Math.ceil(this.input.policy.limits.toolWallMs / 1000));
+      if (args.timeout !== undefined) integer(args.timeout, 1, maxTimeoutSec, '/timeout');
     } else {
       if (typeof args.path !== 'string' || !args.path) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-      if (name === 'write' && typeof args.content !== 'string' || name === 'edit' && !Array.isArray(args.edits)) refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
+      if (name === 'write' && typeof args.content !== 'string') refuse('TOOL_DENIED', '/arguments', { phase: 'tool' });
       if (name === 'read') for (const key of ['offset', 'limit']) if (args[key] !== undefined) integer(args[key], 1, Number.MAX_SAFE_INTEGER, '/' + key);
     }
     return args;
@@ -70,28 +110,64 @@ export class Execution implements ToolExecutor {
     if (view.counts.operations >= this.input.policy.limits.operations) refuse('OUTPUT_LIMIT', '', { phase: 'tool' });
     const remaining = view.clock.remainingTaskMs.safeValue; if (remaining === null || remaining <= 0) refuse('DEADLINE', '', { phase: 'tool' });
     const timeout = AbortSignal.timeout(Math.min(remaining, this.input.policy.limits.toolWallMs)), combined = AbortSignal.any([signal, timeout]);
-    let change: CandidateChange | null = null, read: { path: string; digest: string } | null = null;
-    if (identity.name === 'read') { const file = await this.candidate.checkRead(args.path as string); read = { path: file.path, digest: file.ref.digest.hex }; }
-    else if (identity.name === 'write') change = await this.candidate.prepareWrite(args.path as string, args.content as string);
-    else if (identity.name === 'edit') change = await this.candidate.prepareEdit(args.path as string, args.edits);
-    else if (identity.name === 'delete') change = await this.candidate.prepareDelete(args.path as string);
+    let change: CandidateChange | null = null, read: { path: string; digest: string } | null = null, softError: { readonly targetPath: string; readonly message: string } | null = null;
+    if (identity.name === 'read') {
+      const inspected = await this.candidate.inspectReadTarget(args.path as string);
+      if (inspected.kind === 'error') softError = inspected;
+      else read = { path: inspected.path, digest: inspected.ref.digest.hex };
+    } else if (identity.name === 'write') {
+      if (this.#softScopeErrors) {
+        const prepared = await this.candidate.tryPrepareWrite(args.path as string, args.content as string, { softScopeError: true });
+        if (prepared.kind === 'error') softError = prepared;
+        else change = prepared.change;
+      } else {
+        change = await this.candidate.prepareWrite(args.path as string, args.content as string);
+      }
+    } else if (identity.name === 'edit') {
+      const prepared = await this.candidate.tryPrepareEdit(args.path as string, args.edits, { softScopeError: this.#softScopeErrors });
+      if (prepared.kind === 'error') softError = prepared;
+      else change = prepared.change;
+    } else if (identity.name === 'delete') {
+      const prepared = await this.candidate.tryPrepareDelete(args.path as string, { softScopeError: this.#softScopeErrors });
+      if (prepared.kind === 'error') softError = prepared;
+      else change = prepared.change;
+    }
+    const isExternalMcp = isExternalMcpToolName(identity.name);
     let process: ToolProcessPort | null = null, authorized: OperationRecord | null = null, effect = false, cleanup = true;
     let result: ToolResult = { content: [], details: null }, failure: unknown = null, container: Awaited<ReturnType<ToolProcessPort['close']>> = null;
     try {
-      if (identity.name === 'read' || identity.name === 'bash') { process = this.#ports.process(operationId, combined); this.#active = process; await process.ready(); }
+      if (!softError && (identity.name === 'read' || identity.name === 'bash')) { process = this.#ports.process(operationId, combined); this.#active = process; await process.ready(); }
       combined.throwIfAborted();
-      const targetIdentity = identity.name === 'bash' ? 'scratch:' + this.input.sessionId : 'candidate:' + (change?.path ?? read!.path);
+      const targetIdentity = isExternalMcp
+        ? (this.#ports.mcpExecutor?.targetIdentityFor(identity.name) ?? ('mcp:' + identity.name))
+        : identity.name === 'bash'
+          ? 'scratch:' + this.input.sessionId
+          : 'candidate:' + (softError?.targetPath ?? change?.path ?? read!.path);
       const requestDigest = digest(Buffer.from('loopwright.dev/pi-tool/v1\0' + canonical({ identity: { ...identity, slot: digest(Buffer.from(identity.slot)) }, argumentsDigest: digest(bytes), lock: this.input.lock.spec.lockHash, policy: digest(Buffer.from(canonical(this.input.policy))), runtime: this.input.policy.runtime, targetIdentity, before: change?.before ?? null, after: change?.after ?? null, ...(change?.deleted ? { deleted: true } : {}) })));
-      const intent: OperationIntent = { operationId, nodeId: this.input.stepId, attemptId: 'tool-attempt-' + randomBytes(12).toString('hex'), effect: identity.name === 'read' ? 'read_only' : 'local_write', requestDigest, targetIdentity };
+      const intent: OperationIntent = { operationId, nodeId: this.input.stepId, attemptId: 'tool-attempt-' + randomBytes(12).toString('hex'), effect: (identity.name === 'read' || isExternalMcp || softError !== null) ? 'read_only' : 'local_write', requestDigest, targetIdentity };
       onOperation(operationId); const written = stateValue(this.host.store.putIntent(this.host.authority, intent), 'tool');
       if (written.kind !== 'created') refuse('RECOVERY_REQUIRED', '', { phase: 'tool', operationId });
       const dispatch = stateValue(this.host.store.authorizeOperationDispatch(this.host.authority, operationId), 'tool'); if (dispatch.kind !== 'new_dispatch') refuse('RECOVERY_REQUIRED', '', { phase: 'tool', operationId }); authorized = dispatch.record;
       const guard = () => { this.#guard(dispatch.record, dispatch.permit, combined); effect = true; };
-      if (change) {
+      if (softError) {
+        guard();
+        result = clampToolResultBytes(
+          { content: [{ type: 'text', text: softError.message }], isError: true, details: null },
+          this.input.policy.limits.toolResultBytes,
+          { tool: 'read' },
+        );
+      } else if (change) {
         const ref = await this.candidate.commit(change, guard);
         result = change.deleted || ref === null
           ? { content: [{ type: 'text', text: 'Deleted scoped candidate file: ' + change.path }], details: { operationId, deleted: change.path } }
           : { content: [{ type: 'text', text: 'Committed scoped candidate change: ' + ref.name }], details: { operationId, artifact: ref } };
+      } else if (isExternalMcp) {
+        guard();
+        const rawMcp = await this.#ports.mcpExecutor!.callTool(identity.name, args, {
+          signal: combined,
+          maxResultBytes: this.input.policy.limits.toolResultBytes,
+        });
+        result = clampToolResultBytes(rawMcp, this.input.policy.limits.toolResultBytes, { tool: 'bash' });
       } else {
         const reply: ToolProcessReply = await process!.execute(identity.name as 'read' | 'bash', bytes, read, guard); result = reply.result;
         if (reply.code !== null) refuse(reply.code, '', { phase: 'tool', effect: effect ? 'possible' : 'none', operationId });

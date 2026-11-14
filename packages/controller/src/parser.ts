@@ -3,7 +3,7 @@ import { refuse } from './errors.js';
 import type { Json } from './schema.js';
 export const DOCUMENT_BYTES = 1048576;
 /** Lex before JSON.parse so duplicate names and hostile nesting cannot disappear during conversion. */
-function json(source: string, collectionLimit = 128, nodeLimit = 8192): Json {
+function json(source: string, collectionLimit = 128, nodeLimit = 8192, stringLimit = 16384): Json {
   let offset = 0, nodes = 0;
   const space = () => { while (/[\t\n\r ]/.test(source[offset] ?? '') && offset < source.length) offset++; };
   const string = (): string => {
@@ -13,7 +13,7 @@ function json(source: string, collectionLimit = 128, nodeLimit = 8192): Json {
       if (char === '\\') { offset++; continue; }
       if (char === '"') {
         let value: unknown; try { value = JSON.parse(source.slice(start, offset)); } catch { refuse('CONFIG_SYNTAX'); }
-        if (typeof value !== 'string' || value.length > 16384) refuse('CONFIG_LIMIT'); return value;
+        if (typeof value !== 'string' || value.length > stringLimit) refuse('CONFIG_LIMIT'); return value;
       }
     }
     refuse('CONFIG_SYNTAX');
@@ -79,7 +79,7 @@ export function parseDocumentBytes(bytes: Uint8Array, format: 'json' | 'yaml'): 
 }
 /** Private immutable records have their own explicit collection bound; authoring config keeps the default 128. */
 export function parsePrivateJson(bytes: Uint8Array, maximum: number, collectionLimit = 256): Json {
-  if (bytes.byteLength > maximum || maximum > 8388608 || collectionLimit > 2048) refuse('ARTIFACT_INVALID', '', 'recovery');
-  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, 65536); }
+  if (bytes.byteLength > maximum || maximum > 16777216 || collectionLimit > 16384) refuse('ARTIFACT_INVALID', '', 'recovery');
+  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, 262144, 1048576); }
   catch { refuse('ARTIFACT_INVALID', '', 'recovery'); }
 }

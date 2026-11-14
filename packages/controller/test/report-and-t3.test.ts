@@ -15,8 +15,12 @@ import {
 import type { PiAdapterV2, PiErrorV2, PiHostV2, PiOpenInputV2, PiOutcomeV2 } from '@loopwright/agent-pi';
 import {
   REPORT_OUTPUT_FORMATS,
+  compilePlan,
+  formatByteCount,
   formatCostUsd,
+  formatDurationMs,
   formatRunReport,
+  formatTokenCount,
   inspectRun,
   parseReportOutputFormats,
   runCycleWithPorts,
@@ -1144,8 +1148,15 @@ test('report: sanitizeReportText and formatRunReport scrub secrets, strip ANSI/c
     assert.equal(rendered.includes('::error'), false, `${format} leaked ::error`);
     assert.equal(rendered.includes('::warning'), false, `${format} leaked ::warning`);
     assert.equal(rendered.includes('::notice'), false, `${format} leaked ::notice`);
-    assert.ok(rendered.includes('1250'), `${format} missing totalTokens`);
-    assert.ok(rendered.includes('1000'), `${format} missing inputTokens`);
+    if (format === 'json') {
+      assert.ok(rendered.includes('1250'), `${format} missing exact totalTokens`);
+      assert.ok(rendered.includes('1000'), `${format} missing exact inputTokens`);
+      assert.ok(rendered.includes('"formattedTotalTokens":"1.25K"'), `${format} missing formattedTotalTokens`);
+      assert.ok(rendered.includes('"formattedInputTokens":"1K"'), `${format} missing formattedInputTokens`);
+    } else {
+      assert.ok(rendered.includes('1.25K'), `${format} missing human-formatted totalTokens`);
+      assert.ok(rendered.includes('1K'), `${format} missing human-formatted inputTokens`);
+    }
     assert.ok(rendered.includes('250'), `${format} missing outputTokens`);
     assert.ok(rendered.includes('0.012500'), `${format} missing formatted costUsd`);
     assert.ok(rendered.includes('estimated'), `${format} missing cost provenance`);
@@ -1236,4 +1247,112 @@ test('report: sanitizeReportText and formatRunReport scrub secrets, strip ANSI/c
   const partialText = formatRunReport(partialInput, 'text');
   assert.ok(partialText.includes('Tokens: >= 700 total (600 in / 100 out, partial: 1 unknown)'));
   assert.ok(partialText.includes('Cost: >= $0.012500 USD (estimated, partial: 1 unknown)'));
+});
+
+test('formatTokenCount, formatDurationMs, formatByteCount, detail, mcpServers, and RoleProfile limits/external MCP tools', async () => {
+  assert.equal(formatTokenCount(0), '0');
+  assert.equal(formatTokenCount(850), '850');
+  assert.equal(formatTokenCount(1_000), '1K');
+  assert.equal(formatTokenCount(1_250), '1.25K');
+  assert.equal(formatTokenCount(14_200), '14.2K');
+  assert.equal(formatTokenCount(999_999), '1M');
+  assert.equal(formatTokenCount(1_280_000), '1.28M');
+  assert.equal(formatTokenCount(999_999_999), '1B');
+  assert.equal(formatTokenCount(2_100_000_000), '2.1B');
+  assert.throws(() => formatTokenCount(-1), RangeError);
+
+  assert.equal(formatDurationMs(0), '0ms');
+  assert.equal(formatDurationMs(420), '420ms');
+  assert.equal(formatDurationMs(8_400), '8.4s');
+  assert.equal(formatDurationMs(12_000), '12s');
+  assert.equal(formatDurationMs(59_960), '1m');
+  assert.equal(formatDurationMs(148_000), '2m 28s');
+  assert.equal(formatDurationMs(4_320_000), '1h 12m');
+  assert.throws(() => formatDurationMs(-5), RangeError);
+
+  assert.equal(formatByteCount(512), '512 B');
+  assert.equal(formatByteCount(65_536), '64 KB');
+  assert.equal(formatByteCount(1_572_864), '1.5 MB');
+  assert.equal(formatByteCount(2_147_483_648), '2 GB');
+  assert.throws(() => formatByteCount(-1), RangeError);
+
+  const largeUsage: UsageSummary = {
+    requests: [],
+    inputTokens: { knownSubtotal: 1_140_000, unknownCount: 0, completeness: 'complete', provenance: 'reported' },
+    outputTokens: { knownSubtotal: 140_000, unknownCount: 0, completeness: 'complete', provenance: 'reported' },
+    totalTokens: { knownSubtotal: 1_280_000, unknownCount: 0, completeness: 'complete', provenance: 'reported' },
+    costMicrousd: { knownSubtotal: 0, unknownCount: 0, completeness: 'complete', provenance: 'unknown' },
+  };
+  const richReport = {
+    runId: 'run-rich-fmt',
+    status: 'failed',
+    reasonCode: 'RECOVERY_REQUIRED',
+    phase: 'execution',
+    detail: 'piCode=OUTPUT_LIMIT (response exceeded limit)',
+    model: { provider: 'custom-glm', model: 'glm-5.1', thinking: 'high', contextWindow: 200_000 },
+    mcpServers: [
+      { id: 'github', transport: 'stdio' as const, status: 'connected' as const, toolCount: 18 },
+      { id: 'deepwiki', transport: 'http' as const, status: 'connected' as const, toolCount: 3 },
+    ],
+    usage: largeUsage,
+    elapsedMs: 148_000,
+  };
+  const md = formatRunReport(richReport, 'github-step-summary');
+  assert.match(md, /\| Model \| custom-glm\/glm-5\.1 \(thinking: high, contextWindow=200K\) \|/);
+  assert.match(md, /\| Detail \| piCode=OUTPUT_LIMIT \(response exceeded limit\) \|/);
+  assert.match(md, /\| MCP Servers \| github \(stdio, 18 tools\); deepwiki \(http, 3 tools\) \|/);
+  assert.match(md, /\| Tokens \| 1\.28M total \(1\.14M in \/ 140K out, reported\) \|/);
+  assert.match(md, /\| Elapsed \| 2m 28s \|/);
+
+  const txt = formatRunReport(richReport, 'text');
+  assert.match(txt, /Model: custom-glm\/glm-5\.1 \(thinking: high, contextWindow=200K\)/);
+  assert.match(txt, /Detail: piCode=OUTPUT_LIMIT \(response exceeded limit\)/);
+  assert.match(txt, /MCP Servers: github \(stdio, 18 tools\); deepwiki \(http, 3 tools\)/);
+  assert.match(txt, /Tokens: 1\.28M total \(1\.14M in \/ 140K out\)/);
+  assert.match(txt, /Elapsed: 2m 28s/);
+
+  const json = JSON.parse(formatRunReport(richReport, 'json')) as Record<string, unknown>;
+  assert.equal((json.model as Record<string, unknown>).contextWindow, 200_000);
+  assert.equal((json.model as Record<string, unknown>).formattedContextWindow, '200K');
+  assert.equal(json.elapsedMs, 148_000);
+  assert.equal(json.formattedElapsed, '2m 28s');
+  assert.equal(json.detail, 'piCode=OUTPUT_LIMIT (response exceeded limit)');
+  assert.equal((json.usage as Record<string, unknown>).totalTokens, 1_280_000);
+  assert.equal((json.usage as Record<string, unknown>).formattedTotalTokens, '1.28M');
+
+  // Verify TrustedRegistry + compilePlan accept external MCP tools (>8 tools) + custom RoleProfile.limits + >60s gateEndpoints
+  const f = await configurationFixture();
+  try {
+    const extTools = [
+      'read', 'bash', 'write', 'edit', 'delete',
+      'mcp__github__list_commits', 'mcp__github__get_commit', 'mcp__github__list_pull_requests',
+      'mcp__github__get_file_contents', 'mcp__deepwiki__ask_question', 'mcp__deepwiki__read_wiki_structure',
+    ];
+    setFixture(f.registry, ['spec', 'roleProfiles', 0, 'tools'], extTools);
+    setFixture(f.registry, ['spec', 'roleProfiles', 0, 'context', 'workingWindowCeiling'], 8_388_608);
+    setFixture(f.registry, ['spec', 'roleProfiles', 0, 'context', 'maxRequestBytes'], 8_388_608);
+    setFixture(f.registry, ['spec', 'roleProfiles', 0, 'context', 'maxOutputTokens'], 131_072);
+    setFixture(f.registry, ['spec', 'roleProfiles', 0, 'limits'], {
+      responseBytes: 33_554_432,
+      toolResultBytes: 1_048_576,
+      toolWallMs: 300_000,
+      sessionBytes: 16_777_216,
+    });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles', 0, 'tools'], extTools);
+    await f.save();
+    const loaded = await f.load();
+    assert.equal(loaded.ok, true, loaded.ok ? '' : JSON.stringify(loaded.error));
+    if (!loaded.ok) throw new Error('expected load ok');
+    const compiled = await compilePlan(loaded.value);
+    assert.equal(compiled.ok, true, compiled.ok ? '' : JSON.stringify(compiled.error));
+    if (!compiled.ok) throw new Error('expected compile ok');
+    const policy = compiled.value.roles[0]!.policy;
+    assert.deepEqual(policy.tools, extTools);
+    assert.equal(policy.limits.responseBytes, 33_554_432);
+    assert.equal(policy.limits.toolResultBytes, 1_048_576);
+    assert.equal(policy.limits.toolWallMs, 300_000);
+    assert.equal(policy.limits.sessionBytes, 16_777_216);
+  } finally {
+    await f.cleanup();
+  }
 });

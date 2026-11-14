@@ -63,6 +63,88 @@ export interface TaskpackOutputDeclaration {
   readonly formats: readonly TaskpackOutputFormat[];
 }
 
+export interface TaskpackStdioMcpServerDeclaration {
+  readonly id: string;
+  readonly transport: 'stdio';
+  readonly command: string;
+  readonly args?: readonly string[] | undefined;
+  readonly env?: Readonly<Record<string, string>> | undefined;
+  readonly envFrom?: Readonly<Record<string, string>> | undefined;
+  readonly timeoutSeconds?: number | undefined;
+  readonly includeTools?: readonly string[] | undefined;
+  readonly readOnly?: boolean | undefined;
+  readonly required?: boolean | undefined;
+}
+
+export interface TaskpackHttpMcpServerDeclaration {
+  readonly id: string;
+  readonly transport: 'http';
+  readonly url: string;
+  readonly headers?: Readonly<Record<string, string>> | undefined;
+  readonly headersFrom?: Readonly<Record<string, string>> | undefined;
+  readonly bearerTokenEnv?: string | undefined;
+  readonly timeoutSeconds?: number | undefined;
+  readonly includeTools?: readonly string[] | undefined;
+  readonly readOnly?: boolean | undefined;
+  readonly required?: boolean | undefined;
+}
+
+export type TaskpackMcpServerDeclaration =
+  | TaskpackStdioMcpServerDeclaration
+  | TaskpackHttpMcpServerDeclaration;
+
+export interface TaskpackMcpDeclaration {
+  readonly servers: readonly TaskpackMcpServerDeclaration[];
+}
+
+export interface TaskpackLimitsDeclaration {
+  readonly wallTimeSeconds?: number | undefined;
+  readonly wallTimeMs?: number | undefined;
+  readonly totalTokens?: number | undefined;
+  readonly contextWindow?: number | undefined;
+  readonly maxOutputTokens?: number | undefined;
+  readonly perCallOutputTokens?: number | undefined;
+  readonly maxModelCalls?: number | undefined;
+  readonly maxAttempts?: number | undefined;
+  readonly maxFormatRepairs?: number | undefined;
+  readonly maxImplementationRepairs?: number | undefined;
+  readonly maxTransportRetries?: number | undefined;
+  readonly toolTimeoutSeconds?: number | undefined;
+  readonly toolWallMs?: number | undefined;
+  readonly commandTimeoutSeconds?: number | undefined;
+  readonly responseBytes?: number | undefined;
+  readonly toolResultBytes?: number | undefined;
+  readonly toolArgsBytes?: number | undefined;
+  readonly promptBytes?: number | undefined;
+  readonly maxRequestBytes?: number | undefined;
+  readonly workingWindowBytes?: number | undefined;
+  readonly fileBytes?: number | undefined;
+  readonly sessionBytes?: number | undefined;
+  readonly candidateEntries?: number | undefined;
+}
+
+export interface EffectiveTaskpackLimits {
+  readonly budgets: TaskContract['spec']['budgets'];
+  readonly maxAttempts?: number | undefined;
+  readonly commandTimeoutSeconds?: number | undefined;
+  readonly workingWindowCeiling?: number | undefined;
+  readonly maxRequestBytes?: number | undefined;
+  readonly maxOutputTokens?: number | undefined;
+  readonly roleLimits?: {
+    readonly promptBytes?: number;
+    readonly responseBytes?: number;
+    readonly toolArgsBytes?: number;
+    readonly toolResultBytes?: number;
+    readonly sessionBytes?: number;
+    readonly artifactBytes?: number;
+    readonly candidateEntries?: number;
+    readonly fileBytes?: number;
+    readonly toolWallMs?: number;
+    readonly requests?: number;
+    readonly operations?: number;
+  } | undefined;
+}
+
 export interface TaskpackUpstreamDescriptor {
   readonly id: string;
   readonly kind: TaskpackUpstreamKind;
@@ -109,6 +191,8 @@ export interface TaskpackManifest {
     readonly sandbox?: TaskpackSandboxDeclaration | undefined;
     readonly decisions?: TaskpackDecisionsDeclaration | undefined;
     readonly models?: readonly TaskpackModelDeclaration[] | undefined;
+    readonly mcp?: TaskpackMcpDeclaration | undefined;
+    readonly limits?: TaskpackLimitsDeclaration | undefined;
     readonly output?: TaskpackOutputDeclaration | undefined;
   };
 }
@@ -391,6 +475,8 @@ export interface HostTaskpackBindings {
   readonly modelsJsonPath?: string | undefined;
   readonly runtimeOptions?: HostRuntimeOptions | undefined;
   readonly budgets: TaskContract['spec']['budgets'];
+  readonly limits?: TaskpackLimitsDeclaration | undefined;
+  readonly externalMcpTools?: readonly string[] | undefined;
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;
   readonly credentialEnvMap: HostCredentialEnvMap;
@@ -418,6 +504,7 @@ export interface TaskpackUpstreamRecord {
   readonly upstreamId: string;
   readonly status: UpstreamAcquisitionStatus;
   readonly version?: string | undefined;
+  readonly recentVersions?: readonly string[] | undefined;
   readonly reason?: string | undefined;
 }
 
@@ -779,6 +866,7 @@ export interface ActionEntrypointInput {
   readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   readonly budgets?: TaskContract['spec']['budgets'] | undefined;
+  readonly limits?: TaskpackLimitsDeclaration | undefined;
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;
   readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
@@ -787,6 +875,7 @@ export interface ActionEntrypointInput {
   readonly operatorAllowlist?: readonly string[] | undefined;
   readonly commentPrefixes?: readonly string[] | undefined;
   readonly mcpServers?: readonly McpServerAuthDeclaration[] | undefined;
+  readonly mcpServerConfigs?: readonly TaskpackMcpServerDeclaration[] | undefined;
   readonly mcpTransportChallenge?: McpTransportChallenge | null | undefined;
   readonly clockBasis?: ClockBasis | undefined;
   readonly previousClockSample?: ClockSample | undefined;

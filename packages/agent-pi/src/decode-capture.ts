@@ -47,7 +47,7 @@ function rows(input: Buffer): Record<string, unknown>[] {
   let offset = 0;
   while (offset < input.length) {
     const end = input.indexOf(10, offset);
-    if (end < 0 || output.length >= 8192) refuse('RECOVERY_REQUIRED');
+    if (end < 0 || output.length >= 65536) refuse('RECOVERY_REQUIRED');
     output.push(snapshotRow(input.subarray(offset, end)));
     offset = end + 1;
   }
@@ -65,8 +65,8 @@ export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<P
     const lock = checked.value;
     const rawPolicy = snapshot(top.policy) as unknown as AdapterPolicy | AdapterPolicyV2;
     const rawWorkspace = object(top.workspace, ['ref', 'bytes']), rawSession = object(top.session, ['ref', 'bytes']);
-    const ownedWorkspace = bytes(rawWorkspace.bytes, snapshot(rawWorkspace.ref) as unknown as ArtifactRef, 8388608);
-    const ownedSession = bytes(rawSession.bytes, snapshot(rawSession.ref) as unknown as ArtifactRef, 8388608);
+    const ownedWorkspace = bytes(rawWorkspace.bytes, snapshot(rawWorkspace.ref) as unknown as ArtifactRef, 67108864);
+    const ownedSession = bytes(rawSession.bytes, snapshot(rawSession.ref) as unknown as ArtifactRef, 67108864);
     const policy = rawPolicy.version === 2 ? (await effectivePolicyV2(rawPolicy)).native : validatePolicy(snapshot(rawPolicy));
     const checkpoint = snapshot(top.checkpoint) as unknown as CheckpointRecord;
     const sessionId = id(top.sessionId), roleId = id(top.roleId), stepId = id(top.stepId);

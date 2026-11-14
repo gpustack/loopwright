@@ -76,11 +76,12 @@ test('typed artifact views reject shared memory and ignore caller byte getters',
 });
 test('unauthorized plugins, tools, destination fields and widened limits refuse', () => {
   const source = sessionInput();
+  assert.ok(prepareInput({ ...source, policy: { ...source.policy, limits: { ...source.policy.limits, responseBytes: 67_108_864 } } }));
   for (const policy of [
     { ...source.policy, extensions: ['@monotykamary/pi-retry'] },
     { ...source.policy, tools: ['mcp__workspace__denied_write'] },
     { ...source.policy, mcp: { ...source.policy.mcp, url: 'https://forbidden.invalid' } },
-    { ...source.policy, limits: { ...source.policy.limits, responseBytes: 1048577 } },
+    { ...source.policy, limits: { ...source.policy.limits, responseBytes: 67_108_865 } },
   ]) assert.throws(() => prepareInput({ ...source, policy }), PiFailure);
 });
 test('candidate revision, inventory and content digests bind the owned bytes', () => {

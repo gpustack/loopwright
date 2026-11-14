@@ -91,7 +91,7 @@ export function identity(input:unknown):LocalRunIdentity {
   const lock=validateDocument(v.lock,'TaskLock');if(!lock.ok)fail('INVALID_INPUT','/lock',lock.errors);
   const p=record(snapshot(v.policy),['version','leaseMs','cost'],'/policy');
   if(p.version!==1||p.cost!=='observe_only')fail('INVALID_INPUT','/policy');
-  const policy:StatePolicy={version:1,leaseMs:integer(p.leaseMs,'/policy/leaseMs',1000,60000),cost:'observe_only'};
+  const policy:StatePolicy={version:1,leaseMs:integer(p.leaseMs,'/policy/leaseMs',1000,3700000),cost:'observe_only'};
   const bindingInput=record(snapshot(v.binding),['coreApiVersion','hostVersion','adapters','resourceVersion','clockEpoch'],'/binding');
   if(bindingInput.coreApiVersion!=='loopwright.dev/v1alpha1')fail('BINDING_MISMATCH','/binding/coreApiVersion');
   const adapters=array(bindingInput.adapters,'/binding/adapters',64).map((entry,i)=>{const a=record(entry,['id','version']);return {id:text(a.id,`/binding/adapters/${i}/id`),version:text(a.version,`/binding/adapters/${i}/version`)};}).sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);

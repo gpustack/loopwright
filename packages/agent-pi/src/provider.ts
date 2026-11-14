@@ -168,15 +168,22 @@ export function validateInvocation(value: unknown, expected: PiOpenInput['policy
 }
 
 export async function boundedResponse(response: Response, maxBytes: number, signal: AbortSignal): Promise<Uint8Array> {
-  const storage = new Uint8Array(maxBytes); let offset = 0;
-  const reader = response.body?.getReader(); if (!reader) return storage.subarray(0, 0);
+  const reader = response.body?.getReader(); if (!reader) return new Uint8Array(0);
+  const chunks: Uint8Array[] = []; let offset = 0;
   const abort = () => { void reader.cancel().catch(() => {}); }; signal.addEventListener('abort', abort, { once: true });
   try {
     for (;;) {
       signal.throwIfAborted(); const part = await reader.read(); if (part.done) break;
       if (offset + part.value.byteLength > maxBytes) { await reader.cancel(); refuse('OUTPUT_LIMIT', '', { phase: 'dispatch', effect: 'possible' }); }
-      storage.set(part.value, offset); offset += part.value.byteLength;
+      const copy = new Uint8Array(part.value.byteLength); copy.set(part.value);
+      chunks.push(copy); offset += copy.byteLength;
     }
-    signal.throwIfAborted(); return storage.slice(0, offset);
+    signal.throwIfAborted();
+    if (chunks.length === 0) return new Uint8Array(0);
+    if (chunks.length === 1) return chunks[0]!;
+    const out = new Uint8Array(offset);
+    let cursor = 0;
+    for (const chunk of chunks) { out.set(chunk, cursor); cursor += chunk.byteLength; }
+    return out;
   } finally { signal.removeEventListener('abort', abort); reader.releaseLock(); }
 }

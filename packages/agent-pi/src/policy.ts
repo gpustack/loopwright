@@ -1,8 +1,9 @@
 import type { PiCustomModelCompat, PiCustomProviderConfig, PiLimits, PiModelCost, PiModelSelection, PiSamplingParams } from './types.js';
-export const MAX_LIMITS: PiLimits = Object.freeze({ promptBytes: 16384, diagnosticBytes: 1024, responseBytes: 1048576,
-  frameBytes: 65536, eventBytes: 4096, pendingResponseBytes: 262144, eventQueue: 128, eventQueueBytes: 524288,
-  toolArgsBytes: 65536, toolResultBytes: 65536, sessionBytes: 8388608, artifactBytes: 16777216, candidateEntries: 256,
-  fileBytes: 8388608, toolWallMs: 10000, requests: 1024, operations: 2048, checkpoints: 64 });
+import { isExternalMcpToolName } from './external-mcp.js';
+export const MAX_LIMITS: PiLimits = Object.freeze({ promptBytes: 1048576, diagnosticBytes: 65536, responseBytes: 67108864,
+  frameBytes: 65536, eventBytes: 65536, pendingResponseBytes: 262144, eventQueue: 1024, eventQueueBytes: 8388608,
+  toolArgsBytes: 4194304, toolResultBytes: 4194304, sessionBytes: 67108864, artifactBytes: 268435456, candidateEntries: 4096,
+  fileBytes: 67108864, toolWallMs: 1800000, requests: 4096, operations: 16384, checkpoints: 256 });
 import { canonical, freeze, id, integer, object, text, type Json } from './boundary.js';
 import { PI_THINKING_LEVELS, PI_WIRE_APIS, resolveCatalogModel, validateProviderBaseUrl } from './catalog.js';
 import { refuse } from './errors.js';
@@ -167,8 +168,8 @@ export function validatePolicy(input: Json): AdapterPolicy {
   if (!Array.isArray(value.extensions) || value.extensions.length) refuse('EXTENSION_UNSUPPORTED', '/policy/extensions');
   if (value.accounting !== 'soft_only' || value.retry !== 'sender_only') refuse('CAPABILITY_UNSUPPORTED', '/policy');
   if (typeof value.privateArtifacts !== 'boolean') refuse('INPUT_INVALID', '/policy/privateArtifacts');
-  if (!Array.isArray(value.tools) || value.tools.length > 8 || new Set(value.tools).size !== value.tools.length) refuse('INPUT_INVALID', '/policy/tools');
-  if (value.tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name as string))) refuse('TOOL_DENIED', '/policy/tools');
+  if (!Array.isArray(value.tools) || value.tools.length > 128 || new Set(value.tools).size !== value.tools.length) refuse('INPUT_INVALID', '/policy/tools');
+  if (value.tools.some(name => typeof name !== 'string' || (!['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name) && !isExternalMcpToolName(name)))) refuse('TOOL_DENIED', '/policy/tools');
   const mcp = object(value.mcp, ['serverId', 'scriptDigest', 'names', 'effects', 'idleTimeoutSeconds', 'absoluteTimeoutSeconds'], '/policy/mcp');
   if (mcp.serverId !== 'workspace') refuse('CAPABILITY_UNSUPPORTED', '/policy/mcp'); validateDigest(mcp.scriptDigest, '/policy/mcp/scriptDigest');
   if (!Array.isArray(mcp.names) || !Array.isArray(mcp.effects)) refuse('INPUT_INVALID', '/policy/mcp');
@@ -183,7 +184,7 @@ export function validatePolicy(input: Json): AdapterPolicy {
   if (context.mode !== 'proven_bound' && context.mode !== 'estimated_guard') refuse('INPUT_INVALID', '/policy/context/mode');
   if (context.mode === 'proven_bound') refuse('CONTEXT_UNSAFE', '/policy/context/mode');
   exactValue(context.estimator, 'lw-pi-final-json-bytes-v1', '/policy/context/estimator'); exactValue(context.proofId, null, '/policy/context/proofId'); exactValue(context.version, 1, '/policy/context/version'); exactValue(context.evidence, 'estimated', '/policy/context/evidence');
-  integer(context.workingWindowCeiling, 1, 98304); integer(context.maxRequestBytes, 1, 65536); integer(context.serviceMargin, 32768, Number.MAX_SAFE_INTEGER); integer(context.toolReserve, 16384, Number.MAX_SAFE_INTEGER); integer(context.maxOutputTokens, 1, 1024);
+  integer(context.workingWindowCeiling, 1, 16777216); integer(context.maxRequestBytes, 1, 16777216); integer(context.serviceMargin, 32768, Number.MAX_SAFE_INTEGER); integer(context.toolReserve, 16384, Number.MAX_SAFE_INTEGER); integer(context.maxOutputTokens, 1, 262144);
   const limits = object(value.limits, Object.keys(MAX_LIMITS), '/policy/limits');
   for (const [key, max] of Object.entries(MAX_LIMITS)) integer(limits[key], 1, max, '/policy/limits/' + key);
   for (const key of ['frameBytes', 'pendingResponseBytes']) if (limits[key] !== MAX_LIMITS[key as keyof PiLimits]) refuse('CAPABILITY_UNSUPPORTED', '/policy/limits/' + key);

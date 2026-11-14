@@ -29,7 +29,7 @@ test('terminal HTTP errors never manufacture zero usage or non-execution refunds
   const value = inspectRawResponse(bytes, 429, 'claude-sonnet-5.5'); assert.equal(value.termination, 'confirmed'); assert.equal(value.admission.ok, false); assert.deepEqual(value.usage.inputTokens, { provenance: 'unknown' }); assert.deepEqual(value.usage.outputTokens, { provenance: 'unknown' });
 });
 test('provider event and total response bounds are distinct from private protocol frames', () => {
-  const input = wire().toString().replace('"text":""', '"text":' + JSON.stringify('x'.repeat(70000)));
+  const input = wire().toString().replace('"text":""', '"text":' + JSON.stringify('x'.repeat(2_000_000)));
   assert.equal(inspectRawResponse(Buffer.from(input), 200, 'claude-sonnet-5.5').admission.ok, true);
-  assert.equal(inspectRawResponse(Buffer.from(input + 'x'.repeat(1048576)), 200, 'claude-sonnet-5.5').admission.ok, false);
+  assert.equal(inspectRawResponse(Buffer.from(input + 'x'.repeat(67_108_864)), 200, 'claude-sonnet-5.5').admission.ok, false);
 });

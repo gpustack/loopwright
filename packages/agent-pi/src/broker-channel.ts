@@ -44,7 +44,7 @@ export async function receiveBrokerMessage(channel: Channel, broker: RuntimeBrok
   }
   if (message.kind === 'root-tool') {
     const value = message.body as { metadata: unknown; bytes: Uint8Array }, { query, ...call } = identity(value.metadata, true);
-    let admitted = false; try { admitted = await broker.rootTool({ ...call, argumentsBytes: value.bytes, argumentsDigest: toolArgumentsDigest(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(value.bytes))) }); } catch { /* no authority on uncertainty */ }
+    let admitted = false; try { admitted = await broker.rootTool({ ...call, argumentsBytes: value.bytes, argumentsDigest: toolArgumentsDigest(parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(value.bytes), { nodes: 262144, array: 4096, properties: 512 })) }); } catch { /* no authority on uncertainty */ }
     await channel.sendBytes('root-tool-result', null, Buffer.from(JSON.stringify({ query, admitted })), 'json', admitted ? () => broker.guardRootTool?.(call) : undefined); return true;
   }
   if (message.kind === 'native-result') {

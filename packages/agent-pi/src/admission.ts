@@ -4,7 +4,7 @@ import { canonical, digest, freeze, snapshot } from './boundary.js';
 import { refuse } from './errors.js';
 export interface DispatchPayload { readonly destination: string; readonly headers: Readonly<Record<string, string>>; readonly body: Uint8Array; readonly signal: AbortSignal }
 export interface DispatchTicket { readonly requestId: string }
-export interface DispatchPorts { readonly destination: string; readonly fetch: typeof globalThis.fetch }
+export interface DispatchPorts { readonly destination: string; readonly fetch: typeof globalThis.fetch; readonly maxRequestBytes?: number }
 export function stateValue<T>(value: StateResult<T>, phase: PiError['phase'] = 'admission'): T {
   if (value.ok) return value.value; const error = value.error;
   const code = error.commit === 'unknown' ? 'RECOVERY_REQUIRED' : error.code === 'STALE_OWNER' || error.code.startsWith('OWNER_') ? 'AUTHORITY_REFUSED'
@@ -17,13 +17,14 @@ interface Issued {
 /** Original live tickets never leave this owner and cannot be recreated from persistent dispatch markers. */
 export class Admission {
   #tickets = new WeakMap<DispatchTicket, Issued>(); #used = new WeakSet<DispatchTicket>();
-  readonly #authority: Authority; readonly #destination: string; readonly #fetch: typeof globalThis.fetch;
+  readonly #authority: Authority; readonly #destination: string; readonly #fetch: typeof globalThis.fetch; readonly #maxRequestBytes: number;
   constructor(readonly host: PiHost, ports: DispatchPorts) {
     this.#authority = freeze(snapshot(host.authority)) as unknown as Authority; this.#destination = ports.destination; this.#fetch = ports.fetch;
+    this.#maxRequestBytes = ports.maxRequestBytes ?? 65536;
   }
   issue(input: RequestAdmission, payload: DispatchPayload): DispatchTicket {
     if (payload.signal.aborted) refuse('CANCELLED', '', { phase: 'admission' });
-    if (payload.destination !== this.#destination || !(payload.body instanceof Uint8Array) || payload.body.buffer instanceof SharedArrayBuffer || payload.body.byteLength > 65536) refuse('PAYLOAD_MISMATCH', '', { phase: 'admission' });
+    if (payload.destination !== this.#destination || !(payload.body instanceof Uint8Array) || payload.body.buffer instanceof SharedArrayBuffer || payload.body.byteLength > this.#maxRequestBytes) refuse('PAYLOAD_MISMATCH', '', { phase: 'admission' });
     const body = Buffer.from(payload.body), headers = Object.freeze({ ...payload.headers });
     stateValue(this.host.store.reserveRequest(this.#authority, input));
     const authorized = stateValue(this.host.store.authorizeRequestDispatch(this.#authority, input.requestId));

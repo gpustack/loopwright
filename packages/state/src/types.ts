@@ -3,7 +3,7 @@ import type { StateErrorCode } from './errors.js';
 export type ExactTotal = { readonly decimal: string; readonly safeValue: number | null };
 export type StatePolicy = {
   readonly version: 1;
-  readonly leaseMs: number; // integer 1000..60000
+  readonly leaseMs: number; // integer 1000..3700000
   readonly cost: 'observe_only';
 };
 export type CompatibilityBinding = {

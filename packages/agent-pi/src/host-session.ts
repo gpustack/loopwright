@@ -2,7 +2,7 @@ import { execFile, spawn, spawnSync, type ChildProcess, type ChildProcessWithout
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { constants, existsSync, writeFileSync } from 'node:fs';
-import { chmod, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, realpath, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -31,10 +31,57 @@ import { profileIdentity } from './runtime-profile.js';
 import { canonicalDirectory } from './session-host.js';
 import { SnapshotTransfer } from './snapshot-transfer.js';
 import type { ToolProcessPort, ToolProcessReply } from './tool-process.js';
-import type { ToolResult } from './tools.js';
+import { clampToolResultBytes, type ToolResult } from './tools.js';
+import type {
+  CallExternalMcpToolOptions,
+  ConnectHostMcpOptions,
+  ConnectedMcpServerSummary,
+  ExternalMcpHttpServerConfig,
+  ExternalMcpServerConfig,
+  ExternalMcpStdioServerConfig,
+  ExternalMcpToolSchema,
+  HostMcpRegistry,
+} from './external-mcp.js';
 import type { PiAdapterV2, PiHostV2, PiOpenInputV2, PiResultV2 } from './types-v2.js';
 import type { PiAdapter, PiCapabilities, PiErrorCode, PiHost, PiOpenInput, PiResult } from './types.js';
 import { WORKSPACE_TOOL, readWorkspace } from './workspace-mcp.js';
+
+export type {
+  CallExternalMcpToolOptions,
+  ConnectHostMcpOptions,
+  ConnectedMcpServerSummary,
+  ExternalMcpHttpServerConfig,
+  ExternalMcpServerConfig,
+  ExternalMcpStdioServerConfig,
+  ExternalMcpToolSchema,
+  HostMcpRegistry,
+};
+
+export type HostSessionProgressEvent =
+  | { readonly kind: 'request_start'; readonly turn: number; readonly provider: string; readonly model: string }
+  | {
+      readonly kind: 'request_settled';
+      readonly turn: number;
+      readonly stopReason: string;
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+      readonly elapsedMs: number;
+      readonly toolCallNames: readonly string[];
+    }
+  | { readonly kind: 'tool_start'; readonly name: string }
+  | {
+      readonly kind: 'tool_end';
+      readonly name: string;
+      readonly isError: boolean;
+      readonly elapsedMs: number;
+      readonly errorCode?: string | undefined;
+      readonly errorPath?: string | undefined;
+    };
+
+export interface OpenPiHostSessionOptions {
+  readonly mcpRegistry?: HostMcpRegistry | undefined;
+  readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined;
+}
 
 const exec = promisify(execFile);
 const probeEnv = { PATH: '/usr/bin:/bin:/usr/sbin', LANG: 'C' };
@@ -806,6 +853,7 @@ class HostToolProcess implements ToolProcessPort {
     this.#tmpDir = join(canonicalToolDir, 'tmp');
     await mkdir(this.#scratchDir, { mode: 0o700 });
     await mkdir(this.#tmpDir, { mode: 0o700 });
+    await symlink(this.#canonicalCandidate, join(this.#scratchDir, 'candidate'));
     this.#seatbeltProfile = process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')
       ? buildDarwinSeatbeltProfile(this.#scratchDir, this.#tmpDir)
       : null;
@@ -821,9 +869,9 @@ class HostToolProcess implements ToolProcessPort {
     if (!this.#readyComplete || this.#closing || this.#used) refuse('RECOVERY_REQUIRED', '', { phase: 'tool' });
     this.#used = true;
 
-    const fileBytes = integer(this.input.policy.limits.fileBytes, 1, 8388608);
-    const resultBytes = integer(this.input.policy.limits.toolResultBytes, 1, 65536);
-    const wallMs = integer(this.input.policy.limits.toolWallMs, 1, 10000);
+    const fileBytes = integer(this.input.policy.limits.fileBytes, 1, 67108864);
+    const resultBytes = integer(this.input.policy.limits.toolResultBytes, 1, 4194304);
+    const wallMs = integer(this.input.policy.limits.toolWallMs, 1, 1800000);
 
     guard();
 
@@ -833,8 +881,8 @@ class HostToolProcess implements ToolProcessPort {
     let rawResult: ToolResult;
 
     try {
-      if (bytes.length > 65536) refuse('OUTPUT_LIMIT');
-      const args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as Record<string, unknown>;
+      if (bytes.length > 4194304) refuse('OUTPUT_LIMIT');
+      const args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 262144, array: 4096, properties: 512 }) as Record<string, unknown>;
 
       if (name === 'read') {
         if (
@@ -880,7 +928,11 @@ class HostToolProcess implements ToolProcessPort {
             },
           },
         });
-        rawResult = textResult(await readTool.execute('owned-read', { ...args, path: read.path } as Parameters<typeof readTool.execute>[1], this.#cancel.signal));
+        rawResult = clampToolResultBytes(
+          textResult(await readTool.execute('owned-read', { ...args, path: read.path } as Parameters<typeof readTool.execute>[1], this.#cancel.signal)),
+          resultBytes,
+          { tool: 'read', offset: args.offset },
+        );
       } else if (name === 'bash') {
         const candidateDir = this.#canonicalCandidate;
         const scratchDir = this.#scratchDir;
@@ -891,6 +943,7 @@ class HostToolProcess implements ToolProcessPort {
           PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
           HOME: scratchDir,
           TMPDIR: tmpDir,
+          CANDIDATE_DIR: candidateDir,
           LANG: 'C.UTF-8',
           LC_ALL: 'C.UTF-8',
           TERM: 'dumb',
@@ -947,14 +1000,16 @@ class HostToolProcess implements ToolProcessPort {
               }
 
               const onData = (chunk: Buffer) => {
+                const prevProduced = produced;
                 produced += chunk.length;
-                if (produced > resultBytes) {
+                if (prevProduced < resultBytes) {
+                  options.onData(produced > resultBytes ? chunk.subarray(0, resultBytes - prevProduced) : chunk);
+                }
+                if (produced > resultBytes * 4) {
                   overflow = true;
                   outputAbort.abort();
                   killProcessGroup(child.pid, child.exitCode === null && child.signalCode === null);
-                  return;
                 }
-                options.onData(chunk);
               };
               child.stdout.on('data', onData);
               child.stderr.on('data', onData);
@@ -978,19 +1033,31 @@ class HostToolProcess implements ToolProcessPort {
 
               killProcessGroup(child.pid, false);
 
-              if (overflow) refuse('OUTPUT_LIMIT');
               if (this.signal.aborted || this.#cancel.signal.aborted) refuse('CANCELLED');
               if (wallTimeout.aborted) refuse('CANCELLED');
-              return { exitCode };
+              return { exitCode: overflow ? 0 : exitCode };
             },
           },
         });
-        rawResult = textResult(await bashTool.execute('owned-bash', args as Parameters<typeof bashTool.execute>[1], this.#cancel.signal));
+        const executedBash = textResult(await bashTool.execute('owned-bash', args as Parameters<typeof bashTool.execute>[1], this.#cancel.signal));
+        const bashWithOverflowNote: ToolResult = produced > resultBytes
+          ? {
+              ...executedBash,
+              content: [
+                {
+                  type: 'text',
+                  text: executedBash.content.map(item => item.text).join('\n')
+                    + `\n\n[Command output (${produced} bytes)${overflow ? ' exceeded stream cap and was terminated early;' : ''} truncated to fit tool result byte limit.]`,
+                },
+              ],
+            }
+          : executedBash;
+        rawResult = clampToolResultBytes(bashWithOverflowNote, resultBytes, { tool: 'bash' });
       } else {
         refuse('TOOL_DENIED');
       }
 
-      if (overflow || Buffer.byteLength(canonical(rawResult)) > resultBytes || rawResult.content.some(item => item.type !== 'text')) {
+      if (Buffer.byteLength(canonical(rawResult)) > resultBytes || rawResult.content.some(item => item.type !== 'text')) {
         refuse('OUTPUT_LIMIT');
       }
     } catch (error) {
@@ -1071,6 +1138,9 @@ class HostToolProcess implements ToolProcessPort {
       await exitChild(this.host, this.nonce);
       this.#registeredChild = false;
     }
+    if (this.#scratchDir) {
+      await unlink(join(this.#scratchDir, 'candidate')).catch(() => {});
+    }
     if (!this.#readyComplete) return null;
     const receipt: ContainerExit = {
       id: digest(Buffer.from(this.nonce)).hex,
@@ -1087,15 +1157,21 @@ class HostToolProcess implements ToolProcessPort {
 class HostExecution extends Execution {
   #gate: Promise<void> = Promise.resolve();
 
-  constructor(host: PiHost, input: PiOpenInput, readonly candidateDir: string, ports: ExecutionPorts) {
-    super(host, input, candidateDir, ports);
+  constructor(
+    host: PiHost,
+    input: PiOpenInput,
+    readonly candidateDir: string,
+    ports: ExecutionPorts,
+    readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined,
+  ) {
+    super(host, input, candidateDir, { ...ports, softScopeErrors: true });
   }
 
   #extractTargetPath(identity: AdmittedToolIdentity, bytes: Uint8Array): string | null {
     if (!this.input.policy.tools.includes(identity.name)) return null;
     if (bytes.byteLength > this.input.policy.limits.toolArgsBytes) return null;
     try {
-      const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 262144, array: 4096, properties: 512 });
       if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
       const args = object(value, Object.keys(value));
       if (typeof args.path !== 'string' || !args.path) return null;
@@ -1111,24 +1187,49 @@ class HostExecution extends Execution {
     signal: AbortSignal,
     onOperation: (id: string) => void,
   ): Promise<ToolResult> {
+    const emitProgress = (event: HostSessionProgressEvent): void => {
+      try {
+        this.onProgress?.(event);
+      } catch {
+        // Progress observers must never perturb session execution.
+      }
+    };
+    const wrapProgress = async (work: () => Promise<ToolResult>): Promise<ToolResult> => {
+      const started = performance.now();
+      emitProgress({ kind: 'tool_start', name: identity.name });
+      try {
+        const res = await work();
+        emitProgress({
+          kind: 'tool_end',
+          name: identity.name,
+          isError: res.isError === true,
+          elapsedMs: Math.max(1, Math.round(performance.now() - started)),
+        });
+        return res;
+      } catch (error) {
+        const errorCode = error instanceof PiFailure ? error.detail.code : undefined;
+        const errorPath = error instanceof PiFailure && error.detail.path.length > 0 ? error.detail.path : undefined;
+        emitProgress({
+          kind: 'tool_end',
+          name: identity.name,
+          isError: true,
+          elapsedMs: Math.max(1, Math.round(performance.now() - started)),
+          ...(errorCode !== undefined ? { errorCode } : {}),
+          ...(errorPath !== undefined ? { errorPath } : {}),
+        });
+        throw error;
+      }
+    };
     if (identity.name !== 'write' && identity.name !== 'edit' && identity.name !== 'delete') {
-      const plain = this.#gate.then(() => super.invoke(identity, bytes, signal, onOperation));
+      const plain = this.#gate.then(() => wrapProgress(() => super.invoke(identity, bytes, signal, onOperation)));
       this.#gate = plain.then(() => {}, () => {});
       return plain;
     }
     const mediated = this.#gate.then(async () => {
       const relPath = this.#extractTargetPath(identity, bytes);
-      let writable = false;
-      if (relPath !== null) {
-        try {
-          this.candidate.assertWritable(relPath);
-          writable = true;
-        } catch {
-          writable = false;
-        }
-      }
+      const writable = relPath !== null && this.candidate.isWritable(relPath);
       if (relPath === null || !writable) {
-        return await super.invoke(identity, bytes, signal, onOperation);
+        return await wrapProgress(() => super.invoke(identity, bytes, signal, onOperation));
       }
 
       const segments = relPath.split('/').slice(0, -1);
@@ -1165,7 +1266,7 @@ class HostExecution extends Execution {
           await chmod(dir, 0o755);
           unlockedDirs.push(dir);
         }
-        result = await super.invoke(identity, bytes, signal, onOperation);
+        result = await wrapProgress(() => super.invoke(identity, bytes, signal, onOperation));
       } catch (error) {
         opFailed = true;
         opError = error;
@@ -1344,12 +1445,14 @@ class HostRuntimeSession {
   #cleanupComplete = false;
   #failed = false;
   #pending: { kind: string; resolve: (value: unknown) => void; reject: (error: Error) => void } | null = null;
+  readonly #invocationStartedMs = new Map<number, number>();
 
   constructor(
     readonly host: PiHost,
     readonly input: PiOpenInput,
     readonly broker: RuntimeBroker,
     readonly directory: string,
+    readonly options?: OpenPiHostSessionOptions | undefined,
   ) {}
 
   start(): Promise<PiCapabilities> {
@@ -1477,18 +1580,22 @@ class HostRuntimeSession {
     }
 
     const ready = this.#wait('ready');
+    const externalMcpTools = this.options?.mcpRegistry?.toolSchemasFor(this.input.policy.tools) ?? [];
     const [, response] = await Promise.all([
       this.#channel.send('init', {
         selection: this.input.policy.selection,
         systemPrompt: systemPrompt(this.input),
         toolNames: this.input.policy.tools,
         mcp: this.input.policy.mcp,
+        toolArgsBytes: this.input.policy.limits.toolArgsBytes,
         toolResultBytes: this.input.policy.limits.toolResultBytes,
         sessionBytes: this.input.policy.limits.sessionBytes,
         outputTokens: Math.min(
           this.input.lock.spec.contract.spec.budgets.perCallOutputTokens,
           this.input.policy.context.maxOutputTokens,
         ),
+        contextPolicy: this.input.policy.context,
+        ...(externalMcpTools.length > 0 ? { externalMcpTools } : {}),
       }),
       ready,
     ]);
@@ -1573,7 +1680,59 @@ class HostRuntimeSession {
   async #receive(message: ChannelMessage): Promise<void> {
     if (this.#closed) throw new Error('Closed SDK channel');
     if (await this.#snapshots!.receive(message)) return;
-    if (await receiveBrokerMessage(this.#channel!, this.broker, message)) return;
+    if (message.kind === 'invoke' && message.body && typeof message.body === 'object') {
+      const inv = message.body as { invocation?: unknown; provider?: unknown; model?: unknown };
+      if (typeof inv.invocation === 'number' && typeof inv.provider === 'string' && typeof inv.model === 'string') {
+        this.#invocationStartedMs.set(inv.invocation, performance.now());
+        try {
+          this.options?.onProgress?.({
+            kind: 'request_start',
+            turn: inv.invocation,
+            provider: inv.provider,
+            model: inv.model,
+          });
+        } catch {
+          // Ignore observer errors.
+        }
+      }
+    }
+    const handled = await receiveBrokerMessage(this.#channel!, this.broker, message);
+    if (handled) {
+      if (message.kind === 'parsed' && message.body && typeof message.body === 'object') {
+        const parsed = message.body as {
+          invocation?: unknown;
+          stopReason?: unknown;
+          usage?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown };
+          toolCalls?: readonly { name?: unknown }[];
+        };
+        if (typeof parsed.invocation === 'number') {
+          const startedAt = this.#invocationStartedMs.get(parsed.invocation);
+          this.#invocationStartedMs.delete(parsed.invocation);
+          const inputTokens =
+            (typeof parsed.usage?.input === 'number' ? parsed.usage.input : 0)
+            + (typeof parsed.usage?.cacheRead === 'number' ? parsed.usage.cacheRead : 0)
+            + (typeof parsed.usage?.cacheWrite === 'number' ? parsed.usage.cacheWrite : 0);
+          const outputTokens = typeof parsed.usage?.output === 'number' ? parsed.usage.output : 0;
+          const toolCallNames = Array.isArray(parsed.toolCalls)
+            ? parsed.toolCalls.map(item => (typeof item?.name === 'string' ? item.name : '')).filter(Boolean)
+            : [];
+          try {
+            this.options?.onProgress?.({
+              kind: 'request_settled',
+              turn: parsed.invocation,
+              stopReason: typeof parsed.stopReason === 'string' ? parsed.stopReason : 'stop',
+              inputTokens,
+              outputTokens,
+              elapsedMs: Math.max(1, Math.round(performance.now() - (startedAt ?? performance.now()))),
+              toolCallNames,
+            });
+          } catch {
+            // Ignore observer errors.
+          }
+        }
+      }
+      return;
+    }
     if (message.kind === 'refused') {
       this.#snapshots?.close();
       const body = message.body as { code?: string };
@@ -1727,35 +1886,48 @@ async function environment(host: PiHost): Promise<void> {
   }
 }
 
-const hostSessionPorts: FactoryPorts = Object.freeze<FactoryPorts>({
-  environment,
-  lease: (host, input) => HostExecutionLease.acquire(host, input),
-  execution: (host, owned, candidateDir) => new HostExecution(host, owned, candidateDir, {
-    process: (operationId, signal) => new HostToolProcess(
+function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPorts {
+  return Object.freeze<FactoryPorts>({
+    environment,
+    lease: (host, input) => HostExecutionLease.acquire(host, input),
+    execution: (host, owned, candidateDir) => new HostExecution(
       host,
       owned,
-      join(host.directory, 'tool-' + operationId),
       candidateDir,
-      operationId,
-      signal,
+      {
+        process: (operationId, signal) => new HostToolProcess(
+          host,
+          owned,
+          join(host.directory, 'tool-' + operationId),
+          candidateDir,
+          operationId,
+          signal,
+        ),
+        ...(options?.mcpRegistry !== undefined ? { mcpExecutor: options.mcpRegistry } : {}),
+      },
+      options?.onProgress,
     ),
-  }),
-  mcp: (host, owned) => ({
-    process: () => new HostMcpProcess(owned, join(host.directory, 'sdk-' + owned.sessionId, 'candidate')),
-  }),
-  session: (host, owned, sender, directory) => new HostRuntimeSession(host, owned, sender, directory),
-});
+    mcp: (_host, owned) => ({
+      process: () => new HostMcpProcess(owned, join(_host.directory, 'sdk-' + owned.sessionId, 'candidate')),
+    }),
+    session: (host, owned, sender, directory) => new HostRuntimeSession(host, owned, sender, directory, options),
+  });
+}
+
+const defaultHostSessionPorts = createHostSessionPorts();
 
 export function openPiHostSessionAdapter(
   host: PiHost,
   input: unknown,
+  options?: OpenPiHostSessionOptions,
 ): Promise<PiResult<PiAdapter>> {
-  return constructAdapter(host, input, hostSessionPorts);
+  return constructAdapter(host, input, options ? createHostSessionPorts(options) : defaultHostSessionPorts);
 }
 
 export function openPiHostSessionAdapterV2(
   host: PiHostV2,
   input: PiOpenInputV2,
+  options?: OpenPiHostSessionOptions,
 ): Promise<PiResultV2<PiAdapterV2>> {
-  return constructAdapterV2(host, input, hostSessionPorts);
+  return constructAdapterV2(host, input, options ? createHostSessionPorts(options) : defaultHostSessionPorts);
 }

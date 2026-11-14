@@ -41,10 +41,10 @@ export async function schedulingSnapshot(store: LocalRunStore, authority: Author
     || !Buffer.from(await artifacts.read(candidate.ref, 32768)).equals(Buffer.from(canonical(candidate.manifest)))) refuse('ARTIFACT_INVALID', '', 'execution');
   let total = 0;
   for (const entry of candidate.manifest.spec.entries) {
-    const file = candidate.files.find(file => file.name === entry.name); if (!file || (total += entry.byteLength) > 4194304) refuse('ARTIFACT_INVALID', '', 'execution');
-    const bytes = ownedBytes(file.bytes, 4194304); if (bytes.length !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
+    const file = candidate.files.find(file => file.name === entry.name); if (!file || (total += entry.byteLength) > 268435456) refuse('ARTIFACT_INVALID', '', 'execution');
+    const bytes = ownedBytes(file.bytes, 67108864); if (bytes.length !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
   }
-  await artifacts.read(retained.workspace); if (retained.privateSession) await artifacts.read(retained.privateSession, 2097152);
+  await artifacts.read(retained.workspace); if (retained.privateSession) await artifacts.read(retained.privateSession, 67108864);
   await artifacts.owner.assertCurrent(); if (facts() !== records) refuse('RECOVERY_REQUIRED', '', 'execution');
   return Object.freeze({ records, candidate: canonical({ retained, manifest: candidate.manifest, subject: subject.value }) });
 }

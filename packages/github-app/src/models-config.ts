@@ -607,6 +607,7 @@ function resolveSingleModelEntry(
   bindings: HostTaskpackBindings,
   modelsConfig: ParsedPiModelsJson | undefined,
   applyHostRoleOverrides: boolean,
+  manifestLimitsContextWindow?: number | undefined,
 ): { readonly selection: PiModelSelection; readonly apiKeyEnv?: string } {
   const hostRole = applyHostRoleOverrides ? bindings.roleSelection : undefined;
   const entryPath = `/spec/models/${manifestIndex}`;
@@ -689,7 +690,9 @@ function resolveSingleModelEntry(
     for (const part of parts) Object.assign(merged, part);
     return Object.freeze(merged);
   })();
-  const mergedContextWindow = hostCustom?.contextWindow
+  const mergedContextWindow = bindings.limits?.contextWindow
+    ?? hostCustom?.contextWindow
+    ?? manifestLimitsContextWindow
     ?? modelsEntry?.contextWindow
     ?? modelsOverride?.contextWindow
     ?? effectiveManifest?.contextWindow;
@@ -812,29 +815,30 @@ export function resolveTaskpackModelCandidates(
   options: ResolveModelCandidatesOptions = {},
 ): readonly ResolvedModelCandidate[] {
   const manifestModels = manifest.spec.models;
+  const manifestLimitsContextWindow = manifest.spec.limits?.contextWindow;
   const hostRole = bindings.roleSelection;
   const hostPinsProviderOrModel = hostRole?.provider !== undefined || hostRole?.model !== undefined;
 
   // Always statically validate all manifest entries so invalid fallback entries fail closed immediately.
   const validatedManifestEntries = manifestModels === undefined
     ? []
-    : manifestModels.map((entry, idx) => resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, false));
+    : manifestModels.map((entry, idx) => resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, false, manifestLimitsContextWindow));
 
   let baseEntries: { readonly manifestIndex: number; readonly selection: PiModelSelection; readonly apiKeyEnv?: string }[];
   if (hostPinsProviderOrModel) {
     const matchingIdx = manifestModels?.findIndex(m => m.provider === (hostRole?.provider ?? m.provider)) ?? -1;
     const matchedEntry = matchingIdx >= 0 ? manifestModels![matchingIdx] : manifestModels?.[0];
-    const resolved = resolveSingleModelEntry(matchedEntry, Math.max(0, matchingIdx), bindings, options.modelsConfig, true);
+    const resolved = resolveSingleModelEntry(matchedEntry, Math.max(0, matchingIdx), bindings, options.modelsConfig, true, manifestLimitsContextWindow);
     baseEntries = [{ manifestIndex: Math.max(0, matchingIdx), ...resolved }];
   } else if (manifestModels !== undefined && manifestModels.length > 0) {
     baseEntries = manifestModels.map((entry, idx) => {
       const resolved = hostRole !== undefined
-        ? resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, true)
+        ? resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, true, manifestLimitsContextWindow)
         : validatedManifestEntries[idx]!;
       return { manifestIndex: idx, ...resolved };
     });
   } else {
-    const resolved = resolveSingleModelEntry(undefined, 0, bindings, options.modelsConfig, true);
+    const resolved = resolveSingleModelEntry(undefined, 0, bindings, options.modelsConfig, true, manifestLimitsContextWindow);
     baseEntries = [{ manifestIndex: 0, ...resolved }];
   }
 

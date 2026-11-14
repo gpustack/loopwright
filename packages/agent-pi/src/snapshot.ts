@@ -5,8 +5,8 @@ import { refuse } from './errors.js';
 import type { AdapterPolicy } from './types.js';
 /** Private snapshot rows carry passive native data, not JSON schemas or executable loaders. */
 export function snapshotRow(bytes: Uint8Array): Record<string, unknown> {
-  if (bytes.length > 1048576) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-  try { const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 131072, array: 8192, schemaReferences: false }); return object(value, Object.keys(value as object)); }
+  if (bytes.length > 8388608) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+  try { const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { nodes: 524288, array: 16384, schemaReferences: false }); return object(value, Object.keys(value as object)); }
   catch { refuse('RECOVERY_REQUIRED', '', { phase: 'restore' }); }
 }
 export function rowBytes(value: unknown): Buffer {
@@ -25,7 +25,7 @@ export class NativeSnapshot {
     let offset = 0; const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     while (offset < data.length) {
       const end = data.indexOf(10, offset), part = data.subarray(offset, end < 0 ? data.length : end);
-      if (this.#partial.length + part.length > 1048576) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+      if (this.#partial.length + part.length > 8388608) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
       this.#partial = Buffer.concat([this.#partial, part]); offset += part.length + (end < 0 ? 0 : 1); if (end < 0) break;
       this.#accept(snapshotRow(this.#partial)); this.#partial = Buffer.alloc(0);
     }
