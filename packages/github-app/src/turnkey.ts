@@ -1,11 +1,11 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { constants as fsConstants, existsSync, lstatSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
+import { constants as fsConstants, existsSync } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import type { Readable, Writable } from 'node:stream';
 import { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
 import {
   inspectRun,
@@ -16,7 +16,17 @@ import {
   type ControllerPorts,
   type ReportCheckItem,
 } from '@loopwright/controller';
-import { bindSubject, isWritablePath, validateDocument, type ArtifactManifest, type TaskContract, type UsageSummary } from '@loopwright/core';
+import {
+  bindSubject,
+  digestArtifact,
+  isWritablePath,
+  LIMITS,
+  validateDocument,
+  type ArtifactManifest,
+  type BaseTreeAnchor,
+  type TaskContract,
+  type UsageSummary,
+} from '@loopwright/core';
 import { reopenLocalRun, type LocalRunIdentity, type PageCursor } from '@loopwright/state';
 import { LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV } from './models-config.js';
 import { sanitizeReportText } from './output-format.js';
@@ -24,6 +34,7 @@ import { SecretScrubber } from './token-broker.js';
 import {
   GitHubAppError,
   LOCAL_COMMAND_GATE_ENDPOINT_ID,
+  PROTECTED_AUTOMATION_PATHS,
   type ActionDelegateOutcome,
   type CompiledLocalCommandGate,
   type HostGateEndpointPlan,
@@ -41,9 +52,8 @@ import {
   validateGitRemoteSource,
 } from './upstreams.js';
 
-const execFileAsync = promisify(execFile);
-
 const MAX_REQUEST_BODY_BYTES = 262_144;
+const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 262_144;
 const MAX_STDIO_BYTES = 1_048_576;
 const MAX_REASON_CODEPOINTS = 256;
@@ -186,10 +196,17 @@ interface InspectedCandidateSnapshot {
   readonly files: readonly MaterializedCandidateFile[];
 }
 
+function normalizeProtectedPrefix(protectedEntry: string): string {
+  const withoutGlob = protectedEntry.endsWith('/**') ? protectedEntry.slice(0, -3) : protectedEntry;
+  return withoutGlob.replace(/\/+$/, '');
+}
+
 function isProtectedCandidatePath(name: string, protectedPaths: readonly string[]): boolean {
   for (const protectedEntry of protectedPaths) {
-    const clean = protectedEntry.endsWith('/**') ? protectedEntry.slice(0, -3) : protectedEntry;
-    if (name === clean || name.startsWith(clean.endsWith('/') ? clean : `${clean}/`)) {
+    if (protectedEntry === '**') return true;
+    const clean = normalizeProtectedPrefix(protectedEntry);
+    if (clean.length === 0) continue;
+    if (name === clean || name.startsWith(`${clean}/`)) {
       return true;
     }
   }
@@ -366,6 +383,581 @@ async function materializeCandidateFiles(
       await handle.writeFile(file.bytes);
     } finally {
       await handle.close();
+    }
+  }
+}
+
+interface ExecGitOptions {
+  readonly env: Record<string, string>;
+  readonly input?: Buffer | string | undefined;
+  readonly timeoutMs?: number | undefined;
+  readonly maxStdoutBytes?: number | undefined;
+}
+
+async function execGit(
+  repositoryRoot: string,
+  args: readonly string[],
+  options: ExecGitOptions,
+): Promise<Buffer> {
+  const gitBin = resolveGitExecutable();
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const maxStdoutBytes = options.maxStdoutBytes ?? MAX_GIT_LIST_BYTES;
+  return await new Promise<Buffer>((resolvePromise, reject) => {
+    const child = spawn(
+      gitBin,
+      ['-c', 'core.hooksPath=/dev/null', '-C', repositoryRoot, ...args],
+      { env: options.env, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let stdoutOverflow = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    timer.unref?.();
+
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    };
+
+    child.stdin.on('error', () => undefined);
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.byteLength;
+      if (stdoutBytes > maxStdoutBytes) {
+        stdoutOverflow = true;
+        child.kill('SIGKILL');
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (stderrBytes >= 262_144) return;
+      const take = Math.min(chunk.byteLength, 262_144 - stderrBytes);
+      stderrBytes += take;
+      stderrChunks.push(chunk.subarray(0, take));
+    });
+    child.on('error', err => {
+      fail(new GitHubAppError('ACTION_INPUT_INVALID', `git ${args[0] ?? 'command'} failed to spawn: ${err.message}`));
+    });
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (stdoutOverflow) {
+        reject(new GitHubAppError('ACTION_INPUT_INVALID', `git ${args[0] ?? 'command'} output exceeded ${maxStdoutBytes} bytes`));
+        return;
+      }
+      if (timedOut) {
+        reject(new GitHubAppError('ACTION_INPUT_INVALID', `git ${args[0] ?? 'command'} timed out after ${timeoutMs}ms`));
+        return;
+      }
+      if (code !== 0 || signal !== null) {
+        const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+        const detail = stderrText.length > 0 ? `: ${stderrText}` : '';
+        reject(new GitHubAppError('ACTION_INPUT_INVALID', `git ${args[0] ?? 'command'} exited with ${code ?? signal}${detail}`));
+        return;
+      }
+      resolvePromise(Buffer.concat(stdoutChunks));
+    });
+
+    if (options.input !== undefined) {
+      const payload = Buffer.isBuffer(options.input) ? options.input : Buffer.from(options.input, 'utf8');
+      if (payload.byteLength > 0) {
+        child.stdin.end(payload);
+        return;
+      }
+    }
+    child.stdin.end();
+  });
+}
+
+async function writeAllStream(stream: Writable, data: Uint8Array): Promise<void> {
+  const chunkSize = 65_536;
+  for (let offset = 0; offset < data.byteLength; offset += chunkSize) {
+    const slice = data.subarray(offset, Math.min(offset + chunkSize, data.byteLength));
+    if (stream.destroyed || !stream.writable) break;
+    if (!stream.write(slice)) {
+      await new Promise<void>((resolvePromise, reject) => {
+        const cleanup = () => {
+          stream.off('drain', onDrain);
+          stream.off('close', onClose);
+          stream.off('error', onError);
+        };
+        const onDrain = () => { cleanup(); resolvePromise(); };
+        const onClose = () => { cleanup(); resolvePromise(); };
+        const onError = (err: Error) => { cleanup(); reject(err); };
+        stream.once('drain', onDrain);
+        stream.once('close', onClose);
+        stream.once('error', onError);
+      });
+    }
+  }
+}
+
+class BatchStreamReader {
+  readonly #chunks: Buffer[] = [];
+  #headOffset = 0;
+  #queuedBytes = 0;
+  #ended = false;
+  #streamError: Error | null = null;
+  #waiter: (() => void) | null = null;
+
+  constructor(private readonly stdout: Readable) {
+    stdout.on('data', (part: Buffer) => {
+      if (part.byteLength > 0) {
+        this.#chunks.push(part);
+        this.#queuedBytes += part.byteLength;
+        if (this.#queuedBytes >= 4_194_304) stdout.pause();
+        this.#notify();
+      }
+    });
+    stdout.on('end', () => {
+      this.#ended = true;
+      this.#notify();
+    });
+    stdout.on('error', err => {
+      this.#streamError = err;
+      this.#ended = true;
+      this.#notify();
+    });
+  }
+
+  #notify(): void {
+    if (this.#waiter) {
+      const w = this.#waiter;
+      this.#waiter = null;
+      w();
+    }
+  }
+
+  async #waitMore(): Promise<boolean> {
+    if (this.#streamError) throw this.#streamError;
+    if (this.#ended) return false;
+    await new Promise<void>(resolvePromise => {
+      this.#waiter = resolvePromise;
+    });
+    if (this.#streamError) throw this.#streamError;
+    return this.#chunks.length > 0 || !this.#ended;
+  }
+
+  #consumeHead(n: number): void {
+    this.#headOffset += n;
+    this.#queuedBytes -= n;
+    if (this.#headOffset >= this.#chunks[0]!.byteLength) {
+      this.#chunks.shift();
+      this.#headOffset = 0;
+    }
+    if (this.#queuedBytes < 1_048_576 && !this.#ended) {
+      this.stdout.resume();
+    }
+  }
+
+  async readLine(maxBytes = 256): Promise<string> {
+    const parts: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      if (this.#chunks.length === 0) {
+        if (!(await this.#waitMore())) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'unexpected EOF reading git cat-file --batch header');
+        }
+        continue;
+      }
+      const head = this.#chunks[0]!;
+      const nl = head.indexOf(10, this.#headOffset);
+      if (nl !== -1) {
+        const piece = head.subarray(this.#headOffset, nl);
+        if (total + piece.byteLength > maxBytes) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'git cat-file --batch header exceeded maximum length');
+        }
+        parts.push(piece);
+        this.#consumeHead(nl - this.#headOffset + 1);
+        return Buffer.concat(parts).toString('utf8');
+      }
+      const piece = head.subarray(this.#headOffset);
+      total += piece.byteLength;
+      if (total > maxBytes) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'git cat-file --batch header exceeded maximum length');
+      }
+      parts.push(piece);
+      this.#consumeHead(piece.byteLength);
+    }
+  }
+
+  async streamBytes(length: number, sink: (slice: Buffer) => Promise<void>): Promise<void> {
+    let remaining = length;
+    while (remaining > 0) {
+      if (this.#chunks.length === 0) {
+        if (!(await this.#waitMore())) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'unexpected EOF reading git cat-file --batch blob body');
+        }
+        continue;
+      }
+      const head = this.#chunks[0]!;
+      const take = Math.min(remaining, head.byteLength - this.#headOffset);
+      await sink(head.subarray(this.#headOffset, this.#headOffset + take));
+      this.#consumeHead(take);
+      remaining -= take;
+    }
+  }
+
+  async readExactByte(expected: number): Promise<void> {
+    while (this.#chunks.length === 0) {
+      if (!(await this.#waitMore())) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'unexpected EOF reading git cat-file --batch delimiter');
+      }
+    }
+    if (this.#chunks[0]![this.#headOffset]! !== expected) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'malformed delimiter in git cat-file --batch output');
+    }
+    this.#consumeHead(1);
+  }
+
+  async assertExhausted(): Promise<void> {
+    while (!this.#ended) {
+      await this.#waitMore();
+    }
+    if (this.#queuedBytes !== 0) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'trailing bytes in git cat-file --batch output');
+    }
+  }
+}
+
+interface BaselineRegularEntry {
+  readonly path: string;
+  readonly mode: '100644' | '100755';
+  readonly oid: string;
+  readonly byteLength: number;
+}
+
+function validateBaselineGitPath(rawPath: string): string {
+  const clean = normalizeCandidateRelativePath(rawPath);
+  for (const segment of clean.split('/')) {
+    if (segment.toLowerCase() === '.git' || Buffer.byteLength(segment, 'utf8') > 255) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid baseline path segment in "${clean}"`);
+    }
+  }
+  if (!digestArtifact(clean, new Uint8Array()).ok) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid baseline artifact path "${clean}"`);
+  }
+  return clean;
+}
+
+export async function verifyBaseTreeAnchor(
+  repositoryRoot: string,
+  baseTree: BaseTreeAnchor,
+  gitEnv: Record<string, string>,
+  expectedCommitOid?: string,
+): Promise<void> {
+  const oidPattern = baseTree.objectFormat === 'sha1' ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
+  if (!oidPattern.test(baseTree.commitOid) || !oidPattern.test(baseTree.treeOid)) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `baseTree OIDs do not match objectFormat "${baseTree.objectFormat}"`,
+    );
+  }
+  if (expectedCommitOid !== undefined && baseTree.commitOid !== expectedCommitOid) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `baseTree.commitOid "${baseTree.commitOid}" does not match sourceRevision "${expectedCommitOid}"`,
+    );
+  }
+  const actualTreeOid = (
+    await execGit(
+      repositoryRoot,
+      ['rev-parse', '--verify', '--end-of-options', `${baseTree.commitOid}^{tree}`],
+      { env: gitEnv, timeoutMs: 15_000 },
+    )
+  ).toString('utf8').trim();
+  if (actualTreeOid !== baseTree.treeOid) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `baseTree.treeOid "${baseTree.treeOid}" does not match ${baseTree.commitOid}^{tree} ("${actualTreeOid}")`,
+    );
+  }
+}
+
+/**
+ * List all regular baseline files (`100644`/`100755`) in `commitOid`, skipping
+ * only protected `120000`/`160000` specials while rejecting unprotected specials
+ * and unsafe `.git` / oversized path segments.
+ */
+export async function listBaselineRegularEntries(
+  repositoryRoot: string,
+  commitOid: string,
+  protectedPaths: readonly string[] = PROTECTED_AUTOMATION_PATHS,
+): Promise<readonly BaselineRegularEntry[]> {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commitOid)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'baseTree commitOid is invalid');
+  }
+  const stdout = await execGit(
+    repositoryRoot,
+    ['ls-tree', '-r', '-l', '-z', '--full-tree', commitOid],
+    { env: buildCleanGitEnv(), maxStdoutBytes: MAX_GIT_LIST_BYTES, timeoutMs: 30_000 },
+  );
+  if (stdout.byteLength > 0 && stdout.at(-1) !== 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'git ls-tree output exceeded boundary');
+  }
+  const text = stdout.byteLength > 0 ? new TextDecoder('utf-8', { fatal: true }).decode(stdout) : '';
+  const rows = text.length > 0 ? text.split('\0').slice(0, -1) : [];
+  const entries: BaselineRegularEntry[] = [];
+  for (const row of rows) {
+    const symlinkMatch = /^120000 blob ([0-9a-f]{40}|[0-9a-f]{64}) +[0-9-]+\t(.+)$/s.exec(row);
+    const gitlinkMatch = /^160000 commit ([0-9a-f]{40}|[0-9a-f]{64}) +-\t(.+)$/s.exec(row);
+    const special = symlinkMatch ?? gitlinkMatch;
+    if (special !== null) {
+      const specialPath = validateBaselineGitPath(special[2]!);
+      if (!isProtectedCandidatePath(specialPath, protectedPaths)) {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `unsupported unprotected ${symlinkMatch !== null ? 'symlink' : 'gitlink'} "${specialPath}" in baseline tree`,
+        );
+      }
+      continue;
+    }
+    const match = /^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64}) +([0-9]+)\t(.+)$/s.exec(row);
+    if (match === null) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'unsupported git ls-tree entry in baseline tree');
+    }
+    const mode = match[1] as '100644' | '100755';
+    const oid = match[2]!;
+    const byteLength = Number(match[3]!);
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'invalid baseline blob byteLength');
+    }
+    const path = validateBaselineGitPath(match[4]!);
+    entries.push({ path, mode, oid, byteLength });
+    if (entries.length > LIMITS.baselineEntries) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `baseline tree exceeds ${LIMITS.baselineEntries} regular files`);
+    }
+  }
+  return entries;
+}
+
+async function materializeBaselineBatchForGate(
+  repositoryRoot: string,
+  objectFormat: 'sha1' | 'sha256',
+  entries: readonly BaselineRegularEntry[],
+  candidateDir: string,
+  timeoutMs: number,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const gitBin = resolveGitExecutable();
+  const child = spawn(
+    gitBin,
+    ['-c', 'core.hooksPath=/dev/null', '-C', repositoryRoot, 'cat-file', '--batch'],
+    { env: buildCleanGitEnv(), stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  child.stdin.on('error', () => undefined);
+
+  const stderrChunks: Buffer[] = [];
+  let stderrBytes = 0;
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (stderrBytes >= 8192) return;
+    const take = Math.min(chunk.byteLength, 8192 - stderrBytes);
+    stderrBytes += take;
+    stderrChunks.push(chunk.subarray(0, take));
+  });
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, timeoutMs);
+  timer.unref?.();
+
+  const exited = new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>((resolvePromise, reject) => {
+    child.once('error', err => reject(new GitHubAppError('ACTION_INPUT_INVALID', `git cat-file --batch failed: ${err.message}`)));
+    child.once('close', (code, signal) => resolvePromise({ code, signal }));
+  });
+
+  const reader = new BatchStreamReader(child.stdout);
+
+  const writeBatch = async (): Promise<void> => {
+    let chunk = '';
+    let count = 0;
+    for (const entry of entries) {
+      chunk += `${entry.oid}\n`;
+      count += 1;
+      if (count >= 256) {
+        await writeAllStream(child.stdin, Buffer.from(chunk, 'utf8'));
+        chunk = '';
+        count = 0;
+      }
+    }
+    if (chunk.length > 0) {
+      await writeAllStream(child.stdin, Buffer.from(chunk, 'utf8'));
+    }
+    child.stdin.end();
+  };
+
+  const readBatch = async (): Promise<void> => {
+    const checkedDirs = new Set<string>(['']);
+    const oidPattern = objectFormat === 'sha1' ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
+    for (const entry of entries) {
+      const header = await reader.readLine(256);
+      const space1 = header.indexOf(' ');
+      const space2 = space1 === -1 ? -1 : header.indexOf(' ', space1 + 1);
+      if (space1 === -1 || space2 === -1 || header.indexOf(' ', space2 + 1) !== -1) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'malformed git cat-file --batch header');
+      }
+      const oid = header.slice(0, space1);
+      const kind = header.slice(space1 + 1, space2);
+      const sizeStr = header.slice(space2 + 1);
+      if (
+        !oidPattern.test(entry.oid)
+        || oid !== entry.oid
+        || kind !== 'blob'
+        || !/^(?:0|[1-9][0-9]*)$/.test(sizeStr)
+        || Number(sizeStr) !== entry.byteLength
+      ) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `baseline blob mismatch for "${entry.path}"`);
+      }
+
+      const blobHash = createHash(objectFormat).update(`blob ${entry.byteLength}\0`);
+      const dest = resolve(candidateDir, entry.path);
+      const slash = entry.path.lastIndexOf('/');
+      if (slash !== -1) {
+        const relDir = entry.path.slice(0, slash);
+        if (!checkedDirs.has(relDir)) {
+          const parent = dirname(dest);
+          assertNoSymlinkSegments(candidateDir, parent);
+          await mkdir(parent, { recursive: true, mode: 0o700 });
+          assertNoSymlinkSegments(candidateDir, parent);
+          let pos = relDir.indexOf('/');
+          while (pos !== -1) {
+            checkedDirs.add(relDir.slice(0, pos));
+            pos = relDir.indexOf('/', pos + 1);
+          }
+          checkedDirs.add(relDir);
+        }
+      }
+
+      const fileMode = entry.mode === '100755' ? 0o755 : 0o600;
+      const handle = await open(
+        dest,
+        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+        fileMode,
+      );
+      try {
+        await reader.streamBytes(entry.byteLength, async slice => {
+          blobHash.update(slice);
+          let offset = 0;
+          while (offset < slice.byteLength) {
+            const { bytesWritten } = await handle.write(slice, offset, slice.byteLength - offset);
+            if (bytesWritten <= 0) {
+              throw new GitHubAppError('ACTION_INPUT_INVALID', `short write materializing "${entry.path}"`);
+            }
+            offset += bytesWritten;
+          }
+        });
+        if (blobHash.digest('hex') !== entry.oid) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `baseline blob digest mismatch for "${entry.path}"`);
+        }
+        await handle.chmod(fileMode);
+      } finally {
+        await handle.close();
+      }
+      await reader.readExactByte(10);
+    }
+    await reader.assertExhausted();
+  };
+
+  try {
+    await Promise.all([
+      writeBatch().catch(err => {
+        child.kill('SIGKILL');
+        throw err;
+      }),
+      readBatch().catch(err => {
+        child.kill('SIGKILL');
+        throw err;
+      }),
+    ]);
+    const exit = await exited;
+    if (timedOut) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `git cat-file --batch timed out after ${timeoutMs}ms`);
+    }
+    if (exit.code !== 0 || exit.signal !== null) {
+      const stderrText = Buffer.concat(stderrChunks).toString('utf8').trim();
+      const detail = stderrText.length > 0 ? `: ${stderrText}` : '';
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `git cat-file --batch exited with ${exit.code ?? exit.signal}${detail}`);
+    }
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await exited.catch(() => undefined);
+    }
+  }
+}
+
+async function materializeOverlayCandidateFiles(
+  targetDir: string,
+  files: readonly MaterializedCandidateFile[],
+  baselineModes: ReadonlyMap<string, '100644' | '100755'>,
+): Promise<void> {
+  const checkedDirs = new Set<string>(['']);
+  for (const file of files) {
+    const dest = resolve(targetDir, file.name);
+    const slash = file.name.lastIndexOf('/');
+    if (slash !== -1) {
+      const relDir = file.name.slice(0, slash);
+      if (!checkedDirs.has(relDir)) {
+        const parent = dirname(dest);
+        assertNoSymlinkSegments(targetDir, parent);
+        await mkdir(parent, { recursive: true, mode: 0o700 });
+        assertNoSymlinkSegments(targetDir, parent);
+        let pos = relDir.indexOf('/');
+        while (pos !== -1) {
+          checkedDirs.add(relDir.slice(0, pos));
+          pos = relDir.indexOf('/', pos + 1);
+        }
+        checkedDirs.add(relDir);
+      }
+    }
+    const mode = baselineModes.get(file.name) === '100755' ? 0o755 : 0o600;
+    const handle = await open(
+      dest,
+      fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      mode,
+    );
+    try {
+      await handle.writeFile(file.bytes);
+      await handle.chmod(mode);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function assertDeletedPathsAbsent(
+  candidateDir: string,
+  deletedPaths: readonly string[],
+): Promise<void> {
+  for (const rawRelPath of deletedPaths) {
+    const relPath = normalizeCandidateRelativePath(rawRelPath);
+    const target = resolve(candidateDir, relPath);
+    let exists = true;
+    try {
+      await lstat(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        exists = false;
+      } else {
+        throw error;
+      }
+    }
+    if (exists) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `deleted candidate path "${relPath}" is still present`);
     }
   }
 }
@@ -621,7 +1213,40 @@ export async function startLocalCommandGateServer(
         join(workDir, 'gate-script.sh'),
       );
       const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
-      await materializeCandidateFiles(candidateDir, snapshot.files);
+      if (snapshot.manifest.spec.baseTree !== undefined) {
+        await verifyBaseTreeAnchor(
+          options.repositoryRoot,
+          snapshot.manifest.spec.baseTree,
+          buildCleanGitEnv(),
+          snapshot.sourceRevision,
+        );
+        const baselineEntries = await listBaselineRegularEntries(
+          options.repositoryRoot,
+          snapshot.manifest.spec.baseTree.commitOid,
+          snapshot.protectedPaths,
+        );
+        const baselineModes = new Map<string, '100644' | '100755'>();
+        for (const entry of baselineEntries) {
+          baselineModes.set(entry.path, entry.mode);
+        }
+        const deletedPaths = snapshot.manifest.spec.deleted ?? [];
+        const deletedSet = new Set(deletedPaths);
+        const overlayNames = new Set(snapshot.files.map(file => file.name));
+        const toMaterialize = baselineEntries.filter(
+          entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
+        );
+        await materializeBaselineBatchForGate(
+          options.repositoryRoot,
+          snapshot.manifest.spec.baseTree.objectFormat,
+          toMaterialize,
+          candidateDir,
+          Math.max(60_000, gate.timeoutSeconds * 1000),
+        );
+        await materializeOverlayCandidateFiles(candidateDir, snapshot.files, baselineModes);
+        await assertDeletedPathsAbsent(candidateDir, deletedPaths);
+      } else {
+        await materializeCandidateFiles(candidateDir, snapshot.files);
+      }
 
       const childEnv = buildSandboxedChildEnv(
         gate,
@@ -715,18 +1340,27 @@ export interface NativePullRequestPublisherServer {
   close(): Promise<void>;
 }
 
-async function listRegularFilesAtRevision(
+interface GitTreeEntry {
+  readonly mode: string;
+  readonly type: string;
+  readonly oid: string;
+}
+
+async function listTreeEntriesAtRevision(
   repositoryRoot: string,
   revision: string,
-): Promise<ReadonlyMap<string, string>> {
-  const gitBin = resolveGitExecutable();
-  const { stdout } = await execFileAsync(
-    gitBin,
-    ['-C', repositoryRoot, 'ls-tree', '-rz', '--full-tree', revision],
-    { env: buildCleanGitEnv(), encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 },
+  env: Record<string, string>,
+): Promise<ReadonlyMap<string, GitTreeEntry>> {
+  const stdout = await execGit(
+    repositoryRoot,
+    ['ls-tree', '-r', '-z', '--full-tree', revision],
+    { env, maxStdoutBytes: MAX_GIT_LIST_BYTES, timeoutMs: 30_000 },
   );
-  const entries = new Map<string, string>();
-  const parts = stdout.toString('utf8').split('\0');
+  if (stdout.byteLength > 0 && stdout.at(-1) !== 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'git ls-tree output exceeded boundary');
+  }
+  const entries = new Map<string, GitTreeEntry>();
+  const parts = (stdout.byteLength > 0 ? new TextDecoder('utf-8', { fatal: true }).decode(stdout) : '').split('\0');
   for (const part of parts) {
     if (part.length === 0) continue;
     const tabIdx = part.indexOf('\t');
@@ -736,11 +1370,65 @@ async function listRegularFilesAtRevision(
     const fields = meta.split(' ');
     const mode = fields[0];
     const type = fields[1];
-    if (type === 'blob' && (mode === '100644' || mode === '100755')) {
-      entries.set(path, mode);
+    const oid = fields[2];
+    if (mode !== undefined && type !== undefined && oid !== undefined) {
+      entries.set(path, { mode, type, oid });
     }
   }
   return entries;
+}
+
+function isSpecialGitTreeEntry(entry: GitTreeEntry | undefined): boolean {
+  return entry?.mode === '120000' || entry?.mode === '160000';
+}
+
+function hasSymlinkAtOrAbove(
+  path: string,
+  baseEntries: ReadonlyMap<string, GitTreeEntry>,
+  sourceEntries: ReadonlyMap<string, GitTreeEntry>,
+): boolean {
+  if (isSpecialGitTreeEntry(baseEntries.get(path)) || isSpecialGitTreeEntry(sourceEntries.get(path))) {
+    return true;
+  }
+  let slash = path.indexOf('/');
+  while (slash !== -1) {
+    const prefix = path.slice(0, slash);
+    if (isSpecialGitTreeEntry(baseEntries.get(prefix)) || isSpecialGitTreeEntry(sourceEntries.get(prefix))) {
+      return true;
+    }
+    slash = path.indexOf('/', slash + 1);
+  }
+  return false;
+}
+
+async function stageEntriesInIndex(
+  repositoryRoot: string,
+  indexFile: string,
+  entries: readonly { readonly path: string; readonly mode: '100644' | '100755'; readonly oid: string }[],
+  gitEnv: Record<string, string>,
+): Promise<void> {
+  if (entries.length === 0) return;
+  const payload = entries.map(entry => `${entry.mode} blob ${entry.oid}\t${entry.path}\0`).join('');
+  await execGit(
+    repositoryRoot,
+    ['update-index', '-z', '--index-info'],
+    { env: { ...gitEnv, GIT_INDEX_FILE: indexFile }, input: payload, timeoutMs: 30_000 },
+  );
+}
+
+async function removePathsFromIndex(
+  repositoryRoot: string,
+  indexFile: string,
+  paths: readonly string[],
+  gitEnv: Record<string, string>,
+): Promise<void> {
+  if (paths.length === 0) return;
+  const payload = paths.map(path => `${path}\0`).join('');
+  await execGit(
+    repositoryRoot,
+    ['update-index', '--force-remove', '-z', '--stdin'],
+    { env: { ...gitEnv, GIT_INDEX_FILE: indexFile }, input: payload, timeoutMs: 30_000 },
+  );
 }
 
 function buildGitAuthEnv(gitWriteToken: string | undefined): Record<string, string> {
@@ -757,8 +1445,9 @@ function buildGitAuthEnv(gitWriteToken: string | undefined): Record<string, stri
 
 /**
  * Start a loopback HTTP server implementing Loopwright's signed publication protocol
- * with a detached temporary `git worktree` (preserving repository `HEAD` and
- * protected paths/symlinks) and `--force-with-lease` push protection.
+ * using pure Git index/tree plumbing over a private temporary `GIT_INDEX_FILE`
+ * (preserving repository `HEAD`, working tree, `.git/worktrees`, and protected
+ * paths/symlinks) and `--force-with-lease` push protection.
  */
 export async function startNativePullRequestPublisherServer(
   options: NativePullRequestPublisherOptions,
@@ -893,11 +1582,20 @@ export async function startNativePullRequestPublisherServer(
       writeSignedJsonResponse(res, 200, signingSecret, receipt);
     };
 
-    const workRoot = await mkdtemp(join(scratchBase, 'wt-'));
+    const workRoot = await mkdtemp(join(scratchBase, 'idx-'));
     await chmod(workRoot, 0o700);
-    const worktreeDir = join(workRoot, 'checkout');
-    const gitBin = resolveGitExecutable();
+    const indexFile = join(workRoot, 'index');
     const gitEnv = buildGitAuthEnv(options.gitWriteToken);
+    const gitRepo = (
+      args: readonly string[],
+      extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
+    ): Promise<Buffer> =>
+      execGit(options.repositoryRoot, args, { env: gitEnv, ...extraOpts });
+    const gitWithIndex = (
+      args: readonly string[],
+      extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
+    ): Promise<Buffer> =>
+      execGit(options.repositoryRoot, args, { env: { ...gitEnv, GIT_INDEX_FILE: indexFile }, ...extraOpts });
     let mutationStarted = false;
 
     try {
@@ -913,88 +1611,135 @@ export async function startNativePullRequestPublisherServer(
         throw new GitHubAppError('ACTION_INPUT_INVALID', `unsafe target branch name "${branchName}"`);
       }
 
-      await execFileAsync(
-        gitBin,
-        ['-c', 'core.hooksPath=/dev/null', '-C', options.repositoryRoot, 'worktree', 'add', '--detach', worktreeDir, baseRevision],
-        { env: gitEnv, timeout: 15_000 },
-      );
+      await gitRepo(['rev-parse', '--verify', '--end-of-options', `${baseRevision}^{commit}`]);
+      await gitRepo(['rev-parse', '--verify', '--end-of-options', `${sourceRevision}^{commit}`]);
+      if (snapshot.manifest.spec.baseTree !== undefined) {
+        await verifyBaseTreeAnchor(
+          options.repositoryRoot,
+          snapshot.manifest.spec.baseTree,
+          gitEnv,
+          sourceRevision,
+        );
+      }
+      const baseTreeOid = (
+        await gitRepo(['rev-parse', '--verify', '--end-of-options', `${baseRevision}^{tree}`])
+      ).toString('utf8').trim();
 
-      const sourceModes = await listRegularFilesAtRevision(options.repositoryRoot, sourceRevision);
+      await gitWithIndex(['read-tree', `${baseRevision}^{tree}`]);
+
+      const baseEntries = await listTreeEntriesAtRevision(options.repositoryRoot, baseRevision, gitEnv);
+      const sourceEntries = sourceRevision === baseRevision
+        ? baseEntries
+        : await listTreeEntriesAtRevision(options.repositoryRoot, sourceRevision, gitEnv);
+
+      if (sourceRevision !== baseRevision) {
+        const carryRemovals: string[] = [];
+        for (const [path, baseEntry] of baseEntries.entries()) {
+          if (baseEntry.mode !== '100644' && baseEntry.mode !== '100755') continue;
+          const sourceEntry = sourceEntries.get(path);
+          if (sourceEntry !== undefined && (sourceEntry.mode === '100644' || sourceEntry.mode === '100755')) {
+            continue;
+          }
+          if (!isAllowedCandidateWrite(path, snapshot)) continue;
+          if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
+          carryRemovals.push(path);
+        }
+        if (carryRemovals.length > 0) {
+          await removePathsFromIndex(options.repositoryRoot, indexFile, carryRemovals, gitEnv);
+        }
+
+        const carryUpdates: Array<{ readonly path: string; readonly mode: '100644' | '100755'; readonly oid: string }> = [];
+        for (const [path, sourceEntry] of sourceEntries.entries()) {
+          if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
+          const baseEntry = baseEntries.get(path);
+          if (baseEntry !== undefined && baseEntry.mode === sourceEntry.mode && baseEntry.oid === sourceEntry.oid) {
+            continue;
+          }
+          if (!isAllowedCandidateWrite(path, snapshot)) continue;
+          if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
+          carryUpdates.push({ path, mode: sourceEntry.mode, oid: sourceEntry.oid });
+        }
+        if (carryUpdates.length > 0) {
+          await stageEntriesInIndex(options.repositoryRoot, indexFile, carryUpdates, gitEnv);
+        }
+      }
+
       const candidateNames = new Set<string>();
-      const filesToAdd: string[] = [];
+      const stagedFiles: Array<{ readonly path: string; readonly mode: '100644' | '100755'; readonly oid: string }> = [];
 
       for (const file of snapshot.files) {
         candidateNames.add(file.name);
         if (!isAllowedCandidateWrite(file.name, snapshot)) {
           continue;
         }
-        const dest = resolve(worktreeDir, file.name);
-        const parent = dirname(dest);
-        assertNoSymlinkSegments(worktreeDir, parent);
-        await mkdir(parent, { recursive: true });
-        assertNoSymlinkSegments(worktreeDir, parent);
-        const existingStats = lstatSync(dest, { throwIfNoEntry: false });
-        if (existingStats?.isSymbolicLink()) {
-          throw new GitHubAppError('ACTION_INPUT_INVALID', `refusing to overwrite symlink "${file.name}"`);
+        if (hasSymlinkAtOrAbove(file.name, baseEntries, sourceEntries)) {
+          throw new GitHubAppError(
+            'ACTION_INPUT_INVALID',
+            'Refusing to overwrite symlinked candidate path during native PR publication.',
+          );
         }
-        const mode = sourceModes.get(file.name) === '100755' ? 0o755 : 0o644;
-        const handle = await open(
-          dest,
-          fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
-          mode,
-        );
-        try {
-          await handle.writeFile(file.bytes);
-        } finally {
-          await handle.close();
+        const blobOid = (
+          await gitRepo(['hash-object', '-w', '--stdin'], { input: Buffer.from(file.bytes) })
+        ).toString('utf8').trim();
+        if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(blobOid)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `git hash-object returned invalid oid for "${file.name}"`);
         }
-        if (mode === 0o755) {
-          await chmod(dest, 0o755);
-        }
-        filesToAdd.push(file.name);
-      }
-
-      if (filesToAdd.length > 0) {
-        await execFileAsync(
-          gitBin,
-          ['-c', 'core.hooksPath=/dev/null', '-C', worktreeDir, 'add', '--', ...filesToAdd],
-          { env: gitEnv, timeout: 15_000 },
-        );
+        const mode: '100644' | '100755' =
+          (sourceEntries.get(file.name)?.mode ?? baseEntries.get(file.name)?.mode) === '100755'
+            ? '100755'
+            : '100644';
+        stagedFiles.push({ path: file.name, mode, oid: blobOid });
       }
 
       const filesToRemove: string[] = [];
-      for (const sourceName of sourceModes.keys()) {
-        if (!candidateNames.has(sourceName) && isAllowedCandidateWrite(sourceName, snapshot)) {
-          filesToRemove.push(sourceName);
+      if (snapshot.manifest.spec.baseTree !== undefined) {
+        for (const rawDeleted of snapshot.manifest.spec.deleted ?? []) {
+          const deletedName = normalizeCandidateRelativePath(rawDeleted);
+          if (
+            !candidateNames.has(deletedName)
+            && isAllowedCandidateWrite(deletedName, snapshot)
+            && !hasSymlinkAtOrAbove(deletedName, baseEntries, sourceEntries)
+          ) {
+            filesToRemove.push(deletedName);
+          }
+        }
+      } else {
+        for (const [sourceName, sourceEntry] of sourceEntries.entries()) {
+          if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
+          if (
+            !candidateNames.has(sourceName)
+            && isAllowedCandidateWrite(sourceName, snapshot)
+            && !hasSymlinkAtOrAbove(sourceName, baseEntries, sourceEntries)
+          ) {
+            filesToRemove.push(sourceName);
+          }
         }
       }
+
       if (filesToRemove.length > 0) {
-        await execFileAsync(
-          gitBin,
-          ['-c', 'core.hooksPath=/dev/null', '-C', worktreeDir, 'rm', '-f', '--ignore-unmatch', '--', ...filesToRemove],
-          { env: gitEnv, timeout: 15_000 },
-        );
+        await removePathsFromIndex(options.repositoryRoot, indexFile, filesToRemove, gitEnv);
+      }
+      if (stagedFiles.length > 0) {
+        await stageEntriesInIndex(options.repositoryRoot, indexFile, stagedFiles, gitEnv);
       }
 
-      const { stdout: statusOut } = await execFileAsync(
-        gitBin,
-        ['-c', 'core.hooksPath=/dev/null', '-C', worktreeDir, 'status', '--porcelain'],
-        { env: gitEnv, encoding: 'utf8', timeout: 15_000 },
-      );
-      if (statusOut.trim().length > 0) {
-        await execFileAsync(
-          gitBin,
-          [
-            '-c', 'core.hooksPath=/dev/null',
-            '-c', 'user.name=Loopwright Bot',
-            '-c', 'user.email=loopwright[bot]@users.noreply.github.com',
-            '-C', worktreeDir,
-            'commit',
-            '-s',
-            '-m', title,
-          ],
-          { env: gitEnv, timeout: 15_000 },
-        );
+      const treeOid = (await gitWithIndex(['write-tree'])).toString('utf8').trim();
+      let headOid = baseRevision;
+      if (treeOid !== baseTreeOid) {
+        const commitMessage = `${title}\n\nSigned-off-by: Loopwright Bot <loopwright[bot]@users.noreply.github.com>\n`;
+        headOid = (
+          await gitRepo(
+            [
+              '-c', 'user.name=Loopwright Bot',
+              '-c', 'user.email=loopwright[bot]@users.noreply.github.com',
+              'commit-tree',
+              treeOid,
+              '-p',
+              baseRevision,
+            ],
+            { input: commitMessage },
+          )
+        ).toString('utf8').trim();
       }
 
       const remote = options.remoteUrl ?? 'origin';
@@ -1009,11 +1754,9 @@ export async function startNativePullRequestPublisherServer(
       if (options.openManagedPr !== undefined && options.openManagedPr !== null) {
         expectedRemoteOid = options.openManagedPr.headSha;
       } else {
-        const { stdout: remoteOut } = await execFileAsync(
-          gitBin,
-          ['-c', 'core.hooksPath=/dev/null', ...protocolArgs, '-C', worktreeDir, 'ls-remote', '--', remote, `refs/heads/${branchName}`],
-          { env: gitEnv, encoding: 'utf8', timeout: 15_000 },
-        );
+        const remoteOut = (
+          await gitRepo([...protocolArgs, 'ls-remote', '--', remote, `refs/heads/${branchName}`])
+        ).toString('utf8');
         const existingRef = remoteOut.split(/\r?\n/).some(line => line.trim().length > 0);
         if (existingRef) {
           throw new GitHubAppError(
@@ -1024,19 +1767,16 @@ export async function startNativePullRequestPublisherServer(
       }
 
       mutationStarted = true;
-      await execFileAsync(
-        gitBin,
+      await gitRepo(
         [
-          '-c', 'core.hooksPath=/dev/null',
           ...protocolArgs,
-          '-C', worktreeDir,
           'push',
           `--force-with-lease=refs/heads/${branchName}:${expectedRemoteOid}`,
           '--',
           remote,
-          `HEAD:refs/heads/${branchName}`,
+          `${headOid}:refs/heads/${branchName}`,
         ],
-        { env: gitEnv, timeout: 25_000 },
+        { timeoutMs: 25_000 },
       );
 
       let externalUrl: string | null = null;
@@ -1095,16 +1835,6 @@ export async function startNativePullRequestPublisherServer(
         scrubbed.length > 0 ? scrubbed : 'publication aborted',
       ));
     } finally {
-      await execFileAsync(
-        gitBin,
-        ['-c', 'core.hooksPath=/dev/null', '-C', options.repositoryRoot, 'worktree', 'remove', '--force', worktreeDir],
-        { env: gitEnv, timeout: 10_000 },
-      ).catch(() => undefined);
-      await execFileAsync(
-        gitBin,
-        ['-c', 'core.hooksPath=/dev/null', '-C', options.repositoryRoot, 'worktree', 'prune'],
-        { env: gitEnv, timeout: 10_000 },
-      ).catch(() => undefined);
       await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   });

@@ -105,11 +105,21 @@ export interface AdapterPolicy {
   readonly accounting: 'soft_only'; readonly retry: 'sender_only'; readonly extensions: readonly [];
   readonly privateArtifacts: boolean; readonly limits: PiLimits;
 }
+export interface PiBaselineEntry {
+  readonly name: string;
+  readonly mode: '100644' | '100755';
+  readonly oid: string;
+  readonly byteLength: number;
+}
+export interface PiCandidateBaseline {
+  readonly directory: string;
+  readonly entries: readonly PiBaselineEntry[];
+}
 export interface PiOpenInput {
   readonly version: 1; readonly lock: TaskLock; readonly roleId: string; readonly stepId: string; readonly sessionId: string;
   readonly policy: AdapterPolicy;
   readonly candidate: { readonly manifest: ArtifactManifest; readonly baseRevision: string; readonly sourceRevision: string;
-    readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[] };
+    readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[]; readonly baseline?: PiCandidateBaseline };
   readonly resources: readonly { readonly id: string; readonly kind: ResourceIdentity['kind']; readonly ref: ArtifactRef; readonly bytes: Uint8Array }[];
   readonly restore: null | { readonly checkpointId: string; readonly workspace: { readonly ref: ArtifactRef; readonly bytes: Uint8Array };
     readonly session: { readonly ref: ArtifactRef; readonly bytes: Uint8Array } };

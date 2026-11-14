@@ -6,20 +6,29 @@ import { canonical, digestValue, freeze, hash, id, integer, record, same } from 
 import { HEADER_BYTES, JSON_FILE_BYTES, PACKET_BYTES, type ManifestDescriptor, type VerifierHeader } from './verifier-protocol.js';
 import type { CompiledPlan, VerifierRefusalRow } from './types.js';
 export interface SizingDescription {
-  readonly reason: 'json_file_bytes' | 'header_bytes' | 'packet_bytes'; readonly actual: number; readonly allowed: number;
+  readonly reason: 'header_bytes' | 'json_file_bytes' | 'inventory_bytes' | 'packet_bytes' | 'tree_proof_bytes' | 'tree_proof_depth';
+  readonly actual: number; readonly allowed: number;
   readonly headerBytes: number; readonly payloadBytes: number; readonly packetBytes: number;
 }
 /** Created only by complete, pure job sizing after original byte validation. Never a general OUTPUT_LIMIT catch. */
 export class VerifierSizingFailure extends ControllerFailure {
   constructor(readonly sizing: SizingDescription) { super({ version: 1, code: 'OUTPUT_LIMIT', phase: 'verification', path: '', stateCode: null, piCode: null, effect: 'none', retryable: false }); }
 }
-export function sizeJob(header: VerifierHeader, payloadBytes: number, jsonBytes: number | null): void {
-  integer(payloadBytes, 0, 4194308);
+export function sizeJob(header: VerifierHeader, payloadBytes: number, jsonBytes: number | null, merkle?: { readonly treeCount: number; readonly treeProofBytes: number }): void {
+  integer(payloadBytes, 0, Number.MAX_SAFE_INTEGER);
   const headerBytes = Buffer.byteLength(canonical({ ...header, jobId: 'x'.repeat(64), operationId: 'x'.repeat(64), dispatchId: 'x'.repeat(64), generation: 16 })), packetBytes = 4 + HEADER_BYTES + payloadBytes;
   const limit = header.payloadKind === 'inventories' ? 81932 : PACKET_BYTES;
-  const refusal: SizingDescription | null = jsonBytes !== null && jsonBytes > JSON_FILE_BYTES ? { reason: 'json_file_bytes', actual: jsonBytes, allowed: JSON_FILE_BYTES, headerBytes, payloadBytes, packetBytes }
-    : headerBytes > HEADER_BYTES ? { reason: 'header_bytes', actual: headerBytes, allowed: HEADER_BYTES, headerBytes, payloadBytes, packetBytes }
-    : packetBytes > limit ? { reason: 'packet_bytes', actual: packetBytes, allowed: limit, headerBytes, payloadBytes, packetBytes } : null;
+  const refusal: SizingDescription | null = jsonBytes !== null && jsonBytes > JSON_FILE_BYTES
+    ? { reason: 'json_file_bytes', actual: jsonBytes, allowed: JSON_FILE_BYTES, headerBytes, payloadBytes: 4 + jsonBytes, packetBytes: 4 + HEADER_BYTES + 4 + jsonBytes }
+    : headerBytes > HEADER_BYTES
+      ? { reason: 'header_bytes', actual: headerBytes, allowed: HEADER_BYTES, headerBytes, payloadBytes, packetBytes }
+      : merkle !== undefined && merkle.treeCount > 16
+        ? { reason: 'tree_proof_depth', actual: merkle.treeCount, allowed: 16, headerBytes, payloadBytes, packetBytes }
+        : merkle !== undefined && merkle.treeProofBytes > 262_144
+          ? { reason: 'tree_proof_bytes', actual: merkle.treeProofBytes, allowed: 262_144, headerBytes, payloadBytes, packetBytes }
+          : packetBytes > limit
+            ? { reason: 'packet_bytes', actual: packetBytes, allowed: limit, headerBytes, payloadBytes, packetBytes }
+            : null;
   if (refusal) throw new VerifierSizingFailure(freeze(refusal));
 }
 export interface RefusalRecord {
@@ -36,14 +45,22 @@ export function checkedRefusalSubject(input: unknown, lock: TaskLock): Subject {
   if (!same(value.lockHash, lock.spec.lockHash) || !same(value.contractHash, lock.spec.contractHash) || value.repository !== target.repository || value.baseRevision !== target.baseRevision || value.sourceRevision !== target.sourceRevision || value.targetMatrixDigest !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
   digestValue(value.candidateDigest); return input as Subject;
 }
+const MAX_REFUSAL_METRIC = 1_073_741_824;
+
 export function checkedRefusalRecord(input: unknown, plan: CompiledPlan, lock: TaskLock, row: VerifierRefusalRow): RefusalRecord {
   const value = record(input, ['version', 'kind', 'planDigest', 'handlerDigest', 'slotId', 'checkId', 'generation', 'prospectiveOperationId', 'producerNonce', 'subject', 'source', 'candidate', 'code', 'limits']);
   const slot = plan.verifierSlots.find(slot => slot.id === row.slot), limits = record(value.limits, ['reason', 'actual', 'allowed', 'headerBytes', 'payloadBytes', 'packetBytes']);
-  for (const key of ['actual', 'allowed', 'headerBytes', 'payloadBytes', 'packetBytes']) integer(limits[key], 0, 8388608);
-  const expectedAllowed = limits.reason === 'json_file_bytes' ? JSON_FILE_BYTES : limits.reason === 'header_bytes' ? HEADER_BYTES : limits.reason === 'packet_bytes' ? slot?.handler.implementation === 'json-artifact.v1' ? PACKET_BYTES : 81932 : -1;
+  for (const key of ['actual', 'allowed', 'headerBytes', 'payloadBytes', 'packetBytes']) integer(limits[key], 0, MAX_REFUSAL_METRIC);
+  const expectedAllowed = limits.reason === 'json_file_bytes' ? JSON_FILE_BYTES
+    : limits.reason === 'header_bytes' ? HEADER_BYTES
+    : limits.reason === 'inventory_bytes' ? 81932
+    : limits.reason === 'tree_proof_bytes' ? 262_144
+    : limits.reason === 'tree_proof_depth' ? 16
+    : limits.reason === 'packet_bytes' ? slot?.handler.implementation === 'json-artifact.v1' ? PACKET_BYTES : 81932 : -1;
   if (!slot || value.version !== 1 || value.kind !== 'controller_preflight_refusal' || value.code !== 'OUTPUT_LIMIT' || limits.allowed !== expectedAllowed || (limits.actual as number) <= expectedAllowed
     || limits.packetBytes !== 4 + HEADER_BYTES + (limits.payloadBytes as number) || limits.reason === 'json_file_bytes' && (slot.handler.implementation !== 'json-artifact.v1' || limits.actual !== (limits.payloadBytes as number) - 4)
     || limits.reason === 'header_bytes' && limits.actual !== limits.headerBytes || limits.reason === 'packet_bytes' && limits.actual !== limits.packetBytes
+    || (limits.reason === 'tree_proof_bytes' || limits.reason === 'tree_proof_depth') && slot.handler.implementation !== 'json-artifact.v1'
     || !same(value.planDigest, plan.planDigest) || !same(value.handlerDigest, slot.handler.digest) || value.slotId !== row.slot || value.checkId !== slot.checkId || value.generation !== row.generation
     || value.prospectiveOperationId !== row.prospectiveOperationId || value.producerNonce !== row.producerNonce || !same(value.subject, row.subject) || !same(row.subject.lockHash, lock.spec.lockHash) || !same(row.subject.contractHash, lock.spec.contractHash)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   digestValue(value.planDigest); digestValue(value.handlerDigest);

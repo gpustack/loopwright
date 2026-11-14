@@ -26,6 +26,8 @@ When a GitHub Action or App processes a taskpack, `compileDeclarativeTaskpack` g
 | `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
 | `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 3`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
 
+Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']`.
+
 ## Taskpack
 
 ```yaml
@@ -143,7 +145,8 @@ spec:
 - **Strict YAML 1.2**: The parser rejects symlinks (`O_NOFOLLOW`), `..` traversal, duplicate keys, YAML anchors/aliases, and `${NAME}` interpolation (`TASKPACK_UNTRUSTED_INTERPOLATION`; see [Environment interpolation](controller-and-registry.md#environment-interpolation)).
 - **Control root**: Set Action `taskpack-path` to select a manifest. Its parent becomes the control root.
 - **Root fallback**: Root-level manifests and raw bytes use `.loopwright` as the control root.
-- **Built-in masks**: `.github`, `.claude`, `.agents`, `.loopwright/policies`, `AGENTS.md`, `CLAUDE.md`, and the active control root remain protected.
+- **Built-in masks**: `PROTECTED_AUTOMATION_PATHS` protects `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
+- **Control root mask**: The active control root also remains protected.
 - **Protected assets**: The exact manifest path, instruction files, and command scripts also remain protected.
 
 ## Metadata and scope
@@ -276,7 +279,7 @@ Provider-reported cost retains `reported` provenance. When billing is absent and
 | Implementation | Compiler parameters | Verification check |
 | --- | --- | --- |
 | `json-artifact.v1` | Binds `proposal.path`, `requiredFields`, and `schema_version` | Parses structured candidate artifact and checks required keys and scalars |
-| `scope.v1` | Binds `checkId` (compiler also runs implicit `scope` guard) | Verifies every modified file stays inside `writable` and outside `protected` |
+| `scope.v1` | Binds `checkId` (compiler also runs implicit `scope` guard) | Verifies modified and deleted paths stay inside `writable` and outside `protected` |
 | `no-change.v1` | Binds `checkId` (used automatically in `no-change` mode) | Confirms candidate tree equals base tree when settling as `no_change` |
 | `command.v1` | Pins script SHA-256 and compiles an authenticated local `gate.v1` | Runs a protected script against a retained candidate copy |
 

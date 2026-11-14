@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
-import type { Digest } from '@loopwright/core';
+import { validateDocument, type ArtifactRef, type Digest } from '@loopwright/core';
 import { refuse } from './errors.js';
 export type Scalar = string | number | boolean | null;
 export type Json = Scalar | readonly Json[] | { readonly [key: string]: Json };
@@ -38,3 +38,7 @@ export function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !ArrayBuffer.isView(value)) { for (const child of Object.values(value)) freeze(child); Object.freeze(value); } return value;
 }
 export function same(left: unknown, right: unknown): boolean { return canonical(left) === canonical(right); }
+export function checkedRef(value: unknown): ArtifactRef {
+  const manifest = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'reference' }, spec: { entries: [value] } }, 'ArtifactManifest');
+  if (!manifest.ok) refuse('ARTIFACT_INVALID', '', 'recovery'); return manifest.value.spec.entries[0]!;
+}

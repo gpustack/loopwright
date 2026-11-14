@@ -1,6 +1,7 @@
 import type { Digest } from '@loopwright/core';
 import type { Purpose } from '@loopwright/state';
-import type { AdapterPolicy, PiAdapter, PiCapabilities, PiError, PiHost, PiOpenInput, PiOutcome } from './types.js';
+import type { AdapterPolicy, PiAdapter, PiBaselineEntry, PiCandidateBaseline, PiCapabilities, PiError, PiHost, PiOpenInput, PiOutcome } from './types.js';
+export type { PiBaselineEntry, PiCandidateBaseline };
 
 export interface HttpMcpPolicy {
   readonly serverId: 'workspace';

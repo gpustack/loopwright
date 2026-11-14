@@ -13,6 +13,7 @@ export { profileIdentity } from './runtime-profile.js';
 import { systemPrompt } from './resources.js';
 import { receiveBrokerMessage } from './broker-channel.js';
 import { stateValue } from './admission.js';
+import { materializeCandidateDirectory, setDirectoryTreeMode } from './candidate.js';
 import { isAbsentContainer } from './docker-absence.js';
 import { registerChild, exitChild, registerAttach } from './execution-lease.js';
 import { recoverSnapshot } from './recovery.js';
@@ -53,10 +54,8 @@ export class RuntimeSession {
       if (!sameIdentity(digest(lockBytes), this.input.policy.runtime.graphDigest)) refuse('RUNTIME_MISMATCH', '/policy/runtime/graphDigest');
       const image = JSON.parse(await this.docker(['image', 'inspect', this.input.policy.runtime.imageDigest]))[0];
       if (image.Id !== this.input.policy.runtime.imageDigest || image.Os !== 'linux' || image.Architecture !== 'arm64' || image.Config.User !== '1000:1000' || !sameIdentity(image.Config.Entrypoint, ['node'])) refuse('RUNTIME_MISMATCH', '/policy/runtime/imageDigest');
-      await mkdir(this.directory, { mode: 0o700 }); await mkdir(join(this.directory, 'candidate'), { mode: 0o755 });
-      for (const file of this.input.candidate.artifacts) {
-        const path = join(this.directory, 'candidate', file.name); await mkdir(resolve(path, '..'), { recursive: true, mode: 0o755 }); await writeFile(path, file.bytes, { flag: 'wx', mode: 0o444 });
-      }
+      await mkdir(this.directory, { mode: 0o700 });
+      await materializeCandidateDirectory(join(this.directory, 'candidate'), this.input);
       const labels = { 'org.loopwright.generation': String(this.host.authority.generation), 'org.loopwright.run': this.input.lock.spec.runId, 'org.loopwright.session': this.input.sessionId, 'org.loopwright.nonce': this.nonce };
       await writeFile(join(this.directory, 'container-intent.json'), JSON.stringify({ version: 1, name: this.name, nonce: this.nonce, labels, image: this.input.policy.runtime.imageDigest }), { flag: 'wx', mode: 0o600 });
       const args = restrictedArguments(this.name, labels, join(this.directory, 'candidate'), this.input.policy.runtime.imageDigest, 'sdk', this.nonce);
@@ -130,26 +129,30 @@ export class RuntimeSession {
   async #cleanup(): Promise<void> {
     if (this.#cleanupComplete) return; this.#closed = true; this.#snapshots?.close(); this.#pending?.reject(new Error('closed')); await this.#bootWork?.catch(() => {});
     try {
-      if (this.#channel) { try { await this.#channel.send('close', null); } catch { /* exact engine cleanup follows */ } this.#channel.close(); }
-      if (this.#exited) { let timer: ReturnType<typeof setTimeout> | undefined; try { await Promise.race([this.#exited, new Promise(resolve => { timer = setTimeout(resolve, 2000); })]); } finally { clearTimeout(timer); } }
-      if (!this.#creationAttempted) { this.#cleanupComplete = true; return; }
-      const identity = this.#id ?? this.name;
-      let inspected: Record<string, unknown>;
-      try { inspected = await this.inspect(identity); } catch (error) { if (this.#id === null && this.#process === null && isAbsentContainer(identity, error)) { await exitChild(this.host, this.nonce); this.#cleanupComplete = true; return; } throw error; }
-      const id = inspected.Id as string; this.#id = id; this.#verifyOwnership(inspected);
-      if ((inspected.State as { Running: boolean }).Running) await this.docker(['kill', id]);
-      const stopped = await this.inspect(id); this.#verifyOwnership(stopped); if ((stopped.State as { Running: boolean; ExitCode: number }).Running || !Number.isInteger((stopped.State as { ExitCode: number }).ExitCode)) refuse('CLEANUP_FAILED', '', { phase: 'cleanup' });
-      await this.docker(['rm', id]);
-      try { await this.inspect(id); refuse('CLEANUP_FAILED'); } catch (error) { if (!isAbsentContainer(id, error)) throw error; }
-      await writeFile(join(this.directory, 'cleanup.json'), JSON.stringify({ id, nonce: this.nonce, removed: true, absenceConfirmed: true, state: stopped.State }), { mode: 0o600 });
+      try {
+        if (this.#channel) { try { await this.#channel.send('close', null); } catch { /* exact engine cleanup follows */ } this.#channel.close(); }
+        if (this.#exited) { let timer: ReturnType<typeof setTimeout> | undefined; try { await Promise.race([this.#exited, new Promise(resolve => { timer = setTimeout(resolve, 2000); })]); } finally { clearTimeout(timer); } }
+        if (!this.#creationAttempted) { this.#cleanupComplete = true; return; }
+        const identity = this.#id ?? this.name;
+        let inspected: Record<string, unknown>;
+        try { inspected = await this.inspect(identity); } catch (error) { if (this.#id === null && this.#process === null && isAbsentContainer(identity, error)) { await exitChild(this.host, this.nonce); this.#cleanupComplete = true; return; } throw error; }
+        const id = inspected.Id as string; this.#id = id; this.#verifyOwnership(inspected);
+        if ((inspected.State as { Running: boolean }).Running) await this.docker(['kill', id]);
+        const stopped = await this.inspect(id); this.#verifyOwnership(stopped); if ((stopped.State as { Running: boolean; ExitCode: number }).Running || !Number.isInteger((stopped.State as { ExitCode: number }).ExitCode)) refuse('CLEANUP_FAILED', '', { phase: 'cleanup' });
+        await this.docker(['rm', id]);
+        try { await this.inspect(id); refuse('CLEANUP_FAILED'); } catch (error) { if (!isAbsentContainer(id, error)) throw error; }
+        await writeFile(join(this.directory, 'cleanup.json'), JSON.stringify({ id, nonce: this.nonce, removed: true, absenceConfirmed: true, state: stopped.State }), { mode: 0o600 });
+      } finally {
+        this.#process?.stdin.destroy(); this.#process?.stdout.destroy(); this.#process?.stderr.destroy();
+        if (this.#process?.exitCode === null && this.#process.signalCode === null) this.#process.kill('SIGKILL');
+        if (this.#exited) { let timer: ReturnType<typeof setTimeout> | undefined; try {
+          const exit = await Promise.race([this.#exited, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Docker CLI cleanup deadline')), 2000); })]);
+          await writeFile(join(this.directory, 'cli-exit.json'), JSON.stringify(exit), { mode: 0o600 });
+        } finally { clearTimeout(timer); } }
+      }
+      await exitChild(this.host, this.nonce); this.#cleanupComplete = true;
     } finally {
-      this.#process?.stdin.destroy(); this.#process?.stdout.destroy(); this.#process?.stderr.destroy();
-      if (this.#process?.exitCode === null && this.#process.signalCode === null) this.#process.kill('SIGKILL');
-      if (this.#exited) { let timer: ReturnType<typeof setTimeout> | undefined; try {
-        const exit = await Promise.race([this.#exited, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Docker CLI cleanup deadline')), 2000); })]);
-        await writeFile(join(this.directory, 'cli-exit.json'), JSON.stringify(exit), { mode: 0o600 });
-      } finally { clearTimeout(timer); } }
+      await setDirectoryTreeMode(join(this.directory, 'candidate'), 0o755).catch(() => {});
     }
-    await exitChild(this.host, this.nonce); this.#cleanupComplete = true;
   }
 }

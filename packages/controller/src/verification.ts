@@ -8,13 +8,14 @@ import type { Authority, DispatchPermit, LocalRunStore, OperationReceipt } from 
 import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
 import { descriptor, encodeInventory, encodePacket, fileHash, ownedBytes, packetSize, checkedHeader, HEADER_BYTES, PACKET_BYTES, type VerifierHeader, type VerifierReply, type ByteHandler } from './verifier-protocol.js';
+import type { BaselineMerkleProof } from './source.js';
 import { canonical, freeze, hash, integer, list, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
 import { verifierOperationId, phaseCheckpointId, ProgressStore, validateProgress, journal } from './progress.js';
 import { sizeJob, VerifierSizingFailure, checkedRefusalRecord, type RefusalRecord } from './refusal-record.js';
 import type { CompiledPlan, VerifierSlot, VerifierRefusalRow } from './types.js';
-export interface ByteInventory { readonly manifest: ArtifactManifest; readonly ref: ArtifactRef; readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[] }
+export interface ByteInventory { readonly manifest: ArtifactManifest; readonly ref: ArtifactRef; readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[]; readonly baselineProofs?: Readonly<Record<string, BaselineMerkleProof>> | undefined }
 export interface PreparedVerification { readonly version: 1; readonly slotId: string; readonly generation: number; readonly operationId: string; readonly producerNonce: string; readonly packetBytes: number; readonly requestDigest: import('@loopwright/core').Digest }
 interface Prepared { readonly header: VerifierHeader; readonly payload: Uint8Array; readonly slot: VerifierSlot }
 const preparedJobs = new WeakMap<PreparedVerification, Prepared>();
@@ -33,10 +34,37 @@ export function prepareVerification(plan: CompiledPlan, lock: TaskLock, slotId: 
   if (!same(plan.task, lock.spec.contract) || !/^[a-f0-9]{32}$/.test(producerNonce)) refuse('ARTIFACT_INVALID', '', 'verification'); integer(generation, 0, plan.capacity.V - 1);
   const slot = plan.verifierSlots.find(slot => slot.id === slotId); if (!slot || slot.handler.kind !== 'check') refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
   inventoryBytes(source); const files = inventoryBytes(candidate), subject = bindSubject(lock, candidate.manifest); if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'verification');
+  if ((source.manifest.spec.baseTree === undefined) !== (candidate.manifest.spec.baseTree === undefined) || !same(source.manifest.spec.baseTree ?? null, candidate.manifest.spec.baseTree ?? null)) refuse('ARTIFACT_INVALID', '', 'verification');
   const operationId = verifierOperationId(lock.spec.runId, slotId, generation), handler = slot.handler.implementation as ByteHandler;
   let parameters: VerifierHeader['parameters'], payload: Uint8Array;
+  let selected: Uint8Array | undefined, jsonBytes: number | null = null, merkle: { readonly treeCount: number; readonly treeProofBytes: number } | undefined;
+  let baselineProof: { readonly blob: Uint8Array; readonly trees: readonly Uint8Array[] } | null = null;
   if (handler === 'json-artifact.v1') {
-    const path = text(slot.handler.parameters.path), expected = candidate.manifest.spec.entries.find(entry => entry.name === path) ?? null;
+    const path = text(slot.handler.parameters.path), overlaySelected = candidate.manifest.spec.entries.find(entry => entry.name === path) ?? null;
+    const baseTree = candidate.manifest.spec.baseTree, isDeleted = (candidate.manifest.spec.deleted ?? []).includes(path);
+    const proof = !overlaySelected && !isDeleted && baseTree !== undefined && source.baselineProofs && Object.hasOwn(source.baselineProofs, path) ? source.baselineProofs[path] ?? null : null;
+    let expected: unknown = overlaySelected;
+    if (baseTree !== undefined && !overlaySelected) {
+      if (isDeleted || proof === null) { expected = null; jsonBytes = 0; }
+      else {
+        const blobBytes = ownedBytes(proof.blob, 8388608), treeBytes = proof.trees.map(tree => ownedBytes(tree, 4194304));
+        const oidPattern = baseTree.objectFormat === 'sha256' ? /^[0-9a-f]{64}$/ : /^[0-9a-f]{40}$/;
+        if (!Number.isSafeInteger(proof.byteLength) || proof.byteLength < 0 || !oidPattern.test(proof.oid)) refuse('ARTIFACT_INVALID', '', 'verification');
+        if (proof.treeCount !== undefined && (!Number.isSafeInteger(proof.treeCount) || proof.treeCount < 0)) refuse('ARTIFACT_INVALID', '', 'verification');
+        if (proof.treeProofBytes !== undefined && (!Number.isSafeInteger(proof.treeProofBytes) || proof.treeProofBytes < 0)) refuse('ARTIFACT_INVALID', '', 'verification');
+        const treeCount = proof.treeCount ?? treeBytes.length;
+        const treeProofBytes = proof.treeProofBytes ?? treeBytes.reduce((sum, tree) => sum + tree.byteLength, 0);
+        const isOversizeProof = treeCount > 16 || treeProofBytes > 262_144 || proof.byteLength > 4_194_304;
+        if (!isOversizeProof && blobBytes.byteLength !== proof.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+        expected = { baseline: true, mode: proof.mode, oid: proof.oid, byteLength: proof.byteLength };
+        jsonBytes = proof.byteLength > blobBytes.byteLength ? proof.byteLength : blobBytes.byteLength;
+        merkle = { treeCount, treeProofBytes };
+        baselineProof = { blob: blobBytes, trees: treeBytes };
+      }
+    } else {
+      selected = overlaySelected ? files.get(path) : undefined;
+      jsonBytes = selected?.byteLength ?? 0;
+    }
     parameters = { path, expected, required: slot.handler.parameters.required, equals: slot.handler.parameters.equals, sourceManifest: source.manifest, candidateManifest: candidate.manifest } as unknown as VerifierHeader['parameters'];
     payload = new Uint8Array(0); // Allocate the selected body only after complete header/file sizing below.
   } else {
@@ -46,9 +74,20 @@ export function prepareVerification(plan: CompiledPlan, lock: TaskLock, slotId: 
   }
   const header = checkedHeader({ version: 1, jobId: 'job.' + hash(operationId + '\0' + producerNonce).hex.slice(0, 40), handler, handlerVersion: 1, handlerDigest: slot.handler.digest, checkId: slot.checkId, producerNonce, operationId, dispatchId: 'unbound', generation, subject: subject.value,
     source: descriptor(source.manifest, source.ref), candidate: descriptor(candidate.manifest, candidate.ref), parameters, payloadKind: handler === 'json-artifact.v1' ? 'json' : 'inventories' });
-  const selected = handler === 'json-artifact.v1' ? files.get(text(slot.handler.parameters.path)) : undefined;
-  sizeJob(header, handler === 'json-artifact.v1' ? 4 + (selected?.byteLength ?? 0) : payload.byteLength, handler === 'json-artifact.v1' ? selected?.byteLength ?? 0 : null);
-  if (handler === 'json-artifact.v1') { payload = new Uint8Array(4 + (selected?.byteLength ?? 0)); new DataView(payload.buffer).setUint32(0, selected?.byteLength ?? 0); if (selected) payload.set(selected, 4); }
+  const sizedPayloadBytes = handler !== 'json-artifact.v1' ? payload.byteLength : baselineProof !== null ? 4 + baselineProof.blob.byteLength + 4 + baselineProof.trees.reduce((sum, tree) => sum + 4 + tree.byteLength, 0) : 4 + (selected?.byteLength ?? 0);
+  sizeJob(header, sizedPayloadBytes, jsonBytes, merkle);
+  if (handler === 'json-artifact.v1') {
+    if (baselineProof !== null) {
+      payload = new Uint8Array(sizedPayloadBytes);
+      const view = new DataView(payload.buffer); let offset = 0;
+      view.setUint32(offset, baselineProof.blob.byteLength); offset += 4;
+      payload.set(baselineProof.blob, offset); offset += baselineProof.blob.byteLength;
+      view.setUint32(offset, baselineProof.trees.length); offset += 4;
+      for (const tree of baselineProof.trees) { view.setUint32(offset, tree.byteLength); offset += 4; payload.set(tree, offset); offset += tree.byteLength; }
+    } else {
+      payload = new Uint8Array(4 + (selected?.byteLength ?? 0)); new DataView(payload.buffer).setUint32(0, selected?.byteLength ?? 0); if (selected) payload.set(selected, 4);
+    }
+  }
   const packetBytes = packetSize(header, payload.byteLength), requestDigest = hash('loopwright.dev/controller/verifier-request/v1\0' + canonical({ planDigest: plan.planDigest, header, payloadDigest: hash(payload) }));
   const sealed = freeze(checkedHeader(parsePrivateJson(Buffer.from(canonical(header)), HEADER_BYTES)));
   const value: PreparedVerification = freeze({ version: 1, slotId, generation, operationId, producerNonce, packetBytes, requestDigest }); preparedJobs.set(value, { header: sealed, payload, slot }); return value;

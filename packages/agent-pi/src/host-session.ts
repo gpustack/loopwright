@@ -2,7 +2,7 @@ import { execFile, spawn, spawnSync, type ChildProcess, type ChildProcessWithout
 import { randomBytes } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { constants, existsSync, writeFileSync } from 'node:fs';
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -14,6 +14,7 @@ import { constructAdapter, type FactoryPorts, type LeasePort } from './adapter.j
 import { stateValue } from './admission.js';
 import { canonical, digest, freeze, integer, list, object } from './boundary.js';
 import { receiveBrokerMessage } from './broker-channel.js';
+import { materializeCandidateDirectory, setDirectoryTreeMode } from './candidate.js';
 import type { ContainerExit } from './containers.js';
 import { parseBoundedJson } from './context.js';
 import { scheduleDeadline } from './deadline.js';
@@ -56,26 +57,6 @@ function killProcessGroup(pid: number | undefined, includeLeader = true): void {
     if (includeLeader) {
       try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
     }
-  }
-}
-
-async function setDirectoryTreeMode(dir: string, mode: number): Promise<void> {
-  const info = await lstat(dir);
-  if (!info.isDirectory() || info.isSymbolicLink()) refuse('RECOVERY_REQUIRED');
-  if (mode & 0o200) {
-    await chmod(dir, mode);
-  }
-  const entries = await readdir(dir);
-  for (const entry of entries) {
-    const childPath = join(dir, entry);
-    const childInfo = await lstat(childPath);
-    if (childInfo.isSymbolicLink()) refuse('RECOVERY_REQUIRED');
-    if (childInfo.isDirectory()) {
-      await setDirectoryTreeMode(childPath, mode);
-    }
-  }
-  if (!(mode & 0o200)) {
-    await chmod(dir, mode);
   }
 }
 
@@ -1110,24 +1091,113 @@ class HostExecution extends Execution {
     super(host, input, candidateDir, ports);
   }
 
+  #extractTargetPath(identity: AdmittedToolIdentity, bytes: Uint8Array): string | null {
+    if (!this.input.policy.tools.includes(identity.name)) return null;
+    if (bytes.byteLength > this.input.policy.limits.toolArgsBytes) return null;
+    try {
+      const value = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      const args = object(value, Object.keys(value));
+      if (typeof args.path !== 'string' || !args.path) return null;
+      return this.candidate.normalize(args.path);
+    } catch {
+      return null;
+    }
+  }
+
   override invoke(
     identity: AdmittedToolIdentity,
     bytes: Uint8Array,
     signal: AbortSignal,
     onOperation: (id: string) => void,
   ): Promise<ToolResult> {
-    if (identity.name !== 'write' && identity.name !== 'edit') {
+    if (identity.name !== 'write' && identity.name !== 'edit' && identity.name !== 'delete') {
       const plain = this.#gate.then(() => super.invoke(identity, bytes, signal, onOperation));
       this.#gate = plain.then(() => {}, () => {});
       return plain;
     }
     const mediated = this.#gate.then(async () => {
-      await setDirectoryTreeMode(this.candidateDir, 0o755);
-      try {
-        return await super.invoke(identity, bytes, signal, onOperation);
-      } finally {
-        await setDirectoryTreeMode(this.candidateDir, 0o555);
+      const relPath = this.#extractTargetPath(identity, bytes);
+      let writable = false;
+      if (relPath !== null) {
+        try {
+          this.candidate.assertWritable(relPath);
+          writable = true;
+        } catch {
+          writable = false;
+        }
       }
+      if (relPath === null || !writable) {
+        return await super.invoke(identity, bytes, signal, onOperation);
+      }
+
+      const segments = relPath.split('/').slice(0, -1);
+      const chain = [this.candidateDir, ...segments.map((_, index) => join(this.candidateDir, ...segments.slice(0, index + 1)))];
+      const unlockedDirs: string[] = [];
+      const absentBeforeOp = new Set<string>();
+      let stoppedAtNonDir = false;
+      let result!: ToolResult;
+      let opFailed = false;
+      let opError: unknown;
+      this.candidate.clearLastPrunedDirectories();
+
+      try {
+        for (let i = 0; i < chain.length; i++) {
+          const dir = chain[i]!;
+          let info;
+          try {
+            info = await lstat(dir);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+              if (i === 0) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+              if (identity.name === 'write') {
+                for (let j = i; j < chain.length; j++) absentBeforeOp.add(chain[j]!);
+              }
+              break;
+            }
+            throw error;
+          }
+          if (info.isSymbolicLink() || !info.isDirectory()) {
+            if (i === 0) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+            stoppedAtNonDir = true;
+            break;
+          }
+          await chmod(dir, 0o755);
+          unlockedDirs.push(dir);
+        }
+        result = await super.invoke(identity, bytes, signal, onOperation);
+      } catch (error) {
+        opFailed = true;
+        opError = error;
+      }
+
+      const prunedDirs = this.candidate.consumeLastPrunedDirectories();
+      const toRelock = [...unlockedDirs, ...(stoppedAtNonDir ? [] : absentBeforeOp)];
+      let relockError: unknown = null;
+      for (let i = toRelock.length - 1; i >= 0; i--) {
+        const dir = toRelock[i]!;
+        try {
+          await chmod(dir, 0o555);
+          const verified = await lstat(dir);
+          if (!verified.isDirectory() || verified.isSymbolicLink() || (verified.mode & 0o777) !== 0o555) {
+            relockError ??= new PiFailure({ code: 'RECOVERY_REQUIRED', path: '/candidate', phase: 'tool', retryable: false, effect: 'possible', requestId: null, operationId: null, stateErrorCode: null });
+          }
+        } catch (error) {
+          const isAbsent = (error as NodeJS.ErrnoException).code === 'ENOENT';
+          const tolerateAbsent = isAbsent && dir !== this.candidateDir && (
+            (identity.name === 'delete' && prunedDirs.has(resolve(dir)))
+            || (identity.name === 'write' && absentBeforeOp.has(dir))
+          );
+          if (tolerateAbsent) continue;
+          relockError ??= new PiFailure({ code: 'RECOVERY_REQUIRED', path: '/candidate', phase: 'tool', retryable: false, effect: 'possible', requestId: null, operationId: null, stateErrorCode: null });
+        }
+      }
+      if (opFailed && (relockError === null || (opError instanceof PiFailure && opError.detail.code === 'RECOVERY_REQUIRED'))) {
+        throw opError;
+      }
+      if (relockError !== null) throw relockError;
+      if (opFailed) throw opError;
+      return result;
     });
     this.#gate = mediated.then(() => {}, () => {});
     return mediated;
@@ -1314,13 +1384,7 @@ class HostRuntimeSession {
     await mkdir(homeDir, { mode: 0o700 });
     await mkdir(tmpDir, { mode: 0o700 });
     const candidateDir = join(this.directory, 'candidate');
-    await mkdir(candidateDir, { mode: 0o755 });
-    for (const file of this.input.candidate.artifacts) {
-      const path = join(candidateDir, file.name);
-      await mkdir(resolve(path, '..'), { recursive: true, mode: 0o755 });
-      await writeFile(path, file.bytes, { flag: 'wx', mode: 0o444 });
-    }
-    await setDirectoryTreeMode(candidateDir, 0o555);
+    await materializeCandidateDirectory(candidateDir, this.input);
 
     const labels = Object.freeze({
       'org.loopwright.generation': String(this.host.authority.generation),

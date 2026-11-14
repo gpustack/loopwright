@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { snapshot, type Json } from './boundary.js';
-import { artifactRefSchema, arrayOf, document, nameSchema, object, record, type ArtifactRef, type Digest, type Infer } from './contracts.js';
+import {
+  artifactRefSchema, arrayOf, branch, document, enumeration, nameSchema,
+  object, record, text, type ArtifactRef, type Digest, type Infer, type Schema,
+} from './contracts.js';
 import { attempt, fail, type DiagnosticCode, type Result } from './diagnostics.js';
 import { LIMITS } from './limits.js';
 
@@ -30,22 +33,94 @@ export function digestArtifact(name: unknown, bytes: Uint8Array): Result<Artifac
     return { name: validName, digest: byteDigest(owned), byteLength: owned.byteLength };
   });
 }
-const manifestShape = document('ArtifactManifest', record({ entries: arrayOf(artifactRefSchema, 0, LIMITS.manifest) }));
+export interface BaseTreeAnchor {
+  readonly objectFormat: 'sha1' | 'sha256';
+  readonly commitOid: string;
+  readonly treeOid: string;
+}
+
+const baseTreeShape = record({
+  objectFormat: enumeration('sha1', 'sha256'),
+  commitOid: text(40, 64),
+  treeOid: text(40, 64),
+});
+
+function baseTreeSchema(value: Json, path: string): BaseTreeAnchor {
+  const anchor = baseTreeShape(value, path);
+  const pattern = anchor.objectFormat === 'sha1' ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
+  if (!pattern.test(anchor.commitOid)) fail('VALUE_RANGE', `${path}/commitOid`);
+  if (!pattern.test(anchor.treeOid)) fail('VALUE_RANGE', `${path}/treeOid`);
+  return anchor;
+}
+
+const classicSpecShape = record({ entries: arrayOf(artifactRefSchema, 0, LIMITS.manifest) });
+const overlaySpecShape = record({
+  baseTree: baseTreeSchema,
+  entries: arrayOf(artifactRefSchema, 0, LIMITS.overlayEntries),
+  deleted: arrayOf(nameSchema, 0, LIMITS.overlayEntries),
+});
+const manifestSpecShape: Schema<
+  | { readonly entries: readonly ArtifactRef[]; readonly baseTree?: undefined; readonly deleted?: undefined }
+  | { readonly baseTree: BaseTreeAnchor; readonly entries: readonly ArtifactRef[]; readonly deleted: readonly string[] }
+> = branch(
+  input => Object.hasOwn(input, 'baseTree') || Object.hasOwn(input, 'deleted'),
+  overlaySpecShape,
+  classicSpecShape,
+);
+const manifestShape = document('ArtifactManifest', manifestSpecShape);
 export type ArtifactManifest = Infer<typeof manifestShape>;
+
+function validateGitPath(name: string, path: string): void {
+  for (const segment of name.split('/')) {
+    if (segment.toLowerCase() === '.git' || Buffer.byteLength(segment, 'utf8') > 255) {
+      fail('PATH_INVALID', path);
+    }
+  }
+}
+
+function requireAscending<T>(
+  items: readonly T[],
+  nameOf: (item: T) => string,
+  elementPath: (index: number) => string,
+): void {
+  for (let index = 1; index < items.length; index++) {
+    if (nameOf(items[index - 1]!) >= nameOf(items[index]!)) {
+      fail('MANIFEST_AMBIGUOUS', elementPath(index));
+    }
+  }
+}
+
 export function manifestSchema(value: Json, path = ''): ArtifactManifest {
   const manifest = manifestShape(value, path);
+  const spec = manifest.spec;
+  if (spec.baseTree) {
+    spec.entries.forEach((entry, index) => {
+      validateGitPath(entry.name, `${path}/spec/entries/${index}/name`);
+    });
+    spec.deleted.forEach((name, index) => {
+      validateGitPath(name, `${path}/spec/deleted/${index}`);
+    });
+    requireAscending(spec.entries, entry => entry.name, index => `${path}/spec/entries/${index}/name`);
+    requireAscending(spec.deleted, name => name, index => `${path}/spec/deleted/${index}`);
+  }
+  // nameSchema (relativeName) restricts segments to ASCII [A-Za-z0-9._-], so normalize('NFC') is defense-in-depth for canonical folding.
+  const normalizeName = (rawName: string) => rawName.normalize('NFC').toLowerCase();
   const names = new Set<string>();
-  manifest.spec.entries.forEach((entry, index) => {
-    const name = entry.name.toLowerCase();
-    if (names.has(name)) fail('MANIFEST_AMBIGUOUS', `${path}/spec/entries/${index}/name`);
-    names.add(name);
-  });
-  manifest.spec.entries.forEach((entry, index) => {
-    const segments = entry.name.toLowerCase().split('/');
+  const register = (rawName: string, elementPath: string) => {
+    const normalized = normalizeName(rawName);
+    if (names.has(normalized)) fail('MANIFEST_AMBIGUOUS', elementPath);
+    names.add(normalized);
+  };
+  const checkPrefixes = (rawName: string, elementPath: string) => {
+    const segments = normalizeName(rawName).split('/');
     for (let count = 1; count < segments.length; count++) {
-      if (names.has(segments.slice(0, count).join('/'))) fail('MANIFEST_AMBIGUOUS', `${path}/spec/entries/${index}/name`);
+      if (names.has(segments.slice(0, count).join('/'))) fail('MANIFEST_AMBIGUOUS', elementPath);
     }
-  });
+  };
+  spec.entries.forEach((entry, index) => register(entry.name, `${path}/spec/entries/${index}/name`));
+  if (spec.baseTree) spec.deleted.forEach((name, index) => register(name, `${path}/spec/deleted/${index}`));
+  spec.entries.forEach((entry, index) => checkPrefixes(entry.name, `${path}/spec/entries/${index}/name`));
+  if (spec.baseTree) spec.deleted.forEach((name, index) => checkPrefixes(name, `${path}/spec/deleted/${index}`));
   return manifest;
 }
 export interface ResolvedArtifact { readonly name: string; readonly bytes: Uint8Array }

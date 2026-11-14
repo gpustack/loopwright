@@ -8,14 +8,14 @@ import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner, bootIdentity } from './ownership.js';
 import { readRetained } from './retained.js';
 import { ArtifactStore, stateValue } from './storage.js';
-import { restoreSource } from './source.js';
+import { assertCanonicalMinimalOverlay, canonicalizeCandidateManifest, restoreSource } from './source.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
 import { ControllerEvents } from './events.js';
 import { Finalizer } from './finalize.js';
 import { formatPolicy } from './repair.js';
 import { parsePrivateJson } from './parser.js';
 import { normalizeSubmission, type RetainedSubmission } from './submission.js';
-import { freeze, hash, record, same } from './schema.js';
+import { freeze, hash, record, same, text } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
 import { Gate, prepareGate } from './gate.js';
 import { Publication, preparePublication } from './publication.js';
@@ -25,7 +25,7 @@ import type { CycleExecution, ControllerIncident } from './finalize.js';
 async function restoredCandidate(context: CycleContext, head: ProgressHead | null): Promise<ByteInventory> {
   if (!head || head.progress.candidate.privateSession === null) {
     if (head && (!same(head.manifest, context.source.manifest) || !same(head.progress.candidate.workspace, context.source.workspace))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    return { manifest: context.source.manifest, ref: head?.progress.candidate.manifest ?? await context.artifacts.json('manifest', context.source.manifest, 32768), files: context.source.artifacts };
+    return { manifest: context.source.manifest, ref: head?.progress.candidate.manifest ?? await context.artifacts.json('manifest', context.source.manifest, 32768), files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
   }
   const attempt = [...head.progress.attempts].reverse().find(item => item.finished?.nativeCheckpointId && same(journal(context.store).checkpoints.find(cp => cp.checkpointId === item.finished!.nativeCheckpointId)?.workspace, head.progress.candidate.workspace));
   if (!attempt) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -35,8 +35,9 @@ async function restoredCandidate(context: CycleContext, head: ProgressHead | nul
   const decoded = await decodePiCapture({ version: 1, lock: context.lock, policy, checkpoint, sessionId: attempt.sessionId, roleId: originalRole.roleId, stepId: attempt.nativeStepId,
     workspace: { ref: checkpoint.workspace, bytes: await context.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await context.artifacts.read(checkpoint.privateSession!, 2097152) },
     command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await context.artifacts.read(attempt.command, 16384)), requestIds: interval.map(row => row.admission.requestId) } });
-  if (!decoded.ok || !same({ ...decoded.value.candidate, metadata: { id: 'candidate' }, spec: { entries: [...decoded.value.candidate.spec.entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) } }, head.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.value.artifacts };
+  if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  assertCanonicalMinimalOverlay(head.manifest, decoded.value.artifacts, context.source, 'recovery');
+  return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.value.artifacts, baselineProofs: context.source.baselineProofs };
 }
 async function retainedPrimary(context: CycleContext, head: ProgressHead): Promise<CycleExecution> {
   const intent = head.progress.terminalIntent; if (!intent?.result) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -94,7 +95,8 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
       authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
       const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
-      const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace);
+      const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path)))];
+      const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
       let context: CycleContext = { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
       const candidate = await restoredCandidate(context, head);
@@ -109,7 +111,7 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
               const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, input.configuration.registry.spec.gateEndpoints);
               await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(input.configuration).vault.resolveNetworkCredential(ref), () => subject).restore(prepared);
             } else {
-              const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts }, candidate, head.progress.candidate.generation, row.producerNonce);
+              const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
               await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
             }
           }

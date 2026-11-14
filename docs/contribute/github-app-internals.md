@@ -25,7 +25,7 @@ The GitHub App accepts authenticated events and queues repository work by tenant
 | `src/qualification.ts` | Deployment host qualification and interactive MCP OAuth refusal |
 | `src/action.ts` | `runGitHubActionEntrypoint` and the `INPUT_*` CLI shim |
 | `src/upstreams.ts` | Native upstream discovery and GitHub token resolution |
-| `src/turnkey.ts` | Local HMAC command gate, detached worktree publisher, and host-session cycle delegate |
+| `src/turnkey.ts` | Local HMAC command gate, private-index publisher, and host-session cycle delegate |
 | `src/output-format.ts` | Action output sinks and step outputs |
 | `src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver and queue dispatcher |
 
@@ -89,7 +89,8 @@ The loader enforces the hard invariants before anything compiles:
 
 - Manifests are read with a bounded (`65536`-byte) `O_NOFOLLOW` file read; symlinks, `..` traversal,
   `__proto__`/`constructor`/`prototype` keys, and any `${...}` interpolation expression are refused.
-- Effective protected paths include the control root, manifest, instructions, scripts, `.github`, `.claude`, `.agents`, `AGENTS.md`, and `CLAUDE.md`.
+- `PROTECTED_AUTOMATION_PATHS` includes `.codex`, `.github`, `.claude`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
+- Effective protected paths also include the control root, manifest, instructions, and scripts.
 - Omitted writable scope defaults to `**`; protected paths take precedence over writable ancestors.
 - The proposal must be writable. Memory must stay under the control root's `memory` directory.
 
@@ -147,8 +148,13 @@ jobs:
 For live execution, `runActionCli` discovers upstreams and wires the turnkey delegate. See [GitHub Action](../operations/github-action.md) for inputs and qualification limits.
 
 `turnkey.ts` runs `command.v1` through a loopback HMAC gate and verifies script and candidate digests.
-It publishes from a detached `git worktree` with `--force-with-lease` and uses `openPiHostSessionAdapterV2` for the cycle.
-The local command runs on the host, not in an OS sandbox.
+`startLocalCommandGateServer` materializes `tree_overlay` baseline blobs with `git cat-file --batch`.
+It applies deleted paths and overlay files before `command.v1` runs on the host, not in an OS sandbox.
+
+`startNativePullRequestPublisherServer` builds commits with a temporary `GIT_INDEX_FILE`.
+It uses `read-tree`, `hash-object -w`, `update-index`, `write-tree`, and `commit-tree`.
+It does not mutate Git worktrees or wipe untouched baseline files.
+Publication uses `--force-with-lease`; the cycle uses `openPiHostSessionAdapterV2`.
 `output-format.ts` writes configured reports and Action step outputs.
 
 `runGitHubActionEntrypoint` qualifies the deployment host first (platform/arch allowlist, qualified 26.x Node runtime, non-network filesystem, clock drift within 1000ms, an exclusive fsync-plus-rename storage probe, and storage-profile budget rules), refuses interactive MCP authentication, evaluates trigger intake, compiles, and writes the registry and configuration into a trusted directory outside the checkout with `untrustedRoots: [<checkout>]`.

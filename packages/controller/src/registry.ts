@@ -80,8 +80,8 @@ function role(raw: unknown, path: string): RoleProfile {
       : err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
     refuse(detailCode === 'INPUT_INVALID' ? 'CONFIG_SCHEMA' : 'CAPABILITY_UNSUPPORTED', path + '/selection');
   }
-  const tools = list(value.tools, path + '/tools', 6).map(item => text(item, path + '/tools', 128));
-  if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
+  const tools = list(value.tools, path + '/tools', 8).map(item => text(item, path + '/tools', 128));
+  if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
   const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp'); return { ...(raw as RoleProfile), context: checkedContext };
 }
 /** Outbound endpoints accept exact https URLs or explicit-port loopback http; credentials, query strings and fragments never pass. */

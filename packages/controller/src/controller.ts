@@ -10,7 +10,7 @@ import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result, type ControllerDiagnostic } from './errors.js';
 import { privateDirectory, ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { ControllerOwner, bootIdentity } from './ownership.js';
-import { freezeSource, verifySource, type FrozenSource } from './source.js';
+import { freezeSource, materializeBaseline, verifySource, type FrozenSource } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
 import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
 import { retainSubmission, normalizeSubmission, type Submission, type RetainedSubmission } from './submission.js';
@@ -60,10 +60,12 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null;
   try {
     owner = await ControllerOwner.acquire(directory, runId, plan.planDigest); const artifactDirectory = join(directory, 'artifacts'); await privateDirectory(artifactDirectory);
-    const artifacts = new ArtifactStore(artifactDirectory, owner, state.vault), source = await freezeSource(repository, plan.task, owner, artifacts);
+    const artifacts = new ArtifactStore(artifactDirectory, owner, state.vault);
+    const jsonPaths = plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path));
+    const source = await freezeSource(repository, plan.task, owner, artifacts, jsonPaths);
     const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId });
     if (!admitted.ok) refuse('CONFIG_SCHEMA', '/spec/task', 'admission'); const lock = admitted.value, manifest = await artifacts.json('manifest', source.manifest, 32768);
-    const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts };
+    const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
     for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
     const planRef = await artifacts.json('plan', plan, 1048576), lockRef = await artifacts.json('task-lock', lock, 1048576);
@@ -86,7 +88,7 @@ export class Cycle {
   #activeAdapter: PiAdapterV2 | null = null; #candidateKnown = true; #cleanup: ControllerIncident['cleanup'] = 'complete';
   #publicationObservation: { readonly status: 'not_run' | 'confirmed' | 'failed' | 'unresolved'; readonly reason: string | null; readonly receipt: ArtifactRef | null } = { status: 'not_run', reason: 'disabled', receipt: null };
   constructor(readonly context: CycleContext, head: ProgressHead | null = null, candidate?: ByteInventory, readonly resumeAdoption?: boolean) {
-    this.head = head; this.candidate = candidate ?? { manifest: context.source.manifest, ref: { name: '', digest: hash(''), byteLength: 0 }, files: context.source.artifacts };
+    this.head = head; this.candidate = candidate ?? { manifest: context.source.manifest, ref: { name: '', digest: hash(''), byteLength: 0 }, files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
     this.deadline = new WorkDeadline(context.store, context.authority, context.plan.controls.drainReserveMs, context.signal);
     this.events = new ControllerEvents(context.store, context.artifacts, context.onEvent, () => this.deadline.stop('OUTPUT_LIMIT'), head?.progress.eventSequence ?? 0);
     this.verifier = new Verifier(context.store, context.authority, context.artifacts, context.plan, context.lock, () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; });
@@ -111,7 +113,7 @@ export class Cycle {
   }
   async bootstrap(): Promise<void> {
     const { plan, lock, source, artifacts } = this.context;
-    const manifest = await artifacts.json('manifest', source.manifest, 32768); this.candidate = { manifest: source.manifest, ref: manifest, files: source.artifacts };
+    const manifest = await artifacts.json('manifest', source.manifest, 32768); this.candidate = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
     const bound = bindSubject(lock, source.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'admission');
     await this.events.push('admission', null);
     await this.publish({ version: 2, runId: lock.spec.runId, lockHash: lock.spec.lockHash, stage: { kind: 'bootstrap', phase: 'bootstrap', capacity: plan.capacity },
@@ -124,7 +126,7 @@ export class Cycle {
     const negative = this.head!.progress.verifierRefusals.find(item => item.slot === slotId && item.generation === this.generation);
     if (negative) {
       const known = this.refusals.get(slotId + ':' + this.generation); if (known) return known;
-      const source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts };
+      const source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
       const prepared = preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, negative.producerNonce); if (prepared.kind !== 'refused') refuse('RECOVERY_REQUIRED', '', 'recovery');
       await this.verifier.validateStoredRefusal(prepared.prepared, negative);
       const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId), phase = 'verify.' + this.generation + '.' + ordinal;
@@ -139,7 +141,7 @@ export class Cycle {
       const gateSlot = plan.verifierSlots.find(item => item.id === slotId)!.handler.implementation === 'gate.v1';
       const job = gateSlot
         ? prepareGate(plan, lock, slotId, this.candidate, this.generation, existing.producerNonce, this.context.loaded.registry.spec.gateEndpoints)
-        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts }, this.candidate, this.generation, existing.producerNonce);
+        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs }, this.candidate, this.generation, existing.producerNonce);
       const operation = this.context.store.getOperation(job.operationId);
       const restored = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND' && existing.receipt === null
         ? await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal))
@@ -162,7 +164,7 @@ export class Cycle {
     }
     if (this.draft.failures.length >= 16) refuse('OUTPUT_LIMIT', '', 'verification');
     await this.guard(); const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId); if (ordinal < 0) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-    const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts };
+    const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
     const gateSlot = plan.verifierSlots[ordinal]!.handler.implementation === 'gate.v1';
     const sized = gateSlot ? null : preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
     if (sized && sized.kind === 'refused') {
@@ -276,9 +278,15 @@ export class Cycle {
       if (purpose === 'compaction' && restore === null) refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
     }
     const hostDirectory = join(directory, 'runtime', commandId); await privateDirectory(hostDirectory);
+    let baseline: PiOpenInputV2['candidate']['baseline'];
+    if (this.context.source.version === 2) {
+      const baselineDirectory = join(hostDirectory, 'baseline');
+      await materializeBaseline(this.context.source, baselineDirectory, this.context.owner, this.deadline);
+      baseline = { directory: baselineDirectory, entries: this.context.source.baselineEntries ?? [] };
+    }
     const host: PiHostV2 = { store, authority, directory: hostDirectory, artifactsDirectory: artifacts.directory, dockerExecutable: role.runtime.dockerExecutable, dockerSocket: role.runtime.dockerSocket, runtime: role.runtime.identity,
       ...approvedState(loaded).vault.bind({ runId: lock.spec.runId, roleId: role.roleId, stepId: nativeStepId, providerCredentialRef: role.providerCredentialRef, selection: role.policy.selection, mcp: role.policy.mcp }) };
-    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: this.candidate.files }, resources: approvedState(loaded).resources, restore };
+    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: this.candidate.files, ...(baseline ? { baseline } : {}) }, resources: approvedState(loaded).resources, restore };
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;
@@ -305,9 +313,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       noEffectMcpAuth = outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.error?.effect === 'none' && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       if (outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
-        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
+        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
       if (outcome.status !== 'execution_settled' || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: outcome.error?.code ?? null, effect: outcome.error?.effect ?? 'possible' });
-      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome);
+      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source);
       if ((repair === 'format' || purpose === 'compaction') && !same(captured.digest, oldDigest)) refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'confirmed' });
       structureFailure = await this.completeCapture(attempt, captured);
     } catch (error) {
@@ -339,7 +347,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (!adopt) { await this.role(attempt.nodeId, attempt.repair, undefined, attempt); return; }
     const original = this.context.plan.roles.find(role => role.roleId === this.context.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
     const role = attempt.repair === 'format' ? { ...original, policy: formatPolicy(original.policy) } : original;
-    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt);
+    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt, undefined, this.context.source);
     const failure = await this.completeCapture(attempt, captured);
     if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
     if (failure === 'SUBMISSION_INVALID') await this.repairFormat(attempt.nodeId);
@@ -386,9 +394,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (!failed.length || this.submission?.value.status === 'no_change' && !plan.noChangeEligibility.available) return false;
     const allAvailable = required.every(slot => checks.some(check => check.slotId === slot.id && check.status !== 'blocked'));
     if (!allAvailable || checks.some(check => plan.verifierSlots.find(slot => slot.id === check.slotId)!.implicit === 'scope' && check.status !== 'passed')) return false;
-    const prior = this.draft.attempts.filter(attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!.policy.tools.some(tool => tool === 'write' || tool === 'edit')).at(-1);
+    const prior = this.draft.attempts.filter(attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete')).at(-1);
     const target = prior?.nodeId, node = plan.orderedDAG.find(node => node.id === target), role = plan.roles.find(role => role.roleId === node?.roleId);
-    if (!node || !role?.policy.tools.some(tool => tool === 'write' || tool === 'edit')) return false;
+    if (!node || !role?.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete')) return false;
     this.repairBound('implementation', true, Math.max(0, ...this.draft.failures.filter(item => failed.some(check => same(check.output, item.evidence))).map(item => item.count)));
     const candidateDigest = this.draft.candidate.digest;
     const findings: {

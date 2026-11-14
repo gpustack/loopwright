@@ -77,13 +77,20 @@ test('source topology refuses symlinks, submodules and case collisions before ma
     }
   } finally { await f.close(); }
 });
-test('source inventory and total-body limits refuse the 257th file and 4-MiB-plus-one body', async () => {
+test('source inventory switches to version 2 tree_overlay beyond the 128-file or 4-MiB classic thresholds', async () => {
   const f = await retainedFixture();
   try {
     const r = await repository(f), blob = await r.blob(Buffer.from('inert'));
     const crowded = await r.commit(await r.tree(Array.from({ length: 257 }, (_, index) => ({ mode: '100644', type: 'blob', oid: blob, name: 'f' + String(index).padStart(3, '0') }))));
-    await assert.rejects(freezeSource(f.taskDirectory, r.task(crowded), f.owner, f.artifacts), (error: unknown) => error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_LIMIT');
+    const crowdedFrozen = await freezeSource(f.taskDirectory, r.task(crowded), f.owner, f.artifacts);
+    assert.equal(crowdedFrozen.version, 2);
+    assert.equal(crowdedFrozen.baselineEntries?.length, 257);
+    assert.equal(crowdedFrozen.artifacts.length, 0);
+    assert.ok(crowdedFrozen.manifest.spec.baseTree !== undefined);
     const large = await r.commit(await r.tree([{ mode: '100644', type: 'blob', oid: await r.blob(Buffer.alloc(4194305, 97)), name: 'large' }]));
-    await assert.rejects(freezeSource(f.taskDirectory, r.task(large), f.owner, f.artifacts), (error: unknown) => error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_LIMIT');
+    const largeFrozen = await freezeSource(f.taskDirectory, r.task(large), f.owner, f.artifacts);
+    assert.equal(largeFrozen.version, 2);
+    assert.deepEqual(largeFrozen.baselineEntries?.map(item => item.name), ['large']);
+    assert.equal(largeFrozen.artifacts.length, 0);
   } finally { await f.close(); }
 });

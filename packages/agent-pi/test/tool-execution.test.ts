@@ -8,14 +8,17 @@ import { PiFailure } from '../src/errors.js';
 import { requestFixture, stateGood } from './request-fixtures.js';
 import { sessionInput } from './session-fixtures.js';
 import { contract } from '../../core/test/fixtures.js';
-function input() {
-  const base = sessionInput(), task = contract(); task.spec.roles[0]!.model = 'claude-sonnet-5.5'; task.spec.roles[0]!.thinking = 'xhigh'; task.spec.roles[0]!.tools = ['read', 'bash', 'write', 'edit'];
+import { readdir } from 'node:fs/promises';
+
+function input(extraTools: readonly string[] = []) {
+  const base = sessionInput(), task = contract(), tools = ['read', 'bash', 'write', 'edit', ...extraTools];
+  task.spec.roles[0]!.model = 'claude-sonnet-5.5'; task.spec.roles[0]!.thinking = 'xhigh'; task.spec.roles[0]!.tools = [...tools];
   task.spec.budgets.wallTimeMs = 60000; task.spec.budgets.totalTokens = 1000000; task.spec.budgets.perCallOutputTokens = 1024;
   const lock = admitTask(task, { admissionId: 'admission-1', runId: 'run-1' }); assert.equal(lock.ok, true); if (!lock.ok) throw new Error('fixture lock');
-  return { ...base, lock: lock.value, policy: { ...base.policy, tools: ['read', 'bash', 'write', 'edit'] } };
+  return { ...base, lock: lock.value, policy: { ...base.policy, tools } };
 }
-async function fixture() {
-  const f = await requestFixture(undefined, input), candidate = join(f.directory, 'candidate');
+async function fixture(extraTools: readonly string[] = []) {
+  const f = await requestFixture(undefined, () => input(extraTools)), candidate = join(f.directory, 'candidate');
   for (const file of f.input.candidate.artifacts) { await mkdir(join(candidate, file.name, '..'), { recursive: true }); await writeFile(join(candidate, file.name), file.bytes, { mode: 0o444 }); }
   const actor = () => new Execution(f.host, f.input, candidate, { process: () => { throw new Error('Host mutations must not run an interpreter'); } });
   return { ...f, candidate, actor };
@@ -68,4 +71,100 @@ test('final executor revalidates bytes after an admitted native tool_call hook',
     await assert.rejects(sender.tool(tool, Buffer.from(JSON.stringify({ ...originalArgs, content: 'MUTATED_AFTER_HOOK' }))), error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED');
     await assert.rejects(readFile(join(f.candidate, 'packages/new.ts'))); assert.equal(stateGood(f.host.store.inspect()).counts.operations, 1);
   } finally { sender.cancel(); await execution.close(); await f.cleanup(); }
+});
+
+test('mediated delete records local_write receipt with deleted:true discriminator and rejects invalid arguments', async () => {
+  const f = await fixture(['delete']), execution = f.actor(), operations: string[] = [];
+  try {
+    assert.throws(
+      () => execution.invoke({ ...identity, callId: 'call-bad-arg', name: 'delete' }, Buffer.from(JSON.stringify({ path: 'packages/example.ts', extra: true })), new AbortController().signal, () => {}),
+      error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED',
+    );
+    const delResult = await execution.invoke({ ...identity, callId: 'call-del', name: 'delete' }, Buffer.from(JSON.stringify({ path: 'packages/example.ts' })), new AbortController().signal, id => operations.push(id));
+    assert.equal(delResult.isError, undefined);
+    assert.deepEqual(delResult.content, [{ type: 'text', text: 'Deleted scoped candidate file: packages/example.ts' }]);
+    assert.equal((delResult.details as { native?: { deleted?: string } }).native?.deleted, 'packages/example.ts');
+    await assert.rejects(readFile(join(f.candidate, 'packages/example.ts')));
+    assert.equal(operations.length, 1);
+    const record = stateGood(f.host.store.getOperation(operations[0]!));
+    assert.equal(record.state, 'confirmed');
+    assert.equal(record.intent.effect, 'local_write');
+    assert.equal(record.initialReceipt?.outcome, 'succeeded');
+    const receiptsDir = join(f.host.artifactsDirectory, 'pi-receipts');
+    const files = (await readdir(receiptsDir)).filter(file => file.endsWith('.json'));
+    const payloads = await Promise.all(files.map(async file => JSON.parse(await readFile(join(receiptsDir, file), 'utf8')) as { tool?: string; subject?: { operationId?: string }; before?: { hex: string } | null; after?: unknown; deleted?: boolean }));
+    const deleteReceipt = payloads.find(payload => payload.subject?.operationId === operations[0]);
+    assert.ok(deleteReceipt);
+    assert.equal(deleteReceipt.tool, 'delete');
+    assert.equal(typeof deleteReceipt.before?.hex, 'string');
+    assert.equal(deleteReceipt.after, null);
+    assert.equal(deleteReceipt.deleted, true);
+  } finally { await execution.close(); await f.cleanup(); }
+});
+
+test('pre-guard failure records not_executed with deleted:false while post-guard crash leaves operation unresolved and blocks subsequent tools', async () => {
+  {
+    const f = await fixture(['delete']), execution = f.actor();
+    const originalCommit = execution.candidate.commit.bind(execution.candidate);
+    execution.candidate.commit = async (change, guard) => {
+      if (change.deleted) {
+        throw new Error('simulated pre-guard failure');
+      }
+      return originalCommit(change, guard);
+    };
+    const operations: string[] = [];
+    try {
+      await assert.rejects(
+        execution.invoke({ ...identity, callId: 'call-pre-crash-del', name: 'delete' }, Buffer.from(JSON.stringify({ path: 'packages/example.ts' })), new AbortController().signal, id => operations.push(id)),
+        error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED' && error.detail.effect === 'none',
+      );
+      assert.equal(operations.length, 1);
+      const record = stateGood(f.host.store.getOperation(operations[0]!));
+      assert.equal(record.state, 'confirmed');
+      assert.equal(record.initialReceipt?.outcome, 'not_executed');
+      assert.equal(stateGood(f.host.store.inspect()).counts.unresolvedOperations, 0);
+
+      const receiptsDir = join(f.host.artifactsDirectory, 'pi-receipts');
+      const files = (await readdir(receiptsDir)).filter(file => file.endsWith('.json'));
+      const payloads = await Promise.all(files.map(async file => JSON.parse(await readFile(join(receiptsDir, file), 'utf8')) as { tool?: string; outcome?: string; subject?: { operationId?: string }; after?: unknown; deleted?: boolean }));
+      const notExecutedDel = payloads.find(payload => payload.subject?.operationId === operations[0] && payload.tool === 'delete' && payload.outcome === 'not_executed');
+      assert.ok(notExecutedDel);
+      assert.equal(notExecutedDel.after, null);
+      assert.equal(notExecutedDel.deleted, false);
+    } finally { await execution.close(); await f.cleanup(); }
+  }
+
+  const f = await fixture(['delete']), execution = f.actor();
+  let calls = 0;
+  const originalCommit = execution.candidate.commit.bind(execution.candidate);
+  execution.candidate.commit = async (change, guard) => {
+    calls += 1;
+    if (change.deleted) {
+      guard();
+      throw new Error('simulated post-unlink crash');
+    }
+    return originalCommit(change, guard);
+  };
+  const operations: string[] = [];
+  try {
+    await assert.rejects(
+      execution.invoke({ ...identity, callId: 'call-crash-del', name: 'delete' }, Buffer.from(JSON.stringify({ path: 'packages/example.ts' })), new AbortController().signal, id => operations.push(id)),
+      error => error instanceof PiFailure && error.detail.code === 'RECOVERY_REQUIRED' && error.detail.effect === 'possible',
+    );
+    assert.equal(calls, 1);
+    assert.equal(operations.length, 1);
+    assert.equal(stateGood(f.host.store.inspect()).counts.unresolvedOperations, 1);
+    const record = stateGood(f.host.store.getOperation(operations[0]!));
+    assert.equal(record.state, 'unresolved');
+    assert.equal(record.initialReceipt, null);
+
+    const receiptsDir = join(f.host.artifactsDirectory, 'pi-receipts');
+    const files = await readdir(receiptsDir).catch(() => [] as string[]);
+    assert.equal(files.filter(file => file.endsWith('.json')).length, 0);
+
+    await assert.rejects(
+      execution.invoke({ ...identity, callId: 'call-after-crash', name: 'write' }, Buffer.from(JSON.stringify({ path: 'packages/other.ts', content: 'DENIED' })), new AbortController().signal, () => {}),
+      error => error instanceof PiFailure && error.detail.code === 'RECOVERY_REQUIRED',
+    );
+  } finally { await execution.close(); await f.cleanup(); }
 });

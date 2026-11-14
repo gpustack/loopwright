@@ -5,6 +5,7 @@ import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
 import { stateValue, checkedRef, ArtifactStore, type ArtifactReader } from './storage.js';
 import { checkedRefusalRecord, checkedRefusalSubject, refusalSubject } from './refusal-record.js';
+import { canonicalizeCandidateManifest, compareUtf16 } from './source.js';
 import type { CheckpointCapacity, CompiledPlan, ControllerProgress, ReceiptIndex } from './types.js';
 
 export function phaseCheckpointId(runId: string, phase: string): string {
@@ -159,7 +160,12 @@ export class ProgressStore {
     const identified = identifyManifest(parsePrivateJson(await this.artifacts.read(ref, 32768), 32768));
     if (!identified.ok) refuse('ARTIFACT_INVALID', '', 'recovery');
     const manifest = identified.value.manifest;
-    if (manifest.metadata.id !== 'candidate' || !same([...manifest.spec.entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0), manifest.spec.entries)) refuse('ARTIFACT_INVALID', '', 'recovery'); return manifest;
+    if (manifest.metadata.id !== 'candidate'
+      || !same([...manifest.spec.entries].sort((a, b) => compareUtf16(a.name, b.name)), manifest.spec.entries)
+      || (manifest.spec.deleted !== undefined && !same([...manifest.spec.deleted].sort(compareUtf16), manifest.spec.deleted))) {
+      refuse('ARTIFACT_INVALID', '', 'recovery');
+    }
+    return manifest;
   }
   async read(): Promise<ProgressHead | null> {
     if (!same(parsePrivateJson(await this.artifacts.read(this.planRef, 1048576), 1048576), this.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -212,7 +218,7 @@ export class ProgressStore {
         const originalRef = checkedRef(wrapper.originalManifest), manifestRef = checkedRef(wrapper.manifest);
         const original = identifyManifest(parsePrivateJson(await this.artifacts.read(originalRef, 32768), 32768)), canonicalManifest = await this.manifest(manifestRef);
         if (!original.ok) refuse('ARTIFACT_INVALID', '', 'recovery'); const originalSubject = bindSubject(this.lock, original.value.manifest);
-        if (!originalSubject.ok || !same(originalSubject.value, native.subject) || !same(canonicalManifest, { ...original.value.manifest, metadata: { id: 'candidate' }, spec: { entries: [...original.value.manifest.spec.entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0) } })) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        if (!originalSubject.ok || !same(originalSubject.value, native.subject) || !same(canonicalManifest, canonicalizeCandidateManifest(original.value.manifest))) refuse('RECOVERY_REQUIRED', '', 'recovery');
         if (wrapper.submission !== null) await verify(checkedRef(wrapper.submission), 1048576);
         const interval = record(wrapper.journal, ['requestIds', 'operationIds']);
         if (!same(interval.requestIds, before.requests.filter(item => item.sequence > attempt.before.requests && item.sequence <= native.counts.requests).map(item => item.admission.requestId))

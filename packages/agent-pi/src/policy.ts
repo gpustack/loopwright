@@ -167,8 +167,8 @@ export function validatePolicy(input: Json): AdapterPolicy {
   if (!Array.isArray(value.extensions) || value.extensions.length) refuse('EXTENSION_UNSUPPORTED', '/policy/extensions');
   if (value.accounting !== 'soft_only' || value.retry !== 'sender_only') refuse('CAPABILITY_UNSUPPORTED', '/policy');
   if (typeof value.privateArtifacts !== 'boolean') refuse('INPUT_INVALID', '/policy/privateArtifacts');
-  if (!Array.isArray(value.tools) || value.tools.length > 6 || new Set(value.tools).size !== value.tools.length) refuse('INPUT_INVALID', '/policy/tools');
-  if (value.tools.some(name => !['read', 'bash', 'write', 'edit', 'codemode', 'mcp__workspace__read_file'].includes(name as string))) refuse('TOOL_DENIED', '/policy/tools');
+  if (!Array.isArray(value.tools) || value.tools.length > 8 || new Set(value.tools).size !== value.tools.length) refuse('INPUT_INVALID', '/policy/tools');
+  if (value.tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name as string))) refuse('TOOL_DENIED', '/policy/tools');
   const mcp = object(value.mcp, ['serverId', 'scriptDigest', 'names', 'effects', 'idleTimeoutSeconds', 'absoluteTimeoutSeconds'], '/policy/mcp');
   if (mcp.serverId !== 'workspace') refuse('CAPABILITY_UNSUPPORTED', '/policy/mcp'); validateDigest(mcp.scriptDigest, '/policy/mcp/scriptDigest');
   if (!Array.isArray(mcp.names) || !Array.isArray(mcp.effects)) refuse('INPUT_INVALID', '/policy/mcp');

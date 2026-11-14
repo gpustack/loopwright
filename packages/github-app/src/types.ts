@@ -44,7 +44,7 @@ export class GitHubAppError extends Error {
 export const TASKPACK_MANIFEST_API_VERSION = 'loopwright.dev/v1alpha1' as const;
 export const TASKPACK_MANIFEST_BYTES = 65_536;
 /** Automation paths every target repository keeps protected, regardless of the manifest. */
-export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.claude', '.agents', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
+export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.claude', '.codex', '.agents', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
 
 export type TaskpackUpstreamKind = 'github-release' | 'git-tag' | 'git-commit' | 'http-json' | 'custom-table';
 export type TaskpackCommentCommand = 'retry' | 'revise' | 'status';

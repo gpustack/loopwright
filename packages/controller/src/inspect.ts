@@ -7,6 +7,7 @@ import { ProgressStore, journal, type ProgressHead } from './progress.js';
 import { stateValue, checkedRef } from './storage.js';
 import { parsePrivateJson } from './parser.js';
 import { freeze, hash, id, list, record, same } from './schema.js';
+import { canonicalizeCandidateManifest } from './source.js';
 import { formatPolicy } from './repair.js';
 import { PublicBundle, type ExportManifest } from './bundle.js';
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -44,7 +45,14 @@ export function readStatus(input: RetainedRunInput) {
 type Snapshot = Awaited<ReturnType<typeof snapshot>>;
 async function candidateFiles(saved: Snapshot, head: ProgressHead) {
   if (head.progress.candidate.privateSession === null) {
-    const source = record(parsePrivateJson(await saved.artifacts.read(saved.descriptor.source, 262144), 262144), ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'manifest', 'entries']);
+    const rawSource = parsePrivateJson(await saved.artifacts.read(saved.descriptor.source, 262144), 262144);
+    const sourceVersion = isRecord(rawSource) ? rawSource.version : undefined;
+    if (sourceVersion === 2) {
+      record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'baseTree', 'manifest', 'sourceTree', 'entryCount']);
+      if (head.manifest.spec.entries.length !== 0 || head.manifest.spec.baseTree === undefined) refuse('ARTIFACT_INVALID', '', 'inspection');
+      return [];
+    }
+    const source = record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'manifest', 'entries']);
     const files = []; let total = 0;
     for (const raw of list(source.entries, '', 256)) {
       const entry = record(raw, ['name', 'mode', 'oid', 'ref', 'artifact']), ref = checkedRef(entry.ref), bytes = await saved.artifacts.read(checkedRef(entry.artifact), 4194304), actual = digestArtifact(ref.name, bytes);
@@ -58,7 +66,7 @@ async function candidateFiles(saved: Snapshot, head: ProgressHead) {
   const decoded = await decodePiCapture({ version: 1, lock: saved.lock, policy: attempt.repair === 'format' ? formatPolicy(role.policy) : role.policy, checkpoint, sessionId: attempt.sessionId, roleId: role.roleId, stepId: attempt.nativeStepId,
     workspace: { ref: checkpoint.workspace, bytes: await saved.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await saved.artifacts.read(checkpoint.privateSession!, 2097152) },
     command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await saved.artifacts.read(attempt.command, 16384)), requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId) } });
-  if (!decoded.ok || !same([...decoded.value.candidate.spec.entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0), head.manifest.spec.entries)) refuse('ARTIFACT_INVALID', '', 'inspection'); return decoded.value.artifacts;
+  if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('ARTIFACT_INVALID', '', 'inspection'); return decoded.value.artifacts;
 }
 export interface InspectRunInput extends RetainedRunInput { readonly output?: string }
 export interface InspectRunValue {

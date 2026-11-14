@@ -633,7 +633,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       roleProfiles: [{
         id: 'taskpack-author-role',
         selection,
-        tools: ['read', 'write', 'edit', 'bash'],
+        tools: ['read', 'write', 'edit', 'bash', 'delete'],
         context: {
           mode: 'estimated_guard' as const, estimator: 'lw-pi-final-json-bytes-v1', proofId: null, version: 1,
           evidence: 'estimated' as const, workingWindowCeiling: 98_304, maxRequestBytes: 65_536, serviceMargin: 32_768,
@@ -687,7 +687,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       },
       roles: [{
         id: 'author', adapter: 'pi', provider: selection.provider, model: selection.model,
-        thinking: selection.thinking, tools: ['read', 'write', 'edit', 'bash'],
+        thinking: selection.thinking, tools: ['read', 'write', 'edit', 'bash', 'delete'],
       }],
       trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: compiledResources },
       budgets: bindings.budgets,

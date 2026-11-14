@@ -135,8 +135,10 @@ test('freezeSource skips protected 120000 symlinks and excludes them from the 25
       f.owner,
       f.artifacts,
     );
-    assert.equal(crowdedFrozen.artifacts.length, 200);
-    assert.equal(crowdedFrozen.manifest.spec.entries.some(item => item.name.startsWith('.claude/')), false);
+    assert.equal(crowdedFrozen.version, 2);
+    assert.equal(crowdedFrozen.artifacts.length, 0);
+    assert.equal(crowdedFrozen.baselineEntries?.length, 200);
+    assert.equal(crowdedFrozen.baselineEntries?.some(item => item.name.startsWith('.claude/')), false);
   } finally {
     await f.close();
   }
@@ -171,7 +173,7 @@ test('freezeSource still refuses unprotected 120000 symlinks with CAPABILITY_UNS
   }
 });
 
-test('freezeSource refuses a 160000 submodule under a protected path with CAPABILITY_UNSUPPORTED', async () => {
+test('freezeSource skips a 160000 submodule under a protected path and refuses unprotected 160000 with CAPABILITY_UNSUPPORTED', async () => {
   const f = await retainedFixture();
   try {
     const r = await gitRepoFixture(f);
@@ -188,8 +190,17 @@ test('freezeSource refuses a 160000 submodule under a protected path with CAPABI
       { mode: '100644', type: 'blob', oid: fileBlob, name: 'src.ts' },
     ]);
     const oid = await r.commit(rootTree);
+    const frozen = await freezeSource(f.taskDirectory, r.task(oid, ['.claude/**']), f.owner, f.artifacts);
+    assert.equal(frozen.version, 1);
+    assert.deepEqual(frozen.manifest.spec.entries.map(item => item.name), ['src.ts']);
+
+    const unprotectedRoot = await r.tree([
+      { mode: '160000', type: 'commit', oid: subCommit, name: 'vendor-sub' },
+      { mode: '100644', type: 'blob', oid: fileBlob, name: 'src.ts' },
+    ]);
+    const unprotectedOid = await r.commit(unprotectedRoot);
     await assert.rejects(
-      freezeSource(f.taskDirectory, r.task(oid, ['.claude/**']), f.owner, f.artifacts),
+      freezeSource(f.taskDirectory, r.task(unprotectedOid, ['.claude/**']), f.owner, f.artifacts),
       (error: unknown) =>
         error instanceof ControllerFailure &&
         error.diagnostic.code === 'CAPABILITY_UNSUPPORTED' &&
@@ -200,7 +211,7 @@ test('freezeSource refuses a 160000 submodule under a protected path with CAPABI
   }
 });
 
-test('freezeSource refuses > 4 MiB regular files alongside protected symlinks with CONFIG_LIMIT', async () => {
+test('freezeSource admits > 4 MiB regular files alongside protected symlinks as version 2 tree_overlay', async () => {
   const f = await retainedFixture();
   try {
     const r = await gitRepoFixture(f);
@@ -215,13 +226,10 @@ test('freezeSource refuses > 4 MiB regular files alongside protected symlinks wi
       { mode: '100644', type: 'blob', oid: largeBlob, name: 'big-b.bin' },
     ]);
     const oid = await r.commit(rootTree);
-    await assert.rejects(
-      freezeSource(f.taskDirectory, r.task(oid, ['.claude/**']), f.owner, f.artifacts),
-      (error: unknown) =>
-        error instanceof ControllerFailure &&
-        error.diagnostic.code === 'CONFIG_LIMIT' &&
-        error.diagnostic.phase === 'admission',
-    );
+    const frozen = await freezeSource(f.taskDirectory, r.task(oid, ['.claude/**']), f.owner, f.artifacts);
+    assert.equal(frozen.version, 2);
+    assert.equal(frozen.artifacts.length, 0);
+    assert.deepEqual(frozen.baselineEntries?.map(item => item.name), ['big-a.bin', 'big-b.bin']);
   } finally {
     await f.close();
   }

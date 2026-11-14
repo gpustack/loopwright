@@ -127,6 +127,7 @@
 | [2026-11-11-native-os-sandbox-execution-backends.md](../specs/2026-11-11-native-os-sandbox-execution-backends.md) | native os sandbox execution backends |
 | [2026-11-11-reviewed-memory-and-cas-compaction.md](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md) | reviewed memory and cas compaction |
 | [2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md](../specs/2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md) | YAML configuration, connected guides, and branded site |
+| [2026-11-13-tree-overlay-manifest-and-candidate-delete.md](../specs/2026-11-13-tree-overlay-manifest-and-candidate-delete.md) | tree overlay manifests and candidate deletion |
 | [2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md) | Turnkey execution, scope, and output modes |
 
 ## All pages

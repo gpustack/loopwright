@@ -96,7 +96,13 @@ export async function constructAdapter(unownedHost: PiHost, input: unknown, port
       void (async () => { await events.push('cancellation', { code: remaining === null ? 'AUTHORITY_REFUSED' : 'DEADLINE' }).catch(() => {}); await stopEvents(); })().catch(() => {});
     }; scheduleDeadline();
     let facts: PiCapabilities;
-    try { facts = freeze(await session.start()); if (fatal) stateFailure(fatal); }
+    try {
+      facts = freeze(await session.start());
+      if (owned.candidate.baseline) {
+        await execution.candidate.captureBaselineStats();
+      }
+      if (fatal) stateFailure(fatal);
+    }
     catch (error) { clearInterval(renewTimer); clearTimeout(deadlineTimer); await cleanupRoles(); await lease.release(); if (error instanceof PiFailure) throw error; refuse('CONTAINMENT_UNAVAILABLE'); }
     const ready = () => { if (fatal) stateFailure(fatal); if (closed) refuse('CANCELLED', '', { phase: 'session' }); };
     let shutdownWork: Promise<PiResult<{ readonly closed: true }>> | null = null;

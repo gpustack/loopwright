@@ -3,7 +3,7 @@ export { LIMITS } from './limits.js';
 export { DIAGNOSTIC_CODES, type DiagnosticCode, type Diagnostic, type Result } from './diagnostics.js';
 export { isWritablePath, type TaskContract, type Digest, type ArtifactRef, type EvidenceLevel, type CheckStatus } from './contracts.js';
 export { admitTask, identifyManifest, bindSubject, type TaskLock, type Subject } from './identity.js';
-export { digestArtifact, type ArtifactManifest, type ResolvedArtifact } from './artifacts.js';
+export { digestArtifact, type ArtifactManifest, type BaseTreeAnchor, type ResolvedArtifact } from './artifacts.js';
 export { evaluateAcceptance, type VerificationResult, type EvaluatedCheck } from './acceptance.js';
 export type { Evidence, SubmittedCheck } from './evidence.js';
 export { aggregateUsage, type RequestUsage, type Quantity, type Aggregate, type UsageSummary } from './usage.js';

@@ -16,6 +16,14 @@ The root build compiles `core`, `state`, `agent-pi`, `controller`, `taskpack-run
 
 Core owns contracts and evidence; state owns fenced local authority; the adapter owns isolated execution; controller coordinates independent verification and authenticated effects. The runner owns offline parity, memory owns reviewed compaction, decisions provide bounded advice, the App owns intake and token scoping, and the CLI exposes operations. Preserve unknown outcomes and do not promote fixture evidence into deployed acceptance.
 
+Controller admits `version: 2` `tree_overlay` sources with `git ls-tree -r -l -z --full-tree`.
+Admission permits at most 65,536 regular files and an 8 MiB `source-tree` NDJSON artifact.
+It skips protected Git symlinks (`120000`) and gitlinks (`160000`); unprotected ones fail admission.
+It rejects case, NFC-NFD, and file-prefix collisions.
+
+Controller materializes raw baseline blobs with `git cat-file --batch`.
+This bypasses `.gitattributes` filters and preserves Git blob bytes.
+
 ## Architecture decisions
 
 The public site contains 9 pages; [Development](../development.md) and this guide remain repository-only. Run `npm run lint:docs`, `node scripts/check-docs.mjs --report`, and `npm run site` after documentation changes.

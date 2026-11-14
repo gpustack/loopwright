@@ -1,11 +1,12 @@
 import { constants } from 'node:fs';
 import { mkdir, open, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { digestArtifact, validateDocument, type ArtifactRef } from '@loopwright/core';
+import { digestArtifact, type ArtifactRef } from '@loopwright/core';
 import type { StateResult } from '@loopwright/state';
 import { ControllerFailure, refuse } from './errors.js';
 import { canonicalComponents, readBoundedFile, inside } from './files.js';
-import { canonical, hash, same } from './schema.js';
+import { canonical, checkedRef, hash, same } from './schema.js';
+export { checkedRef };
 import type { ControllerOwner } from './ownership.js';
 import type { CredentialVault } from './credentials.js';
 export function stateValue<T>(result: StateResult<T>): T {
@@ -18,10 +19,6 @@ export async function privateDirectory(path: string, excluded: readonly string[]
   if (resolve(path) !== path || excluded.some(root => inside(path, resolve(root)))) refuse('ARTIFACT_INVALID', '', 'admission');
   await mkdir(path, { recursive: true, mode: 0o700 }); await canonicalComponents(path);
   const info = await lstat(path); if (!info.isDirectory() || info.uid !== process.getuid?.() || info.mode & 0o077) refuse('ARTIFACT_INVALID', '', 'admission');
-}
-export function checkedRef(value: unknown): ArtifactRef {
-  const manifest = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'reference' }, spec: { entries: [value] } }, 'ArtifactManifest');
-  if (!manifest.ok) refuse('ARTIFACT_INVALID', '', 'recovery'); return manifest.value.spec.entries[0]!;
 }
 export interface ArtifactReader { read(ref: ArtifactRef, maximum?: number): Promise<Uint8Array> }
 export async function readArtifact(directory: string, unowned: ArtifactRef, maximum = 8388608): Promise<Uint8Array> {

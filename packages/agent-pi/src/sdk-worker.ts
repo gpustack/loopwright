@@ -89,7 +89,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     if (message.kind === 'init') {
       if (session || restoring) throw new Error('duplicate init');
       const value = message.body as { selection: AdapterPolicy['selection']; systemPrompt: string; outputTokens: number; toolNames: string[]; mcp: AdapterPolicy['mcp']; toolResultBytes: number; sessionBytes: number };
-      if (!Array.isArray(value.toolNames) || value.toolNames.length > 6 || new Set(value.toolNames).size !== value.toolNames.length || value.toolNames.some(name => !['read', 'bash', 'write', 'edit', 'codemode', 'mcp__workspace__read_file'].includes(name))) throw new Error('Tool allowlist');
+      if (!Array.isArray(value.toolNames) || value.toolNames.length > 8 || new Set(value.toolNames).size !== value.toolNames.length || value.toolNames.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name))) throw new Error('Tool allowlist');
       if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 8388608) throw new Error('Session bound'); sessionBytes = value.sessionBytes; snapshotPolicy = { selection: value.selection, tools: value.toolNames, limits: { sessionBytes } };
       if (!Number.isSafeInteger(value.toolResultBytes) || value.toolResultBytes < 1 || value.toolResultBytes > 65536) throw new Error('Tool result bound'); toolResultBytes = value.toolResultBytes;
       if (!Number.isSafeInteger(value.outputTokens) || value.outputTokens < 1 || value.outputTokens > 1024) throw new Error('output bound'); outputTokens = value.outputTokens;

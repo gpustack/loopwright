@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -74,10 +74,16 @@ function sseStop(model: string, text: string): string {
   ].join('\n');
 }
 
+import { decodePiCapture } from '../src/decode-capture.js';
+import { gitBlobOid } from '../src/candidate.js';
+import { validatePolicy } from '../src/policy.js';
+import { PiFailure } from '../src/errors.js';
+
 async function createHostSessionFixture(options: {
   readonly baseUrl: string;
   readonly tools?: readonly string[];
   readonly mcpNames?: readonly 'mcp__workspace__read_file'[];
+  readonly candidate?: PiOpenInput['candidate'];
 }) {
   const filesRes = await describePiAdapterFiles();
   assert.equal(filesRes.ok, true);
@@ -207,7 +213,7 @@ async function createHostSessionFixture(options: {
       privateArtifacts: true,
       limits: MAX_LIMITS,
     },
-    candidate: {
+    candidate: options.candidate ?? {
       manifest: {
         apiVersion: 'loopwright.dev/v1alpha1',
         kind: 'ArtifactManifest',
@@ -727,6 +733,409 @@ test('HostToolProcess fails closed with CONTAINMENT_MISMATCH when host confineme
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     fixture.cleanup();
+  }
+});
+
+test('validatePolicy accepts 7 tools including delete and rejects > 8 tools', async () => {
+  const filesRes = await describePiAdapterFiles();
+  assert.equal(filesRes.ok, true);
+  if (!filesRes.ok) return;
+  const seven = ['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'];
+  const graphDigest = digest(readFileSync(new URL('../../../../package-lock.json', import.meta.url)));
+  const runtime = {
+    sdkIntegrity: filesRes.value.sdkIntegrity,
+    graphDigest,
+    imageDigest: 'sha256:' + 'b'.repeat(64),
+    configDigest: filesRes.value.restrictionDigest,
+    profile: 'linux/arm64' as const,
+  };
+  const basePolicy = {
+    version: 1,
+    policyId: 'policy-p7',
+    resourceVersion: 'context-host-1',
+    adapterId: 'pi',
+    adapterVersion: '0.0.0',
+    runtime,
+    selection: { provider: 'github-copilot', model: 'claude-sonnet-5.5', thinking: 'xhigh', api: 'anthropic-messages' },
+    resources: [filesRes.value.preamble],
+    tools: seven,
+    mcp: { serverId: 'workspace', scriptDigest: filesRes.value.localMcpScriptDigest, names: ['mcp__workspace__read_file'], effects: ['read_only'], idleTimeoutSeconds: 2, absoluteTimeoutSeconds: 10 },
+    context: { mode: 'estimated_guard', estimator: 'lw-pi-final-json-bytes-v1', proofId: null, version: 1, evidence: 'estimated', workingWindowCeiling: 98304, maxRequestBytes: 65536, serviceMargin: 32768, toolReserve: 16384, maxOutputTokens: 512 },
+    accounting: 'soft_only',
+    retry: 'sender_only',
+    extensions: [],
+    privateArtifacts: true,
+    limits: MAX_LIMITS,
+  };
+  const okPolicy = validatePolicy(JSON.parse(JSON.stringify(basePolicy)) as import('../src/boundary.js').Json);
+  assert.equal(okPolicy.tools.length, 7);
+  assert.throws(
+    () => validatePolicy(JSON.parse(JSON.stringify({ ...basePolicy, tools: [...seven, 'read', 'write'] })) as import('../src/boundary.js').Json),
+    error => error instanceof PiFailure && error.detail.code === 'INPUT_INVALID',
+  );
+});
+
+test('HostRuntimeSession tree_overlay materializes 100755 baseline, gates delete with ENOENT subdir relock tolerance, and preserves overlay capture', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  let callIndex = 0;
+  let bashCandidateDir = '';
+  const capturedBodies: Record<string, unknown>[] = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+    capturedBodies.push(parsed);
+    callIndex++;
+    const body = callIndex === 1
+      ? sseToolCall('glm-5.3', 'call-ov-del', 'delete', { path: 'packages/nested/deep/to-delete.ts' })
+      : callIndex === 2
+        ? sseToolCall('glm-5.3', 'call-ov-bash', 'bash', { command: `"${bashCandidateDir}/packages/run.sh"` })
+        : callIndex === 3
+          ? sseToolCall('glm-5.3', 'call-ov-write', 'write', { path: 'packages/created/sub/new.ts', content: 'export const created = true;\n' })
+          : sseStop('glm-5.3', 'Overlay delete, exec, and write complete.');
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(body);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('server address failed');
+
+  const stagingParent = mkdtempSync(join(realpathSync(tmpdir()), 'loopwright-host-overlay-stage-'));
+  const stagingDir = join(stagingParent, 'baseline');
+  mkdirSync(join(stagingDir, 'packages/nested/deep'), { recursive: true, mode: 0o755 });
+  const initialGoneBytes = Buffer.from('gone\n');
+  const toDeleteBytes = Buffer.from('delete me\n');
+  const keepBytes = Buffer.from('export const keep = 1;\n');
+  const baseExampleBytes = Buffer.from('export const value = 0;\n');
+  const overrideExampleBytes = Buffer.from('export const value = 42;\n');
+  const runShBytes = Buffer.from('#!/bin/sh\necho EXEC_100755_OK\n');
+  writeFileSync(join(stagingDir, 'packages/example.ts'), baseExampleBytes, { mode: 0o444 });
+  writeFileSync(join(stagingDir, 'packages/nested/deep/gone.ts'), initialGoneBytes, { mode: 0o444 });
+  writeFileSync(join(stagingDir, 'packages/nested/deep/to-delete.ts'), toDeleteBytes, { mode: 0o444 });
+  writeFileSync(join(stagingDir, 'packages/nested/keep.ts'), keepBytes, { mode: 0o444 });
+  writeFileSync(join(stagingDir, 'packages/run.sh'), runShBytes, { mode: 0o555 });
+
+  const baselineEntries = [
+    { name: 'packages/example.ts', mode: '100644' as const, oid: gitBlobOid('sha256', baseExampleBytes), byteLength: baseExampleBytes.length },
+    { name: 'packages/nested/deep/gone.ts', mode: '100644' as const, oid: gitBlobOid('sha256', initialGoneBytes), byteLength: initialGoneBytes.length },
+    { name: 'packages/nested/deep/to-delete.ts', mode: '100644' as const, oid: gitBlobOid('sha256', toDeleteBytes), byteLength: toDeleteBytes.length },
+    { name: 'packages/nested/keep.ts', mode: '100644' as const, oid: gitBlobOid('sha256', keepBytes), byteLength: keepBytes.length },
+    { name: 'packages/run.sh', mode: '100755' as const, oid: gitBlobOid('sha256', runShBytes), byteLength: runShBytes.length },
+  ];
+
+  const fixture = await createHostSessionFixture({
+    baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+    tools: ['read', 'bash', 'write', 'edit', 'delete'],
+    candidate: {
+      manifest: {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'ArtifactManifest',
+        metadata: { id: 'candidate' },
+        spec: {
+          baseTree: { objectFormat: 'sha256', commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+          entries: [coreGood(digestArtifact('packages/example.ts', overrideExampleBytes))],
+          deleted: ['packages/nested/deep/gone.ts'],
+        },
+      },
+      baseRevision: 'base-1',
+      sourceRevision: 'source-1',
+      artifacts: [{ name: 'packages/example.ts', bytes: overrideExampleBytes }],
+      baseline: { directory: stagingDir, entries: baselineEntries },
+    },
+  });
+  bashCandidateDir = join(fixture.runtimeDir, 'sdk-' + fixture.inputV2.sessionId, 'candidate');
+
+  try {
+    const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) return;
+
+    const executed = await opened.value.execute({
+      commandId: 'cmd-ov-1',
+      text: 'Delete to-delete.ts, run packages/run.sh, and write packages/created/sub/new.ts.',
+      purpose: 'task',
+      repair: 'none',
+    });
+    assert.equal(executed.ok, true, JSON.stringify(executed));
+    if (!executed.ok) return;
+    assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+    assert.equal(callIndex, 4);
+    assert.ok(JSON.stringify(capturedBodies[2]).includes('EXEC_100755_OK'));
+
+    const candidateDir = bashCandidateDir;
+    assert.equal(existsSync(join(candidateDir, 'packages/nested/deep')), false);
+    assert.equal(statSync(join(candidateDir, 'packages/run.sh')).mode & 0o777, 0o555);
+    assert.equal(statSync(join(candidateDir, 'packages/created/sub')).mode & 0o777, 0o555);
+    assert.equal(statSync(join(candidateDir, 'packages/created')).mode & 0o777, 0o555);
+    assert.equal(statSync(candidateDir).mode & 0o777, 0o555);
+
+    const captured = await opened.value.capture({ checkpointId: 'checkpoint-ov-1' });
+    assert.equal(captured.ok, true, JSON.stringify(captured));
+    if (!captured.ok) return;
+
+    const decoded = await decodePiCapture({
+      version: 1,
+      lock: fixture.inputV2.lock,
+      policy: fixture.inputV2.policy,
+      checkpoint: stateGood(fixture.store.getCheckpoint('checkpoint-ov-1')),
+      sessionId: fixture.inputV2.sessionId,
+      roleId: fixture.inputV2.roleId,
+      stepId: fixture.inputV2.stepId,
+      workspace: {
+        ref: captured.value.workspace,
+        bytes: readFileSync(join(fixture.artifactsDir, captured.value.workspace.name)),
+      },
+      session: {
+        ref: captured.value.session,
+        bytes: readFileSync(join(fixture.artifactsDir, captured.value.session.name)),
+      },
+      command: null,
+    });
+    assert.equal(decoded.ok, true, JSON.stringify(decoded));
+    if (!decoded.ok) return;
+    assert.deepEqual({ ...decoded.value.candidate.spec.baseTree }, {
+      objectFormat: 'sha256',
+      commitOid: 'a'.repeat(64),
+      treeOid: 'b'.repeat(64),
+    });
+    assert.deepEqual(decoded.value.candidate.spec.deleted, [
+      'packages/nested/deep/gone.ts',
+      'packages/nested/deep/to-delete.ts',
+    ]);
+    assert.deepEqual(
+      decoded.value.candidate.spec.entries.map(entry => entry.name),
+      ['packages/created/sub/new.ts', 'packages/example.ts'],
+    );
+    assert.equal(decoded.value.artifacts.some(item => item.name === 'packages/run.sh'), false);
+
+    await opened.value.close();
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    fixture.cleanup();
+    rmSync(stagingParent, { recursive: true, force: true });
+  }
+});
+
+test('HostRuntimeSession tree_overlay refuses wrong-mode, extra-file, or hardlinked staged baseline with RECOVERY_REQUIRED before worker boot', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  for (const kind of ['wrong-mode', 'extra-file', 'hardlink'] as const) {
+    const stagingParent = mkdtempSync(join(realpathSync(tmpdir()), 'loopwright-host-overlay-bad-'));
+    const stagingDir = join(stagingParent, 'baseline');
+    mkdirSync(join(stagingDir, 'packages'), { recursive: true, mode: 0o755 });
+    const keepBytes = Buffer.from('export const keep = 1;\n');
+    const keepPath = join(stagingDir, 'packages/keep.ts');
+    writeFileSync(keepPath, keepBytes, { mode: kind === 'wrong-mode' ? 0o644 : 0o444 });
+    if (kind === 'extra-file') {
+      writeFileSync(join(stagingDir, 'packages/rogue.ts'), 'rogue\n', { mode: 0o444 });
+    } else if (kind === 'hardlink') {
+      linkSync(keepPath, join(stagingParent, 'outside-link.ts'));
+    }
+
+    const fixture = await createHostSessionFixture({
+      baseUrl: 'http://127.0.0.1:1/v1',
+      tools: ['read', 'write', 'edit', 'delete'],
+      candidate: {
+        manifest: {
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'ArtifactManifest',
+          metadata: { id: 'candidate' },
+          spec: {
+            baseTree: { objectFormat: 'sha256', commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+            entries: [],
+            deleted: [],
+          },
+        },
+        baseRevision: 'base-1',
+        sourceRevision: 'source-1',
+        artifacts: [],
+        baseline: {
+          directory: stagingDir,
+          entries: [
+            { name: 'packages/keep.ts', mode: '100644', oid: gitBlobOid('sha256', keepBytes), byteLength: keepBytes.length },
+          ],
+        },
+      },
+    });
+    try {
+      const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+      assert.equal(opened.ok, false, `expected ${kind} to refuse`);
+      if (!opened.ok) {
+        assert.equal(opened.error.code, 'RECOVERY_REQUIRED', JSON.stringify(opened.error));
+      }
+    } finally {
+      fixture.cleanup();
+      rmSync(stagingParent, { recursive: true, force: true });
+    }
+  }
+});
+
+test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> fileBytes), refuses read with TOOL_DENIED, and captures sibling edits/deletes', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  const oversizeBytes = Buffer.alloc(9 * 1024 * 1024, 0x41);
+  const keepBytes = Buffer.from('export const keep = 1;\n');
+  const toDeleteBytes = Buffer.from('delete me\n');
+
+  const createOversizeOverlay = () => {
+    const stagingParent = mkdtempSync(join(realpathSync(tmpdir()), 'loopwright-host-overlay-oversize-'));
+    const stagingDir = join(stagingParent, 'baseline');
+    mkdirSync(join(stagingDir, 'packages'), { recursive: true, mode: 0o755 });
+    writeFileSync(join(stagingDir, 'packages/keep.ts'), keepBytes, { mode: 0o444 });
+    writeFileSync(join(stagingDir, 'packages/large.bin'), oversizeBytes, { mode: 0o444 });
+    writeFileSync(join(stagingDir, 'packages/to-delete.ts'), toDeleteBytes, { mode: 0o444 });
+    const entries = [
+      { name: 'packages/keep.ts', mode: '100644' as const, oid: gitBlobOid('sha256', keepBytes), byteLength: keepBytes.length },
+      { name: 'packages/large.bin', mode: '100644' as const, oid: gitBlobOid('sha256', oversizeBytes), byteLength: oversizeBytes.length },
+      { name: 'packages/to-delete.ts', mode: '100644' as const, oid: gitBlobOid('sha256', toDeleteBytes), byteLength: toDeleteBytes.length },
+    ];
+    return { stagingParent, stagingDir, entries };
+  };
+
+  // 1) Sibling edit + delete + capture succeed while oversize baseline stays untouched
+  {
+    let callIndex = 0;
+    const server = http.createServer(async (req, res) => {
+      for await (const chunk of req) {
+        void chunk;
+      }
+      callIndex++;
+      const body = callIndex === 1
+        ? sseToolCall('glm-5.3', 'call-ov-big-edit', 'edit', { path: 'packages/keep.ts', edits: [{ oldText: 'keep = 1', newText: 'keep = 2' }] })
+        : callIndex === 2
+          ? sseToolCall('glm-5.3', 'call-ov-big-del', 'delete', { path: 'packages/to-delete.ts' })
+          : sseStop('glm-5.3', 'Edited and deleted sibling files.');
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(body);
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('server address failed');
+
+    const { stagingParent, stagingDir, entries } = createOversizeOverlay();
+    const fixture = await createHostSessionFixture({
+      baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+      tools: ['read', 'write', 'edit', 'delete'],
+      candidate: {
+        manifest: {
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'ArtifactManifest',
+          metadata: { id: 'candidate' },
+          spec: {
+            baseTree: { objectFormat: 'sha256', commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+            entries: [],
+            deleted: [],
+          },
+        },
+        baseRevision: 'base-1',
+        sourceRevision: 'source-1',
+        artifacts: [],
+        baseline: { directory: stagingDir, entries },
+      },
+    });
+    try {
+      const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+      assert.equal(opened.ok, true, JSON.stringify(opened));
+      if (!opened.ok) return;
+
+      const executed = await opened.value.execute({
+        commandId: 'cmd-ov-oversize-ok',
+        text: 'Edit packages/keep.ts and delete packages/to-delete.ts.',
+        purpose: 'task',
+        repair: 'none',
+      });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+
+      const captured = await opened.value.capture({ checkpointId: 'checkpoint-ov-oversize-1' });
+      assert.equal(captured.ok, true, JSON.stringify(captured));
+      if (!captured.ok) return;
+
+      const decoded = await decodePiCapture({
+        version: 1,
+        lock: fixture.inputV2.lock,
+        policy: fixture.inputV2.policy,
+        checkpoint: stateGood(fixture.store.getCheckpoint('checkpoint-ov-oversize-1')),
+        sessionId: fixture.inputV2.sessionId,
+        roleId: fixture.inputV2.roleId,
+        stepId: fixture.inputV2.stepId,
+        workspace: {
+          ref: captured.value.workspace,
+          bytes: readFileSync(join(fixture.artifactsDir, captured.value.workspace.name)),
+        },
+        session: {
+          ref: captured.value.session,
+          bytes: readFileSync(join(fixture.artifactsDir, captured.value.session.name)),
+        },
+        command: null,
+      });
+      assert.equal(decoded.ok, true, JSON.stringify(decoded));
+      if (!decoded.ok) return;
+      assert.deepEqual(decoded.value.candidate.spec.entries.map(e => e.name), ['packages/keep.ts']);
+      assert.deepEqual(decoded.value.candidate.spec.deleted, ['packages/to-delete.ts']);
+
+      await opened.value.close();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      fixture.cleanup();
+      rmSync(stagingParent, { recursive: true, force: true });
+    }
+  }
+
+  // 2) Attempting to read the oversize baseline file fails closed with TOOL_DENIED
+  {
+    const server = http.createServer(async (req, res) => {
+      for await (const chunk of req) {
+        void chunk;
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sseToolCall('glm-5.3', 'call-ov-big-read', 'read', { path: 'packages/large.bin' }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('server address failed');
+
+    const { stagingParent, stagingDir, entries } = createOversizeOverlay();
+    const fixture = await createHostSessionFixture({
+      baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+      tools: ['read', 'write', 'edit', 'delete'],
+      candidate: {
+        manifest: {
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'ArtifactManifest',
+          metadata: { id: 'candidate' },
+          spec: {
+            baseTree: { objectFormat: 'sha256', commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+            entries: [],
+            deleted: [],
+          },
+        },
+        baseRevision: 'base-1',
+        sourceRevision: 'source-1',
+        artifacts: [],
+        baseline: { directory: stagingDir, entries },
+      },
+    });
+    try {
+      const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2);
+      assert.equal(opened.ok, true, JSON.stringify(opened));
+      if (!opened.ok) return;
+
+      const executed = await opened.value.execute({
+        commandId: 'cmd-ov-oversize-read',
+        text: 'Read packages/large.bin.',
+        purpose: 'task',
+        repair: 'none',
+      });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.error?.code, 'TOOL_DENIED', JSON.stringify(executed.value));
+
+      await opened.value.close();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      fixture.cleanup();
+      rmSync(stagingParent, { recursive: true, force: true });
+    }
   }
 });
 

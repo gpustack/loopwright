@@ -141,6 +141,15 @@ Engine ID is local consistency evidence, not attestation; the trusted operator m
 
 Missing birth/exit evidence requires explicit safe intervention; a TTL or broad name match never authorizes deletion.
 
+The mediated `delete` tool accepts `{ path: string }` and enforces writable and protected paths.
+Its operation receipt uses a `deleted: boolean` discriminator.
+An unconfirmed crash after unlink requires `RECOVERY_REQUIRED`.
+
+For `tree_overlay`, the adapter verifies the baseline Git blob OID on first touch.
+Baseline files use read-only `0o444` or executable `0o555` modes; directories use `0o555`.
+`HostExecution` relocks ancestors from leaf to root after mediated mutations.
+At `capture`, an O(N) `lstat` fingerprint walk detects baseline drift and unexpected files.
+
 ## Context and finite limits
 
 | Mode | Meaning |

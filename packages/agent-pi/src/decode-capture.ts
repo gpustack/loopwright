@@ -100,6 +100,7 @@ export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<P
     if (header.type !== 'workspace_snapshot' || header.version !== 1 || !sameIdentity(header.binding, binding)) refuse('BINDING_MISMATCH');
     const manifest = validateDocument(header.manifest, 'ArtifactManifest');
     if (!manifest.ok || Buffer.byteLength(canonical(manifest.value)) > 32768 || manifest.value.spec.entries.length > policy.limits.candidateEntries) refuse('RECOVERY_REQUIRED');
+    if (manifest.value.spec.baseTree !== undefined && manifest.value.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) > 4_194_304) refuse('OUTPUT_LIMIT');
     const subject = bindSubject(lock, manifest.value);
     if (!subject.ok || !sameIdentity(subject.value, checkpoint.subject)) refuse('BINDING_MISMATCH');
     const artifacts: { name: string; bytes: Uint8Array }[] = [];

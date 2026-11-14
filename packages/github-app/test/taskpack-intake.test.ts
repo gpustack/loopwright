@@ -13,7 +13,7 @@ import { GITHUB_APP_CONFIG_API_VERSION, loadGitHubAppConfig, parseGitHubAppConfi
 import { resolveTaskpackModelCandidates, selectHealthyModelCandidate } from '../src/models-config.js';
 import { createGitHubRestTokenTransport, InstallationTokenBroker, SecretScrubber } from '../src/token-broker.js';
 import { serializePrettyYaml } from '../src/yaml.js';
-import { GitHubAppError, type HostTaskpackBindings, type TaskpackManifest } from '../src/types.js';
+import { GitHubAppError, PROTECTED_AUTOMATION_PATHS, type HostTaskpackBindings, type TaskpackManifest } from '../src/types.js';
 
 const VALID_MANIFEST_YAML = `apiVersion: loopwright.dev/v1alpha1
 kind: Taskpack
@@ -1190,9 +1190,12 @@ spec:
         credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
       }));
       assert.deepEqual(compiledCustom.config.spec.task.spec.scope.writable, ['**']);
+      assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.codex'), true);
+      assert.deepEqual(compiledCustom.registry.spec.roleProfiles[0]?.tools, ['read', 'write', 'edit', 'bash', 'delete']);
+      assert.deepEqual(compiledCustom.config.spec.task.spec.roles[0]?.tools, ['read', 'write', 'edit', 'bash', 'delete']);
       const protectedPatterns = compiledCustom.config.spec.task.spec.scope.protected;
       for (const expected of [
-        '.github/**', '.claude/**', '.agents/**', '.loopwright/policies/**',
+        '.github/**', '.claude/**', '.codex/**', '.agents/**', '.loopwright/policies/**',
         'AGENTS.md/**', 'CLAUDE.md/**', '.auto-sync/policies/**', '.auto-sync/checks/**',
         '.auto-sync/memory/**', '.auto-sync/sync.yaml/**',
       ]) {
@@ -1244,8 +1247,8 @@ spec:
       (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
     );
 
-    // Reject .claude and .agents in writable
-    for (const protectedWritable of ['.claude', '.claude/skills', '.agents', '.agents/prompts']) {
+    // Reject .claude, .codex, and .agents in writable
+    for (const protectedWritable of ['.claude', '.claude/skills', '.codex', '.codex/config.toml', '.agents', '.agents/prompts']) {
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
           (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [protectedWritable] };

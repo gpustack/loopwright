@@ -12,6 +12,16 @@ export function object(value: Json, path: string): Record<string, Json> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('VALUE_TYPE', path);
   return value;
 }
+export function branch<A, B>(
+  predicate: (input: Record<string, Json>) => boolean,
+  whenTrue: Schema<A>,
+  whenFalse: Schema<B>,
+): Schema<A | B> {
+  return (value, path) => {
+    const input = object(value, path);
+    return predicate(input) ? whenTrue(input, path) : whenFalse(input, path);
+  };
+}
 export function record<const S extends Shape>(shape: S): Schema<{ readonly [K in keyof S]: Infer<S[K]> }> {
   return (value, path) => {
     const input = object(value, path), keys = Object.keys(shape);

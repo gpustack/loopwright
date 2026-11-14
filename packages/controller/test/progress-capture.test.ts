@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { bindSubject, type ArtifactManifest } from '@loopwright/core';
 import { retainedFixture } from './progress-fixtures.js';
 import { adoptRoleCapture, nativeSessionId } from '../src/capture.js';
+import type { FrozenSource } from '../src/source.js';
 import { journal, phaseCheckpointId, stableId } from '../src/progress.js';
 import { stateValue } from '../src/storage.js';
 import { canonical, hash } from '../src/schema.js';
@@ -43,12 +44,13 @@ async function snapshotFixture() {
     { type: 'message', id: 'a1', parentId: 'u1', timestamp, message: { role: 'assistant', ...sourcePolicy.selection, content: [{ type: 'thinking', thinking: 'PRIVATE THINKING' }, { type: 'text', text: submission }], stopReason: 'stop' } },
   ].map(line).join('')), 2097152);
   const native = stateValue(f.store.writeCheckpoint(f.authority, { checkpointId, expectedRevision: stateValue(f.store.inspect()).revision, candidateManifest: manifest, workspace, privateSession: session, additionalArtifacts: [] })).record;
-  return { ...f, role, attempt, pre, native, submission };
+  const source: FrozenSource = { version: 1, repository: f.plan.task.spec.target.repository, directory: f.taskDirectory, baseObject: '0'.repeat(40), sourceObject: '0'.repeat(40), manifest, inventory: f.progress.sourceRef, workspace: pre.progress.candidate.workspace, artifacts: [] };
+  return { ...f, role, attempt, pre, native, submission, source };
 }
 test('a known original capture adopts current-command bytes without adapter startup or a second journal effect', async () => {
   const f = await snapshotFixture();
   try {
-    const before = journal(f.store), adopted = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt), again = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt);
+    const before = journal(f.store), adopted = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source), again = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source);
     assert.equal(canonical(adopted), canonical(again)); assert.equal(adopted.checkpointId, f.native.checkpointId); assert.equal(Buffer.from(await f.artifacts.read(adopted.submission!)).toString(), f.submission);
     assert.equal(adopted.artifacts.length, 1); assert.equal(Buffer.from(adopted.artifacts[0]!.bytes).toString(), 'export const value = 0;\n');
     assert.deepEqual(journal(f.store).view.counts, before.view.counts); assert.deepEqual(journal(f.store).view.ledger, before.view.ledger);
@@ -67,9 +69,9 @@ test('capture adoption rejects wrong session, command and request interval witho
   try {
     const before = journal(f.store), wrongCommand = await f.artifacts.put('command', Buffer.from('a different command'));
     for (const attempt of [{ ...f.attempt, sessionId: 'wrong-session' }, { ...f.attempt, command: wrongCommand }, { ...f.attempt, before: { requests: 1, operations: 1 } }]) {
-      await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, attempt), (error: unknown) => error instanceof ControllerFailure && error.diagnostic.code === 'RECOVERY_REQUIRED');
+      await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, attempt, undefined, f.source), (error: unknown) => error instanceof ControllerFailure && error.diagnostic.code === 'RECOVERY_REQUIRED');
     }
-    await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, ['another-request']));
+    await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, ['another-request'], f.source));
     assert.deepEqual(journal(f.store).view.counts, before.view.counts); assert.deepEqual(journal(f.store).view.ledger, before.view.ledger);
   } finally { await f.close(); }
 });
@@ -77,8 +79,8 @@ test('later journal work and corrupt original native bytes prevent capture adopt
   const f = await snapshotFixture();
   try {
     await writeFile(join(f.artifacts.directory, f.native.workspace.name), Buffer.from('replaced original snapshot'));
-    await assert.rejects(f.progress.read()); await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt));
+    await assert.rejects(f.progress.read()); await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source));
     stateValue(f.store.putIntent(f.authority, { operationId: 'late-read', nodeId: 'build', attemptId: 'late-attempt', effect: 'read_only', requestDigest: hash('later journal'), targetIdentity: 'fixture:no-send' }));
-    await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt)); assert.equal(journal(f.store).checkpoints.length, 3);
+    await assert.rejects(adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source)); assert.equal(journal(f.store).checkpoints.length, 3);
   } finally { await f.close(); }
 });

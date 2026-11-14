@@ -30,6 +30,15 @@ Names are inventory keys, not paths to open. The library does not fetch URLs or 
 Candidate entries and evidence references are checked against the inventory's byte length and SHA-256.
 All inventory byte bounds are checked before copying/hashing; bytes are hashed once per inventory entry.
 
+The `tree_overlay` inventory uses binary framing with magic `0x4c574f56` (`LWOV`).
+It carries the tree anchor, modified or added `entries`, and `deleted` paths.
+`no-change.v1` compares both lists; `scope.v1` checks every modified, added, and deleted path.
+
+For untouched baseline JSON, `json-artifact.v1` authenticates the blob through a Git Merkle tree-path proof.
+The proof contains at most 16 trees and 256 KiB of raw tree bytes.
+The worker verifies the tree chain and blob OID before parsing JSON.
+A deleted target fails as a missing file.
+
 Every required check produces exactly one row in contract-required order.
 Missing submission means `not_run`. Missing eligible pass evidence or invalid bytes means `blocked`.
 Failed, blocked, and explicit not_run submissions retain their status and reason.

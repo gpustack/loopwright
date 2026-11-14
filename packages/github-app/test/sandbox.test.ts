@@ -105,6 +105,22 @@ describe('macOS Seatbelt SBPL profile compiler (AC-1)', () => {
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
       );
       assert.throws(
+        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+      );
+      assert.throws(
+        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex/config.toml'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+      );
+      const codexSeatbelt = compileMacosSeatbeltProfile(
+        { workspaceRoot, writablePaths: ['docs'] },
+        { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+      );
+      assert.ok(
+        codexSeatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, '.codex')),
+        'macOS Seatbelt profile must protect .codex by default',
+      );
+      assert.throws(
         () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['docs'] }, { platform: 'darwin', arch: 'arm64', seatbeltExecutable: '/tmp/fake-sandbox-exec', probeExecutables: false }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_BACKEND_UNAVAILABLE',
       );
@@ -168,6 +184,10 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
           `missing built-in protected path ${builtIn}`,
         );
       }
+      assert.ok(
+        compiled.canonicalProtectedPaths.includes(join(workspaceRoot, '.codex')),
+        'linux-bwrap policy must protect .codex by default',
+      );
 
       const seccomp = computeSandboxSeccompProfile();
       assert.equal(compiled.seccompProfileJson, seccomp.json);
