@@ -354,6 +354,8 @@
 </li>
 <li><a href="#model-configuration">Model configuration</a>
 </li>
+<li><a href="#mcp-and-limits">MCP and limits</a>
+</li>
 <li><a href="#upstreams-and-proposal">Upstreams and proposal</a>
 </li>
 <li><a href="#verification-checks">Verification checks</a>
@@ -378,22 +380,22 @@
   <tbody>
       <tr>
           <td><code>TaskContract</code></td>
-          <td><code>metadata.name</code>, <code>spec.goal</code>, <code>spec.scope</code>, <code>spec.verification</code></td>
-          <td>Adds protected paths and default budgets (<code>wallTimeMs: 3300000</code>, <code>maxModelCalls: 12</code>)</td>
+          <td><code>metadata.name</code>, <code>spec.goal</code>, <code>spec.scope</code>, <code>spec.verification</code>, <code>spec.limits</code></td>
+          <td>Adds protected paths and default budgets (<code>wallTimeMs: 3600000</code>, <code>maxModelCalls: 256</code>)</td>
       </tr>
       <tr>
           <td><code>TrustedRegistry</code></td>
-          <td><code>spec.proposal</code>, <code>spec.verification</code>, <code>spec.publication</code></td>
+          <td><code>spec.proposal</code>, <code>spec.verification</code>, <code>spec.publication</code>, <code>spec.mcp</code></td>
           <td>Computes SHA-256 digests for installed handlers (<code>pi.agent.v1</code>, <code>json-artifact.v1</code>, <code>scope.v1</code>, <code>no-change.v1</code>, <code>gate.v1</code>) and <code>package-lock.json</code></td>
       </tr>
       <tr>
           <td><code>ControllerConfig</code></td>
           <td>Binds compiled <code>TaskContract</code> and <code>TrustedRegistry</code> SHA-256</td>
-          <td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 3</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> credential templates (<code>0600</code>)</td>
+          <td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 4</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> credential templates (<code>0600</code>)</td>
       </tr>
   </tbody>
 </table>
-<p>Turnkey compilation grants author roles <code>['read', 'write', 'edit', 'bash', 'delete']</code>.</p>
+<p>Turnkey compilation grants author roles <code>['read', 'write', 'edit', 'bash', 'delete']</code> plus discovered <code>mcp__&lt;id&gt;__&lt;tool&gt;</code> tools.</p>
 <h2 id="taskpack-1">Taskpack</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -478,6 +480,28 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">mcp</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host MCP servers</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">servers</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">github</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">stdio</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l">github-mcp-server</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">stdio</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- --<span class="l">read-only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- --<span class="l">toolsets</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">repos,pull_requests,issues</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">60</span><span class="w"> </span><span class="c"># Optional (defaults to 60)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">deepwiki</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">http</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l">https://mcp.deepwiki.com/mcp</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional execution ceiling overrides</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="c"># Optional (defaults to 3600)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">20000000</span><span class="w"> </span><span class="c"># Optional (defaults to 20000000)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional (defaults to 32768)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="c"># Optional (defaults to 256)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="c"># Optional (defaults to 300)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
@@ -579,7 +603,7 @@
           <td><code>spec.instructions</code></td>
           <td>No</td>
           <td>Relative path or list (<code>1..16</code> paths)</td>
-          <td>UTF-8 files compiled as SHA-256-pinned <code>instruction</code> trusted resources; aggregate size <code>&lt;= 24576</code> bytes</td>
+          <td>UTF-8 files compiled as SHA-256-pinned <code>instruction</code> trusted resources; aggregate size <code>&lt;= 262144</code> bytes</td>
       </tr>
   </tbody>
 </table>
@@ -739,6 +763,92 @@
   </tbody>
 </table>
 <p>Provider-reported cost retains <code>reported</code> provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains <code>unknown</code>.</p>
+<h2 id="mcp-and-limits">MCP and limits</h2>
+<p><code>spec.mcp.servers</code> connects <code>stdio</code> and Streamable <code>http</code> MCP servers on the host and exposes tools as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>. OAuth MCP declarations fail closed (<code>MCP_OAUTH_UNSUPPORTED</code>). <code>spec.limits</code> raises or lowers execution ceilings; Action inputs and <code>LOOPWRIGHT_*</code> variables override manifest values.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Field path</th>
+          <th>Required</th>
+          <th>Type and bounds</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>mcp.servers</code></td>
+          <td>No</td>
+          <td>Object list (<code>0..16</code> items)</td>
+          <td>Host MCP servers (<code>id</code>: <code>1..24</code> chars, never <code>workspace</code>)</td>
+      </tr>
+      <tr>
+          <td><code>servers[].transport</code></td>
+          <td>Conditional</td>
+          <td><code>'stdio'</code> | <code>'http'</code></td>
+          <td><strong>Required</strong> per server; selects local process or Streamable HTTP</td>
+      </tr>
+      <tr>
+          <td><code>servers[].command</code> / <code>args</code></td>
+          <td>Conditional</td>
+          <td>Executable / string list (<code>0..32</code>)</td>
+          <td><code>stdio</code> binary resolved on trusted host <code>PATH</code> and fixed CLI arguments</td>
+      </tr>
+      <tr>
+          <td><code>servers[].env</code> / <code>envFrom</code></td>
+          <td>No</td>
+          <td>String maps (<code>&lt;= 32</code> entries)</td>
+          <td>Non-secret <code>stdio</code> env values and host secret env bindings (scrubbed automatically)</td>
+      </tr>
+      <tr>
+          <td><code>servers[].url</code></td>
+          <td>Conditional</td>
+          <td><code>https://</code> URL</td>
+          <td><strong>Required</strong> for <code>http</code> servers (loopback <code>http://</code> requires custom base URL opt-in)</td>
+      </tr>
+      <tr>
+          <td><code>servers[].headersFrom</code> / <code>bearerTokenEnv</code></td>
+          <td>No</td>
+          <td>Header map / env name</td>
+          <td>Host secret env bindings for HTTP headers or <code>Authorization: Bearer</code></td>
+      </tr>
+      <tr>
+          <td><code>servers[].includeTools</code> / <code>timeoutSeconds</code></td>
+          <td>No</td>
+          <td>Tool list (<code>1..64</code>) / <code>5..600</code></td>
+          <td>Optional upstream tool allowlist and per-call timeout in seconds (default <code>60</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.wallTimeSeconds</code></td>
+          <td>No</td>
+          <td>Integer (<code>60..21600</code>, default <code>3600</code>)</td>
+          <td>Total run wall-time budget in seconds (<code>wallTimeMs</code> also accepted)</td>
+      </tr>
+      <tr>
+          <td><code>limits.totalTokens</code></td>
+          <td>No</td>
+          <td>Integer (<code>1024..200000000</code>, default <code>20000000</code>)</td>
+          <td>Aggregate input + output token ceiling across all model calls</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxOutputTokens</code></td>
+          <td>No</td>
+          <td>Integer (<code>256..262144</code>, default <code>32768</code>)</td>
+          <td>Per-call output token ceiling (<code>perCallOutputTokens</code> alias supported)</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxModelCalls</code> / <code>maxAttempts</code></td>
+          <td>No</td>
+          <td><code>1..1024</code> (<code>256</code>) / <code>1..16</code> (<code>4</code>)</td>
+          <td>Model turn ceiling and controller attempt ceiling</td>
+      </tr>
+      <tr>
+          <td><code>limits.toolTimeoutSeconds</code></td>
+          <td>No</td>
+          <td>Integer (<code>5..1800</code>, default <code>300</code>)</td>
+          <td>Per-tool wall-time ceiling in seconds; <code>toolResultBytes</code> (<code>65536..4194304</code>) also configurable</td>
+      </tr>
+  </tbody>
+</table>
 <h2 id="upstreams-and-proposal">Upstreams and proposal</h2>
 <h3 id="upstream-and-proposal-fields">Upstream and proposal fields</h3>
 <table>
@@ -964,7 +1074,7 @@
       <tr>
           <td><code>timeoutSeconds</code></td>
           <td>No</td>
-          <td>Integer (<code>1..55</code>, default <code>30</code>)</td>
+          <td>Integer (<code>1..3600</code>, default <code>30</code>)</td>
           <td>Maximum script execution time</td>
       </tr>
       <tr>
@@ -1158,7 +1268,7 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
       </tr>
   </tbody>
 </table>
-<p>Summaries include status, checks, token counts, elapsed time, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. CLI JSON remains NDJSON when the step summary uses a file.</p>
+<p>Summaries include status, connected MCP servers, checks, <code>K</code>/<code>M</code>/<code>B</code> token counts, <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code> elapsed durations, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. JSON outputs preserve exact integer counts alongside formatted strings.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -1187,6 +1297,7 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
         <li><a href="#model-fields">Model fields</a></li>
       </ul>
     </li>
+    <li><a href="#mcp-and-limits">MCP and limits</a></li>
     <li><a href="#upstreams-and-proposal">Upstreams and proposal</a>
       <ul>
         <li><a href="#upstream-and-proposal-fields">Upstream and proposal fields</a></li>

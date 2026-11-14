@@ -577,12 +577,52 @@
           <td>Unset</td>
           <td>JSON array of precomputed upstream acquisition records.</td>
       </tr>
+      <tr>
+          <td><code>mcp-servers</code></td>
+          <td>Taskpack <code>spec.mcp.servers</code></td>
+          <td>JSON or YAML MCP server declarations merged by <code>id</code> (<code>LOOPWRIGHT_MCP_SERVERS</code> fallback).</td>
+      </tr>
+      <tr>
+          <td><code>wall-time-seconds</code></td>
+          <td><code>3600</code></td>
+          <td>Run wall-time limit override in seconds (<code>60..21600</code>; <code>LOOPWRIGHT_WALL_TIME_SECONDS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>total-tokens</code></td>
+          <td><code>20000000</code></td>
+          <td>Total token ceiling across model calls (<code>1024..200000000</code>; <code>LOOPWRIGHT_TOTAL_TOKENS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>max-output-tokens</code></td>
+          <td><code>32768</code></td>
+          <td>Per-call output token ceiling (<code>256..262144</code>; <code>LOOPWRIGHT_MAX_OUTPUT_TOKENS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>max-model-calls</code></td>
+          <td><code>256</code></td>
+          <td>Maximum model call count per run (<code>1..1024</code>; <code>LOOPWRIGHT_MAX_MODEL_CALLS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>max-attempts</code></td>
+          <td><code>4</code></td>
+          <td>Maximum controller attempt count (<code>1..16</code>; <code>LOOPWRIGHT_MAX_ATTEMPTS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>tool-timeout-seconds</code></td>
+          <td><code>300</code></td>
+          <td>Per-tool execution timeout in seconds (<code>5..1800</code>; <code>LOOPWRIGHT_TOOL_TIMEOUT_SECONDS</code>).</td>
+      </tr>
+      <tr>
+          <td><code>command-timeout-seconds</code></td>
+          <td><code>30</code> (<code>&lt;= 3600</code>)</td>
+          <td><code>command.v1</code> local check timeout override (<code>1..3600</code>; <code>LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS</code>).</td>
+      </tr>
   </tbody>
 </table>
-<p>Interactive OAuth and CLI providers are unsupported. Model options and token-based provider configuration are listed in <a href="/loopwright/latest/docs/configuration/taskpack/#model-configuration">Taskpack</a>
+<p>Limit overrides apply in strict order (<code>INPUT_*</code> &gt; <code>LOOPWRIGHT_*</code> &gt; <code>spec.limits</code> &gt; compiler defaults). Additional byte and session ceilings (<code>LOOPWRIGHT_RESPONSE_BYTES</code>, <code>LOOPWRIGHT_TOOL_RESULT_BYTES</code>, <code>LOOPWRIGHT_FILE_BYTES</code>, <code>LOOPWRIGHT_SESSION_BYTES</code>) also accept environment overrides. Interactive OAuth and CLI providers or MCP servers are unsupported. Model and MCP options are listed in <a href="/loopwright/latest/docs/configuration/taskpack/#model-configuration">Taskpack</a>
 .</p>
 <h2 id="outputs">Outputs</h2>
-<p>The Action always writes a scrubbed structured <code>result</code> JSON value to stdout and <code>GITHUB_OUTPUT</code>. A <code>compiled</code> result alone does not establish successful publication. Inspect the delegate outcome and run report.</p>
+<p>The Action writes a compact, scrubbed <code>result</code> JSON summary (with SHA-256 digests and byte lengths rather than raw binary buffers) to stdout and <code>GITHUB_OUTPUT</code>. Live runs stream <code>[loopwright]</code> progress lines (upstream discovery, connected MCP servers, per-turn token/duration metrics, tool calls, and check outcomes) plus a plain-text run summary to stderr. A <code>compiled</code> result alone does not establish successful publication; inspect <code>delegateOutcome</code> and the run report.</p>
 <table>
   <thead>
       <tr>
@@ -593,7 +633,7 @@
   <tbody>
       <tr>
           <td><code>result</code></td>
-          <td>Structured entrypoint result, including the delegate outcome when available.</td>
+          <td>Compact structured entrypoint summary and <code>delegateOutcome</code> (<code>ok</code>, <code>detail</code>).</td>
       </tr>
       <tr>
           <td><code>pr-url</code></td>
@@ -601,7 +641,7 @@
       </tr>
       <tr>
           <td><code>total-tokens</code></td>
-          <td>Known token subtotal, or <code>0</code> when usage is unavailable.</td>
+          <td>Exact integer token subtotal, or <code>0</code> when usage is unavailable.</td>
       </tr>
       <tr>
           <td><code>cost-usd</code></td>
@@ -609,7 +649,7 @@
       </tr>
   </tbody>
 </table>
-<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. Known subtotals need not represent complete usage. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.</p>
+<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. Step summaries and human-readable reports format token counts using <code>K</code>/<code>M</code>/<code>B</code> and elapsed durations using <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code>, while <code>total-tokens</code> and JSON reports preserve exact integer counts. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.</p>
 <table>
   <thead>
       <tr>
