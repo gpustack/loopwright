@@ -132,6 +132,7 @@ spec:
   limits: # Optional execution ceiling overrides
     wallTimeSeconds: 3600 # Optional (defaults to 3600)
     totalTokens: 20000000 # Optional (defaults to 20000000)
+    contextWindow: 200000 # Optional model context window override
     maxOutputTokens: 32768 # Optional (defaults to 32768)
     maxModelCalls: 256 # Optional (defaults to 256)
     toolTimeoutSeconds: 300 # Optional (defaults to 300)
@@ -269,7 +270,8 @@ Provider-reported cost retains `reported` provenance. When billing is absent and
 | `servers[].headersFrom` / `bearerTokenEnv` | No | Header map / env name | Host secret env bindings for HTTP headers or `Authorization: Bearer` |
 | `servers[].includeTools` / `timeoutSeconds` | No | Tool list (`1..64`) / `5..600` | Optional upstream tool allowlist and per-call timeout in seconds (default `60`) |
 | `limits.wallTimeSeconds` | No | Integer (`60..21600`, default `3600`) | Total run wall-time budget in seconds (`wallTimeMs` also accepted) |
-| `limits.totalTokens` | No | Integer (`1024..200000000`, default `20000000`) | Aggregate input + output token ceiling across all model calls |
+| `limits.totalTokens` | No | Integer (`1000..1000000000`, default `20000000`) | Aggregate input + output token ceiling across all model calls |
+| `limits.contextWindow` | No | Integer (`1024..10000000`) | Model context window override (`LOOPWRIGHT_CONTEXT_WINDOW` or `context-window` overrides) |
 | `limits.maxOutputTokens` | No | Integer (`256..262144`, default `32768`) | Per-call output token ceiling (`perCallOutputTokens` alias supported) |
 | `limits.maxModelCalls` / `maxAttempts` | No | `1..1024` (`256`) / `1..16` (`4`) | Model turn ceiling and controller attempt ceiling |
 | `limits.toolTimeoutSeconds` | No | Integer (`5..1800`, default `300`) | Per-tool wall-time ceiling in seconds; `toolResultBytes` (`65536..4194304`) also configurable |

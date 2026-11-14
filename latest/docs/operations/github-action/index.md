@@ -117,7 +117,8 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
 | `mcp-servers` | Taskpack `spec.mcp.servers` | JSON or YAML MCP server declarations merged by `id` (`LOOPWRIGHT_MCP_SERVERS` fallback). |
 | `wall-time-seconds` | `3600` | Run wall-time limit override in seconds (`60..21600`; `LOOPWRIGHT_WALL_TIME_SECONDS`). |
-| `total-tokens` | `20000000` | Total token ceiling across model calls (`1024..200000000`; `LOOPWRIGHT_TOTAL_TOKENS`). |
+| `total-tokens` | `20000000` | Total token ceiling across model calls (`1000..1000000000`; `LOOPWRIGHT_TOTAL_TOKENS`). |
+| `context-window` | Model catalog or `128000` | Model context window token override (`1024..10000000`; `LOOPWRIGHT_CONTEXT_WINDOW`). |
 | `max-output-tokens` | `32768` | Per-call output token ceiling (`256..262144`; `LOOPWRIGHT_MAX_OUTPUT_TOKENS`). |
 | `max-model-calls` | `256` | Maximum model call count per run (`1..1024`; `LOOPWRIGHT_MAX_MODEL_CALLS`). |
 | `max-attempts` | `4` | Maximum controller attempt count (`1..16`; `LOOPWRIGHT_MAX_ATTEMPTS`). |

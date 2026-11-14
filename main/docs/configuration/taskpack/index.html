@@ -499,6 +499,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional execution ceiling overrides</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="c"># Optional (defaults to 3600)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">20000000</span><span class="w"> </span><span class="c"># Optional (defaults to 20000000)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">200000</span><span class="w"> </span><span class="c"># Optional model context window override</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional (defaults to 32768)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="c"># Optional (defaults to 256)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="c"># Optional (defaults to 300)</span><span class="w">
@@ -826,8 +827,14 @@
       <tr>
           <td><code>limits.totalTokens</code></td>
           <td>No</td>
-          <td>Integer (<code>1024..200000000</code>, default <code>20000000</code>)</td>
+          <td>Integer (<code>1000..1000000000</code>, default <code>20000000</code>)</td>
           <td>Aggregate input + output token ceiling across all model calls</td>
+      </tr>
+      <tr>
+          <td><code>limits.contextWindow</code></td>
+          <td>No</td>
+          <td>Integer (<code>1024..10000000</code>)</td>
+          <td>Model context window override (<code>LOOPWRIGHT_CONTEXT_WINDOW</code> or <code>context-window</code> overrides)</td>
       </tr>
       <tr>
           <td><code>limits.maxOutputTokens</code></td>
