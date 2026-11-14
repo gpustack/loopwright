@@ -1,15 +1,19 @@
 # GitHub Action
 
-GitHub Action mode is the primary zero-server entry point for consumer repositories. Use `gpustack/loopwright@main` for scheduled, manual, and `/loopwright` comment triggers.
+The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It discovers upstream changes, verifies candidates, and can publish a managed pull request.
 
 ## Contents
 
 - [Workflow](#workflow)
+- [Execution and publication](#execution-and-publication)
 - [Secrets and environment](#secrets-and-environment)
-- [Inputs and output](#inputs-and-output)
-- [Taskpack and triggers](#taskpack-and-triggers)
+- [Inputs](#inputs)
+- [Outputs](#outputs)
+- [Triggers](#triggers)
 
 ## Workflow
+
+Install a taskpack and configure the provider and App secrets before enabling this workflow. The App installation needs repository contents and pull request write permissions for native publication.
 
 ```yaml
 name: loopwright
@@ -26,106 +30,123 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/create-github-app-token@v1 # Optional when minting App PR tokens
-        id: app-token
         with:
-          app-id: ${{ secrets.LOOPWRIGHT_APP_ID }}
-          private-key: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: gpustack/loopwright@main
         id: loopwright
         with:
-          taskpack-path: .loopwright/taskpack.yaml # Optional (defaults to .loopwright/taskpack.yaml)
-          event-name: ${{ github.event_name }} # Optional (defaults to GITHUB_EVENT_NAME)
-          event-path: ${{ github.event_path }} # Optional for schedule/manual; needed on comments
-          provider: zai # Optional override (omit to use spec.models pool)
-          model: glm-5.3 # Optional override (defaults to glm-5.3)
-          thinking: high # Optional override
-          publication-endpoint-url: https://publish.internal.example/pr # Optional when publication is disabled
-          dry-run: 'true' # Optional (defaults to 'false')
+          taskpack-path: .loopwright/taskpack.yaml # Optional
+          event-name: ${{ github.event_name }}
+          event-path: ${{ github.event_path }}
+          github-app-id: ${{ secrets.LOOPWRIGHT_APP_ID }}
+          github-app-private-key: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
+          github-app-installation-id: ${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}
+          output: json,github-step-summary # Optional
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }} # Optional in dry-run mode
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }} # Optional in dry-run mode
-          LOOPWRIGHT_GATE_SIGNING_SECRET: ${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }} # Optional when externalGates is empty
-          LOOPWRIGHT_PUBLICATION_SIGNING_SECRET: ${{ secrets.LOOPWRIGHT_PUBLICATION_SIGNING_SECRET }} # Optional when publication is disabled
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
 ```
 
-- **Minimal setup**: Every `with:` input on `gpustack/loopwright@main` has a default when running `schedule` or `workflow_dispatch` with `publication.mode: disabled`; conditional inputs (`event-path`, `publication-endpoint-url`, `gate-endpoint-url`) become mandatory when their corresponding features are enabled.
-- **Runtime provisioning**: The composite Action provisions the required [runtime baseline](../getting-started/architecture.md#runtime-baseline) automatically and builds the workspace when `dist/action.js` is absent.
-- **Dry-run vs. live execution**: Standalone `runActionCli` compiles and scrubs artifacts outside the checkout (`dry-run: 'true'` skips any host controller delegate). Never commit provider or signing secrets to the repository.
+- **Taskpack**: Set publication to `pull_request` to enable native PR publication, or `disabled` to omit it.
+- **Provider**: Set the token variable for the selected model, not necessarily `ZAI_API_KEY`.
+- **Runtime**: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.
+- **Dry run**: Set `dry-run: 'true'` to compile without running the controller.
+
+## Execution and publication
+
+A live Action resolves repository identity and revisions, discovers upstreams, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, then runs the controller for admitted work.
+
+| Stage | Behavior |
+| --- | --- |
+| Discover | Read GitHub releases, Git tags or commits, HTTP JSON, or custom tables; compare versions with the proposal. |
+| Execute | Author a candidate and verify scope and configured checks; eligible failures can enter bounded repair. |
+| Publish | For `pull_request` mode, create or update a managed PR after verification. |
+
+Use `upstream-records` to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as `no_change`. Unavailable upstreams can block execution.
+
+Native publication uses a detached `git worktree`, a signed-off diff-only commit, and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
+
+Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.
+
+On GitHub Actions, an omitted `spec.sandbox` selects `direct-dedicated`. This uses host process isolation, not a container security boundary. The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`. See [Sandbox Backends](../configuration/sandbox-backends.md) for isolation tradeoffs.
+
+Protected paths override writable paths. Workflow files and taskpack control assets remain protected. See [Taskpack](../configuration/taskpack.md) for scope, instructions, and check configuration.
 
 ## Secrets and environment
 
-`compileDeclarativeTaskpack` writes literal `${LOOPWRIGHT_*}` templates—never raw secret values—into `registry.yaml` and `config.yaml`, and `SecretScrubber` verifies zero secret bytes appear on disk. During live execution, `@loopwright/controller` resolves those approved variable names from `env` in memory for each bound consumer (`provider`, `gate`, or `publisher`).
+Pass a token with `github-token`, or provide all three App inputs to mint an installation token inside the Action. A nonempty `github-token` takes precedence, followed by `GITHUB_TOKEN`; either prevents App token minting. `GH_TOKEN` is not the Action token fallback.
 
-### GitHub App secrets
+The App ID and installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub's App event rules.
 
-Configure repository or organization secrets when using `actions/create-github-app-token@v1`:
+| Credential | Purpose |
+| --- | --- |
+| `github-token` or `GITHUB_TOKEN` | GitHub discovery and native PR publication; permissions depend on the operations used. |
+| `github-app-id`, `github-app-private-key`, `github-app-installation-id` | Mint an installation token when no direct token is supplied. |
+| Provider token environment | Authenticate live model calls; token variables can contain comma-separated token pools. |
+| `LOOPWRIGHT_GATE_SIGNING_SECRET` | Sign external gate requests when a gate endpoint is configured. |
+| `LOOPWRIGHT_PUBLICATION_SIGNING_SECRET` | Sign requests to an external publication endpoint. |
 
-| Secret | Required | Consumer step | Purpose |
-| --- | --- | --- | --- |
-| `LOOPWRIGHT_APP_ID` | Conditional | `create-github-app-token` | Required when minting an App installation token; GitHub App numeric ID |
-| `LOOPWRIGHT_APP_PRIVATE_KEY` | Conditional | `create-github-app-token` | Required when minting an App installation token; GitHub App RSA private key PEM |
+Local command gates and native publication use ephemeral loopback credentials. They do not require external endpoint signing secrets. Generated registry and controller files contain secret references, not raw credentials. Never commit secrets to the repository.
 
-### Step environment
+## Inputs
 
-Pass runtime credentials and optional overrides via `env:` on the `gpustack/loopwright` step:
+All Action inputs are optional. Conditional credentials, endpoint bindings, and event payloads depend on the taskpack and trigger.
 
-| Variable | Required | Condition and default | Runtime usage |
-| --- | --- | --- | --- |
-| `GH_TOKEN` | Conditional | Required for live GitHub API / PR writes | Receives `steps.app-token.outputs.token` so managed PRs trigger downstream CI |
-| `ZAI_API_KEY` / `LOOPWRIGHT_PROVIDER_TOKEN` | Conditional | Required for live controller model calls | Standard Pi provider env var or `LOOPWRIGHT_PROVIDER_TOKEN` (accepts comma-separated token pools) |
-| `LOOPWRIGHT_GATE_SIGNING_SECRET` | Conditional | Required when `externalGates` is non-empty | Bound to `consumer: gate` to HMAC-SHA256 sign gate requests and verify receipts |
-| `LOOPWRIGHT_PUBLICATION_SIGNING_SECRET` | Conditional | Required when `publication.mode` is `pull_request` | Bound to `consumer: publisher` to HMAC-SHA256 sign PR dispatches and verify receipts |
-| `LOOPWRIGHT_OPERATOR_ALLOWLIST` | No | Unset (collaborators only) | Comma-separated extra GitHub logins authorized for `/loopwright` slash commands |
-| `LOOPWRIGHT_REPOSITORY` | No | `GITHUB_REPOSITORY` | Explicit `owner/repo` override when `GITHUB_REPOSITORY` is unset |
-
-## Inputs and output
-
-### Action inputs
-
-| Input | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `taskpack-path` | No | `.loopwright/taskpack.yaml` | Repository-relative manifest path |
-| `mode` | No | `candidate` | Execution mode (`candidate` or `no-change`) |
-| `event-name` | No | `GITHUB_EVENT_NAME` (`workflow_dispatch`) | Triggering GitHub event name |
-| `event-path` | Conditional | Unset | Absolute JSON event payload path; **required** for `issue_comment` and `pull_request_review` |
-| `publication-endpoint-url` | Conditional | Unset | Managed PR endpoint URL; **required** when `mode: candidate` and `publication.mode: pull_request` |
-| `gate-endpoint-url` | Conditional | Unset | External `gate.v1` URL (bound as `id: default`); **required** when `externalGates` is non-empty |
-| `run-root` | No | `RUNNER_TEMP` (`../.loopwright-runs`) | Trusted artifact root outside the repository checkout |
-| `run-id` | No | `GITHUB_RUN_ID` (`local`) | Stable identifier for state and receipts |
-| `storage-profile` | No | `actions-basic` | Host storage profile (`actions-basic` or `durable`) |
-| `provider` | No | `spec.models[0].provider` (`zai`) | Pins one token-based Pi provider (omit to probe `spec.models` in order) |
-| `model` | No | `spec.models[0].id` (`glm-5.3`) | Pins one coding/authoring model ID (see [Model configuration](../configuration/taskpack.md#model-configuration)) |
-| `thinking` | No | `spec.models[0].thinking` (`high`) | Pi reasoning level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
-| `api` | Conditional | Inferred | Wire protocol (`anthropic-messages`, `openai-completions`, `openai-responses`); **required** with `base-url` |
-| `base-url` | No | Unset | Trusted host override for custom compatible API `baseUrl` |
-| `provider-token-env` | No | Pi provider default | Host env var name holding provider API key or comma-separated token pool |
-| `models-json` | No | Unset | Path to trusted Pi `models.json` file (`$ENV_VAR` `apiKey` refs only; `!command` refused) |
-| `allow-custom-base-url` | No | `'false'` | Set `'true'` to permit `spec.models[].baseUrl` declared inside `.loopwright/taskpack.yaml` |
-| `dry-run` | No | `'false'` | Set `'true'` to compile and validate without invoking a host controller delegate |
-
-Interactive OAuth and CLI providers (`github-copilot`, `gemini`, `google`, `claude-code`, `openai-codex`, `google-gemini-cli`, `google-antigravity`) fail closed with `PROVIDER_OAUTH_UNSUPPORTED`.
-
-### Result statuses
-
-`runActionCli` writes the structured JSON `result` object to stdout and `GITHUB_OUTPUT`. In standalone mode, it compiles and validates trusted artifacts outside the checkout unless a host controller delegate is wired via `runGitHubActionEntrypoint`.
-
-| Status | Exit code | Meaning |
+| Input | Default | Purpose |
 | --- | --- | --- |
-| `compiled` | `0` | Manifest and trusted configuration compiled cleanly |
-| `no_change` | `0` | Discovery or verification settled with no repository update |
-| `refused` | `1` | Signature, actor authorization, scope, or sandbox policy refused intake |
-| `blocked` | `1` | Host qualification or external prerequisite blocked execution |
+| `taskpack-path` | `.loopwright/taskpack.yaml` | Repository-relative manifest path, including a custom control directory. |
+| `mode` | `candidate` | `candidate` or `no-change` cycle mode. |
+| `event-name` | `workflow_dispatch` | GitHub event name; pass `github.event_name` for other triggers. |
+| `event-path` | Unset | Event payload path; pass `github.event_path` for comment and review events. |
+| `run-root` | `RUNNER_TEMP` or `../.loopwright-runs` | Trusted artifact root outside the checkout. |
+| `run-id` | `GITHUB_RUN_ID` or `local` | Stable run identifier. |
+| `storage-profile` | `actions-basic` | Host storage profile: `actions-basic` or `durable`. |
+| `provider`, `model`, `thinking` | Taskpack model pool | Override author model selection; thinking levels range from `off` to `max`. |
+| `api`, `base-url` | Inferred, unset | Wire API and trusted HTTPS endpoint override; `base-url` requires `api`. |
+| `provider-token-env` | Provider default | Environment variable containing a provider token or comma-separated pool. |
+| `models-json` | Unset | Trusted Pi model configuration path; shell credential resolvers are refused. |
+| `allow-custom-base-url` | `false` | Set `true` to permit model base URLs declared in the taskpack. |
+| `dry-run` | `false` | Set `true` to compile without executing the controller. |
+| `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
+| `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
+| `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |
+| `github-token` | `GITHUB_TOKEN` or unset | GitHub token for discovery, opted-in checks, and publication. |
+| `github-app-id` | Unset | App ID for installation token minting. |
+| `github-app-private-key` | Unset | App PEM private key for installation token minting. |
+| `github-app-installation-id` | Unset | Installation ID for token minting. |
+| `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
 
-A `compiled` status alone does not confirm remote publication.
+Interactive OAuth and CLI providers are unsupported. Model options and token-based provider configuration are listed in [Taskpack](../configuration/taskpack.md#model-configuration).
 
-## Taskpack and triggers
+## Outputs
 
-`runGitHubActionEntrypoint` combines the manifest with trusted host bindings and writes `registry.yaml` and `config.yaml` outside the checkout. It scrubs generated artifacts before invoking an optional host delegate.
+The Action always writes a scrubbed structured `result` JSON value to stdout and `GITHUB_OUTPUT`. A `compiled` result alone does not establish successful publication. Inspect the delegate outcome and run report.
 
-Configure writable and protected scope, checks, publication, triggers, and optional `spec.sandbox` preferences (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`) in [Declarative Taskpack](../walkthroughs/declarative-taskpack.md). When a taskpack declares `spec.sandbox`, backend negotiation (`negotiateSandboxBackend`) fails closed if the runner lacks the required OS sandbox binary or isolation capabilities.
+| Output | Meaning |
+| --- | --- |
+| `result` | Structured entrypoint result, including the delegate outcome when available. |
+| `pr-url` | Published PR URL when available; otherwise empty. |
+| `total-tokens` | Known token subtotal, or `0` when usage is unavailable. |
+| `cost-usd` | Six-decimal USD known subtotal when cost provenance is `reported` or `estimated`; otherwise omitted. |
 
-Scheduled, manual, repository dispatch, release, issue comment and pull request review events are supported by intake subject to taskpack policy. Install a workflow in each consumer repository. The resident listener is disabled by default; see [GitHub App](github-app.md) for opt-in centralized queuing and token brokering.
+Extended outputs are written for live runs, or for dry runs with an explicit `output` input. Known subtotals need not represent complete usage. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.
+
+| Format | Destination |
+| --- | --- |
+| `json` | Structured Action result remains on stdout and `GITHUB_OUTPUT`. |
+| `github-step-summary` | Markdown report appended to `GITHUB_STEP_SUMMARY` when available. |
+| `markdown` | Human-readable report on stderr. |
+| `text` | Plain-text report on stderr. |
+
+`totalTokens` is the primary usage metric across sinks, with `inputTokens` and `outputTokens` breakdowns when available.
+Human-readable summaries show cost only for `reported` or `estimated` provenance.
+Reports include usage provenance when available. Output is scrubbed and workflow command text is neutralized. Local and fixture tests do not qualify live GitHub publication or provider billing.
+
+## Triggers
+
+Intake supports schedule, manual dispatch, repository dispatch, release, issue comment, and pull request review events, subject to taskpack policy. Pass the event name and payload explicitly as shown above. Comment commands also require actor authorization.
+
+Install a workflow in each consumer repository. For centralized webhook intake and token brokering, see [GitHub App](github-app.md).
 
 ---
 

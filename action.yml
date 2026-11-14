@@ -71,11 +71,38 @@ inputs:
   publication-endpoint-url:
     description: 'Managed publication endpoint URL.'
     required: false
+  output:
+    description: 'Output sink format or comma-separated list (json, github-step-summary, markdown, text).'
+    required: false
+  github-token:
+    description: 'Optional GitHub token for upstream discovery, read-only command.v1 checks, and pull request publication.'
+    required: false
+  github-app-id:
+    description: 'Optional GitHub App ID for minting installation tokens.'
+    required: false
+  github-app-private-key:
+    description: 'Optional GitHub App PEM private key for minting installation tokens.'
+    required: false
+  github-app-installation-id:
+    description: 'Optional GitHub App installation ID for minting installation tokens.'
+    required: false
+  upstream-records:
+    description: 'Optional JSON array of precomputed upstream acquisition records.'
+    required: false
 
 outputs:
   result:
     description: 'Structured JSON result of the entrypoint run.'
     value: ${{ steps.loopwright-entrypoint.outputs.result }}
+  pr-url:
+    description: 'Pull request URL produced by turnkey publication, when available.'
+    value: ${{ steps.loopwright-entrypoint.outputs.pr-url }}
+  total-tokens:
+    description: 'Total tokens reported for the execution run.'
+    value: ${{ steps.loopwright-entrypoint.outputs.total-tokens }}
+  cost-usd:
+    description: 'Formatted USD cost when reported or estimated by the model catalog.'
+    value: ${{ steps.loopwright-entrypoint.outputs.cost-usd }}
 
 runs:
   using: 'composite'
@@ -106,6 +133,12 @@ runs:
         INPUT_DRY-RUN: ${{ inputs.dry-run }}
         INPUT_GATE-ENDPOINT-URL: ${{ inputs.gate-endpoint-url }}
         INPUT_PUBLICATION-ENDPOINT-URL: ${{ inputs.publication-endpoint-url }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_GITHUB-TOKEN: ${{ inputs.github-token }}
+        INPUT_GITHUB-APP-ID: ${{ inputs.github-app-id }}
+        INPUT_GITHUB-APP-PRIVATE-KEY: ${{ inputs.github-app-private-key }}
+        INPUT_GITHUB-APP-INSTALLATION-ID: ${{ inputs.github-app-installation-id }}
+        INPUT_UPSTREAM-RECORDS: ${{ inputs.upstream-records }}
       run: |
         if [[ ! -f "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js" ]]; then
           npm --prefix "${GITHUB_ACTION_PATH}" ci --no-audit --no-fund && npm --prefix "${GITHUB_ACTION_PATH}" run build

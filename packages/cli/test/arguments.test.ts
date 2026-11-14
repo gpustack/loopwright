@@ -7,10 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cycleFixture } from '../../controller/test/scheduling-fixtures.js';
-import { parseArguments } from '../src/arguments.js';
+import { parseArguments, UsageError } from '../src/arguments.js';
 import { encoded, diagnosticExit, executionExit, main as cliMain } from '../src/main.js';
-import { initDraft } from '../src/draft.js';
-import { loadTrustedConfiguration, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
+import { appendStepSummary, initDraft } from '../src/draft.js';
+import { formatRunReport, loadTrustedConfiguration, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
 import { parseTaskpackDocument } from '@loopwright/github-app';
 for (const argv of [[], ['status'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--run-id', 'y'], ['status', '--run-root', '/tmp', '--run-id', 'x', 'extra'], ['check', '--config'], ['run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--latest'], ['run', '--dry-run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c', '--repo', '/tmp'], ['closure', '--repo'], ['closure', '--repo', '/a', '--repo', '/b'], ['closure', 'extra'], ['closure', '--verify-only'], ['closure', '--json', '--json'], ['closure', '--output'], ['app-serve'], ['app-serve', '--config']]) test('cli: rejects incomplete/duplicate/unknown argument set ' + JSON.stringify(argv), () => assert.throws(() => parseArguments(argv)));
 test('cli: accepts every exact documented command flag shape', () => {
@@ -186,6 +186,184 @@ spec:
     else process.env['GITHUB_WEBHOOK_SECRET'] = prevSecret;
     if (prevKey === undefined) delete process.env['GITHUB_APP_PRIVATE_KEY'];
     else process.env['GITHUB_APP_PRIVATE_KEY'] = prevKey;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cli: parseArguments validates --output-format and --step-summary-file across commands', () => {
+  const common = ['--config', '/config', '--registry', '/registry', '--registry-sha256', 'a'.repeat(64)];
+  const runTarget = ['--repo', '/repo', '--run-root', '/runs', '--run-id', 'id-1'];
+
+  for (const format of ['json', 'text', 'markdown', 'github-step-summary', 'json,github-step-summary', 'markdown,text']) {
+    const parsedRun = parseArguments(['run', ...common, ...runTarget, '--output-format', format, '--step-summary-file', '/tmp/summary.md']);
+    assert.equal(parsedRun.values.get('output-format'), format);
+    assert.equal(parsedRun.values.get('step-summary-file'), '/tmp/summary.md');
+
+    const parsedResume = parseArguments(['resume', ...common, ...runTarget, '--output-format', format, '--step-summary-file', '/tmp/summary.md']);
+    assert.equal(parsedResume.values.get('output-format'), format);
+
+    const parsedReconcile = parseArguments(['reconcile', ...common, ...runTarget, '--receipt', '/receipt.json', '--output-format', format, '--step-summary-file', '/tmp/summary.md']);
+    assert.equal(parsedReconcile.values.get('output-format'), format);
+  }
+
+  for (const invalidArgv of [
+    ['run', '--dry-run', ...common, '--output-format', 'json'],
+    ['run', '--dry-run', ...common, '--step-summary-file', '/tmp/summary.md'],
+    ['run', ...common, ...runTarget, '--output-format', 'xml'],
+    ['run', ...common, ...runTarget, '--output-format', 'json,'],
+    ['run', ...common, ...runTarget, '--output-format', '   '],
+    ['run', ...common, ...runTarget, '--step-summary-file', '   '],
+    ['status', '--run-root', '/runs', '--run-id', 'id-1', '--output-format', 'json'],
+    ['status', '--run-root', '/runs', '--run-id', 'id-1', '--step-summary-file', '/tmp/summary.md'],
+    ['init', '--directory', '/draft', '--output-format', 'text'],
+    ['check', ...common, '--output-format', 'markdown'],
+    ['inspect', '--run-root', '/runs', '--run-id', 'id-1', '--output-format', 'text'],
+  ]) {
+    assert.throws(() => parseArguments(invalidArgv), UsageError, `expected UsageError for ${JSON.stringify(invalidArgv)}`);
+  }
+
+  const mainPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
+  const invalidSub = spawnSync(process.execPath, [mainPath, 'status', '--run-root', '/runs', '--run-id', 'id-1', '--output-format', 'json'], {
+    encoding: 'utf8',
+    timeout: 5000,
+    env: { PATH: '/usr/bin:/bin' },
+  });
+  assert.equal(invalidSub.status, 2);
+});
+
+test('cli: --json with --output-format json,github-step-summary keeps pure NDJSON stdout and writes step summary file', async () => {
+  const f = await cycleFixture(true);
+  const mainPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
+  const summaryPath = join(f.root, 'step-summary.md');
+  try {
+    const common = ['--config', f.input.configPath, '--registry', f.input.registryPath, '--registry-sha256', f.input.registrySha256];
+    const runTarget = ['--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'cli-multi-sink'];
+    const result = spawnSync(
+      process.execPath,
+      [mainPath, 'run', ...common, ...runTarget, '--json', '--output-format', 'json,github-step-summary', '--step-summary-file', summaryPath],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+
+    const lines = result.stdout.trim().split('\n');
+    assert.ok(lines.length >= 2);
+    const envelopes = lines.map(line => JSON.parse(line) as { kind: string; sequence: number; runId: string | null });
+    assert.ok(envelopes.some(env => env.kind === 'event'));
+    assert.equal(envelopes.at(-1)?.kind, 'result');
+    assert.deepEqual(envelopes.map(env => env.sequence), envelopes.map((_, index) => index + 1));
+    assert.equal(result.stdout.includes('## Loopwright Run Report'), false);
+
+    const summaryMd = await readFile(summaryPath, 'utf8');
+    assert.match(summaryMd, /^## Loopwright Run Report/m);
+    assert.match(summaryMd, /\| Run ID \| cli-multi-sink \|/);
+    assert.match(summaryMd, /\| Status \| completed \|/);
+    assert.match(summaryMd, /\| Tokens \|/);
+    assert.match(summaryMd, /\| Model \| github-copilot\/claude-sonnet-5\.5/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cli: --output-format text and markdown emit multi-line sanitized summaries without --json', async () => {
+  const f = await cycleFixture(true);
+  const fFail = await cycleFixture(false);
+  const mainPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
+  try {
+    const common = ['--config', f.input.configPath, '--registry', f.input.registryPath, '--registry-sha256', f.input.registrySha256];
+    const runTarget = ['--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'cli-human-sinks'];
+
+    const textRun = spawnSync(
+      process.execPath,
+      [mainPath, 'run', ...common, ...runTarget, '--output-format', 'text'],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(textRun.status, 0, textRun.stdout + textRun.stderr);
+    assert.match(textRun.stdout, /^Run ID: cli-human-sinks$/m);
+    assert.match(textRun.stdout, /^Status: completed\b/m);
+    assert.match(textRun.stdout, /^Model: github-copilot\/claude-sonnet-5\.5/m);
+    assert.match(textRun.stdout, /^Tokens: /m);
+    assert.match(textRun.stdout, /^Checks:$/m);
+
+    const markdownResume = spawnSync(
+      process.execPath,
+      [mainPath, 'resume', ...common, ...runTarget, '--output-format', 'markdown'],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(markdownResume.status, 0, markdownResume.stdout + markdownResume.stderr);
+    assert.match(markdownResume.stdout, /^## Loopwright Run Report$/m);
+    assert.match(markdownResume.stdout, /\| Run ID \| cli-human-sinks \|/);
+    assert.match(markdownResume.stdout, /\| Status \| completed \|/);
+    assert.match(markdownResume.stdout, /### Verification Checks/);
+
+    const failCommon = ['--config', fFail.input.configPath, '--registry', fFail.input.registryPath, '--registry-sha256', fFail.input.registrySha256];
+    const failRun = spawnSync(
+      process.execPath,
+      [mainPath, 'run', ...failCommon, '--repo', fFail.repository, '--run-root', fFail.runRoot, '--run-id', 'cli-human-fail', '--output-format', 'text'],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(failRun.status, 4, failRun.stdout + failRun.stderr);
+    assert.match(failRun.stdout, /^Run ID: cli-human-fail$/m);
+    assert.match(failRun.stdout, /^Status: failed/m);
+
+    // Verify ANSI/control stripping and workflow-command neutralization on multi-line sinks via shared formatter.
+    const ansiRendered = formatRunReport({
+      runId: 'cli-human-sinks',
+      status: 'failed',
+      reasonCode: '\x1b[31m::error::bad\x1b[0m\x00\x1f::add-mask::tok\n##[error]ctrl',
+      checks: [{ checkId: 'verify', status: 'failed', code: 'FAILED', detail: '\x1b]0;title\x07::error::detail\r\n##[error]line2' }],
+    }, 'text');
+    assert.equal(ansiRendered.includes('\x1b'), false);
+    assert.equal(ansiRendered.includes('\x00'), false);
+    assert.equal(ansiRendered.includes('\x1f'), false);
+    assert.equal(ansiRendered.includes('::error::'), false);
+    assert.equal(ansiRendered.includes('::add-mask::'), false);
+    assert.equal(ansiRendered.includes('##[error]'), false);
+  } finally {
+    await f.cleanup();
+    await fFail.cleanup();
+  }
+});
+
+test('cli: appendStepSummary and --step-summary-file refuse symlinked targets and symlinked parent directories', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'lw-cli-summary-')));
+  const mainPath = fileURLToPath(new URL('../src/main.js', import.meta.url));
+  const f = await cycleFixture(true);
+  try {
+    const regularFile = join(root, 'regular-summary.md');
+    await appendStepSummary(regularFile, Buffer.from('first\n', 'utf8'));
+    await appendStepSummary(regularFile, Buffer.from('second\n', 'utf8'));
+    assert.equal(await readFile(regularFile, 'utf8'), 'first\nsecond\n');
+
+    await assert.rejects(appendStepSummary(regularFile, new Uint8Array(1048577)), /CLI_OUTPUT_LIMIT/);
+
+    const targetSymlink = join(root, 'linked-summary.md');
+    await symlink(regularFile, targetSymlink);
+    await assert.rejects(appendStepSummary(targetSymlink, Buffer.from('x\n', 'utf8')));
+
+    const realDir = join(root, 'real-dir');
+    await mkdir(realDir, { mode: 0o700 });
+    const linkedDir = join(root, 'linked-dir');
+    await symlink(realDir, linkedDir);
+    await assert.rejects(appendStepSummary(join(linkedDir, 'summary.md'), Buffer.from('x\n', 'utf8')), /CLI_PATH/);
+
+    const common = ['--config', f.input.configPath, '--registry', f.input.registryPath, '--registry-sha256', f.input.registrySha256];
+    const runTarget = ['--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'cli-symlink-refuse'];
+    const symlinkTargetRun = spawnSync(
+      process.execPath,
+      [mainPath, 'run', ...common, ...runTarget, '--json', '--output-format', 'github-step-summary', '--step-summary-file', targetSymlink],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(symlinkTargetRun.status, 8);
+    assert.equal(JSON.parse(symlinkTargetRun.stdout.trim().split('\n').at(-1)!).kind, 'diagnostic');
+
+    const symlinkParentRun = spawnSync(
+      process.execPath,
+      [mainPath, 'resume', ...common, ...runTarget, '--step-summary-file', join(linkedDir, 'summary.md')],
+      { encoding: 'utf8', timeout: 15000, env: { PATH: '/usr/bin:/bin' } },
+    );
+    assert.equal(symlinkParentRun.status, 8);
+  } finally {
+    await f.cleanup();
     await rm(root, { recursive: true, force: true });
   }
 });

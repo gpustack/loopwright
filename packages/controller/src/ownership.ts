@@ -16,7 +16,7 @@ const execute = promisify(execFile);
 const processEnvironment = { PATH: '/usr/bin:/bin:/usr/sbin', LANG: 'C', LC_ALL: 'C' };
 export async function processBirth(pid: number): Promise<string | null> {
   try {
-    const result = await execute('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 2000, maxBuffer: 1024, env: processEnvironment });
+    const result = await execute('/bin/ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 10000, maxBuffer: 1024, env: processEnvironment });
     const birth = result.stdout.trim(); if (!birth || birth.length > 128 || result.stderr) refuse('RECOVERY_REQUIRED', '', 'recovery'); return birth;
   } catch (error) {
     const value = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
@@ -26,7 +26,7 @@ export async function processBirth(pid: number): Promise<string | null> {
 }
 export async function bootIdentity(): Promise<string> {
   if (process.platform === 'darwin' && process.arch === 'arm64') {
-    const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 2000, maxBuffer: 1024, env: processEnvironment });
+    const result = await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { timeout: 10000, maxBuffer: 1024, env: processEnvironment });
     if (!/^\{ sec = \d+, usec = \d+ \} [^\r\n]+\n$/.test(result.stdout) || result.stderr) refuse('RECOVERY_REQUIRED', '', 'recovery');
     return result.stdout.trim();
   }

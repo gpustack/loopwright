@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import type { Digest } from '@loopwright/core';
 import { canonical, digest, freeze } from './boundary.js';
 import { refuse } from './errors.js';
-import type { PiModelSelection, PiOpenInput, PiThinkingLevel, PiWireApi } from './types.js';
+import type { PiModelCost, PiModelSelection, PiOpenInput, PiThinkingLevel, PiWireApi } from './types.js';
 
 export const LEGACY_COPILOT_DESTINATION = 'https://api.individual.githubcopilot.com/v1/messages?beta=true';
 
@@ -97,6 +97,29 @@ export interface CatalogModelRecord {
   readonly contextWindow: number;
   readonly maxTokens: number;
   readonly thinkingLevelMap?: Readonly<Record<string, string | null>>;
+  readonly cost?: PiModelCost;
+}
+
+export function hasPositiveModelCost(cost: PiModelCost | undefined): cost is PiModelCost {
+  return cost !== undefined && (cost.input > 0 || cost.output > 0 || (cost.cacheRead ?? 0) > 0 || (cost.cacheWrite ?? 0) > 0);
+}
+
+function isNonNegativeRate(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1_000_000 && !Object.is(value, -0);
+}
+
+function extractBuiltInModelCost(raw: unknown): PiModelCost | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const item = raw as Record<string, unknown>;
+  if (!isNonNegativeRate(item.input) || !isNonNegativeRate(item.output)) return undefined;
+  if (item.cacheRead !== undefined && !isNonNegativeRate(item.cacheRead)) return undefined;
+  if (item.cacheWrite !== undefined && !isNonNegativeRate(item.cacheWrite)) return undefined;
+  return freeze({
+    input: item.input,
+    output: item.output,
+    ...(item.cacheRead !== undefined ? { cacheRead: item.cacheRead } : {}),
+    ...(item.cacheWrite !== undefined ? { cacheWrite: item.cacheWrite } : {}),
+  });
 }
 
 export interface CatalogIdentity {
@@ -158,6 +181,7 @@ export function resolveBuiltInPiCatalogModel(provider: string, modelId: string, 
     contextWindow?: number;
     maxTokens?: number;
     thinkingLevelMap?: Record<string, string | null>;
+    cost?: unknown;
   }>>;
   const apis = api !== undefined ? [api] : PI_WIRE_APIS;
   for (const candidateApi of apis) {
@@ -168,6 +192,7 @@ export function resolveBuiltInPiCatalogModel(provider: string, modelId: string, 
     if (!Number.isSafeInteger(entry.contextWindow) || (entry.contextWindow ?? 0) <= 0 || !Number.isSafeInteger(entry.maxTokens) || (entry.maxTokens ?? 0) <= 0) {
       continue;
     }
+    const cost = extractBuiltInModelCost(entry.cost);
     return {
       id: entry.id,
       api: entry.api as PiWireApi,
@@ -177,6 +202,7 @@ export function resolveBuiltInPiCatalogModel(provider: string, modelId: string, 
       contextWindow: entry.contextWindow!,
       maxTokens: entry.maxTokens!,
       ...(entry.thinkingLevelMap ? { thinkingLevelMap: entry.thinkingLevelMap } : {}),
+      ...(cost ? { cost } : {}),
     };
   }
   return null;
@@ -235,6 +261,7 @@ export function resolveCatalogModel(selection: PiModelSelection): { readonly rec
       contextWindow: cp.contextWindow,
       maxTokens: cp.maxTokens,
       ...(cp.thinkingLevelMap ? { thinkingLevelMap: cp.thinkingLevelMap } : {}),
+      ...(cp.cost ? { cost: cp.cost } : {}),
     };
     validateThinkingAgainstModel(selection.thinking, record);
     return { record, rawForDigest: { provider: selection.provider, model: selection.model, api: selection.api, customProvider: cp } };

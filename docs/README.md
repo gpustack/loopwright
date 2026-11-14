@@ -83,7 +83,7 @@
 - Use for: configure App intake, Action execution, and sandboxes
 - Aliases: github-app
 - Guides: [operations/github-action.md](operations/github-action.md), [operations/github-app.md](operations/github-app.md), [contribute/github-app-internals.md](contribute/github-app-internals.md)
-- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md)
+- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md), [Turnkey Execution](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md)
 - Code: [github-app](../packages/github-app/)
 - Related: [taskpacks](#declarative-taskpacks-and-runner-parity), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -127,6 +127,7 @@
 | [2026-11-11-native-os-sandbox-execution-backends.md](../specs/2026-11-11-native-os-sandbox-execution-backends.md) | native os sandbox execution backends |
 | [2026-11-11-reviewed-memory-and-cas-compaction.md](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md) | reviewed memory and cas compaction |
 | [2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md](../specs/2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md) | YAML configuration, connected guides, and branded site |
+| [2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md) | Turnkey execution, scope, and output modes |
 
 ## All pages
 

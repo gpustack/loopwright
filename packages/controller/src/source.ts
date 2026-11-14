@@ -13,6 +13,16 @@ export interface FrozenSource {
   readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
 }
 const decoded = (value: Buffer): string => { try { return new TextDecoder('utf-8', { fatal: true }).decode(value); } catch { refuse('TARGET_MISMATCH', '', 'admission'); } };
+// Must stay in lockstep with `matches()` in `@loopwright/core` (`packages/core/src/scope.ts`).
+function matchesScopePattern(pattern: string, name: string): boolean {
+  if (pattern === '**') return true;
+  if (!pattern.endsWith('/**')) return pattern === name;
+  const prefix = pattern.slice(0, -3);
+  return name === prefix || name.startsWith(`${prefix}/`);
+}
+function isProtectedByScope(name: string, protectedPatterns: readonly string[]): boolean {
+  return protectedPatterns.some(pattern => matchesScopePattern(pattern, name));
+}
 async function object(owner: ControllerOwner, directory: string, revision: string): Promise<string> {
   const value = decoded(await owner.git(directory, ['rev-parse', '--verify', '--end-of-options', revision + '^{commit}'], 256)).trim();
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value)) refuse('TARGET_MISMATCH', '', 'admission'); return value;
@@ -24,8 +34,18 @@ export async function freezeSource(repository: string, task: TaskContract, owner
   if (top !== directory) refuse('TARGET_MISMATCH', '', 'admission');
   const baseObject = await object(owner, directory, task.spec.target.baseRevision), sourceObject = await object(owner, directory, task.spec.target.sourceRevision);
   const tree = await owner.git(directory, ['ls-tree', '-rz', '--full-tree', sourceObject], 1048576), rows = tree.length ? decoded(tree).split('\0').slice(0, -1) : [];
-  if (tree.length && tree.at(-1) !== 0 || rows.length > 256) refuse('CONFIG_LIMIT', '', 'admission');
-  const descriptions = rows.map(row => {
+  if (tree.length && tree.at(-1) !== 0) refuse('CONFIG_LIMIT', '', 'admission');
+  const filteredRows = rows.filter(row => {
+    const symlinkMatch = /^120000 blob ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$/.exec(row);
+    if (!symlinkMatch) return true;
+    const name = symlinkMatch[2]!;
+    if (name.split('/').some(segment => segment.toLowerCase() === '.git' || segment.length > 255) || !digestArtifact(name, new Uint8Array()).ok) {
+      return true;
+    }
+    return !isProtectedByScope(name, task.spec.scope.protected);
+  });
+  if (filteredRows.length > 256) refuse('CONFIG_LIMIT', '', 'admission');
+  const descriptions = filteredRows.map(row => {
     const match = /^(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$/.exec(row);
     if (!match || match[3]!.split('/').some(segment => segment.toLowerCase() === '.git' || segment.length > 255) || !digestArtifact(match[3], new Uint8Array()).ok) refuse('CAPABILITY_UNSUPPORTED', '', 'admission');
     return { name: match[3]!, mode: match[1]!, oid: match[2]! };

@@ -44,6 +44,7 @@ export interface CycleContext {
   readonly signal: AbortSignal; readonly onEvent: RunCycleInput['onEvent']; readonly ports: ControllerPorts;
 }
 type Draft = Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { readonly stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> };
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const safeDiagnostic = (error: unknown, phase: ControllerDiagnostic['phase']): ControllerDiagnostic => error instanceof ControllerFailure ? error.diagnostic : { version: 1, code: 'STATE_UNAVAILABLE', phase, path: '', stateCode: null, piCode: null, effect: 'possible', retryable: false };
 async function exclusiveJson(path: string, value: unknown): Promise<void> {
   const bytes = Buffer.from(canonical(value)); if (bytes.length > 1048576) refuse('OUTPUT_LIMIT', '', 'admission');
@@ -389,8 +390,54 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     const target = prior?.nodeId, node = plan.orderedDAG.find(node => node.id === target), role = plan.roles.find(role => role.roleId === node?.roleId);
     if (!node || !role?.policy.tools.some(tool => tool === 'write' || tool === 'edit')) return false;
     this.repairBound('implementation', true, Math.max(0, ...this.draft.failures.filter(item => failed.some(check => same(check.output, item.evidence))).map(item => item.count)));
-    const findings = failed.map(check => { const slot = plan.verifierSlots.find(slot => slot.id === check.slotId)!; return { checkId: check.checkId, handler: slot.handler.implementation, code: check.reason, parameters: slot.handler.parameters, candidate: this.draft.candidate.digest }; });
-    await this.role(target!, 'implementation', 'Repair only the admitted writable candidate to satisfy these authenticated current-candidate findings. Return the complete structured submission; evidence claims will be independently checked. Findings:\n' + canonical(findings)); return true;
+    const candidateDigest = this.draft.candidate.digest;
+    const findings: {
+      checkId: string;
+      handler: typeof plan.verifierSlots[number]['handler']['implementation'];
+      code: string | null;
+      detail?: string;
+      parameters: typeof plan.verifierSlots[number]['handler']['parameters'];
+      candidate: typeof candidateDigest;
+    }[] = failed.map(check => {
+      const slot = plan.verifierSlots.find(slot => slot.id === check.slotId)!;
+      let detail: string | undefined;
+      if (slot.handler.implementation === 'gate.v1') {
+        const trusted = authenticatedGate(check);
+        try {
+          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), 65536);
+          const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
+          if (verdict && typeof verdict.reason === 'string' && verdict.reason.length > 0) {
+            detail = Array.from(verdict.reason).slice(0, 256).join('');
+          }
+        } catch {
+          // Malformed gate payload must not crash failure repair; fall back to default detail.
+        }
+      }
+      return {
+        checkId: check.checkId,
+        handler: slot.handler.implementation,
+        code: check.reason,
+        ...(detail !== undefined ? { detail } : {}),
+        parameters: slot.handler.parameters,
+        candidate: candidateDigest,
+      };
+    });
+    const maxPromptBytes = Math.min(16384, role.policy.limits.promptBytes);
+    const prefix = 'Repair only the admitted writable candidate to satisfy these authenticated current-candidate findings. Return the complete structured submission; evidence claims will be independently checked. Findings:\n';
+    let prompt = prefix + canonical(findings);
+    if (Buffer.byteLength(prompt, 'utf8') > maxPromptBytes) {
+      for (let index = findings.length - 1; index >= 0 && Buffer.byteLength(prompt, 'utf8') > maxPromptBytes; index--) {
+        if (findings[index]!.detail !== undefined) {
+          delete findings[index]!.detail;
+          prompt = prefix + canonical(findings);
+        }
+      }
+      while (findings.length > 1 && Buffer.byteLength(prompt, 'utf8') > maxPromptBytes) {
+        findings.pop();
+        prompt = prefix + canonical(findings);
+      }
+    }
+    await this.role(target!, 'implementation', prompt); return true;
   }
   async execute(): Promise<AcceptanceObservation> {
     if (!this.head) await this.bootstrap();

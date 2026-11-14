@@ -1,14 +1,15 @@
 import { reopenLocalRun, type LocalRunStore, type RunView } from '@loopwright/state';
 import { decodePiCapture } from '@loopwright/agent-pi';
-import { digestArtifact, validateDocument } from '@loopwright/core';
-import { result, refuse } from './errors.js';
+import { aggregateUsage, digestArtifact, validateDocument, type RequestUsage, type UsageSummary } from '@loopwright/core';
+import { result, refuse, type ControllerResult } from './errors.js';
 import { readRetained, type RetainedRunInput } from './retained.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
 import { stateValue, checkedRef } from './storage.js';
 import { parsePrivateJson } from './parser.js';
 import { freeze, hash, id, list, record, same } from './schema.js';
 import { formatPolicy } from './repair.js';
-import { PublicBundle } from './bundle.js';
+import { PublicBundle, type ExportManifest } from './bundle.js';
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 export type CurrentState = Pick<RunView, 'revision' | 'clockStatus' | 'counts' | 'ledger' | 'clock'>;
 export interface RunStatus {
   readonly runId: string; readonly source: 'current' | 'retained' | 'unavailable'; readonly stage: string | null; readonly status: string | null;
@@ -60,11 +61,17 @@ async function candidateFiles(saved: Snapshot, head: ProgressHead) {
   if (!decoded.ok || !same([...decoded.value.candidate.spec.entries].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0), head.manifest.spec.entries)) refuse('ARTIFACT_INVALID', '', 'inspection'); return decoded.value.artifacts;
 }
 export interface InspectRunInput extends RetainedRunInput { readonly output?: string }
-export function inspectRun(input: InspectRunInput) {
-  return result(async () => {
+export interface InspectRunValue {
+  readonly status: RunStatus;
+  readonly manifest: ExportManifest | null;
+  readonly usage: UsageSummary | null;
+  readonly externalUrl: string | null;
+}
+export function inspectRun(input: InspectRunInput): Promise<ControllerResult<InspectRunValue>> {
+  return result(async (): Promise<InspectRunValue> => {
     const fields = Object.keys(input); record(input, fields); if (fields.some(key => !['runRoot', 'runId', 'output'].includes(key))) refuse('CONFIG_SCHEMA', '', 'inspection');
     const runId = id(input.runId); let saved: Awaited<ReturnType<typeof snapshot>>;
-    try { saved = await snapshot(input); } catch { return freeze({ status: unavailable(runId), manifest: null }); }
+    try { saved = await snapshot(input); } catch { return freeze({ status: unavailable(runId), manifest: null, usage: null, externalUrl: null }); }
     const bundle = new PublicBundle(runId, saved.lock.spec.lockHash), { head, primary, observed } = saved;
     bundle.json('task.lock.json', saved.lock); bundle.json('plan.json', saved.plan);
     if (head) {
@@ -72,26 +79,80 @@ export function inspectRun(input: InspectRunInput) {
       catch { bundle.absent('candidate.files.json'); }
     } else bundle.absent('candidate.files.json');
     const validResult = validateDocument(primary, 'RunResult');
+    let usage: UsageSummary | null = null;
     if (validResult.ok && same(validResult.value.spec.subject.lockHash, saved.lock.spec.lockHash)) {
       bundle.json('result.json', validResult.value); bundle.add('result.md', Buffer.from('Run ' + runId + '\nStatus: ' + validResult.value.spec.status + '\n'));
-    } else { bundle.absent('result.json'); bundle.absent('result.md'); }
+      usage = validResult.value.spec.usage;
+    } else {
+      bundle.absent('result.json'); bundle.absent('result.md');
+      const requestUsages: RequestUsage[] = [];
+      for (const row of saved.records.requests) {
+        const obs = row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation;
+        if (obs?.usage != null) {
+          requestUsages.push(obs.usage);
+        } else {
+          requestUsages.push({
+            requestId: row.admission.requestId,
+            inputTokens: { provenance: 'unknown' },
+            outputTokens: { provenance: 'unknown' },
+            costMicrousd: { provenance: 'unknown' },
+          });
+        }
+      }
+      const aggregated = aggregateUsage(requestUsages);
+      if (aggregated.ok) usage = aggregated.value;
+    }
     if (observed?.verification) bundle.json('verification.json', observed.verification); else bundle.absent('verification.json');
     if (observed?.events) {
       try { bundle.add('events.jsonl', await saved.artifacts.read(checkedRef(observed.events), 4194304)); } catch { bundle.absent('events.jsonl'); }
     } else bundle.absent('events.jsonl');
-    bundle.json('usage.json', { version: 1, ledger: saved.records.view.ledger, requests: saved.records.requests.map(row => ({ requestId: row.admission.requestId, state: row.state, usage: (row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation)?.usage ?? null })) });
+    bundle.json('usage.json', { version: 1, ledger: saved.records.view.ledger, requests: saved.records.requests.map(row => ({ requestId: row.admission.requestId, state: row.state, usage: (row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation)?.usage ?? null })), summary: usage });
     bundle.json('checkpoint.manifest.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, checkpoints: saved.records.checkpoints.map(cp => ({ checkpointId: cp.checkpointId, sequence: cp.sequence, subject: cp.subject, artifacts: cp.additionalArtifacts })) });
     for (const name of ['review.json', 'memory.json']) bundle.absent(name, 'outside_scope', 'not_run');
+    let externalUrl: string | null = null;
     const publication = head?.progress.publication, externalWrite = saved.records.operations.find(item => item.intent.effect === 'external_write');
     const journalReceipt = externalWrite && externalWrite.state === 'confirmed' ? externalWrite.reconciliation ?? externalWrite.initialReceipt : null;
+    let publicationPayload: { readonly status: string; readonly operationId: string | null; readonly receipt: unknown } | null = null;
     if (externalWrite && journalReceipt) {
-      try { bundle.json('publication.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, status: journalReceipt.outcome === 'succeeded' ? 'confirmed' : 'failed', operationId: externalWrite.intent.operationId, receipt: journalReceipt }); }
+      publicationPayload = { status: journalReceipt.outcome === 'succeeded' ? 'confirmed' : 'failed', operationId: externalWrite.intent.operationId, receipt: journalReceipt };
+    } else if (publication && publication.receipt !== null && ['confirmed', 'failed'].includes(publication.status)) {
+      try {
+        const parsedReceipt = parsePrivateJson(await saved.artifacts.read(publication.receipt, 65536), 65536);
+        publicationPayload = { status: publication.status, operationId: publication.operationId, receipt: parsedReceipt };
+      } catch {
+        publicationPayload = null;
+      }
+    }
+    if (publicationPayload) {
+      const receiptRecord = isRecord(publicationPayload.receipt) ? publicationPayload.receipt : null;
+      const evidenceRecord = receiptRecord && isRecord(receiptRecord.evidence) ? receiptRecord.evidence : null;
+      if (publicationPayload.status === 'confirmed' && evidenceRecord && evidenceRecord.artifact !== undefined) {
+        try {
+          const rawArtifact = await saved.artifacts.read(checkedRef(evidenceRecord.artifact), 65536);
+          const parsedArtifact = parsePrivateJson(Buffer.from(rawArtifact), 65536);
+          if (isRecord(parsedArtifact) && typeof parsedArtifact.responseBytes === 'string') {
+            const parsedResponse = parsePrivateJson(Buffer.from(parsedArtifact.responseBytes, 'base64'), 65536);
+            if (isRecord(parsedResponse) && typeof parsedResponse.externalUrl === 'string' && parsedResponse.externalUrl.length > 0 && parsedResponse.externalUrl.length <= 512) {
+              try {
+                const parsedUrl = new URL(parsedResponse.externalUrl);
+                if (parsedUrl.protocol === 'https:' && parsedUrl.username === '' && parsedUrl.password === '') {
+                  externalUrl = parsedResponse.externalUrl;
+                }
+              } catch {
+                externalUrl = null;
+              }
+            }
+          }
+        } catch {
+          externalUrl = null;
+        }
+      }
+      try { bundle.json('publication.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, status: publicationPayload.status, operationId: publicationPayload.operationId, receipt: publicationPayload.receipt, externalUrl }); }
       catch { bundle.absent('publication.json'); }
     } else if (publication && publication.receipt !== null && ['confirmed', 'failed'].includes(publication.status)) {
-      try { bundle.json('publication.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, status: publication.status, operationId: publication.operationId, receipt: parsePrivateJson(await saved.artifacts.read(publication.receipt, 65536), 65536) }); }
-      catch { bundle.absent('publication.json'); }
+      bundle.absent('publication.json');
     } else bundle.absent('publication.json', saved.plan.publication.mode === 'disabled' ? 'disabled' : 'ineligible', 'not_run');
     if (input.output !== undefined) await bundle.write(input.output, saved.directory);
-    return freeze({ status: saved.status, manifest: bundle.manifest() });
+    return freeze({ status: saved.status, manifest: bundle.manifest(), usage, externalUrl });
   }, 'inspection');
 }

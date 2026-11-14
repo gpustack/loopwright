@@ -24,9 +24,14 @@ interface Session {
   close(): Promise<void>;
   capture?(sink: (bytes: Uint8Array) => Promise<void>): Promise<void>;
 }
+export interface LeasePort {
+  release(): Promise<void>;
+}
 export interface FactoryPorts {
   readonly mcp?: (host: PiHost, input: PiOpenInput) => McpPorts;
   readonly sender?: (host: PiHost, input: PiOpenInput) => Sender;
+  readonly lease?: (host: PiHost, input: PiOpenInput) => Promise<LeasePort>;
+  readonly execution?: (host: PiHost, input: PiOpenInput, candidate: string) => Execution;
   readonly environment: (host: PiHost) => Promise<void>;
   readonly session: (host: PiHost, input: PiOpenInput, sender: RuntimeBroker, directory: string) => Session;
 }
@@ -65,10 +70,11 @@ export async function constructAdapter(unownedHost: PiHost, input: unknown, port
     const restored = recoverSnapshot(host, owned);
     if (owned.policy.mcp.names.length && !sameIdentity(digest(await readFile(new URL('./workspace-mcp.js', import.meta.url))), owned.policy.mcp.scriptDigest)) refuse('RUNTIME_MISMATCH', '/policy/mcp/scriptDigest');
     const catalog = selectedCatalog(owned); await ports.environment(host);
-    const lease = await ExecutionLease.acquire(host, owned);
+    const lease = await (ports.lease ? ports.lease(host, owned) : ExecutionLease.acquire(host, owned));
     let sequencing: Awaited<ReturnType<typeof eventSequence>>; try { sequencing = await eventSequence(host, owned, restored?.sequence ?? 0); } catch (error) { await lease.release(); throw error; }
     const sender = ports.sender?.(host, owned) ?? new Sender(host, owned, { fetch: globalThis.fetch, catalog });
-    const execution = new Execution(host, owned, join(host.directory, 'sdk-' + owned.sessionId, 'candidate')); sender.installTools(execution);
+    const candidateDirectory = join(host.directory, 'sdk-' + owned.sessionId, 'candidate');
+    const execution = ports.execution ? ports.execution(host, owned, candidateDirectory) : new Execution(host, owned, candidateDirectory); sender.installTools(execution);
     const session = ports.session(host, owned, sender, join(host.directory, 'sdk-' + owned.sessionId));
     const mcp = new Mcp(host, owned, execution.candidate, code => sender.runtimeFault(code), ports.mcp?.(host, owned));
     const cleanupRoles = async () => { const results = await Promise.allSettled([execution.close(), mcp.close(), session.close()]); if (results.some(item => item.status === 'rejected')) refuse('CLEANUP_FAILED', '', { phase: 'cleanup' }); };

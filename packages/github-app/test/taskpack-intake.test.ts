@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { createHash, createVerify, generateKeyPairSync } from 'node:crypto';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { validateDocument } from '@loopwright/core';
 import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
-import { compileDeclarativeTaskpack, authorizeRepositoryActor, boundDiagnosticLog, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand, prepareTaskpackIntake, validateCommentGuidance } from '../src/taskpack.js';
-import { parseTaskpackDocument, validateTaskpackManifest, type Json } from '../src/schema.js';
+import { compileDeclarativeTaskpack, compileScopePatterns, authorizeRepositoryActor, boundDiagnosticLog, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand, prepareTaskpackIntake, resolveManifestControlRoot, stageCompiledInstructionResources, validateCommentGuidance } from '../src/taskpack.js';
+import { effectiveProtectedPaths, parseTaskpackDocument, validateTaskpackManifest, type Json } from '../src/schema.js';
 import { GITHUB_APP_CONFIG_API_VERSION, loadGitHubAppConfig, parseGitHubAppConfigDocument, startConfiguredGitHubApp } from '../src/config.js';
 import { resolveTaskpackModelCandidates, selectHealthyModelCandidate } from '../src/models-config.js';
 import { createGitHubRestTokenTransport, InstallationTokenBroker, SecretScrubber } from '../src/token-broker.js';
@@ -1126,5 +1126,702 @@ spec:
         (err: GitHubAppError) => err.code === 'PROVIDER_OAUTH_UNSUPPORTED',
       );
     }
+  });
+});
+
+describe('T2 control-root, orthogonal scope, instructions, command.v1, bare prefix, & output (AC-1..7)', () => {
+  it('derives controlRoot from repository-relative manifestPath, rejects symlinked ancestors, and protects root/custom manifests plus .claude/.agents', async () => {
+    await withSandbox(async root => {
+      // Custom .auto-sync/sync.yaml control root
+      await mkdir(join(root, '.auto-sync'), { recursive: true });
+      const customManifestYaml = `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: auto-sync
+spec:
+  goal:
+    candidate: Sync upstream files.
+    noChange: Confirm no upstream change.
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: octocat/engine
+      watchedPaths:
+        - pack
+  proposal:
+    path: pack/proposal.json
+    requiredFields:
+      - schema_version
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: proposal-json
+        implementation: json-artifact.v1
+    externalGates: []
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: sync-
+    titleTemplate: 'chore: sync'
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands:
+      - retry
+      - revise
+      - status
+    commentPrefixes:
+      - /auto-sync
+`;
+      await writeFile(join(root, '.auto-sync', 'sync.yaml'), customManifestYaml);
+      const loadedCustom = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/sync.yaml', repositoryRoot: root });
+      assert.equal(loadedCustom.controlRoot, '.auto-sync');
+      assert.equal(loadedCustom.manifestPath, '.auto-sync/sync.yaml');
+      assert.deepEqual(loadedCustom.spec.scope, { writable: [], protected: [] });
+
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      const compiledCustom = await compileDeclarativeTaskpack(loadedCustom, bindingsFor(loadedCustom, {
+        publicationEndpoint: null,
+        credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
+      }));
+      assert.deepEqual(compiledCustom.config.spec.task.spec.scope.writable, ['**']);
+      const protectedPatterns = compiledCustom.config.spec.task.spec.scope.protected;
+      for (const expected of [
+        '.github/**', '.claude/**', '.agents/**', '.loopwright/policies/**',
+        'AGENTS.md/**', 'CLAUDE.md/**', '.auto-sync/policies/**', '.auto-sync/checks/**',
+        '.auto-sync/memory/**', '.auto-sync/sync.yaml/**',
+      ]) {
+        assert.equal(protectedPatterns.includes(expected), true, `missing protected pattern ${expected}`);
+      }
+
+      // Root taskpack.yaml defaults controlRoot to .loopwright while protecting exact taskpack.yaml
+      const rootManifestYaml = customManifestYaml.replace('directory: .auto-sync/memory', 'directory: .loopwright/memory/auto-sync');
+      await writeFile(join(root, 'taskpack.yaml'), rootManifestYaml);
+      const loadedRoot = await loadDeclarativeTaskpack({ manifestPath: 'taskpack.yaml', repositoryRoot: root });
+      assert.equal(loadedRoot.controlRoot, '.loopwright');
+      assert.equal(loadedRoot.manifestPath, 'taskpack.yaml');
+      const compiledRoot = await compileDeclarativeTaskpack(loadedRoot, bindingsFor(loadedRoot, {
+        publicationEndpoint: null,
+        credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
+      }));
+      assert.equal(compiledRoot.config.spec.task.spec.scope.protected.includes('taskpack.yaml/**'), true);
+
+      // Symlinked ancestor directory inside repositoryRoot is refused with TASKPACK_MANIFEST_INVALID
+      await mkdir(join(root, 'real-dir'), { recursive: true });
+      await writeFile(join(root, 'real-dir', 'taskpack.yaml'), customManifestYaml);
+      await symlink(join(root, 'real-dir'), join(root, 'linked-dir'));
+      await assert.rejects(
+        loadDeclarativeTaskpack({ manifestPath: 'linked-dir/taskpack.yaml', repositoryRoot: root }),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+    });
+  });
+
+  it('enforces strict @loopwright/core path grammar, explicit empty writable refusal, and blacklist-wins scope compilation', async () => {
+    const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+
+    // Reject globs, spaces, +, trailing dots, and reserved Windows device names
+    for (const badPath of ['**', 'docs/**', 'docs/*.md', 'docs with space', 'c++', 'docs/sub.', 'con', 'docs/nul.txt']) {
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [badPath], protected: [] };
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+        `expected TASKPACK_MANIFEST_INVALID for writable path "${badPath}"`,
+      );
+    }
+
+    // Reject explicit empty writable: []
+    assert.throws(
+      () => validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [], protected: [] };
+      })),
+      (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+
+    // Reject .claude and .agents in writable
+    for (const protectedWritable of ['.claude', '.claude/skills', '.agents', '.agents/prompts']) {
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [protectedWritable] };
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+    }
+
+    // Blacklist-wins: broad writable parent 'pack' with protected descendant 'pack/dependencies.json'
+    const blacklistWins = validateTaskpackManifest(editedManifest(base, draft => {
+      (draft['spec'] as Record<string, unknown>)['scope'] = {
+        writable: ['pack', 'docs'],
+        protected: ['pack/dependencies.json', 'docs/protected-notes.md'],
+      };
+    }));
+    assert.deepEqual(blacklistWins.spec.scope, {
+      writable: ['pack', 'docs'],
+      protected: ['pack/dependencies.json', 'docs/protected-notes.md'],
+    });
+    assert.deepEqual(compileScopePatterns(undefined, 'writable'), ['**']);
+    assert.deepEqual(compileScopePatterns([], 'writable'), ['**']);
+    assert.deepEqual(compileScopePatterns(undefined, 'protected'), []);
+    assert.deepEqual(compileScopePatterns(['pack', 'docs'], 'writable'), ['pack/**', 'docs/**']);
+
+    // proposal.path inside protected descendant is still refused with TASKPACK_SCOPE_VIOLATION
+    assert.throws(
+      () => validateTaskpackManifest(editedManifest(blacklistWins, draft => {
+        (draft['spec'] as Record<string, unknown>)['proposal'] = {
+          path: 'pack/dependencies.json',
+          requiredFields: ['schema_version'],
+          schemaVersion: 1,
+        };
+      })),
+      (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
+    );
+  });
+
+  it('validates, SHA-256-pins, and stages nested spec.instructions while enforcing the 24576-byte aggregate limit', async () => {
+    await withSandbox(async root => {
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+      await mkdir(join(root, '.auto-sync', 'prompts'), { recursive: true });
+      const instrA = '# Instruction A\nAlways keep patches minimal.\n';
+      const instrB = '# Instruction B\nVerify checksums.\n';
+      await writeFile(join(root, '.auto-sync', 'prompts', 'a.md'), instrA, 'utf8');
+      await writeFile(join(root, '.auto-sync', 'prompts', 'b.md'), instrB, 'utf8');
+
+      const instrYaml = `${VALID_MANIFEST_YAML.replace('.loopwright/memory/docs-sync', '.auto-sync/memory/docs-sync')}  instructions:
+    - .auto-sync/prompts/a.md
+    - .auto-sync/prompts/b.md
+`;
+      await writeFile(join(root, '.auto-sync', 'taskpack.yaml'), instrYaml, 'utf8');
+      const manifest = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: root });
+      assert.deepEqual(manifest.spec.instructions, ['.auto-sync/prompts/a.md', '.auto-sync/prompts/b.md']);
+      assert.equal(effectiveProtectedPaths(manifest.spec.scope.protected, {
+        controlRoot: manifest.controlRoot,
+        manifestPath: manifest.manifestPath,
+        instructions: manifest.spec.instructions,
+      }).includes('.auto-sync/prompts/a.md'), true);
+
+      // Missing repositoryRoot fails closed
+      await assert.rejects(
+        compileDeclarativeTaskpack(manifest, bindingsFor(manifest)),
+        (err: GitHubAppError) => err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+
+      const compiled = await compileDeclarativeTaskpack(manifest, bindingsFor(manifest, { repositoryRoot: root }));
+      assert.equal(compiled.instructionResources?.length, 2);
+      assert.equal(compiled.instructionResources?.[0]?.id, 'instruction-0-auto-sync-prompts-a-md');
+      assert.equal(compiled.instructionResources?.[0]?.digest.hex, createHash('sha256').update(instrA, 'utf8').digest('hex'));
+      assert.deepEqual(
+        compiled.registry.spec.resources,
+        JSON.parse(JSON.stringify(compiled.config.spec.task.spec.trustedContext.resources)),
+      );
+
+      // Stage instruction resources into registry directory and verify loadTrustedConfiguration + compilePlan pass
+      const { registryPath, configPath } = await writeTrustedArtifacts(compiled.registryBytes, Buffer.from(serializePrettyYaml(compiled.config), 'utf8'));
+      await stageCompiledInstructionResources(dirname(registryPath), compiled.instructionResources);
+      const loaded = await loadTrustedConfiguration({ configPath, registryPath, registrySha256: compiled.registrySha256, untrustedRoots: [root] });
+      assert.equal(loaded.ok, true, `loadTrustedConfiguration failed: ${loaded.ok ? '' : loaded.error.code}`);
+      if (loaded.ok) {
+        const plan = await compilePlan(loaded.value);
+        assert.equal(plan.ok, true, `compilePlan failed: ${plan.ok ? '' : plan.error.code}`);
+      }
+
+      // Single string spec.instructions is normalized to a 1-element array
+      const singleInstr = validateTaskpackManifest(editedManifest(manifest, draft => {
+        (draft['spec'] as Record<string, unknown>)['instructions'] = '.auto-sync/prompts/a.md';
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' });
+      assert.deepEqual(singleInstr.spec.instructions, ['.auto-sync/prompts/a.md']);
+
+      // Aggregate > 24576 bytes is refused
+      await writeFile(join(root, '.auto-sync', 'prompts', 'b.md'), 'x'.repeat(24_570), 'utf8');
+      await assert.rejects(
+        compileDeclarativeTaskpack(manifest, bindingsFor(manifest, { repositoryRoot: root })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+
+      // Symlinked instruction file is refused
+      await writeFile(join(root, '.auto-sync', 'prompts', 'target.md'), 'hi\n', 'utf8');
+      await rm(join(root, '.auto-sync', 'prompts', 'b.md'));
+      await symlink(join(root, '.auto-sync', 'prompts', 'target.md'), join(root, '.auto-sync', 'prompts', 'b.md'));
+      await assert.rejects(
+        compileDeclarativeTaskpack(manifest, bindingsFor(manifest, { repositoryRoot: root })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+    });
+  });
+
+  it('validates and compiles command.v1 checks to gate.v1 slots alongside externalGates', async () => {
+    await withSandbox(async root => {
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      withEnv('TASKPACK_TEST_GATE_SIGNING_SECRET', 'gate-signing-value');
+      withEnv('TASKPACK_TEST_LOCAL_GATE_SECRET', 'local-gate-signing-value');
+      withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+
+      await mkdir(join(root, '.auto-sync', 'checks'), { recursive: true });
+      const scriptText = '#!/bin/sh\necho ok\n';
+      await writeFile(join(root, '.auto-sync', 'checks', 'verify.sh'), scriptText, 'utf8');
+
+      const baseYaml = VALID_MANIFEST_YAML.replace('.loopwright/memory/docs-sync', '.auto-sync/memory/docs-sync');
+      await writeFile(join(root, '.auto-sync', 'taskpack.yaml'), baseYaml, 'utf8');
+      const base = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: root });
+
+      // Script outside protected path is refused with TASKPACK_SCOPE_VIOLATION
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['verification'] = {
+            localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: 'docs/verify.sh' } }],
+            externalGates: [],
+          };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // Invalid timeoutSeconds & reserved env vars are refused with TASKPACK_MANIFEST_INVALID
+      for (const badTimeout of [0, 56, 1.5]) {
+        assert.throws(
+          () => validateTaskpackManifest(editedManifest(base, draft => {
+            (draft['spec'] as Record<string, unknown>)['verification'] = {
+              localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', timeoutSeconds: badTimeout } }],
+              externalGates: [],
+            };
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+        );
+      }
+
+      for (const badEnv of ['LOOPWRIGHT_TOKEN', 'INPUT_SECRET', 'GITHUB_APP_KEY', 'GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_ID_TOKEN', 'BASH_ENV', 'ENV', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_LIBRARY_PATH', 'GIT_DIR', 'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL']) {
+        assert.throws(
+          () => validateTaskpackManifest(editedManifest(base, draft => {
+            (draft['spec'] as Record<string, unknown>)['verification'] = {
+              localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', env: [badEnv] } }],
+              externalGates: [],
+            };
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+          `expected reserved env "${badEnv}" to be rejected`,
+        );
+      }
+
+      // Valid command.v1 with 64-char checkId + externalGate compiles and passes loadTrustedConfiguration + compilePlan
+      const longCheckId = `c${'a'.repeat(63)}`;
+      const mixedManifest = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [
+            { id: 'docs-proposal-json', implementation: 'json-artifact.v1' },
+            {
+              id: longCheckId,
+              implementation: 'command.v1',
+              parameters: {
+                script: '.auto-sync/checks/verify.sh',
+                timeoutSeconds: 45,
+                allowReadOnlyGitHubToken: true,
+                env: ['TARGET_ARCH'],
+              },
+            },
+          ],
+          externalGates: [{ id: 'docs-gate', gateId: 'candidate-validation', endpointId: 'docs-gate', required: true }],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' });
+
+      // Missing repositoryRoot in candidate mode fails closed
+      await assert.rejects(
+        compileDeclarativeTaskpack(mixedManifest, bindingsFor(mixedManifest, {
+          gateEndpoints: [{ id: 'docs-gate', url: 'https://gate.example.test/verify', signingCredentialRef: 'docs-gate-signing' }],
+          credentialEnvMap: {
+            provider: 'TASKPACK_TEST_PROVIDER_TOKEN',
+            gate: 'TASKPACK_TEST_GATE_SIGNING_SECRET',
+            localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+            publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+          },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+
+      const compiled = await compileDeclarativeTaskpack(mixedManifest, bindingsFor(mixedManifest, {
+        repositoryRoot: root,
+        gateEndpoints: [{ id: 'docs-gate', url: 'https://gate.example.test/verify', signingCredentialRef: 'docs-gate-signing' }],
+        credentialEnvMap: {
+          provider: 'TASKPACK_TEST_PROVIDER_TOKEN',
+          gate: 'TASKPACK_TEST_GATE_SIGNING_SECRET',
+          localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+          publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+        },
+      }));
+
+      assert.equal(compiled.localCommandGates?.length, 1);
+      const localGate = compiled.localCommandGates![0]!;
+      assert.equal(localGate.checkId, longCheckId);
+      assert.equal(localGate.endpointRef, 'loopwright-local-command');
+      assert.equal(localGate.script, '.auto-sync/checks/verify.sh');
+      assert.equal(localGate.scriptSha256, createHash('sha256').update(scriptText, 'utf8').digest('hex'));
+      assert.equal(localGate.timeoutSeconds, 45);
+      assert.equal(localGate.allowReadOnlyGitHubToken, true);
+      assert.deepEqual(localGate.env, ['TARGET_ARCH']);
+      assert.ok(localGate.gateId.length <= 128);
+
+      const cmdHandler = compiled.registry.spec.handlers.find(h => h.id === longCheckId);
+      assert.equal(cmdHandler?.implementation, 'gate.v1');
+      assert.deepEqual(cmdHandler?.parameters, {
+        checkId: longCheckId,
+        endpointRef: 'loopwright-local-command',
+        gateId: localGate.gateId,
+      });
+
+      const { registryPath, configPath } = await writeTrustedArtifacts(compiled.registryBytes, Buffer.from(serializePrettyYaml(compiled.config), 'utf8'));
+      const loaded = await loadTrustedConfiguration({ configPath, registryPath, registrySha256: compiled.registrySha256, untrustedRoots: [root] });
+      assert.equal(loaded.ok, true, `loadTrustedConfiguration failed: ${loaded.ok ? '' : loaded.error.code}`);
+      if (loaded.ok) {
+        const plan = await compilePlan(loaded.value);
+        assert.equal(plan.ok, true, `compilePlan failed: ${plan.ok ? '' : plan.error.code}`);
+      }
+    });
+  });
+
+  it('parses bare comment prefix with multiline guidance as revise when revise is enabled', () => {
+    assert.deepEqual(
+      parseCommentCommand('/auto-sync\nUpdate chart version to 1.2.3.', ['/auto-sync'], ['retry', 'revise']),
+      { command: 'revise', guidance: 'Update chart version to 1.2.3.' },
+    );
+    assert.deepEqual(
+      parseCommentCommand('/auto-sync   \r\nLine 1\nLine 2', ['/auto-sync'], ['revise']),
+      { command: 'revise', guidance: 'Line 1\nLine 2' },
+    );
+    assert.equal(parseCommentCommand('/auto-sync', ['/auto-sync'], ['revise']), null);
+    assert.equal(parseCommentCommand('/auto-sync\n   \n', ['/auto-sync'], ['revise']), null);
+    assert.equal(parseCommentCommand('/auto-sync\nGuidance', ['/auto-sync'], ['retry', 'status']), null);
+  });
+
+  it('validates spec.output formats and rejects empty, duplicate, or invalid sinks', async () => {
+    const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+    const single = validateTaskpackManifest(editedManifest(base, draft => {
+      (draft['spec'] as Record<string, unknown>)['output'] = { formats: 'markdown' };
+    }));
+    assert.deepEqual(single.spec.output, { formats: ['markdown'] });
+
+    const multi = validateTaskpackManifest(editedManifest(base, draft => {
+      (draft['spec'] as Record<string, unknown>)['output'] = { formats: ['json', 'github-step-summary', 'markdown', 'text'] };
+    }));
+    assert.deepEqual(multi.spec.output, { formats: ['json', 'github-step-summary', 'markdown', 'text'] });
+
+    for (const badOutput of [
+      { formats: [] },
+      { formats: ['json', 'json'] },
+      { formats: ['html'] },
+      { formats: 'html' },
+      { formats: ['json'], extra: true },
+    ]) {
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['output'] = badOutput;
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+    }
+  });
+
+  it('compiles standalone command.v1 using DEFAULT_LOCAL_COMMAND_GATE_ENV rather than reusing gate secret', async () => {
+    await withSandbox(async root => {
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      withEnv('TASKPACK_TEST_GATE_SIGNING_SECRET', 'gate-signing-value');
+      withEnv('LOOPWRIGHT_LOCAL_GATE_SECRET', 'local-gate-signing-value');
+      withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+
+      await mkdir(join(root, '.loopwright', 'checks'), { recursive: true });
+      await writeFile(join(root, '.loopwright', 'checks', 'lint.sh'), '#!/bin/sh\necho lint\n', 'utf8');
+
+      const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+      const manifest = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [
+            {
+              id: 'lint-check',
+              implementation: 'command.v1',
+              parameters: { script: '.loopwright/checks/lint.sh' },
+            },
+          ],
+          externalGates: [],
+        };
+      }));
+
+      const compiled = await compileDeclarativeTaskpack(manifest, bindingsFor(manifest, {
+        repositoryRoot: root,
+        credentialEnvMap: {
+          provider: 'TASKPACK_TEST_PROVIDER_TOKEN',
+          gate: 'TASKPACK_TEST_GATE_SIGNING_SECRET',
+          publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+        },
+      }));
+
+      assert.equal(compiled.localCommandGates?.length, 1);
+      assert.equal(compiled.localCommandGates?.[0]?.timeoutSeconds, 30);
+      assert.equal(compiled.localCommandGates?.[0]?.allowReadOnlyGitHubToken, false);
+      assert.deepEqual(compiled.localCommandGates?.[0]?.env, []);
+      const localCred = compiled.registry.spec.credentialBindings.find(b => b.destinationRef === 'taskpack-local-command-signing');
+      assert.deepEqual(localCred?.environmentNames, ['LOOPWRIGHT_LOCAL_GATE_SECRET']);
+    });
+  });
+
+  it('enforces T2 review edge cases (controlRoot conflicts, symlinks, 128-pattern & 1021-char caps, reserved endpointId & env names, script/instruction bounds, staging modes, and output shorthands)', async () => {
+    await withSandbox(async root => {
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      withEnv('TASKPACK_TEST_GATE_SIGNING_SECRET', 'gate-signing-value');
+      withEnv('TASKPACK_TEST_LOCAL_GATE_SECRET', 'local-gate-signing-value');
+      withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+
+      // 1. resolveManifestControlRoot & compileDeclarativeTaskpack conflict + memory.directory check
+      await mkdir(join(root, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(root, '.auto-sync', 'prompts'), { recursive: true });
+      const autoSyncYaml = VALID_MANIFEST_YAML.replace('.loopwright/memory/docs-sync', '.auto-sync/memory/docs-sync');
+      await writeFile(join(root, '.auto-sync', 'sync.yaml'), autoSyncYaml, 'utf8');
+      const loadedAutoSync = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/sync.yaml', repositoryRoot: root });
+
+      assert.throws(
+        () => resolveManifestControlRoot(loadedAutoSync, '.other/sync.yaml'),
+        (err: GitHubAppError) => err.code === 'TASKPACK_HOST_BINDING_INVALID' && err.path === '/taskpackPath',
+      );
+      assert.throws(
+        () => resolveManifestControlRoot(loadedAutoSync, '.auto-sync/other.yaml'),
+        (err: GitHubAppError) => err.code === 'TASKPACK_HOST_BINDING_INVALID' && err.path === '/taskpackPath',
+      );
+      await assert.rejects(
+        compileDeclarativeTaskpack(loadedAutoSync, bindingsFor(loadedAutoSync, {
+          taskpackPath: '.other/sync.yaml',
+          publicationEndpoint: null,
+          credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+
+      // JSON-roundtripped .auto-sync manifest compiled without taskpackPath fails closed on memory directory mismatch
+      const roundTripped = JSON.parse(JSON.stringify(loadedAutoSync)) as TaskpackManifest;
+      await assert.rejects(
+        compileDeclarativeTaskpack(roundTripped, bindingsFor(roundTripped, {
+          publicationEndpoint: null,
+          credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION' && err.path === '/spec/memory/directory',
+      );
+
+      // Whole <controlRoot> is protected in compiled TaskContract and refused in writable
+      const compiledAutoSync = await compileDeclarativeTaskpack(loadedAutoSync, bindingsFor(loadedAutoSync, {
+        taskpackPath: '.auto-sync/sync.yaml',
+      }));
+      assert.equal(compiledAutoSync.config.spec.task.spec.scope.protected.includes('.auto-sync/**'), true);
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs', '.auto-sync/sub'], protected: [] };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' }),
+        (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 2. '..foo' directory name is allowed (not misclassified as '..' root escape) & relative manifestPath without repositoryRoot still rejects symlinked ancestors
+      await mkdir(join(root, '..foo'), { recursive: true });
+      await writeFile(
+        join(root, '..foo', 'taskpack.yaml'),
+        VALID_MANIFEST_YAML.replace('.loopwright/memory/docs-sync', '..foo/memory/docs-sync'),
+        'utf8',
+      );
+      const dotDotFooManifest = await loadDeclarativeTaskpack({ manifestPath: '..foo/taskpack.yaml', repositoryRoot: root });
+      assert.equal(dotDotFooManifest.controlRoot, '..foo');
+
+      await mkdir(join(root, 'real-rel'), { recursive: true });
+      await writeFile(join(root, 'real-rel', 'taskpack.yaml'), VALID_MANIFEST_YAML, 'utf8');
+      await symlink(join(root, 'real-rel'), join(root, 'linked-rel'));
+      const prevCwd = process.cwd();
+      try {
+        process.chdir(root);
+        await assert.rejects(
+          loadDeclarativeTaskpack({ manifestPath: 'linked-rel/taskpack.yaml' }),
+          (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+        );
+      } finally {
+        process.chdir(prevCwd);
+      }
+
+      // 3. 1021-char path cap and 128-entry effectiveProtectedPaths cap
+      const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs'], protected: [`docs/${'a'.repeat(1017)}`] };
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+      const manyProtected = Array.from({ length: 120 }, (_, i) => `docs/protected-${i}.md`);
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs'], protected: manyProtected };
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/scope/protected',
+      );
+
+      // 4. Reject reserved externalGates[].endpointId: 'loopwright-local-command'
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['verification'] = {
+            localChecks: [],
+            externalGates: [{ id: 'sneaky-gate', gateId: 'g1', endpointId: 'loopwright-local-command', required: true }],
+          };
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/verification/externalGates/0/endpointId',
+      );
+
+      // 5. Block provider & credential env names in command.v1 parameters.env (schema + compiler) and distinct gateIds for shared prefixes
+      await writeFile(join(root, '.auto-sync', 'checks', 'a.sh'), '#!/bin/sh\necho a\n', 'utf8');
+      for (const blockedEnv of ['ZAI_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'LLM_TOKEN']) {
+        assert.throws(
+          () => validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+            (draft['spec'] as Record<string, unknown>)['verification'] = {
+              localChecks: [{ id: 'cmd-a', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/a.sh', env: [blockedEnv] } }],
+              externalGates: [],
+            };
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' }),
+          (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+        );
+      }
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+          (draft['spec'] as Record<string, unknown>)['models'] = [{ provider: 'zai', id: 'glm-5.3', apiKeyEnv: 'CUSTOM_MODEL_SECRET' }];
+          (draft['spec'] as Record<string, unknown>)['verification'] = {
+            localChecks: [{ id: 'cmd-a', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/a.sh', env: ['CUSTOM_MODEL_SECRET'] } }],
+            externalGates: [],
+          };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' }),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/verification/localChecks/0/parameters/env/0',
+      );
+      const customSecretCmdManifest = validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [{ id: 'cmd-a', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/a.sh', env: ['HOST_SECRET_ENV'] } }],
+          externalGates: [],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' });
+      await assert.rejects(
+        compileDeclarativeTaskpack(customSecretCmdManifest, bindingsFor(customSecretCmdManifest, {
+          repositoryRoot: root,
+          credentialEnvMap: {
+            provider: 'HOST_SECRET_ENV',
+            localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+            publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+          },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/verification/localChecks/0/parameters/env',
+      );
+
+      // Two command.v1 checks sharing first 48 chars of id produce distinct gateIds
+      const sharedPrefix = `c${'x'.repeat(48)}`;
+      const twoCommandsManifest = validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [
+            { id: `${sharedPrefix}-one`, implementation: 'command.v1', parameters: { script: '.auto-sync/checks/a.sh' } },
+            { id: `${sharedPrefix}-two`, implementation: 'command.v1', parameters: { script: '.auto-sync/checks/a.sh' } },
+          ],
+          externalGates: [],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' });
+      const compiledTwoCommands = await compileDeclarativeTaskpack(twoCommandsManifest, bindingsFor(twoCommandsManifest, {
+        repositoryRoot: root,
+        credentialEnvMap: {
+          provider: 'TASKPACK_TEST_PROVIDER_TOKEN',
+          localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+          publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+        },
+      }));
+      assert.equal(compiledTwoCommands.localCommandGates?.length, 2);
+      assert.notEqual(compiledTwoCommands.localCommandGates?.[0]?.gateId, compiledTwoCommands.localCommandGates?.[1]?.gateId);
+
+      // 6. Empty (0-byte), oversized (>262144-byte), or symlinked command.v1 script, and non-UTF-8 spec.instructions
+      const cmdManifestForFileChecks = validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [{ id: 'cmd-file', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/target.sh' } }],
+          externalGates: [],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' });
+      await writeFile(join(root, '.auto-sync', 'checks', 'target.sh'), '', 'utf8');
+      await assert.rejects(
+        compileDeclarativeTaskpack(cmdManifestForFileChecks, bindingsFor(cmdManifestForFileChecks, {
+          repositoryRoot: root,
+          credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN', localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET', publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET' },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+      await writeFile(join(root, '.auto-sync', 'checks', 'target.sh'), 'x'.repeat(262_145), 'utf8');
+      await assert.rejects(
+        compileDeclarativeTaskpack(cmdManifestForFileChecks, bindingsFor(cmdManifestForFileChecks, {
+          repositoryRoot: root,
+          credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN', localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET', publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET' },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+      await rm(join(root, '.auto-sync', 'checks', 'target.sh'));
+      await symlink(join(root, '.auto-sync', 'checks', 'a.sh'), join(root, '.auto-sync', 'checks', 'target.sh'));
+      await assert.rejects(
+        compileDeclarativeTaskpack(cmdManifestForFileChecks, bindingsFor(cmdManifestForFileChecks, {
+          repositoryRoot: root,
+          credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN', localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET', publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET' },
+        })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+
+      // Non-UTF-8 spec.instructions is rejected
+      await writeFile(join(root, '.auto-sync', 'prompts', 'bad.md'), Buffer.from([0xff, 0xfe, 0xfd]));
+      const badUtf8InstrManifest = validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
+        (draft['spec'] as Record<string, unknown>)['instructions'] = ['.auto-sync/prompts/bad.md'];
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' });
+      await assert.rejects(
+        compileDeclarativeTaskpack(badUtf8InstrManifest, bindingsFor(badUtf8InstrManifest, { repositoryRoot: root })),
+        (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/instructions/0',
+      );
+
+      // 7. Explicit 0o700 directory and 0o600 file mode assertions on stageCompiledInstructionResources
+      const stageDir = join(root, 'staged-registry');
+      await mkdir(stageDir, { recursive: true });
+      await stageCompiledInstructionResources(stageDir, [
+        {
+          id: 'instruction-0-nested',
+          kind: 'instruction',
+          path: '.auto-sync/prompts/nested/guide.md',
+          bytes: Buffer.from('# Guide\n', 'utf8'),
+          digest: { algorithm: 'sha256', hex: createHash('sha256').update('# Guide\n', 'utf8').digest('hex') },
+        },
+      ]);
+      for (const dirRel of ['.auto-sync', '.auto-sync/prompts', '.auto-sync/prompts/nested']) {
+        const st = await stat(join(stageDir, dirRel));
+        assert.equal(st.mode & 0o777, 0o700, `expected 0o700 mode on ${dirRel}`);
+      }
+      const stagedFileStat = await stat(join(stageDir, '.auto-sync/prompts/nested/guide.md'));
+      assert.equal(stagedFileStat.mode & 0o777, 0o600);
+
+      // 8. Flexible spec.output shorthand & object forms
+      assert.deepEqual(
+        validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['output'] = 'json,github-step-summary';
+        })).spec.output,
+        { formats: ['json', 'github-step-summary'] },
+      );
+      assert.deepEqual(
+        validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['output'] = ['json', 'markdown'];
+        })).spec.output,
+        { formats: ['json', 'markdown'] },
+      );
+      assert.deepEqual(
+        validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['output'] = { formats: 'json,text' };
+        })).spec.output,
+        { formats: ['json', 'text'] },
+      );
+      for (const invalidOutput of ['', [], 'json,json', 'json,', ',json', { formats: 'json,json' }, { formats: 'json,' }]) {
+        assert.throws(
+          () => validateTaskpackManifest(editedManifest(base, draft => {
+            (draft['spec'] as Record<string, unknown>)['output'] = invalidOutput;
+          })),
+          (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
+        );
+      }
+    });
   });
 });

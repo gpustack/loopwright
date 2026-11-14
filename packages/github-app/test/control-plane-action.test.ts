@@ -541,6 +541,12 @@ describe('reusable Action entrypoint (AC-6)', () => {
     assert.match(actionYml, /using: 'composite'/);
     assert.match(actionYml, /node-version: '26'/);
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.result \}\}/);
+    assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.pr-url \}\}/);
+    assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.total-tokens \}\}/);
+    assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.cost-usd \}\}/);
+    assert.match(actionYml, /INPUT_OUTPUT: \$\{\{ inputs\.output \}\}/);
+    assert.match(actionYml, /INPUT_GITHUB-TOKEN: \$\{\{ inputs\.github-token \}\}/);
+    assert.match(actionYml, /INPUT_UPSTREAM-RECORDS: \$\{\{ inputs\.upstream-records \}\}/);
 
     withEnv('LOOPWRIGHT_PROVIDER_TOKEN', 'provider-token-value');
     withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');

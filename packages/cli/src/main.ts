@@ -2,10 +2,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compilePlan, loadTrustedConfiguration, runCycle, resumeCycle, reconcileCycle, readStatus, inspectRun, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
+import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, runCycle, type ControllerDiagnostic, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput } from '@loopwright/controller';
 import { startConfiguredGitHubApp } from '@loopwright/github-app';
-import { parseArguments, UsageError } from './arguments.js';
-import { initDraft, writeOutput } from './draft.js';
+import { parseArguments, UsageError, type Arguments } from './arguments.js';
+import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
 function resolveCliVersion(): string {
   try {
@@ -15,7 +15,7 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json] [--output-format FORMATS] [--step-summary-file FILE]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -53,6 +53,67 @@ export function closureExitCode(report: ClosureMatrixReport, verifyFailures: boo
   if (!report.integrity.ok) return 8;
   if (verifyFailures && (report.failureMatrix === null || !report.failureMatrix.allPassed)) return 4;
   return report.summary.closedLocal === 18 && report.summary.unprovisionedExternal === 5 ? 0 : 3;
+}
+async function queryInspection(runRoot: string, runId: string): Promise<InspectRunValue | null> {
+  try {
+    const inspected = await inspectRun({ runRoot, runId });
+    return inspected.ok ? inspected.value : null;
+  } catch {
+    return null;
+  }
+}
+function primaryModelInfo(configuration: LoadedConfiguration): ReportModelInfo | null {
+  const firstRole = configuration.configuration.spec.task.spec.roles[0];
+  return firstRole ? { provider: firstRole.provider, model: firstRole.model, thinking: firstRole.thinking } : null;
+}
+interface EmitOutcomeReportInput {
+  readonly args: Arguments;
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly json: boolean;
+  readonly configuration: LoadedConfiguration;
+  readonly report: Omit<RunReportInput, 'runId' | 'model' | 'usage' | 'externalUrl'> & { readonly usage?: RunReportInput['usage'] };
+  readonly emitDefault: () => Promise<void>;
+}
+async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> {
+  const { args, runRoot, runId, json, configuration, report, emitDefault } = input;
+  const outputFormats: readonly ReportOutputFormat[] = args.values.has('output-format')
+    ? parseReportOutputFormats(args.values.get('output-format'))
+    : [];
+  const rawSummaryFile = args.values.get('step-summary-file')
+    ?? (outputFormats.includes('github-step-summary') ? process.env['GITHUB_STEP_SUMMARY'] : undefined);
+  const stepSummaryFile = rawSummaryFile !== undefined && rawSummaryFile.trim().length > 0 ? rawSummaryFile : undefined;
+  if (outputFormats.length === 0 && stepSummaryFile === undefined) {
+    await emitDefault();
+    return;
+  }
+  const inspected = await queryInspection(runRoot, runId);
+  const reportInput: RunReportInput = {
+    runId,
+    status: report.status,
+    reasonCode: report.reasonCode ?? null,
+    phase: report.phase ?? inspected?.status.stage ?? null,
+    checks: report.checks ?? [],
+    model: primaryModelInfo(configuration),
+    usage: report.usage ?? inspected?.usage ?? null,
+    externalUrl: inspected?.externalUrl ?? null,
+  };
+  if (stepSummaryFile !== undefined) {
+    const summaryMd = formatRunReport(reportInput, 'github-step-summary') + '\n';
+    await appendStepSummary(stepSummaryFile, Buffer.from(summaryMd, 'utf8'));
+  }
+  if (json || outputFormats.length === 0) {
+    await emitDefault();
+    return;
+  }
+  const stdoutFormats = outputFormats.filter(fmt => !(fmt === 'github-step-summary' && stepSummaryFile !== undefined));
+  if (stdoutFormats.length === 0) {
+    await emitDefault();
+    return;
+  }
+  for (const fmt of stdoutFormats) {
+    await stdout(formatRunReport(reportInput, fmt) + '\n');
+  }
 }
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
@@ -110,7 +171,17 @@ export async function main(argv: readonly string[]): Promise<number> {
       const reconciled = await reconcileCycle({ configuration: trusted.value, runRoot: resolve(get('run-root')), runId, receipt: resolve(get('receipt')) });
       if (!reconciled.ok) { await emit('diagnostic', reconciled.error, reconciled.error.code); return diagnosticExit(reconciled.error); }
       if (args.values.has('output')) await writeOutput(resolve(get('output')), Buffer.from(encoded(reconciled.value)));
-      await emit('result', reconciled.value, reconciled.value.kind === 'settled' ? 'reconciled: ' + reconciled.value.status : 'unresolved: ' + reconciled.value.reason);
+      await emitOutcomeReports({
+        args,
+        runRoot: resolve(get('run-root')),
+        runId,
+        json,
+        configuration: trusted.value,
+        report: reconciled.value.kind === 'settled'
+          ? { status: reconciled.value.status, reasonCode: null, phase: null, checks: [] }
+          : { status: 'unresolved', reasonCode: reconciled.value.reason, phase: null, checks: [] },
+        emitDefault: () => emit('result', reconciled.value, reconciled.value.kind === 'settled' ? 'reconciled: ' + reconciled.value.status : 'unresolved: ' + reconciled.value.reason),
+      });
       return reconciled.value.kind === 'settled' ? reconciled.value.status === 'completed' ? 0 : reconciled.value.status === 'blocked' ? 3 : 4 : 7;
     }
     const loaded = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: args.values.has('repo') ? [resolve(get('repo'))] : [] });
@@ -128,8 +199,28 @@ export async function main(argv: readonly string[]): Promise<number> {
         onEvent: async (event: unknown) => { if (json) await emit('event', event); else process.stderr.write('progress\n'); } };
       const execution = args.command === 'resume' ? await resumeCycle(input) : await runCycle(input);
       if (!execution.ok) { await emit('diagnostic', execution.error, execution.error.code); return diagnosticExit(execution.error); }
-      if (execution.value.kind === 'incident') await emit('incident', execution.value.incident, execution.value.incident.code);
-      else await emit('result', execution.value, execution.value.result.spec.status);
+      const outcome = execution.value;
+      await emitOutcomeReports({
+        args,
+        runRoot: resolve(get('run-root')),
+        runId,
+        json,
+        configuration: loaded.value,
+        report: outcome.kind === 'incident'
+          ? { status: 'incident', reasonCode: outcome.incident.code, phase: outcome.incident.stage, checks: [] }
+          : {
+              status: outcome.result.spec.status,
+              reasonCode: outcome.result.spec.verification.spec.diagnostics[0]?.code ?? null,
+              phase: null,
+              checks: [...outcome.result.spec.verification.spec.required, ...outcome.result.spec.verification.spec.optional].map(
+                (row): ReportCheckItem => ({ checkId: row.checkId, status: row.status, code: row.reason, detail: row.detail }),
+              ),
+              usage: outcome.result.spec.usage,
+            },
+        emitDefault: () => outcome.kind === 'incident'
+          ? emit('incident', outcome.incident, outcome.incident.code)
+          : emit('result', outcome, outcome.result.spec.status),
+      });
       return executionExit(execution.value, caughtSignal);
     } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
   } catch (error) {

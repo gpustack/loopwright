@@ -1,18 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFile, realpath } from 'node:fs/promises';
-import { extname, isAbsolute, join, resolve, sep } from 'node:path';
+import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles } from '@loopwright/agent-pi';
 import { validateDocument, type TaskContract } from '@loopwright/core';
 import { CONTROLLER_API_VERSION, installedHandlerDigests, type ControllerConfiguration, type TrustedRegistry } from '@loopwright/controller';
-import { effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument, validateTaskpackManifest, type Json } from './schema.js';
-import { loadPiModelsJson, resolveTaskpackModelSelection } from './models-config.js';
+import { effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy, validateTaskpackManifest, type Json } from './schema.js';
+import { loadPiModelsJson, resolveTaskpackModelCandidates, resolveTaskpackModelSelection } from './models-config.js';
 import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
 import {
-  AUTHORIZED_ASSOCIATIONS, GitHubAppError, TASKPACK_MANIFEST_BYTES,
-  type CompiledTaskpack, type HostGateEndpointPlan, type HostTaskpackBindings, type ParsedCommentCommand,
-  type PiModelSelection, type TaskpackCommentCommand, type TaskpackIntakeInput, type TaskpackIntakeOutcome,
-  type TaskpackManifest, type TaskpackRunDiagnostic,
+  AUTHORIZED_ASSOCIATIONS, DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID, TASKPACK_MANIFEST_BYTES,
+  type CompiledInstructionResource, type CompiledLocalCommandGate, type CompiledTaskpack, type HostGateEndpointPlan,
+  type HostTaskpackBindings, type ParsedCommentCommand, type PiModelSelection, type TaskpackCommentCommand,
+  type TaskpackIntakeInput, type TaskpackIntakeOutcome, type TaskpackManifest, type TaskpackRunDiagnostic,
 } from './types.js';
 
 /** Default controller budgets for host bindings that do not pin their own (mirrors the runner research stage). */
@@ -36,13 +36,116 @@ export const ACTIONS_RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DRAIN_RESERVE_MS = 120_000;
+const INSTRUCTION_MAX_AGGREGATE_BYTES = 24_576;
+const COMMAND_SCRIPT_MAX_BYTES = 262_144;
 
 function manifestInvalid(message: string, path: string | null): never {
   throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', message, path);
 }
 
-function bindingInvalid(message: string): never {
-  throw new GitHubAppError('TASKPACK_HOST_BINDING_INVALID', message);
+function bindingInvalid(message: string, path: string | null = null): never {
+  throw new GitHubAppError('TASKPACK_HOST_BINDING_INVALID', message, path);
+}
+
+function deriveControlRoot(relativeTaskpackPath: string | undefined): string {
+  if (relativeTaskpackPath === undefined) return '.loopwright';
+  const dir = posix.dirname(relativeTaskpackPath);
+  return dir === '.' || dir === '' ? '.loopwright' : dir;
+}
+
+/** Resolve the control root and optional repository-relative manifest path for a validated manifest. */
+export function resolveManifestControlRoot(
+  manifest: TaskpackManifest,
+  taskpackPath?: string,
+): { readonly controlRoot: string; readonly manifestPath?: string } {
+  const normalized = taskpackPath === undefined
+    ? undefined
+    : normalizeRelativePath(posix.normalize(taskpackPath.replace(/\\/g, '/')), '/');
+  if (normalized !== undefined) {
+    const expectedControlRoot = deriveControlRoot(normalized);
+    if (
+      (manifest.controlRoot !== undefined && manifest.controlRoot !== expectedControlRoot) ||
+      (manifest.manifestPath !== undefined && manifest.manifestPath !== normalized)
+    ) {
+      bindingInvalid('bindings.taskpackPath conflicts with manifest controlRoot or manifestPath', '/taskpackPath');
+    }
+  }
+  if (manifest.controlRoot !== undefined) {
+    return {
+      controlRoot: manifest.controlRoot,
+      ...(manifest.manifestPath !== undefined
+        ? { manifestPath: manifest.manifestPath }
+        : normalized !== undefined
+          ? { manifestPath: normalized }
+          : {}),
+    };
+  }
+  if (normalized !== undefined) {
+    return { controlRoot: deriveControlRoot(normalized), manifestPath: normalized };
+  }
+  return { controlRoot: '.loopwright' };
+}
+
+/** Compile manifest `writable` or `protected` path entries into `@loopwright/core` scope patterns. */
+export function compileScopePatterns(
+  entries: readonly string[] | undefined,
+  mode: 'writable' | 'protected',
+): readonly string[] {
+  if (entries === undefined || entries.length === 0) {
+    return mode === 'writable' ? Object.freeze(['**']) : Object.freeze([]);
+  }
+  return Object.freeze([...new Set(entries.map(entry => `${entry}/**`))]);
+}
+
+async function assertNoSymlinkInSubpath(
+  repositoryRoot: string,
+  relativePath: string,
+  onInvalid: (message: string) => never,
+): Promise<string> {
+  const resolvedRoot = resolve(repositoryRoot);
+  const rootStat = await lstat(resolvedRoot).catch(() => null);
+  if (rootStat === null || rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    onInvalid('repository root must be an existing non-symlink directory');
+  }
+  const segments = relativePath.split('/').filter(Boolean);
+  let current = resolvedRoot;
+  for (const segment of segments) {
+    current = join(current, segment);
+    const st = await lstat(current).catch(() => null);
+    if (st === null) onInvalid(`path "${relativePath}" does not exist`);
+    if (st.isSymbolicLink()) onInvalid(`path "${relativePath}" must not contain symbolic links`);
+  }
+  const realRoot = await realpath(resolvedRoot).catch(() => onInvalid('repository root does not exist'));
+  const realFull = await realpath(current).catch(() => onInvalid(`path "${relativePath}" does not exist`));
+  if (realFull !== realRoot && !realFull.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) {
+    onInvalid(`path "${relativePath}" escapes the repository root`);
+  }
+  return current;
+}
+
+/**
+ * Stage compiled `spec.instructions` files inside `registryDirectory` with `0o700` intermediate
+ * directories and `0o600` regular files so `loadTrustedConfiguration` accepts them.
+ */
+export async function stageCompiledInstructionResources(
+  registryDirectory: string,
+  resources: readonly CompiledInstructionResource[] | undefined,
+): Promise<void> {
+  if (resources === undefined || resources.length === 0) return;
+  const baseDir = resolve(registryDirectory);
+  for (const resource of resources) {
+    const rel = normalizeRelativePath(resource.path, '/spec/instructions');
+    const segments = rel.split('/');
+    let current = baseDir;
+    for (const dirSegment of segments.slice(0, -1)) {
+      current = join(current, dirSegment);
+      await mkdir(current, { recursive: true, mode: 0o700 });
+      await chmod(current, 0o700);
+    }
+    const filePath = join(current, segments[segments.length - 1]!);
+    await writeFile(filePath, resource.bytes, { mode: 0o600 });
+    await chmod(filePath, 0o600);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -63,22 +166,30 @@ export async function loadDeclarativeTaskpack(input: { manifestPath: string; rep
   const resolvedRoot = repositoryRoot === undefined ? undefined : resolve(repositoryRoot);
   let full = resolve(manifestPath);
   if (resolvedRoot !== undefined) full = isAbsolute(manifestPath) ? resolve(manifestPath) : join(resolvedRoot, manifestPath);
+
+  let relativeTaskpackPath: string | undefined;
   if (resolvedRoot !== undefined) {
-    let realRoot: string, realFull: string;
-    try {
-      realRoot = await realpath(resolvedRoot);
-      realFull = await realpath(full);
-    } catch {
-      manifestInvalid('manifest or repository root does not exist', '/');
-    }
-    if (realFull !== realRoot && !realFull.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) {
+    const relToRoot = relative(resolvedRoot, full);
+    if (relToRoot.length === 0 || relToRoot === '..' || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
       manifestInvalid('manifest escapes the repository root', '/');
     }
+    relativeTaskpackPath = normalizeRelativePath(relToRoot.split(sep).join('/'), '/');
+    await assertNoSymlinkInSubpath(resolvedRoot, relativeTaskpackPath, message => manifestInvalid(message, '/'));
+  } else if (!isAbsolute(manifestPath)) {
+    const rawRel = posix.normalize(manifestPath.replace(/\\/g, '/'));
+    relativeTaskpackPath = normalizeRelativePath(rawRel, '/');
+    const impliedRoot = resolve(process.cwd());
+    await assertNoSymlinkInSubpath(impliedRoot, relativeTaskpackPath, message => manifestInvalid(message, '/'));
   }
+
+  const controlRoot = deriveControlRoot(relativeTaskpackPath);
   const format = extname(full).toLowerCase();
   if (format !== '.yaml' && format !== '.yml' && format !== '.json') manifestInvalid('manifest extension must be .yaml, .yml, or .json', '/');
   const bytes = await readBoundedRegularFile(full, TASKPACK_MANIFEST_BYTES, message => manifestInvalid(message, '/'));
-  return validateTaskpackManifest(parseTaskpackDocument(bytes, format === '.json' ? 'json' : 'yaml'));
+  return validateTaskpackManifest(
+    parseTaskpackDocument(bytes, format === '.json' ? 'json' : 'yaml'),
+    { controlRoot, manifestPath: relativeTaskpackPath },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -123,11 +234,140 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   if (!REVISION_PATTERN.test(resourceVersion)) bindingInvalid('resourceVersion is not a valid revision identifier');
   if (bindings.budgets.wallTimeMs <= DRAIN_RESERVE_MS) bindingInvalid(`budget wallTimeMs must exceed the ${DRAIN_RESERVE_MS}ms drain reserve`);
   const modelsConfig = bindings.modelsJsonPath === undefined ? undefined : await loadPiModelsJson(bindings.modelsJsonPath);
+  const resolvedCandidates = resolveTaskpackModelCandidates(manifest, bindings, { modelsConfig });
   const { selection } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
   const providerEnv = requireEnvName(bindings.credentialEnvMap.provider, 'provider');
   const runtime = await runtimeIdentity();
   const installed = await installedHandlerDigests();
   const authorPrompt = bindings.authorPrompt ?? 'Inspect the repository snapshot and produce one structured submission with the candidate patch and proposal document.';
+  const { controlRoot, manifestPath } = resolveManifestControlRoot(manifest, bindings.taskpackPath);
+  const memoryRoot = `${controlRoot}/memory`;
+  if (!pathCoveredBy(manifest.spec.memory.directory, memoryRoot)) {
+    throw new GitHubAppError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `memory directory "${manifest.spec.memory.directory}" is not under "${memoryRoot}"`,
+      '/spec/memory/directory',
+    );
+  }
+
+  const instructionResources: CompiledInstructionResource[] = [];
+  if (manifest.spec.instructions !== undefined && manifest.spec.instructions.length > 0) {
+    if (bindings.repositoryRoot === undefined || bindings.repositoryRoot.trim().length === 0) {
+      bindingInvalid('spec.instructions requires bindings.repositoryRoot', '/spec/instructions');
+    }
+    let aggregateBytes = 0;
+    for (const [index, relPath] of manifest.spec.instructions.entries()) {
+      const diagPath = `/spec/instructions/${index}`;
+      const fullPath = await assertNoSymlinkInSubpath(
+        bindings.repositoryRoot,
+        relPath,
+        message => manifestInvalid(message, diagPath),
+      );
+      const rawBytes = await readBoundedRegularFile(
+        fullPath,
+        INSTRUCTION_MAX_AGGREGATE_BYTES,
+        message => manifestInvalid(message, diagPath),
+      );
+      try {
+        new TextDecoder('utf-8', { fatal: true }).decode(rawBytes);
+      } catch {
+        manifestInvalid(`spec.instructions[${index}] is not valid UTF-8`, diagPath);
+      }
+      aggregateBytes += rawBytes.byteLength;
+      if (aggregateBytes > INSTRUCTION_MAX_AGGREGATE_BYTES) {
+        manifestInvalid(`spec.instructions exceeds ${INSTRUCTION_MAX_AGGREGATE_BYTES} aggregate bytes`, diagPath);
+      }
+      const slug = relPath
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 40)
+        .replace(/-+$/g, '') || 'file';
+      const id = `instruction-${index}-${slug}`;
+      const bytes = Buffer.from(rawBytes);
+      const digest = { algorithm: 'sha256' as const, hex: createHash('sha256').update(bytes).digest('hex') };
+      instructionResources.push(Object.freeze({ id, kind: 'instruction' as const, path: relPath, bytes, digest }));
+    }
+  }
+
+  const commandGateMetaByCheckId = new Map<string, CompiledLocalCommandGate>();
+  const commandScripts: string[] = [];
+  const hasCommandChecks = manifest.spec.verification.localChecks.some(c => c.implementation === 'command.v1');
+  if (hasCommandChecks) {
+    if (candidate && (bindings.repositoryRoot === undefined || bindings.repositoryRoot.trim().length === 0)) {
+      bindingInvalid('command.v1 checks require bindings.repositoryRoot', '/spec/verification/localChecks');
+    }
+    const activeCredentialEnvs = new Set<string>([
+      providerEnv,
+      ...(bindings.credentialEnvMap.provider !== undefined ? [bindings.credentialEnvMap.provider] : []),
+      ...(bindings.sourceTokenEnvNames ?? []),
+      ...resolvedCandidates.flatMap(candidate => [
+        candidate.providerEnvName,
+        ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
+      ]),
+      ...(bindings.credentialEnvMap.gate !== undefined ? [bindings.credentialEnvMap.gate] : []),
+      ...(bindings.credentialEnvMap.localCommandGate !== undefined ? [bindings.credentialEnvMap.localCommandGate] : []),
+      ...(bindings.credentialEnvMap.publication !== undefined ? [bindings.credentialEnvMap.publication] : []),
+      ...(bindings.credentialEnvMap.publicationAuth !== undefined ? [bindings.credentialEnvMap.publicationAuth] : []),
+      ...(modelsConfig === undefined
+        ? []
+        : [...modelsConfig.providers.values()].map(p => p.apiKeyEnv).filter((v): v is string => v !== undefined)),
+      ...(manifest.spec.models === undefined
+        ? []
+        : manifest.spec.models.map(m => m.apiKeyEnv).filter((v): v is string => v !== undefined)),
+    ]);
+    for (const [index, declared] of manifest.spec.verification.localChecks.entries()) {
+      if (declared.implementation !== 'command.v1') continue;
+      const rawEnv = declared.parameters?.['env'];
+      if (Array.isArray(rawEnv)) {
+        for (const envEntry of rawEnv) {
+          if (typeof envEntry === 'string' && activeCredentialEnvs.has(envEntry)) {
+            manifestInvalid(
+              `command.v1 env "${envEntry}" must not reference a provider or host credential environment variable`,
+              `/spec/verification/localChecks/${index}/parameters/env`,
+            );
+          }
+        }
+      }
+      const script = String(declared.parameters?.['script'] ?? '');
+      commandScripts.push(script);
+      if (bindings.repositoryRoot !== undefined && bindings.repositoryRoot.trim().length > 0) {
+        const diagPath = `/spec/verification/localChecks/${index}/parameters/script`;
+        const fullScriptPath = await assertNoSymlinkInSubpath(
+          bindings.repositoryRoot,
+          script,
+          message => manifestInvalid(message, diagPath),
+        );
+        const scriptBytes = await readBoundedRegularFile(
+          fullScriptPath,
+          COMMAND_SCRIPT_MAX_BYTES,
+          message => manifestInvalid(message, diagPath),
+        );
+        if (scriptBytes.byteLength === 0) {
+          manifestInvalid('command.v1 script must not be empty', diagPath);
+        }
+        const scriptSha256 = createHash('sha256').update(scriptBytes).digest('hex');
+        const gateId = `cmd-${index}-${declared.id.slice(0, 40)}-${scriptSha256.slice(0, 16)}`;
+        const timeoutSeconds = typeof declared.parameters?.['timeoutSeconds'] === 'number'
+          ? declared.parameters['timeoutSeconds']
+          : 30;
+        const allowReadOnlyGitHubToken = declared.parameters?.['allowReadOnlyGitHubToken'] === true;
+        const env = Array.isArray(declared.parameters?.['env'])
+          ? Object.freeze([...(declared.parameters['env'] as readonly string[])])
+          : Object.freeze([]);
+        commandGateMetaByCheckId.set(declared.id, Object.freeze({
+          checkId: declared.id,
+          gateId,
+          endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+          script,
+          scriptSha256,
+          timeoutSeconds,
+          allowReadOnlyGitHubToken,
+          env,
+        }));
+      }
+    }
+  }
 
   const publicationEnabled = candidate && manifest.spec.publication.mode === 'pull_request';
   const publicationEndpoint = publicationEnabled ? bindings.publicationEndpoint : undefined;
@@ -136,13 +376,24 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   }
   const gatePlans = candidate ? [...(bindings.gateEndpoints ?? [])] : [];
   const gates = candidate ? manifest.spec.verification.externalGates : [];
-  const gateSigningRefs = new Set(gatePlans.map(plan => plan.signingCredentialRef));
+  const externalEndpointPlans = gatePlans.filter(
+    plan => plan.id !== LOCAL_COMMAND_GATE_ENDPOINT_ID || gates.some(gate => gate.endpointId === plan.id),
+  );
   if (gates.length > 0) {
-    if (gatePlans.length === 0) bindingInvalid('external gates require gateEndpoints host bindings');
-    if (gateSigningRefs.size !== 1) bindingInvalid('all gate endpoints must share one signingCredentialRef');
+    if (externalEndpointPlans.length === 0) bindingInvalid('external gates require gateEndpoints host bindings');
+    const externalSigningRefs = new Set(externalEndpointPlans.map(plan => plan.signingCredentialRef));
+    if (externalSigningRefs.size !== 1) bindingInvalid('all gate endpoints must share one signingCredentialRef');
   }
-  const gateEnv = gates.length > 0 ? requireEnvName(bindings.credentialEnvMap.gate, 'gate') : null;
+  const externalGateEnv = gates.length > 0 ? requireEnvName(bindings.credentialEnvMap.gate, 'gate') : null;
+  const externalGateSigningRef = gates.length > 0 ? externalEndpointPlans[0]!.signingCredentialRef : null;
   const publicationEnv = publicationEnabled ? requireEnvName(bindings.credentialEnvMap.publication, 'publication') : null;
+  const publicationAuthEnabled = publicationEnabled
+    && publicationEndpoint != null
+    && publicationEndpoint.authCredentialRef != null
+    && publicationEndpoint.authCredentialRef !== publicationEndpoint.signingCredentialRef;
+  const publicationAuthEnv = publicationAuthEnabled
+    ? requireEnvName(bindings.credentialEnvMap.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN', 'publicationAuth')
+    : null;
 
   interface ActiveCheck {
     readonly id: string;
@@ -151,8 +402,27 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service')[];
   }
   const activeChecks: ActiveCheck[] = [];
+  const localCommandGates: CompiledLocalCommandGate[] = [];
   if (candidate) {
     for (const declared of manifest.spec.verification.localChecks) {
+      if (declared.implementation === 'command.v1') {
+        const meta = commandGateMetaByCheckId.get(declared.id);
+        if (meta === undefined) {
+          bindingInvalid(`command.v1 check "${declared.id}" could not be compiled without repositoryRoot`);
+        }
+        activeChecks.push({
+          id: declared.id,
+          implementation: 'gate.v1',
+          parameters: {
+            checkId: declared.id,
+            endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+            gateId: meta.gateId,
+          },
+          allowedEvidenceLevels: ['external_service'],
+        });
+        localCommandGates.push(meta);
+        continue;
+      }
       const parameters: Record<string, unknown> = { checkId: declared.id };
       if (declared.implementation === 'json-artifact.v1') {
         parameters['path'] = manifest.spec.proposal.path;
@@ -175,6 +445,31 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       });
     }
   }
+
+  let localCmdGateEnv: string | null = null;
+  let localCmdGateSigningRef: string | null = null;
+  if (candidate && localCommandGates.length > 0) {
+    let localPlan = gatePlans.find(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
+    if (localPlan === undefined) {
+      localPlan = {
+        id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+        url: 'http://127.0.0.1:65535/loopwright-local-command',
+        signingCredentialRef: 'taskpack-local-command-signing',
+        authCredentialRef: null,
+        timeoutMs: 58_000,
+        maxPollMs: 120_000,
+        pollInitialMs: 200,
+        pollMaxMs: 5_000,
+        jitter: 100,
+      };
+      gatePlans.push(localPlan);
+    }
+    localCmdGateSigningRef = localPlan.signingCredentialRef;
+    localCmdGateEnv = requireEnvName(
+      bindings.credentialEnvMap.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
+      'localCommandGate',
+    );
+  }
   // The frozen compile capability accepts only a null task matrix; host targetMatrix stays intake metadata.
   void bindings.targetMatrix;
 
@@ -188,7 +483,12 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   if (candidate) {
     const required = activeChecks.filter((_, index) => index < manifest.spec.verification.localChecks.length || gates[index - manifest.spec.verification.localChecks.length]?.required === true).map(check => check.id);
     if (required.length === 0) bindingInvalid('candidate mode requires at least one required check');
-    return assemble({ manifest, bindings, selection, mode: 'candidate', resourceVersion, authorPrompt, runtime, installed, providerEnv, gateEnv, publicationEnv, activeChecks, steps, required: [...required], authorStepId, gatePlans, publicationEndpoint });
+    return assemble({
+      manifest, bindings, selection, mode: 'candidate', resourceVersion, authorPrompt, runtime, installed,
+      providerEnv, externalGateEnv, externalGateSigningRef, localCmdGateEnv, localCmdGateSigningRef,
+      publicationEnv, publicationAuthEnv, activeChecks, steps, required: [...required], authorStepId, gatePlans, publicationEndpoint,
+      controlRoot, manifestPath, instructionResources, localCommandGates, commandScripts,
+    });
   }
   const noChangeCheck: ActiveCheck = {
     id: 'taskpack-no-change', implementation: 'no-change.v1',
@@ -200,8 +500,10 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   ];
   return assemble({
     manifest, bindings, selection, mode: 'no-change', resourceVersion, authorPrompt, runtime, installed, providerEnv,
-    gateEnv: null, publicationEnv: null, activeChecks: [noChangeCheck], steps: noChangeSteps,
+    externalGateEnv: null, externalGateSigningRef: null, localCmdGateEnv: null, localCmdGateSigningRef: null,
+    publicationEnv: null, publicationAuthEnv: null, activeChecks: [noChangeCheck], steps: noChangeSteps,
     required: [noChangeCheck.id], authorStepId, gatePlans: [], publicationEndpoint: undefined,
+    controlRoot, manifestPath, instructionResources, localCommandGates: [], commandScripts,
   });
 }
 
@@ -215,14 +517,23 @@ interface AssembleInput {
   readonly runtime: RuntimeIdentity;
   readonly installed: Readonly<Record<string, { algorithm: 'sha256'; hex: string }>>;
   readonly providerEnv: string;
-  readonly gateEnv: string | null;
+  readonly externalGateEnv: string | null;
+  readonly externalGateSigningRef: string | null;
+  readonly localCmdGateEnv: string | null;
+  readonly localCmdGateSigningRef: string | null;
   readonly publicationEnv: string | null;
+  readonly publicationAuthEnv: string | null;
   readonly activeChecks: readonly { readonly id: string; readonly implementation: string; readonly parameters: Record<string, unknown>; readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service')[] }[];
   readonly steps: readonly { id: string; kind: 'agent' | 'check'; uses: string; roleId: string | null; dependsOn: string[] }[];
   readonly required: readonly string[];
   readonly authorStepId: string;
   readonly gatePlans: readonly HostGateEndpointPlan[];
   readonly publicationEndpoint: HostTaskpackBindings['publicationEndpoint'];
+  readonly controlRoot: string;
+  readonly manifestPath: string | undefined;
+  readonly instructionResources: readonly CompiledInstructionResource[];
+  readonly localCommandGates: readonly CompiledLocalCommandGate[];
+  readonly commandScripts: readonly string[];
 }
 
 function assemble(input: AssembleInput): CompiledTaskpack {
@@ -245,36 +556,74 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   const credentialBindings: { id: string; consumer: 'provider' | 'gate' | 'publisher'; destinationRef: string; environmentNames: readonly string[]; template: string }[] = [
     { id: 'taskpack-provider-token', consumer: 'provider', destinationRef: selection.provider, environmentNames: [input.providerEnv], template: `\${${input.providerEnv}}` },
   ];
-  const gateBindingId = input.gateEnv === null ? null : [...new Set(input.gatePlans.map(plan => plan.signingCredentialRef))][0] ?? 'taskpack-gate-signing';
-  if (input.gateEnv !== null && gateBindingId !== null) {
-    credentialBindings.push({ id: gateBindingId, consumer: 'gate', destinationRef: 'taskpack-gate-signing', environmentNames: [input.gateEnv], template: `\${${input.gateEnv}}` });
+  if (input.externalGateEnv !== null && input.externalGateSigningRef !== null) {
+    credentialBindings.push({
+      id: input.externalGateSigningRef,
+      consumer: 'gate',
+      destinationRef: 'taskpack-gate-signing',
+      environmentNames: [input.externalGateEnv],
+      template: `\${${input.externalGateEnv}}`,
+    });
+  }
+  if (
+    input.localCmdGateEnv !== null &&
+    input.localCmdGateSigningRef !== null &&
+    input.localCmdGateSigningRef !== input.externalGateSigningRef
+  ) {
+    credentialBindings.push({
+      id: input.localCmdGateSigningRef,
+      consumer: 'gate',
+      destinationRef: 'taskpack-local-command-signing',
+      environmentNames: [input.localCmdGateEnv],
+      template: `\${${input.localCmdGateEnv}}`,
+    });
   }
   if (input.publicationEnv !== null && input.publicationEndpoint !== undefined && input.publicationEndpoint !== null) {
     credentialBindings.push({
       id: input.publicationEndpoint.signingCredentialRef, consumer: 'publisher', destinationRef: 'taskpack-publication-signing',
       environmentNames: [input.publicationEnv], template: `\${${input.publicationEnv}}`,
     });
+    if (
+      input.publicationAuthEnv !== null
+      && input.publicationEndpoint.authCredentialRef != null
+      && input.publicationEndpoint.authCredentialRef !== input.publicationEndpoint.signingCredentialRef
+    ) {
+      credentialBindings.push({
+        id: input.publicationEndpoint.authCredentialRef,
+        consumer: 'publisher',
+        destinationRef: 'taskpack-publication-auth',
+        environmentNames: [input.publicationAuthEnv],
+        template: `\${${input.publicationAuthEnv}}`,
+      });
+    }
   }
-  const environmentBindings = credentialBindings.map((binding, index) => ({
-    name: binding.environmentNames[0]!, classification: 'credential' as const, paths: [`/spec/credentials/${index}/template`],
+  const envPaths = new Map<string, string[]>();
+  for (const [index, binding] of credentialBindings.entries()) {
+    const envName = binding.environmentNames[0]!;
+    const paths = envPaths.get(envName) ?? [];
+    paths.push(`/spec/credentials/${index}/template`);
+    envPaths.set(envName, paths);
+  }
+  const environmentBindings = [...envPaths.entries()].map(([name, paths]) => ({
+    name, classification: 'credential' as const, paths,
   }));
   const handlers = [
     {
       id: 'taskpack-author', kind: 'agent' as const, implementation: 'pi.agent.v1' as const, version: 1 as const,
-      digest: installed['pi.agent.v1']!, parameters: { prompt: input.authorPrompt, purpose: 'task' }, capabilities: ['pi'],
+      digest: { ...installed['pi.agent.v1']! }, parameters: { prompt: input.authorPrompt, purpose: 'task' }, capabilities: ['pi'],
     },
     ...input.activeChecks.map(check => ({
       id: check.id, kind: 'check' as const, implementation: check.implementation as 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'gate.v1',
-      version: 1 as const, digest: installed[check.implementation]!, parameters: check.parameters as Readonly<Record<string, Json>>,
+      version: 1 as const, digest: { ...installed[check.implementation]! }, parameters: check.parameters as Readonly<Record<string, Json>>,
       capabilities: check.implementation === 'gate.v1' ? ['external_service', 'read_only'] : ['inert_bytes', 'read_only'],
     })),
     {
       id: 'scope', kind: 'check' as const, implementation: 'scope.v1' as const, version: 1 as const,
-      digest: installed['scope.v1']!, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
+      digest: { ...installed['scope.v1']! }, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
     },
     {
       id: 'no-change', kind: 'check' as const, implementation: 'no-change.v1' as const, version: 1 as const,
-      digest: installed['no-change.v1']!, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
+      digest: { ...installed['no-change.v1']! }, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
     },
   ];
   const registry: TrustedRegistry = {
@@ -293,7 +642,12 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         runtimeRef: 'taskpack-runtime', providerCredentialRef: 'taskpack-provider-token',
         mcp: { serverId: 'workspace', scriptDigest: runtime.localMcpScriptDigest, names: [], effects: [], idleTimeoutSeconds: 2, absoluteTimeoutSeconds: 10 },
       }],
-      resources: [],
+      resources: input.instructionResources.map(r => ({
+        id: r.id,
+        kind: r.kind,
+        path: r.path,
+        digest: r.digest,
+      })),
       runtimeProfiles: [{
         id: 'taskpack-runtime',
         dockerExecutable: bindings.runtimeOptions?.dockerExecutable ?? '/usr/local/bin/docker',
@@ -309,18 +663,33 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   };
   const registryBytes = Buffer.from(serializePrettyYaml(registry), 'utf8');
   const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
+  const fullProtected = effectiveProtectedPaths(manifest.spec.scope.protected, {
+    controlRoot: input.controlRoot,
+    manifestPath: input.manifestPath,
+    instructions: manifest.spec.instructions,
+    commandScripts: input.commandScripts,
+  });
+  const compiledResources = input.instructionResources.map(r => ({
+    id: r.id,
+    kind: r.kind,
+    path: r.path,
+    digest: r.digest,
+  }));
   const task = {
     apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'TaskContract' as const,
     spec: {
       goal: candidate ? manifest.spec.goal.candidate : manifest.spec.goal.noChange,
       taskpack: manifest.metadata.name,
       target: { repository: bindings.repository, baseRevision: bindings.baseRevision, sourceRevision: bindings.sourceRevision, matrix: null },
-      scope: { writable: [...manifest.spec.scope.writable], protected: [...effectiveProtectedPaths(manifest.spec.scope.protected)] },
+      scope: {
+        writable: [...compileScopePatterns(manifest.spec.scope.writable, 'writable')],
+        protected: [...compileScopePatterns(fullProtected, 'protected')],
+      },
       roles: [{
         id: 'author', adapter: 'pi', provider: selection.provider, model: selection.model,
         thinking: selection.thinking, tools: ['read', 'write', 'edit', 'bash'],
       }],
-      trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: [] },
+      trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: compiledResources },
       budgets: bindings.budgets,
       steps: input.steps.map(step => ({ ...step, dependsOn: [...step.dependsOn] })),
       acceptance: {
@@ -352,7 +721,14 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         : { mode: 'disabled' as const },
     },
   };
-  return { registry, config, registrySha256, registryBytes };
+  return {
+    registry,
+    config,
+    registrySha256,
+    registryBytes,
+    ...(input.instructionResources.length > 0 ? { instructionResources: Object.freeze([...input.instructionResources]) } : {}),
+    ...(input.localCommandGates.length > 0 ? { localCommandGates: Object.freeze([...input.localCommandGates]) } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -396,15 +772,23 @@ export function boundDiagnosticLog(text: string): { readonly jobLogText: string;
   return { jobLogText: bounded, truncated: text.length > DIAGNOSTIC_LOG_LIMIT };
 }
 
-/** Parse the first comment line as `<prefix> <command>`; anything else returns null. */
+/** Parse the first comment line as `<prefix> <command>` or bare `<prefix>` (when `revise` is enabled with non-empty guidance); anything else returns null. */
 export function parseCommentCommand(body: string, prefixes: readonly string[], commands: readonly TaskpackCommentCommand[]): ParsedCommentCommand | null {
-  const firstLine = body.split('\n')[0]?.trimEnd() ?? '';
+  const lines = body.split('\n');
+  const firstLine = lines[0]?.trimEnd() ?? '';
   for (const prefix of prefixes) {
-    if (!firstLine.startsWith(`${prefix} `)) continue;
-    const remainder = firstLine.slice(prefix.length).trim();
-    const command = remainder.split(/\s+/)[0] ?? '';
-    if (!(commands as readonly string[]).includes(command)) return null;
-    return { command: command as TaskpackCommentCommand, guidance: body.split('\n').slice(1).join('\n') };
+    if (firstLine.startsWith(`${prefix} `)) {
+      const remainder = firstLine.slice(prefix.length).trim();
+      const command = remainder.split(/\s+/)[0] ?? '';
+      if (!(commands as readonly string[]).includes(command)) return null;
+      return { command: command as TaskpackCommentCommand, guidance: lines.slice(1).join('\n') };
+    }
+    if (firstLine.trim() === prefix) {
+      if (!(commands as readonly string[]).includes('revise')) return null;
+      const guidance = lines.slice(1).join('\n');
+      if (guidance.trim().length === 0) return null;
+      return { command: 'revise', guidance };
+    }
   }
   return null;
 }

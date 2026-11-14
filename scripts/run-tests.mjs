@@ -28,6 +28,7 @@ const EXTRA_TESTS = [
 
 // Schedule long-pole integration suites first so multi-core workers never stall on tail stragglers.
 const PRIORITY_WEIGHTS = new Map([
+  ['turnkey-action.test.js', 105],
   ['python-bridge.test.js', 100],
   ['parity.test.js', 95],
   ['progress-checkpoint.test.js', 90],

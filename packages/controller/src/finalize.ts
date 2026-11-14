@@ -16,7 +16,7 @@ export function incident(diagnostic: ControllerDiagnostic, runId: string, lockHa
 /** A single immutable primary; bounded secondary writes cannot change it. No finalizer model or allowance. */
 export class Finalizer {
   readonly started = performance.now(); #bytes = 0; readonly #deadline: number;
-  constructor(readonly artifacts: ArtifactStore, remainingMs: number) { this.#deadline = this.started + Math.min(5000, Math.max(0, remainingMs)); }
+  constructor(readonly artifacts: ArtifactStore, remainingMs: number) { this.#deadline = this.started + Math.min(15000, Math.max(0, remainingMs)); }
   reserve(bytes: number): void {
     this.#bytes += bytes;
     if (!Number.isSafeInteger(bytes) || bytes < 0 || this.#bytes > 1048576 || performance.now() >= this.#deadline) throw new ControllerFailure({ version: 1, code: 'OUTPUT_LIMIT', phase: 'finalization', path: '', stateCode: null, piCode: null, effect: 'none', retryable: false });

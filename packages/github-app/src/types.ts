@@ -1,11 +1,11 @@
 import type { Digest, TaskContract } from '@loopwright/core';
 import type { ClockBasis, ClockSample } from '@loopwright/state';
 import type {
-  PiCustomModelCompat, PiCustomProviderConfig, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
+  PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
 } from '@loopwright/agent-pi';
 import type { ControllerConfiguration, TrustedRegistry } from '@loopwright/controller';
 
-export type { ClockBasis, ClockSample, PiCustomModelCompat, PiCustomProviderConfig, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi };
+export type { ClockBasis, ClockSample, PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi };
 
 /** Closed set of matchable failure codes for @loopwright/github-app diagnostics. */
 export const GITHUB_APP_ERROR_CODES = Object.freeze([
@@ -44,12 +44,24 @@ export class GitHubAppError extends Error {
 export const TASKPACK_MANIFEST_API_VERSION = 'loopwright.dev/v1alpha1' as const;
 export const TASKPACK_MANIFEST_BYTES = 65_536;
 /** Automation paths every target repository keeps protected, regardless of the manifest. */
-export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
+export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.claude', '.agents', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
 
 export type TaskpackUpstreamKind = 'github-release' | 'git-tag' | 'git-commit' | 'http-json' | 'custom-table';
 export type TaskpackCommentCommand = 'retry' | 'revise' | 'status';
 export const TASKPACK_COMMENT_COMMANDS: readonly TaskpackCommentCommand[] = Object.freeze(['retry', 'revise', 'status']);
 export const DEFAULT_COMMENT_PREFIXES: readonly string[] = Object.freeze(['/loopwright']);
+
+export type TaskpackOutputFormat = 'json' | 'github-step-summary' | 'markdown' | 'text';
+export const TASKPACK_OUTPUT_FORMATS: readonly TaskpackOutputFormat[] = Object.freeze([
+  'json',
+  'github-step-summary',
+  'markdown',
+  'text',
+]);
+
+export interface TaskpackOutputDeclaration {
+  readonly formats: readonly TaskpackOutputFormat[];
+}
 
 export interface TaskpackUpstreamDescriptor {
   readonly id: string;
@@ -61,8 +73,8 @@ export interface TaskpackUpstreamDescriptor {
 
 export interface TaskpackCheckDeclaration {
   readonly id: string;
-  readonly implementation: 'json-artifact.v1' | 'scope.v1' | 'no-change.v1';
-  readonly parameters?: Readonly<Record<string, string | number | boolean | null>> | undefined;
+  readonly implementation: 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'command.v1';
+  readonly parameters?: Readonly<Record<string, string | number | boolean | null | readonly string[]>> | undefined;
 }
 
 export interface TaskpackExternalGateDeclaration {
@@ -76,9 +88,12 @@ export interface TaskpackManifest {
   readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
   readonly kind: 'Taskpack';
   readonly metadata: { readonly name: string };
+  readonly controlRoot?: string | undefined;
+  readonly manifestPath?: string | undefined;
   readonly spec: {
     readonly goal: { readonly candidate: string; readonly noChange: string };
     readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
+    readonly instructions?: readonly string[] | undefined;
     readonly upstreams: readonly TaskpackUpstreamDescriptor[];
     readonly proposal: { readonly path: string; readonly requiredFields: readonly string[]; readonly schemaVersion: number };
     readonly verification: { readonly localChecks: readonly TaskpackCheckDeclaration[]; readonly externalGates: readonly TaskpackExternalGateDeclaration[] };
@@ -94,6 +109,7 @@ export interface TaskpackManifest {
     readonly sandbox?: TaskpackSandboxDeclaration | undefined;
     readonly decisions?: TaskpackDecisionsDeclaration | undefined;
     readonly models?: readonly TaskpackModelDeclaration[] | undefined;
+    readonly output?: TaskpackOutputDeclaration | undefined;
   };
 }
 
@@ -116,6 +132,7 @@ export interface TaskpackModelDeclaration {
   readonly samplingParams?: PiSamplingParams | undefined;
   readonly samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>> | undefined;
   readonly compat?: PiCustomModelCompat | undefined;
+  readonly cost?: PiModelCost | undefined;
 }
 
 export type TaskpackDecisionProviderKind =
@@ -329,12 +346,38 @@ export interface HostPublicationEndpointPlan {
 export interface HostCredentialEnvMap {
   readonly provider: string;
   readonly gate?: string | undefined;
+  readonly localCommandGate?: string | undefined;
   readonly publication?: string | undefined;
+  readonly publicationAuth?: string | undefined;
+}
+
+export const LOCAL_COMMAND_GATE_ENDPOINT_ID = 'loopwright-local-command' as const;
+export const DEFAULT_LOCAL_COMMAND_GATE_ENV = 'LOOPWRIGHT_LOCAL_GATE_SECRET' as const;
+
+export interface CompiledInstructionResource {
+  readonly id: string;
+  readonly kind: 'instruction';
+  readonly path: string;
+  readonly bytes: Buffer;
+  readonly digest: Digest;
+}
+
+export interface CompiledLocalCommandGate {
+  readonly checkId: string;
+  readonly gateId: string;
+  readonly endpointRef: typeof LOCAL_COMMAND_GATE_ENDPOINT_ID;
+  readonly script: string;
+  readonly scriptSha256: string;
+  readonly timeoutSeconds: number;
+  readonly allowReadOnlyGitHubToken: boolean;
+  readonly env: readonly string[];
 }
 
 export interface HostTaskpackBindings {
   readonly mode: 'candidate' | 'no-change';
   readonly repository: string;
+  readonly repositoryRoot?: string | undefined;
+  readonly taskpackPath?: string | undefined;
   readonly baseRevision: string;
   readonly sourceRevision: string;
   /**
@@ -351,6 +394,7 @@ export interface HostTaskpackBindings {
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;
   readonly credentialEnvMap: HostCredentialEnvMap;
+  readonly sourceTokenEnvNames?: readonly string[] | undefined;
   readonly resourceVersion?: string | undefined;
   readonly authorPrompt?: string | undefined;
 }
@@ -360,6 +404,8 @@ export interface CompiledTaskpack {
   readonly config: ControllerConfiguration;
   readonly registrySha256: string;
   readonly registryBytes: Buffer;
+  readonly instructionResources?: readonly CompiledInstructionResource[] | undefined;
+  readonly localCommandGates?: readonly CompiledLocalCommandGate[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -681,6 +727,7 @@ export interface ResolvedModelCandidate {
   readonly selection: PiModelSelection;
   readonly apiKeyEnv?: string | undefined;
   readonly providerEnvName: string;
+  readonly sourceTokenEnvName?: string | undefined;
   readonly token?: string | undefined;
   readonly usesActiveTokenEnv: boolean;
 }

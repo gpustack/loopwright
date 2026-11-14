@@ -1,11 +1,13 @@
+import { parseReportOutputFormats } from '@loopwright/controller';
+
 export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
 export interface Arguments { readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve'; readonly values: ReadonlyMap<string, string>; readonly flags: ReadonlySet<string> }
 const commands = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'] },
-  run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output'], flags: ['json', 'dry-run'] },
-  resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], flags: ['json'] },
-  reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output'], flags: ['json'] },
+  run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run'] },
+  resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json'] },
+  reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
   inspect: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id', 'output'], flags: ['json'] },
   closure: { required: [], values: ['repo', 'output'], flags: ['json', 'verify-failures'] },
@@ -24,7 +26,12 @@ export function parseArguments(argv: readonly string[]): Arguments {
   }
   const required = [...rule.required];
   if (command === 'run' && !flags.has('dry-run')) { required.push('repo', 'run-root', 'run-id'); if (values.has('output')) throw new UsageError(); }
-  if (command === 'run' && flags.has('dry-run') && ['repo', 'run-root', 'run-id'].some(key => values.has(key))) throw new UsageError();
+  if (command === 'run' && flags.has('dry-run') && ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))) throw new UsageError();
+  if (values.has('output-format')) {
+    try { parseReportOutputFormats(values.get('output-format')); }
+    catch { throw new UsageError(); }
+  }
+  if (values.has('step-summary-file') && values.get('step-summary-file')!.trim().length === 0) throw new UsageError();
   if (values.has('run-id') && (values.get('run-id')!.length > 64 || !/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(values.get('run-id')!))) throw new UsageError();
   if (required.some(key => !values.has(key))) throw new UsageError(); return { command, values, flags };
 }

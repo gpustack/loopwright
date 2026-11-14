@@ -5,6 +5,6 @@ export { describePiAdapterFiles, type PiAdapterFiles } from './descriptor.js';
 export { decodePiCapture, type PiCaptureDecodeInput, type PiDecodedCapture } from './decode-capture.js';
 export type {
   AdapterPolicy, PiAdapter, PiCapabilities, PiCapture, PiCommand, PiCustomModelCompat, PiCustomProviderConfig,
-  PiError, PiErrorCode, PiEvent, PiContextRecord, PiContextAssessment, PiHost, PiLimits, PiModelSelection,
+  PiError, PiErrorCode, PiEvent, PiContextRecord, PiContextAssessment, PiHost, PiLimits, PiModelCost, PiModelSelection,
   PiOpenInput, PiOutcome, PiResult, PiSamplingParams, PiThinkingLevel, PiWireApi, ResourceIdentity, RuntimeIdentity,
 } from './types.js';

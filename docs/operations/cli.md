@@ -69,6 +69,11 @@ loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST -
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
 
+`run`, `resume`, and `reconcile` accept `--output-format <csv>` with `json`, `github-step-summary`, `markdown`, and `text`.
+Use `--step-summary-file <path>` to select the summary file.
+With `--json`, stdout stays pure NDJSON. The CLI does not emit selected Markdown or text reports in this mode.
+Use `--step-summary-file` to write a separate Markdown summary. Without `--json`, selected reports go to stdout.
+
 ## Step 5: Inspect recovery
 
 ![Recovery, receipt reconciliation, and closure audit](../assets/diagrams/reconcile-closure-flow.svg)
@@ -105,12 +110,12 @@ Closure exits `0` for a valid report, `3` for falsification or unsupported capab
 | --- | --- | --- | --- |
 | `init` | `--directory` | `--force`, `--json` | Emit `controller.draft.yaml` and `registry.draft.yaml` |
 | `check` | `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile and verify configuration and registry digest statically |
-| `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json` | Execute a bounded controller run |
+| `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Execute a bounded controller run |
 | `run --dry-run` | `--dry-run`, `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile plan statically (`--repo`, `--run-root`, `--run-id` disallowed) |
-| `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json` | Resume an existing run under identical trusted bindings |
+| `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
 | `status` | `--run-root`, `--run-id` | `--json` | Read current run stage, lease state, and checkpoint summary |
 | `inspect` | `--run-root`, `--run-id` | `--output`, `--json` | Export redacted run receipts, checkpoints, and diagnostics |
-| `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json` | Settle an unknown external outcome with an authenticated receipt |
+| `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json`, `--output-format`, `--step-summary-file` | Settle an unknown external outcome with an authenticated receipt |
 | `closure` | None | `--repo`, `--output`, `--verify-failures`, `--json` | Audit the 23-capability closure matrix and 14-case failure suite |
 | `app-serve` | `--config` | `--repo`, `--json` | Start the opt-in GitHub App HTTP webhook and token listener |
 

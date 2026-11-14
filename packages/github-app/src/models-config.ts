@@ -9,7 +9,7 @@ import { readBoundedRegularFile } from './yaml.js';
 import {
   GitHubAppError, MAX_EXPANDED_MODEL_CANDIDATES, MAX_TASKPACK_MODEL_CANDIDATES, TASKPACK_MANIFEST_BYTES,
   type HostTaskpackBindings, type ModelCandidateProbeAttempt, type ModelCandidateSelectionResult,
-  type PiCustomModelCompat, type PiCustomProviderConfig, type PiModelSelection, type PiSamplingParams,
+  type PiCustomModelCompat, type PiCustomProviderConfig, type PiModelCost, type PiModelSelection, type PiSamplingParams,
   type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate, type TaskpackManifest,
   type TaskpackModelDeclaration,
 } from './types.js';
@@ -29,6 +29,7 @@ const COMPAT_BOOLEAN_KEYS = [
 ] as const;
 const COMPAT_ALL_KEYS = [...COMPAT_BOOLEAN_KEYS, 'maxTokensField', 'thinkingFormat'] as const;
 const THINKING_FORMATS = ['openai', 'zai', 'qwen', 'qwen-chat-template', 'openrouter', 'deepseek'] as const;
+const MODEL_COST_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
 const PROBE_MAX_RESPONSE_BYTES = 65_536;
 const DEFAULT_PROBE_TOTAL_TIMEOUT_MS = 30_000;
 const DEFAULT_PROBE_CANDIDATE_TIMEOUT_MS = 15_000;
@@ -37,6 +38,14 @@ export const DEFAULT_PI_PROVIDER = 'zai' as const;
 export const DEFAULT_PI_MODEL = 'glm-5.3' as const;
 export const DEFAULT_PI_THINKING: PiThinkingLevel = 'high';
 export const LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV = 'LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN' as const;
+
+function isOneOf<T extends string>(list: readonly T[], value: unknown): value is T {
+  return typeof value === 'string' && list.some(item => item === value);
+}
+
+function errorCode(err: unknown): string {
+  return err !== null && typeof err === 'object' && 'code' in err ? String(err.code) : '';
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -62,9 +71,9 @@ function validateSamplingObject(
   fail: (msg: string, p: string) => never,
 ): PiSamplingParams {
   if (!isPlainRecord(raw)) fail('samplingParams must be an object', path);
-  const out: Record<string, number> = {};
+  const out: { -readonly [K in keyof PiSamplingParams]: PiSamplingParams[K] } = {};
   for (const [key, val] of Object.entries(raw)) {
-    if (!(SAMPLING_KEYS as readonly string[]).includes(key)) fail(`unknown sampling parameter "${key}"`, `${path}/${key}`);
+    if (!isOneOf(SAMPLING_KEYS, key)) fail(`unknown sampling parameter "${key}"`, `${path}/${key}`);
     if (typeof val !== 'number' || !Number.isFinite(val) || Object.is(val, -0)) {
       fail(`sampling parameter "${key}" must be a finite number`, `${path}/${key}`);
     }
@@ -75,7 +84,7 @@ function validateSamplingObject(
     }
     out[key] = val;
   }
-  return Object.freeze(out) as PiSamplingParams;
+  return Object.freeze(out);
 }
 
 function validateCompatObject(
@@ -84,25 +93,25 @@ function validateCompatObject(
   fail: (msg: string, p: string) => never,
 ): PiCustomModelCompat {
   if (!isPlainRecord(raw)) fail('compat must be an object', path);
-  const out: Record<string, unknown> = {};
+  const out: { -readonly [K in keyof PiCustomModelCompat]: PiCustomModelCompat[K] } = {};
   for (const [key, val] of Object.entries(raw)) {
-    if (!(COMPAT_ALL_KEYS as readonly string[]).includes(key)) fail(`unknown compat field "${key}"`, `${path}/${key}`);
-    if ((COMPAT_BOOLEAN_KEYS as readonly string[]).includes(key)) {
+    if (!isOneOf(COMPAT_ALL_KEYS, key)) fail(`unknown compat field "${key}"`, `${path}/${key}`);
+    if (isOneOf(COMPAT_BOOLEAN_KEYS, key)) {
       if (typeof val !== 'boolean') fail(`compat.${key} must be a boolean`, `${path}/${key}`);
       out[key] = val;
     } else if (key === 'maxTokensField') {
       if (val !== 'max_completion_tokens' && val !== 'max_tokens') {
         fail('compat.maxTokensField must be "max_completion_tokens" or "max_tokens"', `${path}/${key}`);
       }
-      out[key] = val;
+      out.maxTokensField = val;
     } else if (key === 'thinkingFormat') {
-      if (typeof val !== 'string' || !(THINKING_FORMATS as readonly string[]).includes(val)) {
+      if (!isOneOf(THINKING_FORMATS, val)) {
         fail(`compat.thinkingFormat must be one of ${THINKING_FORMATS.join(', ')}`, `${path}/${key}`);
       }
-      out[key] = val;
+      out.thinkingFormat = val;
     }
   }
-  return Object.freeze(out) as PiCustomModelCompat;
+  return Object.freeze(out);
 }
 
 function validateHeadersObject(
@@ -138,7 +147,7 @@ function validateThinkingLevelMapObject(
   if (!isPlainRecord(raw)) fail('thinkingLevelMap must be an object', path);
   const out: Record<string, string | null> = {};
   for (const [key, val] of Object.entries(raw)) {
-    if (!(PI_THINKING_LEVELS as readonly string[]).includes(key)) {
+    if (!isOneOf(PI_THINKING_LEVELS, key)) {
       fail(`thinkingLevelMap key "${key}" must be a valid Pi thinking level`, `${path}/${key}`);
     }
     if (val !== null && (typeof val !== 'string' || val.length < 1 || val.length > 64 || /\s/.test(val))) {
@@ -157,10 +166,36 @@ function validateSamplingByThinkingObject(
   if (!isPlainRecord(raw)) fail('samplingParamsByThinkingLevel must be an object', path);
   const out: Record<string, PiSamplingParams> = {};
   for (const [key, val] of Object.entries(raw)) {
-    if (!(PI_THINKING_LEVELS as readonly string[]).includes(key)) {
+    if (!isOneOf(PI_THINKING_LEVELS, key)) {
       fail(`samplingParamsByThinkingLevel key "${key}" must be a valid Pi thinking level`, `${path}/${key}`);
     }
     out[key] = validateSamplingObject(val, `${path}/${key}`, fail);
+  }
+  return Object.freeze(out);
+}
+
+function validateModelCostObject(
+  raw: unknown,
+  path: string,
+  fail: (msg: string, p: string) => never,
+): PiModelCost {
+  if (!isPlainRecord(raw)) fail('cost must be an object', path);
+  for (const key of Object.keys(raw)) {
+    if (!isOneOf(MODEL_COST_KEYS, key)) {
+      fail(`unknown cost field "${key}"`, `${path}/${key}`);
+    }
+  }
+  if (!Object.hasOwn(raw, 'input') || !Object.hasOwn(raw, 'output')) {
+    fail('cost must include required "input" and "output" rates', path);
+  }
+  const out: { input: number; output: number; cacheRead?: number; cacheWrite?: number } = { input: 0, output: 0 };
+  for (const key of MODEL_COST_KEYS) {
+    if (!Object.hasOwn(raw, key)) continue;
+    const val = raw[key];
+    if (typeof val !== 'number' || !Number.isFinite(val) || Object.is(val, -0) || val < 0 || val > 1_000_000) {
+      fail(`cost.${key} must be a finite number in [0, 1000000]`, `${path}/${key}`);
+    }
+    out[key] = val;
   }
   return Object.freeze(out);
 }
@@ -177,7 +212,7 @@ export function validateTaskpackModelDeclaration(raw: unknown, path = '/spec/mod
   const allowed = [
     'provider', 'id', 'thinking', 'api', 'apiKeyEnv', 'baseUrl', 'authHeader', 'headers',
     'contextWindow', 'maxTokens', 'reasoning', 'thinkingLevelMap', 'samplingParams',
-    'samplingParamsByThinkingLevel', 'compat',
+    'samplingParamsByThinkingLevel', 'compat', 'cost',
   ];
   for (const key of Object.keys(raw)) {
     if (!allowed.includes(key)) manifestInvalid(`unknown field "${key}" in spec.models entry`, `${path}/${key}`);
@@ -212,19 +247,20 @@ export function validateTaskpackModelDeclaration(raw: unknown, path = '/spec/mod
     samplingParams?: PiSamplingParams;
     samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
     compat?: PiCustomModelCompat;
+    cost?: PiModelCost;
   } = { provider, id };
 
   if (raw['thinking'] !== undefined) {
-    if (typeof raw['thinking'] !== 'string' || !(PI_THINKING_LEVELS as readonly string[]).includes(raw['thinking'])) {
+    if (!isOneOf(PI_THINKING_LEVELS, raw['thinking'])) {
       manifestInvalid(`spec.models[].thinking must be one of ${PI_THINKING_LEVELS.join(', ')}`, `${path}/thinking`);
     }
-    result.thinking = raw['thinking'] as PiThinkingLevel;
+    result.thinking = raw['thinking'];
   }
   if (raw['api'] !== undefined) {
-    if (typeof raw['api'] !== 'string' || !(PI_WIRE_APIS as readonly string[]).includes(raw['api'])) {
+    if (!isOneOf(PI_WIRE_APIS, raw['api'])) {
       manifestInvalid(`spec.models[].api must be one of ${PI_WIRE_APIS.join(', ')}`, `${path}/api`);
     }
-    result.api = raw['api'] as PiWireApi;
+    result.api = raw['api'];
   }
   if (raw['apiKeyEnv'] !== undefined) {
     if (typeof raw['apiKeyEnv'] !== 'string') {
@@ -282,6 +318,9 @@ export function validateTaskpackModelDeclaration(raw: unknown, path = '/spec/mod
   if (raw['compat'] !== undefined) {
     result.compat = validateCompatObject(raw['compat'], `${path}/compat`, manifestInvalid);
   }
+  if (raw['cost'] !== undefined) {
+    result.cost = validateModelCostObject(raw['cost'], `${path}/cost`, manifestInvalid);
+  }
   return Object.freeze(result);
 }
 
@@ -309,6 +348,7 @@ export interface ParsedPiModelEntry {
   readonly samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
   readonly headers?: Readonly<Record<string, string>>;
   readonly compat?: PiCustomModelCompat;
+  readonly cost?: PiModelCost;
 }
 
 export interface ParsedPiProviderEntry {
@@ -339,12 +379,13 @@ function parseModelOverrideFields(raw: Record<string, unknown>, path: string): O
     samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
     headers?: Readonly<Record<string, string>>;
     compat?: PiCustomModelCompat;
+    cost?: PiModelCost;
   } = {};
   if (raw['api'] !== undefined) {
-    if (typeof raw['api'] !== 'string' || !(PI_WIRE_APIS as readonly string[]).includes(raw['api'])) {
+    if (!isOneOf(PI_WIRE_APIS, raw['api'])) {
       bindingInvalid(`models.json api must be one of ${PI_WIRE_APIS.join(', ')}`, `${path}/api`);
     }
-    out.api = raw['api'] as PiWireApi;
+    out.api = raw['api'];
   }
   if (raw['baseUrl'] !== undefined) {
     try { out.baseUrl = validateProviderBaseUrl(raw['baseUrl'], `${path}/baseUrl`); }
@@ -382,6 +423,9 @@ function parseModelOverrideFields(raw: Record<string, unknown>, path: string): O
   }
   if (raw['compat'] !== undefined) {
     out.compat = validateCompatObject(raw['compat'], `${path}/compat`, bindingInvalid);
+  }
+  if (raw['cost'] !== undefined) {
+    out.cost = validateModelCostObject(raw['cost'], `${path}/cost`, bindingInvalid);
   }
   return Object.freeze(out);
 }
@@ -439,10 +483,10 @@ export function parsePiModelsJson(bytes: Uint8Array): ParsedPiModelsJson {
       catch { bindingInvalid(`invalid baseUrl in models.json provider "${providerId}"`, `${pPath}/baseUrl`); }
     }
     if (entryRaw['api'] !== undefined) {
-      if (typeof entryRaw['api'] !== 'string' || !(PI_WIRE_APIS as readonly string[]).includes(entryRaw['api'])) {
+      if (!isOneOf(PI_WIRE_APIS, entryRaw['api'])) {
         bindingInvalid(`models.json provider "${providerId}" api must be one of ${PI_WIRE_APIS.join(', ')}`, `${pPath}/api`);
       }
-      entry.api = entryRaw['api'] as PiWireApi;
+      entry.api = entryRaw['api'];
     }
     if (entryRaw['apiKey'] !== undefined) {
       if (typeof entryRaw['apiKey'] !== 'string') bindingInvalid('models.json apiKey must be a string', `${pPath}/apiKey`);
@@ -633,13 +677,17 @@ function resolveSingleModelEntry(
     const parts = [modelsProvider?.headers, effectiveManifest?.headers, modelsOverride?.headers, modelsEntry?.headers, hostCustom?.headers]
       .filter((item): item is Readonly<Record<string, string>> => item !== undefined);
     if (parts.length === 0) return undefined;
-    return Object.freeze(Object.assign({}, ...parts) as Record<string, string>);
+    const merged: Record<string, string> = {};
+    for (const part of parts) Object.assign(merged, part);
+    return Object.freeze(merged);
   })();
   const mergedCompat = (() => {
     const parts = [modelsProvider?.compat, effectiveManifest?.compat, modelsOverride?.compat, modelsEntry?.compat, hostCustom?.compat]
       .filter((item): item is PiCustomModelCompat => item !== undefined);
     if (parts.length === 0) return undefined;
-    return Object.freeze(Object.assign({}, ...parts) as PiCustomModelCompat);
+    const merged: { -readonly [K in keyof PiCustomModelCompat]: PiCustomModelCompat[K] } = {};
+    for (const part of parts) Object.assign(merged, part);
+    return Object.freeze(merged);
   })();
   const mergedContextWindow = hostCustom?.contextWindow
     ?? modelsEntry?.contextWindow
@@ -665,6 +713,10 @@ function resolveSingleModelEntry(
     ?? modelsEntry?.samplingParamsByThinkingLevel
     ?? modelsOverride?.samplingParamsByThinkingLevel
     ?? effectiveManifest?.samplingParamsByThinkingLevel;
+  const mergedCost = hostCustom?.cost
+    ?? modelsEntry?.cost
+    ?? modelsOverride?.cost
+    ?? effectiveManifest?.cost;
 
   const hasCustomOverrides = builtIn === null
     || mergedBaseUrl !== undefined
@@ -676,7 +728,8 @@ function resolveSingleModelEntry(
     || mergedReasoning !== undefined
     || mergedThinkingMap !== undefined
     || mergedSampling !== undefined
-    || mergedSamplingByThinking !== undefined;
+    || mergedSamplingByThinking !== undefined
+    || mergedCost !== undefined;
 
   const requestedThinking = hostRole?.thinking ?? effectiveManifest?.thinking;
   const effectiveReasoning = mergedReasoning ?? builtIn?.reasoning ?? (requestedThinking !== undefined ? requestedThinking !== 'off' : true);
@@ -699,6 +752,7 @@ function resolveSingleModelEntry(
       samplingParams?: PiSamplingParams;
       samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
       compat?: PiCustomModelCompat;
+      cost?: PiModelCost;
     } = {
       baseUrl,
       contextWindow: mergedContextWindow ?? builtIn?.contextWindow ?? 128_000,
@@ -712,10 +766,12 @@ function resolveSingleModelEntry(
     if (mergedSampling !== undefined) rawCustom.samplingParams = mergedSampling;
     if (mergedSamplingByThinking !== undefined) rawCustom.samplingParamsByThinkingLevel = mergedSamplingByThinking;
     if (mergedCompat !== undefined) rawCustom.compat = mergedCompat;
+    const effectiveCost = mergedCost ?? builtIn?.cost;
+    if (effectiveCost !== undefined) rawCustom.cost = effectiveCost;
     try {
       customProvider = validateCustomProviderConfig(rawCustom, '/roleSelection/customProvider');
     } catch (err) {
-      const code = err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+      const code = errorCode(err);
       if (code === 'SEND_PATH_UNSUPPORTED') oauthUnsupported('custom Pi provider configuration uses an unsupported credential or send path', '/roleSelection/customProvider');
       bindingInvalid('custom Pi provider configuration failed validation', '/roleSelection/customProvider');
     }
@@ -728,7 +784,7 @@ function resolveSingleModelEntry(
   try {
     validateSelection(candidateSelection, '/roleSelection');
   } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+    const code = errorCode(err);
     if (code === 'SEND_PATH_UNSUPPORTED') {
       oauthUnsupported(`Pi selection "${provider}/${model}" uses an unsupported OAuth or non-fenced send path`, '/roleSelection');
     }
@@ -819,6 +875,7 @@ export function resolveTaskpackModelCandidates(
           selection: base.selection,
           ...(base.apiKeyEnv !== undefined ? { apiKeyEnv: base.apiKeyEnv } : {}),
           providerEnvName: LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV,
+          sourceTokenEnvName: sourceEnvName,
           token,
           usesActiveTokenEnv: true,
         }));

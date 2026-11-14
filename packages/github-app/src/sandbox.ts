@@ -3,13 +3,14 @@ import { createHash } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { effectiveProtectedPaths } from './schema.js';
 import { SecretScrubber } from './token-broker.js';
 import {
   GitHubAppError, PROTECTED_AUTOMATION_PATHS,
   type CompiledLinuxBwrapCommand, type CompiledMacosSeatbeltProfile, type Digest,
   type NegotiatedSandboxBackend, type SandboxBackendId, type SandboxCapability,
   type SandboxHostEnvironment, type SandboxedCommandInput, type SandboxedCommandResult,
-  type SandboxNetworkMode, type SandboxPolicyInput,
+  type SandboxNetworkMode, type SandboxPolicyInput, type TaskpackManifest,
 } from './types.js';
 
 export const TRUSTED_SEATBELT_PATHS: readonly string[] = Object.freeze(['/usr/bin/sandbox-exec']);
@@ -239,7 +240,7 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
   for (const [index, entry] of policy.writablePaths.entries()) {
     const cleaned = assertCleanPathString(entry, `writablePaths/${index}`);
     let canonicalWritable: string;
-    if (cleaned === '.') {
+    if (cleaned === '.' || cleaned === '**') {
       canonicalWritable = canonicalWorkspaceRoot;
     } else if (isAbsolute(cleaned)) {
       canonicalWritable = canonicalizeAbsolutePath(cleaned, `writablePaths/${index}`);
@@ -1026,4 +1027,71 @@ export async function executeSandboxedCommand(input: SandboxedCommandInput): Pro
       finish(code, signal);
     });
   });
+}
+
+export interface ResolveTaskpackSandboxOptions {
+  readonly workspaceRoot: string;
+  readonly scratchDirectory?: string | undefined;
+  readonly controlRoot?: string | undefined;
+  readonly relativeTaskpackPath?: string | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+}
+
+/**
+ * Resolve the effective sandbox policy for a declarative Taskpack manifest.
+ * Under GitHub Actions (`GITHUB_ACTIONS === 'true'`), omitted `spec.sandbox`
+ * defaults to `direct-dedicated` because GitHub-hosted runners already isolate the job.
+ */
+export function resolveEffectiveTaskpackSandboxPolicy(
+  manifest: TaskpackManifest,
+  options: ResolveTaskpackSandboxOptions,
+): SandboxPolicyInput {
+  const writablePaths = manifest.spec.scope.writable.length === 0 ||
+    (manifest.spec.scope.writable.length === 1 && manifest.spec.scope.writable[0] === '**')
+    ? ['.']
+    : [...manifest.spec.scope.writable];
+  const commandScripts = manifest.spec.verification.localChecks
+    .flatMap(check => (
+      check.implementation === 'command.v1' && typeof check.parameters?.['script'] === 'string'
+        ? [check.parameters['script']]
+        : []
+    ));
+  const protectedPaths = effectiveProtectedPaths(manifest.spec.scope.protected, {
+    controlRoot: options.controlRoot ?? manifest.controlRoot,
+    manifestPath: options.relativeTaskpackPath ?? manifest.manifestPath,
+    instructions: manifest.spec.instructions,
+    commandScripts,
+  });
+
+  const basePolicy: SandboxPolicyInput = {
+    workspaceRoot: options.workspaceRoot,
+    ...(options.scratchDirectory !== undefined ? { scratchDirectory: options.scratchDirectory } : {}),
+    writablePaths,
+    protectedPaths,
+  };
+
+  if (manifest.spec.sandbox !== undefined) {
+    const sandbox = manifest.spec.sandbox;
+    return {
+      ...basePolicy,
+      ...(sandbox.preferredBackends?.includes('direct-dedicated') === true ? { allowDedicatedDirectOverride: true } : {}),
+      ...(sandbox.preferredBackends !== undefined ? { preferredBackends: sandbox.preferredBackends } : {}),
+      ...(sandbox.networkMode !== undefined ? { networkMode: sandbox.networkMode } : {}),
+      ...(sandbox.requiredCapabilities !== undefined ? { requiredCapabilities: sandbox.requiredCapabilities } : {}),
+      ...(sandbox.deniedReadPaths !== undefined ? { deniedReadPaths: sandbox.deniedReadPaths } : {}),
+    };
+  }
+
+  const runtimeEnv = options.env ?? process.env;
+  if (runtimeEnv['GITHUB_ACTIONS'] === 'true') {
+    return {
+      ...basePolicy,
+      preferredBackends: ['direct-dedicated'],
+      networkMode: 'allow-outbound',
+      requiredCapabilities: ['processTreeCleanup'],
+      allowDedicatedDirectOverride: true,
+    };
+  }
+
+  return basePolicy;
 }

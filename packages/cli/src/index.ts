@@ -1,5 +1,5 @@
 export { parseArguments, UsageError, type Arguments } from './arguments.js';
-export { canonicalPath, initDraft, writeOutput } from './draft.js';
+export { canonicalPath, initDraft, writeOutput, appendStepSummary } from './draft.js';
 export { encoded, diagnosticExit, executionExit, closureExitCode, main, type Envelope } from './main.js';
 export {
   CLOSURE_CAPABILITY_LEDGER,

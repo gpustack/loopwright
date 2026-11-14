@@ -24,6 +24,9 @@ The GitHub App accepts authenticated events and queues repository work by tenant
 | `src/token-broker.ts` | RS256 App JWTs, `InstallationTokenBroker`, multi-encoding `SecretScrubber` |
 | `src/qualification.ts` | Deployment host qualification and interactive MCP OAuth refusal |
 | `src/action.ts` | `runGitHubActionEntrypoint` and the `INPUT_*` CLI shim |
+| `src/upstreams.ts` | Native upstream discovery and GitHub token resolution |
+| `src/turnkey.ts` | Local HMAC command gate, detached worktree publisher, and host-session cycle delegate |
+| `src/output-format.ts` | Action output sinks and step outputs |
 | `src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver and queue dispatcher |
 
 Repository CI/CD runs from `.github/workflows/`. Configure consumer workflows separately and review the [Action limits](../operations/github-action.md).
@@ -86,10 +89,9 @@ The loader enforces the hard invariants before anything compiles:
 
 - Manifests are read with a bounded (`65536`-byte) `O_NOFOLLOW` file read; symlinks, `..` traversal,
   `__proto__`/`constructor`/`prototype` keys, and any `${...}` interpolation expression are refused.
-- The effective protected scope always contains `.github`, `.loopwright/policies`, `AGENTS.md`, and
-  `CLAUDE.md`; a writable path that overlaps that set fails with `TASKPACK_SCOPE_VIOLATION`.
-- The proposal path must live inside the writable scope, and the memory directory must stay under
-  `.loopwright/memory/<name>` and disjoint from the writable scope.
+- Effective protected paths include the control root, manifest, instructions, scripts, `.github`, `.claude`, `.agents`, `AGENTS.md`, and `CLAUDE.md`.
+- Omitted writable scope defaults to `**`; protected paths take precedence over writable ancestors.
+- The proposal must be writable. Memory must stay under the control root's `memory` directory.
 
 `compileDeclarativeTaskpack` combines the manifest with trusted host bindings into a `TrustedRegistry` and
 `ControllerConfiguration` that pass `@loopwright/core` `validateDocument` and `@loopwright/controller`
@@ -109,7 +111,7 @@ from explicitly bound environment variables.
 - **Fail-closed negotiation (`negotiateSandboxBackend`)**: refuses missing or untrusted binaries
   (`SANDBOX_BACKEND_UNAVAILABLE`) and backends that lack required isolation capabilities
   (`SANDBOX_CAPABILITY_INSUFFICIENT`); `direct-dedicated` is refused unless
-  `allowDedicatedDirectOverride: true` is explicitly supplied by the host operator.
+  `allowDedicatedDirectOverride: true` is supplied. Actions enable it for an omitted sandbox policy.
 
 ## Reusable Action entrypoint
 
@@ -142,7 +144,12 @@ jobs:
           LOOPWRIGHT_PUBLICATION_SIGNING_SECRET: ${{ secrets.LOOPWRIGHT_PUBLICATION_SIGNING_SECRET }}
 ```
 
-The illustrative workflow cannot currently pass the declared Node 20 Action runtime through host qualification. The shim also lacks a controller delegate and does not write the declared output. See [GitHub Action](../operations/github-action.md) before use.
+For live execution, `runActionCli` discovers upstreams and wires the turnkey delegate. See [GitHub Action](../operations/github-action.md) for inputs and qualification limits.
+
+`turnkey.ts` runs `command.v1` through a loopback HMAC gate and verifies script and candidate digests.
+It publishes from a detached `git worktree` with `--force-with-lease` and uses `openPiHostSessionAdapterV2` for the cycle.
+The local command runs on the host, not in an OS sandbox.
+`output-format.ts` writes configured reports and Action step outputs.
 
 `runGitHubActionEntrypoint` qualifies the deployment host first (platform/arch allowlist, qualified 26.x Node runtime, non-network filesystem, clock drift within 1000ms, an exclusive fsync-plus-rename storage probe, and storage-profile budget rules), refuses interactive MCP authentication, evaluates trigger intake, compiles, and writes the registry and configuration into a trusted directory outside the checkout with `untrustedRoots: [<checkout>]`.
 

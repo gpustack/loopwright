@@ -1,10 +1,15 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { canonical, digest } from './boundary.js';
 import { refuse } from './errors.js';
 import { sameIdentity } from './policy.js';
 export async function profileIdentity() {
-  const seccomp = digest(await readFile(new URL('../runtime/seccomp.json', import.meta.url)));
+  const localSeccomp = new URL('../runtime/seccomp.json', import.meta.url);
+  const seccompUrl = existsSync(localSeccomp)
+    ? localSeccomp
+    : new URL('../../../../packages/agent-pi/runtime/seccomp.json', import.meta.url);
+  const seccomp = digest(await readFile(seccompUrl));
   const value = { version: 1, profile: 'linux/arm64', user: '1000:1000', network: 'none', readOnly: true, capabilities: 'drop-all', noNewPrivileges: true,
     seccomp, memory: 536870912, memorySwap: 536870912, cpus: 1, pids: 64, init: true,
     tmpBytes: 33554432, scratchBytes: 134217728, mounts: 'candidate-readonly', logs: 'none', environment: { HOME: '/tmp/home', PI_OFFLINE: '1', LANG: 'C.UTF-8', TERM: 'dumb', PATH: '/usr/local/bin:/usr/bin:/bin' } };

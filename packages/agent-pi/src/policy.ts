@@ -1,9 +1,9 @@
-import type { PiCustomModelCompat, PiCustomProviderConfig, PiLimits, PiModelSelection, PiSamplingParams } from './types.js';
+import type { PiCustomModelCompat, PiCustomProviderConfig, PiLimits, PiModelCost, PiModelSelection, PiSamplingParams } from './types.js';
 export const MAX_LIMITS: PiLimits = Object.freeze({ promptBytes: 16384, diagnosticBytes: 1024, responseBytes: 1048576,
   frameBytes: 65536, eventBytes: 4096, pendingResponseBytes: 262144, eventQueue: 128, eventQueueBytes: 524288,
   toolArgsBytes: 65536, toolResultBytes: 65536, sessionBytes: 8388608, artifactBytes: 16777216, candidateEntries: 256,
   fileBytes: 8388608, toolWallMs: 10000, requests: 1024, operations: 2048, checkpoints: 64 });
-import { canonical, id, integer, object, text, type Json } from './boundary.js';
+import { canonical, freeze, id, integer, object, text, type Json } from './boundary.js';
 import { PI_THINKING_LEVELS, PI_WIRE_APIS, resolveCatalogModel, validateProviderBaseUrl } from './catalog.js';
 import { refuse } from './errors.js';
 import type { AdapterPolicy, ResourceIdentity, RuntimeIdentity } from './types.js';
@@ -34,7 +34,27 @@ const COMPAT_BOOLEAN_KEYS = [
 ] as const;
 const COMPAT_ALL_KEYS = [...COMPAT_BOOLEAN_KEYS, 'maxTokensField', 'thinkingFormat'] as const;
 const THINKING_FORMATS = ['openai', 'zai', 'qwen', 'qwen-chat-template', 'openrouter', 'deepseek'] as const;
+const MODEL_COST_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
 const FORBIDDEN_HEADER_NAMES = new Set(['authorization', 'x-api-key', 'api-key', 'x-goog-api-key', 'cookie', 'proxy-authorization', 'host', 'content-length']);
+
+export function validateModelCost(raw: unknown, path: string): PiModelCost {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('INPUT_INVALID', path);
+  const keys = Reflect.ownKeys(raw);
+  if (keys.some(key => typeof key !== 'string' || !(MODEL_COST_KEYS as readonly string[]).includes(key))) {
+    refuse('INPUT_INVALID', path);
+  }
+  if (!keys.includes('input') || !keys.includes('output')) {
+    refuse('INPUT_INVALID', path);
+  }
+  const item = object(raw, keys as string[], path);
+  for (const key of keys as string[]) {
+    const val = item[key];
+    if (typeof val !== 'number' || !Number.isFinite(val) || Object.is(val, -0) || val < 0 || val > 1_000_000) {
+      refuse('INPUT_INVALID', `${path}/${key}`);
+    }
+  }
+  return freeze(item as unknown as PiModelCost);
+}
 
 function validateSamplingParams(raw: unknown, path: string): PiSamplingParams {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('INPUT_INVALID', path);
@@ -70,7 +90,7 @@ function validateCompat(raw: unknown, path: string): PiCustomModelCompat {
 export function validateCustomProviderConfig(raw: unknown, path: string): PiCustomProviderConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('INPUT_INVALID', path);
   if (Object.hasOwn(raw, 'oauth') || Object.hasOwn(raw, 'apiKey')) refuse('SEND_PATH_UNSUPPORTED', path);
-  const allowed = ['baseUrl', 'authHeader', 'headers', 'contextWindow', 'maxTokens', 'reasoning', 'thinkingLevelMap', 'samplingParams', 'samplingParamsByThinkingLevel', 'compat'];
+  const allowed = ['baseUrl', 'authHeader', 'headers', 'contextWindow', 'maxTokens', 'reasoning', 'thinkingLevelMap', 'samplingParams', 'samplingParamsByThinkingLevel', 'compat', 'cost'];
   const keys = Object.keys(raw as Record<string, unknown>);
   if (keys.some(key => !allowed.includes(key))) refuse('INPUT_INVALID', path);
   const item = object(raw, keys, path);
@@ -114,6 +134,10 @@ export function validateCustomProviderConfig(raw: unknown, path: string): PiCust
     for (const k of levelKeys) validateSamplingParams(byLevel[k], `${path}/samplingParamsByThinkingLevel/${k}`);
   }
   if (Object.hasOwn(item, 'compat')) validateCompat(item.compat, `${path}/compat`);
+  if (Object.hasOwn(item, 'cost')) {
+    if (item.cost !== undefined) item.cost = validateModelCost(item.cost, `${path}/cost`);
+    else delete item.cost;
+  }
   return item as unknown as PiCustomProviderConfig;
 }
 

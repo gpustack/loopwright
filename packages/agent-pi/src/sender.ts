@@ -8,12 +8,12 @@ import { PiFailure, refuse } from './errors.js';
 import { inspectRawResponse, toolArgumentsDigest, type RawInspection } from './usage.js';
 import { publishReceipt } from './receipt.js';
 import { boundedResponse, semanticHeaders, validateInvocation, validateRequestResources, type FetchIdentity, type InvocationIdentity, type ParsedCandidate, type RuntimeBroker, type RuntimeReply, type ToolAuthorization } from './provider.js';
-import type { PiHost, PiOpenInput, PiCommand, PiOutcome, PiErrorCode, PiError, PiContextRecord } from './types.js';
+import type { PiHost, PiOpenInput, PiCommand, PiOutcome, PiErrorCode, PiError, PiContextRecord, PiModelCost } from './types.js';
 import type { ToolExecutor, ToolIdentity, ToolResult } from './tools.js';
 import type { Mcp } from './mcp.js';
 import type { JsonRpcMessage } from '@earendil-works/pi-mcp';
 import type { EventPublisher } from './events.js';
-import { resolveProviderAuthHeaderName, resolveProviderDestination, selectedCatalog, type CatalogIdentity } from './catalog.js';
+import { resolveCatalogModel, resolveProviderAuthHeaderName, resolveProviderDestination, selectedCatalog, type CatalogIdentity } from './catalog.js';
 interface Attempt {
   readonly requestId: string; readonly operationId: string; readonly context: PiContextRecord;
   raw?: RawInspection; status?: number; committed: boolean; committedUsage?: RawInspection['usage'];
@@ -34,7 +34,7 @@ export interface SenderPorts { readonly fetch: typeof globalThis.fetch; readonly
 const unknown = (): Quantity => ({ provenance: 'unknown' });
 /** One active host command, original permits only, and no native/provider retry authority. */
 export class Sender implements RuntimeBroker {
-  readonly #admission: Admission; readonly #catalog: CatalogIdentity; readonly #destination: string; readonly #authHeader: 'authorization' | 'x-api-key';
+  readonly #admission: Admission; readonly #catalog: CatalogIdentity; readonly #destination: string; readonly #authHeader: 'authorization' | 'x-api-key'; readonly #modelCost: PiModelCost | undefined;
   #turn: Turn | null = null; #lastInvocation = 0;
   #slots = new Map<number, Slot>(); #commands = new Set<string>(); #blocked = false; #lastSlot: Slot | null = null;
   #outboundObserved = false;
@@ -71,6 +71,7 @@ export class Sender implements RuntimeBroker {
   constructor(readonly host: PiHost, readonly input: PiOpenInput, readonly ports: SenderPorts = { fetch: globalThis.fetch }) {
     this.#destination = resolveProviderDestination(input.policy.selection);
     this.#authHeader = resolveProviderAuthHeaderName(input.policy.selection);
+    this.#modelCost = resolveCatalogModel(input.policy.selection).record.cost;
     this.#admission = new Admission(host, { destination: this.#destination, fetch: ports.fetch });
     this.#catalog = freeze(structuredClone(ports.catalog ?? selectedCatalog(input)));
   }
@@ -148,7 +149,7 @@ export class Sender implements RuntimeBroker {
         const decoded = Buffer.from(body).toString('utf8').replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16))).replace(/\\\//g, '/');
         if (decoded.includes(credential)) { this.host.store.markRequestUnresolved(this.host.authority, requestId, 'connection_lost'); turn.uncertain = true; refuse('PROVIDER_RESPONSE_INVALID', '', { phase: 'dispatch', effect: 'possible', requestId, operationId }); }
         const strictModel = this.input.policy.selection.provider === 'github-copilot' && !this.input.policy.selection.customProvider;
-        attempt.raw = inspectRawResponse(body, response.status, this.input.policy.selection.model, this.input.policy.selection.api, strictModel); attempt.status = response.status;
+        attempt.raw = inspectRawResponse(body, response.status, this.input.policy.selection.model, this.input.policy.selection.api, strictModel, this.#modelCost); attempt.status = response.status;
         const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
         if (mediaType !== (response.status === 200 ? 'text/event-stream' : 'application/json')) { turn.failure ??= 'PROVIDER_RESPONSE_INVALID'; }
         await publishReceipt(this.host.artifactsDirectory, requestId, 'raw', { version: 1, requestId, operationId, requestDigest, responseDigest: attempt.raw.responseDigest,

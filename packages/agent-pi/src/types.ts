@@ -66,6 +66,12 @@ export interface PiCustomModelCompat {
   readonly supportsStrictMode?: boolean;
   readonly zaiToolStream?: boolean;
 }
+export interface PiModelCost {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead?: number;
+  readonly cacheWrite?: number;
+}
 export interface PiCustomProviderConfig {
   readonly baseUrl: string;
   readonly authHeader?: boolean;
@@ -77,6 +83,7 @@ export interface PiCustomProviderConfig {
   readonly samplingParams?: PiSamplingParams;
   readonly samplingParamsByThinkingLevel?: Readonly<Record<string, PiSamplingParams>>;
   readonly compat?: PiCustomModelCompat;
+  readonly cost?: PiModelCost;
 }
 export interface PiModelSelection {
   readonly provider: string;

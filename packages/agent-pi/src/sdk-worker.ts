@@ -1,5 +1,6 @@
 import { createAgentSession, ModelRuntime, SessionManager, type ExtensionFactory, type ToolDefinition, type FileEntry, type AgentSession } from '@earendil-works/pi-coding-agent';
 import { mkdtemp } from 'node:fs/promises';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Channel, type ChannelMessage } from './protocol.js';
 import { compileTrustedFactories } from './factory-bootstrap.js';
@@ -92,7 +93,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
       if (!Number.isSafeInteger(value.sessionBytes) || value.sessionBytes < 1 || value.sessionBytes > 8388608) throw new Error('Session bound'); sessionBytes = value.sessionBytes; snapshotPolicy = { selection: value.selection, tools: value.toolNames, limits: { sessionBytes } };
       if (!Number.isSafeInteger(value.toolResultBytes) || value.toolResultBytes < 1 || value.toolResultBytes > 65536) throw new Error('Tool result bound'); toolResultBytes = value.toolResultBytes;
       if (!Number.isSafeInteger(value.outputTokens) || value.outputTokens < 1 || value.outputTokens > 1024) throw new Error('output bound'); outputTokens = value.outputTokens;
-      const directory = await mkdtemp('/tmp/loopwright-sdk-');
+      const directory = await mkdtemp(join(process.env.TMPDIR || '/tmp', 'loopwright-sdk-'));
       runtime = await ModelRuntime.create({ credentials: { read: async () => ({ type: 'api_key', key: 'loopwright-non-secret-placeholder' }), list: async () => [], modify: async () => undefined, delete: async () => {} }, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
       if (value.selection.customProvider) {
         const cp = value.selection.customProvider;
@@ -107,7 +108,12 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
             name: value.selection.model,
             reasoning: cp.reasoning,
             input: ['text'],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            cost: {
+              input: cp.cost?.input ?? 0,
+              output: cp.cost?.output ?? 0,
+              cacheRead: cp.cost?.cacheRead ?? 0,
+              cacheWrite: cp.cost?.cacheWrite ?? 0,
+            },
             contextWindow: cp.contextWindow,
             maxTokens: cp.maxTokens,
             ...(cp.thinkingLevelMap ? { thinkingLevelMap: { ...cp.thinkingLevelMap } as never } : {}),

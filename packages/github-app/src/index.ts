@@ -26,11 +26,37 @@ export {
 export {
   ALWAYS_PROTECTED_WORKSPACE_SUBPATHS, compileLinuxBwrapCommand, compileMacosSeatbeltProfile,
   computeSandboxSeccompProfile, DEFAULT_DENIED_HOME_SUBPATHS, DEFAULT_REQUIRED_SANDBOX_CAPABILITIES,
-  executeSandboxedCommand, negotiateSandboxBackend, SANDBOX_CAPABILITIES_BY_BACKEND,
-  SECCOMP_BLOCKED_SYSCALLS, TRUSTED_BWRAP_PATHS, TRUSTED_DOCKER_PATHS, TRUSTED_PYTHON_PATHS,
-  TRUSTED_SEATBELT_PATHS,
+  executeSandboxedCommand, negotiateSandboxBackend, resolveEffectiveTaskpackSandboxPolicy,
+  SANDBOX_CAPABILITIES_BY_BACKEND, SECCOMP_BLOCKED_SYSCALLS, TRUSTED_BWRAP_PATHS, TRUSTED_DOCKER_PATHS,
+  TRUSTED_PYTHON_PATHS, TRUSTED_SEATBELT_PATHS, type ResolveTaskpackSandboxOptions,
 } from './sandbox.js';
-export { runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload } from './action.js';
+export {
+  runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload,
+  type TurnkeyActionEntrypointInput, type TurnkeyActionExecutionReport,
+} from './action.js';
+export {
+  checkManagedPrMatchesDiscoveredState, compareVersionTags, discoverTaskpackUpstreams,
+  findOpenManagedPullRequest, parseUpstreamRecordsJson, resolveGitHubToken,
+  resolveRepositoryAndRevisions,
+  type CheckManagedPrMatchesOptions, type DiscoverTaskpackUpstreamsOptions,
+  type FindOpenManagedPullRequestOptions, type ManagedPullRequestInfo,
+  type ResolveActionGitHubTokenOptions, type ResolvedRepositoryAndRevisions,
+  type ResolveRepositoryAndRevisionsOptions,
+} from './upstreams.js';
+export {
+  formatCostUsd, formatRunReport, parseReportOutputFormats, REPORT_OUTPUT_FORMATS,
+  resolveActionOutputFormats, sanitizeReportText, writeActionOutputSinks,
+  type ReportOutputFormat, type RunReportInput, type WriteActionOutputSinksOptions,
+  type WrittenActionOutputs,
+} from './output-format.js';
+export {
+  createTurnkeyCycleDelegate, executeTurnkeyActionCycle, makeAttemptRunId,
+  normalizeControllerRunId, startLocalCommandGateServer, startNativePullRequestPublisherServer,
+  type ExecuteTurnkeyActionCycleOptions, type LocalCommandGateServer,
+  type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,
+  type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
+  type TurnkeyCycleDelegateOptions,
+} from './turnkey.js';
 export { startGitHubAppControlPlane, type ControlPlaneHandle, type ControlPlaneOptions } from './service.js';
 export { serializePrettyYaml } from './yaml.js';
 export {

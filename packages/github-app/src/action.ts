@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { appendFileSync, closeSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, openSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,17 +8,54 @@ import {
   LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveTaskpackModelCandidates, selectHealthyModelCandidate,
   type ParsedPiModelsJson,
 } from './models-config.js';
+import { resolveActionOutputFormats, writeActionOutputSinks, type RunReportInput } from './output-format.js';
 import { validateMcpAuthConfiguration, qualifyDeploymentHostProfile } from './qualification.js';
-import { authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseCommentCommand, prepareTaskpackIntake, validateCommentGuidance } from './taskpack.js';
+import { negotiateSandboxBackend, resolveEffectiveTaskpackSandboxPolicy } from './sandbox.js';
+import {
+  authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack,
+  parseCommentCommand, prepareTaskpackIntake, stageCompiledInstructionResources, validateCommentGuidance,
+} from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
+import {
+  createTurnkeyCycleDelegate, normalizeControllerRunId, startLocalCommandGateServer,
+  startNativePullRequestPublisherServer,
+  type LocalCommandGateServer, type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
+} from './turnkey.js';
+import {
+  checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, discoverTaskpackUpstreams,
+  findOpenManagedPullRequest, resolveGitHubToken, resolveRepositoryAndRevisions,
+  type ManagedPullRequestInfo,
+} from './upstreams.js';
 import { serializePrettyYaml } from './yaml.js';
 import {
-  GitHubAppError,
+  DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID,
   type ActionDelegateOutcome, type ActionEntrypointInput, type ActionEntrypointResult, type ClockSample,
-  type HostRoleSelection, type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi,
-  type ResolvedModelCandidate, type TaskpackCommentCommand, type TaskpackIntakeOutcome,
-  type TaskpackManifest, type WrittenCompiledTaskpack,
+  type HostGateEndpointPlan, type HostPublicationEndpointPlan, type HostRoleSelection, type HostTaskpackBindings,
+  type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate, type TaskpackCommentCommand,
+  type TaskpackIntakeOutcome, type TaskpackManifest, type WrittenCompiledTaskpack,
 } from './types.js';
+
+export interface TurnkeyActionExecutionReport {
+  readonly manifest: TaskpackManifest | null;
+  readonly report: RunReportInput;
+  readonly scrubber: SecretScrubber;
+}
+
+export interface TurnkeyActionEntrypointInput extends ActionEntrypointInput {
+  readonly turnkey?: boolean | undefined;
+  readonly repositoryId?: number | undefined;
+  readonly installationId?: number | undefined;
+  readonly githubApiBaseUrl?: string | undefined;
+  readonly githubToken?: string | undefined;
+  readonly githubAppId?: string | number | undefined;
+  readonly githubAppPrivateKey?: string | undefined;
+  readonly githubAppInstallationId?: string | number | undefined;
+  readonly upstreamRecordsJson?: string | undefined;
+  readonly gitRemoteUrl?: string | undefined;
+  readonly managedPrMatchesDiscoveredState?: boolean | undefined;
+  readonly output?: string | undefined;
+  readonly onTurnkeyReport?: ((info: TurnkeyActionExecutionReport) => void) | undefined;
+}
 
 function systemSample(): ClockSample {
   return { wallMs: Date.now(), monotonicMs: (process.hrtime.bigint() / 1_000_000n).toString() };
@@ -149,8 +186,9 @@ async function invokeDelegateForCandidate(
  * candidates are configured), compile, write trusted artifacts outside the checkout, scrub them, and
  * optionally delegate execution with fresh-session fallback across remaining healthy model candidates.
  */
-export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): Promise<ActionEntrypointResult> {
+export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointInput): Promise<ActionEntrypointResult> {
   const runtimeEnv = input.env ?? process.env;
+  const turnkeyScrubber = new SecretScrubber();
   const storageProfile = input.storageProfile ?? 'actions-basic';
   const startSample = input.previousClockSample ?? systemSample();
   const basis = input.clockBasis ?? {
@@ -158,7 +196,8 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     created: { ...startSample },
     taskDeadlineMonotonicMs: (BigInt(startSample.monotonicMs) + BigInt(input.budgets?.wallTimeMs ?? DEFAULT_HOST_BUDGETS.wallTimeMs)).toString(),
   };
-  await mkdir(input.runRoot, { recursive: true }).catch(() => undefined);
+  await mkdir(input.runRoot, { recursive: true, mode: 0o700 }).catch(() => undefined);
+  await chmod(input.runRoot, 0o700).catch(() => undefined);
   const qualification = await qualifyDeploymentHostProfile({
     platform: process.platform,
     arch: process.arch,
@@ -201,12 +240,175 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     throw error;
   }
 
-  const tenant = { installationId: 0, repositoryId: 0, repositoryFullName: input.repositoryFullName, taskpackId: manifest.metadata.name };
+  resolveActionOutputFormats(input.output, manifest);
+
+  const turnkeyEnabled = input.turnkey === true && input.dryRun !== true;
+  let effectiveRepositoryId = input.repositoryId ?? 0;
+  let effectiveBaseRevision = input.baseRevision;
+  let effectiveSourceRevision = input.sourceRevision ?? input.baseRevision;
+  let effectiveUpstreamRecords = input.upstreamRecords;
+  let githubToken: string | undefined;
+  let openManagedPr: ManagedPullRequestInfo | null = null;
+  let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
+  const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim();
+
+  if (turnkeyEnabled) {
+    try {
+      const effectivePolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+        workspaceRoot: input.repositoryRoot,
+        relativeTaskpackPath: input.taskpackPath,
+        env: runtimeEnv,
+      });
+      const negotiated = negotiateSandboxBackend(effectivePolicy, {
+        platform: process.platform,
+        arch: process.arch,
+      });
+      if (input.delegate === undefined && negotiated.backendId === 'docker') {
+        return blocked(
+          'SANDBOX_POLICY_INVALID',
+          'turnkey host-session mode runs without Docker; docker sandbox backend cannot be used when delegate is unset',
+        );
+      }
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, error.message);
+      }
+      throw error;
+    }
+
+    try {
+      githubToken = await resolveGitHubToken({
+        apiBaseUrl: effectiveApiBaseUrl,
+        repositoryFullName: input.repositoryFullName,
+        repositoryId: effectiveRepositoryId > 0 ? effectiveRepositoryId : undefined,
+        githubToken: input.githubToken,
+        appId: input.githubAppId,
+        appPrivateKey: input.githubAppPrivateKey,
+        appInstallationId: input.githubAppInstallationId,
+        fetchImpl: input.probeFetch,
+        scrubber: turnkeyScrubber,
+        env: runtimeEnv,
+      });
+      const resolvedRepo = await resolveRepositoryAndRevisions({
+        repositoryRoot: input.repositoryRoot,
+        repositoryFullName: input.repositoryFullName,
+        baseRevision: effectiveBaseRevision,
+        sourceRevision: effectiveSourceRevision,
+        eventName: input.eventName,
+        eventPayload: input.eventPayload,
+        apiBaseUrl: effectiveApiBaseUrl,
+        githubToken,
+        fetchImpl: input.probeFetch,
+        scrubber: turnkeyScrubber,
+        env: runtimeEnv,
+      });
+      effectiveRepositoryId = input.repositoryId !== undefined && input.repositoryId > 0
+        ? input.repositoryId
+        : resolvedRepo.repositoryId;
+      effectiveBaseRevision = resolvedRepo.baseRevision;
+      effectiveSourceRevision = resolvedRepo.sourceRevision;
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+
+    if (
+      effectiveUpstreamRecords === undefined
+      && (input.upstreamRecordsJson !== undefined || manifest.spec.upstreams.length > 0)
+    ) {
+      try {
+        effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
+          repositoryRoot: input.repositoryRoot,
+          apiBaseUrl: effectiveApiBaseUrl,
+          githubToken,
+          upstreamRecordsJson: input.upstreamRecordsJson,
+          fetchImpl: input.probeFetch,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+        }
+        throw error;
+      }
+    }
+
+    if (
+      manifest.spec.publication.mode === 'pull_request'
+      && input.publicationEndpoint === undefined
+      && input.mode === 'candidate'
+      && (effectiveApiBaseUrl !== undefined || githubToken !== undefined)
+    ) {
+      try {
+        openManagedPr = await findOpenManagedPullRequest({
+          apiBaseUrl: effectiveApiBaseUrl,
+          repositoryFullName: input.repositoryFullName,
+          targetBranch: manifest.spec.publication.targetBranch,
+          headBranchPrefix: manifest.spec.publication.headBranchPrefix,
+          githubToken,
+          fetchImpl: input.probeFetch,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+        }
+        throw error;
+      }
+    }
+
+    if (
+      managedPrMatchesDiscoveredState === undefined
+      && openManagedPr !== null
+      && effectiveUpstreamRecords !== undefined
+      && effectiveUpstreamRecords.length > 0
+    ) {
+      managedPrMatchesDiscoveredState = await checkManagedPrMatchesDiscoveredState({
+        repositoryRoot: input.repositoryRoot,
+        repositoryFullName: input.repositoryFullName,
+        manifest,
+        openManagedPr,
+        records: effectiveUpstreamRecords,
+        apiBaseUrl: effectiveApiBaseUrl,
+        githubToken,
+        fetchImpl: input.probeFetch,
+        scrubber: turnkeyScrubber,
+        env: runtimeEnv,
+      });
+    }
+  } else if (input.upstreamRecords === undefined && input.upstreamRecordsJson !== undefined) {
+    try {
+      effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
+        repositoryRoot: input.repositoryRoot,
+        upstreamRecordsJson: input.upstreamRecordsJson,
+        scrubber: turnkeyScrubber,
+        env: runtimeEnv,
+      });
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+  }
+
+  const tenant = {
+    installationId: input.installationId ?? 0,
+    repositoryId: effectiveRepositoryId,
+    repositoryFullName: input.repositoryFullName,
+    taskpackId: manifest.metadata.name,
+  };
   let intake: TaskpackIntakeOutcome;
   if (eventNameIsTrigger(input.eventName)) {
     const outcome = prepareTaskpackIntake({
-      mode: 'discover', tenant, baseRevision: input.baseRevision,
-      records: input.upstreamRecords ?? [], targetMatrix: input.targetMatrix ?? null,
+      mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
+      records: effectiveUpstreamRecords ?? [],
+      ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
+      targetMatrix: input.targetMatrix ?? null,
     });
     if (outcome.kind === 'discover' && outcome.disposition === 'no_change') return { kind: 'no_change', reason: outcome.reason };
     if (outcome.kind === 'discover' && outcome.disposition === 'blocked') {
@@ -226,9 +428,12 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     if (evaluation.command === 'status') {
       intake = { kind: 'status', disposition: 'ready', summary: `status query admitted for ${input.repositoryFullName}/${manifest.metadata.name}` };
     } else if (evaluation.command === 'revise') {
+      const boundHeadSha = evaluation.headSha.startsWith('pr-') && COMMIT_SHA_PATTERN.test(effectiveSourceRevision)
+        ? effectiveSourceRevision
+        : evaluation.headSha;
       const reviseInput = {
         mode: 'revise' as const, tenant,
-        command: { commandId: evaluation.commandId, headSha: evaluation.headSha, commandDigest },
+        command: { commandId: evaluation.commandId, headSha: boundHeadSha, commandDigest },
         actorLogin: evaluation.login, authorAssociation: evaluation.authorAssociation,
         guidance: evaluation.guidance,
         ...(input.operatorAllowlist !== undefined ? { operatorAllowlist: input.operatorAllowlist } : {}),
@@ -238,8 +443,10 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
       intake = outcome;
     } else {
       const discoverOutcome = prepareTaskpackIntake({
-        mode: 'discover', tenant, baseRevision: input.baseRevision,
-        records: input.upstreamRecords ?? [], targetMatrix: input.targetMatrix ?? null,
+        mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
+        records: effectiveUpstreamRecords ?? [],
+        ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
+        targetMatrix: input.targetMatrix ?? null,
       });
       if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'no_change') return { kind: 'no_change', reason: discoverOutcome.reason };
       if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'blocked') return blocked('upstream sources are unavailable');
@@ -264,11 +471,15 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     }
   }
 
-  const scrubber = new SecretScrubber();
+  const scrubber = turnkeyScrubber;
   const gateEnvName = input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET';
   const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
+  const publicationAuthEnvName = input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
+  const localCmdGateEnvName = input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
   if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
   if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
+  if (typeof runtimeEnv[publicationAuthEnvName] === 'string') scrubber.register(runtimeEnv[publicationAuthEnvName]!);
+  if (typeof runtimeEnv[localCmdGateEnvName] === 'string') scrubber.register(runtimeEnv[localCmdGateEnvName]!);
 
   const hasHostRoleOverrides = input.provider !== undefined
     || input.model !== undefined
@@ -285,55 +496,47 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     }
     : undefined;
 
-  const makeBindings = (candidate: ResolvedModelCandidate): HostTaskpackBindings => ({
+  let activeGateEndpoints: readonly HostGateEndpointPlan[] = input.gateEndpoints ?? [];
+  let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? null;
+
+  let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined
+    ? [input.providerTokenEnv]
+    : [];
+  const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => ({
     mode: input.mode,
     repository: input.repositoryFullName,
-    baseRevision: input.baseRevision,
-    sourceRevision: input.sourceRevision ?? input.baseRevision,
+    repositoryRoot: input.repositoryRoot,
+    taskpackPath: input.taskpackPath,
+    baseRevision: effectiveBaseRevision,
+    sourceRevision: effectiveSourceRevision,
     targetMatrix: input.targetMatrix ?? null,
     roleSelection,
-    candidateIndex: candidate.manifestIndex,
+    ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
     allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
     modelsJsonPath: input.modelsJsonPath,
     runtimeOptions: {},
     budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
-    gateEndpoints: input.gateEndpoints ?? [],
-    publicationEndpoint: input.publicationEndpoint ?? null,
+    gateEndpoints: activeGateEndpoints,
+    publicationEndpoint: activePublicationEndpoint,
     credentialEnvMap: {
-      provider: input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
-        ? input.credentialEnvMap.provider
-        : candidate.providerEnvName,
+      provider: candidate !== undefined
+        ? (input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
+          ? input.credentialEnvMap.provider
+          : candidate.providerEnvName)
+        : (input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN'),
       gate: gateEnvName,
       publication: publicationEnvName,
+      publicationAuth: publicationAuthEnvName,
+      localCommandGate: localCmdGateEnvName,
     },
+    ...(trackedSourceTokenEnvNames.length > 0 ? { sourceTokenEnvNames: trackedSourceTokenEnvNames } : {}),
     resourceVersion: input.resourceVersion,
     authorPrompt: input.authorPrompt,
   });
 
   let candidates: readonly ResolvedModelCandidate[];
   try {
-    const previewBindings: HostTaskpackBindings = {
-      mode: input.mode,
-      repository: input.repositoryFullName,
-      baseRevision: input.baseRevision,
-      sourceRevision: input.sourceRevision ?? input.baseRevision,
-      targetMatrix: input.targetMatrix ?? null,
-      roleSelection,
-      allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
-      modelsJsonPath: input.modelsJsonPath,
-      runtimeOptions: {},
-      budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
-      gateEndpoints: input.gateEndpoints ?? [],
-      publicationEndpoint: input.publicationEndpoint ?? null,
-      credentialEnvMap: {
-        provider: input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN',
-        gate: gateEnvName,
-        publication: publicationEnvName,
-      },
-      resourceVersion: input.resourceVersion,
-      authorPrompt: input.authorPrompt,
-    };
-    candidates = resolveTaskpackModelCandidates(manifest, previewBindings, {
+    candidates = resolveTaskpackModelCandidates(manifest, buildBindings(), {
       modelsConfig,
       env: runtimeEnv,
       explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
@@ -348,6 +551,16 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     }
     throw error;
   }
+
+  const forbiddenCommandEnvNames = new Set<string>([
+    ...candidates.flatMap(candidate => [
+      candidate.providerEnvName,
+      ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
+    ]),
+    ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
+    ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
+  ]);
+  trackedSourceTokenEnvNames = [...forbiddenCommandEnvNames];
 
   let currentPos = 0;
   if (input.dryRun !== true && candidates.length >= 2) {
@@ -366,94 +579,223 @@ export async function runGitHubActionEntrypoint(input: ActionEntrypointInput): P
     }
   }
 
-  let realRunRoot: string;
-  let realRepositoryRoot: string;
-  const compileAndWriteCandidate = async (candidate: ResolvedModelCandidate, attemptSeq: number): Promise<WrittenCompiledTaskpack> => {
-    const compiled = await compileDeclarativeTaskpack(manifest, makeBindings(candidate));
-    realRunRoot ??= await realpath(input.runRoot);
-    realRepositoryRoot ??= await realpath(input.repositoryRoot);
-    if (insideRoot(realRunRoot, realRepositoryRoot)) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', 'run root must live outside the target repository checkout');
-    }
-    // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
-    // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
-    const suffix = attemptSeq === 0 ? '' : `-fallback-${attemptSeq}`;
-    const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}${suffix}`);
-    const registryDirectory = join(trustedDirectory, 'registry');
-    const configDirectory = join(trustedDirectory, 'config');
-    await mkdir(registryDirectory, { recursive: true });
-    await mkdir(configDirectory, { recursive: true });
-    await chmod(trustedDirectory, 0o700);
-    await chmod(registryDirectory, 0o700);
-    await chmod(configDirectory, 0o700);
-    const registryPath = join(registryDirectory, 'registry.yaml');
-    const configPath = join(configDirectory, 'config.yaml');
-    const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
-    await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
-    await writeFile(configPath, configBytes, { mode: 0o600 });
-    await chmod(registryPath, 0o600);
-    await chmod(configPath, 0o600);
-    assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
-    assertCleanArtifact(configBytes, scrubber, '/config');
-    return {
-      ...compiled, configBytes, trustedDirectory, registryPath, configPath,
-    };
-  };
+  const realRunRoot = await realpath(input.runRoot);
+  const realRepositoryRoot = await realpath(input.repositoryRoot);
+  if (insideRoot(realRunRoot, realRepositoryRoot)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'run root must live outside the target repository checkout');
+  }
 
-  let activeCandidate = candidates[currentPos]!;
-  let activeTaskpack: WrittenCompiledTaskpack;
+  let localGateServer: LocalCommandGateServer | undefined;
+  let publisherServer: NativePullRequestPublisherServer | undefined;
+  let lastTurnkeySummary: TurnkeyCycleAttemptSummary | undefined;
+
   try {
-    activeTaskpack = await compileAndWriteCandidate(activeCandidate, 0);
-  } catch (error) {
-    if (error instanceof GitHubAppError) {
-      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
-        return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+    const ephemeralEnv: Record<string, string> = {};
+    if (turnkeyEnabled && input.delegate === undefined) {
+      if (
+        manifest.spec.publication.mode === 'pull_request'
+        && input.publicationEndpoint === undefined
+        && input.mode === 'candidate'
+      ) {
+        publisherServer = await startNativePullRequestPublisherServer({
+          runRoot: realRunRoot,
+          repositoryRoot: realRepositoryRoot,
+          repositoryFullName: input.repositoryFullName,
+          targetBranch: manifest.spec.publication.targetBranch,
+          headBranchPrefix: manifest.spec.publication.headBranchPrefix,
+          titleTemplate: manifest.spec.publication.titleTemplate,
+          openManagedPr,
+          remoteUrl: input.gitRemoteUrl,
+          apiBaseUrl: effectiveApiBaseUrl,
+          gitWriteToken: githubToken,
+          fetchImpl: input.probeFetch,
+          scrubber,
+        });
+        activePublicationEndpoint = publisherServer.endpointPlan;
+        ephemeralEnv[publicationEnvName] = publisherServer.signingSecret;
+        ephemeralEnv[publicationAuthEnvName] = publisherServer.authToken;
       }
-      if (error.code === 'ACTION_INPUT_INVALID') {
-        return blocked(error.message);
+
+      const hasCommandChecks = input.mode === 'candidate'
+        && manifest.spec.verification.localChecks.some(check => check.implementation === 'command.v1');
+      if (hasCommandChecks) {
+        let preview: Awaited<ReturnType<typeof compileDeclarativeTaskpack>>;
+        try {
+          preview = await compileDeclarativeTaskpack(manifest, buildBindings(candidates[currentPos]));
+        } catch (error) {
+          if (error instanceof GitHubAppError) {
+            if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+              return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+            }
+            if (error.code === 'ACTION_INPUT_INVALID') {
+              return blocked(error.message);
+            }
+            return blocked(error.code, error.message);
+          }
+          throw error;
+        }
+        const hasExplicitLocalEndpoint = (input.gateEndpoints ?? []).some(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
+        if (!hasExplicitLocalEndpoint) {
+          localGateServer = await startLocalCommandGateServer({
+            runRoot: realRunRoot,
+            repositoryRoot: realRepositoryRoot,
+            gates: preview.localCommandGates ?? [],
+            runtimeEnv,
+            readOnlyGitHubToken: githubToken,
+            scrubber,
+            forbiddenEnvNames: forbiddenCommandEnvNames,
+          });
+          activeGateEndpoints = [...activeGateEndpoints, localGateServer.endpointPlan];
+          ephemeralEnv[localCmdGateEnvName] = localGateServer.signingSecret;
+        }
       }
-      return blocked(error.code, error.message);
     }
-    throw error;
-  }
 
-  if (input.dryRun === true || input.delegate === undefined) {
-    return { kind: 'compiled', manifest, intake, taskpack: activeTaskpack, delegateOutcome: null };
-  }
-
-  let attemptSeq = 0;
-  let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, input.delegate);
-  while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
-    const remaining = candidates.slice(currentPos + 1);
-    let nextSelected;
-    try {
-      nextSelected = await selectHealthyModelCandidate(remaining, {
-        fetchImpl: input.probeFetch,
-        totalTimeoutMs: input.probeTimeoutMs,
-        forceProbe: true,
-        scrubber,
-      });
-    } catch {
-      lastOutcome = {
-        ok: false,
-        detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
+    const compileAndWriteCandidate = async (candidate: ResolvedModelCandidate, attemptSeq: number): Promise<WrittenCompiledTaskpack> => {
+      const compiled = await compileDeclarativeTaskpack(manifest, buildBindings(candidate));
+      // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
+      // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
+      const suffix = attemptSeq === 0 ? '' : `-fallback-${attemptSeq}`;
+      const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}${suffix}`);
+      const registryDirectory = join(trustedDirectory, 'registry');
+      const configDirectory = join(trustedDirectory, 'config');
+      await mkdir(registryDirectory, { recursive: true });
+      await mkdir(configDirectory, { recursive: true });
+      await chmod(trustedDirectory, 0o700);
+      await chmod(registryDirectory, 0o700);
+      await chmod(configDirectory, 0o700);
+      const registryPath = join(registryDirectory, 'registry.yaml');
+      const configPath = join(configDirectory, 'config.yaml');
+      const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+      await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
+      await writeFile(configPath, configBytes, { mode: 0o600 });
+      await chmod(registryPath, 0o600);
+      await chmod(configPath, 0o600);
+      if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+        await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+        for (const resource of compiled.instructionResources) {
+          assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+        }
+      }
+      assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+      assertCleanArtifact(configBytes, scrubber, '/config');
+      return {
+        ...compiled, configBytes, trustedDirectory, registryPath, configPath,
       };
-      break;
-    }
-    currentPos = currentPos + 1 + nextSelected.index;
-    activeCandidate = candidates[currentPos]!;
-    attemptSeq += 1;
-    activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
-    lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, input.delegate);
-  }
+    };
 
-  return {
-    kind: 'compiled',
-    manifest,
-    intake,
-    taskpack: activeTaskpack,
-    delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
-  };
+    let activeCandidate = candidates[currentPos]!;
+    let activeTaskpack: WrittenCompiledTaskpack;
+    try {
+      activeTaskpack = await compileAndWriteCandidate(activeCandidate, 0);
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+        }
+        if (error.code === 'ACTION_INPUT_INVALID') {
+          return blocked(error.message);
+        }
+        return blocked(error.code, error.message);
+      }
+      throw error;
+    }
+
+    const effectiveDelegate = input.delegate ?? (turnkeyEnabled
+      ? createTurnkeyCycleDelegate({
+        runId: input.runId,
+        repositoryRoot: realRepositoryRoot,
+        runtimeEnv,
+        ephemeralEnv,
+        scrubber,
+        onAttemptSettled: summary => {
+          lastTurnkeySummary = summary;
+        },
+      })
+      : undefined);
+
+    if (input.dryRun === true || effectiveDelegate === undefined) {
+      input.onTurnkeyReport?.({
+        manifest,
+        scrubber,
+        report: {
+          runId: normalizeControllerRunId(input.runId),
+          status: input.dryRun === true ? 'dry_run' : 'compiled',
+          discovery: intake.kind === 'discover'
+            ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
+            : null,
+          model: {
+            provider: activeCandidate.selection.provider,
+            model: activeCandidate.selection.model,
+            thinking: activeCandidate.selection.thinking ?? null,
+          },
+          scrub: text => scrubber.scrub(text),
+        },
+      });
+      return { kind: 'compiled', manifest, intake, taskpack: activeTaskpack, delegateOutcome: null };
+    }
+
+    let attemptSeq = 0;
+    let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+    while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
+      const remaining = candidates.slice(currentPos + 1);
+      let nextSelected;
+      try {
+        nextSelected = await selectHealthyModelCandidate(remaining, {
+          fetchImpl: input.probeFetch,
+          totalTimeoutMs: input.probeTimeoutMs,
+          forceProbe: true,
+          scrubber,
+        });
+      } catch {
+        lastOutcome = {
+          ok: false,
+          detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
+        };
+        break;
+      }
+      currentPos = currentPos + 1 + nextSelected.index;
+      activeCandidate = candidates[currentPos]!;
+      attemptSeq += 1;
+      activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+      lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+    }
+
+    input.onTurnkeyReport?.({
+      manifest,
+      scrubber,
+      report: {
+        runId: lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId),
+        status: lastTurnkeySummary?.status ?? (lastOutcome.ok ? 'passed' : 'failed'),
+        reasonCode: lastTurnkeySummary?.reasonCode ?? null,
+        discovery: intake.kind === 'discover'
+          ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
+          : null,
+        checks: lastTurnkeySummary?.checks,
+        model: {
+          provider: activeCandidate.selection.provider,
+          model: activeCandidate.selection.model,
+          thinking: activeCandidate.selection.thinking ?? null,
+          tokenRotations: attemptSeq,
+        },
+        usage: lastTurnkeySummary?.usage ?? null,
+        elapsedMs: lastTurnkeySummary?.elapsedMs ?? null,
+        externalUrl: lastTurnkeySummary?.externalUrl ?? null,
+        scrub: text => scrubber.scrub(text),
+      },
+    });
+
+    return {
+      kind: 'compiled',
+      manifest,
+      intake,
+      taskpack: activeTaskpack,
+      delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
+    };
+  } finally {
+    await localGateServer?.close().catch(() => undefined);
+    await publisherServer?.close().catch(() => undefined);
+  }
 }
 
 function eventNameIsTrigger(eventName: string): boolean {
@@ -481,6 +823,15 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
   const mode = env['INPUT_MODE'];
   const gateEndpointUrl = env['INPUT_GATE-ENDPOINT-URL']?.trim();
   const publicationEndpointUrl = env['INPUT_PUBLICATION-ENDPOINT-URL']?.trim();
+  const dryRun = env['INPUT_DRY-RUN'] === 'true';
+  const inputRunId = env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local';
+  const inputOutput = env['INPUT_OUTPUT']?.trim() || undefined;
+  const prevalidatedInputFormats = inputOutput !== undefined
+    ? resolveActionOutputFormats(inputOutput, undefined)
+    : undefined;
+
+  let capturedReport: TurnkeyActionExecutionReport | undefined;
+
   const result = await runGitHubActionEntrypoint({
     repositoryRoot,
     taskpackPath: env['INPUT_TASKPACK-PATH']?.trim() || undefined,
@@ -490,7 +841,7 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
     eventName: env['INPUT_EVENT-NAME']?.trim() || env['GITHUB_EVENT_NAME'] || 'workflow_dispatch',
     eventPayload,
     runRoot: env['INPUT_RUN-ROOT']?.trim() || env['RUNNER_TEMP'] || resolve(repositoryRoot, '../.loopwright-runs'),
-    runId: env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local',
+    runId: inputRunId,
     storageProfile: storageProfile === 'durable' ? 'durable' : 'actions-basic',
     provider: env['INPUT_PROVIDER']?.trim() || undefined,
     model: env['INPUT_MODEL']?.trim() || undefined,
@@ -504,15 +855,64 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
     publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
     env,
-    dryRun: env['INPUT_DRY-RUN'] === 'true',
+    dryRun,
+    turnkey: !dryRun,
+    githubApiBaseUrl: env['GITHUB_API_URL']?.trim() || undefined,
+    githubToken: env['INPUT_GITHUB-TOKEN']?.trim() || env['GITHUB_TOKEN']?.trim() || undefined,
+    githubAppId: env['INPUT_GITHUB-APP-ID']?.trim() || undefined,
+    githubAppPrivateKey: env['INPUT_GITHUB-APP-PRIVATE-KEY']?.trim() || undefined,
+    githubAppInstallationId: env['INPUT_GITHUB-APP-INSTALLATION-ID']?.trim() || undefined,
+    upstreamRecordsJson: env['INPUT_UPSTREAM-RECORDS']?.trim() || undefined,
+    gitRemoteUrl: env['INPUT_REMOTE-URL']?.trim() || undefined,
+    output: inputOutput,
+    onTurnkeyReport: info => {
+      capturedReport = info;
+    },
   });
-  const serialized = JSON.stringify(result);
-  process.stdout.write(`${serialized}\n`);
-  const githubOutput = env['GITHUB_OUTPUT'];
-  if (typeof githubOutput === 'string' && githubOutput.length > 0) {
-    appendFileSync(githubOutput, `result<<LOOPWRIGHT_EOF\n${serialized}\nLOOPWRIGHT_EOF\n`, 'utf8');
+
+  const fallbackScrubber = capturedReport?.scrubber ?? new SecretScrubber();
+  for (const key of [
+    'INPUT_GITHUB-TOKEN',
+    'GITHUB_TOKEN',
+    'INPUT_GITHUB-APP-PRIVATE-KEY',
+    'LOOPWRIGHT_GATE_SIGNING_SECRET',
+    'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+    'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+  ]) {
+    const val = env[key];
+    if (typeof val === 'string' && val.length > 0) fallbackScrubber.register(val);
   }
-  return result.kind === 'compiled' || result.kind === 'no_change' ? 0 : 1;
+  const serialized = fallbackScrubber.scrub(JSON.stringify(result));
+  process.stdout.write(`${serialized}\n`);
+
+  const manifest = capturedReport?.manifest ?? (result.kind === 'compiled' ? result.manifest : null);
+  const formats = prevalidatedInputFormats ?? resolveActionOutputFormats(undefined, manifest);
+  const report: RunReportInput = capturedReport?.report ?? {
+    runId: normalizeControllerRunId(inputRunId),
+    status: result.kind === 'no_change'
+      ? 'no_change'
+      : result.kind === 'blocked'
+        ? 'blocked'
+        : result.kind === 'refused'
+          ? 'refused'
+          : (result.delegateOutcome?.ok === false ? 'failed' : 'passed'),
+    reasonCode: result.kind === 'refused' ? result.code : result.kind === 'blocked' ? result.reason : null,
+    scrub: text => fallbackScrubber.scrub(text),
+  };
+
+  await writeActionOutputSinks({
+    formats,
+    report,
+    stepSummaryPath: env['GITHUB_STEP_SUMMARY'],
+    githubOutputPath: env['GITHUB_OUTPUT'],
+    actionResultJson: serialized,
+    scrubber: fallbackScrubber,
+    includeExtendedGithubOutputs: !dryRun || inputOutput !== undefined,
+  });
+
+  const executionSucceeded = result.kind === 'no_change'
+    || (result.kind === 'compiled' && (result.delegateOutcome === null || result.delegateOutcome.ok));
+  return executionSucceeded ? 0 : 1;
 }
 
 const invokedDirectly = process.argv[1] !== undefined && (() => {

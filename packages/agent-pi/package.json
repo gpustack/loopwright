@@ -24,6 +24,10 @@
     "./catalog": {
       "types": "./dist/catalog-api.d.ts",
       "import": "./dist/catalog-api.js"
+    },
+    "./host-session": {
+      "types": "./dist/host-session.d.ts",
+      "import": "./dist/host-session.js"
     }
   }
 }

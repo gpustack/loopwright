@@ -1,10 +1,12 @@
 import { CST, isAlias, isMap, isScalar, isSeq, Lexer, parseDocument } from 'yaml';
+import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import {
-  GitHubAppError, DEFAULT_COMMENT_PREFIXES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
-  TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES,
+  GitHubAppError, DEFAULT_COMMENT_PREFIXES, LOCAL_COMMAND_GATE_ENDPOINT_ID, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
+  TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS,
   type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
-  type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
-  type TaskpackDecisionsDeclaration, type TaskpackManifest, type TaskpackModelDeclaration, type TaskpackSandboxDeclaration,
+  type TaskpackCheckDeclaration, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
+  type TaskpackDecisionsDeclaration, type TaskpackManifest, type TaskpackModelDeclaration,
+  type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackSandboxDeclaration,
   type TaskpackUpstreamDescriptor,
 } from './types.js';
 import { validateTaskpackModelsDeclaration } from './models-config.js';
@@ -13,6 +15,17 @@ export const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const TARGET_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const COMMENT_PREFIX_PATTERN = /^\/[A-Za-z0-9_-]{0,31}$/;
 const FIELD_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const PATH_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+$/;
+const RESERVED_DEVICE_NAME_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const COMMAND_ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const RESERVED_COMMAND_ENV_NAMES = new Set([
+  'GH_TOKEN', 'GITHUB_TOKEN', 'BASH_ENV', 'ENV', 'NODE_OPTIONS',
+  'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'LLM_TOKEN',
+  ...Object.values(STANDARD_PI_PROVIDER_ENV),
+]);
+const RESERVED_COMMAND_ENV_PREFIXES = [
+  'LOOPWRIGHT_', 'INPUT_', 'GITHUB_APP_', 'ACTIONS_', 'RUNNER_', 'LD_', 'DYLD_', 'GIT_',
+] as const;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 // Twin yaml@2.9.0 AST traversal caps shared with packages/decisions/src/schema.ts (4096 nodes, depth 16, 512 collection items, 8192 string chars).
 const MAX_NODES = 4096;
@@ -193,16 +206,26 @@ export function parseTaskpackDocument(bytes: Uint8Array, format: 'json' | 'yaml'
 // Path guards and scope helpers
 // ---------------------------------------------------------------------------
 
-/** Validate a manifest-declared relative path: no traversal, no absolutes, no escapes. */
+/** Validate a manifest-declared relative path: strict `@loopwright/core` segment grammar, no traversal, no absolutes. */
 export function normalizeRelativePath(input: unknown, path: string): string {
-  if (typeof input !== 'string' || input.length === 0 || input.length > 1024) {
-    manifestInvalid('path must be a non-empty string of at most 1024 characters', path);
+  // Cap at 1021 characters so appending `/**` during scope compilation never exceeds LIMITS.path (1024).
+  if (typeof input !== 'string' || input.length === 0 || input.length > 1021) {
+    manifestInvalid('path must be a non-empty string of at most 1021 characters', path);
   }
   if (input.includes('\0') || input.includes('\\') || input.includes(':')) manifestInvalid('path contains forbidden characters', path);
   if (input.startsWith('/')) manifestInvalid('path must be relative', path);
   const segments = input.split('/');
+  if (segments.length > 64) manifestInvalid('path exceeds 64 segments', path);
   for (const segment of segments) {
-    if (segment === '' || segment === '.' || segment === '..') manifestInvalid(`path segment "${segment}" is not allowed`, path);
+    if (segment === '' || segment === '.' || segment === '..' || segment.endsWith('.')) {
+      manifestInvalid(`path segment "${segment}" is not allowed`, path);
+    }
+    if (!PATH_SEGMENT_PATTERN.test(segment)) {
+      manifestInvalid(`path segment "${segment}" contains invalid characters`, path);
+    }
+    if (RESERVED_DEVICE_NAME_PATTERN.test(segment)) {
+      manifestInvalid(`path segment "${segment}" is a reserved device name`, path);
+    }
   }
   return input;
 }
@@ -212,9 +235,34 @@ export function pathCoveredBy(candidate: string, root: string): boolean {
   return candidate === root || candidate.startsWith(root.endsWith('/') ? root : `${root}/`);
 }
 
-/** The manifest-protected set merged with the built-in automation paths. */
-export function effectiveProtectedPaths(manifestProtected: readonly string[]): readonly string[] {
-  return Object.freeze([...new Set([...PROTECTED_AUTOMATION_PATHS, ...manifestProtected])]);
+export interface EffectiveProtectedPathsOptions {
+  readonly controlRoot?: string | undefined;
+  readonly manifestPath?: string | undefined;
+  readonly instructions?: readonly string[] | undefined;
+  readonly commandScripts?: readonly string[] | undefined;
+}
+
+/** The manifest-protected set merged with built-in automation paths and the active control root. */
+export function effectiveProtectedPaths(
+  manifestProtected: readonly string[],
+  options: EffectiveProtectedPathsOptions = {},
+): readonly string[] {
+  const controlRoot = options.controlRoot ?? '.loopwright';
+  const items: string[] = [
+    ...PROTECTED_AUTOMATION_PATHS,
+    controlRoot,
+    `${controlRoot}/policies`,
+    `${controlRoot}/checks`,
+    `${controlRoot}/memory`,
+    `${controlRoot}/taskpack.yaml`,
+    `${controlRoot}/taskpack.yml`,
+    `${controlRoot}/taskpack.json`,
+  ];
+  if (options.manifestPath !== undefined) items.push(options.manifestPath);
+  if (options.instructions !== undefined) items.push(...options.instructions);
+  if (options.commandScripts !== undefined) items.push(...options.commandScripts);
+  items.push(...manifestProtected);
+  return Object.freeze([...new Set(items)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +326,7 @@ function requireParameters(value: unknown, path: string): Readonly<Record<string
 }
 
 function pathInsideWritable(candidate: string, writable: readonly string[], protectedPaths: readonly string[], path: string): void {
-  if (!writable.some(root => pathCoveredBy(candidate, root))) {
+  if (writable.length > 0 && !writable.some(root => pathCoveredBy(candidate, root))) {
     throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `path "${candidate}" is not inside spec.scope.writable`, path);
   }
   const overlap = protectedPaths.find(protectedPath => pathCoveredBy(candidate, protectedPath) || pathCoveredBy(protectedPath, candidate));
@@ -287,35 +335,76 @@ function pathInsideWritable(candidate: string, writable: readonly string[], prot
   }
 }
 
+function isReservedCommandEnvName(name: string): boolean {
+  if (RESERVED_COMMAND_ENV_NAMES.has(name)) return true;
+  return RESERVED_COMMAND_ENV_PREFIXES.some(prefix => name.startsWith(prefix));
+}
+
+export interface ValidateTaskpackManifestOptions {
+  readonly controlRoot?: string | undefined;
+  readonly manifestPath?: string | undefined;
+}
+
 /**
  * Validate a parsed manifest document against every Feature 1 constraint and return the frozen manifest.
  * Scope violations (writable overlapping the effective protected set, memory directory placement) throw
  * `TASKPACK_SCOPE_VIOLATION`; all other schema violations throw `TASKPACK_MANIFEST_INVALID`.
  */
-export function validateTaskpackManifest(value: Json): TaskpackManifest {
+export function validateTaskpackManifest(value: Json, options: ValidateTaskpackManifestOptions = {}): TaskpackManifest {
+  const controlRoot = options.controlRoot !== undefined ? normalizeRelativePath(options.controlRoot, '/') : '.loopwright';
+  const manifestPath = options.manifestPath !== undefined ? normalizeRelativePath(options.manifestPath, '/') : undefined;
   const root = requireObject(value, '/', ['apiVersion', 'kind', 'metadata', 'spec']);
   if (root['apiVersion'] !== TASKPACK_MANIFEST_API_VERSION) manifestInvalid('unsupported apiVersion', '/apiVersion');
   if (root['kind'] !== 'Taskpack') manifestInvalid('kind must be Taskpack', '/kind');
   const metadata = requireObject(root['metadata'], '/metadata', ['name']);
   const name = requireIdentifier(metadata['name'], '/metadata/name');
 
-  const spec = requireObject(root['spec'], '/spec', ['goal', 'scope', 'upstreams', 'proposal', 'verification', 'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models']);
+  const spec = requireObject(root['spec'], '/spec', [
+    'goal', 'scope', 'instructions', 'upstreams', 'proposal', 'verification',
+    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'output',
+  ]);
   const goal = requireObject(spec['goal'], '/spec/goal', ['candidate', 'noChange']);
   const goalCandidate = requireString(goal['candidate'], '/spec/goal/candidate', 1, 1024);
   const goalNoChange = requireString(goal['noChange'], '/spec/goal/noChange', 1, 1024);
 
-  const scope = requireObject(spec['scope'], '/spec/scope', ['writable', 'protected']);
-  const writable = requireStringList(scope['writable'], '/spec/scope/writable', 1, 128).map((entry, index) => normalizeRelativePath(entry, `/spec/scope/writable/${index}`));
-  const manifestProtected = requireStringList(scope['protected'], '/spec/scope/protected', 0, 128).map((entry, index) => normalizeRelativePath(entry, `/spec/scope/protected/${index}`));
-  const protectedPaths = effectiveProtectedPaths(manifestProtected);
+  let instructions: readonly string[] | undefined;
+  if (spec['instructions'] !== undefined) {
+    if (typeof spec['instructions'] === 'string') {
+      instructions = Object.freeze([normalizeRelativePath(spec['instructions'], '/spec/instructions')]);
+    } else {
+      instructions = Object.freeze(
+        requireStringList(spec['instructions'], '/spec/instructions', 1, 16)
+          .map((entry, idx) => normalizeRelativePath(entry, `/spec/instructions/${idx}`)),
+      );
+    }
+  }
+
+  let writable: readonly string[] = [];
+  let manifestProtected: readonly string[] = [];
+  if (spec['scope'] !== undefined) {
+    const scope = requireObject(spec['scope'], '/spec/scope', ['writable', 'protected']);
+    if (scope['writable'] !== undefined) {
+      writable = requireStringList(scope['writable'], '/spec/scope/writable', 1, 128)
+        .map((entry, index) => normalizeRelativePath(entry, `/spec/scope/writable/${index}`));
+    }
+    if (scope['protected'] !== undefined) {
+      manifestProtected = requireStringList(scope['protected'], '/spec/scope/protected', 0, 128)
+        .map((entry, index) => normalizeRelativePath(entry, `/spec/scope/protected/${index}`));
+    }
+  }
+  const builtInProtected = effectiveProtectedPaths([], { controlRoot, manifestPath });
+  const protectedPaths = effectiveProtectedPaths(manifestProtected, { controlRoot, manifestPath, instructions });
   for (const [index, entry] of writable.entries()) {
-    // A writable path must neither live inside a protected path nor encompass one: the second direction
-    // keeps built-in automation paths (e.g. `.loopwright/policies` under a writable `.loopwright`) safe.
+    // A writable entry may encompass manifest-declared `protected` exclusions (blacklist wins),
+    // but must never live inside any effective protected path or encompass built-in/control-root paths.
     const covering = protectedPaths.find(protectedPath => pathCoveredBy(entry, protectedPath));
     if (covering !== undefined) {
       throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" overlaps protected path "${covering}"`, `/spec/scope/writable/${index}`);
     }
-    const encompassed = PROTECTED_AUTOMATION_PATHS.find(protectedPath => pathCoveredBy(protectedPath, entry));
+    if (entry === controlRoot || pathCoveredBy(controlRoot, entry)) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" encompasses protected control root "${controlRoot}"`, `/spec/scope/writable/${index}`);
+    }
+    const encompassed = builtInProtected.find(protectedPath => pathCoveredBy(protectedPath, entry));
     if (encompassed !== undefined) {
       throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" encompasses built-in protected path "${encompassed}"`, `/spec/scope/writable/${index}`);
     }
@@ -367,33 +456,90 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
   if (!Array.isArray(externalGatesValue) || externalGatesValue.length > 32) manifestInvalid('spec.verification.externalGates must contain 0..32 entries', '/spec/verification/externalGates');
   const checkIds = new Set<string>();
   const reservedIds = new Set(['scope', 'no-change', 'taskpack-author', 'taskpack-no-change']);
-  const localChecks = localChecksValue.map((item, index) => {
+  const localChecks: TaskpackCheckDeclaration[] = localChecksValue.map((item, index) => {
     const check = requireObject(item, `/spec/verification/localChecks/${index}`, ['id', 'implementation', 'parameters']);
     const checkId = requireIdentifier(check['id'], `/spec/verification/localChecks/${index}/id`);
     if (checkIds.has(checkId)) manifestInvalid('duplicate check id across localChecks and externalGates', `/spec/verification/localChecks/${index}/id`);
     if (reservedIds.has(checkId)) manifestInvalid(`check id "${checkId}" is reserved by the compiler`, `/spec/verification/localChecks/${index}/id`);
     checkIds.add(checkId);
     const implementation = requireString(check['implementation'], `/spec/verification/localChecks/${index}/implementation`, 1, 32);
-    if (!['json-artifact.v1', 'scope.v1', 'no-change.v1'].includes(implementation)) {
+    if (!['json-artifact.v1', 'scope.v1', 'no-change.v1', 'command.v1'].includes(implementation)) {
       manifestInvalid('unsupported local check implementation', `/spec/verification/localChecks/${index}/implementation`);
     }
+    if (implementation === 'command.v1') {
+      const paramPath = `/spec/verification/localChecks/${index}/parameters`;
+      const params = requireObject(check['parameters'], paramPath, ['script', 'timeoutSeconds', 'allowReadOnlyGitHubToken', 'env']);
+      const script = normalizeRelativePath(params['script'], `${paramPath}/script`);
+      if (!protectedPaths.some(protectedPath => pathCoveredBy(script, protectedPath))) {
+        throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `command.v1 script "${script}" must reside inside a protected path`, `${paramPath}/script`);
+      }
+      let timeoutSeconds = 30;
+      if (params['timeoutSeconds'] !== undefined) {
+        const rawTimeout = params['timeoutSeconds'];
+        if (typeof rawTimeout !== 'number' || !Number.isSafeInteger(rawTimeout) || rawTimeout < 1 || rawTimeout > 55) {
+          manifestInvalid('command.v1 timeoutSeconds must be an integer in 1..55', `${paramPath}/timeoutSeconds`);
+        }
+        timeoutSeconds = rawTimeout;
+      }
+      const allowReadOnlyGitHubToken = params['allowReadOnlyGitHubToken'] === undefined
+        ? false
+        : requireBoolean(params['allowReadOnlyGitHubToken'], `${paramPath}/allowReadOnlyGitHubToken`);
+      let env: readonly string[] = Object.freeze([]);
+      if (params['env'] !== undefined) {
+        const rawEnv = requireStringList(params['env'], `${paramPath}/env`, 0, 16);
+        for (const [envIdx, envName] of rawEnv.entries()) {
+          if (!COMMAND_ENV_NAME_PATTERN.test(envName)) {
+            manifestInvalid(`command.v1 env "${envName}" must match ^[A-Z][A-Z0-9_]{0,63}$`, `${paramPath}/env/${envIdx}`);
+          }
+          if (isReservedCommandEnvName(envName)) {
+            manifestInvalid(`command.v1 env "${envName}" is reserved`, `${paramPath}/env/${envIdx}`);
+          }
+        }
+        env = Object.freeze([...rawEnv]);
+      }
+      return Object.freeze({
+        id: checkId,
+        implementation: 'command.v1' as const,
+        parameters: Object.freeze({ script, timeoutSeconds, allowReadOnlyGitHubToken, env }),
+      });
+    }
     const parametersKey = Object.hasOwn(check, 'parameters') ? 'parameters' : '';
-    const record: { id: string; implementation: TaskpackCheckImplementationKind; parameters?: Readonly<Record<string, string | number | boolean | null>> } = {
-      id: checkId, implementation: implementation as TaskpackCheckImplementationKind,
+    const record: { id: string; implementation: 'json-artifact.v1' | 'scope.v1' | 'no-change.v1'; parameters?: Readonly<Record<string, string | number | boolean | null>> } = {
+      id: checkId, implementation: implementation as 'json-artifact.v1' | 'scope.v1' | 'no-change.v1',
     };
     if (parametersKey !== '') record.parameters = requireParameters(check['parameters'], `/spec/verification/localChecks/${index}/parameters`);
-    return record;
+    return Object.freeze(record);
   });
+  const commandScripts = localChecks
+    .filter(c => c.implementation === 'command.v1')
+    .map(c => String(c.parameters?.['script'] ?? ''))
+    .filter(s => s.length > 0);
+  const allProtected = effectiveProtectedPaths(manifestProtected, {
+    controlRoot,
+    manifestPath,
+    instructions,
+    commandScripts,
+  });
+  if (allProtected.length > 128) {
+    manifestInvalid('effective protected path set exceeds 128 entries', '/spec/scope/protected');
+  }
   const externalGates = externalGatesValue.map((item, index) => {
     const gate = requireObject(item, `/spec/verification/externalGates/${index}`, ['id', 'gateId', 'endpointId', 'required']);
     const gateId = requireIdentifier(gate['id'], `/spec/verification/externalGates/${index}/id`);
     if (checkIds.has(gateId)) manifestInvalid('duplicate check id across localChecks and externalGates', `/spec/verification/externalGates/${index}/id`);
     if (reservedIds.has(gateId)) manifestInvalid(`check id "${gateId}" is reserved by the compiler`, `/spec/verification/externalGates/${index}/id`);
     checkIds.add(gateId);
+    const endpointId = requireIdentifier(gate['endpointId'], `/spec/verification/externalGates/${index}/endpointId`);
+    if (endpointId === LOCAL_COMMAND_GATE_ENDPOINT_ID) {
+      manifestInvalid(
+        `endpointId "${LOCAL_COMMAND_GATE_ENDPOINT_ID}" is reserved for command.v1 local checks`,
+        `/spec/verification/externalGates/${index}/endpointId`,
+      );
+    }
     return {
       id: gateId,
       gateId: requireIdentifier(gate['gateId'], `/spec/verification/externalGates/${index}/gateId`),
-      endpointId: requireIdentifier(gate['endpointId'], `/spec/verification/externalGates/${index}/endpointId`),
+      endpointId,
       required: requireBoolean(gate['required'], `/spec/verification/externalGates/${index}/required`),
     };
   });
@@ -411,11 +557,11 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
 
   const memory = requireObject(spec['memory'], '/spec/memory', ['directory', 'apply', 'onNoModelBudget']);
   const memoryDirectory = normalizeRelativePath(memory['directory'], '/spec/memory/directory');
-  const memoryRoot = `.loopwright/memory/${name}`;
+  const memoryRoot = `${controlRoot}/memory`;
   if (!pathCoveredBy(memoryDirectory, memoryRoot)) {
     throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `memory directory must be under ${memoryRoot}`, '/spec/memory/directory');
   }
-  const memoryOverlap = writable.find(entry => pathCoveredBy(memoryDirectory, entry) || pathCoveredBy(entry, memoryDirectory));
+  const memoryOverlap = writable.find(entry => pathCoveredBy(entry, memoryDirectory));
   if (memoryOverlap !== undefined) {
     throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `memory directory "${memoryDirectory}" overlaps writable path "${memoryOverlap}"`, '/spec/memory/directory');
   }
@@ -592,11 +738,84 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
   let models: readonly TaskpackModelDeclaration[] | undefined;
   if (spec['models'] !== undefined) {
     models = validateTaskpackModelsDeclaration(spec['models'], '/spec/models');
+    const modelApiKeyEnvs = new Set(
+      models.map(m => m.apiKeyEnv).filter((v): v is string => v !== undefined),
+    );
+    if (modelApiKeyEnvs.size > 0) {
+      for (const [checkIdx, check] of localChecks.entries()) {
+        if (check.implementation !== 'command.v1') continue;
+        const envList = check.parameters?.['env'];
+        if (!Array.isArray(envList)) continue;
+        for (const [envIdx, envName] of envList.entries()) {
+          if (typeof envName === 'string' && modelApiKeyEnvs.has(envName)) {
+            manifestInvalid(
+              `command.v1 env "${envName}" conflicts with spec.models apiKeyEnv`,
+              `/spec/verification/localChecks/${checkIdx}/parameters/env/${envIdx}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  let output: TaskpackOutputDeclaration | undefined;
+  if (spec['output'] !== undefined) {
+    const parseOutputFormats = (rawFormats: unknown, fmtPath: string): readonly TaskpackOutputFormat[] => {
+      const asOutputFormat = (token: string, tokenPath: string): TaskpackOutputFormat => {
+        const matched = TASKPACK_OUTPUT_FORMATS.find(fmt => fmt === token);
+        if (matched === undefined) {
+          manifestInvalid(`unsupported output format "${token}"`, tokenPath);
+        }
+        return matched;
+      };
+      if (typeof rawFormats === 'string') {
+        if (rawFormats.length === 0 || /[\0\r\n]/.test(rawFormats)) {
+          manifestInvalid('output formats string must be non-empty without control characters', fmtPath);
+        }
+        const parts = rawFormats.split(',').map(part => part.trim());
+        if (parts.length > TASKPACK_OUTPUT_FORMATS.length) {
+          manifestInvalid(`expected 1..${TASKPACK_OUTPUT_FORMATS.length} output formats`, fmtPath);
+        }
+        const seen = new Set<TaskpackOutputFormat>();
+        const parsed: TaskpackOutputFormat[] = [];
+        for (const part of parts) {
+          if (part.length === 0) {
+            manifestInvalid('output formats must not contain empty tokens', fmtPath);
+          }
+          const fmt = asOutputFormat(part, fmtPath);
+          if (seen.has(fmt)) {
+            manifestInvalid(`duplicate output format "${fmt}"`, fmtPath);
+          }
+          seen.add(fmt);
+          parsed.push(fmt);
+        }
+        return Object.freeze(parsed);
+      }
+      const list = requireStringList(rawFormats, fmtPath, 1, TASKPACK_OUTPUT_FORMATS.length);
+      const seen = new Set<string>();
+      const formats: TaskpackOutputFormat[] = [];
+      for (const [idx, fmt] of list.entries()) {
+        const normalized = asOutputFormat(fmt, `${fmtPath}/${idx}`);
+        if (seen.has(normalized)) {
+          manifestInvalid(`duplicate output format "${normalized}"`, `${fmtPath}/${idx}`);
+        }
+        seen.add(normalized);
+        formats.push(normalized);
+      }
+      return Object.freeze(formats);
+    };
+
+    const rawSpecOutput = spec['output'];
+    const formats = typeof rawSpecOutput === 'string' || Array.isArray(rawSpecOutput)
+      ? parseOutputFormats(rawSpecOutput, '/spec/output')
+      : parseOutputFormats(requireObject(rawSpecOutput, '/spec/output', ['formats'])['formats'], '/spec/output/formats');
+    output = Object.freeze({ formats });
   }
 
   const baseSpec = {
     goal: Object.freeze({ candidate: goalCandidate, noChange: goalNoChange }),
     scope: Object.freeze({ writable: Object.freeze(writable), protected: Object.freeze(manifestProtected) }),
+    ...(instructions === undefined ? {} : { instructions }),
     upstreams: Object.freeze(upstreams),
     proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
     verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
@@ -606,15 +825,20 @@ export function validateTaskpackManifest(value: Json): TaskpackManifest {
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),
     ...(models === undefined ? {} : { models }),
+    ...(output === undefined ? {} : { output }),
   };
   const specRecord: TaskpackManifest['spec'] = Object.freeze(baseSpec);
 
-  return Object.freeze({
+  const manifest: TaskpackManifest = {
     apiVersion: TASKPACK_MANIFEST_API_VERSION,
     kind: 'Taskpack',
     metadata: Object.freeze({ name }),
     spec: specRecord,
-  });
+  };
+  // Keep controlRoot and manifestPath non-enumerable so JSON.stringify round-trips cleanly.
+  Object.defineProperty(manifest, 'controlRoot', { value: controlRoot, enumerable: false });
+  if (manifestPath !== undefined) {
+    Object.defineProperty(manifest, 'manifestPath', { value: manifestPath, enumerable: false });
+  }
+  return Object.freeze(manifest);
 }
-
-type TaskpackCheckImplementationKind = TaskpackManifest['spec']['verification']['localChecks'][number]['implementation'];

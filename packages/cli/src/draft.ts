@@ -11,6 +11,24 @@ export async function writeOutput(path: string, bytes: Uint8Array): Promise<void
   const file = await open(resolve(path), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
 }
+export async function appendStepSummary(path: string, bytes: Uint8Array): Promise<void> {
+  if (bytes.byteLength > 1048576) throw new Error('CLI_OUTPUT_LIMIT');
+  const resolved = resolve(path);
+  await canonicalPath(dirname(resolved));
+  const file = await open(
+    resolved,
+    constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error('CLI_PATH');
+    await file.writeFile(bytes);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+}
 export async function initDraft(path: string, force: boolean) {
   const directory = resolve(path); await canonicalPath(dirname(directory));
   try { await mkdir(directory, { mode: 0o700 }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
