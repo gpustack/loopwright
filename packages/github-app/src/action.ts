@@ -509,6 +509,7 @@ async function invokeDelegateForCandidate(
  * optionally delegate execution with fresh-session fallback across remaining healthy model candidates.
  */
 export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointInput): Promise<ActionEntrypointResult> {
+  const entrypointStartedMs = performance.now();
   const runtimeEnv = input.env ?? process.env;
   const turnkeyScrubber = new SecretScrubber();
   const emitProgress = input.progressSink !== undefined
@@ -1196,32 +1197,46 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
 
     let attemptSeq = 0;
     let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
-    while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
-      const remaining = candidates.slice(currentPos + 1);
-      let nextSelected;
-      try {
-        nextSelected = await selectHealthyModelCandidate(remaining, {
-          fetchImpl: input.probeFetch,
-          totalTimeoutMs: input.probeTimeoutMs,
-          forceProbe: true,
-          scrubber,
-        });
-      } catch {
-        lastOutcome = {
-          ok: false,
-          detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
-        };
-        break;
+    if (candidates.length === 1 && shouldRotateModelCandidate(lastOutcome)) {
+      const elapsedEntrypointMs = Math.max(0, Math.round(performance.now() - entrypointStartedMs));
+      const configuredWallTimeMs = activeTaskpack.config.spec.task.spec.budgets.wallTimeMs;
+      const minReserveMs = Math.min(60_000, Math.floor(configuredWallTimeMs / 4));
+      if (elapsedEntrypointMs + minReserveMs < configuredWallTimeMs) {
+        attemptSeq += 1;
+        emitProgress?.(
+          `model: retrying primary candidate #${attemptSeq} after transient provider failure (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
+        );
+        activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+        lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
       }
-      currentPos = currentPos + 1 + nextSelected.index;
-      activeCandidate = candidates[currentPos]!;
-      activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
-      attemptSeq += 1;
-      emitProgress?.(
-        `model: rotating to fallback #${attemptSeq} (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
-      );
-      activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
-      lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+    } else {
+      while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
+        const remaining = candidates.slice(currentPos + 1);
+        let nextSelected;
+        try {
+          nextSelected = await selectHealthyModelCandidate(remaining, {
+            fetchImpl: input.probeFetch,
+            totalTimeoutMs: input.probeTimeoutMs,
+            forceProbe: true,
+            scrubber,
+          });
+        } catch {
+          lastOutcome = {
+            ok: false,
+            detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
+          };
+          break;
+        }
+        currentPos = currentPos + 1 + nextSelected.index;
+        activeCandidate = candidates[currentPos]!;
+        activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
+        attemptSeq += 1;
+        emitProgress?.(
+          `model: rotating to fallback #${attemptSeq} (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
+        );
+        activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+        lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+      }
     }
 
     input.onTurnkeyReport?.({

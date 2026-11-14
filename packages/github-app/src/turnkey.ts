@@ -2069,6 +2069,27 @@ export interface TurnkeyCycleDelegateOptions {
   readonly onLog?: ((line: string) => void) | undefined;
   readonly onAttemptSettled?: ((summary: TurnkeyCycleAttemptSummary) => void) | undefined;
   readonly signal?: AbortSignal | undefined;
+  readonly openHostSessionAdapter?: typeof openPiHostSessionAdapterV2 | undefined;
+}
+
+export function isRetryablePerRequestTimeout(input: {
+  readonly cycleOk: boolean;
+  readonly reasonCode: string | null;
+  readonly observedPiErrorDetail: string | null;
+  readonly externalWriteDispatched: boolean;
+  readonly elapsedMs: number;
+  readonly taskWallTimeMs: number;
+}): boolean {
+  if (input.cycleOk || input.externalWriteDispatched) return false;
+  if (input.taskWallTimeMs < 420_000) return false;
+  if (input.elapsedMs + 120_000 >= input.taskWallTimeMs) return false;
+  if (input.observedPiErrorDetail === null || !input.observedPiErrorDetail.startsWith('DEADLINE')) {
+    return false;
+  }
+  if (input.observedPiErrorDetail.includes('(tool')) {
+    return false;
+  }
+  return input.reasonCode === 'RECOVERY_REQUIRED' || input.reasonCode === 'DEADLINE';
 }
 
 export interface ExecuteTurnkeyActionCycleOptions extends TurnkeyCycleDelegateOptions {
@@ -2388,7 +2409,8 @@ export async function executeTurnkeyActionCycle(
           }
         };
 
-      const opened = await openPiHostSessionAdapterV2(wrappedHost, adapterInput, {
+      const adapterFactory = options.openHostSessionAdapter ?? openPiHostSessionAdapterV2;
+      const opened = await adapterFactory(wrappedHost, adapterInput, {
         ...(options.mcpRegistry !== undefined ? { mcpRegistry: options.mcpRegistry } : {}),
         ...(progressHandler !== undefined ? { onProgress: progressHandler } : {}),
       });
@@ -2679,8 +2701,19 @@ export async function executeTurnkeyActionCycle(
     }
   }
 
+  const elapsedMs = Math.max(1, Math.round(performance.now() - startedMs));
+  const taskWallTimeMs = options.taskpack.config.spec.task.spec.budgets.wallTimeMs;
+  const retryableTimeout = isRetryablePerRequestTimeout({
+    cycleOk: cycleOutcome.ok,
+    reasonCode: cycleOutcome.code,
+    observedPiErrorDetail,
+    externalWriteDispatched: extraInfo.externalWriteDispatched,
+    elapsedMs,
+    taskWallTimeMs,
+  });
+
   const retryableProviderFailure = !cycleOutcome.ok
-    && observedRetryablePiFailure
+    && (observedRetryablePiFailure || retryableTimeout)
     && !extraInfo.externalWriteDispatched;
 
   const summary: TurnkeyCycleAttemptSummary = {
@@ -2693,7 +2726,7 @@ export async function executeTurnkeyActionCycle(
     externalUrl,
     usage,
     checks: extraInfo.checks,
-    elapsedMs: Math.max(1, Math.round(performance.now() - startedMs)),
+    elapsedMs,
     retryableProviderFailure,
   };
   options.onLog?.(scrubber.scrub(

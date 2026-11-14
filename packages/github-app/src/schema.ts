@@ -378,8 +378,8 @@ export function validateTaskpackLimitsDeclaration(value: unknown, path: string):
   }
   setOpt('maxModelCalls', 1, 1_024);
   setOpt('maxAttempts', 1, 16);
-  setOpt('maxFormatRepairs', 0, 8);
-  setOpt('maxImplementationRepairs', 0, 8);
+  setOpt('maxFormatRepairs', 0, 1_024);
+  setOpt('maxImplementationRepairs', 0, 1_024);
   setOpt('maxTransportRetries', 0, 8);
   setOpt('toolTimeoutSeconds', 1, 1_800);
   setOpt('toolWallMs', 1_000, 1_800_000);

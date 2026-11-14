@@ -23,7 +23,7 @@ import {
 /** Default controller budgets for host bindings that do not pin their own. */
 export const DEFAULT_HOST_BUDGETS: TaskContract['spec']['budgets'] = Object.freeze({
   wallTimeMs: 3_600_000, totalTokens: 20_000_000, perCallOutputTokens: 32_768, maxModelCalls: 256, maxConcurrency: 1,
-  maxFormatRepairs: 3, maxImplementationRepairs: 3, maxTransportRetries: 3,
+  maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries: 3,
   enforcement: Object.freeze({
     wallTime: 'hard_admission', tokens: 'soft_accounting', modelCalls: 'hard_admission', concurrency: 'hard_admission',
     formatRepairs: 'hard_admission', implementationRepairs: 'hard_admission', transportRetries: 'hard_admission',
@@ -798,8 +798,10 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   while (effectiveMaxAttempts > 1 && calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
     effectiveMaxAttempts -= 1;
   }
-  while (effectiveImplRepairs > 0 && calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
-    effectiveImplRepairs -= 1;
+  if (effectiveMaxAttempts === 1 && calcD(1, effectiveImplRepairs) > 64) {
+    while (effectiveImplRepairs > 0 && calcD(1, effectiveImplRepairs) > 64) {
+      effectiveImplRepairs -= 1;
+    }
   }
   if (calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
     manifestInvalid('verification check count exceeds controller 64-checkpoint schedule capacity', '/spec/verification');
@@ -809,10 +811,13 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   const capJ = verifierSlotCount * capV;
   const maxAllowedModelCalls = Math.max(1, Math.min(1024, 2048 - capJ - (hasPublication ? 1 : 0) - 3 * effectiveMaxAttempts));
   const effectiveModelCalls = Math.min(requestedBudgets.maxModelCalls, maxAllowedModelCalls);
+  const effectiveFormatRepairs = Math.min(requestedBudgets.maxFormatRepairs, effectiveModelCalls);
+  effectiveImplRepairs = Math.min(effectiveImplRepairs, effectiveModelCalls);
 
   const effectiveBudgets: TaskContract['spec']['budgets'] = {
     ...requestedBudgets,
     perCallOutputTokens: effectiveOutputTokens,
+    maxFormatRepairs: effectiveFormatRepairs,
     maxImplementationRepairs: effectiveImplRepairs,
     maxModelCalls: effectiveModelCalls,
   };

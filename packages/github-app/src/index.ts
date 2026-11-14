@@ -54,7 +54,8 @@ export {
   type WriteActionOutputSinksOptions, type WrittenActionOutputs,
 } from './output-format.js';
 export {
-  buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle, makeAttemptRunId,
+  buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle,
+  isRetryablePerRequestTimeout, makeAttemptRunId,
   normalizeControllerRunId, startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type ExecuteTurnkeyActionCycleOptions, type LocalCommandGateServer,
   type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,
