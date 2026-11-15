@@ -1,9 +1,9 @@
 # Reviewed Memory and CAS Compaction
 
 `@loopwright/memory` keeps repository-scoped active knowledge for a taskpack under
-`.loopwright/memory/<taskpack>/`, curates it into verified proposals after a cycle settles, and controls the
-two-layer context compaction of an agent session. The package never changes a primary `RunResult`, never
-spends exhausted model budget, and never writes outside the taskpack memory directory.
+`<memoryRoot>/<taskpack>/` (default `.loopwright/memory/<taskpack>/` or a custom root like `.auto-sync/memory/<taskpack>/`).
+It curates settled runs into verified proposals and controls two-layer agent session compaction.
+The package never mutates a primary `RunResult`, never spends exhausted model budget, and never writes outside the taskpack memory directory.
 
 ## Contents
 
@@ -61,10 +61,9 @@ Passing checks on positive runs become `fact` entries bound to the authenticated
 The finalizer treats the primary `RunResult`/`VerificationResult` as frozen inputs and confines every fault — including a curator throw, timeout, or invalid emission — to the returned `MemoryObservation` (`status: 'unavailable'`).
 
 The curator port runs only when budget remains and the port is configured. With
-`onNoModelBudget: 'deterministic-observations-only'`, an exhausted budget never invokes the curator:
-entries are synthesized deterministically, and a requested-but-skipped curator pass archives the
-proposal as `pending` with `no_model_budget_deterministic_only`. The emitted proposal carries the base
-store digest and revision plus `memory.json` and a unified `memory.patch` over the memory directory.
+`onNoModelBudget: 'deterministic-observations-only'`, an exhausted budget synthesizes deterministic entries without invoking the curator.
+With `onNoModelBudget: 'skip'`, finalization returns `pending` (`no_model_budget_skipped`) and emits no proposal.
+Emitted proposals carry the base store digest, revision, `memory.json`, and a unified `memory.patch` over `<memoryRoot>/<taskpack>/`.
 
 ## Five-gate verification
 

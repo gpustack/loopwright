@@ -1,6 +1,6 @@
 import type { Evidence, VerificationResult } from '@loopwright/core';
 import { diagnostic, digestEqual, hasControlCharacter, incidentReferenceDigest, memoryProposalSchema, renderEntryMarkdown } from './schema.js';
-import { isMemoryManagedPath, matchScopePattern, memoryDirectoryFor } from './store.js';
+import { compileScopePattern, isMemoryManagedPath, matchScopePattern, memoryDirectoryFor, normalizeMemoryRoot } from './store.js';
 import type { MemoryDiagnostic, MemoryGateResult, MemoryGateName, MemoryOperation, MemoryProposal, MemoryVerificationInput, MemoryVerificationReport } from './types.js';
 
 const CREDENTIAL_PATTERNS: readonly { readonly source: RegExp; readonly label: string }[] = [
@@ -111,25 +111,59 @@ function provenanceGate(input: MemoryVerificationInput, proposal: MemoryProposal
   }
   return gate('provenance', diagnostics);
 }
+function matchProtectedScopePattern(pattern: string, path: string): boolean {
+  return matchScopePattern(pattern, path) || new RegExp(compileScopePattern(pattern).source, 'i').test(path);
+}
 function scopeGate(input: MemoryVerificationInput, proposal: MemoryProposal): MemoryGateResult {
   const diagnostics: MemoryDiagnostic[] = [];
   const push = (path: string, detail: string) => diagnostics.push({ code: 'MEMORY_SCOPE_VIOLATION', path, detail });
-  if (!input.memoryWritable.every(prefix => isMemoryManagedPath(proposal.taskpack, prefix))) push('/memoryWritable', 'memory writable roots must stay inside the taskpack memory directory');
-  const targets = new Set<string>([`${memoryDirectoryFor(proposal.taskpack)}/index.json`]);
+  let normalizedRoot: string;
+  try {
+    normalizedRoot = normalizeMemoryRoot(input.memoryRoot);
+  } catch (error) {
+    push('/memoryRoot', error instanceof Error ? error.message : 'invalid memoryRoot');
+    return gate('scope', diagnostics);
+  }
+  const taskpackDirectory = memoryDirectoryFor(proposal.taskpack, normalizedRoot);
+  const validWritableRoots = input.memoryWritable.length > 0 && input.memoryWritable.every(prefix =>
+    prefix === normalizedRoot || isMemoryManagedPath(proposal.taskpack, prefix, normalizedRoot));
+  if (!validWritableRoots) {
+    push('/memoryWritable', 'memory writable roots must stay inside the taskpack memory directory');
+  }
+  const targets = new Set<string>([`${taskpackDirectory}/index.json`]);
   for (const operation of proposal.operations) {
-    if (operation.kind === 'upsert') targets.add(`${memoryDirectoryFor(proposal.taskpack)}/entries/${operation.entry.id}.md`);
-    else targets.add(`${memoryDirectoryFor(proposal.taskpack)}/index.json`);
+    if (operation.kind === 'upsert') targets.add(`${taskpackDirectory}/entries/${operation.entry.id}.md`);
+    else targets.add(`${taskpackDirectory}/index.json`);
   }
   for (const path of parsePatchPaths(input.patch)) targets.add(path);
-  const memoryPrefixes = input.memoryWritable.map(prefix => prefix.endsWith('/') ? prefix : `${prefix}/`);
+  const memoryPrefixes = validWritableRoots
+    ? input.memoryWritable.map(prefix => {
+        if (prefix === normalizedRoot) return `${taskpackDirectory}/`;
+        return prefix.endsWith('/') ? prefix : `${prefix}/`;
+      })
+    : [];
   const contractScope = input.lock.spec.contract.spec.scope;
+  const exemptContractProtected = new Set(input.exemptContractProtectedPatterns ?? []);
   for (const path of targets) {
     if (path.split('/').includes('..')) { push('/paths', `path ${path} contains path traversal`); continue; }
     if (!memoryPrefixes.some(prefix => path === prefix.slice(0, -1) || path.startsWith(prefix))) { push('/paths', `path ${path} escapes the memory writable roots`); continue; }
-    if (path.startsWith('.github/') || path.startsWith('.loopwright/policies/')) push('/paths', `path ${path} touches a protected policy area`);
-    if (input.protectedPaths.some(pattern => matchScopePattern(pattern, path))) push('/paths', `path ${path} matches a protected scope pattern`);
-    if (contractScope.writable.some(pattern => matchScopePattern(pattern, path))) push('/paths', `path ${path} overlaps the contract writable scope`);
-    if (contractScope.protected.some(pattern => matchScopePattern(pattern, path))) push('/paths', `path ${path} matches the contract protected scope`);
+    const lowerPath = path.toLowerCase();
+    if (
+      lowerPath === '.github'
+      || lowerPath.startsWith('.github/')
+      || lowerPath === '.loopwright/policies'
+      || lowerPath.startsWith('.loopwright/policies/')
+    ) {
+      push('/paths', `path ${path} touches a protected policy area`);
+    }
+    if (input.protectedPaths.some(pattern => matchProtectedScopePattern(pattern, path))) push('/paths', `path ${path} matches a protected scope pattern`);
+    const candidateWritable = contractScope.writable.some(pattern => matchProtectedScopePattern(pattern, path))
+      && !contractScope.protected.some(pattern => matchScopePattern(pattern, path));
+    if (candidateWritable) push('/paths', `path ${path} overlaps the contract writable scope`);
+    const effectiveProtected = path === taskpackDirectory || path.startsWith(`${taskpackDirectory}/`)
+      ? contractScope.protected.filter(pattern => !exemptContractProtected.has(pattern))
+      : contractScope.protected;
+    if (effectiveProtected.some(pattern => matchProtectedScopePattern(pattern, path))) push('/paths', `path ${path} matches the contract protected scope`);
   }
   return gate('scope', diagnostics);
 }

@@ -77,9 +77,13 @@ export function assertTokenScope(request: InstallationTokenRequest): void {
 /** Tracks credential material in raw, JSON-escaped, URL-encoded, and base64 forms and scrubs every form. */
 export class SecretScrubber {
   readonly #forms = new Set<string>();
+  readonly #rawSecrets = new Set<string>();
 
   register(secret: string): void {
     if (typeof secret !== 'string' || secret.length === 0) return;
+    if (secret.trim().length >= 4) {
+      this.#rawSecrets.add(secret);
+    }
     const forms = [
       secret,
       JSON.stringify(secret).slice(1, -1),
@@ -89,6 +93,11 @@ export class SecretScrubber {
     for (const form of forms) {
       if (form.length >= MIN_FORM_LENGTH) this.#forms.add(form);
     }
+  }
+
+  /** Registered secret values and derived encoded forms for redaction verification gates. */
+  get secretValues(): readonly string[] {
+    return Object.freeze([...new Set([...this.#rawSecrets, ...this.#forms])]);
   }
 
   /** Replace every tracked credential form and generic token pattern with `[scrubbed]`. */

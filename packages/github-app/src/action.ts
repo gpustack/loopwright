@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { closeSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,8 +23,8 @@ import {
 } from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
 import {
-  createTurnkeyCycleDelegate, normalizeControllerRunId, startLocalCommandGateServer,
-  startNativePullRequestPublisherServer,
+  createTurnkeyCycleDelegate, finalizeAndPublishTurnkeyMemory, normalizeControllerRunId,
+  startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type LocalCommandGateServer, type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
 } from './turnkey.js';
 import {
@@ -41,12 +41,13 @@ import {
   type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate,
   type TaskpackCommentCommand, type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration,
   type TaskpackManifest, type TaskpackMcpServerDeclaration, type TaskpackUpstreamRecord,
-  type WrittenCompiledTaskpack,
+  type TurnkeyMemorySummary, type WrittenCompiledTaskpack,
 } from './types.js';
 
 export interface TurnkeyActionExecutionReport {
   readonly manifest: TaskpackManifest | null;
   readonly report: RunReportInput;
+  readonly memory?: TurnkeyMemorySummary | undefined;
   readonly scrubber: SecretScrubber;
 }
 
@@ -265,9 +266,11 @@ export function serializeActionResultSummary(
           script: gate.script,
           timeoutSeconds: gate.timeoutSeconds,
         })),
+        ...(result.taskpack.activeMemory !== undefined ? { activeMemory: result.taskpack.activeMemory } : {}),
       },
       intake: result.intake,
       delegateOutcome: result.delegateOutcome,
+      ...(result.memory !== undefined ? { memory: result.memory } : {}),
     }
     : result;
 
@@ -909,9 +912,13 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined
     ? [input.providerTokenEnv]
     : [];
+  const loggedMemoryWarnings = new Set<string>();
   const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => {
     const externalMcpTools = mcpRegistry !== undefined && mcpRegistry.toolNames.length > 0
       ? mcpRegistry.toolNames
+      : undefined;
+    const externalMcpToolSchemas = mcpRegistry !== undefined && externalMcpTools !== undefined
+      ? mcpRegistry.toolSchemasFor(externalMcpTools)
       : undefined;
     const acceptanceCheckIds = [
       ...manifest.spec.verification.localChecks.map(c => c.id),
@@ -935,6 +942,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       taskpackPath: input.taskpackPath,
       baseRevision: effectiveBaseRevision,
       sourceRevision: effectiveSourceRevision,
+      upstreamRecords: effectiveUpstreamRecords,
       targetMatrix: input.targetMatrix ?? null,
       roleSelection,
       ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
@@ -945,6 +953,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       limits: explicitLimitsOverride,
       envLimits: envLimitsFallback,
       ...(externalMcpTools !== undefined ? { externalMcpTools } : {}),
+      ...(externalMcpToolSchemas !== undefined ? { externalMcpToolSchemas } : {}),
       gateEndpoints: activeGateEndpoints,
       publicationEndpoint: activePublicationEndpoint,
       credentialEnvMap: {
@@ -961,6 +970,13 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       ...(trackedSourceTokenEnvNames.length > 0 ? { sourceTokenEnvNames: trackedSourceTokenEnvNames } : {}),
       resourceVersion: input.resourceVersion,
       authorPrompt,
+      scrubber,
+      onMemoryWarning: message => {
+        if (!loggedMemoryWarnings.has(message)) {
+          loggedMemoryWarnings.add(message);
+          emitProgress?.(`memory: ${message}`);
+        }
+      },
     };
   };
 
@@ -1327,11 +1343,54 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       }
     }
 
+    const settledRunId = lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId);
+    let memorySummary: TurnkeyMemorySummary | undefined;
+    if (lastTurnkeySummary !== undefined || existsSync(join(realRunRoot, settledRunId, 'run.json'))) {
+      try {
+        memorySummary = await finalizeAndPublishTurnkeyMemory({
+          runRoot: realRunRoot,
+          runId: settledRunId,
+          repositoryRoot: realRepositoryRoot,
+          repositoryFullName: input.repositoryFullName,
+          manifest,
+          taskpackPath: input.taskpackPath,
+          baseRevision: effectiveBaseRevision,
+          upstreamRecords: effectiveUpstreamRecords,
+          remoteUrl: input.gitRemoteUrl,
+          apiBaseUrl: effectiveApiBaseUrl,
+          githubToken,
+          gitCommitIdentity,
+          fetchImpl: input.probeFetch,
+          runtimeEnv,
+          scrubber,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        memorySummary = Object.freeze({
+          status: 'failed',
+          directory: `${manifest.spec.memory.directory}/${manifest.metadata.name}`,
+          proposalId: null,
+          entryCount: 0,
+          rebased: false,
+          branchName: null,
+          pullRequestUrl: null,
+          pullRequestNumber: null,
+          reason: scrubber.scrub(message),
+        });
+      }
+      emitProgress?.(
+        `memory: ${memorySummary.status} (${memorySummary.entryCount} entries`
+        + `${memorySummary.pullRequestUrl ? `, pr=${memorySummary.pullRequestUrl}` : ''}`
+        + `${memorySummary.reason ? ` — ${memorySummary.reason}` : ''})`,
+      );
+    }
+
     input.onTurnkeyReport?.({
       manifest,
       scrubber,
+      ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
       report: {
-        runId: lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId),
+        runId: settledRunId,
         status: lastTurnkeySummary?.status ?? (lastOutcome.ok ? 'passed' : 'failed'),
         reasonCode: lastTurnkeySummary?.reasonCode ?? null,
         detail: !lastOutcome.ok ? (lastTurnkeySummary?.detail ?? lastOutcome.detail) : null,
@@ -1360,6 +1419,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       intake,
       taskpack: activeTaskpack,
       delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
+      ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
     };
   } finally {
     await mcpRegistry?.close().catch(() => undefined);
@@ -1485,9 +1545,12 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
     scrub: text => fallbackScrubber.scrub(text),
   };
 
+  const memorySummary = capturedReport?.memory ?? (result.kind === 'compiled' ? result.memory : undefined);
+
   await writeActionOutputSinks({
     formats,
     report,
+    memory: memorySummary,
     stepSummaryPath: env['GITHUB_STEP_SUMMARY'],
     githubOutputPath: env['GITHUB_OUTPUT'],
     actionResultJson: serialized,

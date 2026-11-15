@@ -858,9 +858,24 @@ export async function discoverTaskpackUpstreams(
   return Object.freeze(records);
 }
 
+export const MEMORY_PULL_REQUEST_BRANCH_PREFIX = 'loopwright/memory/' as const;
+
+export interface FindOpenMemoryPullRequestOptions {
+  readonly apiBaseUrl?: string | undefined;
+  readonly repositoryFullName: string;
+  readonly targetBranch: string;
+  readonly memoryBranch: string;
+  readonly githubToken?: string | undefined;
+  readonly fetchImpl?: typeof globalThis.fetch | undefined;
+  readonly scrubber?: SecretScrubber | undefined;
+  readonly env?: NodeJS.ProcessEnv | undefined;
+  readonly timeoutMs?: number | undefined;
+}
+
 /**
  * Look up an open pull request against `targetBranch` whose head ref begins
- * with `headBranchPrefix`.
+ * with `headBranchPrefix` (excluding dedicated `loopwright/memory/*` branches
+ * unless `headBranchPrefix` itself targets `loopwright/memory/`).
  */
 export async function findOpenManagedPullRequest(
   options: FindOpenManagedPullRequestOptions,
@@ -919,6 +934,7 @@ export async function findOpenManagedPullRequest(
       if (
         typeof headRef === 'string'
         && headRef.startsWith(options.headBranchPrefix)
+        && (options.headBranchPrefix.startsWith(MEMORY_PULL_REQUEST_BRANCH_PREFIX) || !headRef.startsWith(MEMORY_PULL_REQUEST_BRANCH_PREFIX))
         && typeof headSha === 'string'
         && typeof baseRef === 'string'
         && typeof baseSha === 'string'
@@ -944,6 +960,125 @@ export async function findOpenManagedPullRequest(
     if (res.data.length < 100) {
       break;
     }
+  }
+
+  return null;
+}
+
+/**
+ * Look up an existing open dedicated memory pull request whose same-repository
+ * `head.ref` exactly equals `memoryBranch` targeting `targetBranch`.
+ */
+export async function findOpenMemoryPullRequest(
+  options: FindOpenMemoryPullRequestOptions,
+): Promise<ManagedPullRequestInfo | null> {
+  if (!REPOSITORY_FULL_NAME_PATTERN.test(options.repositoryFullName)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid repositoryFullName "${options.repositoryFullName}"`);
+  }
+  const scrubber = options.scrubber ?? new SecretScrubber();
+  if (options.githubToken) scrubber.register(options.githubToken);
+
+  const apiBaseUrl = defaultApiBaseUrl(options.apiBaseUrl, options.env);
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const headers: Record<string, string> = {
+    accept: 'application/vnd.github+json',
+    'user-agent': 'loopwright-github-app',
+  };
+  if (options.githubToken) {
+    headers['authorization'] = `Bearer ${options.githubToken}`;
+  }
+
+  const slashIndex = options.repositoryFullName.indexOf('/');
+  const owner = options.repositoryFullName.slice(0, slashIndex);
+  const headQuery = `${owner}:${options.memoryBranch}`;
+  let confirmedAbsence = false;
+
+  for (let page = 1; page <= 5; page += 1) {
+    const url = `${apiBaseUrl}/repos/${options.repositoryFullName}/pulls?state=open&head=${encodeURIComponent(headQuery)}&base=${encodeURIComponent(options.targetBranch)}&per_page=100&page=${page}`;
+    const res = await fetchJson(url, fetchImpl, headers, timeoutMs, scrubber);
+    if (!res.ok) {
+      throw new GitHubAppError(
+        'ACTION_INPUT_INVALID',
+        `open memory pull requests lookup failed (${res.status}) for ${options.repositoryFullName}`,
+      );
+    }
+    if (!Array.isArray(res.data)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'GitHub pulls response must be an array');
+    }
+
+    for (const item of res.data) {
+      if (!isPlainRecord(item)) continue;
+      if (item['state'] !== undefined && item['state'] !== 'open') continue;
+      const head = isPlainRecord(item['head']) ? item['head'] : undefined;
+      const base = isPlainRecord(item['base']) ? item['base'] : undefined;
+      const headRepo = head?.['repo'];
+      const baseRepo = base?.['repo'];
+      const headRepoValid =
+        isPlainRecord(headRepo)
+        && typeof headRepo['full_name'] === 'string'
+        && headRepo['full_name'].toLowerCase() === options.repositoryFullName.toLowerCase();
+      if (!headRepoValid) continue;
+      if (baseRepo !== undefined) {
+        if (
+          !isPlainRecord(baseRepo)
+          || typeof baseRepo['full_name'] !== 'string'
+          || baseRepo['full_name'].toLowerCase() !== options.repositoryFullName.toLowerCase()
+        ) {
+          continue;
+        }
+        if (
+          typeof headRepo['id'] === 'number'
+          && typeof baseRepo['id'] === 'number'
+          && headRepo['id'] !== baseRepo['id']
+        ) {
+          continue;
+        }
+      }
+
+      const headRef = head?.['ref'];
+      const headSha = head?.['sha'];
+      const baseRef = base?.['ref'];
+      const baseSha = base?.['sha'];
+      const prNumber = item['number'];
+      const htmlUrl = item['html_url'];
+      const title = item['title'];
+      const body = item['body'];
+      if (
+        typeof headRef === 'string'
+        && headRef === options.memoryBranch
+        && typeof headSha === 'string'
+        && typeof baseRef === 'string'
+        && baseRef === options.targetBranch
+        && typeof prNumber === 'number'
+        && Number.isSafeInteger(prNumber)
+        && prNumber > 0
+        && typeof htmlUrl === 'string'
+      ) {
+        return {
+          number: prNumber,
+          htmlUrl,
+          headRef,
+          headSha,
+          baseRef,
+          baseSha: typeof baseSha === 'string' ? baseSha : '',
+          title: typeof title === 'string' ? title : '',
+          body: typeof body === 'string' ? body : null,
+        };
+      }
+    }
+
+    if (res.data.length < 100) {
+      confirmedAbsence = true;
+      break;
+    }
+  }
+
+  if (!confirmedAbsence) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `open memory pull requests lookup exhausted pagination (500 open pull requests) for ${options.repositoryFullName} without confirming absence`,
+    );
   }
 
   return null;

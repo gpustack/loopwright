@@ -1130,7 +1130,9 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
   const apply = requireString(memory['apply'], '/spec/memory/apply', 1, 32);
   if (apply !== 'separate-pull-request') manifestInvalid('memory apply must be separate-pull-request', '/spec/memory/apply');
   const onNoModelBudget = requireString(memory['onNoModelBudget'], '/spec/memory/onNoModelBudget', 1, 48);
-  if (onNoModelBudget !== 'deterministic-observations-only') manifestInvalid('onNoModelBudget must be deterministic-observations-only', '/spec/memory/onNoModelBudget');
+  if (onNoModelBudget !== 'deterministic-observations-only' && onNoModelBudget !== 'skip') {
+    manifestInvalid('onNoModelBudget must be deterministic-observations-only or skip', '/spec/memory/onNoModelBudget');
+  }
 
   const triggers = requireObject(spec['triggers'], '/spec/triggers', ['schedule', 'workflowDispatch', 'releasePublished', 'commentCommands', 'commentPrefixes']);
   const schedule = requireBoolean(triggers['schedule'], '/spec/triggers/schedule');
@@ -1499,7 +1501,7 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
     verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
     publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
-    memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget: 'deterministic-observations-only' as const }),
+    memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget }),
     triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),

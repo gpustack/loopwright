@@ -165,7 +165,7 @@ export function memoryEntrySchema(value: unknown, path = ''): MemoryEntry {
   const verifiedAtMs = integer(input['verifiedAtMs'], `${path}/verifiedAtMs`, 0);
   const expiresAtMs = integer(input['expiresAtMs'], `${path}/expiresAtMs`, 1);
   if (expiresAtMs <= verifiedAtMs) fail('MEMORY_SCHEMA_INVALID', `${path}/expiresAtMs`, 'expiresAtMs must exceed verifiedAtMs');
-  const paths = sortedUnique(scope['paths'], `${path}/scope/paths`, 1, 32, 1024);
+  const paths = sortedUnique(scope['paths'], `${path}/scope/paths`, 1, 128, 1024);
   const entry: MemoryEntry = { version: 1, id: identifier(input['id'], `${path}/id`, 128), claimKey: identifier(input['claimKey'], `${path}/claimKey`, 128),
     claim: memoryClaim(input['claim'], `${path}/claim`), kind: kind as (typeof ENTRY_KINDS)[number],
     scope: { taskpack: identifier(scope['taskpack'], `${path}/scope/taskpack`, 128), repository: repositorySlug(scope['repository'], `${path}/scope/repository`),

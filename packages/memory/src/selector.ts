@@ -89,8 +89,8 @@ export function selectActiveMemory(input: MemorySelectorInput): ActiveMemorySnap
   return snapshot;
 }
 export function memorySnapshotResourceId(snapshot: ActiveMemorySnapshot): string {
-  const suffix = snapshot.taskpack.slice(0, RESOURCE_ID_LIMIT - RESOURCE_ID_PREFIX.length);
-  return `${RESOURCE_ID_PREFIX}${suffix}`;
+  const suffix = snapshot.taskpack.slice(0, RESOURCE_ID_LIMIT - RESOURCE_ID_PREFIX.length).replace(/[._-]+$/g, '');
+  return `${RESOURCE_ID_PREFIX}${suffix.length > 0 ? suffix : 'taskpack'}`;
 }
 export function bindMemorySnapshotToResource(snapshot: ActiveMemorySnapshot, relativePath: string): MemoryTrustedResource {
   if (relativePath.startsWith('/') || relativePath.split('/').includes('..') || relativePath.length === 0) fail('MEMORY_SCHEMA_INVALID', '/relativePath', 'resource path must stay repo-relative');

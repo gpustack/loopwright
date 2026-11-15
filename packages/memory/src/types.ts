@@ -127,6 +127,8 @@ export interface MemoryVerificationInput {
   readonly secretValues: readonly string[];
   readonly memoryWritable: readonly string[];
   readonly protectedPaths: readonly string[];
+  readonly memoryRoot?: string | undefined;
+  readonly exemptContractProtectedPatterns?: readonly string[] | undefined;
 }
 
 export type MemoryExclusionReason =
@@ -203,7 +205,8 @@ export interface MemoryCuratorPort {
 export interface MemoryFinalizerConfig {
   readonly taskpack: string;
   readonly memoryWritable: readonly string[];
-  readonly onNoModelBudget: 'deterministic-observations-only';
+  readonly memoryRoot?: string | undefined;
+  readonly onNoModelBudget: 'deterministic-observations-only' | 'skip';
   readonly curator?: MemoryCuratorPort | null;
   readonly curatorTimeoutMs?: number;
   readonly requireCuratorReview?: boolean;
@@ -262,6 +265,8 @@ export interface MemoryCASInput {
   readonly secretValues: readonly string[];
   readonly memoryWritable: readonly string[];
   readonly protectedPaths: readonly string[];
+  readonly memoryRoot?: string | undefined;
+  readonly exemptContractProtectedPatterns?: readonly string[] | undefined;
   readonly targetBranch: string;
   /** Repository head revision observed by the caller right before applying. */
   readonly currentRevision: string;
