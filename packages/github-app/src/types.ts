@@ -99,18 +99,15 @@ export interface TaskpackMcpDeclaration {
 
 export interface TaskpackLimitsDeclaration {
   readonly wallTimeSeconds?: number | undefined;
-  readonly wallTimeMs?: number | undefined;
   readonly totalTokens?: number | undefined;
   readonly contextWindow?: number | undefined;
   readonly maxOutputTokens?: number | undefined;
-  readonly perCallOutputTokens?: number | undefined;
   readonly maxModelCalls?: number | undefined;
   readonly maxAttempts?: number | undefined;
   readonly maxFormatRepairs?: number | undefined;
   readonly maxImplementationRepairs?: number | undefined;
   readonly maxTransportRetries?: number | undefined;
   readonly toolTimeoutSeconds?: number | undefined;
-  readonly toolWallMs?: number | undefined;
   readonly commandTimeoutSeconds?: number | undefined;
   readonly responseBytes?: number | undefined;
   readonly toolResultBytes?: number | undefined;
@@ -476,6 +473,7 @@ export interface HostTaskpackBindings {
   readonly runtimeOptions?: HostRuntimeOptions | undefined;
   readonly budgets: TaskContract['spec']['budgets'];
   readonly limits?: TaskpackLimitsDeclaration | undefined;
+  readonly envLimits?: TaskpackLimitsDeclaration | undefined;
   readonly externalMcpTools?: readonly string[] | undefined;
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;

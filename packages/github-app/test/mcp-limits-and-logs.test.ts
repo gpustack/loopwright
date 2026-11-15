@@ -22,7 +22,9 @@ import {
   isRetryablePerRequestTimeout,
   loadDeclarativeTaskpack,
   mergeTaskpackLimits,
+  parseActionInputLimits,
   parseEnvAndInputLimitsOverride,
+  parseLoopwrightEnvLimits,
   runActionCli,
   runGitHubActionEntrypoint,
   SecretScrubber,
@@ -192,12 +194,33 @@ describe('MCP servers (stdio + HTTP), configurable execution limits, and human-r
     assert.equal(formatByteCount(67_108_864), '64 MB');
   });
 
-  it('applies limit precedence INPUT_* > LOOPWRIGHT_* > spec.limits > defaults', async () => {
+  it('rejects duplicate limit aliases and applies precedence INPUT_* > spec.limits > LOOPWRIGHT_* > defaults', async () => {
+    for (const removedAlias of [
+      { wallTimeMs: 60_000 },
+      { perCallOutputTokens: 4_096 },
+      { toolWallMs: 30_000 },
+    ]) {
+      assert.throws(
+        () => validateTaskpackLimitsDeclaration(removedAlias, '/spec/limits'),
+        /unknown field/i,
+      );
+    }
+
+    const ignoredLegacyEnv = parseLoopwrightEnvLimits({
+      LOOPWRIGHT_WALL_TIME_MS: '120000',
+      LOOPWRIGHT_PER_CALL_OUTPUT_TOKENS: '8192',
+      LOOPWRIGHT_TOOL_WALL_MS: '60000',
+    });
+    assert.deepEqual(ignoredLegacyEnv, {});
+
     const work = await mkdtemp(join(tmpdir(), 'lw-limits-prec-'));
+    await chmod(work, 0o700);
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
     try {
-      await mkdir(join(work, '.loopwright'), { recursive: true });
+      await mkdir(join(repo, '.loopwright'), { recursive: true });
       await writeFile(
-        join(work, '.loopwright', 'taskpack.yaml'),
+        join(repo, '.loopwright', 'taskpack.yaml'),
         `apiVersion: loopwright.dev/v1alpha1
 kind: Taskpack
 metadata:
@@ -244,25 +267,29 @@ spec:
         'utf8',
       );
       const manifest = await loadDeclarativeTaskpack({
-        manifestPath: join(work, '.loopwright', 'taskpack.yaml'),
-        repositoryRoot: work,
+        manifestPath: join(repo, '.loopwright', 'taskpack.yaml'),
+        repositoryRoot: repo,
       });
       assert.equal(manifest.spec.limits?.wallTimeSeconds, 5400);
       assert.equal(manifest.spec.limits?.totalTokens, 15_000_000);
 
-      const envLimits = parseEnvAndInputLimitsOverride({
+      const runtimeEnv = {
         LOOPWRIGHT_WALL_TIME_SECONDS: '7200',
         LOOPWRIGHT_TOTAL_TOKENS: '30000000',
+        LOOPWRIGHT_MAX_ATTEMPTS: '6',
         'INPUT_WALL-TIME-SECONDS': '9000',
-      });
-      const merged = mergeTaskpackLimits(manifest.spec.limits, envLimits);
-      assert.equal(merged.wallTimeSeconds, 9000, 'INPUT_WALL-TIME-SECONDS overrides LOOPWRIGHT_WALL_TIME_SECONDS and spec.limits');
-      assert.equal(merged.totalTokens, 30_000_000, 'LOOPWRIGHT_TOTAL_TOKENS overrides spec.limits');
+      };
+      const envFallback = parseLoopwrightEnvLimits(runtimeEnv);
+      const actionInputs = parseActionInputLimits(runtimeEnv);
+      const merged = mergeTaskpackLimits(envFallback, manifest.spec.limits, actionInputs);
+      assert.equal(merged.wallTimeSeconds, 9000, 'INPUT_WALL-TIME-SECONDS overrides spec.limits and LOOPWRIGHT_WALL_TIME_SECONDS');
+      assert.equal(merged.totalTokens, 15_000_000, 'explicit spec.limits overrides LOOPWRIGHT_TOTAL_TOKENS');
+      assert.equal(merged.maxAttempts, 6, 'LOOPWRIGHT_MAX_ATTEMPTS overrides compiler default when omitted in spec.limits');
       assert.equal(merged.maxOutputTokens, 24_576, 'unset env fields preserve spec.limits');
 
       const budgets = applyLimitsToBudgets(DEFAULT_HOST_BUDGETS, merged);
       assert.equal(budgets.wallTimeMs, 9_000_000);
-      assert.equal(budgets.totalTokens, 30_000_000);
+      assert.equal(budgets.totalTokens, 15_000_000);
       assert.equal(budgets.perCallOutputTokens, 24_576);
       assert.equal(budgets.maxModelCalls, 80);
 
@@ -270,13 +297,14 @@ spec:
       const compiled = await compileDeclarativeTaskpack(manifest, {
         mode: 'candidate',
         repository: 'acme/repo',
-        repositoryRoot: work,
+        repositoryRoot: repo,
         baseRevision: 'a'.repeat(40),
         sourceRevision: 'a'.repeat(40),
         targetMatrix: null,
         runtimeOptions: {},
         budgets: DEFAULT_HOST_BUDGETS,
-        limits: envLimits,
+        limits: actionInputs,
+        envLimits: envFallback,
         gateEndpoints: [],
         publicationEndpoint: null,
         credentialEnvMap: {
@@ -288,8 +316,32 @@ spec:
       });
       delete process.env['TEST_PROVIDER_KEY'];
       assert.equal(compiled.config.spec.task.spec.budgets.wallTimeMs, 9_000_000);
-      assert.equal(compiled.config.spec.task.spec.budgets.totalTokens, 30_000_000);
+      assert.equal(compiled.config.spec.task.spec.budgets.totalTokens, 15_000_000);
+      assert.equal(compiled.config.spec.controls.maxAttempts, 6);
       assert.equal(compiled.registry.spec.roleProfiles[0]?.limits?.toolWallMs, 420_000);
+
+      const dryRunRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'a'.repeat(40),
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'limits-prec-dryrun',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v1.0.0' }],
+        dryRun: true,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          ZAI_API_KEY: 'tok-dryrun-123',
+          ...runtimeEnv,
+        },
+      });
+      assert.equal(dryRunRes.kind, 'compiled');
+      if (dryRunRes.kind === 'compiled') {
+        assert.equal(dryRunRes.taskpack.config.spec.task.spec.budgets.wallTimeMs, 9_000_000);
+        assert.equal(dryRunRes.taskpack.config.spec.task.spec.budgets.totalTokens, 15_000_000);
+        assert.equal(dryRunRes.taskpack.config.spec.controls.maxAttempts, 6);
+      }
     } finally {
       await rm(work, { recursive: true, force: true });
     }
@@ -1014,11 +1066,37 @@ spec:
       assert.equal(compiledFromYaml.registry.spec.roleProfiles[0]?.selection.customProvider?.contextWindow, 200_000);
       assert.equal(compiledFromYaml.config.spec.task.spec.budgets.perCallOutputTokens, 65_536);
 
-      // 2. LOOPWRIGHT_CONTEXT_WINDOW overrides spec.limits.contextWindow, and INPUT_CONTEXT-WINDOW overrides LOOPWRIGHT_CONTEXT_WINDOW
-      const envOnly = parseEnvAndInputLimitsOverride({
+      // 2. spec.limits.contextWindow overrides LOOPWRIGHT_CONTEXT_WINDOW, and INPUT_CONTEXT-WINDOW overrides spec.limits.contextWindow
+      const envOnly = parseLoopwrightEnvLimits({
         LOOPWRIGHT_CONTEXT_WINDOW: '256000',
       });
       assert.equal(envOnly.contextWindow, 256_000);
+
+      const compiledWithEnvAndManifest = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        repository: 'acme/repo',
+        repositoryRoot: work,
+        baseRevision: 'a'.repeat(40),
+        sourceRevision: 'a'.repeat(40),
+        targetMatrix: null,
+        allowManifestCustomBaseUrl: true,
+        runtimeOptions: {},
+        budgets: DEFAULT_HOST_BUDGETS,
+        envLimits: envOnly,
+        gateEndpoints: [],
+        publicationEndpoint: null,
+        credentialEnvMap: {
+          provider: 'CUSTOM_GLM_TOKEN',
+          gate: 'TEST_GATE_KEY',
+          publication: 'TEST_PUB_KEY',
+        },
+        authorPrompt: 'Update proposal.',
+      });
+      assert.equal(
+        compiledWithEnvAndManifest.registry.spec.roleProfiles[0]?.selection.customProvider?.contextWindow,
+        200_000,
+        'explicit spec.limits.contextWindow overrides LOOPWRIGHT_CONTEXT_WINDOW',
+      );
 
       const inputWins = parseEnvAndInputLimitsOverride({
         LOOPWRIGHT_CONTEXT_WINDOW: '256000',
@@ -1036,7 +1114,8 @@ spec:
         allowManifestCustomBaseUrl: true,
         runtimeOptions: {},
         budgets: DEFAULT_HOST_BUDGETS,
-        limits: inputWins,
+        limits: parseActionInputLimits({ 'INPUT_CONTEXT-WINDOW': '512000' }),
+        envLimits: envOnly,
         gateEndpoints: [],
         publicationEndpoint: null,
         credentialEnvMap: {
@@ -2652,7 +2731,7 @@ spec:
         repositoryRoot: repo,
       });
 
-      const writeWrittenTaskpack = async (wallTimeMs: number, suffix: string) => {
+      const writeWrittenTaskpack = async (wallTimeSeconds: number, suffix: string) => {
         const compiled = await compileDeclarativeTaskpack(manifest, {
           mode: 'candidate',
           repository: 'gpustack/runner',
@@ -2662,7 +2741,7 @@ spec:
           targetMatrix: null,
           runtimeOptions: {},
           budgets: DEFAULT_HOST_BUDGETS,
-          limits: { wallTimeMs },
+          limits: { wallTimeSeconds },
           publicationEndpoint: null,
           credentialEnvMap: { provider: 'LOOPWRIGHT_PROVIDER_TOKEN' },
         });
@@ -2718,7 +2797,7 @@ spec:
         };
       };
 
-      const ampleWallTaskpack = await writeWrittenTaskpack(3_000_000, 'ample');
+      const ampleWallTaskpack = await writeWrittenTaskpack(3_000, 'ample');
       const ampleRes = await executeTurnkeyActionCycle({
         runId: 'deadline-ample',
         repositoryRoot: repo,
@@ -2731,7 +2810,7 @@ spec:
       assert.match(ampleRes.detail, /DEADLINE \(session\)/);
       assert.equal(ampleRes.retryableProviderFailure, true);
 
-      const tightWallTaskpack = await writeWrittenTaskpack(180_000, 'tight');
+      const tightWallTaskpack = await writeWrittenTaskpack(180, 'tight');
       const tightRes = await executeTurnkeyActionCycle({
         runId: 'deadline-tight',
         repositoryRoot: repo,

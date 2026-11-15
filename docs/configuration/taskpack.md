@@ -25,7 +25,7 @@ When a GitHub Action or App processes a taskpack, `compileDeclarativeTaskpack` g
 | --- | --- | --- |
 | `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.verification`, `spec.limits` | Adds protected paths and default budgets (`wallTimeMs: 3600000`, `maxModelCalls: 256`) |
 | `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication`, `spec.mcp` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
-| `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 4`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
+| `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 5`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
 
 Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']` plus discovered `mcp__<id>__<tool>` tools.
 
@@ -41,25 +41,18 @@ spec:
     candidate: Update catalog manifests from upstream releases and pass checks.
     noChange: Confirm upstream versions match current manifests and settle cleanly.
   scope: # Optional whitelist and blacklist
-    writable: # Optional (defaults to repository-wide writes)
-      - manifests
-      - docs/versions.md
-    protected: # Optional blacklist
-      - manifests/frozen-policy.yaml
-  instructions: # Optional protected UTF-8 instruction files
-    - .loopwright/instructions.md
+    writable: [manifests, docs/versions.md] # Optional (defaults to repository-wide writes)
+    protected: [manifests/frozen-policy.yaml] # Optional blacklist
+  instructions: [.loopwright/instructions.md] # Optional protected UTF-8 instruction files
   upstreams:
     - id: engine-release
       kind: github-release
       source: octocat/engine
-      watchedPaths:
-        - docs
+      watchedPaths: [docs]
       allowPrerelease: false # Optional (defaults to false)
   proposal:
     path: manifests/proposal.yaml
-    requiredFields:
-      - schema_version
-      - candidates
+    requiredFields: [schema_version, candidates]
     schemaVersion: 1
   verification:
     localChecks:
@@ -73,8 +66,7 @@ spec:
           script: .loopwright/checks/verify.sh
           timeoutSeconds: 30 # Optional (defaults to 30)
           allowReadOnlyGitHubToken: false # Optional (defaults to false)
-          env: # Optional safe environment variable names
-            - CHECK_MODE
+          env: [CHECK_MODE] # Optional safe environment variable names
     externalGates:
       - id: ci-smoke
         gateId: catalog-smoke
@@ -93,22 +85,14 @@ spec:
     schedule: true
     workflowDispatch: true
     releasePublished: false
-    commentCommands:
-      - retry
-      - revise
-      - status
-    commentPrefixes: # Optional (defaults to ['/loopwright'])
-      - /loopwright
+    commentCommands: [retry, revise, status]
+    commentPrefixes: [/loopwright] # Optional (defaults to ['/loopwright'])
   models: # Optional ordered model pool (defaults to zai / glm-5.3 / high)
     - provider: zai
       id: glm-5.3
       thinking: high # Optional (defaults to high)
       apiKeyEnv: ZAI_API_KEY # Optional (defaults to provider token env)
-      cost: # Optional USD per million tokens
-        input: 1
-        output: 2
-        cacheRead: 0.1 # Optional
-        cacheWrite: 1.25 # Optional
+      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 } # Optional USD per million tokens
     - provider: zai-coding-cn # Optional fallback candidate on quota exhaustion
       id: glm-5.3
       thinking: high # Optional
@@ -118,34 +102,29 @@ spec:
       - id: github
         transport: stdio
         command: github-mcp-server
-        args: # Optional command arguments
-          - stdio
-          - --read-only
-          - --toolsets
-          - repos,pull_requests,issues
+        args: [stdio, --read-only, --toolsets, "repos,pull_requests,issues"] # Optional command arguments
         envFrom: # Optional secret env mapping
           GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
         timeoutSeconds: 60 # Optional (defaults to 60)
       - id: deepwiki
         transport: http
         url: https://mcp.deepwiki.com/mcp
-  limits: # Optional execution ceiling overrides
+  limits: # Optional canonical execution ceilings
     wallTimeSeconds: 3600 # Optional (defaults to 3600)
     totalTokens: 20000000 # Optional (defaults to 20000000)
     contextWindow: 200000 # Optional model context window override
     maxOutputTokens: 32768 # Optional (defaults to 32768)
     maxModelCalls: 256 # Optional (defaults to 256)
+    maxAttempts: 5 # Optional (defaults to 5)
+    maxFormatRepairs: 6 # Optional (defaults to 6)
+    maxImplementationRepairs: 32 # Optional (defaults to 32)
+    maxTransportRetries: 3 # Optional (defaults to 3)
     toolTimeoutSeconds: 300 # Optional (defaults to 300)
+    commandTimeoutSeconds: 30 # Optional (defaults to 30)
   output: # Optional (defaults to json)
-    formats:
-      - json
-      - github-step-summary
+    formats: [json, github-step-summary]
   sandbox: # Optional host isolation policy
-    preferredBackends: # Optional
-      - macos-seatbelt
-      - linux-bwrap
-      - linux-landlock
-      - docker
+    preferredBackends: [macos-seatbelt, linux-bwrap, linux-landlock, docker] # Optional
     networkMode: none # Optional (defaults to none)
     requiredCapabilities: # Optional
       - filesystemReadContainment
@@ -153,8 +132,7 @@ spec:
       - protectedPathReadOnlyMask
       - networkIsolation
       - processTreeCleanup
-    deniedReadPaths: # Optional
-      - ~/.ssh
+    deniedReadPaths: [~/.ssh] # Optional
   decisions: # Optional System-One triage policy
     enabled: true
     provider: typesafe-jev # Optional (defaults to typesafe-jev)
@@ -220,9 +198,7 @@ spec:
       contextWindow: 204800 # Optional
       maxTokens: 32768 # Optional
       reasoning: true # Optional
-      samplingParams: # Optional
-        temperature: 0.6
-        top_p: 0.95
+      samplingParams: { temperature: 0.6, top_p: 0.95 } # Optional
       compat: # Optional OpenAI-compatible wire dialect tuning
         thinkingFormat: zai
         maxTokensField: max_tokens
@@ -258,23 +234,46 @@ Provider-reported cost retains `reported` provenance. When billing is absent and
 
 ## MCP and limits
 
-`spec.mcp.servers` connects `stdio` and Streamable `http` MCP servers on the host and exposes tools as `mcp__<id>__<tool>`. OAuth MCP declarations fail closed (`MCP_OAUTH_UNSUPPORTED`). `spec.limits` raises or lowers execution ceilings; Action inputs and `LOOPWRIGHT_*` variables override manifest values.
+`spec.mcp.servers` connects `stdio` and Streamable `http` MCP servers on the host and exposes tools as `mcp__<id>__<tool>`. OAuth MCP declarations fail closed (`MCP_OAUTH_UNSUPPORTED`).
+
+### MCP server fields
 
 | Field path | Required | Type and bounds | Meaning |
 | --- | --- | --- | --- |
 | `mcp.servers` | No | Object list (`0..16` items) | Host MCP servers (`id`: `1..24` chars, never `workspace`) |
 | `servers[].transport` | Conditional | `'stdio'` \| `'http'` | **Required** per server; selects local process or Streamable HTTP |
-| `servers[].command` / `args` | Conditional | Executable / string list (`0..32`) | `stdio` binary resolved on trusted host `PATH` and fixed CLI arguments |
+| `servers[].command` / `args` | Conditional | Executable / string list (`0..64`) | `stdio` binary resolved on trusted host `PATH` and fixed CLI arguments |
 | `servers[].env` / `envFrom` | No | String maps (`<= 32` entries) | Non-secret `stdio` env values and host secret env bindings (scrubbed automatically) |
 | `servers[].url` | Conditional | `https://` URL | **Required** for `http` servers (loopback `http://` requires custom base URL opt-in) |
 | `servers[].headersFrom` / `bearerTokenEnv` | No | Header map / env name | Host secret env bindings for HTTP headers or `Authorization: Bearer` |
-| `servers[].includeTools` / `timeoutSeconds` | No | Tool list (`1..64`) / `5..600` | Optional upstream tool allowlist and per-call timeout in seconds (default `60`) |
-| `limits.wallTimeSeconds` | No | Integer (`60..21600`, default `3600`) | Total run wall-time budget in seconds (`wallTimeMs` also accepted) |
-| `limits.totalTokens` | No | Integer (`1000..1000000000`, default `20000000`) | Aggregate input + output token ceiling across all model calls |
-| `limits.contextWindow` | No | Integer (`1024..10000000`) | Model context window override (`LOOPWRIGHT_CONTEXT_WINDOW` or `context-window` overrides) |
-| `limits.maxOutputTokens` | No | Integer (`256..262144`, default `32768`) | Per-call output token ceiling (`perCallOutputTokens` alias supported) |
-| `limits.maxModelCalls` / `maxAttempts` | No | `1..1024` (`256`) / `1..16` (`4`) | Model turn ceiling and controller attempt ceiling |
-| `limits.toolTimeoutSeconds` | No | Integer (`5..1800`, default `300`) | Per-tool wall-time ceiling in seconds; `toolResultBytes` (`65536..4194304`) also configurable |
+| `servers[].includeTools` / `timeoutSeconds` | No | Tool list (`1..64`) / `1..600` | Optional upstream tool allowlist and per-call timeout in seconds (default `60`) |
+
+### Execution limits
+
+Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrides `LOOPWRIGHT_*` environment variables before compiler defaults apply. Every limit uses one canonical field and environment variable name; unknown alias keys fail closed with `TASKPACK_MANIFEST_INVALID`.
+
+| Field | Environment variable | Default and bounds | Meaning |
+| --- | --- | --- | --- |
+| `limits.wallTimeSeconds` | `LOOPWRIGHT_WALL_TIME_SECONDS` | `3600` (`60..21600`) | Run wall-clock ceiling in seconds (Action input `wall-time-seconds`) |
+| `limits.totalTokens` | `LOOPWRIGHT_TOTAL_TOKENS` | `20000000` (`1000..1000000000`) | Aggregate input and output token ceiling across calls (Action input `total-tokens`) |
+| `limits.contextWindow` | `LOOPWRIGHT_CONTEXT_WINDOW` | Catalog or `128000` (`1024..10000000`) | Model context window token ceiling (Action input `context-window`) |
+| `limits.maxOutputTokens` | `LOOPWRIGHT_MAX_OUTPUT_TOKENS` | `32768` (`256..262144`) | Per-call output token ceiling clamped to model and window caps (Action input `max-output-tokens`) |
+| `limits.maxModelCalls` | `LOOPWRIGHT_MAX_MODEL_CALLS` | `256` (`1..1024`) | Maximum model calls per run within store capacity (Action input `max-model-calls`) |
+| `limits.maxAttempts` | `LOOPWRIGHT_MAX_ATTEMPTS` | `5` (`1..16`) | Maximum controller attempts within 64-checkpoint cap (Action input `max-attempts`) |
+| `limits.maxFormatRepairs` | `LOOPWRIGHT_MAX_FORMAT_REPAIRS` | `6` (`0..1024`) | Maximum model calls spent repairing malformed submission JSON |
+| `limits.maxImplementationRepairs` | `LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS` | `32` (`0..1024`) | Maximum model calls spent repairing failed verification checks |
+| `limits.maxTransportRetries` | `LOOPWRIGHT_MAX_TRANSPORT_RETRIES` | `3` (`0..8`) | Maximum in-session retries on transient network or rate-limit errors |
+| `limits.toolTimeoutSeconds` | `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS` | `300` (`1..1800`) | Per-tool wall-clock timeout in seconds (Action input `tool-timeout-seconds`) |
+| `limits.commandTimeoutSeconds` | `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS` | `30` (`1..3600`) | Fallback `command.v1` script timeout in seconds (Action input `command-timeout-seconds`) |
+| `limits.workingWindowBytes` | `LOOPWRIGHT_WORKING_WINDOW_BYTES` | `8388608..16777216` (`131072..16777216`) | Retained session working window bytes (`min(16 MiB, max(8 MiB, contextWindow))`) |
+| `limits.maxRequestBytes` | `LOOPWRIGHT_MAX_REQUEST_BYTES` | `8388608` (`65536..16777216`) | Single outbound model HTTP payload byte ceiling (`<= workingWindowBytes`) |
+| `limits.promptBytes` | `LOOPWRIGHT_PROMPT_BYTES` | `262144` (`4096..1048576`) | Maximum UTF-8 role prompt byte size |
+| `limits.responseBytes` | `LOOPWRIGHT_RESPONSE_BYTES` | `67108864` (`65536..67108864`) | Maximum single provider response stream byte size |
+| `limits.toolArgsBytes` | `LOOPWRIGHT_TOOL_ARGS_BYTES` | `1048576` (`16384..4194304`) | Maximum serialized tool call arguments byte size |
+| `limits.toolResultBytes` | `LOOPWRIGHT_TOOL_RESULT_BYTES` | `1048576` (`16384..4194304`) | Maximum serialized tool result byte size |
+| `limits.fileBytes` | `LOOPWRIGHT_FILE_BYTES` | `33554432` (`65536..67108864`) | Maximum candidate file byte size read or written by workspace tools |
+| `limits.sessionBytes` | `LOOPWRIGHT_SESSION_BYTES` | `33554432` (`524288..67108864`) | Maximum cumulative isolated Pi session transcript byte size |
+| `limits.candidateEntries` | `LOOPWRIGHT_CANDIDATE_ENTRIES` | `4096` (`16..4096`) | Maximum tracked candidate workspace entries |
 
 ## Upstreams and proposal
 

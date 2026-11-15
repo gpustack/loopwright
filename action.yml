@@ -102,7 +102,7 @@ inputs:
     description: 'Optional total run wall-time limit override in seconds (60..21600).'
     required: false
   total-tokens:
-    description: 'Optional total token budget override across all model calls (1024..200000000).'
+    description: 'Optional total token budget override across all model calls (1000..1000000000).'
     required: false
   context-window:
     description: 'Optional model context window token override (1024..10000000).'
@@ -114,10 +114,10 @@ inputs:
     description: 'Optional maximum model call count override per run (1..1024).'
     required: false
   max-attempts:
-    description: 'Optional maximum attempt count override (1..16).'
+    description: 'Optional maximum attempt count override (1..16, default 5).'
     required: false
   tool-timeout-seconds:
-    description: 'Optional per-tool execution timeout override in seconds (5..1800).'
+    description: 'Optional per-tool execution timeout override in seconds (1..1800).'
     required: false
   command-timeout-seconds:
     description: 'Optional command.v1 local check timeout ceiling override in seconds (1..3600).'

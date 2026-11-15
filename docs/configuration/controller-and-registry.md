@@ -293,6 +293,7 @@ Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` 
 | `roleProfiles[].tools` | Yes | Subset of `read`, `write`, `edit`, `bash`, `codemode`, `mcp__workspace__read_file` | Host-approved tool ceiling for bound task roles |
 | `roleProfiles[].runtimeRef` | Yes | `runtimeProfiles[].id` | Binds the role to a verified runtime identity |
 | `roleProfiles[].providerCredentialRef` | Yes (`null` allowed) | `credentialBindings[].id` or `null` | Selects the `provider` credential injected into the broker |
+| `roleProfiles[].limits` | No | Positive integer map (`promptBytes`, `responseBytes`, `toolArgsBytes`, `toolResultBytes`, `sessionBytes`, `fileBytes`, `candidateEntries`, `toolWallMs`, etc.) | Optional per-role byte, entry, and tool runtime ceilings |
 | `runtimeProfiles[].id` | Yes | Identifier (`1..64` chars) | Unique runtime profile ID |
 | `runtimeProfiles[].dockerExecutable` | Yes | Absolute path (for example `/usr/local/bin/docker`) | Verified container runtime binary path |
 | `runtimeProfiles[].dockerSocket` | Yes | Absolute path (for example `/var/run/docker.sock`) | Container runtime UNIX socket path |
@@ -309,11 +310,11 @@ Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` 
 | `context.mode` | No | `'proven_bound'` (default) or `'estimated_guard'` | Strict pre-send byte proof vs. estimated window guard |
 | `context.estimator` | Yes | `'lw-pi-final-json-bytes-v1'` | Deterministic JSON request byte estimator |
 | `context.proofId` / `version` / `evidence` | Yes | `proofId: null`, `version: 1`, `evidence: 'estimated'` | Estimator protocol metadata required by Pi adapter |
-| `context.workingWindowCeiling` | Yes | Integer `1 .. 98304` bytes | Maximum retained conversation window bytes before compaction |
-| `context.maxRequestBytes` | Yes | Integer `1 .. 65536` bytes | Maximum single outbound provider HTTP payload size |
+| `context.workingWindowCeiling` | Yes | Integer `1 .. 16777216` bytes | Maximum retained conversation window bytes before compaction |
+| `context.maxRequestBytes` | Yes | Integer `1 .. 16777216` bytes | Maximum single outbound provider HTTP payload size |
 | `context.serviceMargin` | Yes | Integer `>= 32768` bytes | Safety buffer reserved for provider system framing |
 | `context.toolReserve` | Yes | Integer `>= 16384` bytes | Window space reserved for tool call results |
-| `context.maxOutputTokens` | Yes | Integer `1 .. 1024` tokens | Per-call output token ceiling enforced by the adapter |
+| `context.maxOutputTokens` | Yes | Integer `1 .. 262144` tokens | Per-call output token ceiling enforced by the adapter |
 
 ### MCP configuration
 

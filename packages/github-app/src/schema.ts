@@ -352,9 +352,9 @@ function requireSafeIntInRange(value: unknown, path: string, min: number, max: n
 
 export function validateTaskpackLimitsDeclaration(value: unknown, path: string): TaskpackLimitsDeclaration {
   const raw = requireObject(value, path, [
-    'wallTimeSeconds', 'wallTimeMs', 'totalTokens', 'contextWindow', 'maxOutputTokens', 'perCallOutputTokens',
+    'wallTimeSeconds', 'totalTokens', 'contextWindow', 'maxOutputTokens',
     'maxModelCalls', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
-    'toolTimeoutSeconds', 'toolWallMs', 'commandTimeoutSeconds', 'responseBytes', 'toolResultBytes',
+    'toolTimeoutSeconds', 'commandTimeoutSeconds', 'responseBytes', 'toolResultBytes',
     'toolArgsBytes', 'promptBytes', 'maxRequestBytes', 'workingWindowBytes', 'fileBytes',
     'sessionBytes', 'candidateEntries',
   ]);
@@ -365,27 +365,15 @@ export function validateTaskpackLimitsDeclaration(value: unknown, path: string):
     }
   };
   setOpt('wallTimeSeconds', 60, 21_600);
-  setOpt('wallTimeMs', 60_000, 21_600_000);
-  if (out['wallTimeSeconds'] !== undefined && out['wallTimeMs'] !== undefined && out['wallTimeSeconds'] * 1000 !== out['wallTimeMs']) {
-    manifestInvalid('wallTimeSeconds and wallTimeMs conflict', `${path}/wallTimeMs`);
-  }
   setOpt('totalTokens', 1_000, 1_000_000_000);
   setOpt('contextWindow', 1_024, 10_000_000);
   setOpt('maxOutputTokens', 256, 262_144);
-  setOpt('perCallOutputTokens', 256, 262_144);
-  if (out['maxOutputTokens'] !== undefined && out['perCallOutputTokens'] !== undefined && out['maxOutputTokens'] !== out['perCallOutputTokens']) {
-    manifestInvalid('maxOutputTokens and perCallOutputTokens conflict', `${path}/perCallOutputTokens`);
-  }
   setOpt('maxModelCalls', 1, 1_024);
   setOpt('maxAttempts', 1, 16);
   setOpt('maxFormatRepairs', 0, 1_024);
   setOpt('maxImplementationRepairs', 0, 1_024);
   setOpt('maxTransportRetries', 0, 8);
   setOpt('toolTimeoutSeconds', 1, 1_800);
-  setOpt('toolWallMs', 1_000, 1_800_000);
-  if (out['toolTimeoutSeconds'] !== undefined && out['toolWallMs'] !== undefined && out['toolTimeoutSeconds'] * 1000 !== out['toolWallMs']) {
-    manifestInvalid('toolTimeoutSeconds and toolWallMs conflict', `${path}/toolWallMs`);
-  }
   setOpt('commandTimeoutSeconds', 1, 3_600);
   setOpt('responseBytes', 65_536, 67_108_864);
   setOpt('toolResultBytes', 16_384, 4_194_304);

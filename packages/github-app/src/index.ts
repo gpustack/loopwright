@@ -9,8 +9,9 @@ export {
   ACTIONS_RUN_URL_PATTERN, applyLimitsToBudgets, authorizeRepositoryActor, boundDiagnosticLog,
   compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT,
   GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL,
-  INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionsRunUrl,
-  parseCommentCommand, parseEnvAndInputLimitsOverride, prepareTaskpackIntake, validateCommentGuidance,
+  INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits,
+  parseActionsRunUrl, parseCommentCommand, parseEnvAndInputLimitsOverride, parseLoopwrightEnvLimits,
+  prepareTaskpackIntake, validateCommentGuidance,
 } from './taskpack.js';
 export {
   intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore,

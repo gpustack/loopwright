@@ -52,67 +52,23 @@ const DRAIN_RESERVE_MS = 120_000;
 export const INSTRUCTION_MAX_AGGREGATE_BYTES = 262_144;
 const COMMAND_SCRIPT_MAX_BYTES = 262_144;
 
-export function parseEnvAndInputLimitsOverride(env: NodeJS.ProcessEnv): TaskpackLimitsDeclaration {
-  const raw: Record<string, number> = {};
-  const parseEnvInt = (envKey: string): number | undefined => {
-    const val = env[envKey]?.trim();
-    if (val === undefined || val === '') return undefined;
-    if (!/^-?\d+$/.test(val)) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid integer in ${envKey}: "${val}"`, envKey);
-    }
-    const parsed = Number(val);
-    if (!Number.isSafeInteger(parsed)) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `integer out of range in ${envKey}: "${val}"`, envKey);
-    }
-    return parsed;
-  };
-  const pick = (targetField: string, ...envKeys: string[]): void => {
-    for (const key of envKeys) {
-      const val = parseEnvInt(key);
-      if (val !== undefined) {
-        raw[targetField] = val;
-        return;
-      }
-    }
-  };
-  // Precedence: INPUT_* > LOOPWRIGHT_*
-  const inputWallSec = parseEnvInt('INPUT_WALL-TIME-SECONDS');
-  const envWallMs = parseEnvInt('LOOPWRIGHT_WALL_TIME_MS');
-  const envWallSec = parseEnvInt('LOOPWRIGHT_WALL_TIME_SECONDS');
-  if (inputWallSec !== undefined) raw['wallTimeSeconds'] = inputWallSec;
-  else if (envWallMs !== undefined) raw['wallTimeMs'] = envWallMs;
-  else if (envWallSec !== undefined) raw['wallTimeSeconds'] = envWallSec;
+function parseOptionalLimitInt(env: NodeJS.ProcessEnv, envKey: string): number | undefined {
+  const val = env[envKey]?.trim();
+  if (val === undefined || val === '') return undefined;
+  if (!/^-?\d+$/.test(val)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid integer in ${envKey}: "${val}"`, envKey);
+  }
+  const parsed = Number(val);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `integer out of range in ${envKey}: "${val}"`, envKey);
+  }
+  return parsed;
+}
 
-  pick('totalTokens', 'INPUT_TOTAL-TOKENS', 'LOOPWRIGHT_TOTAL_TOKENS');
-  pick('contextWindow', 'INPUT_CONTEXT-WINDOW', 'LOOPWRIGHT_CONTEXT_WINDOW');
-  pick('maxOutputTokens', 'INPUT_MAX-OUTPUT-TOKENS', 'LOOPWRIGHT_MAX_OUTPUT_TOKENS', 'LOOPWRIGHT_PER_CALL_OUTPUT_TOKENS');
-  pick('maxModelCalls', 'INPUT_MAX-MODEL-CALLS', 'LOOPWRIGHT_MAX_MODEL_CALLS');
-  pick('maxAttempts', 'INPUT_MAX-ATTEMPTS', 'LOOPWRIGHT_MAX_ATTEMPTS');
-  pick('maxFormatRepairs', 'LOOPWRIGHT_MAX_FORMAT_REPAIRS');
-  pick('maxImplementationRepairs', 'LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS');
-  pick('maxTransportRetries', 'LOOPWRIGHT_MAX_TRANSPORT_RETRIES');
-
-  const inputToolSec = parseEnvInt('INPUT_TOOL-TIMEOUT-SECONDS');
-  const envToolWallMs = parseEnvInt('LOOPWRIGHT_TOOL_WALL_MS');
-  const envToolSec = parseEnvInt('LOOPWRIGHT_TOOL_TIMEOUT_SECONDS');
-  if (inputToolSec !== undefined) raw['toolTimeoutSeconds'] = inputToolSec;
-  else if (envToolWallMs !== undefined) raw['toolWallMs'] = envToolWallMs;
-  else if (envToolSec !== undefined) raw['toolTimeoutSeconds'] = envToolSec;
-
-  pick('commandTimeoutSeconds', 'INPUT_COMMAND-TIMEOUT-SECONDS', 'LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS');
-  pick('responseBytes', 'LOOPWRIGHT_RESPONSE_BYTES');
-  pick('toolResultBytes', 'LOOPWRIGHT_TOOL_RESULT_BYTES');
-  pick('toolArgsBytes', 'LOOPWRIGHT_TOOL_ARGS_BYTES');
-  pick('promptBytes', 'LOOPWRIGHT_PROMPT_BYTES');
-  pick('maxRequestBytes', 'LOOPWRIGHT_MAX_REQUEST_BYTES');
-  pick('workingWindowBytes', 'LOOPWRIGHT_WORKING_WINDOW_BYTES');
-  pick('fileBytes', 'LOOPWRIGHT_FILE_BYTES');
-  pick('sessionBytes', 'LOOPWRIGHT_SESSION_BYTES');
-  pick('candidateEntries', 'LOOPWRIGHT_CANDIDATE_ENTRIES');
-
+function validateParsedLimits(raw: Record<string, number>, diagPath: string): TaskpackLimitsDeclaration {
   if (Object.keys(raw).length === 0) return Object.freeze({});
   try {
-    return validateTaskpackLimitsDeclaration(raw, '/env/limits');
+    return validateTaskpackLimitsDeclaration(raw, diagPath);
   } catch (error) {
     if (error instanceof GitHubAppError) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', error.message, error.path);
@@ -121,28 +77,68 @@ export function parseEnvAndInputLimitsOverride(env: NodeJS.ProcessEnv): Taskpack
   }
 }
 
+/** Parse explicit GitHub Action `with:` inputs (`INPUT_*`), which override `taskpack.yaml` `spec.limits` and `LOOPWRIGHT_*`. */
+export function parseActionInputLimits(env: NodeJS.ProcessEnv): TaskpackLimitsDeclaration {
+  const raw: Record<string, number> = {};
+  const setFrom = (targetField: keyof TaskpackLimitsDeclaration, inputKey: string): void => {
+    const val = parseOptionalLimitInt(env, inputKey);
+    if (val !== undefined) raw[targetField] = val;
+  };
+  setFrom('wallTimeSeconds', 'INPUT_WALL-TIME-SECONDS');
+  setFrom('totalTokens', 'INPUT_TOTAL-TOKENS');
+  setFrom('contextWindow', 'INPUT_CONTEXT-WINDOW');
+  setFrom('maxOutputTokens', 'INPUT_MAX-OUTPUT-TOKENS');
+  setFrom('maxModelCalls', 'INPUT_MAX-MODEL-CALLS');
+  setFrom('maxAttempts', 'INPUT_MAX-ATTEMPTS');
+  setFrom('toolTimeoutSeconds', 'INPUT_TOOL-TIMEOUT-SECONDS');
+  setFrom('commandTimeoutSeconds', 'INPUT_COMMAND-TIMEOUT-SECONDS');
+  return validateParsedLimits(raw, '/inputs/limits');
+}
+
+/** Parse canonical `LOOPWRIGHT_*` environment variable limit fallbacks (lower precedence than `spec.limits` and `INPUT_*`). */
+export function parseLoopwrightEnvLimits(env: NodeJS.ProcessEnv): TaskpackLimitsDeclaration {
+  const raw: Record<string, number> = {};
+  const setFrom = (targetField: keyof TaskpackLimitsDeclaration, envKey: string): void => {
+    const val = parseOptionalLimitInt(env, envKey);
+    if (val !== undefined) raw[targetField] = val;
+  };
+  setFrom('wallTimeSeconds', 'LOOPWRIGHT_WALL_TIME_SECONDS');
+  setFrom('totalTokens', 'LOOPWRIGHT_TOTAL_TOKENS');
+  setFrom('contextWindow', 'LOOPWRIGHT_CONTEXT_WINDOW');
+  setFrom('maxOutputTokens', 'LOOPWRIGHT_MAX_OUTPUT_TOKENS');
+  setFrom('maxModelCalls', 'LOOPWRIGHT_MAX_MODEL_CALLS');
+  setFrom('maxAttempts', 'LOOPWRIGHT_MAX_ATTEMPTS');
+  setFrom('maxFormatRepairs', 'LOOPWRIGHT_MAX_FORMAT_REPAIRS');
+  setFrom('maxImplementationRepairs', 'LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS');
+  setFrom('maxTransportRetries', 'LOOPWRIGHT_MAX_TRANSPORT_RETRIES');
+  setFrom('toolTimeoutSeconds', 'LOOPWRIGHT_TOOL_TIMEOUT_SECONDS');
+  setFrom('commandTimeoutSeconds', 'LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS');
+  setFrom('responseBytes', 'LOOPWRIGHT_RESPONSE_BYTES');
+  setFrom('toolResultBytes', 'LOOPWRIGHT_TOOL_RESULT_BYTES');
+  setFrom('toolArgsBytes', 'LOOPWRIGHT_TOOL_ARGS_BYTES');
+  setFrom('promptBytes', 'LOOPWRIGHT_PROMPT_BYTES');
+  setFrom('maxRequestBytes', 'LOOPWRIGHT_MAX_REQUEST_BYTES');
+  setFrom('workingWindowBytes', 'LOOPWRIGHT_WORKING_WINDOW_BYTES');
+  setFrom('fileBytes', 'LOOPWRIGHT_FILE_BYTES');
+  setFrom('sessionBytes', 'LOOPWRIGHT_SESSION_BYTES');
+  setFrom('candidateEntries', 'LOOPWRIGHT_CANDIDATE_ENTRIES');
+  return validateParsedLimits(raw, '/env/limits');
+}
+
+export function parseEnvAndInputLimitsOverride(env: NodeJS.ProcessEnv): TaskpackLimitsDeclaration {
+  return mergeTaskpackLimits(parseLoopwrightEnvLimits(env), parseActionInputLimits(env));
+}
+
 export function mergeTaskpackLimits(
   base: TaskpackLimitsDeclaration | undefined,
-  override: TaskpackLimitsDeclaration | undefined,
+  ...overrides: readonly (TaskpackLimitsDeclaration | undefined)[]
 ): TaskpackLimitsDeclaration {
-  if (!base && !override) return Object.freeze({});
+  const layers = [base, ...overrides].filter((layer): layer is TaskpackLimitsDeclaration => layer !== undefined);
+  if (layers.length === 0) return Object.freeze({});
   const out: Record<string, number> = {};
-  if (base) {
-    for (const [k, v] of Object.entries(base)) {
+  for (const layer of layers) {
+    for (const [k, v] of Object.entries(layer)) {
       if (typeof v === 'number') out[k] = v;
-    }
-  }
-  if (override) {
-    for (const [k, v] of Object.entries(override)) {
-      if (typeof v === 'number') {
-        out[k] = v;
-        if (k === 'wallTimeSeconds') delete out['wallTimeMs'];
-        if (k === 'wallTimeMs') delete out['wallTimeSeconds'];
-        if (k === 'maxOutputTokens') delete out['perCallOutputTokens'];
-        if (k === 'perCallOutputTokens') delete out['maxOutputTokens'];
-        if (k === 'toolTimeoutSeconds') delete out['toolWallMs'];
-        if (k === 'toolWallMs') delete out['toolTimeoutSeconds'];
-      }
     }
   }
   return Object.freeze(out) as TaskpackLimitsDeclaration;
@@ -153,8 +149,8 @@ export function applyLimitsToBudgets(
   limits: TaskpackLimitsDeclaration | undefined,
 ): TaskContract['spec']['budgets'] {
   if (!limits) return baseBudgets;
-  const wallTimeMs = limits.wallTimeMs ?? (limits.wallTimeSeconds !== undefined ? limits.wallTimeSeconds * 1000 : baseBudgets.wallTimeMs);
-  const perCallOutputTokens = limits.maxOutputTokens ?? limits.perCallOutputTokens ?? baseBudgets.perCallOutputTokens;
+  const wallTimeMs = limits.wallTimeSeconds !== undefined ? limits.wallTimeSeconds * 1000 : baseBudgets.wallTimeMs;
+  const perCallOutputTokens = limits.maxOutputTokens ?? baseBudgets.perCallOutputTokens;
   return Object.freeze({
     ...baseBudgets,
     wallTimeMs,
@@ -418,7 +414,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
   }
 
-  const mergedLimits = mergeTaskpackLimits(manifest.spec.limits, bindings.limits);
+  const mergedLimits = mergeTaskpackLimits(bindings.envLimits, manifest.spec.limits, bindings.limits);
   const commandGateMetaByCheckId = new Map<string, CompiledLocalCommandGate>();
   const commandScripts: string[] = [];
   const hasCommandChecks = manifest.spec.verification.localChecks.some(c => c.implementation === 'command.v1');
@@ -760,9 +756,9 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     },
   ];
   const catalogRecord = resolveCatalogModel(selection).record;
-  const mergedLimits = mergeTaskpackLimits(manifest.spec.limits, bindings.limits);
+  const mergedLimits = mergeTaskpackLimits(bindings.envLimits, manifest.spec.limits, bindings.limits);
   const baseBudgetsWithManifest = bindings.budgets === DEFAULT_HOST_BUDGETS
-    ? applyLimitsToBudgets(DEFAULT_HOST_BUDGETS, manifest.spec.limits)
+    ? applyLimitsToBudgets(applyLimitsToBudgets(DEFAULT_HOST_BUDGETS, bindings.envLimits), manifest.spec.limits)
     : bindings.budgets;
   const requestedBudgets = applyLimitsToBudgets(baseBudgetsWithManifest, bindings.limits);
   const defaultWorkingWindow = Math.min(16_777_216, Math.max(8_388_608, catalogRecord.contextWindow));
@@ -838,7 +834,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     artifactBytes: 268_435_456,
     candidateEntries: mergedLimits.candidateEntries ?? 4_096,
     fileBytes: mergedLimits.fileBytes ?? 33_554_432,
-    toolWallMs: mergedLimits.toolWallMs ?? (mergedLimits.toolTimeoutSeconds !== undefined ? mergedLimits.toolTimeoutSeconds * 1000 : 300_000),
+    toolWallMs: mergedLimits.toolTimeoutSeconds !== undefined ? mergedLimits.toolTimeoutSeconds * 1000 : 300_000,
   };
 
   const registry: TrustedRegistry = {

@@ -16,8 +16,8 @@ import { negotiateSandboxBackend, resolveEffectiveTaskpackSandboxPolicy } from '
 import { collectMcpReferencedEnvNames, parseTaskpackDocument, validateMcpServerDeclarations } from './schema.js';
 import {
   authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS,
-  loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand,
-  parseEnvAndInputLimitsOverride, prepareTaskpackIntake, stageCompiledInstructionResources,
+  loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits, parseActionsRunUrl, parseCommentCommand,
+  parseLoopwrightEnvLimits, prepareTaskpackIntake, stageCompiledInstructionResources,
   validateCommentGuidance,
 } from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
@@ -518,15 +518,14 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     ? (line: string) => { input.progressSink!(turnkeyScrubber.scrub(line)); }
     : undefined;
 
-  let effectiveLimitsOverride: TaskpackLimitsDeclaration;
+  let explicitLimitsOverride: TaskpackLimitsDeclaration;
+  let envLimitsFallback: TaskpackLimitsDeclaration;
   let explicitGitAuthorName: string | undefined;
   let explicitGitAuthorEmail: string | undefined;
   try {
-    const envLimits = parseEnvAndInputLimitsOverride(runtimeEnv);
-    effectiveLimitsOverride = {
-      ...(envLimits ?? {}),
-      ...(input.limits ?? {}),
-    };
+    envLimitsFallback = parseLoopwrightEnvLimits(runtimeEnv);
+    const actionInputLimits = parseActionInputLimits(runtimeEnv);
+    explicitLimitsOverride = mergeTaskpackLimits(actionInputLimits, input.limits);
     explicitGitAuthorName = parseOptionalGitIdentityInput(
       input.gitAuthorName,
       runtimeEnv['INPUT_GIT-AUTHOR-NAME'],
@@ -546,10 +545,10 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
 
   const storageProfile = input.storageProfile ?? 'actions-basic';
   const startSample = input.previousClockSample ?? systemSample();
-  const basisWallTimeMs = effectiveLimitsOverride.wallTimeMs
-    ?? (effectiveLimitsOverride.wallTimeSeconds !== undefined ? effectiveLimitsOverride.wallTimeSeconds * 1000 : undefined)
-    ?? input.budgets?.wallTimeMs
-    ?? DEFAULT_HOST_BUDGETS.wallTimeMs;
+  const preManifestWallSeconds = explicitLimitsOverride.wallTimeSeconds ?? envLimitsFallback.wallTimeSeconds;
+  const basisWallTimeMs = preManifestWallSeconds !== undefined
+    ? preManifestWallSeconds * 1000
+    : (input.budgets?.wallTimeMs ?? DEFAULT_HOST_BUDGETS.wallTimeMs);
   const basis = input.clockBasis ?? {
     clockEpoch: input.runId,
     created: { ...startSample },
@@ -942,7 +941,8 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       modelsJsonPath: input.modelsJsonPath,
       runtimeOptions: {},
       budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
-      limits: effectiveLimitsOverride,
+      limits: explicitLimitsOverride,
+      envLimits: envLimitsFallback,
       ...(externalMcpTools !== undefined ? { externalMcpTools } : {}),
       gateEndpoints: activeGateEndpoints,
       publicationEndpoint: activePublicationEndpoint,

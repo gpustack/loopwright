@@ -695,7 +695,8 @@ function resolveSingleModelEntry(
     ?? manifestLimitsContextWindow
     ?? modelsEntry?.contextWindow
     ?? modelsOverride?.contextWindow
-    ?? effectiveManifest?.contextWindow;
+    ?? effectiveManifest?.contextWindow
+    ?? bindings.envLimits?.contextWindow;
   const mergedMaxTokens = hostCustom?.maxTokens
     ?? modelsEntry?.maxTokens
     ?? modelsOverride?.maxTokens
