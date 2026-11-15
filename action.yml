@@ -144,7 +144,7 @@ runs:
   using: 'composite'
   steps:
     - name: Setup Node.js 26
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
       with:
         node-version: '26'
     - name: Run Loopwright Taskpack Entrypoint
@@ -188,6 +188,6 @@ runs:
         INPUT_COMMAND-TIMEOUT-SECONDS: ${{ inputs.command-timeout-seconds }}
       run: |
         if [[ ! -f "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js" ]]; then
-          npm --prefix "${GITHUB_ACTION_PATH}" ci --no-audit --no-fund && npm --prefix "${GITHUB_ACTION_PATH}" run build
+          npm --prefix "${GITHUB_ACTION_PATH}" ci --ignore-scripts --no-audit --no-fund && npm --prefix "${GITHUB_ACTION_PATH}" run build
         fi
         node "${GITHUB_ACTION_PATH}/packages/github-app/dist/action.js"

@@ -1,0 +1,265 @@
+name: Self-Upgrade
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.repository }}"
+  cancel-in-progress: false
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Preflight mode selection ('auto', 'candidate', or 'no-change')"
+        default: auto
+        required: false
+        type: choice
+        options:
+          - auto
+          - candidate
+          - no-change
+      dry-run:
+        description: "Compile without invoking model execution or PR publication"
+        default: 'false'
+        required: false
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  issue_comment:
+    types:
+      - created
+
+jobs:
+  self-upgrade:
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'schedule' && github.repository == 'gpustack/loopwright')
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request != null
+        && startsWith(github.event.comment.body, '/loopwright')
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      npm_config_ignore_scripts: 'true'
+    steps:
+      - name: Checkout SHA-pinned bootstrap Loopwright control plane
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: gpustack/loopwright
+          ref: f8ab6867d103667195c53bd12e7866c174e983f4
+          path: bootstrap-loopwright
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Relocate bootstrap control plane outside workspace
+        run: |
+          rm -rf "${RUNNER_TEMP}/loopwright-bootstrap"
+          mv "${GITHUB_WORKSPACE}/bootstrap-loopwright" "${RUNNER_TEMP}/loopwright-bootstrap"
+
+      - name: Checkout trusted main repository state
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify main checkout and dispatch ref alignment
+        id: main_ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_REF}" != "refs/heads/main" ]]; then
+            echo "Refusing workflow_dispatch from '${DISPATCH_REF}'; dispatch Self-Upgrade from refs/heads/main." >&2
+            exit 1
+          fi
+          MAIN_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
+          echo "sha=${MAIN_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: Fetch pull request commit object without checkout
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          EXPECTED_MAIN_SHA: ${{ steps.main_ref.outputs.sha }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          if [[ ! "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid pull request number '${PR_NUMBER}' in issue_comment payload." >&2
+            exit 1
+          fi
+          if [[ -n "${GH_TOKEN}" ]]; then
+            AUTH_B64="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\r\n')"
+            GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.${SERVER_URL}/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_B64}" \
+            git -c core.hooksPath=/dev/null fetch --no-tags --no-recurse-submodules origin \
+              "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}"
+          else
+            git -c core.hooksPath=/dev/null fetch --no-tags --no-recurse-submodules origin \
+              "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}"
+          fi
+          CURRENT_HEAD="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "${CURRENT_HEAD}" != "${EXPECTED_MAIN_SHA}" ]]; then
+            echo "HEAD moved unexpectedly from '${EXPECTED_MAIN_SHA}' to '${CURRENT_HEAD}'." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "Working tree became dirty after pull request object fetch." >&2
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@75d2e84710de30f6ff7268e08f310b60ef14033f # v3.0.0
+        with:
+          hugo-version: '0.152.2'
+          extended: true
+
+      - name: Install sandbox and Python bridge dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bubblewrap \
+            python3-packaging \
+            python3-yaml \
+            python3-requests \
+            python3-pytest \
+            python3-pytest-xdist
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-all --ro-bind / / -- /bin/true
+
+      - name: Build pinned bootstrap control plane and workspace preflight
+        run: |
+          npm --prefix "${RUNNER_TEMP}/loopwright-bootstrap" ci --ignore-scripts --no-audit --no-fund
+          npm --prefix "${RUNNER_TEMP}/loopwright-bootstrap" run build
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+
+      - name: Run self-upgrade preflight and stage lockfile bundle
+        id: preflight
+        env:
+          REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
+        run: |
+          STAGE_DIR="${RUNNER_TEMP}/loopwright-self-upgrade-stage"
+          node scripts/prepare-self-upgrade.mjs \
+            --stage-dir "${STAGE_DIR}" \
+            --requested-mode "${REQUESTED_MODE}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Validate preflight disposition and resolve effective mode
+        id: mode_gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
+          RECOMMENDED_MODE: ${{ steps.preflight.outputs.recommended_mode }}
+          ACTION_MODE: ${{ steps.preflight.outputs.action_mode }}
+        run: |
+          if [[ "${RECOMMENDED_MODE}" == "blocked" ]]; then
+            echo "Self-upgrade preflight reported recommended_mode=blocked; refusing execution." >&2
+            exit 3
+          fi
+          if [[ ( "${EVENT_NAME}" == "issue_comment" || "${REQUESTED_MODE}" == "candidate" ) && "${RECOMMENDED_MODE}" != "candidate" ]]; then
+            echo "Candidate execution requested (${EVENT_NAME}, mode=${REQUESTED_MODE}), but preflight recommended_mode=${RECOMMENDED_MODE} staged no upgrade bundle." >&2
+            exit 3
+          fi
+          echo "effective_mode=${ACTION_MODE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve host tool paths
+        id: tools
+        run: |
+          {
+            echo "node_bin_dir=$(dirname "$(command -v node)")"
+            echo "hugo_bin=$(command -v hugo)"
+            echo "python_bin=$(command -v python3)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify no-change.v1 controller invariance
+        if: steps.mode_gate.outputs.effective_mode == 'no-change'
+        env:
+          GITHUB_SHA: ${{ steps.main_ref.outputs.sha }}
+        run: |
+          BOOTSTRAP_CLI="${RUNNER_TEMP}/loopwright-bootstrap/packages/cli/dist/main.js"
+          NO_CHANGE_ROOT="${RUNNER_TEMP}/loopwright-self-upgrade-no-change"
+          NO_CHANGE_RUN_ID="no-change-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "${NO_CHANGE_ROOT}"
+          chmod 0700 "${NO_CHANGE_ROOT}"
+          STEP_JSON="$(node "${BOOTSTRAP_CLI}" step next \
+            --taskpack .loopwright/taskpack.yaml \
+            --mode no-change \
+            --repo "${GITHUB_WORKSPACE}" \
+            --run-root "${NO_CHANGE_ROOT}" \
+            --run-id "${NO_CHANGE_RUN_ID}" \
+            --json)"
+          LEASE_TOKEN="$(printf '%s\n' "${STEP_JSON}" | node -e '
+            const fs = require("node:fs");
+            const lines = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean);
+            const last = JSON.parse(lines[lines.length - 1]);
+            if (last.kind !== "step" || !last.data?.leaseToken) process.exit(1);
+            process.stdout.write(last.data.leaseToken);
+          ')"
+          SUBMIT_JSON="$(node "${BOOTSTRAP_CLI}" step submit \
+            --run-root "${NO_CHANGE_ROOT}" \
+            --run-id "${NO_CHANGE_RUN_ID}" \
+            --lease "${LEASE_TOKEN}" \
+            --status no_change \
+            --reason "Verified baseline parity and upstream SemVer invariance." \
+            --json)"
+          printf '%s\n' "${SUBMIT_JSON}" | node -e '
+            const fs = require("node:fs");
+            const lines = fs.readFileSync(0, "utf8").trim().split("\n").filter(Boolean);
+            const last = JSON.parse(lines[lines.length - 1]);
+            if (last.kind !== "result" || last.data?.result?.spec?.status !== "no_change") {
+              console.error("no-change.v1 verification did not settle no_change:", JSON.stringify(last));
+              process.exit(1);
+            }
+          '
+
+      - name: Run pinned Loopwright Taskpack Entrypoint
+        id: loopwright
+        env:
+          GITHUB_SHA: ${{ steps.main_ref.outputs.sha }}
+          GITHUB_REF: refs/heads/main
+          INPUT_TASKPACK-PATH: .loopwright/taskpack.yaml
+          INPUT_MODE: ${{ steps.mode_gate.outputs.effective_mode }}
+          INPUT_UPSTREAM-RECORDS: ${{ steps.preflight.outputs.upstream_records }}
+          INPUT_EVENT-NAME: ${{ github.event_name }}
+          INPUT_EVENT-PATH: ${{ github.event_path }}
+          INPUT_RUN-ROOT: ${{ runner.temp }}/loopwright-self-upgrade
+          INPUT_STORAGE-PROFILE: actions-basic
+          INPUT_DRY-RUN: ${{ inputs.dry-run || 'false' }}
+          INPUT_ALLOW-CUSTOM-BASE-URL: 'false'
+          INPUT_GITHUB-APP-ID: ${{ secrets.LOOPWRIGHT_APP_ID }}
+          INPUT_GITHUB-APP-PRIVATE-KEY: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
+          INPUT_GITHUB-APP-INSTALLATION-ID: ${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}
+          INPUT_OUTPUT: json,github-step-summary
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          ZAI_CODING_CN_API_KEY: ${{ secrets.ZAI_CODING_CN_API_KEY }}
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          NODE_BIN_DIR: ${{ steps.tools.outputs.node_bin_dir }}
+          HUGO_BIN: ${{ steps.tools.outputs.hugo_bin }}
+          PYTHON_BIN: ${{ steps.tools.outputs.python_bin }}
+          SELF_UPGRADE_RUN_ROOT: ${{ runner.temp }}/loopwright-self-upgrade
+          SELF_UPGRADE_STAGE_DIR: ${{ steps.preflight.outputs.stage_dir }}
+          SELF_UPGRADE_NPM_CACHE: ${{ steps.preflight.outputs.npm_cache_dir }}
+          SELF_UPGRADE_REPO_ROOT: ${{ github.workspace }}
+          SELF_UPGRADE_REQUIRE_HUGO: '1'
+        run: |
+          node "${RUNNER_TEMP}/loopwright-bootstrap/packages/github-app/dist/action.js"

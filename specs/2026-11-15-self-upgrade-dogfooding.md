@@ -1,6 +1,6 @@
 # Spec: Self-Upgrade Dogfooding
 
-Status: Building
+Status: Built
 Type: Feature
 
 ## Summary
@@ -64,12 +64,12 @@ As a Loopwright contributor, I want to drive the same `.loopwright/taskpack.yaml
 
 4. **Bootstrap-Pinned GitHub Actions Workflow & Connected Documentation**
    - Add `.github/workflows/self-upgrade.yml` supporting weekly `schedule`, manual `workflow_dispatch`, and PR `/loopwright` (`retry`, `revise`) `issue_comment` triggers.
-   - Enforce workflow provenance and authorization: gate `issue_comment` jobs to pull-request comments starting with `/loopwright` by `OWNER`, `MEMBER`, or `COLLABORATOR` actors; check out trusted `ref: refs/heads/main` with `persist-credentials: false` (never checking out unreviewed PR heads); pin `gpustack/loopwright` and every third-party Action to 40-character commit SHAs; run `node scripts/prepare-self-upgrade.mjs` to compute `mode` (`no-change` / `candidate` / `blocked`), `upstream-records`, and `SELF_UPGRADE_STAGE_DIR`; and pass explicit `mode`, `event-name: ${{ github.event_name }}`, `event-path: ${{ github.event_path }}`, and `run-root: ${{ runner.temp }}/loopwright-self-upgrade`.
+   - Enforce workflow provenance and authorization: gate `issue_comment` jobs to pull-request comments starting with `/loopwright` by `OWNER`, `MEMBER`, or `COLLABORATOR` actors; check out trusted `ref: refs/heads/main` with `persist-credentials: false` (never checking out unreviewed PR heads) and reject `workflow_dispatch` from non-`main` refs; pin the bootstrap `gpustack/loopwright` control plane and every third-party Action (including nested `actions/setup-node` in `action.yml`) to 40-character commit SHAs with `--ignore-scripts` enforced on bootstrap and workspace installs; run `node scripts/prepare-self-upgrade.mjs` to compute `mode` (`no-change` / `candidate` / `blocked`), `upstream-records`, and `SELF_UPGRADE_STAGE_DIR`, failing closed on `blocked`; execute `no-change.v1` controller invariance verification on `no-change` runs; and pass explicit `mode`, `event-name: ${{ github.event_name }}`, `event-path: ${{ github.event_path }}`, `GITHUB_SHA` bound to `refs/heads/main`, and `run-root: ${{ runner.temp }}/loopwright-self-upgrade`.
    - Update [`docs/walkthroughs/declarative-taskpack.md`](../docs/walkthroughs/declarative-taskpack.md), [`docs/operations/coding-agents.md`](../docs/operations/coding-agents.md), [`docs/development.md`](../docs/development.md), and [`docs/README.md`](../docs/README.md), keeping `npm run lint:docs` and `npm run site` green.
 
 ### Notes / Constraints / Caveats
 
-- `command.v1` in [`packages/github-app/src/turnkey.ts`](../packages/github-app/src/turnkey.ts) spawns scripts directly under a sanitized environment (`PATH=/usr/local/bin:/usr/bin:/bin`); `.loopwright/checks/verify.sh` therefore enforces its own `bwrap` / `sandbox-exec` containment boundary and passes only safe uppercase names (`NODE_BIN_DIR`, `HUGO_BIN`, `PYTHON_BIN`, `SELF_UPGRADE_STAGE_DIR`, `SELF_UPGRADE_NPM_CACHE`, `SELF_UPGRADE_REPO_ROOT`, `SELF_UPGRADE_REQUIRE_HUGO`, `SELF_UPGRADE_ALLOW_TEST_FIXTURE`, `SELF_UPGRADE_TEST_NODE_MODULES`) through `parameters.env`.
+- `command.v1` in [`packages/github-app/src/turnkey.ts`](../packages/github-app/src/turnkey.ts) spawns scripts directly under a sanitized environment (`PATH=/usr/local/bin:/usr/bin:/bin`); `.loopwright/checks/verify.sh` therefore enforces its own `bwrap` / `sandbox-exec` containment boundary and passes only safe uppercase names (`NODE_BIN_DIR`, `HUGO_BIN`, `PYTHON_BIN`, `SELF_UPGRADE_RUN_ROOT`, `SELF_UPGRADE_STAGE_DIR`, `SELF_UPGRADE_NPM_CACHE`, `SELF_UPGRADE_REPO_ROOT`, `SELF_UPGRADE_REQUIRE_HUGO`, `SELF_UPGRADE_ALLOW_TEST_FIXTURE`, `SELF_UPGRADE_TEST_NODE_MODULES`) through `parameters.env`.
 - Local `loopwright step next --taskpack .loopwright/taskpack.yaml` defaults to `candidate` mode (`no-change.v1` is compiled only in `--mode no-change`). Operators and coding agents run `node scripts/prepare-self-upgrade.mjs` first and pass `--mode no-change` when no eligible upgrade exists.
 
 ### Boundaries
@@ -90,7 +90,7 @@ As a Loopwright contributor, I want to drive the same `.loopwright/taskpack.yaml
 
 ### Commands
 
-Target build and test environment: **local** macOS (`darwin/arm64`, Node `26.x`, `npm` `11.x`, `python3`, `sandbox-exec`, and Hugo binary via `HUGO_BIN=/Users/thxcode/Documents/github.com/thxcode/loopwright/.sbin/hugo` when building `site/`).
+Target build and test environment: **local** macOS (`darwin/arm64`, Node `26.x`, `npm` `11.x`, `python3`, `sandbox-exec`, and Hugo `0.152.2+extended` on `PATH` or via `HUGO_BIN` when building `site/`).
 
 ```sh
 npm ci
@@ -98,7 +98,7 @@ npm run build
 npm run typecheck
 npm run lint
 npm run lint:docs
-HUGO_BIN=/Users/thxcode/Documents/github.com/thxcode/loopwright/.sbin/hugo npm run site
+npm run site
 node packages/cli/dist/main.js closure --verify-failures
 npm test
 ```
@@ -156,16 +156,16 @@ if (isPlainRecord(res.data)) {
       Acceptance: `.loopwright/checks/verify.sh` rejects unauthorized `packages/*/package.json` field or script edits before running candidate code, checks lockstep `@earendil-works/pi-*` and direct `yaml` lockfile resolutions (permitting nested transitive `yaml` differences), enforces `package-lock.json <= 900 KiB`, runs pinned build/typecheck/lint/docs/closure/test commands offline inside `bwrap` (Linux) or `sandbox-exec` (macOS) containment (blocking canary secret reads and checkout writes), and `self-upgrade-taskpack.test.ts` covers positive and negative preflight, compilation, `loopwright step` (`no-change` and `candidate`), manifest tampering, lockfile skew, and sandbox containment cases offline.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/github-app/test/self-upgrade-taskpack.test.js`
 
-- [ ] **T3 · SHA-pinned GitHub Actions workflow & connected documentation**
+- [x] **T3 · SHA-pinned GitHub Actions workflow & connected documentation**
       Blocked by: T1
-      Owns: `.github/workflows/self-upgrade.yml`, `docs/README.md`, `docs/development.md`, `docs/operations/coding-agents.md`, `docs/walkthroughs/declarative-taskpack.md`
+      Owns: `.github/workflows/self-upgrade.yml`, `action.yml`, `docs/README.md`, `docs/development.md`, `docs/operations/coding-agents.md`, `docs/walkthroughs/declarative-taskpack.md`
       Gate: review
-      Acceptance: `.github/workflows/self-upgrade.yml` pins all Actions (including `gpustack/loopwright`) to 40-character commit SHAs, checks out `refs/heads/main` (`persist-credentials: false`), gates `issue_comment` to authorized PR `/loopwright` (`retry`, `revise`) actors, runs `scripts/prepare-self-upgrade.mjs` to bind explicit `mode`, `upstream-records`, `event-name`, `event-path`, and `run-root`, installs Node 26, Python bridge packages, and Hugo `0.152.2`, and documentation updates pass `npm run lint:docs`, `npm run site`, and `docs-and-site.test.js`.
-      Verify: `npm run build && npm run lint:docs && HUGO_BIN=/Users/thxcode/Documents/github.com/thxcode/loopwright/.sbin/hugo npm run site && npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/cli/test/check-docs-rules.test.js .test-build/packages/cli/test/docs-and-site.test.js`
+      Acceptance: `.github/workflows/self-upgrade.yml` and `action.yml` pin all Actions (including nested `actions/setup-node` and bootstrap `gpustack/loopwright` checkout) to 40-character commit SHAs with `--ignore-scripts` enforced, check out `refs/heads/main` (`persist-credentials: false`), gate `issue_comment` to authorized PR `/loopwright` (`retry`, `revise`) actors, run `scripts/prepare-self-upgrade.mjs` (failing closed on `blocked`), verify `no-change.v1` invariance on `no-change` runs, bind explicit `mode`, `upstream-records`, `event-name`, `event-path`, `GITHUB_SHA`, and `run-root`, install Node 26, Python bridge packages, and Hugo `0.152.2`, and documentation updates pass `npm run lint:docs`, `npm run site`, and `docs-and-site.test.js`.
+      Verify: `npm run build && npm run lint:docs && npm run site && npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/cli/test/check-docs-rules.test.js .test-build/packages/cli/test/docs-and-site.test.js`
 
 ### Test Plan
 
-[ ] I/we understand the owners of the involved components may require updates to existing tests to make this
+[x] I/we understand the owners of the involved components may require updates to existing tests to make this
 code solid enough prior to committing the changes necessary to implement this enhancement.
 
 #### Prerequisite testing updates
@@ -194,7 +194,7 @@ Live end-to-end GitHub Actions self-upgrade execution against `registry.npmjs.or
 - **GitHub Dependabot / Renovate only:** Dependabot bumps `package.json` and `package-lock.json` mechanically, but it cannot adapt TypeScript call sites in `packages/agent-pi`, update documentation, enforce `@earendil-works/pi-*` six-package lockstep invariants before opening a PR, or dogfood Loopwright's own `Taskpack` and `loopwright step` runtime.
 - **Including `typescript` and `eslint` in the same Taskpack:** Compiler and linter upgrades frequently trigger mechanical edits across all nine workspace packages, substantially increasing merge conflict surface and repair iterations compared to isolating runtime dependencies (`@earendil-works/pi-*` and `yaml`).
 - **Running `npm install --package-lock-only` inside the Turnkey author sandbox or running uncontained `npm run` inside `verify.sh`:** Linux `host-session.ts` disables network access (`--unshare-net`) and mounts `candidateDir` read-only for `bash`, while uncontained `command.v1` execution exposes host files and trusts candidate `package.json` scripts; host preflight lockfile/cache staging plus OS-contained pinned tool execution in `verify.sh` closes both gaps without modifying `@loopwright/github-app` runtime code.
-- **Referencing `uses: ./` or checking out PR heads in `.github/workflows/self-upgrade.yml`:** Using the local checkout or an unreviewed PR head lets candidate branches supply control-plane code or `verify.sh`; checking out `refs/heads/main` and pinning `gpustack/loopwright@<40-char-sha>` preserves bootstrap provenance.
+- **Referencing `uses: ./` or checking out PR heads in `.github/workflows/self-upgrade.yml`:** Using the local checkout or an unreviewed PR head lets candidate branches supply control-plane code or `verify.sh`; checking out `refs/heads/main` for repository state and checking out `gpustack/loopwright` at a pinned 40-character commit SHA outside the workspace preserves bootstrap provenance without unpinned nested Action tags.
 
 ## Open Questions
 
