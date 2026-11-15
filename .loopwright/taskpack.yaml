@@ -1,0 +1,145 @@
+apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: self-upgrade
+spec:
+  goal:
+    candidate: >-
+      Upgrade Loopwright runtime dependencies (@earendil-works/pi-* in lockstep and direct yaml packages uniformly)
+      using the host-staged target versions and lockfile, adapt TypeScript call sites and documentation within
+      writable scope, update .loopwright/proposal.json, and pass all verification gates.
+    noChange: >-
+      Verify that .loopwright/proposal.json, workspace package manifests, and package-lock.json already match
+      eligible upstream releases with zero repository modifications.
+  scope:
+    writable:
+      - .loopwright/proposal.json
+      - package-lock.json
+      - packages/agent-pi
+      - packages/cli
+      - packages/controller
+      - packages/decisions
+      - packages/github-app
+      - docs
+    protected:
+      - packages/agent-pi/qualification
+      - packages/controller/qualification
+      - packages/cli/src/closure.ts
+      - packages/cli/src/failure-matrix.ts
+      - docs/contribute
+  instructions:
+    - .loopwright/instructions.md
+  upstreams:
+    - id: pi-coding-agent
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: pi-ai
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-ai/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: pi-agent-core
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-agent-core/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: pi-mcp
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-mcp/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: pi-codemode
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-codemode/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: pi-tui
+      kind: http-json
+      source: https://registry.npmjs.org/@earendil-works/pi-tui/latest
+      watchedPaths: []
+      allowPrerelease: false
+    - id: yaml
+      kind: http-json
+      source: https://registry.npmjs.org/yaml/latest
+      watchedPaths: []
+      allowPrerelease: false
+  proposal:
+    path: .loopwright/proposal.json
+    requiredFields:
+      - schema_version
+      - summary
+      - upstreams
+      - packages
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: proposal-ledger
+        implementation: json-artifact.v1
+      - id: writable-scope
+        implementation: scope.v1
+      - id: self-upgrade-verify
+        implementation: command.v1
+        parameters:
+          script: .loopwright/checks/verify.sh
+          timeoutSeconds: 900
+          allowReadOnlyGitHubToken: false
+          env:
+            - GITHUB_ACTIONS
+            - NODE_BIN_DIR
+            - HUGO_BIN
+            - PYTHON_BIN
+            - SELF_UPGRADE_STAGE_DIR
+            - SELF_UPGRADE_NPM_CACHE
+            - SELF_UPGRADE_REPO_ROOT
+            - SELF_UPGRADE_RUN_ROOT
+            - SELF_UPGRADE_REQUIRE_HUGO
+            - SELF_UPGRADE_ALLOW_TEST_FIXTURE
+            - SELF_UPGRADE_TEST_NODE_MODULES
+    externalGates: []
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright-self-upgrade-
+    titleTemplate: "chore(deps): self-upgrade runtime dependencies"
+  memory:
+    directory: .loopwright/memory/self-upgrade
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands:
+      - retry
+      - revise
+    commentPrefixes:
+      - /loopwright
+  sandbox:
+    preferredBackends:
+      - linux-bwrap
+      - linux-landlock
+      - macos-seatbelt
+    networkMode: none
+    requiredCapabilities:
+      - filesystemReadContainment
+      - filesystemWriteContainment
+      - protectedPathReadOnlyMask
+      - networkIsolation
+      - processTreeCleanup
+    deniedReadPaths:
+      - ~/.ssh
+      - ~/.aws
+      - ~/.gnupg
+      - ~/.npmrc
+      - ~/.netrc
+  limits:
+    wallTimeSeconds: 2700
+    commandTimeoutSeconds: 900
+    toolTimeoutSeconds: 300
+    maxAttempts: 3
+  output:
+    formats:
+      - json
+      - github-step-summary

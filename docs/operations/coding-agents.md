@@ -62,6 +62,32 @@ loopwright step next \
   --json
 ```
 
+### Host preflight
+
+`step next --taskpack` defaults to `--mode candidate` and compiles `no-change.v1` only when `--mode no-change` is set. When a repository pairs `.loopwright/taskpack.yaml` with host preflight staging, run preflight first, stop on `blocked`, and export the repository, stage, cache, and tool paths needed by `step submit`:
+
+```sh
+STAGE_DIR="$RUN_ROOT/preflight-stage"
+PREFLIGHT_JSON="$(node scripts/prepare-self-upgrade.mjs --stage-dir "$STAGE_DIR" --json)"
+MODE="$(printf '%s' "$PREFLIGHT_JSON" | node --eval 'const d=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if(d.recommendedMode==="blocked") process.exit(3); process.stdout.write(d.actionMode);')"
+
+export SELF_UPGRADE_REPO_ROOT="$(pwd -P)"
+export SELF_UPGRADE_RUN_ROOT="$RUN_ROOT"
+export SELF_UPGRADE_STAGE_DIR="$STAGE_DIR"
+export SELF_UPGRADE_NPM_CACHE="$STAGE_DIR/npm-cache"
+export NODE_BIN_DIR="$(dirname "$(command -v node)")"
+export PYTHON_BIN="$(command -v python3)"
+export HUGO_BIN="$(command -v hugo || true)"
+
+loopwright step next \
+  --taskpack .loopwright/taskpack.yaml \
+  --mode "$MODE" \
+  --repo . \
+  --run-root "$RUN_ROOT" \
+  --run-id "$RUN_ID" \
+  --json
+```
+
 Or start a Managed Controller run, pinning `target.sourceRevision` to `git rev-parse HEAD` (`--mode candidate|no-change` is optional):
 
 ```sh
