@@ -84,7 +84,13 @@ inputs:
     description: 'Optional GitHub App PEM private key for minting installation tokens.'
     required: false
   github-app-installation-id:
-    description: 'Optional GitHub App installation ID for minting installation tokens.'
+    description: 'Optional GitHub App installation ID for minting installation tokens (auto-discovered from target repository when omitted).'
+    required: false
+  git-author-name:
+    description: 'Optional Git commit author/committer and DCO Signed-off-by name override.'
+    required: false
+  git-author-email:
+    description: 'Optional Git commit author/committer and DCO Signed-off-by email override.'
     required: false
   upstream-records:
     description: 'Optional JSON array of precomputed upstream acquisition records.'
@@ -165,6 +171,8 @@ runs:
         INPUT_GITHUB-APP-ID: ${{ inputs.github-app-id }}
         INPUT_GITHUB-APP-PRIVATE-KEY: ${{ inputs.github-app-private-key }}
         INPUT_GITHUB-APP-INSTALLATION-ID: ${{ inputs.github-app-installation-id }}
+        INPUT_GIT-AUTHOR-NAME: ${{ inputs.git-author-name }}
+        INPUT_GIT-AUTHOR-EMAIL: ${{ inputs.git-author-email }}
         INPUT_UPSTREAM-RECORDS: ${{ inputs.upstream-records }}
         INPUT_MCP-SERVERS: ${{ inputs.mcp-servers }}
         INPUT_WALL-TIME-SECONDS: ${{ inputs.wall-time-seconds }}

@@ -27,18 +27,20 @@ import {
   type LocalCommandGateServer, type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
 } from './turnkey.js';
 import {
-  checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, discoverTaskpackUpstreams,
-  findOpenManagedPullRequest, resolveGitHubToken, resolveRepositoryAndRevisions,
+  checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
+  discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
+  resolveGitHubAuth, resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
   type ManagedPullRequestInfo,
 } from './upstreams.js';
 import { serializePrettyYaml } from './yaml.js';
 import {
   DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID,
   type ActionDelegateOutcome, type ActionEntrypointInput, type ActionEntrypointResult, type ClockSample,
-  type HostGateEndpointPlan, type HostPublicationEndpointPlan, type HostRoleSelection, type HostTaskpackBindings,
-  type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate, type TaskpackCommentCommand,
-  type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration, type TaskpackManifest,
-  type TaskpackMcpServerDeclaration, type TaskpackUpstreamRecord, type WrittenCompiledTaskpack,
+  type GitCommitIdentity, type HostGateEndpointPlan, type HostPublicationEndpointPlan, type HostRoleSelection,
+  type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate,
+  type TaskpackCommentCommand, type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration,
+  type TaskpackManifest, type TaskpackMcpServerDeclaration, type TaskpackUpstreamRecord,
+  type WrittenCompiledTaskpack,
 } from './types.js';
 
 export interface TurnkeyActionExecutionReport {
@@ -517,15 +519,27 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     : undefined;
 
   let effectiveLimitsOverride: TaskpackLimitsDeclaration;
+  let explicitGitAuthorName: string | undefined;
+  let explicitGitAuthorEmail: string | undefined;
   try {
     const envLimits = parseEnvAndInputLimitsOverride(runtimeEnv);
     effectiveLimitsOverride = {
       ...(envLimits ?? {}),
       ...(input.limits ?? {}),
     };
+    explicitGitAuthorName = parseOptionalGitIdentityInput(
+      input.gitAuthorName,
+      runtimeEnv['INPUT_GIT-AUTHOR-NAME'],
+      validateGitAuthorName,
+    );
+    explicitGitAuthorEmail = parseOptionalGitIdentityInput(
+      input.gitAuthorEmail,
+      runtimeEnv['INPUT_GIT-AUTHOR-EMAIL'],
+      validateGitAuthorEmail,
+    );
   } catch (error) {
     if (error instanceof GitHubAppError) {
-      return blocked(error.code, error.message);
+      return blocked(error.code, turnkeyScrubber.scrub(error.message));
     }
     throw error;
   }
@@ -606,10 +620,15 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
 
   const turnkeyEnabled = input.turnkey === true && input.dryRun !== true;
   let effectiveRepositoryId = input.repositoryId ?? 0;
+  let effectiveInstallationId = input.installationId ?? 0;
   let effectiveBaseRevision = input.baseRevision;
   let effectiveSourceRevision = input.sourceRevision ?? input.baseRevision;
   let effectiveUpstreamRecords = input.upstreamRecords;
   let githubToken: string | undefined;
+  let gitCommitIdentity: GitCommitIdentity = Object.freeze({
+    name: explicitGitAuthorName ?? DEFAULT_GIT_COMMIT_IDENTITY.name,
+    email: explicitGitAuthorEmail ?? DEFAULT_GIT_COMMIT_IDENTITY.email,
+  });
   let openManagedPr: ManagedPullRequestInfo | null = null;
   let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
   const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim();
@@ -639,7 +658,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     }
 
     try {
-      githubToken = await resolveGitHubToken({
+      const resolvedAuth = await resolveGitHubAuth({
         apiBaseUrl: effectiveApiBaseUrl,
         repositoryFullName: input.repositoryFullName,
         repositoryId: effectiveRepositoryId > 0 ? effectiveRepositoryId : undefined,
@@ -647,10 +666,17 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         appId: input.githubAppId,
         appPrivateKey: input.githubAppPrivateKey,
         appInstallationId: input.githubAppInstallationId,
+        gitAuthorName: explicitGitAuthorName,
+        gitAuthorEmail: explicitGitAuthorEmail,
         fetchImpl: input.probeFetch,
         scrubber: turnkeyScrubber,
         env: runtimeEnv,
       });
+      githubToken = resolvedAuth.token;
+      gitCommitIdentity = resolvedAuth.gitCommitIdentity;
+      if (effectiveInstallationId <= 0 && resolvedAuth.installationId !== undefined) {
+        effectiveInstallationId = resolvedAuth.installationId;
+      }
       const resolvedRepo = await resolveRepositoryAndRevisions({
         repositoryRoot: input.repositoryRoot,
         repositoryFullName: input.repositoryFullName,
@@ -765,7 +791,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   }
 
   const tenant = {
-    installationId: input.installationId ?? 0,
+    installationId: effectiveInstallationId,
     repositoryId: effectiveRepositoryId,
     repositoryFullName: input.repositoryFullName,
     taskpackId: manifest.metadata.name,
@@ -1049,6 +1075,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           remoteUrl: input.gitRemoteUrl,
           apiBaseUrl: effectiveApiBaseUrl,
           gitWriteToken: githubToken,
+          gitCommitIdentity,
           fetchImpl: input.probeFetch,
           scrubber,
         });
@@ -1340,10 +1367,12 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
     dryRun,
     turnkey: !dryRun,
     githubApiBaseUrl: env['GITHUB_API_URL']?.trim() || undefined,
-    githubToken: env['INPUT_GITHUB-TOKEN']?.trim() || env['GITHUB_TOKEN']?.trim() || undefined,
+    githubToken: env['INPUT_GITHUB-TOKEN']?.trim() || undefined,
     githubAppId: env['INPUT_GITHUB-APP-ID']?.trim() || undefined,
     githubAppPrivateKey: env['INPUT_GITHUB-APP-PRIVATE-KEY']?.trim() || undefined,
     githubAppInstallationId: env['INPUT_GITHUB-APP-INSTALLATION-ID']?.trim() || undefined,
+    gitAuthorName: env['INPUT_GIT-AUTHOR-NAME'] || undefined,
+    gitAuthorEmail: env['INPUT_GIT-AUTHOR-EMAIL'] || undefined,
     upstreamRecordsJson: env['INPUT_UPSTREAM-RECORDS']?.trim() || undefined,
     mcpServersJson: env['INPUT_MCP-SERVERS']?.trim() || env['LOOPWRIGHT_MCP_SERVERS']?.trim() || undefined,
     gitRemoteUrl: env['INPUT_REMOTE-URL']?.trim() || undefined,

@@ -38,12 +38,15 @@ export {
   type TurnkeyActionEntrypointInput, type TurnkeyActionExecutionReport,
 } from './action.js';
 export {
-  checkManagedPrMatchesDiscoveredState, compareVersionTags, discoverTaskpackUpstreams,
-  findOpenManagedPullRequest, parseUpstreamRecordsJson, resolveGitHubToken,
-  resolveRepositoryAndRevisions,
+  checkManagedPrMatchesDiscoveredState, compareVersionTags, DEFAULT_GIT_COMMIT_IDENTITY,
+  discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
+  parseUpstreamRecordsJson, resolveGitHubAuth, resolveGitHubToken,
+  resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
+  validateGitCommitIdentity,
   type CheckManagedPrMatchesOptions, type DiscoverTaskpackUpstreamsOptions,
   type FindOpenManagedPullRequestOptions, type ManagedPullRequestInfo,
-  type ResolveActionGitHubTokenOptions, type ResolvedRepositoryAndRevisions,
+  type ResolveActionGitHubAuthOptions, type ResolveActionGitHubTokenOptions,
+  type ResolvedActionGitHubAuth, type ResolvedRepositoryAndRevisions,
   type ResolveRepositoryAndRevisionsOptions,
 } from './upstreams.js';
 export {

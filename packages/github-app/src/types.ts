@@ -836,6 +836,11 @@ export interface ModelCandidateSelectionResult {
   readonly attempts: readonly ModelCandidateProbeAttempt[];
 }
 
+export interface GitCommitIdentity {
+  readonly name: string;
+  readonly email: string;
+}
+
 export interface ActionDelegateOutcome {
   readonly ok: boolean;
   readonly detail: string;
@@ -863,6 +868,8 @@ export interface ActionEntrypointInput {
   readonly providerTokenEnv?: string | undefined;
   readonly modelsJsonPath?: string | undefined;
   readonly allowManifestCustomBaseUrl?: boolean | undefined;
+  readonly gitAuthorName?: string | undefined;
+  readonly gitAuthorEmail?: string | undefined;
   readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   readonly budgets?: TaskContract['spec']['budgets'] | undefined;

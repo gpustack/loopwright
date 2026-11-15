@@ -40,6 +40,7 @@ import {
   PROTECTED_AUTOMATION_PATHS,
   type ActionDelegateOutcome,
   type CompiledLocalCommandGate,
+  type GitCommitIdentity,
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
   type WrittenCompiledTaskpack,
@@ -48,10 +49,12 @@ import {
   assertNoSymlinkSegments,
   buildCleanGitEnv,
   COMMIT_SHA_PATTERN,
+  DEFAULT_GIT_COMMIT_IDENTITY,
   fetchBoundedText,
   isPlainRecord,
   resolveGitExecutable,
   type ManagedPullRequestInfo,
+  validateGitCommitIdentity,
   validateGitRemoteSource,
 } from './upstreams.js';
 
@@ -1338,6 +1341,7 @@ export interface NativePullRequestPublisherOptions {
   readonly remoteUrl?: string | undefined;
   readonly apiBaseUrl?: string | undefined;
   readonly gitWriteToken?: string | undefined;
+  readonly gitCommitIdentity?: GitCommitIdentity | undefined;
   readonly fetchImpl?: typeof globalThis.fetch | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly signingSecret?: string | undefined;
@@ -1617,6 +1621,9 @@ export function buildNativePullRequestBody(options: {
 export async function startNativePullRequestPublisherServer(
   options: NativePullRequestPublisherOptions,
 ): Promise<NativePullRequestPublisherServer> {
+  const commitIdentity = options.gitCommitIdentity !== undefined
+    ? validateGitCommitIdentity(options.gitCommitIdentity)
+    : DEFAULT_GIT_COMMIT_IDENTITY;
   const scrubber = options.scrubber ?? new SecretScrubber();
   const signingSecret = options.signingSecret ?? randomBytes(32).toString('hex');
   const authToken = options.authToken ?? randomBytes(32).toString('hex');
@@ -1891,12 +1898,17 @@ export async function startNativePullRequestPublisherServer(
       const treeOid = (await gitWithIndex(['write-tree'])).toString('utf8').trim();
       let headOid = baseRevision;
       if (treeOid !== baseTreeOid) {
-        const commitMessage = `${title}\n\nSigned-off-by: Loopwright Bot <loopwright[bot]@users.noreply.github.com>\n`;
+        const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
+        const normalizedTitle = title.replace(/\r\n?/g, '\n').trimEnd();
+        const hasExactSignoff = normalizedTitle.split('\n').some(line => line.trim() === signoffLine);
+        const commitMessage = hasExactSignoff
+          ? `${normalizedTitle}\n`
+          : `${normalizedTitle}\n\n${signoffLine}\n`;
         headOid = (
           await gitRepo(
             [
-              '-c', 'user.name=Loopwright Bot',
-              '-c', 'user.email=loopwright[bot]@users.noreply.github.com',
+              '-c', `user.name=${commitIdentity.name}`,
+              '-c', `user.email=${commitIdentity.email}`,
               'commit-tree',
               treeOid,
               '-p',

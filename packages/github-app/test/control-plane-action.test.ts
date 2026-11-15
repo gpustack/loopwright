@@ -551,6 +551,8 @@ describe('reusable Action entrypoint (AC-6)', () => {
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.cost-usd \}\}/);
     assert.match(actionYml, /INPUT_OUTPUT: \$\{\{ inputs\.output \}\}/);
     assert.match(actionYml, /INPUT_GITHUB-TOKEN: \$\{\{ inputs\.github-token \}\}/);
+    assert.match(actionYml, /INPUT_GIT-AUTHOR-NAME: \$\{\{ inputs\.git-author-name \}\}/);
+    assert.match(actionYml, /INPUT_GIT-AUTHOR-EMAIL: \$\{\{ inputs\.git-author-email \}\}/);
     assert.match(actionYml, /INPUT_UPSTREAM-RECORDS: \$\{\{ inputs\.upstream-records \}\}/);
 
     withEnv('LOOPWRIGHT_PROVIDER_TOKEN', 'provider-token-value');

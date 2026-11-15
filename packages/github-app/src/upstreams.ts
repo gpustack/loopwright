@@ -7,8 +7,8 @@ import { promisify } from 'node:util';
 import { createGitHubAppJwt, SecretScrubber } from './token-broker.js';
 import {
   GitHubAppError, REPOSITORY_FULL_NAME_PATTERN,
-  type TaskpackManifest, type TaskpackUpstreamDescriptor, type TaskpackUpstreamRecord,
-  type UpstreamAcquisitionStatus,
+  type GitCommitIdentity, type TaskpackManifest, type TaskpackUpstreamDescriptor,
+  type TaskpackUpstreamRecord, type UpstreamAcquisitionStatus,
 } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -97,6 +97,91 @@ export interface ResolveActionGitHubTokenOptions {
   readonly scrubber?: SecretScrubber | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly permissions?: Readonly<Record<string, 'read' | 'write'>> | undefined;
+}
+
+export interface ResolveActionGitHubAuthOptions extends ResolveActionGitHubTokenOptions {
+  readonly gitAuthorName?: string | undefined;
+  readonly gitAuthorEmail?: string | undefined;
+}
+
+export interface ResolvedActionGitHubAuth {
+  readonly token: string | undefined;
+  readonly installationId?: number | undefined;
+  readonly appSlug?: string | undefined;
+  readonly gitCommitIdentity: GitCommitIdentity;
+}
+
+export const DEFAULT_GIT_COMMIT_IDENTITY: GitCommitIdentity = Object.freeze({
+  name: 'github-actions[bot]',
+  email: '41898282+github-actions[bot]@users.noreply.github.com',
+});
+
+const MAX_GIT_IDENTITY_FIELD_LENGTH = 256;
+const SIMPLE_EMAIL_PATTERN = /^[^\s<>@]+@[^\s<>@]+$/;
+
+function hasDisallowedGitIdentityChars(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f || code === 0x3c || code === 0x3e) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function validateGitAuthorName(raw: string): string {
+  if (typeof raw !== 'string' || hasDisallowedGitIdentityChars(raw)) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      'git-author-name must not contain control characters (CR/LF/NUL) or angle brackets (< or >)',
+    );
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_GIT_IDENTITY_FIELD_LENGTH) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `git-author-name must be 1..${MAX_GIT_IDENTITY_FIELD_LENGTH} printable characters`,
+    );
+  }
+  return trimmed;
+}
+
+export function validateGitAuthorEmail(raw: string): string {
+  if (typeof raw !== 'string' || hasDisallowedGitIdentityChars(raw)) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      'git-author-email must not contain control characters (CR/LF/NUL) or angle brackets (< or >)',
+    );
+  }
+  const trimmed = raw.trim();
+  if (
+    trimmed.length === 0
+    || trimmed.length > MAX_GIT_IDENTITY_FIELD_LENGTH
+    || !SIMPLE_EMAIL_PATTERN.test(trimmed)
+  ) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `git-author-email must be a valid email address (1..${MAX_GIT_IDENTITY_FIELD_LENGTH} chars without whitespace or angle brackets)`,
+    );
+  }
+  return trimmed;
+}
+
+export function validateGitCommitIdentity(identity: GitCommitIdentity): GitCommitIdentity {
+  return Object.freeze({
+    name: validateGitAuthorName(identity.name),
+    email: validateGitAuthorEmail(identity.email),
+  });
+}
+
+export function parseOptionalGitIdentityInput(
+  explicitValue: string | undefined,
+  envValue: string | undefined,
+  validator: (raw: string) => string,
+): string | undefined {
+  const raw = explicitValue !== undefined ? explicitValue : envValue;
+  if (raw === undefined || raw === '') return undefined;
+  return validator(raw);
 }
 
 export function resolveGitExecutable(): string {
@@ -1066,82 +1151,319 @@ export async function resolveRepositoryAndRevisions(
   };
 }
 
+function parsePositiveSafeInt(raw: string | number): number | null {
+  if (typeof raw === 'number') {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+  }
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function resolveGitHubAuthInternal(
+  options: ResolveActionGitHubAuthOptions,
+  resolveCommitIdentity: boolean,
+): Promise<ResolvedActionGitHubAuth> {
+  const scrubber = options.scrubber ?? new SecretScrubber();
+  const explicitName = parseOptionalGitIdentityInput(
+    options.gitAuthorName,
+    options.env?.['INPUT_GIT-AUTHOR-NAME'],
+    validateGitAuthorName,
+  );
+  const explicitEmail = parseOptionalGitIdentityInput(
+    options.gitAuthorEmail,
+    options.env?.['INPUT_GIT-AUTHOR-EMAIL'],
+    validateGitAuthorEmail,
+  );
+  const shouldLookupDynamicIdentity = resolveCommitIdentity && (explicitName === undefined || explicitEmail === undefined);
+  const finalizeIdentity = (resolved: GitCommitIdentity): GitCommitIdentity => Object.freeze({
+    name: explicitName ?? resolved.name,
+    email: explicitEmail ?? resolved.email,
+  });
+
+  const rawPrivateKey = options.appPrivateKey?.trim() || options.env?.['INPUT_GITHUB-APP-PRIVATE-KEY']?.trim() || undefined;
+  if (rawPrivateKey !== undefined) {
+    scrubber.register(rawPrivateKey);
+  }
+  const ambientToken = options.env?.['GITHUB_TOKEN']?.trim() || undefined;
+  if (ambientToken !== undefined) {
+    scrubber.register(ambientToken);
+  }
+
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const resolveNoreplyIdentityFromUserEndpoint = async (
+    url: string,
+    bearerToken: string,
+  ): Promise<GitCommitIdentity | undefined> => {
+    try {
+      const res = await fetchJson(
+        url,
+        fetchImpl,
+        {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${bearerToken}`,
+          'user-agent': 'loopwright-github-app',
+        },
+        10_000,
+        scrubber,
+      );
+      if (!res.ok || !isPlainRecord(res.data)) return undefined;
+      const id = res.data['id'];
+      const login = res.data['login'];
+      if (
+        typeof id !== 'number'
+        || !Number.isSafeInteger(id)
+        || id <= 0
+        || typeof login !== 'string'
+        || login.trim().length === 0
+      ) {
+        return undefined;
+      }
+      const cleanLogin = login.trim();
+      return validateGitCommitIdentity({
+        name: cleanLogin,
+        email: `${id}+${cleanLogin}@users.noreply.github.com`,
+      });
+    } catch {
+      return undefined;
+    }
+  };
+
+  // 1) Explicit token input (options.githubToken / INPUT_GITHUB-TOKEN)
+  const explicitToken = options.githubToken?.trim() || options.env?.['INPUT_GITHUB-TOKEN']?.trim() || undefined;
+  if (explicitToken !== undefined) {
+    scrubber.register(explicitToken);
+    let resolvedIdentity = DEFAULT_GIT_COMMIT_IDENTITY;
+    if (shouldLookupDynamicIdentity) {
+      const explicitApiBase = (options.apiBaseUrl?.trim() || options.env?.['GITHUB_API_URL']?.trim())?.replace(/\/+$/, '');
+      if (explicitApiBase && explicitApiBase.length > 0) {
+        resolvedIdentity = (await resolveNoreplyIdentityFromUserEndpoint(`${explicitApiBase}/user`, explicitToken))
+          ?? DEFAULT_GIT_COMMIT_IDENTITY;
+      }
+    }
+    return {
+      token: explicitToken,
+      gitCommitIdentity: finalizeIdentity(resolvedIdentity),
+    };
+  }
+
+  // 2) GitHub App credentials (appId + appPrivateKey; installation ID optional via auto-discovery)
+  const rawAppId = options.appId !== undefined && (typeof options.appId === 'number' || options.appId.trim().length > 0)
+    ? options.appId
+    : (options.env?.['INPUT_GITHUB-APP-ID']?.trim() || undefined);
+  const rawInstallationId = options.appInstallationId !== undefined
+    && (typeof options.appInstallationId === 'number' || options.appInstallationId.trim().length > 0)
+    ? options.appInstallationId
+    : (options.env?.['INPUT_GITHUB-APP-INSTALLATION-ID']?.trim() || undefined);
+
+  if (rawAppId !== undefined && rawPrivateKey !== undefined) {
+    const appId = parsePositiveSafeInt(rawAppId);
+    if (appId === null) {
+      throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub App ID must be a positive integer');
+    }
+
+    let installationId: number | undefined;
+    if (rawInstallationId !== undefined) {
+      const parsedInstallationId = parsePositiveSafeInt(rawInstallationId);
+      if (parsedInstallationId === null) {
+        throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub App installation ID must be a positive integer');
+      }
+      installationId = parsedInstallationId;
+    }
+
+    const apiBaseUrl = defaultApiBaseUrl(options.apiBaseUrl, options.env);
+    const jwt = createGitHubAppJwt({
+      appId,
+      privateKeyPem: rawPrivateKey,
+      nowSeconds: Math.floor(Date.now() / 1000),
+    });
+    scrubber.register(jwt);
+
+    let appSlug: string | undefined;
+    if (installationId === undefined) {
+      const repoFullName = options.repositoryFullName?.trim() ?? '';
+      if (!REPOSITORY_FULL_NAME_PATTERN.test(repoFullName)) {
+        throw new GitHubAppError(
+          'TOKEN_BROKER_CONFIG_INVALID',
+          `repositoryFullName matching "owner/repo" is required to auto-discover GitHub App installation (got "${scrubber.scrub(repoFullName)}")`,
+        );
+      }
+      const [owner, repo] = repoFullName.split('/') as [string, string];
+      if (owner === '.' || owner === '..' || repo === '.' || repo === '..') {
+        throw new GitHubAppError(
+          'TOKEN_BROKER_CONFIG_INVALID',
+          `invalid repositoryFullName "${scrubber.scrub(repoFullName)}" for GitHub App installation lookup`,
+        );
+      }
+      const installRes = await fetchBoundedText(
+        `${apiBaseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`,
+        fetchImpl,
+        {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${jwt}`,
+          'user-agent': 'loopwright-github-app',
+        },
+        15_000,
+        scrubber,
+      );
+      if (!installRes.ok) {
+        throw new GitHubAppError(
+          'TOKEN_BROKER_CONFIG_INVALID',
+          `failed to discover GitHub App installation for ${repoFullName} (${installRes.status}): ${scrubber.scrub(installRes.text)}`,
+        );
+      }
+      let installParsed: unknown;
+      try {
+        installParsed = JSON.parse(installRes.text);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new GitHubAppError(
+          'TOKEN_BROKER_CONFIG_INVALID',
+          `invalid GitHub App installation JSON: ${scrubber.scrub(detail)}`,
+        );
+      }
+      if (
+        !isPlainRecord(installParsed)
+        || typeof installParsed['id'] !== 'number'
+        || !Number.isSafeInteger(installParsed['id'])
+        || installParsed['id'] <= 0
+      ) {
+        throw new GitHubAppError(
+          'TOKEN_BROKER_CONFIG_INVALID',
+          `GitHub App installation response for ${repoFullName} missing positive integer id`,
+        );
+      }
+      installationId = installParsed['id'];
+      if (typeof installParsed['app_slug'] === 'string' && installParsed['app_slug'].trim().length > 0) {
+        appSlug = installParsed['app_slug'].trim();
+      }
+    }
+
+    const bodyPayload: Record<string, unknown> = {};
+    if (options.permissions !== undefined) {
+      bodyPayload['permissions'] = options.permissions;
+    }
+    if (options.repositoryId !== undefined && Number.isSafeInteger(options.repositoryId) && options.repositoryId > 0) {
+      bodyPayload['repository_ids'] = [options.repositoryId];
+    } else if (options.repositoryFullName && REPOSITORY_FULL_NAME_PATTERN.test(options.repositoryFullName)) {
+      bodyPayload['repositories'] = [options.repositoryFullName.split('/')[1]];
+    }
+
+    const res = await fetchBoundedText(
+      `${apiBaseUrl}/app/installations/${installationId}/access_tokens`,
+      fetchImpl,
+      {
+        accept: 'application/vnd.github+json',
+        authorization: `Bearer ${jwt}`,
+        'content-type': 'application/json',
+        'user-agent': 'loopwright-github-app',
+      },
+      15_000,
+      scrubber,
+      { method: 'POST', body: JSON.stringify(bodyPayload) },
+    );
+    if (!res.ok) {
+      throw new GitHubAppError(
+        'TOKEN_BROKER_CONFIG_INVALID',
+        `failed to mint installation token (${res.status}): ${scrubber.scrub(res.text)}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(res.text);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `invalid GitHub App access_tokens JSON: ${scrubber.scrub(detail)}`);
+    }
+    if (!isPlainRecord(parsed) || typeof parsed['token'] !== 'string' || parsed['token'].length === 0) {
+      throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub App access_tokens response missing token');
+    }
+    const mintedToken = parsed['token'];
+    scrubber.register(mintedToken);
+
+    let resolvedIdentity = DEFAULT_GIT_COMMIT_IDENTITY;
+    if (shouldLookupDynamicIdentity) {
+      if (appSlug === undefined) {
+        try {
+          const appRes = await fetchJson(
+            `${apiBaseUrl}/app`,
+            fetchImpl,
+            {
+              accept: 'application/vnd.github+json',
+              authorization: `Bearer ${jwt}`,
+              'user-agent': 'loopwright-github-app',
+            },
+            10_000,
+            scrubber,
+          );
+          if (appRes.ok && isPlainRecord(appRes.data) && typeof appRes.data['slug'] === 'string' && appRes.data['slug'].trim().length > 0) {
+            appSlug = appRes.data['slug'].trim();
+          }
+        } catch {
+          // Best-effort lookup; fall back to default DCO-valid bot identity.
+        }
+      }
+      if (appSlug !== undefined && appSlug.length > 0) {
+        const botLogin = appSlug.endsWith('[bot]') ? appSlug : `${appSlug}[bot]`;
+        resolvedIdentity = (await resolveNoreplyIdentityFromUserEndpoint(
+          `${apiBaseUrl}/users/${encodeURIComponent(botLogin)}`,
+          mintedToken,
+        )) ?? DEFAULT_GIT_COMMIT_IDENTITY;
+      }
+    }
+
+    return {
+      token: mintedToken,
+      installationId,
+      ...(appSlug !== undefined ? { appSlug } : {}),
+      gitCommitIdentity: finalizeIdentity(resolvedIdentity),
+    };
+  }
+
+  // 3) Ambient fallback (env.GITHUB_TOKEN)
+  if (ambientToken !== undefined) {
+    let resolvedIdentity = DEFAULT_GIT_COMMIT_IDENTITY;
+    if (shouldLookupDynamicIdentity) {
+      const explicitApiBase = (options.apiBaseUrl?.trim() || options.env?.['GITHUB_API_URL']?.trim())?.replace(/\/+$/, '');
+      if (explicitApiBase && explicitApiBase.length > 0) {
+        resolvedIdentity = (await resolveNoreplyIdentityFromUserEndpoint(`${explicitApiBase}/user`, ambientToken))
+          ?? DEFAULT_GIT_COMMIT_IDENTITY;
+      }
+    }
+    return {
+      token: ambientToken,
+      gitCommitIdentity: finalizeIdentity(resolvedIdentity),
+    };
+  }
+
+  return {
+    token: undefined,
+    gitCommitIdentity: finalizeIdentity(DEFAULT_GIT_COMMIT_IDENTITY),
+  };
+}
+
 /**
- * Resolve a GitHub token either directly (`githubToken` / `GITHUB_TOKEN`) or by
- * minting an installation token from GitHub App credentials when configured.
+ * Resolve GitHub authentication credentials and a DCO-valid Git commit identity
+ * using strict precedence:
+ *   1) Explicit token (`githubToken` / `INPUT_GITHUB-TOKEN`)
+ *   2) GitHub App credentials (`appId` + `appPrivateKey`, auto-discovering installation ID when omitted)
+ *   3) Ambient `GITHUB_TOKEN` environment fallback
+ */
+export async function resolveGitHubAuth(options: ResolveActionGitHubAuthOptions): Promise<ResolvedActionGitHubAuth> {
+  return resolveGitHubAuthInternal(options, true);
+}
+
+/**
+ * Resolve a GitHub token using strict precedence: explicit token input, GitHub App
+ * installation token minting (auto-discovering installation ID when omitted), or
+ * ambient `GITHUB_TOKEN` fallback.
  */
 export async function resolveGitHubToken(options: ResolveActionGitHubTokenOptions): Promise<string | undefined> {
-  const scrubber = options.scrubber ?? new SecretScrubber();
-  const direct = options.githubToken?.trim()
-    || options.env?.['INPUT_GITHUB-TOKEN']?.trim()
-    || options.env?.['GITHUB_TOKEN']?.trim();
-  if (direct && direct.length > 0) {
-    scrubber.register(direct);
-    return direct;
-  }
-
-  const rawAppId = options.appId ?? options.env?.['INPUT_GITHUB-APP-ID']?.trim();
-  const rawPrivateKey = options.appPrivateKey ?? options.env?.['INPUT_GITHUB-APP-PRIVATE-KEY']?.trim();
-  const rawInstallationId = options.appInstallationId ?? options.env?.['INPUT_GITHUB-APP-INSTALLATION-ID']?.trim();
-  if (!rawAppId || !rawPrivateKey || !rawInstallationId) {
-    return undefined;
-  }
-
-  scrubber.register(rawPrivateKey);
-  const appId = typeof rawAppId === 'number' ? rawAppId : Number.parseInt(String(rawAppId), 10);
-  const installationId = typeof rawInstallationId === 'number' ? rawInstallationId : Number.parseInt(String(rawInstallationId), 10);
-  if (!Number.isSafeInteger(appId) || appId <= 0 || !Number.isSafeInteger(installationId) || installationId <= 0) {
-    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub App ID and installation ID must be positive integers');
-  }
-
-  const apiBaseUrl = defaultApiBaseUrl(options.apiBaseUrl, options.env);
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-  const jwt = createGitHubAppJwt({
-    appId,
-    privateKeyPem: rawPrivateKey,
-    nowSeconds: Math.floor(Date.now() / 1000),
-  });
-  const bodyPayload: Record<string, unknown> = {};
-  if (options.permissions !== undefined) {
-    bodyPayload['permissions'] = options.permissions;
-  }
-  if (options.repositoryId !== undefined && Number.isSafeInteger(options.repositoryId) && options.repositoryId > 0) {
-    bodyPayload['repository_ids'] = [options.repositoryId];
-  } else if (options.repositoryFullName && REPOSITORY_FULL_NAME_PATTERN.test(options.repositoryFullName)) {
-    bodyPayload['repositories'] = [options.repositoryFullName.split('/')[1]];
-  }
-
-  const res = await fetchBoundedText(
-    `${apiBaseUrl}/app/installations/${installationId}/access_tokens`,
-    fetchImpl,
-    {
-      accept: 'application/vnd.github+json',
-      authorization: `Bearer ${jwt}`,
-      'content-type': 'application/json',
-      'user-agent': 'loopwright-github-app',
-    },
-    15_000,
-    scrubber,
-    { method: 'POST', body: JSON.stringify(bodyPayload) },
-  );
-  if (!res.ok) {
-    throw new GitHubAppError(
-      'TOKEN_BROKER_CONFIG_INVALID',
-      `failed to mint installation token (${res.status}): ${scrubber.scrub(res.text)}`,
-    );
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(res.text);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', `invalid GitHub App access_tokens JSON: ${scrubber.scrub(detail)}`);
-  }
-  if (!isPlainRecord(parsed) || typeof parsed['token'] !== 'string' || parsed['token'].length === 0) {
-    throw new GitHubAppError('TOKEN_BROKER_CONFIG_INVALID', 'GitHub App access_tokens response missing token');
-  }
-  scrubber.register(parsed['token']);
-  return parsed['token'];
+  const resolved = await resolveGitHubAuthInternal(options, false);
+  return resolved.token;
 }
 
 export interface CheckManagedPrMatchesOptions {
