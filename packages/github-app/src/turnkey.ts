@@ -248,6 +248,11 @@ function isAllowedCandidateWrite(name: string, snapshot: InspectedCandidateSnaps
   if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
     return false;
   }
+  const lowerName = name.normalize('NFC').toLowerCase();
+  const lowerProtected = snapshot.protectedPaths.map(entry => entry.normalize('NFC').toLowerCase());
+  if (isProtectedCandidatePath(lowerName, lowerProtected)) {
+    return false;
+  }
   const writableCheck = isWritablePath(snapshot.contract, name);
   return writableCheck.ok && writableCheck.value === true;
 }
@@ -1262,6 +1267,23 @@ export async function startLocalCommandGateServer(
           baselineModes.set(entry.path, entry.mode);
         }
         const deletedPaths = snapshot.manifest.spec.deleted ?? [];
+        for (const file of snapshot.files) {
+          if (!isAllowedCandidateWrite(file.name, snapshot)) {
+            throw new GitHubAppError(
+              'TASKPACK_SCOPE_VIOLATION',
+              `candidate overlay file "${file.name}" is outside writable scope`,
+            );
+          }
+        }
+        for (const rawDeleted of deletedPaths) {
+          const deletedName = normalizeCandidateRelativePath(rawDeleted);
+          if (!isAllowedCandidateWrite(deletedName, snapshot)) {
+            throw new GitHubAppError(
+              'TASKPACK_SCOPE_VIOLATION',
+              `candidate deleted path "${deletedName}" is outside writable scope`,
+            );
+          }
+        }
         const deletedSet = new Set(deletedPaths);
         const overlayNames = new Set(snapshot.files.map(file => file.name));
         const toMaterialize = baselineEntries.filter(

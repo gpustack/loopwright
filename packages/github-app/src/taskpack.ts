@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,8 +9,8 @@ import { isOAuthOnlyPiProvider, PI_THINKING_LEVELS, resolveCatalogModel, STANDAR
 import { validateDocument, type TaskContract } from '@loopwright/core';
 import { CONTROLLER_API_VERSION, installedHandlerDigests, type ControllerConfiguration, type TrustedRegistry } from '@loopwright/controller';
 import {
-  collectMcpReferencedEnvNames, effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument,
-  pathCoveredBy, validateTaskpackLimitsDeclaration, validateTaskpackManifest, type Json,
+  assertManifestScopeInvariants, collectMcpReferencedEnvNames, effectiveProtectedPaths, normalizeRelativePath,
+  parseTaskpackDocument, pathCoveredBy, tryNormalizeRelativePath, validateTaskpackLimitsDeclaration, validateTaskpackManifest, type Json,
 } from './schema.js';
 import { loadPiModelsJson, resolveDefaultProviderTokenEnv, resolveTaskpackModelCandidates, resolveTaskpackModelSelection } from './models-config.js';
 import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
@@ -214,11 +216,187 @@ export function resolveManifestControlRoot(
 export function compileScopePatterns(
   entries: readonly string[] | undefined,
   mode: 'writable' | 'protected',
+  options?: { readonly exactEntries?: ReadonlySet<string> | undefined },
 ): readonly string[] {
   if (entries === undefined || entries.length === 0) {
     return mode === 'writable' ? Object.freeze(['**']) : Object.freeze([]);
   }
-  return Object.freeze([...new Set(entries.map(entry => `${entry}/**`))]);
+  const exactEntries = options?.exactEntries;
+  return Object.freeze([
+    ...new Set(entries.map(entry => (exactEntries?.has(entry) ? entry : `${entry}/**`))),
+  ]);
+}
+
+export interface ControlRootSiblingSet {
+  readonly prioritySiblings: readonly string[];
+  readonly regularSiblings: readonly string[];
+}
+
+/**
+ * Enumerate existing sibling entries along the `controlRoot -> dirname(proposalPath)` spine
+ * so carved-out control-root proposals preserve protected-sibling semantics (including tracked
+ * symlinks/gitlinks skipped by `freezeSource` and `listBaselineRegularEntries`, and case-colliding files).
+ */
+export function collectControlRootSiblingPaths(options: {
+  readonly repositoryRoot?: string | undefined;
+  readonly controlRoot: string;
+  readonly proposalPath: string;
+  readonly gitRevisions?: readonly string[] | undefined;
+}): ControlRootSiblingSet {
+  const empty: ControlRootSiblingSet = Object.freeze({
+    prioritySiblings: Object.freeze([]),
+    regularSiblings: Object.freeze([]),
+  });
+  if (
+    options.repositoryRoot === undefined
+    || options.repositoryRoot.trim().length === 0
+    || options.proposalPath === options.controlRoot
+    || !pathCoveredBy(options.proposalPath, options.controlRoot)
+  ) {
+    return empty;
+  }
+  const resolvedRoot = resolve(options.repositoryRoot);
+  if (!existsSync(resolvedRoot)) {
+    return empty;
+  }
+
+  const suffix = options.proposalPath.slice(options.controlRoot.length + 1);
+  const relSegments = suffix.split('/').filter(Boolean);
+  if (relSegments.length === 0) return empty;
+
+  const spineLevels: { readonly dirRel: string; readonly spineChild: string }[] = [];
+  let cursorRel = options.controlRoot;
+  for (const seg of relSegments) {
+    spineLevels.push({ dirRel: cursorRel, spineChild: seg });
+    cursorRel = `${cursorRel}/${seg}`;
+  }
+
+  const priority = new Set<string>();
+  const regular = new Set<string>();
+
+  for (const { dirRel, spineChild } of spineLevels) {
+    const dirAbs = join(resolvedRoot, ...dirRel.split('/'));
+    let dirStat: ReturnType<typeof lstatSync> | null;
+    try {
+      dirStat = lstatSync(dirAbs);
+    } catch {
+      dirStat = null;
+    }
+    if (dirStat !== null && !dirStat.isSymbolicLink() && dirStat.isDirectory()) {
+      const dirents = readdirSync(dirAbs, { withFileTypes: true });
+      const lowerSpineChild = spineChild.normalize('NFC').toLowerCase();
+      for (const dirent of dirents) {
+        if (dirent.name === spineChild) continue;
+        const childRel = `${dirRel}/${dirent.name}`;
+        if (tryNormalizeRelativePath(childRel) !== childRel) continue;
+        const isCaseCollision = dirent.name.normalize('NFC').toLowerCase() === lowerSpineChild;
+        if (dirent.isSymbolicLink() || dirent.isDirectory() || !dirent.isFile() || isCaseCollision) {
+          priority.add(childRel);
+          regular.delete(childRel);
+        } else if (!priority.has(childRel)) {
+          regular.add(childRel);
+        }
+      }
+    }
+  }
+
+  const revisions = [
+    ...new Set(
+      (options.gitRevisions ?? []).filter(
+        rev => typeof rev === 'string' && rev.trim().length > 0 && !rev.startsWith('-'),
+      ),
+    ),
+  ];
+  if (revisions.length > 0 && existsSync(join(resolvedRoot, '.git'))) {
+    const gitExecutable = existsSync('/usr/bin/git') ? '/usr/bin/git' : 'git';
+    for (const rev of revisions) {
+      for (const { dirRel, spineChild } of spineLevels) {
+        const res = spawnSync(
+          gitExecutable,
+          ['-c', 'core.hooksPath=/dev/null', 'ls-tree', '-z', `${rev}:${dirRel}`],
+          {
+            cwd: resolvedRoot,
+            env: {
+              PATH: '/usr/bin:/bin:/usr/local/bin',
+              LANG: 'C',
+              LC_ALL: 'C',
+              GIT_TERMINAL_PROMPT: '0',
+              GIT_CONFIG_NOSYSTEM: '1',
+              GIT_CONFIG_GLOBAL: '/dev/null',
+              HOME: '/nonexistent',
+            },
+            timeout: 5_000,
+            maxBuffer: 4 * 1024 * 1024,
+          },
+        );
+        if (res.status !== 0 || !res.stdout || res.stdout.byteLength === 0) continue;
+        const text = res.stdout.toString('utf8');
+        const rows = text.split('\0').filter(Boolean);
+        const lowerSpineChild = spineChild.normalize('NFC').toLowerCase();
+        for (const row of rows) {
+          const parsed = /^([0-9]{6}) ([a-z]+) [0-9a-f]+\t(.+)$/s.exec(row);
+          if (parsed === null) continue;
+          const mode = parsed[1]!;
+          const objType = parsed[2]!;
+          const entryName = parsed[3]!;
+          if (entryName === spineChild) continue;
+          const childRel = `${dirRel}/${entryName}`;
+          if (tryNormalizeRelativePath(childRel) !== childRel) continue;
+          const isCaseCollision = entryName.normalize('NFC').toLowerCase() === lowerSpineChild;
+          if (
+            mode === '120000'
+            || mode === '160000'
+            || mode === '040000'
+            || objType === 'tree'
+            || objType === 'commit'
+            || isCaseCollision
+          ) {
+            priority.add(childRel);
+            regular.delete(childRel);
+          } else if (!priority.has(childRel)) {
+            regular.add(childRel);
+          }
+        }
+      }
+    }
+  }
+
+  return Object.freeze({
+    prioritySiblings: Object.freeze([...priority].sort()),
+    regularSiblings: Object.freeze([...regular].sort()),
+  });
+}
+
+async function assertNoSymlinkAlongProposalPath(
+  repositoryRoot: string,
+  relativePath: string,
+  onInvalid: (message: string) => never,
+): Promise<void> {
+  const resolvedRoot = resolve(repositoryRoot);
+  const rootStat = await lstat(resolvedRoot).catch(() => null);
+  if (rootStat === null || rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    onInvalid('repository root must be an existing non-symlink directory');
+  }
+  const segments = relativePath.split('/').filter(Boolean);
+  let current = resolvedRoot;
+  let deepestExisting = resolvedRoot;
+  for (let i = 0; i < segments.length; i += 1) {
+    current = join(current, segments[i]!);
+    const st = await lstat(current).catch(() => null);
+    if (st === null) break;
+    if (st.isSymbolicLink()) onInvalid(`path "${relativePath}" must not contain symbolic links`);
+    if (i < segments.length - 1) {
+      if (!st.isDirectory()) onInvalid(`parent segment of "${relativePath}" is not a directory`);
+    } else if (!st.isFile() || st.nlink > 1) {
+      onInvalid(`path "${relativePath}" must be a regular non-hardlinked file when present`);
+    }
+    deepestExisting = current;
+  }
+  const realRoot = await realpath(resolvedRoot).catch(() => onInvalid('repository root does not exist'));
+  const realDeepest = await realpath(deepestExisting).catch(() => onInvalid(`path "${relativePath}" could not be resolved`));
+  if (realDeepest !== realRoot && !realDeepest.startsWith(realRoot.endsWith(sep) ? realRoot : realRoot + sep)) {
+    onInvalid(`path "${relativePath}" escapes the repository root`);
+  }
 }
 
 async function assertNoSymlinkInSubpath(
@@ -676,6 +854,35 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       }
     }
   }
+  const declaredCommandScripts = manifest.spec.verification.localChecks.flatMap(check => (
+    check.implementation === 'command.v1' && typeof check.parameters?.['script'] === 'string' && check.parameters['script'].length > 0
+      ? [check.parameters['script']]
+      : []
+  ));
+  const controlRootSiblingSet = collectControlRootSiblingPaths({
+    repositoryRoot: bindings.repositoryRoot,
+    controlRoot,
+    proposalPath: manifest.spec.proposal.path,
+    gitRevisions: [bindings.sourceRevision, bindings.baseRevision],
+  });
+  assertManifestScopeInvariants(manifest, {
+    controlRoot,
+    manifestPath,
+    commandScripts: declaredCommandScripts,
+    priorityControlRootSiblings: controlRootSiblingSet.prioritySiblings,
+    controlRootSiblings: controlRootSiblingSet.regularSiblings,
+  });
+  if (
+    bindings.repositoryRoot !== undefined
+    && bindings.repositoryRoot.trim().length > 0
+    && pathCoveredBy(manifest.spec.proposal.path, controlRoot)
+  ) {
+    await assertNoSymlinkAlongProposalPath(
+      bindings.repositoryRoot,
+      manifest.spec.proposal.path,
+      message => manifestInvalid(message, '/spec/proposal/path'),
+    );
+  }
 
   const publicationEnabled = candidate && manifest.spec.publication.mode === 'pull_request' && (!isDelegated || bindings.publicationEndpoint != null);
   const publicationEndpoint = publicationEnabled ? bindings.publicationEndpoint : undefined;
@@ -818,7 +1025,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       manifest, bindings, compiledRoles, hasManifestRoles, isDelegated, mode: 'candidate', resourceVersion, runtime, installed,
       externalGateEnv, externalGateSigningRef, localCmdGateEnv, localCmdGateSigningRef,
       publicationEnv, publicationAuthEnv, activeChecks, steps, required: [...required], gatePlans, publicationEndpoint,
-      controlRoot, manifestPath, instructionResources, localCommandGates, commandScripts,
+      controlRoot, manifestPath, instructionResources, localCommandGates, commandScripts, controlRootSiblingSet,
     });
   }
   const noChangeCheck: ActiveCheck = {
@@ -834,7 +1041,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     externalGateEnv: null, externalGateSigningRef: null, localCmdGateEnv: null, localCmdGateSigningRef: null,
     publicationEnv: null, publicationAuthEnv: null, activeChecks: [noChangeCheck], steps: noChangeSteps,
     required: [noChangeCheck.id], gatePlans: [], publicationEndpoint: undefined,
-    controlRoot, manifestPath, instructionResources, localCommandGates: [], commandScripts,
+    controlRoot, manifestPath, instructionResources, localCommandGates: [], commandScripts, controlRootSiblingSet,
   });
 }
 
@@ -864,6 +1071,7 @@ interface AssembleInput {
   readonly instructionResources: readonly CompiledInstructionResource[];
   readonly localCommandGates: readonly CompiledLocalCommandGate[];
   readonly commandScripts: readonly string[];
+  readonly controlRootSiblingSet: ControlRootSiblingSet;
 }
 
 function assemble(input: AssembleInput): CompiledTaskpack {
@@ -1167,7 +1375,13 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     manifestPath: input.manifestPath,
     instructions: manifest.spec.instructions,
     commandScripts: input.commandScripts,
+    proposalPath: manifest.spec.proposal.path,
+    priorityControlRootSiblings: input.controlRootSiblingSet.prioritySiblings,
+    controlRootSiblings: input.controlRootSiblingSet.regularSiblings,
   });
+  const exactWritableEntries = pathCoveredBy(manifest.spec.proposal.path, input.controlRoot)
+    ? new Set<string>([manifest.spec.proposal.path])
+    : undefined;
   const compiledResources = input.instructionResources.map(r => ({
     id: r.id,
     kind: r.kind,
@@ -1181,7 +1395,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       taskpack: manifest.metadata.name,
       target: { repository: bindings.repository, baseRevision: bindings.baseRevision, sourceRevision: bindings.sourceRevision, matrix: null },
       scope: {
-        writable: [...compileScopePatterns(manifest.spec.scope.writable, 'writable')],
+        writable: [...compileScopePatterns(manifest.spec.scope.writable, 'writable', { exactEntries: exactWritableEntries })],
         protected: [...compileScopePatterns(fullProtected, 'protected')],
       },
       roles: compiledRoles.map(role => ({

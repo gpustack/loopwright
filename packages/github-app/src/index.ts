@@ -5,17 +5,19 @@ export {
 } from './types.js';
 export type * from './types.js';
 export {
-  IDENTIFIER_PATTERN, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy,
+  assertManifestScopeInvariants, canCarveOutControlRootProposal, IDENTIFIER_PATTERN,
+  isControlRootProposalWritableAllowed, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy,
   effectiveProtectedPaths, validateTaskpackManifest, validateTaskpackLimitsDeclaration,
-  validateMcpServerDeclarations, collectMcpReferencedEnvNames, type Json,
+  validateMcpServerDeclarations, collectMcpReferencedEnvNames,
+  type EffectiveProtectedPathsOptions, type Json,
 } from './schema.js';
 export {
   ACTIONS_RUN_URL_PATTERN, applyLimitsToBudgets, authorizeRepositoryActor, boundDiagnosticLog,
-  compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT,
-  GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL,
+  collectControlRootSiblingPaths, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS,
+  DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL,
   INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits,
   parseActionsRunUrl, parseCommentCommand, parseEnvAndInputLimitsOverride, parseLoopwrightEnvLimits,
-  prepareTaskpackIntake, validateCommentGuidance,
+  prepareTaskpackIntake, validateCommentGuidance, type ControlRootSiblingSet,
 } from './taskpack.js';
 export {
   intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore,

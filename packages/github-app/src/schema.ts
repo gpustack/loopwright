@@ -234,9 +234,26 @@ export function normalizeRelativePath(input: unknown, path: string): string {
   return input;
 }
 
+export function tryNormalizeRelativePath(input: unknown): string | undefined {
+  if (typeof input !== 'string' || input.length === 0 || input.length > 1021) return undefined;
+  if (input.includes('\0') || input.includes('\\') || input.includes(':') || input.startsWith('/')) return undefined;
+  const segments = input.split('/');
+  if (segments.length > 64) return undefined;
+  for (const segment of segments) {
+    if (segment === '' || segment === '.' || segment === '..' || segment.endsWith('.')) return undefined;
+    if (!PATH_SEGMENT_PATTERN.test(segment)) return undefined;
+    if (RESERVED_DEVICE_NAME_PATTERN.test(segment)) return undefined;
+  }
+  return input;
+}
+
 /** True when `candidate` equals `root` or lives underneath it. */
 export function pathCoveredBy(candidate: string, root: string): boolean {
   return candidate === root || candidate.startsWith(root.endsWith('/') ? root : `${root}/`);
+}
+
+function pathCoveredByCaseInsensitive(candidate: string, root: string): boolean {
+  return pathCoveredBy(candidate.normalize('NFC').toLowerCase(), root.normalize('NFC').toLowerCase());
 }
 
 export interface EffectiveProtectedPathsOptions {
@@ -244,6 +261,94 @@ export interface EffectiveProtectedPathsOptions {
   readonly manifestPath?: string | undefined;
   readonly instructions?: readonly string[] | undefined;
   readonly commandScripts?: readonly string[] | undefined;
+  readonly proposalPath?: string | undefined;
+  readonly controlRootSiblings?: readonly string[] | undefined;
+  readonly priorityControlRootSiblings?: readonly string[] | undefined;
+}
+
+function explicitProtectedPathsWithoutControlRoot(
+  manifestProtected: readonly string[],
+  options: EffectiveProtectedPathsOptions,
+): readonly string[] {
+  const controlRoot = options.controlRoot ?? '.loopwright';
+  const baseSet = new Set<string>([
+    ...PROTECTED_AUTOMATION_PATHS,
+    `${controlRoot}/policies`,
+    `${controlRoot}/checks`,
+    `${controlRoot}/memory`,
+    `${controlRoot}/taskpack.yaml`,
+    `${controlRoot}/taskpack.yml`,
+    `${controlRoot}/taskpack.json`,
+  ]);
+  if (options.manifestPath !== undefined) baseSet.add(options.manifestPath);
+  if (options.instructions !== undefined) {
+    for (const instruction of options.instructions) baseSet.add(instruction);
+  }
+  if (options.commandScripts !== undefined) {
+    for (const script of options.commandScripts) baseSet.add(script);
+  }
+  for (const entry of manifestProtected) baseSet.add(entry);
+  if (options.priorityControlRootSiblings !== undefined) {
+    for (const sibling of options.priorityControlRootSiblings) baseSet.add(sibling);
+  }
+  if (options.controlRootSiblings !== undefined) {
+    for (const sibling of options.controlRootSiblings) {
+      if (baseSet.size >= 128) break;
+      baseSet.add(sibling);
+    }
+  }
+  return Object.freeze([...baseSet]);
+}
+
+/**
+ * True when `proposalPath` is a valid `.yaml`/`.yml`/`.json` file strictly inside `controlRoot`
+ * that does not overlap any built-in or manifest control-plane path.
+ */
+export function canCarveOutControlRootProposal(
+  proposalPath: string | undefined,
+  controlRoot: string,
+  explicitProtectedPaths: readonly string[],
+): boolean {
+  if (proposalPath === undefined) return false;
+  if (tryNormalizeRelativePath(proposalPath) !== proposalPath) return false;
+  if (tryNormalizeRelativePath(controlRoot) !== controlRoot) return false;
+  if (!/\.(?:yaml|yml|json)$/i.test(proposalPath)) return false;
+  if (proposalPath === controlRoot || !pathCoveredBy(proposalPath, controlRoot)) return false;
+  for (const protectedPath of explicitProtectedPaths) {
+    if (
+      pathCoveredBy(proposalPath, protectedPath)
+      || pathCoveredBy(protectedPath, proposalPath)
+      || pathCoveredByCaseInsensitive(proposalPath, protectedPath)
+      || pathCoveredByCaseInsensitive(protectedPath, proposalPath)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * True when `proposalPath` inside `controlRoot` is eligible for carve-out AND `writable`
+ * reaches `controlRoot` exclusively via the exact `proposalPath` file entry.
+ */
+export function isControlRootProposalWritableAllowed(
+  proposalPath: string | undefined,
+  writable: readonly string[],
+  controlRoot: string,
+  explicitProtectedPaths: readonly string[] = [],
+): boolean {
+  if (!canCarveOutControlRootProposal(proposalPath, controlRoot, explicitProtectedPaths)) return false;
+  if (writable.length === 0 || !writable.includes(proposalPath!)) return false;
+  for (const entry of writable) {
+    if (tryNormalizeRelativePath(entry) !== entry) return false;
+    if (entry === controlRoot || pathCoveredBy(controlRoot, entry) || pathCoveredByCaseInsensitive(controlRoot, entry)) {
+      return false;
+    }
+    if ((pathCoveredBy(entry, controlRoot) || pathCoveredByCaseInsensitive(entry, controlRoot)) && entry !== proposalPath) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The manifest-protected set merged with built-in automation paths and the active control root. */
@@ -252,21 +357,132 @@ export function effectiveProtectedPaths(
   options: EffectiveProtectedPathsOptions = {},
 ): readonly string[] {
   const controlRoot = options.controlRoot ?? '.loopwright';
+  const explicit = explicitProtectedPathsWithoutControlRoot(manifestProtected, options);
+  if (canCarveOutControlRootProposal(options.proposalPath, controlRoot, explicit)) {
+    return explicit;
+  }
   const items: string[] = [
     ...PROTECTED_AUTOMATION_PATHS,
     controlRoot,
-    `${controlRoot}/policies`,
-    `${controlRoot}/checks`,
-    `${controlRoot}/memory`,
-    `${controlRoot}/taskpack.yaml`,
-    `${controlRoot}/taskpack.yml`,
-    `${controlRoot}/taskpack.json`,
+    ...explicit.slice(PROTECTED_AUTOMATION_PATHS.length),
   ];
-  if (options.manifestPath !== undefined) items.push(options.manifestPath);
-  if (options.instructions !== undefined) items.push(...options.instructions);
-  if (options.commandScripts !== undefined) items.push(...options.commandScripts);
-  items.push(...manifestProtected);
   return Object.freeze([...new Set(items)]);
+}
+
+/**
+ * Re-validate `spec.scope` and `spec.proposal.path` against the resolved `(controlRoot, manifestPath)`
+ * so callers passing in-memory or JSON-roundtripped `TaskpackManifest` objects cannot bypass control-root protection.
+ */
+export function assertManifestScopeInvariants(
+  manifest: TaskpackManifest,
+  options: {
+    readonly controlRoot: string;
+    readonly manifestPath?: string | undefined;
+    readonly commandScripts?: readonly string[] | undefined;
+    readonly controlRootSiblings?: readonly string[] | undefined;
+    readonly priorityControlRootSiblings?: readonly string[] | undefined;
+    readonly allowWildcardWritableWhenControlRootProtected?: boolean | undefined;
+  },
+): readonly string[] {
+  const controlRoot = normalizeRelativePath(options.controlRoot, '/');
+  const manifestPath = options.manifestPath !== undefined ? normalizeRelativePath(options.manifestPath, '/') : undefined;
+  const proposalPath = normalizeRelativePath(manifest.spec.proposal.path, '/spec/proposal/path');
+  const rawWritable = manifest.spec.scope.writable;
+  const isSingleWildcardWritable = (
+    options.allowWildcardWritableWhenControlRootProtected === true
+    && rawWritable.length === 1
+    && rawWritable[0] === '**'
+  );
+  const writable = isSingleWildcardWritable
+    ? Object.freeze<readonly string[]>([])
+    : rawWritable.map((entry, index) => normalizeRelativePath(entry, `/spec/scope/writable/${index}`));
+  const manifestProtected = manifest.spec.scope.protected.map((entry, index) => (
+    normalizeRelativePath(entry, `/spec/scope/protected/${index}`)
+  ));
+  const instructions = manifest.spec.instructions?.map((entry, index) => (
+    normalizeRelativePath(entry, `/spec/instructions/${index}`)
+  ));
+  const commandScripts = options.commandScripts?.map((entry, index) => (
+    normalizeRelativePath(entry, `/spec/verification/localChecks/${index}/parameters/script`)
+  ));
+  const scriptPlacementProtected = effectiveProtectedPaths(manifestProtected, {
+    controlRoot,
+    manifestPath,
+    instructions,
+  });
+  for (const [index, script] of (commandScripts ?? []).entries()) {
+    if (!scriptPlacementProtected.some(protectedPath => pathCoveredBy(script, protectedPath))) {
+      throw new GitHubAppError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `command.v1 script "${script}" must reside inside a protected path`,
+        `/spec/verification/localChecks/${index}/parameters/script`,
+      );
+    }
+  }
+
+  const builtInProtected = effectiveProtectedPaths([], { controlRoot, manifestPath, proposalPath });
+  const allProtected = effectiveProtectedPaths(manifestProtected, {
+    controlRoot,
+    manifestPath,
+    instructions,
+    commandScripts,
+    proposalPath,
+    controlRootSiblings: options.controlRootSiblings,
+    priorityControlRootSiblings: options.priorityControlRootSiblings,
+  });
+  if (allProtected.length > 128) {
+    manifestInvalid('effective protected path set exceeds 128 entries', '/spec/scope/protected');
+  }
+  for (const [index, entry] of writable.entries()) {
+    const covering = allProtected.find(protectedPath => pathCoveredBy(entry, protectedPath));
+    if (covering !== undefined) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" overlaps protected path "${covering}"`, `/spec/scope/writable/${index}`);
+    }
+    if (entry === controlRoot || pathCoveredBy(controlRoot, entry) || pathCoveredByCaseInsensitive(controlRoot, entry)) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" encompasses protected control root "${controlRoot}"`, `/spec/scope/writable/${index}`);
+    }
+    if ((pathCoveredBy(entry, controlRoot) || pathCoveredByCaseInsensitive(entry, controlRoot)) && entry !== proposalPath) {
+      throw new GitHubAppError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `writable path "${entry}" inside control root "${controlRoot}" must exactly match spec.proposal.path`,
+        `/spec/scope/writable/${index}`,
+      );
+    }
+    const encompassed = builtInProtected.find(protectedPath => pathCoveredBy(protectedPath, entry));
+    if (encompassed !== undefined) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" encompasses built-in protected path "${encompassed}"`, `/spec/scope/writable/${index}`);
+    }
+  }
+  pathInsideWritable(proposalPath, writable, allProtected, '/spec/proposal/path');
+  if (
+    (pathCoveredBy(proposalPath, controlRoot) || pathCoveredByCaseInsensitive(proposalPath, controlRoot))
+    && (
+      isSingleWildcardWritable
+      || !isControlRootProposalWritableAllowed(
+        proposalPath,
+        writable,
+        controlRoot,
+        explicitProtectedPathsWithoutControlRoot(manifestProtected, {
+          controlRoot,
+          manifestPath,
+          instructions,
+          commandScripts,
+          controlRootSiblings: options.controlRootSiblings,
+          priorityControlRootSiblings: options.priorityControlRootSiblings,
+        }),
+      )
+    )
+  ) {
+    throw new GitHubAppError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `spec.proposal.path "${proposalPath}" inside control root "${controlRoot}" must be listed as an exact file in spec.scope.writable without overlapping protected control-plane paths`,
+      '/spec/proposal/path',
+    );
+  }
+  if (!/\.(?:yaml|yml|json)$/i.test(proposalPath)) {
+    manifestInvalid('spec.proposal.path must end in .yaml, .yml, or .json', '/spec/proposal/path');
+  }
+  return allProtected;
 }
 
 // ---------------------------------------------------------------------------
@@ -669,8 +885,27 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
         .map((entry, index) => normalizeRelativePath(entry, `/spec/scope/protected/${index}`));
     }
   }
-  const builtInProtected = effectiveProtectedPaths([], { controlRoot, manifestPath });
-  const protectedPaths = effectiveProtectedPaths(manifestProtected, { controlRoot, manifestPath, instructions });
+  const rawProposalObj = spec['proposal'];
+  const candidateProposalPath = (
+    rawProposalObj !== null
+    && typeof rawProposalObj === 'object'
+    && !Array.isArray(rawProposalObj)
+    && Object.hasOwn(rawProposalObj, 'path')
+  )
+    ? tryNormalizeRelativePath((rawProposalObj as Record<string, unknown>)['path'])
+    : undefined;
+  const builtInProtected = effectiveProtectedPaths([], { controlRoot, manifestPath, proposalPath: candidateProposalPath });
+  const scriptPlacementProtected = effectiveProtectedPaths(manifestProtected, {
+    controlRoot,
+    manifestPath,
+    instructions,
+  });
+  const protectedPaths = effectiveProtectedPaths(manifestProtected, {
+    controlRoot,
+    manifestPath,
+    instructions,
+    proposalPath: candidateProposalPath,
+  });
   for (const [index, entry] of writable.entries()) {
     // A writable entry may encompass manifest-declared `protected` exclusions (blacklist wins),
     // but must never live inside any effective protected path or encompass built-in/control-root paths.
@@ -678,8 +913,15 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     if (covering !== undefined) {
       throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" overlaps protected path "${covering}"`, `/spec/scope/writable/${index}`);
     }
-    if (entry === controlRoot || pathCoveredBy(controlRoot, entry)) {
+    if (entry === controlRoot || pathCoveredBy(controlRoot, entry) || pathCoveredByCaseInsensitive(controlRoot, entry)) {
       throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" encompasses protected control root "${controlRoot}"`, `/spec/scope/writable/${index}`);
+    }
+    if ((pathCoveredBy(entry, controlRoot) || pathCoveredByCaseInsensitive(entry, controlRoot)) && entry !== candidateProposalPath) {
+      throw new GitHubAppError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `writable path "${entry}" inside control root "${controlRoot}" must exactly match spec.proposal.path`,
+        `/spec/scope/writable/${index}`,
+      );
     }
     const encompassed = builtInProtected.find(protectedPath => pathCoveredBy(protectedPath, entry));
     if (encompassed !== undefined) {
@@ -714,6 +956,21 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
   const proposal = requireObject(spec['proposal'], '/spec/proposal', ['path', 'requiredFields', 'schemaVersion']);
   const proposalPath = normalizeRelativePath(proposal['path'], '/spec/proposal/path');
   pathInsideWritable(proposalPath, writable, protectedPaths, '/spec/proposal/path');
+  if (
+    (pathCoveredBy(proposalPath, controlRoot) || pathCoveredByCaseInsensitive(proposalPath, controlRoot))
+    && !isControlRootProposalWritableAllowed(
+      proposalPath,
+      writable,
+      controlRoot,
+      explicitProtectedPathsWithoutControlRoot(manifestProtected, { controlRoot, manifestPath, instructions }),
+    )
+  ) {
+    throw new GitHubAppError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `spec.proposal.path "${proposalPath}" inside control root "${controlRoot}" must be listed as an exact file in spec.scope.writable without overlapping protected control-plane paths`,
+      '/spec/proposal/path',
+    );
+  }
   if (!/\.(?:yaml|yml|json)$/i.test(proposalPath)) {
     manifestInvalid('spec.proposal.path must end in .yaml, .yml, or .json', '/spec/proposal/path');
   }
@@ -747,7 +1004,7 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
       const paramPath = `/spec/verification/localChecks/${index}/parameters`;
       const params = requireObject(check['parameters'], paramPath, ['script', 'timeoutSeconds', 'allowReadOnlyGitHubToken', 'env']);
       const script = normalizeRelativePath(params['script'], `${paramPath}/script`);
-      if (!protectedPaths.some(protectedPath => pathCoveredBy(script, protectedPath))) {
+      if (!scriptPlacementProtected.some(protectedPath => pathCoveredBy(script, protectedPath))) {
         throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `command.v1 script "${script}" must reside inside a protected path`, `${paramPath}/script`);
       }
       let explicitTimeoutSeconds: number | undefined;
@@ -801,9 +1058,32 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     manifestPath,
     instructions,
     commandScripts,
+    proposalPath,
   });
   if (allProtected.length > 128) {
     manifestInvalid('effective protected path set exceeds 128 entries', '/spec/scope/protected');
+  }
+  for (const [index, entry] of writable.entries()) {
+    const covering = allProtected.find(protectedPath => pathCoveredBy(entry, protectedPath));
+    if (covering !== undefined) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `writable path "${entry}" overlaps protected path "${covering}"`, `/spec/scope/writable/${index}`);
+    }
+  }
+  pathInsideWritable(proposalPath, writable, allProtected, '/spec/proposal/path');
+  if (
+    (pathCoveredBy(proposalPath, controlRoot) || pathCoveredByCaseInsensitive(proposalPath, controlRoot))
+    && !isControlRootProposalWritableAllowed(
+      proposalPath,
+      writable,
+      controlRoot,
+      explicitProtectedPathsWithoutControlRoot(manifestProtected, { controlRoot, manifestPath, instructions, commandScripts }),
+    )
+  ) {
+    throw new GitHubAppError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `spec.proposal.path "${proposalPath}" inside control root "${controlRoot}" must be listed as an exact file in spec.scope.writable without overlapping protected control-plane paths`,
+      '/spec/proposal/path',
+    );
   }
   const externalGates = externalGatesValue.map((item, index) => {
     const gate = requireObject(item, `/spec/verification/externalGates/${index}`, ['id', 'gateId', 'endpointId', 'required']);

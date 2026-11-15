@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   ALWAYS_PROTECTED_WORKSPACE_SUBPATHS, compileLinuxBwrapCommand, compileMacosSeatbeltProfile,
   computeSandboxSeccompProfile, executeSandboxedCommand, negotiateSandboxBackend,
-  SANDBOX_CAPABILITIES_BY_BACKEND, SECCOMP_BLOCKED_SYSCALLS,
+  resolveEffectiveTaskpackSandboxPolicy, SANDBOX_CAPABILITIES_BY_BACKEND, SECCOMP_BLOCKED_SYSCALLS,
 } from '../src/sandbox.js';
+import { loadDeclarativeTaskpack } from '../src/taskpack.js';
 import { GitHubAppError, type SandboxBackendId } from '../src/types.js';
 
 async function withTempWorkspace(run: (workspaceRoot: string, scratchDir: string) => Promise<void>): Promise<void> {
@@ -501,6 +502,294 @@ describe('real OS kernel sandbox execution (AC-1)', () => {
         timeoutMs: 150,
       });
       assert.equal(result.timedOut, true);
+    });
+  });
+
+  it('resolves and enforces sandbox policy for explicit proposal file inside .auto-sync and .loopwright control roots', async () => {
+    await withTempWorkspace(async workspaceRoot => {
+      for (const controlRoot of ['.auto-sync', '.loopwright'] as const) {
+        await mkdir(join(workspaceRoot, controlRoot, 'checks'), { recursive: true });
+        await mkdir(join(workspaceRoot, 'pack', 'cann'), { recursive: true });
+        const instructionsRel = `${controlRoot}/instructions.md`;
+        const taskpackRel = `${controlRoot}/taskpack.yaml`;
+        const proposalRel = `${controlRoot}/proposal.json`;
+        const otherRel = `${controlRoot}/other.json`;
+        const checkRel = `${controlRoot}/checks/verify.sh`;
+
+        await writeFile(join(workspaceRoot, instructionsRel), '# Immutable instructions\n', 'utf8');
+        await writeFile(join(workspaceRoot, otherRel), '{"untouched":true}\n', 'utf8');
+        await writeFile(join(workspaceRoot, checkRel), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+        const taskpackYaml = `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: sandbox-control-proposal
+spec:
+  goal:
+    candidate: Sync pack and proposal.
+    noChange: Confirm no change.
+  instructions:
+    - ${instructionsRel}
+  scope:
+    writable:
+      - ${proposalRel}
+      - pack/cann
+    protected: []
+  upstreams:
+    - id: cann
+      kind: github-release
+      source: gpustack/cann
+      watchedPaths:
+        - pack/cann
+  proposal:
+    path: ${proposalRel}
+    requiredFields:
+      - summary
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: proposal-json
+        implementation: json-artifact.v1
+        parameters:
+          path: ${proposalRel}
+      - id: verify-pack
+        implementation: command.v1
+        parameters:
+          script: ${checkRel}
+    externalGates: []
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright-sync/
+    titleTemplate: "chore: sync"
+  memory:
+    directory: ${controlRoot}/memory/sync
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+`;
+        await writeFile(join(workspaceRoot, taskpackRel), taskpackYaml, 'utf8');
+
+        const manifest = await loadDeclarativeTaskpack({
+          manifestPath: taskpackRel,
+          repositoryRoot: workspaceRoot,
+        });
+        const policy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+          workspaceRoot,
+          relativeTaskpackPath: taskpackRel,
+          env: {},
+        });
+        assert.equal(policy.controlRoot, controlRoot);
+        assert.equal(policy.proposalPath, proposalRel);
+        assert.deepEqual(policy.writablePaths, [proposalRel, 'pack/cann']);
+        assert.equal(policy.protectedPaths?.includes(controlRoot), false);
+        assert.equal(policy.protectedPaths?.includes(taskpackRel), true);
+        assert.equal(policy.protectedPaths?.includes(instructionsRel), true);
+        assert.equal(policy.protectedPaths?.includes(`${controlRoot}/checks`), true);
+        assert.equal(policy.protectedPaths?.includes(`${controlRoot}/memory`), true);
+        assert.equal(policy.protectedPaths?.includes(`${controlRoot}/policies`), true);
+
+        const seatbelt = compileMacosSeatbeltProfile(
+          policy,
+          { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+        );
+        const canonicalProposalAbs = join(workspaceRoot, proposalRel);
+        assert.equal(seatbelt.canonicalWritablePaths.includes(canonicalProposalAbs), true);
+        assert.equal(seatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, controlRoot)), false);
+        assert.equal(seatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, taskpackRel)), true);
+        assert.equal(seatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, instructionsRel)), true);
+        assert.equal(seatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, otherRel)), true);
+        assert.match(seatbelt.profileText, new RegExp(`\\(require-all \\(literal "${canonicalProposalAbs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\) \\(vnode-type REGULAR-FILE\\)\\)`));
+        assert.equal(seatbelt.profileText.includes(`(subpath "${canonicalProposalAbs}")`), false);
+
+        const bwrap = compileLinuxBwrapCommand(
+          policy,
+          { platform: 'linux', arch: 'x64', probeExecutables: false },
+        );
+        assert.equal(bwrap.canonicalWritablePaths.includes(canonicalProposalAbs), true);
+        assert.equal(bwrap.canonicalProtectedPaths.includes(join(workspaceRoot, controlRoot)), false);
+        assert.equal(bwrap.canonicalProtectedPaths.includes(join(workspaceRoot, taskpackRel)), true);
+        assert.equal(bwrap.args.includes('--bind-try'), false);
+        const bindIdx = bwrap.args.findIndex(
+          (arg, idx) => arg === '--bind' && bwrap.args[idx + 1] === canonicalProposalAbs && bwrap.args[idx + 2] === canonicalProposalAbs,
+        );
+        assert.notEqual(bindIdx, -1, 'expected --bind for exact proposal file');
+
+        // Provisioning for bwrap creates absent proposal file safely as 0o600 regular file
+        assert.equal(existsSync(canonicalProposalAbs), false);
+        compileLinuxBwrapCommand(
+          policy,
+          { platform: 'linux', arch: 'x64', probeExecutables: false },
+          { provisionExactFiles: true },
+        );
+        assert.equal(existsSync(canonicalProposalAbs), true);
+        await rm(canonicalProposalAbs, { force: true });
+
+        const negotiated = negotiateSandboxBackend(
+          policy,
+          { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+        );
+        assert.equal(negotiated.backendId, 'macos-seatbelt');
+
+        // Symlink alias and scratchDirectory bypass attempts reopening controlRoot or siblings are rejected
+        const controlAlias = join(workspaceRoot, 'alias-control');
+        const siblingAlias = join(workspaceRoot, 'alias-sibling');
+        await symlink(join(workspaceRoot, controlRoot), controlAlias);
+        await symlink(join(workspaceRoot, otherRel), siblingAlias);
+        for (const badPolicy of [
+          { ...policy, writablePaths: [proposalRel, 'alias-control'] },
+          { ...policy, writablePaths: [proposalRel, 'alias-sibling'] },
+          { ...policy, scratchDirectory: join(workspaceRoot, controlRoot) },
+          { ...policy, scratchDirectory: controlAlias },
+        ]) {
+          assert.throws(
+            () => compileMacosSeatbeltProfile(
+              badPolicy,
+              { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+            ),
+            (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+          );
+        }
+        await rm(controlAlias, { force: true });
+        await rm(siblingAlias, { force: true });
+
+        // Direct policy without proposalPath opt-in keeps .loopwright protected
+        if (controlRoot === '.loopwright') {
+          assert.throws(
+            () => compileMacosSeatbeltProfile(
+              { workspaceRoot, writablePaths: ['.loopwright/proposal.json'] },
+              { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+            ),
+            (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+          );
+          assert.throws(
+            () => compileMacosSeatbeltProfile(
+              {
+                workspaceRoot,
+                writablePaths: ['.'],
+                controlRoot: '.loopwright',
+                proposalPath: '.loopwright/proposal.json',
+              },
+              { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+            ),
+            (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+          );
+        }
+
+        // Symlinked proposalPath on disk is rejected by normalizeSandboxPolicy
+        await symlink(join(workspaceRoot, otherRel), join(workspaceRoot, proposalRel));
+        assert.throws(
+          () => compileMacosSeatbeltProfile(
+            policy,
+            { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+          ),
+          (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+        );
+        await rm(join(workspaceRoot, proposalRel), { force: true });
+
+        if (canRunKernelSandbox) {
+          const proposalAbs = join(workspaceRoot, proposalRel);
+          // Absent proposal: directory and symlink creation at proposalRel are denied by kernel
+          const mkdirAbsent = await executeSandboxedCommand({
+            policy,
+            command: '/bin/sh',
+            args: ['-c', 'mkdir "$1" && touch "$1/evil.sh"', 'sh', proposalAbs],
+          });
+          assert.notEqual(mkdirAbsent.exitCode, 0, 'expected kernel sandbox to block mkdir at proposalPath');
+          assert.equal(existsSync(join(proposalAbs, 'evil.sh')), false);
+          if (mkdirAbsent.backendId === 'macos-seatbelt') {
+            assert.equal(existsSync(proposalAbs), false);
+          } else {
+            const st = await lstat(proposalAbs);
+            assert.equal(st.isFile(), true);
+            assert.equal(st.isDirectory(), false);
+            assert.equal(st.isSymbolicLink(), false);
+            assert.equal(st.size, 0);
+            await rm(proposalAbs, { force: true });
+          }
+
+          const symlinkAbsent = await executeSandboxedCommand({
+            policy,
+            command: '/bin/sh',
+            args: ['-c', 'ln -s /etc/hosts "$1"', 'sh', proposalAbs],
+          });
+          assert.notEqual(symlinkAbsent.exitCode, 0, 'expected kernel sandbox to block symlink at proposalPath');
+          if (symlinkAbsent.backendId === 'macos-seatbelt') {
+            assert.equal(existsSync(proposalAbs), false);
+          } else {
+            const st = await lstat(proposalAbs);
+            assert.equal(st.isFile(), true);
+            assert.equal(st.isDirectory(), false);
+            assert.equal(st.isSymbolicLink(), false);
+            assert.equal(st.size, 0);
+          }
+
+          // Absent proposal: regular file creation succeeds
+          const createProposal = await executeSandboxedCommand({
+            policy,
+            command: '/bin/sh',
+            args: ['-c', 'printf \'{"summary":"created"}\\n\' > "$1"', 'sh', proposalAbs],
+          });
+          assert.equal(createProposal.exitCode, 0, createProposal.stderr);
+          assert.equal(await readFile(proposalAbs, 'utf8'), '{"summary":"created"}\n');
+
+          // Nested proposal under missing parent directory inside controlRoot succeeds without opening sibling writes
+          const nestedProposalRel = `${controlRoot}/output/proposal.json`;
+          const nestedProposalAbs = join(workspaceRoot, nestedProposalRel);
+          const nestedSiblingAbs = join(workspaceRoot, `${controlRoot}/output/sibling.json`);
+          const nestedPolicy = {
+            ...policy,
+            writablePaths: [nestedProposalRel, 'pack/cann'],
+            proposalPath: nestedProposalRel,
+          };
+          const createNested = await executeSandboxedCommand({
+            policy: nestedPolicy,
+            command: '/bin/sh',
+            args: ['-c', 'printf \'{"summary":"nested"}\\n\' > "$1"', 'sh', nestedProposalAbs],
+          });
+          assert.equal(createNested.exitCode, 0, createNested.stderr);
+          assert.equal(await readFile(nestedProposalAbs, 'utf8'), '{"summary":"nested"}\n');
+          const blockedNestedSibling = await executeSandboxedCommand({
+            policy: nestedPolicy,
+            command: '/bin/sh',
+            args: ['-c', 'printf \'{"evil":1}\\n\' > "$1"', 'sh', nestedSiblingAbs],
+          });
+          assert.notEqual(blockedNestedSibling.exitCode, 0, 'expected sibling inside nested controlRoot subdir to stay blocked');
+          assert.equal(existsSync(nestedSiblingAbs), false);
+
+          // Existing proposal: overwrite succeeds, but rm + mkdir subtree replacement is denied
+          const writeProposal = await executeSandboxedCommand({
+            policy,
+            command: '/bin/sh',
+            args: ['-c', 'printf \'{"summary":"updated"}\\n\' > "$1"', 'sh', join(workspaceRoot, proposalRel)],
+          });
+          assert.equal(writeProposal.exitCode, 0, writeProposal.stderr);
+          assert.equal(await readFile(join(workspaceRoot, proposalRel), 'utf8'), '{"summary":"updated"}\n');
+
+          const replaceWithDir = await executeSandboxedCommand({
+            policy,
+            command: '/bin/sh',
+            args: ['-c', 'rm -f "$1" && mkdir "$1" && touch "$1/evil.sh"', 'sh', join(workspaceRoot, proposalRel)],
+          });
+          assert.notEqual(replaceWithDir.exitCode, 0, 'expected Seatbelt to block replacing proposal file with directory');
+          assert.equal(existsSync(join(workspaceRoot, proposalRel, 'evil.sh')), false);
+
+          for (const blockedRel of [otherRel, taskpackRel, instructionsRel]) {
+            const target = join(workspaceRoot, blockedRel);
+            const before = await readFile(target, 'utf8');
+            const blockedRes = await executeSandboxedCommand({
+              policy,
+              command: '/bin/sh',
+              args: ['-c', 'printf "tampered" > "$1"', 'sh', target],
+            });
+            assert.notEqual(blockedRes.exitCode, 0, `expected kernel sandbox to deny writing ${blockedRel}`);
+            assert.equal(await readFile(target, 'utf8'), before);
+          }
+        }
+      }
     });
   });
 });

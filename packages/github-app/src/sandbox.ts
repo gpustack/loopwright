@@ -1,9 +1,15 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, realpathSync, statSync } from 'node:fs';
+import {
+  closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, realpathSync, statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { effectiveProtectedPaths } from './schema.js';
+import {
+  assertManifestScopeInvariants, effectiveProtectedPaths, isControlRootProposalWritableAllowed,
+  normalizeRelativePath, pathCoveredBy,
+} from './schema.js';
+import { collectControlRootSiblingPaths, resolveManifestControlRoot } from './taskpack.js';
 import { SecretScrubber } from './token-broker.js';
 import {
   GitHubAppError, PROTECTED_AUTOMATION_PATHS,
@@ -151,6 +157,10 @@ function isSameOrSubpath(candidate: string, root: string): boolean {
   return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
 
+function isSameOrSubpathCaseInsensitive(candidate: string, root: string): boolean {
+  return isSameOrSubpath(candidate.normalize('NFC').toLowerCase(), root.normalize('NFC').toLowerCase());
+}
+
 interface ResolvedHostEnvironment {
   readonly platform: string;
   readonly arch: string;
@@ -181,9 +191,60 @@ interface NormalizedSandboxPaths {
   readonly canonicalWorkspaceRoot: string;
   readonly canonicalScratchDirectory: string | null;
   readonly canonicalWritablePaths: readonly string[];
+  readonly canonicalExactWritableFiles: ReadonlySet<string>;
   readonly canonicalProtectedPaths: readonly string[];
   readonly canonicalDeniedReadPaths: readonly string[];
   readonly networkMode: SandboxNetworkMode;
+}
+
+function provisionSandboxExactWritablePaths(
+  normalized: NormalizedSandboxPaths,
+  options: { readonly createTargetFile: boolean },
+): void {
+  if (normalized.canonicalExactWritableFiles.size === 0 || !existsSync(normalized.canonicalWorkspaceRoot)) {
+    return;
+  }
+  const rootStat = lstatSync(normalized.canonicalWorkspaceRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    policyInvalid('workspaceRoot must be an existing non-symlink directory', 'workspaceRoot');
+  }
+  for (const exactFile of normalized.canonicalExactWritableFiles) {
+    if (!isSameOrSubpath(exactFile, normalized.canonicalWorkspaceRoot) || exactFile === normalized.canonicalWorkspaceRoot) {
+      policyInvalid(`exact writable file "${exactFile}" escapes workspaceRoot`, 'proposalPath');
+    }
+    const rel = exactFile.slice(normalized.canonicalWorkspaceRoot.length + 1);
+    const segments = rel.split(sep).filter(Boolean);
+    let cursor = normalized.canonicalWorkspaceRoot;
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      cursor = join(cursor, segments[i]!);
+      let parentStat: ReturnType<typeof lstatSync> | null;
+      try {
+        parentStat = lstatSync(cursor);
+      } catch {
+        parentStat = null;
+      }
+      if (parentStat === null) {
+        mkdirSync(cursor, { mode: 0o700 });
+      } else if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) {
+        policyInvalid(`parent segment of exact writable file "${exactFile}" must be a real directory`, 'proposalPath');
+      }
+    }
+    let targetStat: ReturnType<typeof lstatSync> | null;
+    try {
+      targetStat = lstatSync(exactFile);
+    } catch {
+      targetStat = null;
+    }
+    if (targetStat === null) {
+      if (options.createTargetFile) {
+        const openFlags = fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0);
+        const fd = openSync(exactFile, openFlags, 0o600);
+        closeSync(fd);
+      }
+    } else if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.nlink > 1) {
+      policyInvalid(`exact writable file "${exactFile}" must be a regular non-hardlinked file`, 'proposalPath');
+    }
+  }
 }
 
 function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEnvironment): NormalizedSandboxPaths {
@@ -206,10 +267,7 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
   }
 
   // Build protected paths first so we can check writable path overlaps against protected automation paths.
-  const protectedSubpaths = new Set<string>([
-    ...ALWAYS_PROTECTED_WORKSPACE_SUBPATHS,
-    ...PROTECTED_AUTOMATION_PATHS,
-  ]);
+  const callerProtectedRelPaths: string[] = [];
   if (policy.protectedPaths !== undefined) {
     if (!Array.isArray(policy.protectedPaths) || policy.protectedPaths.length > 128) {
       policyInvalid('protectedPaths must be an array of at most 128 paths', 'protectedPaths');
@@ -223,10 +281,134 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
         }
         const rel = canonicalProtected.slice(canonicalWorkspaceRoot.length + 1);
         if (rel.length === 0) policyInvalid('protectedPath must not be workspaceRoot itself', `protectedPaths/${index}`);
-        protectedSubpaths.add(normalizeRelativeSubpath(rel, `protectedPaths/${index}`));
+        callerProtectedRelPaths.push(normalizeRelativeSubpath(rel, `protectedPaths/${index}`));
       } else {
-        protectedSubpaths.add(normalizeRelativeSubpath(cleaned, `protectedPaths/${index}`));
+        callerProtectedRelPaths.push(normalizeRelativeSubpath(cleaned, `protectedPaths/${index}`));
       }
+    }
+  }
+
+  const effectiveControlRoot = policy.controlRoot !== undefined
+    ? normalizeRelativeSubpath(policy.controlRoot, 'controlRoot')
+    : '.loopwright';
+  const canonicalControlRoot = canonicalizeAbsolutePath(join(canonicalWorkspaceRoot, effectiveControlRoot), 'controlRoot');
+  const normalizedProposalPath = policy.proposalPath !== undefined
+    ? normalizeRelativeSubpath(policy.proposalPath, 'proposalPath')
+    : undefined;
+
+  let omitBareControlRootProtection = false;
+  let canonicalProposalFile: string | null = null;
+  let discoveredSiblings: { readonly prioritySiblings: readonly string[]; readonly regularSiblings: readonly string[] } = {
+    prioritySiblings: [],
+    regularSiblings: [],
+  };
+  if (normalizedProposalPath !== undefined) {
+    discoveredSiblings = collectControlRootSiblingPaths({
+      repositoryRoot: canonicalWorkspaceRoot,
+      controlRoot: effectiveControlRoot,
+      proposalPath: normalizedProposalPath,
+    });
+    const workspaceRelativeWritables: string[] = [];
+    for (const [index, entry] of policy.writablePaths.entries()) {
+      const cleaned = assertCleanPathString(entry, `writablePaths/${index}`);
+      if (cleaned === '.' || cleaned === '**') {
+        workspaceRelativeWritables.push(cleaned);
+        continue;
+      }
+      if (isAbsolute(cleaned)) {
+        const canonicalEntry = canonicalizeAbsolutePath(cleaned, `writablePaths/${index}`);
+        if (isSameOrSubpath(canonicalEntry, canonicalWorkspaceRoot)) {
+          if (canonicalEntry === canonicalWorkspaceRoot) {
+            workspaceRelativeWritables.push('.');
+          } else {
+            const rel = canonicalEntry.slice(canonicalWorkspaceRoot.length + 1).split(sep).join('/');
+            workspaceRelativeWritables.push(rel);
+          }
+        }
+      } else {
+        workspaceRelativeWritables.push(normalizeRelativeSubpath(cleaned, `writablePaths/${index}`));
+      }
+    }
+    const explicitControlProtected: string[] = [
+      ...ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.filter(
+        sub => sub !== '.loopwright' || effectiveControlRoot !== '.loopwright',
+      ),
+      ...PROTECTED_AUTOMATION_PATHS,
+      `${effectiveControlRoot}/policies`,
+      `${effectiveControlRoot}/checks`,
+      `${effectiveControlRoot}/memory`,
+      `${effectiveControlRoot}/taskpack.yaml`,
+      `${effectiveControlRoot}/taskpack.yml`,
+      `${effectiveControlRoot}/taskpack.json`,
+      ...callerProtectedRelPaths,
+      ...discoveredSiblings.prioritySiblings,
+    ];
+    if (
+      !isControlRootProposalWritableAllowed(
+        normalizedProposalPath,
+        workspaceRelativeWritables,
+        effectiveControlRoot,
+        explicitControlProtected,
+      )
+    ) {
+      policyInvalid(
+        `proposalPath "${policy.proposalPath}" is not permitted as a carved-out control-root writable file`,
+        'proposalPath',
+      );
+    }
+    if (existsSync(canonicalWorkspaceRoot)) {
+      const segments = normalizedProposalPath.split('/');
+      let cursor = canonicalWorkspaceRoot;
+      for (let i = 0; i < segments.length; i += 1) {
+        cursor = join(cursor, segments[i]!);
+        let st: ReturnType<typeof lstatSync> | null;
+        try {
+          st = lstatSync(cursor);
+        } catch {
+          st = null;
+        }
+        if (st === null) break;
+        if (st.isSymbolicLink()) {
+          policyInvalid(`proposalPath "${policy.proposalPath}" must not traverse or target symbolic links`, 'proposalPath');
+        }
+        if (i < segments.length - 1) {
+          if (!st.isDirectory()) {
+            policyInvalid(`parent segment of proposalPath "${policy.proposalPath}" is not a directory`, 'proposalPath');
+          }
+        } else if (!st.isFile() || st.nlink > 1) {
+          policyInvalid(`proposalPath "${policy.proposalPath}" must be a regular non-hardlinked file when present`, 'proposalPath');
+        }
+      }
+    }
+    canonicalProposalFile = canonicalizeAbsolutePath(join(canonicalWorkspaceRoot, normalizedProposalPath), 'proposalPath');
+    if (!isSameOrSubpath(canonicalProposalFile, canonicalControlRoot) || canonicalProposalFile === canonicalControlRoot) {
+      policyInvalid(`proposalPath "${policy.proposalPath}" escapes controlRoot "${effectiveControlRoot}"`, 'proposalPath');
+    }
+    omitBareControlRootProtection = true;
+  }
+
+  const protectedSubpaths = new Set<string>([
+    ...(omitBareControlRootProtection && effectiveControlRoot === '.loopwright'
+      ? ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.filter(sub => sub !== '.loopwright')
+      : ALWAYS_PROTECTED_WORKSPACE_SUBPATHS),
+    ...PROTECTED_AUTOMATION_PATHS,
+    ...(omitBareControlRootProtection
+      ? [
+        `${effectiveControlRoot}/policies`,
+        `${effectiveControlRoot}/checks`,
+        `${effectiveControlRoot}/memory`,
+        `${effectiveControlRoot}/taskpack.yaml`,
+        `${effectiveControlRoot}/taskpack.yml`,
+        `${effectiveControlRoot}/taskpack.json`,
+        ...discoveredSiblings.prioritySiblings,
+      ]
+      : [effectiveControlRoot]),
+    ...callerProtectedRelPaths,
+  ]);
+  if (omitBareControlRootProtection) {
+    for (const sibling of discoveredSiblings.regularSiblings) {
+      if (protectedSubpaths.size >= 128) break;
+      protectedSubpaths.add(sibling);
     }
   }
 
@@ -235,6 +417,51 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
     canonicalProtectedSet.add(canonicalizeAbsolutePath(join(canonicalWorkspaceRoot, rel), `protectedPaths/${rel}`));
   }
   const canonicalProtectedPaths = Object.freeze([...canonicalProtectedSet].sort());
+
+  const assertCanonicalGrantAllowed = (canonicalGrant: string, label: string, checkEncompassedProtected: boolean): void => {
+    for (const protectedPath of canonicalProtectedPaths) {
+      if (isSameOrSubpath(canonicalGrant, protectedPath)) {
+        policyInvalid(`${label} targets protected path "${protectedPath}"`, label);
+      }
+      if (checkEncompassedProtected && isSameOrSubpath(protectedPath, canonicalGrant)) {
+        policyInvalid(`${label} encompasses protected path "${protectedPath}"`, label);
+      }
+    }
+    if (canonicalProposalFile !== null) {
+      if (
+        isSameOrSubpath(canonicalControlRoot, canonicalGrant)
+        || isSameOrSubpathCaseInsensitive(canonicalControlRoot, canonicalGrant)
+      ) {
+        policyInvalid(
+          `${label} canonicalizes to "${canonicalGrant}", encompassing protected control root "${canonicalControlRoot}"`,
+          label,
+        );
+      }
+      if (
+        (isSameOrSubpath(canonicalGrant, canonicalControlRoot)
+          || isSameOrSubpathCaseInsensitive(canonicalGrant, canonicalControlRoot))
+        && canonicalGrant !== canonicalProposalFile
+      ) {
+        policyInvalid(
+          `${label} canonicalizes to "${canonicalGrant}" inside control root "${canonicalControlRoot}" outside "${canonicalProposalFile}"`,
+          label,
+        );
+      }
+    }
+  };
+
+  if (canonicalProposalFile !== null) {
+    for (const protectedPath of canonicalProtectedPaths) {
+      if (
+        isSameOrSubpath(canonicalProposalFile, protectedPath)
+        || isSameOrSubpath(protectedPath, canonicalProposalFile)
+        || isSameOrSubpathCaseInsensitive(canonicalProposalFile, protectedPath)
+        || isSameOrSubpathCaseInsensitive(protectedPath, canonicalProposalFile)
+      ) {
+        policyInvalid(`proposalPath "${policy.proposalPath}" overlaps protected path "${protectedPath}"`, 'proposalPath');
+      }
+    }
+  }
 
   const canonicalWritableSet = new Set<string>();
   for (const [index, entry] of policy.writablePaths.entries()) {
@@ -255,18 +482,17 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
       policyInvalid(`writablePath "${entry}" escapes workspaceRoot`, `writablePaths/${index}`);
     }
 
-    // Reject any writable path that directly targets or lives inside a protected path.
-    for (const protectedPath of canonicalProtectedPaths) {
-      if (isSameOrSubpath(canonicalWritable, protectedPath)) {
-        policyInvalid(`writablePath "${entry}" targets protected path "${protectedPath}"`, `writablePaths/${index}`);
-      }
-    }
+    assertCanonicalGrantAllowed(canonicalWritable, `writablePaths/${index}`, false);
     canonicalWritableSet.add(canonicalWritable);
   }
   if (canonicalScratchDirectory !== null) {
+    assertCanonicalGrantAllowed(canonicalScratchDirectory, 'scratchDirectory', true);
     canonicalWritableSet.add(canonicalScratchDirectory);
   }
   const canonicalWritablePaths = Object.freeze([...canonicalWritableSet].sort());
+  const canonicalExactWritableFiles: ReadonlySet<string> = new Set(
+    canonicalProposalFile !== null ? [canonicalProposalFile] : [],
+  );
 
   // Build denied read paths from homeDirectory defaults + caller deniedReadPaths.
   const deniedSet = new Set<string>();
@@ -316,6 +542,7 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
     canonicalWorkspaceRoot,
     canonicalScratchDirectory,
     canonicalWritablePaths,
+    canonicalExactWritableFiles,
     canonicalProtectedPaths,
     canonicalDeniedReadPaths: Object.freeze(filteredDenied),
     networkMode,
@@ -388,7 +615,11 @@ export function compileMacosSeatbeltProfile(
   lines.push('  (literal "/dev/zero")');
   lines.push('  (literal "/dev/dtracehelper")');
   for (const writablePath of normalized.canonicalWritablePaths) {
-    lines.push(`  (subpath "${writablePath}")`);
+    if (normalized.canonicalExactWritableFiles.has(writablePath)) {
+      lines.push(`  (require-all (literal "${writablePath}") (vnode-type REGULAR-FILE))`);
+    } else {
+      lines.push(`  (subpath "${writablePath}")`);
+    }
   }
   lines.push(')');
 
@@ -450,7 +681,11 @@ export function computeSandboxSeccompProfile(): { readonly json: string; readonl
 export function compileLinuxBwrapCommand(
   policy: SandboxPolicyInput,
   host?: SandboxHostEnvironment,
-  options?: { readonly cwd?: string | undefined; readonly env?: Readonly<Record<string, string>> | undefined },
+  options?: {
+    readonly cwd?: string | undefined;
+    readonly env?: Readonly<Record<string, string>> | undefined;
+    readonly provisionExactFiles?: boolean | undefined;
+  },
 ): CompiledLinuxBwrapCommand {
   const env = resolveHostEnvironment(host);
   const executablePath = env.bwrapExecutable ?? TRUSTED_BWRAP_PATHS[0]!;
@@ -458,6 +693,9 @@ export function compileLinuxBwrapCommand(
     throw new GitHubAppError('SANDBOX_BACKEND_UNAVAILABLE', `untrusted Linux bwrap executable "${executablePath}"`, 'bwrapExecutable');
   }
   const normalized = normalizeSandboxPolicy(policy, env);
+  if (options?.provisionExactFiles ?? env.probeExecutables) {
+    provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
+  }
   const args: string[] = ['--unshare-all'];
   if (normalized.networkMode === 'allow-outbound') {
     args.push('--share-net');
@@ -635,7 +873,11 @@ export function negotiateSandboxBackend(
         capabilityFailure ??= `linux-bwrap lacks required capabilities: ${missing.join(', ')}`;
         continue;
       }
-      const compiled = compileLinuxBwrapCommand(policy, { ...env, bwrapExecutable: executable });
+      const compiled = compileLinuxBwrapCommand(
+        policy,
+        { ...env, bwrapExecutable: executable },
+        { provisionExactFiles: false },
+      );
       return Object.freeze({
         backendId: 'linux-bwrap',
         executablePath: executable,
@@ -846,12 +1088,16 @@ def grant_tree(current, excluded_set, access):
 denied_reads = {p for p in cfg.get("deniedReadPaths", []) if os.path.exists(p)}
 protected_writes = {p for p in cfg.get("protectedPaths", []) if os.path.exists(p)} | denied_reads
 writable_paths = cfg.get("writablePaths", [])
+exact_writable_files = set(cfg.get("exactWritableFiles", []))
 
 grant_tree("/", denied_reads, READ_ACCESS)
 for dev in ("/dev/null", "/dev/zero"):
     add_path_rule(dev, READ_ACCESS | WRITE_FILE_ACCESS)
 for wp in writable_paths:
-    if os.path.exists(wp):
+    if wp in exact_writable_files:
+        if os.path.isfile(wp) and not os.path.islink(wp):
+            add_path_rule(wp, READ_ACCESS | WRITE_FILE_ACCESS)
+    elif os.path.exists(wp):
         grant_tree(wp, protected_writes, READ_ACCESS | WRITE_DIR_ACCESS)
 
 if libc.syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0:
@@ -913,18 +1159,25 @@ export async function executeSandboxedCommand(input: SandboxedCommandInput): Pro
   let spawnArgs: readonly string[];
 
   if (negotiated.backendId === 'macos-seatbelt') {
+    provisionSandboxExactWritablePaths(normalized, { createTargetFile: false });
     const compiled = compileMacosSeatbeltProfile(input.policy, env);
     spawnExecutable = compiled.executablePath;
     spawnArgs = ['-p', compiled.profileText, '--', input.command, ...(input.args ?? [])];
   } else if (negotiated.backendId === 'linux-bwrap') {
-    const compiled = compileLinuxBwrapCommand(input.policy, env, { cwd: targetCwd, env: sanitizedEnv });
+    const compiled = compileLinuxBwrapCommand(input.policy, env, {
+      cwd: targetCwd,
+      env: sanitizedEnv,
+      provisionExactFiles: true,
+    });
     spawnExecutable = compiled.executablePath;
     spawnArgs = [...compiled.args, '--', input.command, ...(input.args ?? [])];
   } else if (negotiated.backendId === 'linux-landlock') {
+    provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
     spawnExecutable = negotiated.executablePath!;
     const landlockConfig = JSON.stringify({
       workspaceRoot: normalized.canonicalWorkspaceRoot,
       writablePaths: normalized.canonicalWritablePaths,
+      exactWritableFiles: [...normalized.canonicalExactWritableFiles],
       protectedPaths: normalized.canonicalProtectedPaths,
       deniedReadPaths: normalized.canonicalDeniedReadPaths,
       networkMode: normalized.networkMode,
@@ -1046,28 +1299,61 @@ export function resolveEffectiveTaskpackSandboxPolicy(
   manifest: TaskpackManifest,
   options: ResolveTaskpackSandboxOptions,
 ): SandboxPolicyInput {
+  const resolvedControl = options.controlRoot !== undefined
+    ? {
+      controlRoot: normalizeRelativePath(options.controlRoot, '/controlRoot'),
+      ...(options.relativeTaskpackPath !== undefined
+        ? { manifestPath: normalizeRelativePath(options.relativeTaskpackPath, '/relativeTaskpackPath') }
+        : manifest.manifestPath !== undefined
+          ? { manifestPath: manifest.manifestPath }
+          : {}),
+    }
+    : resolveManifestControlRoot(manifest, options.relativeTaskpackPath);
+  const commandScripts = manifest.spec.verification.localChecks
+    .flatMap(check => (
+      check.implementation === 'command.v1' && typeof check.parameters?.['script'] === 'string' && check.parameters['script'].length > 0
+        ? [check.parameters['script']]
+        : []
+    ));
+  const controlRootSiblingSet = collectControlRootSiblingPaths({
+    repositoryRoot: options.workspaceRoot,
+    controlRoot: resolvedControl.controlRoot,
+    proposalPath: manifest.spec.proposal.path,
+  });
+  assertManifestScopeInvariants(manifest, {
+    controlRoot: resolvedControl.controlRoot,
+    manifestPath: resolvedControl.manifestPath,
+    commandScripts,
+    priorityControlRootSiblings: controlRootSiblingSet.prioritySiblings,
+    controlRootSiblings: controlRootSiblingSet.regularSiblings,
+    allowWildcardWritableWhenControlRootProtected: true,
+  });
   const writablePaths = manifest.spec.scope.writable.length === 0 ||
     (manifest.spec.scope.writable.length === 1 && manifest.spec.scope.writable[0] === '**')
     ? ['.']
     : [...manifest.spec.scope.writable];
-  const commandScripts = manifest.spec.verification.localChecks
-    .flatMap(check => (
-      check.implementation === 'command.v1' && typeof check.parameters?.['script'] === 'string'
-        ? [check.parameters['script']]
-        : []
-    ));
   const protectedPaths = effectiveProtectedPaths(manifest.spec.scope.protected, {
-    controlRoot: options.controlRoot ?? manifest.controlRoot,
-    manifestPath: options.relativeTaskpackPath ?? manifest.manifestPath,
+    controlRoot: resolvedControl.controlRoot,
+    manifestPath: resolvedControl.manifestPath,
     instructions: manifest.spec.instructions,
     commandScripts,
+    proposalPath: manifest.spec.proposal.path,
+    priorityControlRootSiblings: controlRootSiblingSet.prioritySiblings,
+    controlRootSiblings: controlRootSiblingSet.regularSiblings,
   });
+  const proposalInControlRoot = pathCoveredBy(manifest.spec.proposal.path, resolvedControl.controlRoot);
 
   const basePolicy: SandboxPolicyInput = {
     workspaceRoot: options.workspaceRoot,
     ...(options.scratchDirectory !== undefined ? { scratchDirectory: options.scratchDirectory } : {}),
     writablePaths,
     protectedPaths,
+    ...(proposalInControlRoot
+      ? {
+        controlRoot: resolvedControl.controlRoot,
+        proposalPath: manifest.spec.proposal.path,
+      }
+      : {}),
   };
 
   if (manifest.spec.sandbox !== undefined) {

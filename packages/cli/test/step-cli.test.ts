@@ -1415,3 +1415,169 @@ test('step-cli: in-process cliMain exercises runStepCommand branches cleanly', a
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot while rejecting sibling and control-plane mutations', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'lw-step-autosync-proposal-')));
+  const repoRoot = join(root, 'repo');
+  const runRoot = join(root, 'runs');
+  try {
+    await mkdir(join(repoRoot, '.auto-sync', 'checks'), { recursive: true, mode: 0o700 });
+    await mkdir(join(repoRoot, 'pack', 'cann'), { recursive: true, mode: 0o700 });
+    await writeFile(join(repoRoot, '.auto-sync', 'instructions.md'), '# Auto-sync Instructions\n', { mode: 0o600 });
+    await writeFile(join(repoRoot, '.auto-sync', 'other.json'), '{"sibling":true}\n', { mode: 0o600 });
+    await symlink('../pack/cann/upstream-versions.json', join(repoRoot, '.auto-sync', 'source-link.json'));
+    await writeFile(join(repoRoot, 'pack', 'cann', 'upstream-versions.json'), JSON.stringify({ version: '2.0.0' }), { mode: 0o600 });
+    await writeFile(join(repoRoot, 'pack', 'cann', 'version.txt'), '1.0.0\n', { mode: 0o600 });
+    await writeFile(
+      join(repoRoot, '.auto-sync', 'verify.sh'),
+      '#!/bin/sh\ntest -f .auto-sync/proposal.json && grep -q \'"ready"\' .auto-sync/proposal.json\n',
+      { mode: 0o755 },
+    );
+    const taskpackDoc = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'autosync-step-proposal' },
+      spec: {
+        goal: {
+          candidate: 'Update .auto-sync/proposal.json and pack/cann/version.txt.',
+          noChange: 'Confirm no changes needed.',
+        },
+        instructions: ['.auto-sync/instructions.md'],
+        limits: {
+          maxAttempts: 1,
+        },
+        scope: {
+          writable: ['.auto-sync/proposal.json', 'pack/cann'],
+          protected: [],
+        },
+        roles: [
+          { id: 'author', provider: 'antigravity', model: 'gemini-4-default', thinking: 'low' },
+        ],
+        upstreams: [
+          { id: 'cann', kind: 'custom-table', source: 'pack/cann/upstream-versions.json', watchedPaths: ['pack/cann'] },
+        ],
+        proposal: {
+          path: '.auto-sync/proposal.json',
+          requiredFields: ['schema_version', 'candidates'],
+          schemaVersion: 1,
+        },
+        verification: {
+          localChecks: [
+            { id: 'proposal-json', implementation: 'json-artifact.v1' },
+            { id: 'cmd-check', implementation: 'command.v1', parameters: { script: '.auto-sync/verify.sh', timeoutSeconds: 10 } },
+          ],
+          externalGates: [],
+        },
+        publication: {
+          mode: 'disabled',
+          targetBranch: 'main',
+          headBranchPrefix: 'loopwright-cann-',
+          titleTemplate: 'chore(cann): sync',
+        },
+        memory: {
+          directory: '.auto-sync/memory/cann',
+          apply: 'separate-pull-request',
+          onNoModelBudget: 'deterministic-observations-only',
+        },
+        triggers: {
+          schedule: true,
+          workflowDispatch: true,
+          releasePublished: false,
+          commentCommands: ['retry'],
+        },
+      },
+    };
+    await writeFile(join(repoRoot, '.auto-sync', 'taskpack.yaml'), serializePrettyYaml(taskpackDoc), { mode: 0o600 });
+    const git = (args: string[]) =>
+      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        cwd: repoRoot,
+        env: {
+          PATH: '/usr/bin:/bin',
+          LANG: 'C',
+          LC_ALL: 'C',
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          HOME: '/nonexistent',
+          GIT_TERMINAL_PROMPT: '0',
+        },
+        encoding: 'utf8',
+      });
+    git(['init', '-q']);
+    git(['add', '.']);
+    git(['-c', 'user.name=Taskpack CLI', '-c', 'user.email=tp@localhost.invalid', 'commit', '-qm', 'init']);
+
+    // 1. Positive: writing .auto-sync/proposal.json + pack/cann/version.txt settles accepted
+    const okNext = runCli([
+      'step', 'next', '--taskpack', '.auto-sync/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'autosync-ok', '--json',
+    ]);
+    assert.equal(okNext.status, 0, okNext.stdout + okNext.stderr);
+    const okEnv = parseNdjson(okNext.stdout)[0]!;
+    const okCandidateDir = okEnv.data['candidateDir'] as string;
+    await writeFile(
+      join(okCandidateDir, '.auto-sync', 'proposal.json'),
+      JSON.stringify({ schema_version: 1, candidates: ['ready'] }),
+      { mode: 0o600 },
+    );
+    await writeFile(join(okCandidateDir, 'pack', 'cann', 'version.txt'), '2.0.0\n', { mode: 0o600 });
+    const okSubmit = runCli([
+      'step', 'submit', '--run-root', runRoot, '--run-id', 'autosync-ok',
+      '--lease', okEnv.data['leaseToken'] as string, '--json',
+    ]);
+    assert.equal(okSubmit.status, 0, okSubmit.stdout + okSubmit.stderr);
+    const okSubmitEnv = parseNdjson(okSubmit.stdout)[0]!;
+    assert.equal(okSubmitEnv.kind, 'result');
+    const okResult = okSubmitEnv.data['result'] as { spec: { status: string } };
+    assert.equal(okResult.spec.status, 'completed');
+
+    // 2. Negative: writing unlisted sibling .auto-sync/other.json or tampering .auto-sync/instructions.md or .auto-sync/taskpack.yaml is rejected
+    for (const [caseId, violate] of [
+      ['autosync-bad-sibling', async (dir: string) => {
+        await chmod(join(dir, '.auto-sync', 'other.json'), 0o600);
+        await writeFile(join(dir, '.auto-sync', 'other.json'), '{"sibling":"tampered"}\n', { mode: 0o600 });
+      }],
+      ['autosync-bad-instr', async (dir: string) => {
+        await chmod(join(dir, '.auto-sync', 'instructions.md'), 0o600);
+        await writeFile(join(dir, '.auto-sync', 'instructions.md'), '# Tampered\n', { mode: 0o600 });
+      }],
+      ['autosync-bad-taskpack', async (dir: string) => {
+        await chmod(join(dir, '.auto-sync', 'taskpack.yaml'), 0o600);
+        await writeFile(join(dir, '.auto-sync', 'taskpack.yaml'), 'tampered: true\n', { mode: 0o600 });
+      }],
+    ] as const) {
+      const badNext = runCli([
+        'step', 'next', '--taskpack', '.auto-sync/taskpack.yaml',
+        '--repo', repoRoot, '--run-root', runRoot, '--run-id', caseId, '--json',
+      ]);
+      assert.equal(badNext.status, 0, badNext.stdout + badNext.stderr);
+      const badEnv = parseNdjson(badNext.stdout)[0]!;
+      const badCandidateDir = badEnv.data['candidateDir'] as string;
+      // Materialized control-plane and sibling files start read-only (0o400)
+      assert.equal((await lstat(join(badCandidateDir, '.auto-sync', 'taskpack.yaml'))).mode & 0o222, 0);
+      assert.equal((await lstat(join(badCandidateDir, '.auto-sync', 'instructions.md'))).mode & 0o222, 0);
+      assert.equal((await lstat(join(badCandidateDir, '.auto-sync', 'other.json'))).mode & 0o222, 0);
+
+      await writeFile(
+        join(badCandidateDir, '.auto-sync', 'proposal.json'),
+        JSON.stringify({ schema_version: 1, candidates: ['ready'] }),
+        { mode: 0o600 },
+      );
+      await violate(badCandidateDir);
+
+      const badSubmit = runCli([
+        'step', 'submit', '--run-root', runRoot, '--run-id', caseId,
+        '--lease', badEnv.data['leaseToken'] as string, '--json',
+      ]);
+      assert.notEqual(badSubmit.status, 0, `expected ${caseId} to be rejected: ${badSubmit.stdout}`);
+      const badSubmitEnv = parseNdjson(badSubmit.stdout)[0]!;
+      if (badSubmitEnv.kind === 'result') {
+        const badResult = badSubmitEnv.data['result'] as { spec: { status: string } };
+        assert.notEqual(badResult.spec.status, 'completed', `expected ${caseId} not to complete`);
+      } else {
+        assert.equal(badSubmitEnv.kind, 'diagnostic');
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

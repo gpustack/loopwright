@@ -318,6 +318,8 @@ export interface SandboxPolicyInput {
   readonly workspaceRoot: string;
   readonly writablePaths: readonly string[];
   readonly protectedPaths?: readonly string[] | undefined;
+  readonly controlRoot?: string | undefined;
+  readonly proposalPath?: string | undefined;
   readonly deniedReadPaths?: readonly string[] | undefined;
   readonly scratchDirectory?: string | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;

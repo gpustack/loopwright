@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
-import { validateDocument } from '@loopwright/core';
+import { isWritablePath, validateDocument } from '@loopwright/core';
 import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
 import { compileDeclarativeTaskpack, compileScopePatterns, authorizeRepositoryActor, boundDiagnosticLog, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand, prepareTaskpackIntake, resolveManifestControlRoot, stageCompiledInstructionResources, validateCommentGuidance } from '../src/taskpack.js';
 import { effectiveProtectedPaths, parseTaskpackDocument, validateTaskpackManifest, type Json } from '../src/schema.js';
@@ -1838,6 +1838,371 @@ spec:
           (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
         );
       }
+    });
+  });
+});
+
+describe('explicit spec.proposal.path file inside controlRoot', () => {
+  it('allows an exact proposal file inside .auto-sync and .loopwright while protecting all control-plane and sibling paths', async () => {
+    await withSandbox(async root => {
+      withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
+      withEnv('TASKPACK_TEST_LOCAL_GATE_SECRET', 'local-gate-secret-value');
+      withEnv('TASKPACK_TEST_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+
+      await mkdir(join(root, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(root, 'pack', 'cann'), { recursive: true });
+      await writeFile(join(root, '.auto-sync', 'instructions.md'), '# Sync Instructions\n', 'utf8');
+      await writeFile(join(root, '.auto-sync', 'checks', 'verify.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      await writeFile(join(root, '.auto-sync', 'other.json'), '{"sibling":true}\n', 'utf8');
+
+      const autoSyncTaskpackYaml = `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: cann-sync
+spec:
+  goal:
+    candidate: Sync pack/cann and update .auto-sync/proposal.json.
+    noChange: Confirm pack/cann is up to date.
+  instructions:
+    - .auto-sync/instructions.md
+  scope:
+    writable:
+      - .auto-sync/proposal.json
+      - pack/cann
+    protected: []
+  upstreams:
+    - id: cann
+      kind: github-release
+      source: gpustack/cann
+      watchedPaths:
+        - pack/cann
+  proposal:
+    path: .auto-sync/proposal.json
+    requiredFields:
+      - summary
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: proposal-json
+        implementation: json-artifact.v1
+        parameters:
+          path: .auto-sync/proposal.json
+      - id: verify-pack
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/verify.sh
+    externalGates: []
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright-cann/
+    titleTemplate: "chore(cann): sync upstream"
+  memory:
+    directory: .auto-sync/memory/cann-sync
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: true
+    commentCommands:
+      - retry
+`;
+      await writeFile(join(root, '.auto-sync', 'taskpack.yaml'), autoSyncTaskpackYaml, 'utf8');
+
+      const loaded = await loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: root,
+      });
+      assert.equal(loaded.controlRoot, '.auto-sync');
+      assert.equal(loaded.spec.proposal.path, '.auto-sync/proposal.json');
+
+      const protectedSet = effectiveProtectedPaths(loaded.spec.scope.protected, {
+        controlRoot: '.auto-sync',
+        manifestPath: '.auto-sync/taskpack.yaml',
+        instructions: loaded.spec.instructions,
+        commandScripts: ['.auto-sync/checks/verify.sh'],
+        proposalPath: loaded.spec.proposal.path,
+      });
+      assert.equal(protectedSet.includes('.auto-sync'), false, 'bare .auto-sync directory must be carved out');
+      for (const expectedProtected of [
+        '.auto-sync/policies',
+        '.auto-sync/checks',
+        '.auto-sync/memory',
+        '.auto-sync/taskpack.yaml',
+        '.auto-sync/taskpack.yml',
+        '.auto-sync/taskpack.json',
+        '.auto-sync/instructions.md',
+        '.auto-sync/checks/verify.sh',
+      ]) {
+        assert.equal(protectedSet.includes(expectedProtected), true, `expected ${expectedProtected} to stay protected`);
+      }
+
+      // Compile in turnkey (pi) mode
+      const compiledPi = await compileDeclarativeTaskpack(loaded, bindingsFor(loaded, {
+        repositoryRoot: root,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        gateEndpoints: [{
+          id: 'loopwright-local-command',
+          url: 'http://127.0.0.1:1/command-gate',
+          signingCredentialRef: 'local-cmd-signing',
+          authCredentialRef: null,
+        }],
+        credentialEnvMap: {
+          provider: 'TASKPACK_TEST_PROVIDER_TOKEN',
+          localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+          publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET',
+        },
+      }));
+      assert.deepEqual(
+        compiledPi.config.spec.task.spec.scope.writable,
+        ['.auto-sync/proposal.json', 'pack/cann/**'],
+      );
+      assert.equal(compiledPi.config.spec.task.spec.scope.protected.includes('.auto-sync/**'), false);
+      assert.equal(compiledPi.config.spec.task.spec.scope.protected.includes('.auto-sync/taskpack.yaml/**'), true);
+      assert.equal(compiledPi.config.spec.task.spec.scope.protected.includes('.auto-sync/instructions.md/**'), true);
+      assert.equal(compiledPi.config.spec.task.spec.scope.protected.includes('.auto-sync/checks/**'), true);
+      assert.equal(compiledPi.config.spec.task.spec.scope.protected.includes('.auto-sync/memory/**'), true);
+
+      const contract = compiledPi.config.spec.task;
+      assert.deepEqual(isWritablePath(contract, '.auto-sync/proposal.json'), { ok: true, value: true });
+      assert.deepEqual(isWritablePath(contract, 'pack/cann/version.txt'), { ok: true, value: true });
+      for (const deniedPath of [
+        '.auto-sync/proposal.json/evil.sh',
+        '.auto-sync/other.json',
+        '.auto-sync/taskpack.yaml',
+        '.auto-sync/taskpack.yml',
+        '.auto-sync/taskpack.json',
+        '.auto-sync/instructions.md',
+        '.auto-sync/checks/verify.sh',
+        '.auto-sync/memory/cann-sync/index.json',
+        '.auto-sync/policies/policy.yaml',
+      ]) {
+        assert.deepEqual(isWritablePath(contract, deniedPath), { ok: true, value: false }, `expected ${deniedPath} not writable`);
+      }
+
+      // Compile in delegated (step) mode
+      const compiledDelegated = await compileDeclarativeTaskpack(loaded, bindingsFor(loaded, {
+        executionMode: 'delegated',
+        repositoryRoot: root,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        publicationEndpoint: null,
+        gateEndpoints: [{
+          id: 'loopwright-local-command',
+          url: 'http://127.0.0.1:1/command-gate',
+          signingCredentialRef: 'local-cmd-signing',
+          authCredentialRef: null,
+        }],
+        credentialEnvMap: {
+          localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+        },
+      }));
+      assert.deepEqual(
+        compiledDelegated.config.spec.task.spec.scope.writable,
+        ['.auto-sync/proposal.json', 'pack/cann/**'],
+      );
+
+      // Also validate and compile .loopwright/proposal.json inside default .loopwright controlRoot
+      await mkdir(join(root, '.loopwright'), { recursive: true });
+      await mkdir(join(root, 'docs'), { recursive: true });
+      const loopwrightProposalYaml = autoSyncTaskpackYaml
+        .replaceAll('.auto-sync/instructions.md', '.loopwright/instructions.md')
+        .replaceAll('.auto-sync/proposal.json', '.loopwright/proposal.json')
+        .replaceAll('pack/cann', 'docs')
+        .replaceAll('.auto-sync/checks/verify.sh', '.loopwright/checks/verify.sh')
+        .replaceAll('.auto-sync/memory/cann-sync', '.loopwright/memory/cann-sync');
+      await mkdir(join(root, '.loopwright', 'checks'), { recursive: true });
+      await writeFile(join(root, '.loopwright', 'instructions.md'), '# Loopwright Instructions\n', 'utf8');
+      await writeFile(join(root, '.loopwright', 'checks', 'verify.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      await writeFile(join(root, '.loopwright', 'taskpack.yaml'), loopwrightProposalYaml, 'utf8');
+      const loadedLw = await loadDeclarativeTaskpack({
+        manifestPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: root,
+      });
+      const compiledLw = await compileDeclarativeTaskpack(loadedLw, bindingsFor(loadedLw, {
+        executionMode: 'delegated',
+        repositoryRoot: root,
+        taskpackPath: '.loopwright/taskpack.yaml',
+        publicationEndpoint: null,
+        gateEndpoints: [{
+          id: 'loopwright-local-command',
+          url: 'http://127.0.0.1:1/command-gate',
+          signingCredentialRef: 'local-cmd-signing',
+          authCredentialRef: null,
+        }],
+        credentialEnvMap: {
+          localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET',
+        },
+      }));
+      assert.deepEqual(
+        compiledLw.config.spec.task.spec.scope.writable,
+        ['.loopwright/proposal.json', 'docs/**'],
+      );
+      assert.equal(compiledLw.config.spec.task.spec.scope.protected.includes('.loopwright/**'), false);
+      assert.equal(compiledLw.config.spec.task.spec.scope.protected.includes('.loopwright/taskpack.yaml/**'), true);
+
+      // Colocated command.v1 scripts directly inside .auto-sync/ and .loopwright/ (outside checks/) validate and stay protected
+      await writeFile(join(root, '.auto-sync', 'verify.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      await writeFile(join(root, '.loopwright', 'verify.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      const colocatedAutoSync = validateTaskpackManifest(editedManifest(loaded, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [
+            { id: 'proposal-json', implementation: 'json-artifact.v1' },
+            { id: 'colocated-cmd', implementation: 'command.v1', parameters: { script: '.auto-sync/verify.sh' } },
+          ],
+          externalGates: [],
+        };
+      }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' });
+      const compiledColocated = await compileDeclarativeTaskpack(colocatedAutoSync, bindingsFor(colocatedAutoSync, {
+        executionMode: 'delegated',
+        repositoryRoot: root,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        publicationEndpoint: null,
+        gateEndpoints: [{
+          id: 'loopwright-local-command',
+          url: 'http://127.0.0.1:1/command-gate',
+          signingCredentialRef: 'local-cmd-signing',
+          authCredentialRef: null,
+        }],
+        credentialEnvMap: { localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET' },
+      }));
+      assert.equal(compiledColocated.config.spec.task.spec.scope.protected.includes('.auto-sync/verify.sh/**'), true);
+
+      const colocatedLw = validateTaskpackManifest(editedManifest(loadedLw, draft => {
+        (draft['spec'] as Record<string, unknown>)['verification'] = {
+          localChecks: [
+            { id: 'proposal-json', implementation: 'json-artifact.v1' },
+            { id: 'colocated-cmd', implementation: 'command.v1', parameters: { script: '.loopwright/verify.sh' } },
+          ],
+          externalGates: [],
+        };
+      }), { controlRoot: '.loopwright', manifestPath: '.loopwright/taskpack.yaml' });
+      assert.equal(colocatedLw.spec.verification.localChecks[1]?.parameters?.['script'], '.loopwright/verify.sh');
+
+      // Unprotected command.v1 script outside controlRoot and command.v1 script overlapping proposal.path remain rejected
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          (draft['spec'] as Record<string, unknown>)['verification'] = {
+            localChecks: [{ id: 'bad-cmd', implementation: 'command.v1', parameters: { script: 'pack/cann/verify.sh' } }],
+            externalGates: [],
+          };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          (draft['spec'] as Record<string, unknown>)['verification'] = {
+            localChecks: [{ id: 'bad-cmd', implementation: 'command.v1', parameters: { script: '.auto-sync/proposal.json' } }],
+            externalGates: [],
+          };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // Negative security gates
+      // 1. writable: [".auto-sync"] -> TASKPACK_SCOPE_VIOLATION
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['.auto-sync'], protected: [] };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 2. Omitted spec.scope (writable = []) with proposal inside controlRoot -> TASKPACK_SCOPE_VIOLATION
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          delete (draft['spec'] as Record<string, unknown>)['scope'];
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 3. Sibling file or directory prefix under .auto-sync in writable -> TASKPACK_SCOPE_VIOLATION
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = {
+            writable: ['.auto-sync/proposal.json', '.auto-sync/other.json'],
+            protected: [],
+          };
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['.auto-sync/sub'], protected: [] };
+          ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = '.auto-sync/sub/proposal.json';
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 4. Protected control-plane paths as proposal.path -> TASKPACK_SCOPE_VIOLATION (including case-folded aliases and omitted instructions)
+      for (const forbiddenProposal of [
+        '.auto-sync/taskpack.yaml',
+        '.auto-sync/taskpack.yml',
+        '.auto-sync/taskpack.json',
+        '.auto-sync/Taskpack.yaml',
+        '.auto-sync/instructions.md',
+        '.auto-sync/checks/evil.json',
+        '.auto-sync/CHECKS/evil.json',
+        '.auto-sync/memory/index.json',
+        '.auto-sync/MEMORY/index.json',
+        '.auto-sync/policies/evil.yaml',
+        '.github/proposal.json',
+      ]) {
+        assert.throws(
+          () => validateTaskpackManifest(editedManifest(loaded, draft => {
+            (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [forbiddenProposal, 'pack/cann'], protected: [] };
+            ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = forbiddenProposal;
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+          `expected TASKPACK_SCOPE_VIOLATION for ${forbiddenProposal}`,
+        );
+      }
+      // Even when spec.instructions is omitted, proposal.path = ".auto-sync/instructions.md" still fails with TASKPACK_SCOPE_VIOLATION
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(loaded, draft => {
+          delete (draft['spec'] as Record<string, unknown>)['instructions'];
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['.auto-sync/instructions.md', 'pack/cann'], protected: [] };
+          ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = '.auto-sync/instructions.md';
+        }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 5. Unvalidated in-memory manifest with wildcard or empty writable rejected by compileDeclarativeTaskpack
+      const forgedEmptyWritable: TaskpackManifest = {
+        ...loaded,
+        spec: {
+          ...loaded.spec,
+          scope: { writable: [], protected: [] },
+        },
+      };
+      await assert.rejects(
+        compileDeclarativeTaskpack(forgedEmptyWritable, bindingsFor(forgedEmptyWritable, {
+          executionMode: 'delegated',
+          repositoryRoot: root,
+          taskpackPath: '.auto-sync/taskpack.yaml',
+          publicationEndpoint: null,
+        })),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
+
+      // 6. Symlink at .auto-sync/proposal.json is rejected by compileDeclarativeTaskpack
+      await symlink(join(root, '.auto-sync', 'other.json'), join(root, '.auto-sync', 'proposal.json'));
+      await assert.rejects(
+        compileDeclarativeTaskpack(loaded, bindingsFor(loaded, {
+          executionMode: 'delegated',
+          repositoryRoot: root,
+          taskpackPath: '.auto-sync/taskpack.yaml',
+          publicationEndpoint: null,
+          gateEndpoints: [{
+            id: 'loopwright-local-command',
+            url: 'http://127.0.0.1:1/command-gate',
+            signingCredentialRef: 'local-cmd-signing',
+            authCredentialRef: null,
+          }],
+          credentialEnvMap: { localCommandGate: 'TASKPACK_TEST_LOCAL_GATE_SECRET' },
+        })),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/proposal/path',
+      );
     });
   });
 });

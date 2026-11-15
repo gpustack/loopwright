@@ -10,6 +10,8 @@ import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { inspectRun, signPayload } from '@loopwright/controller';
 import {
+  buildNativePullRequestBody,
+  checkManagedPrMatchesDiscoveredState,
   compareVersionTags,
   DEFAULT_GIT_COMMIT_IDENTITY,
   discoverTaskpackUpstreams,
@@ -4945,6 +4947,285 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
     } finally {
       await githubServer.close();
       await rm(fixture.work, { recursive: true, force: true });
+    }
+  });
+
+  it('allows candidate writes to explicit .auto-sync/proposal.json, stages PR commit and body, matches managed PR state, and blocks sibling/control-plane writes', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-autosync-proposal-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let mockGh: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(repo, { recursive: true });
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['init', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack', 'cann'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'instructions.md'), '# Immutable Auto-Sync Instructions\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'other.json'), '{"sibling":"immutable"}\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'cann', 'version.txt'), 'v1.0.0\n', 'utf8');
+      const verifySh = [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'test -f .auto-sync/proposal.json',
+        'test "$(cat pack/cann/version.txt)" = "v2.0.0"',
+        'test "$(cat .auto-sync/other.json)" = \'{"sibling":"immutable"}\'',
+        'test "$(cat .auto-sync/instructions.md)" = "# Immutable Auto-Sync Instructions"',
+        '',
+      ].join('\n');
+      await writeFile(join(repo, '.auto-sync', 'checks', 'verify.sh'), verifySh, { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'verify.sh'), 0o755);
+
+      const toolFeedbackMessages: string[] = [];
+      let turn = 0;
+      openAiServer = await startHttpServer(async (req, res) => {
+        if (req.method !== 'POST' || !req.url?.startsWith('/v1/chat/completions')) {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        const payload = await readJsonBody(req);
+        if (payload['max_tokens'] === 1 && payload['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        const messages = Array.isArray(payload['messages']) ? payload['messages'] as Record<string, unknown>[] : [];
+        const lastMsg = messages.at(-1);
+        if (lastMsg && lastMsg['role'] === 'tool' && typeof lastMsg['content'] === 'string') {
+          toolFeedbackMessages.push(lastMsg['content']);
+        }
+
+        const step = turn++;
+        let sseBody: string;
+        if (step === 0) {
+          sseBody = sseToolCall('gpt-4.1-mini', 'c-other', 'write', {
+            path: '.auto-sync/other.json',
+            content: '{"sibling":"tampered"}\n',
+          });
+        } else if (step === 1) {
+          sseBody = sseToolCall('gpt-4.1-mini', 'c-instr', 'write', {
+            path: '.auto-sync/instructions.md',
+            content: '# Tampered\n',
+          });
+        } else if (step === 2) {
+          sseBody = sseToolCall('gpt-4.1-mini', 'c-tp', 'write', {
+            path: '.auto-sync/taskpack.yaml',
+            content: 'tampered: true\n',
+          });
+        } else if (step === 3) {
+          sseBody = sseToolCall('gpt-4.1-mini', 'c-proposal', 'write', {
+            path: '.auto-sync/proposal.json',
+            content: `${JSON.stringify({
+              schema_version: 1,
+              summary: 'Sync CANN package to v2.0.0.',
+              upstreams: { cann: 'v2.0.0' },
+            }, null, 2)}\n`,
+          });
+        } else if (step === 4) {
+          sseBody = sseToolCall('gpt-4.1-mini', 'c-pack', 'write', {
+            path: 'pack/cann/version.txt',
+            content: 'v2.0.0\n',
+          });
+        } else {
+          sseBody = sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null }));
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseBody);
+      });
+
+      const taskpackYaml = `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: cann-autosync
+spec:
+  goal:
+    candidate: Update pack/cann and .auto-sync/proposal.json.
+    noChange: Confirm pack/cann is already current.
+  instructions:
+    - .auto-sync/instructions.md
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 2
+        output: 8
+  scope:
+    writable:
+      - .auto-sync/proposal.json
+      - pack/cann
+    protected: []
+  upstreams:
+    - id: cann
+      kind: github-release
+      source: gpustack/cann
+      watchedPaths:
+        - pack/cann
+  proposal:
+    path: .auto-sync/proposal.json
+    requiredFields:
+      - schema_version
+      - summary
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: proposal-json
+        implementation: json-artifact.v1
+        parameters:
+          path: .auto-sync/proposal.json
+      - id: verify-pack
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/verify.sh
+    externalGates: []
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright-cann/
+    titleTemplate: "chore(cann): sync upstream"
+  memory:
+    directory: .auto-sync/memory/cann
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: true
+    commentCommands: []
+`;
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), taskpackYaml, 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'initial auto-sync repo']);
+      const headSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      let createdPrBody = '';
+      mockGh = await startHttpServer(async (req, res) => {
+        if (req.method === 'GET' && req.url === '/repos/gpustack/cann/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (req.method === 'GET' && req.url === '/repos/gpustack/runner') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 901 }));
+          return;
+        }
+        if (req.method === 'GET' && req.url?.startsWith('/repos/gpustack/runner/pulls')) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (req.method === 'POST' && req.url === '/repos/gpustack/runner/pulls') {
+          const body = await readJsonBody(req);
+          createdPrBody = String(body['body'] ?? '');
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 108,
+            html_url: 'https://github.invalid/gpustack/runner/pull/108',
+            head: { ref: 'loopwright-cann/main', sha: '0'.repeat(40) },
+            base: { ref: 'main', sha: headSha },
+            title: 'chore(cann): sync upstream',
+            body: createdPrBody,
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const exitCode = await runActionCli({
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repo,
+        GITHUB_REPOSITORY: 'gpustack/runner',
+        GITHUB_SHA: headSha,
+        GITHUB_API_URL: mockGh.url,
+        GITHUB_TOKEN: 'ghs_test_token_1234567890abcdef',
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'turnkey-autosync-proposal',
+        'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
+        'INPUT_REMOTE-URL': bareRemote,
+        LLM_TOKEN: 'sk-test-good-token-123456',
+      });
+      assert.equal(exitCode, 0);
+
+      // Verify all three unauthorized writes under .auto-sync/ were rejected by candidate scope guard
+      assert.ok(toolFeedbackMessages.length >= 3);
+      assert.match(toolFeedbackMessages[0]!, /outside writable scope/);
+      assert.match(toolFeedbackMessages[1]!, /outside writable scope/);
+      assert.match(toolFeedbackMessages[2]!, /outside writable scope/);
+
+      // Verify PR body rendered from .auto-sync/proposal.json
+      assert.match(createdPrBody, /Sync CANN package to v2\.0\.0\./);
+      const directBody = buildNativePullRequestBody({
+        runId: 'turnkey-autosync-proposal',
+        candidateDigest: 'a'.repeat(64),
+        proposalPath: '.auto-sync/proposal.json',
+        files: [{
+          name: '.auto-sync/proposal.json',
+          bytes: Buffer.from(JSON.stringify({ summary: 'Sync CANN package to v2.0.0.' }), 'utf8'),
+        }],
+        stagedPaths: new Set(['.auto-sync/proposal.json']),
+        scrubber: new SecretScrubber(),
+      });
+      assert.match(directBody, /Sync CANN package to v2\.0\.0\./);
+
+      // Verify pushed PR commit staged .auto-sync/proposal.json + pack/cann/version.txt while leaving sibling & control-plane files untouched
+      const prClone = join(work, 'pr-clone');
+      await git(work, ['clone', '--branch', 'loopwright-cann/main', bareRemote, prClone]);
+      const prHeadSha = await git(prClone, ['rev-parse', 'HEAD']);
+      const committedProposal = JSON.parse(await readFile(join(prClone, '.auto-sync', 'proposal.json'), 'utf8')) as Record<string, unknown>;
+      assert.equal(committedProposal['summary'], 'Sync CANN package to v2.0.0.');
+      assert.equal(await readFile(join(prClone, 'pack', 'cann', 'version.txt'), 'utf8'), 'v2.0.0\n');
+      assert.equal(await readFile(join(prClone, '.auto-sync', 'other.json'), 'utf8'), '{"sibling":"immutable"}\n');
+      assert.equal(await readFile(join(prClone, '.auto-sync', 'instructions.md'), 'utf8'), '# Immutable Auto-Sync Instructions\n');
+      assert.equal(await readFile(join(prClone, '.auto-sync', 'taskpack.yaml'), 'utf8'), taskpackYaml);
+
+      // Verify checkManagedPrMatchesDiscoveredState reads .auto-sync/proposal.json from the PR head commit
+      await git(repo, ['fetch', 'origin', 'loopwright-cann/main']);
+      const loadedManifest = await loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repo,
+      });
+      const matchesDiscovered = await checkManagedPrMatchesDiscoveredState({
+        repositoryRoot: repo,
+        repositoryFullName: 'gpustack/runner',
+        openManagedPr: {
+          number: 108,
+          htmlUrl: 'https://github.invalid/gpustack/runner/pull/108',
+          headRef: 'loopwright-cann/main',
+          headSha: prHeadSha,
+          baseRef: 'main',
+          baseSha: headSha,
+          title: 'chore(cann): sync upstream',
+          body: createdPrBody,
+        },
+        manifest: loadedManifest,
+        records: [{
+          upstreamId: 'cann',
+          status: 'available',
+          version: 'v2.0.0',
+        }],
+      });
+      assert.equal(matchesDiscovered, true);
+    } finally {
+      await openAiServer?.close();
+      await mockGh?.close();
+      await rm(work, { recursive: true, force: true });
     }
   });
 });
