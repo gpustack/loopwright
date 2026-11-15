@@ -149,7 +149,7 @@ if (isPlainRecord(res.data)) {
       Acceptance: `scripts/prepare-self-upgrade.mjs` validates baseline `.loopwright/proposal.json` parity against `packages/*/package.json` and `package-lock.json`, enforces monotonic SemVer `X.Y.Z` eligibility (holding `@earendil-works/pi-*` on partial publish while allowing independent `yaml` advancement, rejecting rollbacks and missing-version hashes, and emitting `recommendedMode: 'no-change' | 'candidate' | 'blocked'`), and stages read-only `target-versions.json`, `package-lock.candidate.json`, and `npm-cache/` when `candidate` is selected; `.loopwright/taskpack.yaml` compiles cleanly in both `candidate` and `no-change` modes with narrow `scope.writable` and explicit `scope.protected`; `.gitignore` ignores `.serena/`.
       Verify: `npm run build && node scripts/prepare-self-upgrade.mjs --offline-check && npx tsc -p tsconfig.test.json --noEmit && npm run lint`
 
-- [ ] **T2 · Contained `command.v1` verifier & offline integration test suite**
+- [x] **T2 · Contained `command.v1` verifier & offline integration test suite**
       Blocked by: T1
       Owns: `.loopwright/checks/verify.sh`, `packages/github-app/test/self-upgrade-taskpack.test.ts`
       Gate: review
