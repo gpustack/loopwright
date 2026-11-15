@@ -2,7 +2,7 @@
 
 > Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: 2db6e7853d5fe2454ff9272da895bdd3ddd2df5b.
+Documentation version: main. Source revision: 3dbd93da6602e1ce0cf134ed5eddfca31368ab46.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
@@ -23,6 +23,7 @@ documentation and code for your release. This index routes questions; follow its
 - [GitHub Action](/loopwright/main/docs/operations/github-action/index.md): Configure and run the reusable GitHub Action
 - [GitHub App](/loopwright/main/docs/operations/github-app/index.md): Deploy and configure the GitHub App control plane
 - [CLI](/loopwright/main/docs/operations/cli/index.md): Generate drafts, inspect runs, reconcile, and audit closure
+- [Coding Agents](/loopwright/main/docs/operations/coding-agents/index.md): Drive zero-secret delegated step loops from host coding agents
 
 ## Walkthroughs
 
@@ -39,4 +40,4 @@ documentation and code for your release. This index routes questions; follow its
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/2db6e7853d5fe2454ff9272da895bdd3ddd2df5b/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/3dbd93da6602e1ce0cf134ed5eddfca31368ab46/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.

@@ -12,6 +12,7 @@ Loopwright supports two operating modes sharing one verification kernel: **Decla
 - [GitHub Action](/loopwright/latest/docs/operations/github-action/index.md) configures the reusable Action and secret bindings in workflows.
 - [GitHub App](/loopwright/latest/docs/operations/github-app/index.md) deploys the webhook and token-brokering control plane.
 - [CLI](/loopwright/latest/docs/operations/cli/index.md) runs local compilation, execution, inspection, reconciliation, and closure audits.
+- [Coding Agents](/loopwright/latest/docs/operations/coding-agents/index.md) drives zero-secret delegated `loopwright step` loops from OAuth coding agents.
 
 ## Walkthroughs
 

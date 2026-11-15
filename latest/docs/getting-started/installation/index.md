@@ -16,6 +16,7 @@ Run Loopwright as a zero-install GitHub Action in target repositories or install
 | Surface | Operating mode | Installation method |
 | --- | --- | --- |
 | GitHub Action | Declarative Taskpack (Simple) | Zero local setup; reference `uses: gpustack/loopwright@main` |
+| Host coding agent (`loopwright step`) | Delegated Taskpack or Controller | Install `@gpustack/loopwright` and follow [Coding Agents](/loopwright/latest/docs/operations/coding-agents/index.md) |
 | Laptop CLI (`npm` / `pnpm`) | Managed Controller or local audit | `npm install -g --ignore-scripts @gpustack/loopwright` or `pnpm add -g --ignore-scripts @gpustack/loopwright` |
 | Release tarball | Pinned or air-gapped hosts | Install `gpustack-loopwright-<version>.tgz` from GitHub Releases |
 | Source checkout | Contributors and testers | Clone repository, run `npm ci && npm run build`, and run `npm link` |
@@ -118,6 +119,6 @@ Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides 
 
 ---
 
-**See also** — [Declarative Taskpack](/loopwright/latest/docs/walkthroughs/declarative-taskpack/index.md) (simple automated repository mode) · [Managed Controller](/loopwright/latest/docs/walkthroughs/managed-controller/index.md) (fine-grained registry and contract mode)
+**See also** — [Coding Agents](/loopwright/latest/docs/operations/coding-agents/index.md) (drive zero-secret `loopwright step` loops from OAuth agents) · [Declarative Taskpack](/loopwright/latest/docs/walkthroughs/declarative-taskpack/index.md) (simple automated repository mode) · [Managed Controller](/loopwright/latest/docs/walkthroughs/managed-controller/index.md) (fine-grained registry and contract mode)
 
 **Next** → [Declarative Taskpack](/loopwright/latest/docs/walkthroughs/declarative-taskpack/index.md) — author or migrate a `.loopwright/taskpack.yaml` workflow.
