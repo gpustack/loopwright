@@ -425,6 +425,30 @@
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
 </div>
+<h3 id="host-preflight">Host preflight</h3>
+<p><code>step next --taskpack</code> defaults to <code>--mode candidate</code> and compiles <code>no-change.v1</code> only when <code>--mode no-change</code> is set. When a repository pairs <code>.loopwright/taskpack.yaml</code> with host preflight staging, run preflight first, stop on <code>blocked</code>, and export the repository, stage, cache, and tool paths needed by <code>step submit</code>:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">STAGE_DIR</span><span class="o">=</span><span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">/preflight-stage&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nv">PREFLIGHT_JSON</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span>node scripts/prepare-self-upgrade.mjs --stage-dir <span class="s2">&#34;</span><span class="nv">$STAGE_DIR</span><span class="s2">&#34;</span> --json<span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nv">MODE</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">printf</span> <span class="s1">&#39;%s&#39;</span> <span class="s2">&#34;</span><span class="nv">$PREFLIGHT_JSON</span><span class="s2">&#34;</span> <span class="p">|</span> node --eval <span class="s1">&#39;const d=JSON.parse(require(&#34;node:fs&#34;).readFileSync(0,&#34;utf8&#34;)); if(d.recommendedMode===&#34;blocked&#34;) process.exit(3); process.stdout.write(d.actionMode);&#39;</span><span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">SELF_UPGRADE_REPO_ROOT</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">SELF_UPGRADE_RUN_ROOT</span><span class="o">=</span><span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">SELF_UPGRADE_STAGE_DIR</span><span class="o">=</span><span class="s2">&#34;</span><span class="nv">$STAGE_DIR</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">SELF_UPGRADE_NPM_CACHE</span><span class="o">=</span><span class="s2">&#34;</span><span class="nv">$STAGE_DIR</span><span class="s2">/npm-cache&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">NODE_BIN_DIR</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span>dirname <span class="s2">&#34;</span><span class="k">$(</span><span class="nb">command</span> -v node<span class="k">)</span><span class="s2">&#34;</span><span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">PYTHON_BIN</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">command</span> -v python3<span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">HUGO_BIN</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">command</span> -v hugo <span class="o">||</span> <span class="nb">true</span><span class="k">)</span><span class="s2">&#34;</span>
+</span></span><span class="line"><span class="cl">
+</span></span><span class="line"><span class="cl">loopwright step next <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .loopwright/taskpack.yaml <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --mode <span class="s2">&#34;</span><span class="nv">$MODE</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo . <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</div>
 <p>Or start a Managed Controller run, pinning <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> (<code>--mode candidate|no-change</code> is optional):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -831,7 +855,11 @@
         <li><a href="#zero-install-prompt">Zero-install prompt</a></li>
       </ul>
     </li>
-    <li><a href="#step-1-pull-assignment">Step 1: Pull assignment</a></li>
+    <li><a href="#step-1-pull-assignment">Step 1: Pull assignment</a>
+      <ul>
+        <li><a href="#host-preflight">Host preflight</a></li>
+      </ul>
+    </li>
     <li><a href="#step-2-execute-role">Step 2: Execute role</a></li>
     <li><a href="#step-3-submit-lease">Step 3: Submit lease</a></li>
     <li><a href="#multi-role-routing">Multi-role routing</a>

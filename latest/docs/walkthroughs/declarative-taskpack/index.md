@@ -209,6 +209,13 @@ jobs:
 - **Action inputs and secrets**: Review every input, output, and secret variable in [GitHub Action](/loopwright/latest/docs/operations/github-action/index.md).
 - **Centralized webhook server**: Deploy a multi-repository intake server via [GitHub App](/loopwright/latest/docs/operations/github-app/index.md).
 
+### Bootstrap provenance
+
+Enforce two provenance rules in comment-driven and self-upgrading workflows:
+
+- **Trusted checkout**: Check out `ref: refs/heads/main` with `persist-credentials: false`, pass explicit `event-name` and `event-path`, and gate `issue_comment` jobs to `/loopwright` pull-request comments from `OWNER`, `MEMBER`, or `COLLABORATOR` actors. Fetch `+refs/pull/<number>/head` into `.git/objects` without checking out unreviewed pull-request heads.
+- **Commit SHA pinning**: Pin every third-party Action and the bootstrap `gpustack/loopwright` revision to full 40-character commit SHAs instead of `uses: ./` when Loopwright upgrades itself, so candidate branches cannot replace control-plane code or `command.v1` verification scripts.
+
 ## Step 4: Review outcomes
 
 Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.

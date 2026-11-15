@@ -583,6 +583,12 @@
 <li><strong>Centralized webhook server</strong>: Deploy a multi-repository intake server via <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
 .</li>
 </ul>
+<h3 id="bootstrap-provenance">Bootstrap provenance</h3>
+<p>Enforce two provenance rules in comment-driven and self-upgrading workflows:</p>
+<ul>
+<li><strong>Trusted checkout</strong>: Check out <code>ref: refs/heads/main</code> with <code>persist-credentials: false</code>, pass explicit <code>event-name</code> and <code>event-path</code>, and gate <code>issue_comment</code> jobs to <code>/loopwright</code> pull-request comments from <code>OWNER</code>, <code>MEMBER</code>, or <code>COLLABORATOR</code> actors. Fetch <code>+refs/pull/&lt;number&gt;/head</code> into <code>.git/objects</code> without checking out unreviewed pull-request heads.</li>
+<li><strong>Commit SHA pinning</strong>: Pin every third-party Action and the bootstrap <code>gpustack/loopwright</code> revision to full 40-character commit SHAs instead of <code>uses: ./</code> when Loopwright upgrades itself, so candidate branches cannot replace control-plane code or <code>command.v1</code> verification scripts.</li>
+</ul>
 <h2 id="step-4-review-outcomes">Step 4: Review outcomes</h2>
 <p>Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.</p>
 <ol>
@@ -619,7 +625,11 @@
       </ul>
     </li>
     <li><a href="#step-2-validate-taskpack">Step 2: Validate taskpack</a></li>
-    <li><a href="#step-3-configure-workflow">Step 3: Configure workflow</a></li>
+    <li><a href="#step-3-configure-workflow">Step 3: Configure workflow</a>
+      <ul>
+        <li><a href="#bootstrap-provenance">Bootstrap provenance</a></li>
+      </ul>
+    </li>
     <li><a href="#step-4-review-outcomes">Step 4: Review outcomes</a></li>
   </ul>
 </nav>
