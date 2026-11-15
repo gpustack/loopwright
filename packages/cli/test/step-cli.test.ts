@@ -1255,11 +1255,15 @@ test('step-cli: in-process cliMain exercises runStepCommand branches cleanly', a
     await createTaskpackRepo(repoA, { withCommandCheck: false });
     await createTaskpackRepo(repoB, { withCommandCheck: false });
 
-    // 1. --taskpack GitHubAppError with non-null path + SecretScrubber branch
+    // 1. --taskpack GitHubAppError with non-null path + SecretScrubber branch + ambient GitHub Actions env isolation
     const prevToken = process.env['GITHUB_TOKEN'];
     const prevSigning = process.env['LOOPWRIGHT_LOCAL_COMMAND_SIGNING_SECRET'];
+    const prevGhSha = process.env['GITHUB_SHA'];
+    const prevGhWorkspace = process.env['GITHUB_WORKSPACE'];
     process.env['GITHUB_TOKEN'] = 'ghp_inproc_scrub_token_123456';
     process.env['LOOPWRIGHT_LOCAL_COMMAND_SIGNING_SECRET'] = 'existing-secret';
+    process.env['GITHUB_SHA'] = 'f'.repeat(40);
+    process.env['GITHUB_WORKSPACE'] = join(root, 'outer-actions-workspace');
     try {
       const badTp = await runInProc(['step', 'next', '--taskpack', '../escape.yaml', '--repo', repoA, '--run-root', runRoot, '--run-id', 'inproc-bad-tp', '--json']);
       assert.equal(badTp.code, 2);
@@ -1301,6 +1305,10 @@ test('step-cli: in-process cliMain exercises runStepCommand branches cleanly', a
       else process.env['GITHUB_TOKEN'] = prevToken;
       if (prevSigning === undefined) delete process.env['LOOPWRIGHT_LOCAL_COMMAND_SIGNING_SECRET'];
       else process.env['LOOPWRIGHT_LOCAL_COMMAND_SIGNING_SECRET'] = prevSigning;
+      if (prevGhSha === undefined) delete process.env['GITHUB_SHA'];
+      else process.env['GITHUB_SHA'] = prevGhSha;
+      if (prevGhWorkspace === undefined) delete process.env['GITHUB_WORKSPACE'];
+      else process.env['GITHUB_WORKSPACE'] = prevGhWorkspace;
     }
 
     // 4. --config !loaded.ok, --config ok -> bare step next (without --repo) -> step submit (--status/--reason) -> step cancel

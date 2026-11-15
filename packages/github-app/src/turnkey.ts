@@ -3217,18 +3217,42 @@ export async function stageTaskpackForStep(
     repositoryRoot: realRepositoryRoot,
   });
 
-  const envRepo = runtimeEnv['LOOPWRIGHT_REPOSITORY']?.trim() || runtimeEnv['GITHUB_REPOSITORY']?.trim();
+  const rawGithubWorkspace = runtimeEnv['GITHUB_WORKSPACE']?.trim();
+  let matchesGithubWorkspace = rawGithubWorkspace === undefined || rawGithubWorkspace.length === 0;
+  if (!matchesGithubWorkspace && rawGithubWorkspace !== undefined) {
+    const realGithubWorkspace = await realpath(rawGithubWorkspace).catch(() => null);
+    matchesGithubWorkspace = realGithubWorkspace === realRepositoryRoot;
+  }
+
+  const envRepo = runtimeEnv['LOOPWRIGHT_REPOSITORY']?.trim()
+    || (matchesGithubWorkspace ? runtimeEnv['GITHUB_REPOSITORY']?.trim() : undefined);
   const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
     ? envRepo
     : 'local/repo';
 
+  let baseRevision = 'HEAD';
+  const envGithubSha = matchesGithubWorkspace ? runtimeEnv['GITHUB_SHA']?.trim() : undefined;
+  if (envGithubSha !== undefined && envGithubSha.length > 0) {
+    if (COMMIT_SHA_PATTERN.test(envGithubSha)) {
+      const existsInRepo = await execGit(
+        realRepositoryRoot,
+        ['rev-parse', '--verify', '--quiet', '--end-of-options', `${envGithubSha.toLowerCase()}^{commit}`],
+        { env: buildCleanGitEnv(), timeoutMs: 5_000 },
+      ).then(() => true, () => false);
+      if (existsInRepo) {
+        baseRevision = envGithubSha.toLowerCase();
+      }
+    } else {
+      baseRevision = envGithubSha;
+    }
+  }
+
   const resolvedRepo = await resolveRepositoryAndRevisions({
     repositoryRoot: realRepositoryRoot,
     repositoryFullName,
-    baseRevision: runtimeEnv['GITHUB_SHA']?.trim() || 'HEAD',
+    baseRevision,
     eventName: 'workflow_dispatch',
     scrubber,
-    env: runtimeEnv,
   });
 
   let upstreamRecords: readonly TaskpackUpstreamRecord[] = [];

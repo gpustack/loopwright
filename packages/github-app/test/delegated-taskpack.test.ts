@@ -1277,4 +1277,94 @@ describe('stageTaskpackForStep and openStagedTaskpackStepGate', () => {
       assert.equal(role1ExplicitError instanceof GitHubAppError && role1ExplicitError.code === 'ACTION_INPUT_INVALID', true);
     });
   });
+
+  it('scopes ambient GITHUB_SHA and GITHUB_REPOSITORY in stageTaskpackForStep to matching GITHUB_WORKSPACE and verified commits', async () => {
+    await withTempDir(async dir => {
+      const repoRoot = join(dir, 'repo');
+      const runRoot = join(dir, 'runs');
+      await mkdir(join(repoRoot, '.loopwright'), { recursive: true });
+      await mkdir(join(repoRoot, 'docs'), { recursive: true });
+      await writeFile(join(repoRoot, 'docs', 'proposal.json'), '{"schema_version":1,"candidates":[]}\n');
+      const manifestDoc = mutateManifest(spec => {
+        spec['roles'] = [{ id: 'author', provider: 'antigravity', model: 'gemini-4-carbon' }];
+        spec['verification'] = {
+          localChecks: [{ id: 'docs-proposal-json', implementation: 'json-artifact.v1' }],
+          externalGates: [],
+        };
+      });
+      await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestDoc));
+
+      spawnSync('git', ['init'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['config', 'user.name', 'Test'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['add', '.'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['commit', '-m', 'c1'], { cwd: repoRoot, stdio: 'ignore' });
+      const firstSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
+
+      await writeFile(join(repoRoot, 'docs', 'proposal.json'), '{"schema_version":1,"candidates":["v2"]}\n');
+      spawnSync('git', ['add', '.'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['commit', '-m', 'c2'], { cwd: repoRoot, stdio: 'ignore' });
+      const headSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
+
+      // 1. Unrelated GITHUB_WORKSPACE + nonexistent outer GITHUB_SHA + unreachable GITHUB_API_URL falls back to repo HEAD
+      const stagedUnrelated = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repoRoot,
+        runRoot,
+        runId: 'ambient-gh-unrelated',
+        discoverUpstreams: false,
+        runtimeEnv: {
+          ...process.env,
+          GITHUB_WORKSPACE: join(dir, 'outer-runner-checkout'),
+          GITHUB_SHA: 'f'.repeat(40),
+          GITHUB_REPOSITORY: 'gpustack/loopwright',
+          GITHUB_API_URL: 'http://127.0.0.1:9',
+        },
+      });
+      const loadedUnrelated = await loadTrustedConfiguration({
+        configPath: stagedUnrelated.configPath,
+        registryPath: stagedUnrelated.registryPath,
+        registrySha256: stagedUnrelated.registrySha256,
+        untrustedRoots: [repoRoot],
+      });
+      assert.equal(loadedUnrelated.ok, true);
+      if (!loadedUnrelated.ok) return;
+      assert.equal(loadedUnrelated.value.configuration.spec.task.spec.target.repository, 'local/repo');
+      assert.equal(loadedUnrelated.value.configuration.spec.task.spec.target.baseRevision, headSha);
+
+      const nextRes = await stepNext({
+        configuration: loadedUnrelated.value,
+        repository: repoRoot,
+        runRoot,
+        runId: 'ambient-gh-unrelated',
+      });
+      assert.equal(nextRes.ok, true);
+
+      // 2. Matching GITHUB_WORKSPACE + valid earlier commit GITHUB_SHA adopts GITHUB_SHA and GITHUB_REPOSITORY
+      const stagedMatching = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repoRoot,
+        runRoot,
+        runId: 'ambient-gh-matching',
+        discoverUpstreams: false,
+        runtimeEnv: {
+          ...process.env,
+          GITHUB_WORKSPACE: repoRoot,
+          GITHUB_SHA: firstSha,
+          GITHUB_REPOSITORY: 'gpustack/runner',
+          GITHUB_API_URL: 'http://127.0.0.1:9',
+        },
+      });
+      const loadedMatching = await loadTrustedConfiguration({
+        configPath: stagedMatching.configPath,
+        registryPath: stagedMatching.registryPath,
+        registrySha256: stagedMatching.registrySha256,
+        untrustedRoots: [repoRoot],
+      });
+      assert.equal(loadedMatching.ok, true);
+      if (!loadedMatching.ok) return;
+      assert.equal(loadedMatching.value.configuration.spec.task.spec.target.repository, 'gpustack/runner');
+      assert.equal(loadedMatching.value.configuration.spec.task.spec.target.baseRevision, firstSha);
+    });
+  });
 });
