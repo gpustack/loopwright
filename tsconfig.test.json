@@ -1,6 +1,8 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "incremental": true,
+    "tsBuildInfoFile": ".test-build/tsbuildinfo/tsconfig.test.tsbuildinfo",
     "noEmit": false,
     "rootDir": ".",
     "outDir": ".test-build"

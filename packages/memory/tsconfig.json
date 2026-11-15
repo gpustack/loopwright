@@ -1,5 +1,18 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": { "noEmit": false, "declaration": true, "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"]
+  "compilerOptions": {
+    "composite": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../../.test-build/tsbuildinfo/memory.tsbuildinfo",
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../controller" },
+    { "path": "../core" },
+    { "path": "../state" }
+  ]
 }
