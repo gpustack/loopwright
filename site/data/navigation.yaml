@@ -8,6 +8,7 @@ groups:
       - /docs/operations/github-action/
       - /docs/operations/github-app/
       - /docs/operations/cli/
+      - /docs/operations/coding-agents/
   - name: Walkthroughs
     items:
       - /docs/walkthroughs/declarative-taskpack/
@@ -26,6 +27,7 @@ labels:
   /docs/operations/github-action/: GitHub Action
   /docs/operations/github-app/: GitHub App
   /docs/operations/cli/: CLI
+  /docs/operations/coding-agents/: Coding Agents
   /docs/walkthroughs/declarative-taskpack/: Declarative Taskpack
   /docs/walkthroughs/managed-controller/: Managed Controller
   /docs/configuration/taskpack/: Taskpack

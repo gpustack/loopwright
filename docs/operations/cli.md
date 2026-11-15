@@ -107,7 +107,7 @@ Closure exits `0` for a valid report, `3` for falsification or unsupported capab
 
 ## Delegated stepping
 
-Use `step` to hand each delegated role to a host agent. Start with either trusted configuration or a taskpack:
+Use `step` to hand each delegated role to a host agent (see [Coding Agents](coding-agents.md) for the end-to-end coroutine workflow and overlay application). Start with either trusted configuration or a taskpack:
 
 ```sh
 loopwright step next --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
@@ -161,6 +161,6 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 
 ---
 
-**See also** — [Installation](../getting-started/installation.md) (install `@gpustack/loopwright` and copy bootstrap prompts) · [Controller and Registry](../configuration/controller-and-registry.md) (approve trusted execution bindings)
+**See also** — [Coding Agents](coding-agents.md) (drive zero-secret `loopwright step` loops from OAuth coding agents) · [Installation](../getting-started/installation.md) (install `@gpustack/loopwright` and copy bootstrap prompts) · [Controller and Registry](../configuration/controller-and-registry.md) (approve trusted execution bindings)
 
 **Next** → [Managed Controller](../walkthroughs/managed-controller.md) — populate `registry.yaml` and `controller.yaml` end to end.

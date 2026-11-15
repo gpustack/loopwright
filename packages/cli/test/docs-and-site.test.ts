@@ -1,10 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
+import { installedHandlerDigests } from '@loopwright/controller';
+import { validateTaskpackManifest } from '@loopwright/github-app';
+import { configurationFixture } from '../../controller/test/config-fixtures.js';
+import { setFixture } from '../../controller/test/progress-fixtures.js';
 
 function findRepositoryRoot(startDir = dirname(fileURLToPath(import.meta.url))): string {
   let curr = resolve(startDir);
@@ -132,13 +150,14 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.ok(rulePaths.has('docs/**/*.md'), 'must cover docs');
   assert.ok(rulePaths.has('README.md'), 'must cover README.md');
 
-  // 3. Five repository skills
+  // 3. Six repository skills
   const expectedSkills = [
     'loopwright-overview',
     'loopwright-docs',
     'loopwright-code-review',
     'loopwright-issue-pr',
-    'loopwright-release'
+    'loopwright-release',
+    'loopwright-step'
   ];
   for (const skillName of expectedSkills) {
     const skillFile = join(REPO_ROOT, '.agents', 'skills', skillName, 'SKILL.md');
@@ -148,6 +167,23 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
     assert.match(content, /\nname:\s*[^\n]+/, `${skillName} must declare name in frontmatter`);
     assert.match(content, /\ndescription:\s*[^\n]+/, `${skillName} must declare description in frontmatter`);
   }
+
+  // Verify loopwright-step is standalone/portable (zero repo-relative Markdown links)
+  const stepSkill = readFileSync(join(REPO_ROOT, '.agents', 'skills', 'loopwright-step', 'SKILL.md'), 'utf8');
+  for (const match of stepSkill.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
+    const target = (match[1] ?? '').trim();
+    assert.match(target, /^https:\/\//, `loopwright-step/SKILL.md link must be portable https:// URL, got: ${target}`);
+  }
+
+  // Verify Taskpack YAML example in docs/operations/coding-agents.md validates against schema
+  const codingAgentsDoc = readFileSync(join(REPO_ROOT, 'docs', 'operations', 'coding-agents.md'), 'utf8');
+  const yamlMatch = codingAgentsDoc.match(/```yaml\n([\s\S]*?)\n```/);
+  assert.ok(yamlMatch?.[1], 'docs/operations/coding-agents.md must include a YAML Taskpack example');
+  const parsedTaskpack = parseDocument(yamlMatch[1], { version: '1.2', schema: 'core', uniqueKeys: true });
+  assert.equal(parsedTaskpack.errors.length, 0, 'coding-agents.md YAML must parse cleanly');
+  const validated = validateTaskpackManifest(parsedTaskpack.toJS());
+  assert.equal(validated.metadata.name, 'multi-role-sync');
+  assert.equal(validated.spec.roles?.length, 2);
 
   // 4. .claude/skills symlink
   const claudeSkillsPath = join(REPO_ROOT, '.claude', 'skills');
@@ -172,7 +208,7 @@ test('documentation verification: check-docs.mjs passes with zero errors', () =>
   assert.match(run.stdout, /0 error\(s\)/, 'check-docs.mjs must report 0 error(s)');
 });
 
-test('hugo site: site.mjs build builds 12-page site, exports markdown, renders reading footers, and verifies zero broken links', () => {
+test('hugo site: site.mjs build builds 13-page site, exports markdown, renders reading footers, and verifies zero broken links', () => {
   const siteScript = join(REPO_ROOT, 'scripts', 'site.mjs');
   assert.ok(existsSync(siteScript), 'scripts/site.mjs must exist');
 
@@ -201,7 +237,7 @@ test('hugo site: site.mjs build builds 12-page site, exports markdown, renders r
   });
 
   assert.equal(build.status, 0, `site.mjs build failed:\nstdout: ${build.stdout}\nstderr: ${build.stderr}`);
-  assert.match(build.stdout, /Verified \d+ HTML pages and 12 Markdown exports; 0 broken link\(s\)/);
+  assert.match(build.stdout, /Verified \d+ HTML pages and 13 Markdown exports; 0 broken link\(s\)/);
 
   const publicDir = join(REPO_ROOT, 'site', 'public');
   assert.ok(existsSync(join(publicDir, 'llms.txt')), 'llms.txt must exist');
@@ -211,7 +247,7 @@ test('hugo site: site.mjs build builds 12-page site, exports markdown, renders r
   // Verify llms.txt content
   const llms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
   const llmsMatches = llms.match(/^-\s+\[[^\]]+\]\(\/docs\/[^)]+\):/gm);
-  assert.equal(llmsMatches?.length, 12, 'llms.txt must list exactly 12 docs pages');
+  assert.equal(llmsMatches?.length, 13, 'llms.txt must list exactly 13 docs pages');
   assert.ok(!llms.includes('/docs/development/'), 'llms.txt must not contain /docs/development/');
   assert.ok(!llms.includes('/docs/contribute/'), 'llms.txt must not contain /docs/contribute/');
   assert.ok(!llms.includes('/docs/adr/'), 'llms.txt must not contain /docs/adr/');
@@ -222,15 +258,16 @@ test('hugo site: site.mjs build builds 12-page site, exports markdown, renders r
 
   // Verify index.json content
   const index = JSON.parse(readFileSync(join(publicDir, 'index.json'), 'utf8')) as unknown[];
-  assert.ok(Array.isArray(index) && index.length >= 12, 'index.json must contain at least 12 pages');
+  assert.ok(Array.isArray(index) && index.length >= 13, 'index.json must contain at least 13 pages');
 
-  // Verify 12 markdown and html exports exist under docs/<group>/<slug>/
+  // Verify 13 markdown and html exports exist under docs/<group>/<slug>/
   const canonicalPages = [
     'getting-started/architecture',
     'getting-started/installation',
     'operations/github-action',
     'operations/github-app',
     'operations/cli',
+    'operations/coding-agents',
     'walkthroughs/declarative-taskpack',
     'walkthroughs/managed-controller',
     'configuration/taskpack',
@@ -266,7 +303,7 @@ test('hugo site: site.mjs build builds 12-page site, exports markdown, renders r
     env: { ...process.env, SITE_BASE_URL: 'https://docs.gpustack.ai/loopwright/' }
   });
   assert.equal(subpathBuild.status, 0, `subpath site.mjs build failed:\nstdout: ${subpathBuild.stdout}\nstderr: ${subpathBuild.stderr}`);
-  assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 12 Markdown exports; 0 broken link\(s\)/);
+  assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 13 Markdown exports; 0 broken link\(s\)/);
 
   // Restore default "/" build
   const restoreBuild = spawnSync(process.execPath, [siteScript, 'build'], {
@@ -275,4 +312,347 @@ test('hugo site: site.mjs build builds 12-page site, exports markdown, renders r
     cwd: REPO_ROOT,
   });
   assert.equal(restoreBuild.status, 0, `restore site.mjs build failed:\nstdout: ${restoreBuild.stdout}\nstderr: ${restoreBuild.stderr}`);
+});
+
+test('coding-agents apply snippet: matches loopwright-step skill, handles inspect bundle, classic/overlay deletes, 0755 preservation, and blocks hardlinks/symlinks', () => {
+  const docText = readFileSync(join(REPO_ROOT, 'docs', 'operations', 'coding-agents.md'), 'utf8');
+  const skillText = readFileSync(join(REPO_ROOT, '.agents', 'skills', 'loopwright-step', 'SKILL.md'), 'utf8');
+
+  const docMatch = docText.match(/node -e '\n([\s\S]*?)\n' "\$INSPECT_DIR" \./);
+  const skillMatch = skillText.match(/node -e '\n([\s\S]*?)\n' "\$INSPECT_DIR" <repo-dir>/);
+  assert.ok(docMatch?.[1], 'coding-agents.md must include node -e apply snippet');
+  assert.ok(skillMatch?.[1], 'loopwright-step/SKILL.md must include node -e apply snippet');
+  assert.equal(docMatch[1], skillMatch[1], 'coding-agents.md and loopwright-step/SKILL.md apply scripts must stay identical');
+  const applyScript = docMatch[1];
+
+  const mainJs = fileURLToPath(new URL('../src/main.js', import.meta.url));
+  const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), 'lw-coding-agents-test-')));
+  try {
+    const repoDir = join(tmpRoot, 'repo');
+    const runRoot = join(tmpRoot, 'runs');
+    const inspectParent = join(tmpRoot, 'inspect-parent');
+    const inspectDir = join(inspectParent, 'bundle');
+    mkdirSync(join(repoDir, '.loopwright'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(repoDir, '.agents', 'skills', 'demo'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(repoDir, '.claude'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(repoDir, 'docs', 'obsolete'), { recursive: true, mode: 0o700 });
+    mkdirSync(runRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(inspectParent, { recursive: true, mode: 0o700 });
+
+    writeFileSync(join(repoDir, 'README.md'), '# Repo\n');
+    writeFileSync(join(repoDir, '.agents', 'skills', 'demo', 'SKILL.md'), '# Demo\n');
+    symlinkSync('../.agents/skills', join(repoDir, '.claude', 'skills'));
+    writeFileSync(join(repoDir, 'docs', 'sync.sh'), '#!/bin/sh\necho old\n', { mode: 0o755 });
+    chmodSync(join(repoDir, 'docs', 'sync.sh'), 0o755);
+    writeFileSync(join(repoDir, 'docs', 'obsolete', 'legacy.md'), 'remove me\n');
+    writeFileSync(
+      join(repoDir, '.loopwright', 'taskpack.yaml'),
+      [
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: Taskpack',
+        'metadata:',
+        '  name: apply-test',
+        'spec:',
+        '  goal:',
+        '    candidate: Update docs and proposal.',
+        '    noChange: Confirm no changes needed.',
+        '  scope:',
+        '    writable:',
+        '      - docs',
+        '    protected: []',
+        '  upstreams:',
+        '    - id: up',
+        '      kind: github-release',
+        '      source: gpustack/engine',
+        '      watchedPaths:',
+        '        - docs',
+        '  proposal:',
+        '    path: docs/proposal.json',
+        '    requiredFields:',
+        '      - summary',
+        '    schemaVersion: 1',
+        '  verification:',
+        '    localChecks:',
+        '      - id: proposal-check',
+        '        implementation: json-artifact.v1',
+        '    externalGates: []',
+        '  publication:',
+        '    mode: pull_request',
+        '    targetBranch: main',
+        '    headBranchPrefix: auto-sync/',
+        '    titleTemplate: "chore: sync"',
+        '  memory:',
+        '    directory: .loopwright/memory/apply-test',
+        '    apply: separate-pull-request',
+        '    onNoModelBudget: deterministic-observations-only',
+        '  triggers:',
+        '    schedule: false',
+        '    workflowDispatch: true',
+        '    releasePublished: false',
+        '    commentCommands: []',
+        '',
+      ].join('\n'),
+    );
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repoDir, stdio: 'ignore' });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
+
+    const nextRun = spawnSync(
+      process.execPath,
+      [mainJs, 'step', 'next', '--taskpack', '.loopwright/taskpack.yaml', '--repo', repoDir, '--run-root', runRoot, '--run-id', 'r1', '--json'],
+      { encoding: 'utf8', timeout: 20000 },
+    );
+    assert.equal(nextRun.status, 0, nextRun.stderr || nextRun.stdout);
+    const yieldLine = JSON.parse(nextRun.stdout.trim().split('\n').at(-1) ?? '{}') as {
+      data: { candidateDir: string; leaseToken: string };
+    };
+    const { candidateDir, leaseToken } = yieldLine.data;
+
+    // Mutate inside candidateDir: update 0755 script, delete tracked file (classic snapshot!), add proposal.json
+    writeFileSync(join(candidateDir, 'docs', 'sync.sh'), '#!/bin/sh\necho updated\n');
+    rmSync(join(candidateDir, 'docs', 'obsolete', 'legacy.md'));
+    writeFileSync(join(candidateDir, 'docs', 'proposal.json'), JSON.stringify({ schema_version: 1, summary: 'ok' }) + '\n');
+
+    const submitRun = spawnSync(
+      process.execPath,
+      [mainJs, 'step', 'submit', '--run-root', runRoot, '--run-id', 'r1', '--lease', leaseToken, '--status', 'completed', '--json'],
+      { encoding: 'utf8', timeout: 20000 },
+    );
+    assert.equal(submitRun.status, 0, submitRun.stderr || submitRun.stdout);
+    const submitEnv = JSON.parse(submitRun.stdout.trim().split('\n').at(-1) ?? '{}') as {
+      kind: string;
+      data: { result?: { spec?: { status?: string } } };
+    };
+    assert.equal(submitEnv.kind, 'result', submitRun.stdout);
+    assert.equal(submitEnv.data.result?.spec?.status, 'completed');
+    assert.ok(!existsSync(candidateDir), 'terminal step submit cleans up candidateDir');
+
+    // Export to non-existent child path inspectParent/bundle
+    const inspectRun = spawnSync(
+      process.execPath,
+      [mainJs, 'inspect', '--run-root', runRoot, '--run-id', 'r1', '--output', inspectDir, '--json'],
+      { encoding: 'utf8', timeout: 20000 },
+    );
+    assert.equal(inspectRun.status, 0, inspectRun.stderr || inspectRun.stdout);
+
+    const expectApplyRefused = (expectedStderr: RegExp) => {
+      const res = spawnSync(process.execPath, ['-e', applyScript, inspectDir, repoDir], { encoding: 'utf8' });
+      assert.notEqual(res.status, 0, 'apply script must exit non-zero');
+      assert.match(res.stderr, expectedStderr);
+    };
+    assert.equal(JSON.parse(readFileSync(join(inspectDir, 'result.json'), 'utf8')).spec?.status, 'completed');
+    assert.equal(JSON.parse(readFileSync(join(inspectDir, 'candidate.files.json'), 'utf8')).manifest?.spec?.baseTree, undefined);
+
+    // Negative test 1: dirty working tree (tracked edit or untracked file) must be refused
+    writeFileSync(join(repoDir, 'README.md'), '# Dirty\n');
+    expectApplyRefused(/Error: Refusing apply: working tree is dirty/);
+    writeFileSync(join(repoDir, 'README.md'), '# Repo\n');
+
+    writeFileSync(join(repoDir, 'untracked.txt'), 'scratch\n');
+    expectApplyRefused(/Error: Refusing apply: working tree is dirty/);
+    rmSync(join(repoDir, 'untracked.txt'));
+
+    // Negative test 2: drifted HEAD commit (content, empty, or mode-only) must be refused
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'empty-drift'], { cwd: repoDir, stdio: 'ignore' });
+    expectApplyRefused(/Error: Refusing apply: HEAD != sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repoDir, stdio: 'ignore' });
+
+    chmodSync(join(repoDir, 'docs', 'sync.sh'), 0o644);
+    execFileSync('git', ['commit', '-am', 'mode-drift'], { cwd: repoDir, stdio: 'ignore' });
+    expectApplyRefused(/Error: Refusing apply: HEAD != sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repoDir, stdio: 'ignore' });
+
+    // Negative test 3: hardlinked file in clean checkout (matching bytes/mode so git status is clean) must be refused
+    const sentinel = join(tmpRoot, 'outside-sentinel.sh');
+    writeFileSync(sentinel, '#!/bin/sh\necho old\n', { mode: 0o755 });
+    chmodSync(sentinel, 0o755);
+    rmSync(join(repoDir, 'docs', 'sync.sh'));
+    linkSync(sentinel, join(repoDir, 'docs', 'sync.sh'));
+    assert.equal(
+      execFileSync('git', ['-C', repoDir, 'status', '--porcelain', '-z', '--untracked-files=all'], { encoding: 'utf8' }),
+      '',
+      'git status is clean so nlink !== 1 guard is exercised directly',
+    );
+    expectApplyRefused(/Error: Unsafe target: docs\/sync\.sh/);
+    assert.equal(readFileSync(sentinel, 'utf8'), '#!/bin/sh\necho old\n', 'outside hardlink sentinel must remain untouched');
+
+    // Restore normal executable 0755 file in checkout
+    rmSync(join(repoDir, 'docs', 'sync.sh'));
+    writeFileSync(join(repoDir, 'docs', 'sync.sh'), '#!/bin/sh\necho old\n', { mode: 0o755 });
+    chmodSync(join(repoDir, 'docs', 'sync.sh'), 0o755);
+
+    // Apply cleanly: verifies tracked 120000 symlink preservation, classic deletion, dir cleanup, 0755 preservation, and 0644 creation
+    const cleanApply = spawnSync(process.execPath, ['-e', applyScript, inspectDir, repoDir], { encoding: 'utf8' });
+    assert.equal(cleanApply.status, 0, cleanApply.stderr || cleanApply.stdout);
+    assert.ok(lstatSync(join(repoDir, '.claude', 'skills')).isSymbolicLink(), 'tracked 120000 protected symlink preserved');
+    assert.ok(!existsSync(join(repoDir, 'docs', 'obsolete', 'legacy.md')), 'deleted file removed in classic snapshot mode');
+    assert.ok(!existsSync(join(repoDir, 'docs', 'obsolete')), 'empty parent directory pruned after deletion');
+    assert.equal(readFileSync(join(repoDir, 'docs', 'sync.sh'), 'utf8'), '#!/bin/sh\necho updated\n');
+    assert.equal(lstatSync(join(repoDir, 'docs', 'sync.sh')).mode & 0o777, 0o755, 'existing 0755 preserved');
+    assert.equal(JSON.parse(readFileSync(join(repoDir, 'docs', 'proposal.json'), 'utf8')).summary, 'ok');
+    assert.equal(lstatSync(join(repoDir, 'docs', 'proposal.json')).mode & 0o777, 0o644, 'new file written as 0644');
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('coding-agents apply snippet: Managed Controller refuses symbolic classic sourceRevision and rejects empty or mode-only HEAD drift', async () => {
+  const repoRoot = findRepositoryRoot();
+  const codingAgentsDoc = readFileSync(join(repoRoot, 'docs', 'operations', 'coding-agents.md'), 'utf8');
+  const applyScript = /node -e '([\s\S]*?)' "\$INSPECT_DIR" \./.exec(codingAgentsDoc)?.[1] ?? '';
+  assert.ok(applyScript.length > 0);
+  const mainJs = fileURLToPath(new URL('../src/main.js', import.meta.url));
+
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repository');
+    const runRoot = join(f.root, 'runs');
+    mkdirSync(join(repository, 'packages'), { recursive: true, mode: 0o700 });
+    mkdirSync(runRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(join(repository, 'packages', 'result.json'), JSON.stringify({ ok: false }) + '\n', { mode: 0o644 });
+    writeFileSync(join(repository, 'packages', 'run.sh'), '#!/bin/sh\necho v1\n', { mode: 0o755 });
+    chmodSync(join(repository, 'packages', 'run.sh'), 0o755);
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: repository, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: repository, stdio: 'ignore' });
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+
+    const installed = await installedHandlerDigests();
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
+    setFixture(f.registry, ['spec', 'handlers'], [
+      {
+        id: 'author.step',
+        version: 1,
+        digest: installed['pi.agent.v1'],
+        kind: 'agent',
+        implementation: 'pi.agent.v1',
+        parameters: { purpose: 'task', prompt: 'Update packages/result.json and packages/run.sh.' },
+        capabilities: ['pi'],
+      },
+      {
+        id: 'tests',
+        version: 1,
+        digest: installed['json-artifact.v1'],
+        kind: 'check',
+        implementation: 'json-artifact.v1',
+        parameters: { checkId: 'tests', path: 'packages/result.json', required: ['ok'], equals: { ok: true } },
+        capabilities: ['inert_bytes', 'read_only'],
+      },
+      ...f.registry.spec.handlers.filter(h => h.id === 'scope' || h.id === 'no-change').map(h => ({ ...h })),
+    ]);
+    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+    setFixture(f.registry, ['spec', 'credentialBindings'], []);
+    setFixture(f.registry, ['spec', 'environmentBindings'], []);
+    setFixture(f.config, ['spec', 'credentials'], []);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [
+      {
+        id: 'author',
+        adapter: 'delegated',
+        runtimeRef: null,
+        providerCredentialRef: null,
+        selection: { provider: 'antigravity', model: 'gemini-4-default', thinking: 'medium' },
+        tools: ['read', 'write', 'edit'],
+        mcp: null,
+      },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      {
+        id: 'author',
+        adapter: 'delegated',
+        provider: 'antigravity',
+        model: 'gemini-4-default',
+        thinking: 'medium',
+        tools: ['read', 'write', 'edit'],
+      },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [{ roleId: 'author', profileRef: 'author' }]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'author', kind: 'agent', uses: 'author.step', roleId: 'author', dependsOn: [] },
+      { id: 'verify', kind: 'check', uses: 'tests', roleId: null, dependsOn: ['author'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [
+      { stepId: 'author', handlerRef: 'author.step' },
+      { stepId: 'verify', handlerRef: 'tests' },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+      required: ['tests'],
+      checks: [{ id: 'tests', allowedEvidenceLevels: ['local_execution'] }],
+    });
+
+    const runManaged = async (runId: string, sourceRevision: string) => {
+      setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], baseSha);
+      setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], sourceRevision);
+      await f.save();
+      const nextRes = spawnSync(
+        process.execPath,
+        [mainJs, 'step', 'next', '--config', f.input.configPath, '--registry', f.input.registryPath, '--registry-sha256', f.input.registrySha256, '--repo', repository, '--run-root', runRoot, '--run-id', runId, '--json'],
+        { encoding: 'utf8', timeout: 20000 },
+      );
+      assert.equal(nextRes.status, 0, nextRes.stderr || nextRes.stdout);
+      const stepData = (JSON.parse(nextRes.stdout.trim().split('\n').at(-1) ?? '{}') as {
+        data: { candidateDir: string; leaseToken: string };
+      }).data;
+      writeFileSync(join(stepData.candidateDir, 'packages', 'result.json'), JSON.stringify({ ok: true }) + '\n');
+      writeFileSync(join(stepData.candidateDir, 'packages', 'run.sh'), '#!/bin/sh\necho v2\n');
+      const subRes = spawnSync(
+        process.execPath,
+        [mainJs, 'step', 'submit', '--run-root', runRoot, '--run-id', runId, '--lease', stepData.leaseToken, '--status', 'completed', '--json'],
+        { encoding: 'utf8', timeout: 20000 },
+      );
+      assert.equal(subRes.status, 0, subRes.stderr || subRes.stdout);
+      const outDir = join(f.root, `inspect-${runId}`);
+      const insRes = spawnSync(
+        process.execPath,
+        [mainJs, 'inspect', '--run-root', runRoot, '--run-id', runId, '--output', outDir, '--json'],
+        { encoding: 'utf8', timeout: 20000 },
+      );
+      assert.equal(insRes.status, 0, insRes.stderr || insRes.stdout);
+      assert.equal(JSON.parse(readFileSync(join(outDir, 'result.json'), 'utf8')).spec?.status, 'completed');
+      assert.equal(JSON.parse(readFileSync(join(outDir, 'candidate.files.json'), 'utf8')).manifest?.spec?.baseTree, undefined);
+      assert.equal(JSON.parse(readFileSync(join(outDir, 'task.lock.json'), 'utf8')).spec?.contract?.spec?.target?.sourceRevision, sourceRevision);
+      return outDir;
+    };
+    const expectManagedRefused = (inspectPath: string, expectedStderr: RegExp) => {
+      const res = spawnSync(process.execPath, ['-e', applyScript, inspectPath, repository], { encoding: 'utf8' });
+      assert.notEqual(res.status, 0, 'apply script must exit non-zero');
+      assert.match(res.stderr, expectedStderr);
+    };
+
+    // 1. Symbolic sourceRevision: HEAD in classic mode is refused (even on untouched HEAD, empty commit, or mode-only commit)
+    const symInspect = await runManaged('mc-sym', 'HEAD');
+    expectManagedRefused(symInspect, /Error: Refusing apply: classic snapshot requires pinned commit OID sourceRevision/);
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'empty-after-sym'], { cwd: repository, stdio: 'ignore' });
+    expectManagedRefused(symInspect, /Error: Refusing apply: classic snapshot requires pinned commit OID sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repository, stdio: 'ignore' });
+    chmodSync(join(repository, 'packages', 'run.sh'), 0o644);
+    execFileSync('git', ['commit', '-am', 'mode-only-after-sym'], { cwd: repository, stdio: 'ignore' });
+    expectManagedRefused(symInspect, /Error: Refusing apply: classic snapshot requires pinned commit OID sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repository, stdio: 'ignore' });
+
+    // 2. Pinned commit OID sourceRevision rejects empty and mode-only HEAD drift, then applies cleanly on exact baseSha
+    const pinnedInspect = await runManaged('mc-pinned', baseSha);
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'empty-after-pinned'], { cwd: repository, stdio: 'ignore' });
+    expectManagedRefused(pinnedInspect, /Error: Refusing apply: HEAD != sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repository, stdio: 'ignore' });
+
+    chmodSync(join(repository, 'packages', 'run.sh'), 0o644);
+    execFileSync('git', ['commit', '-am', 'mode-only-after-pinned'], { cwd: repository, stdio: 'ignore' });
+    expectManagedRefused(pinnedInspect, /Error: Refusing apply: HEAD != sourceRevision/);
+    execFileSync('git', ['reset', '--hard', baseSha], { cwd: repository, stdio: 'ignore' });
+
+    const cleanManagedApply = spawnSync(process.execPath, ['-e', applyScript, pinnedInspect, repository], { encoding: 'utf8' });
+    assert.equal(cleanManagedApply.status, 0, cleanManagedApply.stderr || cleanManagedApply.stdout);
+    assert.equal(JSON.parse(readFileSync(join(repository, 'packages', 'result.json'), 'utf8')).ok, true);
+    assert.equal(readFileSync(join(repository, 'packages', 'run.sh'), 'utf8'), '#!/bin/sh\necho v2\n');
+    assert.equal(lstatSync(join(repository, 'packages', 'run.sh')).mode & 0o777, 0o755);
+  } finally {
+    await f.cleanup();
+  }
 });

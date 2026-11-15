@@ -35,6 +35,7 @@ export const PUBLIC_SITE_DOC_REL_PATHS = new Set([
   "docs/operations/github-action.md",
   "docs/operations/github-app.md",
   "docs/operations/cli.md",
+  "docs/operations/coding-agents.md",
   "docs/walkthroughs/declarative-taskpack.md",
   "docs/walkthroughs/managed-controller.md",
   "docs/configuration/taskpack.md",
@@ -1227,7 +1228,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       }
     }
 
-    // Site publication link boundary & 1:1 filename-to-H1 slug rule on the 12 public docs pages
+    // Site publication link boundary & 1:1 filename-to-H1 slug rule on the 13 public docs pages
     if (PUBLIC_SITE_DOC_REL_PATHS.has(relDoc)) {
       if (firstNonEmpty && firstNonEmpty.startsWith("# ")) {
         const h1Title = firstNonEmpty.slice(2).trim();

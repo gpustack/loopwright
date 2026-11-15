@@ -101,7 +101,7 @@ stating the component role, safety boundary, and operator entry point.
 
 ### 1:1:1 Group Directory, Filename Slug, Sidebar Label, and `# H1` Title Rule
 
-Every public documentation page (all 12 pages published to `site/`) must obey strict **1:1:1 alignment**:
+Every public documentation page (all 13 pages published to `site/`) must obey strict **1:1:1 alignment**:
 
 1. **Group directory matches navigation group**: Public pages reside inside one of the 4 group-matching directories under `docs/`:
    - `Getting Started` → `docs/getting-started/`
@@ -117,13 +117,13 @@ Every public documentation page (all 12 pages published to `site/`) must obey st
 
 1. **Trailing `\n---\n` separator**: Every non-index `docs/**/*.md` page must end with a `\n---\n` horizontal rule followed by `**See also** — `.
 2. **Descriptive `See also` items**: Separate multiple items with ` · ` (middle dot). Every item must include a Markdown link `[Title](target.md)` followed by a parenthetical description `(short phrase explaining why to read it)`.
-3. **Descriptive `Next` pointer**: Every public `site/` page (all 12 pages) must include a `**Next** → [Title](target.md) — <short description>` line after `**See also**`. Whenever `**Next**` appears on any repository-only page, it must follow the same `**Next** → [Title](target.md) — <description>` format.
+3. **Descriptive `Next` pointer**: Every public `site/` page (all 13 pages) must include a `**Next** → [Title](target.md) — <short description>` line after `**See also**`. Whenever `**Next**` appears on any repository-only page, it must follow the same `**Next** → [Title](target.md) — <description>` format.
 
 ### Enforced Page Shape Caps
 
 | Rule | Limit | Scope |
 | --- | --- | --- |
-| H1 title & 1:1:1 parity | Exact match with `docs/README.md` `## All pages` label; on public pages, also matches `navigation.yaml` label and `docs/<group>/<slug>.md` | All 24 `docs/**/*.md` pages |
+| H1 title & 1:1:1 parity | Exact match with `docs/README.md` `## All pages` label; on public pages, also matches `navigation.yaml` label and `docs/<group>/<slug>.md` | All 25 `docs/**/*.md` pages |
 | Intro before `## Contents` | 1–3 paragraphs (`<= 5` lines, `<= 500` chars each) | All non-index `docs/**/*.md` pages |
 | `## Contents` | Exact match and order for all subsequent `## ` headings | All non-index `docs/**/*.md` pages |
 | `##` section count | `<= 10` `##` headings (excluding `## Contents`) | All non-index `docs/**/*.md` pages |
@@ -132,7 +132,7 @@ Every public documentation page (all 12 pages published to `site/`) must obey st
 | ADR line budget | `<= 220` lines | `docs/contribute/adr/*.md` |
 | Standard page line budget | `<= 400` lines | All other non-index `docs/**/*.md` pages |
 | Reading footer | `\n---\n\n**See also** — [Title](path) (desc)` required; `**Next** → [Title](path) — desc` required on public pages | All non-index `docs/**/*.md` pages |
-| Public-to-Contribute link ban | `0` links to `development.md` or `contribute/**` | All 12 site-published `docs/` pages |
+| Public-to-Contribute link ban | `0` links to `development.md` or `contribute/**` | All 13 site-published `docs/` pages |
 
 ### Prose Paragraph Measurement Rules
 
@@ -226,4 +226,4 @@ flowchart LR
 
 - **Raw HTML ban in prose**: Outside fenced code blocks and HTML comments, the only permitted raw HTML tag in `docs/**/*.md` is an attribute-free `<br>` or `<br/>`.
 - **Relative links**: Use relative repository paths (`../operations/cli.md`, `./task-contract.md#schema-bounds`) for internal links so both repository readers and `scripts/site.mjs` resolve them deterministically.
-- **Public vs. Contributor link boundary**: The 12 public pages published to `site/` must never link to `docs/development.md` or `docs/contribute/**`.
+- **Public vs. Contributor link boundary**: The 13 public pages published to `site/` must never link to `docs/development.md` or `docs/contribute/**`.

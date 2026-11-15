@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execSync, spawnSync } from "node:child_process";
 import { pathToFileURL, URL } from "node:url";
-import { checkDocs, proseLinks } from "./check-docs.mjs";
+import { checkDocs, proseLinks, PUBLIC_SITE_DOC_REL_PATHS } from "./check-docs.mjs";
 
 export function resolveHugo(rootDir = process.cwd()) {
   const root = path.resolve(rootDir);
@@ -201,8 +201,8 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
       }
     }
 
-    if (expected.size !== 12) {
-      errors.push(`Expected 12 published pages in docs/README.md All pages, found ${expected.size}`);
+    if (expected.size !== PUBLIC_SITE_DOC_REL_PATHS.size) {
+      errors.push(`Expected ${PUBLIC_SITE_DOC_REL_PATHS.size} published pages in docs/README.md All pages, found ${expected.size}`);
     }
 
     if (llmsContent.includes("/docs/development/")) {
@@ -261,7 +261,7 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
     }
   }
 
-  // 3. Verify all 12 Markdown exports exist and preserve prose and code blocks
+  // 3. Verify all public Markdown exports exist and preserve prose and code blocks
   const docFiles = [];
   const excludedDocFiles = [];
   function scan(d) {
@@ -283,8 +283,8 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
   }
   scan(docsDir);
 
-  if (docFiles.length !== 12) {
-    errors.push(`Expected 12 canonical docs files, found ${docFiles.length}`);
+  if (docFiles.length !== PUBLIC_SITE_DOC_REL_PATHS.size) {
+    errors.push(`Expected ${PUBLIC_SITE_DOC_REL_PATHS.size} canonical docs files, found ${docFiles.length}`);
   }
 
   const excludedSiteTargets = [
