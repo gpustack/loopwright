@@ -1,6 +1,6 @@
 # Spec: Self-Upgrade Dogfooding
 
-Status: Built
+Status: Shipped
 Type: Feature
 
 ## Summary
