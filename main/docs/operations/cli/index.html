@@ -356,6 +356,8 @@
 </li>
 <li><a href="#step-6-audit-closure">Step 6: Audit closure</a>
 </li>
+<li><a href="#delegated-stepping">Delegated stepping</a>
+</li>
 <li><a href="#command-reference">Command reference</a>
 </li>
 <li><a href="#exit-codes">Exit codes</a>
@@ -476,6 +478,19 @@ Use <code>--step-summary-file</code> to write a separate Markdown summary. Witho
       </tr>
   </tbody>
 </table>
+<h2 id="delegated-stepping">Delegated stepping</h2>
+<p>Use <code>step</code> to hand each delegated role to a host agent. Start with either trusted configuration or a taskpack:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
+</span></span><span class="line"><span class="cl">loopwright step next --taskpack TASKPACK --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
+</span></span><span class="line"><span class="cl">loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --status completed --json
+</span></span><span class="line"><span class="cl">loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json</span></span></code></pre></div>
+</div>
+<p>Use <code>--action next</code>, <code>--action submit</code>, or <code>--action cancel</code> instead of a positional action. <code>step next</code> accepts <code>--mode candidate|no-change</code>. A parked run rejects another pull unless <code>--reissue-lease</code> replaces a lost lease. Submit each single-use <code>--lease</code> token once. <code>--submission-file</code> supplies an artifact; <code>--status</code> accepts <code>completed</code>, <code>no_change</code>, <code>failed</code>, or <code>blocked</code>. Use <code>--reason</code> for a failure or block.</p>
+<p>JSON output is NDJSON. An envelope with <code>kind: 'step'</code> contains <code>data.status: 'awaiting_role'</code>, selection, prompt, allowed tools, scope, workspace paths, and lease token. Follow those bounds before submitting. Cancellation exits <code>130</code>; SIGINT and SIGTERM exit <code>130</code> and <code>143</code>, subject to uncertainty precedence.</p>
+<p><code>check</code>, <code>run</code>, <code>resume</code>, and <code>step next</code> accept repeatable <code>--role-model ROLE=PROVIDER/MODEL[:THINKING]</code>. Supply at most eight entries. The CLI limits the argument vector to 64 entries. See <a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ for precedence and persistence.</p>
 <h2 id="command-reference">Command reference</h2>
 <table>
   <thead>
@@ -516,6 +531,12 @@ Use <code>--step-summary-file</code> to write a separate Markdown summary. Witho
           <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
           <td><code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
           <td>Resume an existing run under identical trusted bindings</td>
+      </tr>
+      <tr>
+          <td><code>step</code></td>
+          <td><code>--run-root</code>, <code>--run-id</code>, action</td>
+          <td><code>--action</code>, <code>--json</code></td>
+          <td>Pull, submit, or cancel delegated work</td>
       </tr>
       <tr>
           <td><code>status</code></td>
@@ -598,7 +619,7 @@ Use <code>--step-summary-file</code> to write a separate Markdown summary. Witho
       </tr>
       <tr>
           <td>130</td>
-          <td>Accounted SIGINT, subject to uncertainty precedence</td>
+          <td>Step cancellation or accounted SIGINT, subject to uncertainty precedence</td>
       </tr>
       <tr>
           <td>143</td>
@@ -632,6 +653,7 @@ Use <code>--step-summary-file</code> to write a separate Markdown summary. Witho
     <li><a href="#step-4-run-work">Step 4: Run work</a></li>
     <li><a href="#step-5-inspect-recovery">Step 5: Inspect recovery</a></li>
     <li><a href="#step-6-audit-closure">Step 6: Audit closure</a></li>
+    <li><a href="#delegated-stepping">Delegated stepping</a></li>
     <li><a href="#command-reference">Command reference</a></li>
     <li><a href="#exit-codes">Exit codes</a></li>
   </ul>

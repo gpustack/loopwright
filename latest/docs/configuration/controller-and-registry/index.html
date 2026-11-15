@@ -663,6 +663,8 @@
   </tbody>
 </table>
 <h3 id="role-and-runtime-profiles">Role and runtime profiles</h3>
+<p>A role profile accepts <code>adapter: pi</code> or <code>adapter: delegated</code>. For secret-free delegated profiles, set <code>runtimeRef: null</code>, <code>providerCredentialRef: null</code>, and <code>mcp: null</code>. <code>providerCredentialRef</code> must be null. Their optional <code>context</code> defaults to <code>DEFAULT_DELEGATED_CONTEXT</code>. Delegated selections accept valid labels without Docker or provider secrets. <code>pi.compact.v1</code> cannot target delegated roles. Unattended <code>run</code> and <code>resume</code> refuse active or parked delegated roles with <code>CAPABILITY_UNSUPPORTED</code>.</p>
+<p><code>ControllerConfig.spec.profiles.roles[]</code> accepts optional <code>selection</code> with <code>provider</code>, <code>model</code>, and optional <code>thinking</code>. The per-role <code>--role-model</code> override takes precedence and persists in <code>run.json</code> for recovery.</p>
 <p>Top-level <code>TrustedRegistry</code> requires <code>metadata.name</code> (<code>1..64</code> chars) and <code>spec</code> (<code>version: 1</code>, <code>resourceVersion</code>, <code>handlers</code>, <code>roleProfiles</code>, <code>resources</code>, <code>runtimeProfiles</code>, <code>credentialBindings</code>, <code>environmentBindings</code>; <code>gateEndpoints</code> and <code>publicationEndpoints</code> are optional keys):</p>
 <table>
   <thead>
@@ -696,8 +698,8 @@
       <tr>
           <td><code>roleProfiles[].runtimeRef</code></td>
           <td>Yes</td>
-          <td><code>runtimeProfiles[].id</code></td>
-          <td>Binds the role to a verified runtime identity</td>
+          <td><code>runtimeProfiles[].id</code> or <code>null</code> for delegated</td>
+          <td>Binds a Pi role to a verified runtime identity</td>
       </tr>
       <tr>
           <td><code>roleProfiles[].providerCredentialRef</code></td>

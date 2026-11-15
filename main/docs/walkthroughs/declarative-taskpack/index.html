@@ -497,6 +497,35 @@
 <li><strong>Proposal</strong>: The proposal must be writable and end in <code>.yaml</code>, <code>.yml</code>, or <code>.json</code>.</li>
 <li><strong>Secrets</strong>: Never place tokens or <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; the parser rejects untrusted interpolation.</li>
 </ul>
+<h3 id="delegated-role-dag">Delegated role DAG</h3>
+<p>Add roles to the taskpack from Step 1. This example runs a read-only review after the author:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">author-model</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">review-model</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author]</span></span></span></code></pre></div>
+</div>
+<p>Merge these roles into the complete taskpack above; this excerpt omits its other required fields. Run the local delegated loop without Loopwright provider secrets:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json
+</span></span><span class="line"><span class="cl">loopwright step submit --run-root ../runs --run-id demo-1 --lease TOKEN --status completed --json</span></span></code></pre></div>
+</div>
+<p>Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See <a href="/loopwright/main/docs/operations/cli/">CLI</a>
+ for leases and <a href="/loopwright/main/docs/configuration/taskpack/#role-dag">Taskpack</a>
+ for role bounds.</p>
 <h2 id="step-2-validate-taskpack">Step 2: Validate taskpack</h2>
 <p>Verify your host meets the <a href="/loopwright/main/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
 , then test compilation in dry-run mode before enabling live mutations.</p>
@@ -573,7 +602,11 @@
     <li><a href="#contents">Contents</a></li>
     <li><a href="#overview">Overview</a></li>
     <li><a href="#prompt-bootstrap">Prompt bootstrap</a></li>
-    <li><a href="#step-1-author-taskpack">Step 1: Author taskpack</a></li>
+    <li><a href="#step-1-author-taskpack">Step 1: Author taskpack</a>
+      <ul>
+        <li><a href="#delegated-role-dag">Delegated role DAG</a></li>
+      </ul>
+    </li>
     <li><a href="#step-2-validate-taskpack">Step 2: Validate taskpack</a></li>
     <li><a href="#step-3-configure-workflow">Step 3: Configure workflow</a></li>
     <li><a href="#step-4-review-outcomes">Step 4: Review outcomes</a></li>

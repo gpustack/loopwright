@@ -321,6 +321,17 @@ loopwright check --config "$HOME/loopwright-ops/controller.yaml" --registry "$HO
 loopwright run --config "$HOME/loopwright-ops/controller.yaml" --registry "$HOME/loopwright-trust/registry.yaml" --registry-sha256 "$REGISTRY_SHA" --repo /path/to/example-app --run-root "$HOME/loopwright-runs" --run-id run-20261112-01 --json
 ```
 
+### Delegated execution
+
+For delegated execution, approve a role profile with `adapter: delegated`. Set `runtimeRef`, `providerCredentialRef`, and `mcp` to `null`. Bind the task role to that profile and set its task adapter to `delegated`. See [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md#role-and-runtime-profiles) for selection and context rules.
+
+```sh
+loopwright step next --config "$HOME/loopwright-ops/controller.yaml" --registry "$HOME/loopwright-trust/registry.yaml" --registry-sha256 "$REGISTRY_SHA" --repo /path/to/example-app --run-root "$HOME/loopwright-runs" --run-id delegated-1 --role-model builder=example/author-model:medium --json
+loopwright step submit --run-root "$HOME/loopwright-runs" --run-id delegated-1 --lease TOKEN --status completed --json
+```
+
+Use the yielded workspace and allowed tools, then submit its single-use lease. Repeat until the run settles. See [CLI](/loopwright/main/docs/operations/cli/index.md#delegated-stepping) for recovery and cancellation.
+
 ## Step 5: Reconcile receipts
 
 Query run state, export evidence bundles, or resume/reconcile interrupted executions:

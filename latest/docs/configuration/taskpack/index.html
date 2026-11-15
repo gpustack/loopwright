@@ -364,8 +364,6 @@
 </li>
 <li><a href="#triggers-and-policies">Triggers and policies</a>
 </li>
-<li><a href="#output-formats">Output formats</a>
-</li>
 </ul>
 <h2 id="compilation-model">Compilation model</h2>
 <p>When a GitHub Action or App processes a taskpack, <code>compileDeclarativeTaskpack</code> generates three runtime artifacts:</p>
@@ -407,6 +405,19 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Update catalog manifests from upstream releases and pass checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream versions match current manifests and settle cleanly.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional delegated or Pi role DAG</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">task</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">author-model</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">medium</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read, write, edit]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">review-model</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author]</span><span class="w"> </span><span class="c"># Optional prior role IDs</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional whitelist and blacklist</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests, docs/versions.md]</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests/frozen-policy.yaml]</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
@@ -425,8 +436,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">localChecks</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">proposal-schema</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">json-artifact.v1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional scalar overrides</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">release_channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">release_channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable }</span><span class="w"> </span><span class="c"># Optional scalar overrides</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">static-check</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">command.v1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
@@ -470,35 +480,20 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">stdio</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l">github-mcp-server</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">stdio, --read-only, --toolsets, &#34;repos,pull_requests,issues&#34;]</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN }</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">60</span><span class="w"> </span><span class="c"># Optional (defaults to 60)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">deepwiki</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">http</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l">https://mcp.deepwiki.com/mcp</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional canonical execution ceilings</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="c"># Optional (defaults to 3600)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">20000000</span><span class="w"> </span><span class="c"># Optional (defaults to 20000000)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">200000</span><span class="w"> </span><span class="c"># Optional model context window override</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional (defaults to 32768)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="c"># Optional (defaults to 256)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional (defaults to 5)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxFormatRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">6</span><span class="w"> </span><span class="c"># Optional (defaults to 6)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxImplementationRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="c"># Optional (defaults to 32)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTransportRetries</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="c"># Optional (defaults to 3)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="c"># Optional (defaults to 300)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commandTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional (defaults to 30)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">json, github-step-summary]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">wallTimeSeconds: 3600, totalTokens: 20000000, contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">200000</span><span class="p">,</span><span class="w"> </span><span class="c"># Optional; see Execution limits</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens: 32768, maxModelCalls: 256, maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="p">,</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="p">,</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds: 300, commandTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span>}<span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">formats</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">json, github-step-summary] }</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sandbox</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host isolation policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">macos-seatbelt, linux-bwrap, linux-landlock, docker]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">networkMode</span><span class="p">:</span><span class="w"> </span><span class="l">none</span><span class="w"> </span><span class="c"># Optional (defaults to none)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemReadContainment</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemWriteContainment</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">protectedPathReadOnlyMask</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">networkIsolation</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">processTreeCleanup</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">filesystemReadContainment, filesystemWriteContainment, protectedPathReadOnlyMask, networkIsolation, processTreeCleanup]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">~/.ssh]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional System-One triage policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
@@ -510,6 +505,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional (defaults to 1)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowImages</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span></span></span></code></pre></div>
 </div>
+<h3 id="role-dag">Role DAG</h3>
+<p><code>spec.roles</code> contains one to four roles. Each requires <code>id</code>, <code>provider</code>, and <code>model</code>. Optional <code>purpose</code> is <code>task</code> or <code>review</code>; optional <code>thinking</code> selects a reasoning label. Optional <code>tools</code> selects from <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, and <code>delete</code>. <code>dependsOn</code> can reference only earlier roles, so the graph is acyclic. The first check depends on every sink role. The compiler adjusts <code>controls.maxAttempts</code> to fit checkpoint capacity <code>D &lt;= 64</code>.</p>
+<p>Use <code>loopwright step next --taskpack</code> for local compilation without provider secrets. It selects <code>executionMode: 'delegated'</code> and stages configuration under <code>.taskpack-&lt;runId&gt;/</code> in the run root. See <a href="/loopwright/latest/docs/operations/cli/">CLI</a>
+ for the pull and submit protocol.</p>
 <ul>
 <li><strong>Strict YAML 1.2</strong>: The parser rejects symlinks (<code>O_NOFOLLOW</code>), <code>..</code> traversal, duplicate keys, YAML anchors/aliases, and <code>${NAME}</code> interpolation (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>; see <a href="/loopwright/latest/docs/configuration/controller-and-registry/#environment-interpolation">Environment interpolation</a>
 ).</li>
@@ -621,10 +620,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">maxTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">reasoning</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">samplingParams</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">temperature: 0.6, top_p</span><span class="p">:</span><span class="w"> </span><span class="m">0.95</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">compat</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional OpenAI-compatible wire dialect tuning</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">thinkingFormat</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxTokensField</span><span class="p">:</span><span class="w"> </span><span class="l">max_tokens</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">zaiToolStream</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">compat</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">thinkingFormat: zai, maxTokensField: max_tokens, zaiToolStream</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional OpenAI-compatible wire dialect tuning</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
@@ -1316,7 +1312,7 @@
   </tbody>
 </table>
 <p>A bare prefix on the first line followed by non-empty guidance on later lines also invokes <code>revise</code>. The <code>revise</code> command must be enabled.</p>
-<h2 id="output-formats">Output formats</h2>
+<h3 id="output-formats">Output formats</h3>
 <p><code>spec.output</code> accepts a format string, a list, or an object with a <code>formats</code> list. Omission defaults to <code>json</code>.
 Action <code>output</code> overrides the taskpack default. The managed CLI selects formats separately with <code>--output-format</code>.</p>
 <table>
@@ -1372,7 +1368,11 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
   <ul>
     <li><a href="#contents">Contents</a></li>
     <li><a href="#compilation-model">Compilation model</a></li>
-    <li><a href="#taskpack-1">Taskpack</a></li>
+    <li><a href="#taskpack-1">Taskpack</a>
+      <ul>
+        <li><a href="#role-dag">Role DAG</a></li>
+      </ul>
+    </li>
     <li><a href="#metadata-and-scope">Metadata and scope</a></li>
     <li><a href="#model-configuration">Model configuration</a>
       <ul>
@@ -1403,9 +1403,9 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
       <ul>
         <li><a href="#trigger-and-policy-fields">Trigger and policy fields</a></li>
         <li><a href="#comment-commands">Comment commands</a></li>
+        <li><a href="#output-formats">Output formats</a></li>
       </ul>
     </li>
-    <li><a href="#output-formats">Output formats</a></li>
   </ul>
 </nav>
         

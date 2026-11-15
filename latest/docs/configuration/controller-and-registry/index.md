@@ -284,6 +284,10 @@ Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (
 
 ### Role and runtime profiles
 
+A role profile accepts `adapter: pi` or `adapter: delegated`. For secret-free delegated profiles, set `runtimeRef: null`, `providerCredentialRef: null`, and `mcp: null`. `providerCredentialRef` must be null. Their optional `context` defaults to `DEFAULT_DELEGATED_CONTEXT`. Delegated selections accept valid labels without Docker or provider secrets. `pi.compact.v1` cannot target delegated roles. Unattended `run` and `resume` refuse active or parked delegated roles with `CAPABILITY_UNSUPPORTED`.
+
+`ControllerConfig.spec.profiles.roles[]` accepts optional `selection` with `provider`, `model`, and optional `thinking`. The per-role `--role-model` override takes precedence and persists in `run.json` for recovery.
+
 Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` (`version: 1`, `resourceVersion`, `handlers`, `roleProfiles`, `resources`, `runtimeProfiles`, `credentialBindings`, `environmentBindings`; `gateEndpoints` and `publicationEndpoints` are optional keys):
 
 | Field path | Required | Values and bounds | Meaning |
@@ -291,7 +295,7 @@ Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` 
 | `roleProfiles[].id` | Yes | Identifier (`1..64` chars) | Unique role profile ID referenced by `ControllerConfig` |
 | `roleProfiles[].selection` | Yes | `{ provider, model, thinking, api, customProvider? }` (`off..max`; `anthropic-messages`, `openai-completions`, `openai-responses`) | Token-based Pi model or custom compatible endpoint; see [Model configuration](/loopwright/latest/docs/configuration/taskpack/index.md#model-configuration) |
 | `roleProfiles[].tools` | Yes | Subset of `read`, `write`, `edit`, `bash`, `codemode`, `mcp__workspace__read_file` | Host-approved tool ceiling for bound task roles |
-| `roleProfiles[].runtimeRef` | Yes | `runtimeProfiles[].id` | Binds the role to a verified runtime identity |
+| `roleProfiles[].runtimeRef` | Yes | `runtimeProfiles[].id` or `null` for delegated | Binds a Pi role to a verified runtime identity |
 | `roleProfiles[].providerCredentialRef` | Yes (`null` allowed) | `credentialBindings[].id` or `null` | Selects the `provider` credential injected into the broker |
 | `roleProfiles[].limits` | No | Positive integer map (`promptBytes`, `responseBytes`, `toolArgsBytes`, `toolResultBytes`, `sessionBytes`, `fileBytes`, `candidateEntries`, `toolWallMs`, etc.) | Optional per-role byte, entry, and tool runtime ceilings |
 | `runtimeProfiles[].id` | Yes | Identifier (`1..64` chars) | Unique runtime profile ID |
