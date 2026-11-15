@@ -1,9 +1,9 @@
 import { constants, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { open, readFile, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { canonical, digestEqual, unifiedFileDiff } from './schema.js';
-import { entryFileBytes, loadMemoryStore, memoryDirectoryFor, projectMemoryStore } from './store.js';
+import { ensureSafeDirectoryChain, entryFileBytes, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import { verifyMemoryProposal } from './verifier.js';
 import type { MemoryCASInput, MemoryCASRefusal, MemoryCASResult, MemoryDiagnostic, MemoryModifiedFile, MemoryProposal, SeparateMemoryPullRequestSpec } from './types.js';
 
@@ -34,6 +34,10 @@ async function stageFile(target: string, bytes: Uint8Array, nonce: string): Prom
   const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
   return temporary;
+}
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const handle = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 function touchedBy(proposal: MemoryProposal): { readonly ids: ReadonlySet<string>; readonly claimKeys: ReadonlySet<string> } {
   const ids = new Set<string>(), claimKeys = new Set<string>();
@@ -71,10 +75,17 @@ function overlaps(delta: { ids: ReadonlySet<string>; claimKeys: ReadonlySet<stri
   for (const claimKey of touched.claimKeys) if (delta.claimKeys.has(claimKey)) return true;
   return false;
 }
-async function verifyAgainst(input: MemoryCASInput, proposal: MemoryProposal, patch: string, store: Awaited<ReturnType<typeof loadMemoryStore>>['index']) {
+async function verifyAgainst(
+  input: MemoryCASInput,
+  proposal: MemoryProposal,
+  patch: string,
+  store: Awaited<ReturnType<typeof loadMemoryStore>>['index'],
+  memoryRoot: string,
+) {
   return verifyMemoryProposal({ proposal, store, lock: input.lock, result: input.result, incident: input.incident, evidence: input.evidence,
     artifacts: input.artifacts, candidateDigest: input.candidateDigest, patch, secretValues: input.secretValues,
-    memoryWritable: input.memoryWritable, protectedPaths: input.protectedPaths });
+    memoryWritable: input.memoryWritable, protectedPaths: input.protectedPaths, memoryRoot,
+    exemptContractProtectedPatterns: input.exemptContractProtectedPatterns });
 }
 /**
  * Applies a verified proposal under an exclusive lockfile with optimistic compare-and-swap. All files are
@@ -83,10 +94,13 @@ async function verifyAgainst(input: MemoryCASInput, proposal: MemoryProposal, pa
  */
 export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<MemoryCASResult> {
   const repository = resolve(input.repository);
-  const loaded = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository);
-  const directory = memoryDirectoryFor(input.taskpack);
+  const memoryRoot = normalizeMemoryRoot(input.memoryRoot);
+  const loaded = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository, memoryRoot);
+  const directory = memoryDirectoryFor(input.taskpack, memoryRoot);
+  const taskpackSegments = [...memoryRoot.split('/'), input.taskpack];
+  const taskpackDirectory = join(repository, ...taskpackSegments);
   const storeDigestBefore = loaded.index.storeDigest;
-  if (existsSync(join(repository, '.loopwright', 'memory', input.taskpack, LOCK_NAME))) {
+  if (existsSync(join(taskpackDirectory, LOCK_NAME))) {
     return refusal('MEMORY_CAS_CONFLICT', casConflict(`${directory}/${LOCK_NAME}`, 'another apply holds the exclusive lockfile'), storeDigestBefore);
   }
   const proposal = input.proposal;
@@ -104,7 +118,7 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
   const baseEntryFiles = fastPath ? loaded.entryFiles : new Map([...input.baseStore!.entries].map(entry => [entry.id, entryFileBytes(entry)]));
   const baseProjection = projectMemoryStore(verifyBase, proposal.operations, input.nowMs, proposal.proposalId);
   const verificationPatch = buildPatch(directory, baseEntryFiles, baseProjection.entryFiles, canonical(verifyBase), canonical(baseProjection.index)).patch;
-  const verification = await verifyAgainst(input, proposal, verificationPatch, verifyBase);
+  const verification = await verifyAgainst(input, proposal, verificationPatch, verifyBase, memoryRoot);
   if (!verification.satisfied) {
     return refusal('MEMORY_VERIFICATION_FAILED', verification.gates.flatMap(gate => gate.diagnostics), storeDigestBefore);
   }
@@ -119,18 +133,17 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     const rebasedProjection = projectMemoryStore(loaded.index, effective.operations, input.nowMs, effective.proposalId);
     const rebasedPatch = buildPatch(directory, loaded.entryFiles, rebasedProjection.entryFiles,
       existsSync(join(repository, directory, 'index.json')) ? canonical(loaded.index) : null, canonical(rebasedProjection.index));
-    const rebasedVerification = await verifyAgainst(input, effective, rebasedPatch.patch, loaded.index);
+    const rebasedVerification = await verifyAgainst(input, effective, rebasedPatch.patch, loaded.index, memoryRoot);
     if (!rebasedVerification.satisfied) {
       return refusal('MEMORY_VERIFICATION_FAILED', rebasedVerification.gates.flatMap(gate => gate.diagnostics), storeDigestBefore);
     }
     rebased = true;
   }
-  const taskpackDirectory = join(repository, '.loopwright', 'memory', input.taskpack);
   const nonce = randomBytes(6).toString('hex');
   const staged: { readonly temp: string; readonly target: string }[] = [];
   let lockCreated = false;
   try {
-    await mkdir(taskpackDirectory, { recursive: true, mode: 0o700 });
+    await ensureSafeDirectoryChain(repository, taskpackSegments);
     const lockHandle = await open(join(taskpackDirectory, LOCK_NAME), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'EEXIST') return null;
       throw error;
@@ -144,12 +157,11 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
         acquiredAtMs: input.nowMs, touchedEntryIds: [...touchedBy(effective).ids].sort() }));
       await lockHandle.sync();
     } finally { await lockHandle.close(); }
-    const current = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository);
+    const current = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository, memoryRoot);
     if (!digestEqual(current.index.storeDigest, storeDigestBefore)) {
       return refusal('MEMORY_CAS_CONFLICT', casConflict(`${directory}/index.json`, 'store changed while preparing the apply'), storeDigestBefore);
     }
-    const entriesDirectory = join(taskpackDirectory, 'entries');
-    await mkdir(entriesDirectory, { recursive: true, mode: 0o700 });
+    await ensureSafeDirectoryChain(repository, [...taskpackSegments, 'entries']);
     const projection = projectMemoryStore(current.index, effective.operations, input.nowMs, effective.proposalId);
     const indexPath = join(taskpackDirectory, 'index.json');
     const indexExistedBefore = existsSync(indexPath);
@@ -162,9 +174,13 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     const rollback = new Map<string, Buffer | null>();
     for (const stage of staged) rollback.set(stage.target, existsSync(stage.target) ? await readFile(stage.target) : null);
     try {
-      for (const stage of staged.filter(candidate => !candidate.target.endsWith('index.json'))) await rename(stage.temp, stage.target);
+      const entryStages = staged.filter(candidate => !candidate.target.endsWith('index.json'));
+      for (const stage of entryStages) await rename(stage.temp, stage.target);
+      if (entryStages.length > 0) await syncDirectory(join(taskpackDirectory, 'entries'));
       await input.faultInjectionHook?.();
-      for (const stage of staged.filter(candidate => candidate.target.endsWith('index.json'))) await rename(stage.temp, stage.target);
+      const indexStages = staged.filter(candidate => candidate.target.endsWith('index.json'));
+      for (const stage of indexStages) await rename(stage.temp, stage.target);
+      if (indexStages.length > 0) await syncDirectory(taskpackDirectory);
     } catch (error) {
       for (const [target, bytes] of rollback) {
         try {

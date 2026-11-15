@@ -9,18 +9,84 @@ import type { MemoryEntry, MemoryOperation, MemoryStoreIndex, RetiredMemoryEntry
 export const MEMORY_ROOT = '.loopwright/memory';
 const TASKPACK_DIRECTORY_ENTRIES = ['index.json', 'entries', '.cas.lock'];
 const ENTRY_STAGING_PATTERN = /^([a-z0-9][a-z0-9._-]{0,127})\.md\.tmp-[0-9]+-[0-9a-f]+$/;
-export function memoryDirectoryFor(taskpack: string): string { return `${MEMORY_ROOT}/${taskpack}`; }
+const RESERVED_SEGMENT_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+
+function validateSafeSegment(
+  segment: string,
+  pathLabel: string,
+  options?: { readonly rejectReservedDeviceNames?: boolean },
+): void {
+  if (
+    typeof segment !== 'string'
+    || segment.length === 0
+    || segment.length > 128
+    || segment === '.'
+    || segment === '..'
+    || segment.endsWith('.')
+    || segment.includes('/')
+    || segment.includes('\\')
+    || hasControlCharacter(segment)
+  ) {
+    fail('MEMORY_SCHEMA_INVALID', pathLabel, 'memoryRoot contains an invalid path segment');
+  }
+  const lower = segment.toLowerCase();
+  const reservedRejected = options?.rejectReservedDeviceNames === true && RESERVED_SEGMENT_PATTERN.test(segment);
+  if (lower === '.git' || lower === '.github' || reservedRejected || !/^[A-Za-z0-9._-]+$/.test(segment)) {
+    fail('MEMORY_SCHEMA_INVALID', pathLabel, `memoryRoot segment ${segment} is forbidden`);
+  }
+}
+
+async function assertNoCaseAliasSibling(parentDir: string, segment: string, relLabel: string): Promise<boolean> {
+  const entries = await readdir(parentDir);
+  const foldedSegment = segment.normalize('NFC').toLowerCase();
+  let exactExists = false;
+  for (const name of entries) {
+    if (name === segment) {
+      exactExists = true;
+      continue;
+    }
+    if (name.normalize('NFC').toLowerCase() === foldedSegment) {
+      fail('MEMORY_SCOPE_VIOLATION', relLabel, `path segment ${segment} aliases existing entry ${name} with different case`);
+    }
+  }
+  return exactExists;
+}
+
+export function normalizeMemoryRoot(memoryRoot: string = MEMORY_ROOT): string {
+  if (typeof memoryRoot !== 'string' || memoryRoot.length === 0 || memoryRoot.length > 256) {
+    fail('MEMORY_SCHEMA_INVALID', '/memoryRoot', 'memoryRoot must be a non-empty repo-relative path up to 256 characters');
+  }
+  if (memoryRoot.startsWith('/') || memoryRoot.endsWith('/') || memoryRoot.includes('\\') || hasControlCharacter(memoryRoot)) {
+    fail('MEMORY_SCHEMA_INVALID', '/memoryRoot', 'memoryRoot must be a normalized repo-relative POSIX path');
+  }
+  const segments = memoryRoot.split('/');
+  if (segments.length > 16) fail('MEMORY_SCHEMA_INVALID', '/memoryRoot', 'memoryRoot exceeds maximum segment depth');
+  for (const segment of segments) {
+    validateSafeSegment(segment, '/memoryRoot', { rejectReservedDeviceNames: true });
+  }
+  const lowerRoot = memoryRoot.toLowerCase();
+  if (lowerRoot === '.loopwright/policies' || lowerRoot.startsWith('.loopwright/policies/')) {
+    fail('MEMORY_SCOPE_VIOLATION', '/memoryRoot', 'memoryRoot cannot target protected .loopwright/policies area');
+  }
+  return memoryRoot;
+}
+
+export function memoryDirectoryFor(taskpack: string, memoryRoot: string = MEMORY_ROOT): string {
+  const normalizedRoot = normalizeMemoryRoot(memoryRoot);
+  return `${normalizedRoot}/${taskpack}`;
+}
 export function forbiddenMemoryArtifactName(name: string): boolean {
   return name.endsWith('.sqlite') || name === 'run.json' || name.startsWith('privateSession') || /checkpoint/i.test(name);
 }
-export function isMemoryManagedPath(taskpack: string, path: string): boolean {
-  if (!memoryIdentifierPattern.test(taskpack)) return false;
+export function isMemoryManagedPath(taskpack: string, path: string, memoryRoot: string = MEMORY_ROOT): boolean {
+  if (!memoryIdentifierPattern.test(taskpack) || taskpack.length > 128) return false;
   if (path.startsWith('/') || path.includes('\\')) return false;
   const segments = path.split('/');
   if (segments.some(segment => segment.length === 0)) return false;
   if (segments.includes('..') || segments.includes('.')) return false;
   if (hasControlCharacter(path)) return false;
-  const directory = memoryDirectoryFor(taskpack);
+  let directory: string;
+  try { directory = memoryDirectoryFor(taskpack, memoryRoot); } catch { return false; }
   return path === directory || path.startsWith(`${directory}/`);
 }
 export function emptyMemoryStoreIndex(taskpack: string, repository: string, nowMs: number): MemoryStoreIndex {
@@ -67,52 +133,83 @@ export async function readActiveCasLock(directory: string): Promise<ActiveCasLoc
   }
   return { pid: input['pid'], nonce: input['nonce'], touchedEntryIds: new Set(input['touchedEntryIds'] as readonly string[]) };
 }
-/** Reads `<repository>/.loopwright/memory/<taskpack>/`; a missing store reads as empty under `repositorySlug`. */
-export async function loadMemoryStore(repository: string, taskpack: string, repositorySlug: string): Promise<LoadedMemoryStore> {
+/** Reads `<repository>/<memoryRoot>/<taskpack>/`; a missing store reads as empty under `repositorySlug`. */
+export async function loadMemoryStore(
+  repository: string,
+  taskpack: string,
+  repositorySlug: string,
+  memoryRoot: string = MEMORY_ROOT,
+): Promise<LoadedMemoryStore> {
   if (!memoryIdentifierPattern.test(taskpack) || taskpack.length > 128) fail('MEMORY_SCHEMA_INVALID', '/taskpack', 'identifier pattern mismatch');
+  const normalizedRoot = normalizeMemoryRoot(memoryRoot);
+  const dirLabel = memoryDirectoryFor(taskpack, normalizedRoot);
   const root = resolve(repository);
-  const directory = join(root, '.loopwright', 'memory', taskpack);
-  const rootStats = await lstat(join(root, MEMORY_ROOT)).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return null; throw error;
+  const repoStats = await lstat(root).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
   });
-  if (rootStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
-  if (rootStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', MEMORY_ROOT, 'symbolic links are refused in the memory store');
+  if (repoStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+  if (repoStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'symbolic links are refused in the memory store');
+  if (!repoStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'expected a directory');
+  let cursor = root;
+  let relCursor = '';
+  for (const segment of normalizedRoot.split('/')) {
+    const parentDir = cursor;
+    cursor = join(cursor, segment);
+    relCursor = relCursor.length === 0 ? segment : `${relCursor}/${segment}`;
+    const exactExists = await assertNoCaseAliasSibling(parentDir, segment, relCursor);
+    if (!exactExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+    const segStats = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (segStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+    if (segStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'symbolic links are refused in the memory store');
+    if (!segStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'expected a directory');
+  }
+  const memoryRootDir = cursor;
+  const directory = join(memoryRootDir, taskpack);
+  const taskpackExists = await assertNoCaseAliasSibling(memoryRootDir, taskpack, dirLabel);
+  if (!taskpackExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
   const stats = await lstat(directory).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return null; throw error;
   });
   if (stats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
-  if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', memoryDirectoryFor(taskpack), 'symbolic links are refused in the memory store');
-  if (!stats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', memoryDirectoryFor(taskpack), 'expected a directory');
-  await refuseForbiddenNames(join(root, MEMORY_ROOT), MEMORY_ROOT);
+  if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', dirLabel, 'symbolic links are refused in the memory store');
+  if (!stats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', dirLabel, 'expected a directory');
+  await refuseForbiddenNames(memoryRootDir, normalizedRoot);
   const taskpackNames = await readdir(directory);
   let activeLock = await readActiveCasLock(directory);
   for (const name of taskpackNames) {
     if (TASKPACK_DIRECTORY_ENTRIES.includes(name)) continue;
     if (activeLock !== null && name === `index.json.tmp-${activeLock.pid}-${activeLock.nonce}`) continue;
-    fail('MEMORY_SCOPE_VIOLATION', `${memoryDirectoryFor(taskpack)}/${name}`, 'unexpected file in memory directory');
+    fail('MEMORY_SCOPE_VIOLATION', `${dirLabel}/${name}`, 'unexpected file in memory directory');
   }
   const entriesDirectory = join(directory, 'entries');
   const entriesStats = await lstat(entriesDirectory).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return null; throw error;
   });
   const indexBytes = await (async (): Promise<Uint8Array | null> => {
-    try { return await readRegularFile(join(directory, 'index.json'), `${memoryDirectoryFor(taskpack)}/index.json`); }
+    try { return await readRegularFile(join(directory, 'index.json'), `${dirLabel}/index.json`); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   })();
   if (indexBytes === null) {
+    if (entriesStats !== null && (entriesStats.isSymbolicLink() || !entriesStats.isDirectory())) {
+      fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'expected a directory');
+    }
     const existing = entriesStats === null ? [] : await readdir(entriesDirectory);
-    if (existing.length > 0) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/index.json`, 'entry files exist without an index');
+    if (existing.length > 0) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'entry files exist without an index');
     return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
   }
-  if (entriesStats === null) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/entries`, 'entries directory missing');
+  if (entriesStats === null) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'entries directory missing');
   let parsedIndex: unknown;
-  try { parsedIndex = JSON.parse(Buffer.from(indexBytes).toString('utf8')); } catch { fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/index.json`, 'index is not JSON'); }
-  const index = memoryStoreIndexSchema(parsedIndex, memoryDirectoryFor(taskpack));
-  if (index.taskpack !== taskpack) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/index.json/taskpack`, 'index taskpack does not match directory');
-  if (entriesStats!.isSymbolicLink() || !entriesStats!.isDirectory()) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/entries`, 'expected a directory');
+  try { parsedIndex = JSON.parse(Buffer.from(indexBytes).toString('utf8')); } catch { fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'index is not JSON'); }
+  const index = memoryStoreIndexSchema(parsedIndex, dirLabel);
+  if (index.taskpack !== taskpack) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json/taskpack`, 'index taskpack does not match directory');
+  if (entriesStats!.isSymbolicLink() || !entriesStats!.isDirectory()) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'expected a directory');
   const files = await readdir(entriesDirectory);
   const indexedIds = new Set([...index.entries.map(entry => entry.id), ...index.retired.map(row => row.entry.id)]);
   const committedBytes = (row: MemoryEntry): Uint8Array => entryFileBytes(row);
@@ -146,23 +243,23 @@ export async function loadMemoryStore(repository: string, taskpack: string, repo
       const stagedId = stagingMatch[1]!;
       if (activeLock === null || !activeLock.touchedEntryIds.has(stagedId)
         || fileName !== `${stagedId}.md.tmp-${activeLock.pid}-${activeLock.nonce}`) {
-        fail('MEMORY_SCOPE_VIOLATION', `${memoryDirectoryFor(taskpack)}/entries/${fileName}`, 'staging temporary outside an active apply');
+        fail('MEMORY_SCOPE_VIOLATION', `${dirLabel}/entries/${fileName}`, 'staging temporary outside an active apply');
       }
       continue;
     }
-    if (!fileName.endsWith('.md')) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/entries/${fileName}`, 'unexpected non-markdown file');
-    if (forbiddenMemoryArtifactName(fileName)) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/entries/${fileName}`, 'forbidden artifact name in memory store');
+    if (!fileName.endsWith('.md')) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries/${fileName}`, 'unexpected non-markdown file');
+    if (forbiddenMemoryArtifactName(fileName)) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries/${fileName}`, 'forbidden artifact name in memory store');
     const id = fileName.slice(0, -'.md'.length);
     if (!indexedIds.has(id)) {
       activeLock = activeLock ?? await readActiveCasLock(directory);
-      if (activeLock === null || !activeLock.touchedEntryIds.has(id)) fail('MEMORY_SCHEMA_INVALID', `${memoryDirectoryFor(taskpack)}/entries/${fileName}`, 'entry file has no index row');
+      if (activeLock === null || !activeLock.touchedEntryIds.has(id)) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries/${fileName}`, 'entry file has no index row');
       continue;
     }
   }
   const authoritative = new Map<string, MemoryEntry>();
   for (const entry of index.entries) authoritative.set(entry.id, entry);
   for (const row of [...index.retired].reverse()) if (!authoritative.has(row.entry.id)) authoritative.set(row.entry.id, row.entry);
-  await Promise.all([...authoritative].map(([id, row]) => markIndexed(id, row, `${memoryDirectoryFor(taskpack)}/entries/${id}.md`)));
+  await Promise.all([...authoritative].map(([id, row]) => markIndexed(id, row, `${dirLabel}/entries/${id}.md`)));
   return Object.freeze({ index, entryFiles });
 }
 
@@ -193,21 +290,29 @@ export function matchScopePattern(pattern: string, path: string): boolean {
 async function collectFiles(root: string, directory: string, out: string[]): Promise<void> {
   const names = await readdir(directory, { withFileTypes: true });
   for (const entry of names) {
+    if (entry.name === '.git' && directory === root) continue;
     if (entry.isSymbolicLink()) continue;
     const full = join(directory, entry.name);
     if (entry.isDirectory()) await collectFiles(root, full, out);
     else if (entry.isFile()) out.push(relative(root, full).split('\\').join('/'));
   }
 }
-/** Deterministic SHA-256 over the sorted `{ path, sha256, byteLength }` manifest of the files matching `paths`. */
-export async function computeCodeFingerprint(repository: string, paths: readonly string[]): Promise<Digest> {
+/** Deterministic SHA-256 over the sorted `{ path, sha256, byteLength }` manifest of the files matching `paths` outside `memoryRoot`. */
+export async function computeCodeFingerprint(
+  repository: string,
+  paths: readonly string[],
+  memoryRoot: string = MEMORY_ROOT,
+): Promise<Digest> {
   const root = resolve(repository);
+  const normalizedMemoryRoot = normalizeMemoryRoot(memoryRoot);
+  const memoryRootPrefix = `${normalizedMemoryRoot}/`;
   const all: string[] = [];
   await collectFiles(root, root, all);
   all.sort();
   const matchers = [...paths].map(compileScopePattern);
   const manifest: CodeFingerprintEntry[] = [];
   for (const path of all) {
+    if (path === normalizedMemoryRoot || path.startsWith(memoryRootPrefix)) continue;
     if (!matchers.some(matcher => matcher.test(path))) continue;
     const bytes = await readFile(join(root, path));
     manifest.push({ path, sha256: createHash('sha256').update(bytes).digest('hex'), byteLength: bytes.byteLength });
@@ -264,8 +369,50 @@ export function projectMemoryStore(base: MemoryStoreIndex, operations: readonly 
   const entryFiles = new Map<string, Uint8Array>(sorted.map(entry => [entry.id, entryFileBytes(entry)]));
   return { index, entryFiles, retiredRows: retiredSorted };
 }
-export async function ensureMemoryDirectories(repository: string, taskpack: string): Promise<string> {
-  const directory = join(resolve(repository), '.loopwright', 'memory', taskpack, 'entries');
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  return directory;
+export async function ensureSafeDirectoryChain(repository: string, segments: readonly string[]): Promise<string> {
+  if (!Array.isArray(segments) || segments.length === 0 || segments.length > 18) {
+    fail('MEMORY_SCHEMA_INVALID', '/segments', 'segments length outside 1..18');
+  }
+  const root = resolve(repository);
+  const repoStats = await lstat(root);
+  if (repoStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'symbolic links are refused in the memory store');
+  if (!repoStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'expected a directory');
+  let cursor = root;
+  let relCursor = '';
+  for (const segment of segments) {
+    validateSafeSegment(segment, '/segments');
+    const parentDir = cursor;
+    cursor = join(cursor, segment);
+    relCursor = relCursor.length === 0 ? segment : `${relCursor}/${segment}`;
+    const lowerPrefix = relCursor.toLowerCase();
+    if (lowerPrefix === '.loopwright/policies' || lowerPrefix.startsWith('.loopwright/policies/')) {
+      fail('MEMORY_SCOPE_VIOLATION', relCursor, 'directory chain cannot target protected .loopwright/policies area');
+    }
+    const exactExists = await assertNoCaseAliasSibling(parentDir, segment, relCursor);
+    let stats = exactExists
+      ? await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      })
+      : null;
+    if (stats === null) {
+      await mkdir(cursor, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EEXIST') throw error;
+      });
+      await assertNoCaseAliasSibling(parentDir, segment, relCursor);
+      stats = await lstat(cursor);
+    }
+    if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'symbolic links are refused in the memory store');
+    if (!stats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'expected a directory');
+  }
+  return cursor;
+}
+export async function ensureMemoryDirectories(
+  repository: string,
+  taskpack: string,
+  memoryRoot: string = MEMORY_ROOT,
+): Promise<string> {
+  if (!memoryIdentifierPattern.test(taskpack) || taskpack.length > 128) fail('MEMORY_SCHEMA_INVALID', '/taskpack', 'identifier pattern mismatch');
+  const normalizedRoot = normalizeMemoryRoot(memoryRoot);
+  return ensureSafeDirectoryChain(repository, [...normalizedRoot.split('/'), taskpack, 'entries']);
 }

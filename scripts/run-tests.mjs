@@ -30,6 +30,7 @@ const EXTRA_TESTS = [
 const PRIORITY_WEIGHTS = new Map([
   ['tree-overlay.test.js', 110],
   ['turnkey-action.test.js', 105],
+  ['turnkey-memory.test.js', 102],
   ['python-bridge.test.js', 100],
   ['parity.test.js', 95],
   ['progress-checkpoint.test.js', 90],

@@ -130,6 +130,9 @@ outputs:
   pr-url:
     description: 'Pull request URL produced by turnkey publication, when available.'
     value: ${{ steps.loopwright-entrypoint.outputs.pr-url }}
+  memory-pr-url:
+    description: 'Separate memory pull request URL produced by post-settlement memory publication, when available.'
+    value: ${{ steps.loopwright-entrypoint.outputs.memory-pr-url }}
   total-tokens:
     description: 'Total tokens reported for the execution run.'
     value: ${{ steps.loopwright-entrypoint.outputs.total-tokens }}

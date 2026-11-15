@@ -13,11 +13,12 @@ export {
 } from './schema.js';
 export {
   ACTIONS_RUN_URL_PATTERN, applyLimitsToBudgets, authorizeRepositoryActor, boundDiagnosticLog,
-  collectControlRootSiblingPaths, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS,
-  DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL,
-  INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits,
-  parseActionsRunUrl, parseCommentCommand, parseEnvAndInputLimitsOverride, parseLoopwrightEnvLimits,
-  prepareTaskpackIntake, validateCommentGuidance, type ControlRootSiblingSet,
+  buildUpstreamVersionsMap, collectControlRootSiblingPaths, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD,
+  DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES,
+  GUIDANCE_SENTINEL, INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits,
+  parseActionInputLimits, parseActionsRunUrl, parseCommentCommand, parseEnvAndInputLimitsOverride,
+  parseLoopwrightEnvLimits, prepareTaskpackIntake, resolveTaskpackMemoryLocation, stageCompiledInstructionResources,
+  validateCommentGuidance, type ControlRootSiblingSet, type ResolvedTaskpackMemoryLocation,
 } from './taskpack.js';
 export {
   intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore,
@@ -46,12 +47,14 @@ export {
 } from './action.js';
 export {
   checkManagedPrMatchesDiscoveredState, compareVersionTags, DEFAULT_GIT_COMMIT_IDENTITY,
-  discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
+  discoverTaskpackUpstreams, findOpenManagedPullRequest, findOpenMemoryPullRequest,
+  MEMORY_PULL_REQUEST_BRANCH_PREFIX, parseOptionalGitIdentityInput,
   parseUpstreamRecordsJson, resolveGitHubAuth, resolveGitHubToken,
   resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
   validateGitCommitIdentity,
   type CheckManagedPrMatchesOptions, type DiscoverTaskpackUpstreamsOptions,
-  type FindOpenManagedPullRequestOptions, type ManagedPullRequestInfo,
+  type FindOpenManagedPullRequestOptions, type FindOpenMemoryPullRequestOptions,
+  type ManagedPullRequestInfo,
   type ResolveActionGitHubAuthOptions, type ResolveActionGitHubTokenOptions,
   type ResolvedActionGitHubAuth, type ResolvedRepositoryAndRevisions,
   type ResolveRepositoryAndRevisionsOptions,
@@ -65,15 +68,18 @@ export {
 } from './output-format.js';
 export {
   buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle,
-  isRetryablePerRequestTimeout, makeAttemptRunId,
-  normalizeControllerRunId, openStagedTaskpackStepGate, stageTaskpackForStep,
+  finalizeAndPublishTurnkeyMemory, isRetryablePerRequestTimeout, makeAttemptRunId,
+  normalizeControllerRunId, openStagedTaskpackStepGate, readMemoryPublicationJournal,
+  reconcileTurnkeyMemoryPublication, stageTaskpackForStep,
   startLocalCommandGateServer, startNativePullRequestPublisherServer,
-  type ExecuteTurnkeyActionCycleOptions, type LocalCommandGateServer,
+  type ExecuteTurnkeyActionCycleOptions, type FinalizeAndPublishTurnkeyMemoryOptions,
+  type LocalCommandGateServer,
   type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,
   type NativePullRequestPublisherServer, type OpenStagedTaskpackStepGateOptions,
+  type ReconcileTurnkeyMemoryPublicationOptions,
   type StagedTaskpackForStep, type StagedTaskpackStepGateHandle,
   type StageTaskpackForStepOptions, type TurnkeyCycleAttemptSummary,
-  type TurnkeyCycleDelegateOptions,
+  type TurnkeyCycleDelegateOptions, type TurnkeyMemoryPublicationJournal,
 } from './turnkey.js';
 export { startGitHubAppControlPlane, type ControlPlaneHandle, type ControlPlaneOptions } from './service.js';
 export { serializePrettyYaml } from './yaml.js';

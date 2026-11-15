@@ -15,7 +15,7 @@ import {
   type RunReportInput,
 } from '@loopwright/controller';
 import { SecretScrubber } from './token-broker.js';
-import { GitHubAppError, type TaskpackManifest } from './types.js';
+import { GitHubAppError, type TaskpackManifest, type TurnkeyMemorySummary } from './types.js';
 
 export {
   formatByteCount,
@@ -34,6 +34,7 @@ export {
 export interface WriteActionOutputSinksOptions {
   readonly formats: readonly ReportOutputFormat[];
   readonly report: RunReportInput;
+  readonly memory?: TurnkeyMemorySummary | undefined;
   readonly stepSummaryPath?: string | undefined;
   readonly githubOutputPath?: string | undefined;
   readonly actionResultJson: string;
@@ -49,6 +50,7 @@ export interface WrittenActionOutputs {
   readonly githubOutputWritten: boolean;
   readonly result: string;
   readonly prUrl: string;
+  readonly memoryPrUrl: string;
   readonly totalTokens: string;
   readonly costUsd: string | null;
 }
@@ -100,15 +102,61 @@ function encodeGithubOutputField(name: string, value: string): string {
   return `${name}<<LOOPWRIGHT_EOF\n${singleLine}\nLOOPWRIGHT_EOF\n`;
 }
 
+function formatMemorySummaryLine(
+  memory: TurnkeyMemorySummary,
+  format: 'text' | 'markdown' | 'github-step-summary',
+  scrub: ((text: string) => string) | undefined,
+): string {
+  const safeStatus = sanitizeReportText(memory.status, { scrub, singleLine: true });
+  const safeBranch = memory.branchName
+    ? sanitizeReportText(memory.branchName, { scrub, singleLine: true })
+    : '';
+  const safePrUrl = memory.pullRequestUrl
+    ? sanitizeReportText(memory.pullRequestUrl, { scrub, singleLine: true })
+    : '';
+  const safeReason = memory.reason
+    ? sanitizeReportText(memory.reason, { scrub, singleLine: true })
+    : '';
+  const entryLabel = memory.entryCount === 1 ? '1 entry' : `${memory.entryCount} entries`;
+  if (format === 'text') {
+    const extras = [
+      entryLabel,
+      ...(safeBranch ? [`branch=${safeBranch}`] : []),
+      ...(safePrUrl ? [`pr=${safePrUrl}`] : []),
+    ].join(', ');
+    return `Memory: ${safeStatus} (${extras})${safeReason ? ` — ${safeReason}` : ''}`;
+  }
+  const mdExtras = [
+    entryLabel,
+    ...(safeBranch ? [`branch: \`${safeBranch}\``] : []),
+    ...(safePrUrl ? [`PR: ${safePrUrl}`] : []),
+  ].join(', ');
+  return `Memory: \`${safeStatus}\` (${mdExtras})${safeReason ? ` — ${safeReason}` : ''}`;
+}
+
+function appendSummaryLine(base: string, line: string): string {
+  const trimmedEnd = base.replace(/\n+$/, '');
+  const hadTrailingNewline = base.endsWith('\n');
+  return `${trimmedEnd}\n${line}${hadTrailingNewline ? '\n' : ''}`;
+}
+
 export async function writeActionOutputSinks(options: WriteActionOutputSinksOptions): Promise<WrittenActionOutputs> {
   const scrub = options.report.scrub ?? (options.scrubber !== undefined ? (text: string) => options.scrubber!.scrub(text) : undefined);
   const effectiveReport: RunReportInput = scrub !== undefined && options.report.scrub === undefined
     ? { ...options.report, scrub }
     : options.report;
 
+  const renderFormat = (format: ReportOutputFormat): string => {
+    const base = formatRunReport(effectiveReport, format);
+    if (options.memory === undefined || format === 'json') {
+      return base;
+    }
+    return appendSummaryLine(base, formatMemorySummaryLine(options.memory, format, scrub));
+  };
+
   const rendered: Partial<Record<ReportOutputFormat, string>> = {};
   for (const format of options.formats) {
-    rendered[format] = formatRunReport(effectiveReport, format);
+    rendered[format] = renderFormat(format);
   }
 
   const emitLog = options.logSink ?? ((chunk: string) => {
@@ -116,7 +164,7 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
   });
   for (const sinkFormat of ['markdown', 'text'] as const) {
     if (options.formats.includes(sinkFormat)) {
-      const renderedText = rendered[sinkFormat] ?? formatRunReport(effectiveReport, sinkFormat);
+      const renderedText = rendered[sinkFormat] ?? renderFormat(sinkFormat);
       emitLog(renderedText.endsWith('\n') ? renderedText : `${renderedText}\n`);
     }
   }
@@ -125,7 +173,7 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
     && !options.formats.includes('markdown')
     && !options.formats.includes('text')
   ) {
-    const fallbackText = formatRunReport(effectiveReport, 'text');
+    const fallbackText = renderFormat('text');
     emitLog(fallbackText.endsWith('\n') ? fallbackText : `${fallbackText}\n`);
   }
 
@@ -135,14 +183,19 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
     && options.stepSummaryPath !== undefined
     && options.stepSummaryPath.trim().length > 0
   ) {
-    const summaryText = rendered['github-step-summary'] ?? formatRunReport(effectiveReport, 'github-step-summary');
-    await appendSymlinkSafe(options.stepSummaryPath, `${summaryText}\n`);
+    const summaryText = rendered['github-step-summary'] ?? renderFormat('github-step-summary');
+    await appendSymlinkSafe(options.stepSummaryPath, summaryText.endsWith('\n') ? summaryText : `${summaryText}\n`);
     stepSummaryWritten = true;
   }
 
   const prUrl = effectiveReport.externalUrl
     ? sanitizeReportText(effectiveReport.externalUrl, { scrub, singleLine: true })
     : '';
+  const memoryPrUrl =
+    (options.memory?.status === 'published' || options.memory?.status === 'updated')
+    && options.memory.pullRequestUrl
+      ? sanitizeReportText(options.memory.pullRequestUrl, { scrub, singleLine: true })
+      : '';
   const totalTokens = effectiveReport.usage
     ? String(effectiveReport.usage.totalTokens.knownSubtotal)
     : '0';
@@ -157,6 +210,7 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
     let payload = encodeGithubOutputField('result', options.actionResultJson);
     if (options.includeExtendedGithubOutputs === true) {
       payload += encodeGithubOutputField('pr-url', prUrl);
+      payload += encodeGithubOutputField('memory-pr-url', memoryPrUrl);
       payload += encodeGithubOutputField('total-tokens', totalTokens);
       if (costUsd !== null) {
         payload += encodeGithubOutputField('cost-usd', costUsd);
@@ -172,6 +226,7 @@ export async function writeActionOutputSinks(options: WriteActionOutputSinksOpti
     githubOutputWritten,
     result: options.actionResultJson,
     prUrl,
+    memoryPrUrl,
     totalTokens,
     costUsd,
   };

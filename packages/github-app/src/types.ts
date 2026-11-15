@@ -192,7 +192,7 @@ export interface TaskpackManifest {
     readonly proposal: { readonly path: string; readonly requiredFields: readonly string[]; readonly schemaVersion: number };
     readonly verification: { readonly localChecks: readonly TaskpackCheckDeclaration[]; readonly externalGates: readonly TaskpackExternalGateDeclaration[] };
     readonly publication: { readonly mode: 'pull_request' | 'disabled'; readonly targetBranch: string; readonly headBranchPrefix: string; readonly titleTemplate: string };
-    readonly memory: { readonly directory: string; readonly apply: 'separate-pull-request'; readonly onNoModelBudget: 'deterministic-observations-only' };
+    readonly memory: { readonly directory: string; readonly apply: 'separate-pull-request'; readonly onNoModelBudget: 'deterministic-observations-only' | 'skip' };
     readonly triggers: {
       readonly schedule: boolean;
       readonly workflowDispatch: boolean;
@@ -456,10 +456,11 @@ export const CANONICAL_TASKPACK_STEP_GATE_URL = `http://127.0.0.1:65535/${LOCAL_
 
 export interface CompiledInstructionResource {
   readonly id: string;
-  readonly kind: 'instruction';
+  readonly kind: 'instruction' | 'document';
   readonly path: string;
   readonly bytes: Buffer;
   readonly digest: Digest;
+  readonly mode?: number | undefined;
 }
 
 export interface CompiledLocalCommandGate {
@@ -495,6 +496,11 @@ export interface HostTaskpackBindings {
   readonly limits?: TaskpackLimitsDeclaration | undefined;
   readonly envLimits?: TaskpackLimitsDeclaration | undefined;
   readonly externalMcpTools?: readonly string[] | undefined;
+  readonly externalMcpToolSchemas?: readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly inputSchema: Readonly<Record<string, unknown>>;
+  }[] | undefined;
   readonly maxAttempts?: number | undefined;
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;
@@ -502,6 +508,17 @@ export interface HostTaskpackBindings {
   readonly sourceTokenEnvNames?: readonly string[] | undefined;
   readonly resourceVersion?: string | undefined;
   readonly authorPrompt?: string | undefined;
+  readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
+  readonly nowMs?: number | undefined;
+  readonly scrubber?: { scrub(text: string): string } | undefined;
+  readonly onMemoryWarning?: ((message: string) => void) | undefined;
+}
+
+export interface CompiledActiveMemorySummary {
+  readonly activeEntryCount: number;
+  readonly excludedEntryCount: number;
+  readonly snapshotDigest: Digest;
+  readonly resourcePath: string | null;
 }
 
 export interface CompiledTaskpack {
@@ -511,6 +528,7 @@ export interface CompiledTaskpack {
   readonly registryBytes: Buffer;
   readonly instructionResources?: readonly CompiledInstructionResource[] | undefined;
   readonly localCommandGates?: readonly CompiledLocalCommandGate[] | undefined;
+  readonly activeMemory?: CompiledActiveMemorySummary | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -921,6 +939,28 @@ export interface WrittenCompiledTaskpack extends CompiledTaskpack {
   readonly configPath: string;
 }
 
+export type TurnkeyMemoryOutcomeStatus =
+  | 'published'
+  | 'updated'
+  | 'local_only'
+  | 'no_entries'
+  | 'skipped'
+  | 'refused'
+  | 'reconcile_required'
+  | 'failed';
+
+export interface TurnkeyMemorySummary {
+  readonly status: TurnkeyMemoryOutcomeStatus;
+  readonly directory: string;
+  readonly proposalId: string | null;
+  readonly entryCount: number;
+  readonly rebased: boolean;
+  readonly branchName: string | null;
+  readonly pullRequestUrl: string | null;
+  readonly pullRequestNumber: number | null;
+  readonly reason: string | null;
+}
+
 export type ActionEntrypointResult =
   | {
     readonly kind: 'refused';
@@ -936,6 +976,7 @@ export type ActionEntrypointResult =
     readonly intake: TaskpackIntakeOutcome;
     readonly taskpack: WrittenCompiledTaskpack;
     readonly delegateOutcome: { readonly ok: boolean; readonly detail: string } | null;
+    readonly memory?: TurnkeyMemorySummary | undefined;
   };
 
 /** Re-exported utility type so consumers can name a digest without importing core directly. */

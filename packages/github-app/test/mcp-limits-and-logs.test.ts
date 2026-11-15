@@ -715,7 +715,13 @@ rl.on('line', line => {
           return;
         }
         if (req.method === 'POST' && req.url === '/repos/acme/runner/pulls') {
-          prBodies.push(await readJsonBody(req));
+          const payload = await readJsonBody(req);
+          if (String(payload['head'] ?? '').startsWith('loopwright/memory/')) {
+            res.writeHead(201, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ number: 89, html_url: 'https://github.invalid/acme/runner/pull/89' }));
+            return;
+          }
+          prBodies.push(payload);
           res.writeHead(201, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ number: 88, html_url: 'https://github.invalid/acme/runner/pull/88' }));
           return;
@@ -1862,6 +1868,11 @@ grep -q '"ready"' .autosync/proposal.json
         }
         if (req.method === 'POST' && url === '/repos/gpustack/runner/pulls') {
           const body = await readJsonBody(req);
+          if (String(body['head'] ?? '').startsWith('loopwright/memory/')) {
+            res.writeHead(201, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ number: 89, html_url: 'https://github.com/gpustack/runner/pull/89' }));
+            return;
+          }
           createdPrBodies.push(String(body['body'] ?? ''));
           res.writeHead(201, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ number: 88, html_url: 'https://github.com/gpustack/runner/pull/88' }));

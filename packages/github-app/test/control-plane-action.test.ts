@@ -547,6 +547,7 @@ describe('reusable Action entrypoint (AC-6)', () => {
     assert.match(actionYml, /node-version: '26'/);
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.result \}\}/);
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.pr-url \}\}/);
+    assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.memory-pr-url \}\}/);
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.total-tokens \}\}/);
     assert.match(actionYml, /value: \$\{\{ steps\.loopwright-entrypoint\.outputs\.cost-usd \}\}/);
     assert.match(actionYml, /INPUT_OUTPUT: \$\{\{ inputs\.output \}\}/);

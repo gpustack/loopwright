@@ -12,8 +12,8 @@ const BUILD_TIERS = [
   ['state'],
   ['agent-pi'],
   ['controller'],
-  ['taskpack-runner', 'memory', 'github-app'],
-  ['decisions'],
+  ['taskpack-runner', 'memory'],
+  ['decisions', 'github-app'],
   ['cli'],
 ];
 

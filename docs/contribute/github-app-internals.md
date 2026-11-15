@@ -155,7 +155,14 @@ It applies deleted paths and overlay files before `command.v1` runs on the host,
 It uses `read-tree`, `hash-object -w`, `update-index`, `write-tree`, and `commit-tree`.
 It does not mutate Git worktrees or wipe untouched baseline files.
 Publication uses `--force-with-lease`; the cycle uses `openPiHostSessionAdapterV2`.
-`output-format.ts` writes configured reports and Action step outputs.
+`output-format.ts` writes configured reports and Action step outputs (`pr-url`, `memory-pr-url`).
+
+Before authoring, `compileDeclarativeTaskpack` runs `selectActiveMemory` on `spec.memory.directory`.
+Non-empty snapshots bound or omit the `0o400` `document` resource and `<active_memory>` excerpt within model request limits.
+
+After settlement, `finalizeAndPublishTurnkeyMemory` runs `finalizeRunMemory` and `applyMemoryProposalCAS` in a scratch clone.
+When `publication.mode` is `pull_request`, verified proposals fence the branch, journal target-bound progress in `memory-publication.json`, and sign off commits.
+Squash or rebase merges resolve current entries first, while uncertain mutations stay `reconcile_required` without changing `RunResult`.
 
 `runGitHubActionEntrypoint` qualifies the deployment host first (platform/arch allowlist, qualified 26.x Node runtime, non-network filesystem, clock drift within 1000ms, an exclusive fsync-plus-rename storage probe, and storage-profile budget rules), refuses interactive MCP authentication, evaluates trigger intake, compiles, and writes the registry and configuration into a trusted directory outside the checkout with `untrustedRoots: [<checkout>]`.
 

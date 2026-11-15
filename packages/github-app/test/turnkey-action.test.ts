@@ -725,11 +725,15 @@ describe('turnkey Action cycle end-to-end execution', () => {
         if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
           const payload = await readJsonBody(req);
           prRequests.push(payload);
+          const headRef = String(payload['head'] ?? '');
+          const isMemPr = headRef.startsWith('loopwright/memory/');
           res.writeHead(201, { 'content-type': 'application/json' });
           res.end(JSON.stringify({
-            number: 42,
-            html_url: 'https://github.invalid/acme/repo/pull/42',
-            head: { ref: 'loopwright/main', sha: '0'.repeat(40) },
+            number: isMemPr ? 43 : 42,
+            html_url: isMemPr
+              ? 'https://github.invalid/acme/repo/pull/43'
+              : 'https://github.invalid/acme/repo/pull/42',
+            head: { ref: headRef || 'loopwright/main', sha: '0'.repeat(40) },
             base: { ref: 'main', sha: fixture.baseSha },
             title: String(payload['title'] ?? ''),
             body: String(payload['body'] ?? ''),
@@ -769,9 +773,11 @@ describe('turnkey Action cycle end-to-end execution', () => {
       });
 
       assert.equal(exitCode, 0, 'turnkey e2e Action run must succeed cleanly');
-      assert.equal(prRequests.length, 1, 'publisher must open exactly one PR');
+      assert.equal(prRequests.length, 2, 'publisher must open candidate PR plus separate memory PR');
       assert.equal(prRequests[0]?.['head'], 'loopwright/main');
       assert.equal(prRequests[0]?.['base'], 'main');
+      assert.match(String(prRequests[1]?.['head'] ?? ''), /^loopwright\/memory\//);
+      assert.equal(prRequests[1]?.['base'], 'main');
 
       // Primary checkout HEAD, working tree, and protected .claude/skills symlink stay untouched.
       assert.equal(await git(fixture.repo, ['rev-parse', 'HEAD']), headAfterTaskpack);
@@ -2787,8 +2793,19 @@ spec:
           return;
         }
         if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          const payload = await readJsonBody(req);
+          const headRef = String(payload['head'] ?? '');
+          if (headRef.startsWith('loopwright/memory/')) {
+            res.writeHead(201, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({
+              number: 43,
+              html_url: 'https://github.invalid/acme/repo/pull/43',
+              head: { ref: headRef, sha: '0'.repeat(40) },
+              base: { ref: 'main', sha: baseSha },
+            }));
+            return;
+          }
           prPosts += 1;
-          await readJsonBody(req);
           const remoteLs = await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main']);
           openPrHeadSha = remoteLs.split(/\s+/)[0]!;
           res.writeHead(201, { 'content-type': 'application/json' });
@@ -3991,8 +4008,19 @@ spec:
           return;
         }
         if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          const payload = await readJsonBody(req);
+          const headRef = String(payload['head'] ?? '');
+          if (headRef.startsWith('loopwright/memory/')) {
+            res.writeHead(201, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({
+              number: 62,
+              html_url: 'https://github.invalid/acme/repo/pull/62',
+              head: { ref: headRef, sha: '0'.repeat(40) },
+              base: { ref: 'main', sha: baseSha },
+            }));
+            return;
+          }
           prPosts += 1;
-          await readJsonBody(req);
           const remoteLs = await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main']);
           const prSha = remoteLs.split(/\s+/)[0]!;
           res.writeHead(201, { 'content-type': 'application/json' });
@@ -4431,11 +4459,15 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
           assert.equal(auth, `Bearer ${mintedAppToken}`);
           const payload = await readJsonBody(req);
           prRequests.push(payload);
+          const headRef = String(payload['head'] ?? '');
+          const isMemPr = headRef.startsWith('loopwright/memory/');
           res.writeHead(201, { 'content-type': 'application/json' });
           res.end(JSON.stringify({
-            number: 420,
-            html_url: 'https://github.invalid/gpustack/runner/pull/420',
-            head: { ref: 'loopwright/main', sha: '0'.repeat(40) },
+            number: isMemPr ? 421 : 420,
+            html_url: isMemPr
+              ? 'https://github.invalid/gpustack/runner/pull/421'
+              : 'https://github.invalid/gpustack/runner/pull/420',
+            head: { ref: headRef || 'loopwright/main', sha: '0'.repeat(40) },
             base: { ref: 'main', sha: fixture.baseSha },
             title: String(payload['title'] ?? ''),
             body: String(payload['body'] ?? ''),
@@ -4481,7 +4513,9 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
       });
 
       assert.equal(exitCode, 0, 'Action run with auto-discovered GitHub App installation must succeed');
-      assert.equal(prRequests.length, 1, 'must open managed PR with minted App token');
+      assert.equal(prRequests.length, 2, 'must open managed PR and separate memory PR with minted App token');
+      assert.equal(prRequests[0]?.['head'], 'loopwright/main');
+      assert.match(String(prRequests[1]?.['head'] ?? ''), /^loopwright\/memory\//);
       assert.equal(
         observedAuthByRoute.some(entry => entry.rawUrl === '/repos/gpustack/runner/installation'),
         true,
@@ -4814,7 +4848,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
         const headSha = await git(fixture.repo, ['rev-parse', 'HEAD']);
         await git(fixture.repo, ['push', 'origin', 'HEAD:refs/heads/main']);
 
-        const mockGh = await startHttpServer((req, res) => {
+        const mockGh = await startHttpServer(async (req, res) => {
           if (req.method === 'GET' && req.url === '/repos/acme/engine/releases/latest') {
             res.writeHead(200, { 'content-type': 'application/json' });
             res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
@@ -4831,11 +4865,16 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
             return;
           }
           if (req.method === 'POST' && req.url === '/repos/gpustack/runner/pulls') {
+            const payload = await readJsonBody(req);
+            const headRef = String(payload['head'] ?? '');
+            const isMemPr = headRef.startsWith('loopwright/memory/');
             res.writeHead(201, { 'content-type': 'application/json' });
             res.end(JSON.stringify({
-              number: 99,
-              html_url: 'https://github.invalid/gpustack/runner/pull/99',
-              head: { ref: 'loopwright/main', sha: '0'.repeat(40) },
+              number: isMemPr ? 100 : 99,
+              html_url: isMemPr
+                ? 'https://github.invalid/gpustack/runner/pull/100'
+                : 'https://github.invalid/gpustack/runner/pull/99',
+              head: { ref: headRef || 'loopwright/main', sha: '0'.repeat(40) },
               base: { ref: 'main', sha: headSha },
               title: 'chore: update synced pack',
               body: '',
@@ -5129,15 +5168,21 @@ spec:
         }
         if (req.method === 'POST' && req.url === '/repos/gpustack/runner/pulls') {
           const body = await readJsonBody(req);
-          createdPrBody = String(body['body'] ?? '');
+          const headRef = String(body['head'] ?? '');
+          const isMemPr = headRef.startsWith('loopwright/memory/');
+          if (!isMemPr) {
+            createdPrBody = String(body['body'] ?? '');
+          }
           res.writeHead(201, { 'content-type': 'application/json' });
           res.end(JSON.stringify({
-            number: 108,
-            html_url: 'https://github.invalid/gpustack/runner/pull/108',
-            head: { ref: 'loopwright-cann/main', sha: '0'.repeat(40) },
+            number: isMemPr ? 109 : 108,
+            html_url: isMemPr
+              ? 'https://github.invalid/gpustack/runner/pull/109'
+              : 'https://github.invalid/gpustack/runner/pull/108',
+            head: { ref: isMemPr ? headRef : 'loopwright-cann/main', sha: '0'.repeat(40) },
             base: { ref: 'main', sha: headSha },
-            title: 'chore(cann): sync upstream',
-            body: createdPrBody,
+            title: String(body['title'] ?? 'chore(cann): sync upstream'),
+            body: String(body['body'] ?? ''),
           }));
           return;
         }
