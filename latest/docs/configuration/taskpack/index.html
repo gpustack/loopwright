@@ -391,7 +391,7 @@
       <tr>
           <td><code>ControllerConfig</code></td>
           <td>Binds compiled <code>TaskContract</code> and <code>TrustedRegistry</code> SHA-256</td>
-          <td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 4</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> credential templates (<code>0600</code>)</td>
+          <td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 5</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> credential templates (<code>0600</code>)</td>
       </tr>
   </tbody>
 </table>
@@ -408,25 +408,18 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Update catalog manifests from upstream releases and pass checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream versions match current manifests and settle cleanly.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional whitelist and blacklist</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/versions.md</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests/frozen-policy.yaml</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.loopwright/instructions.md</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests, docs/versions.md]</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests/frozen-policy.yaml]</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">.loopwright/instructions.md]</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">engine-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l">octocat/engine</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">docs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">docs]</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">allowPrerelease</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">proposal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">manifests/proposal.yaml</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">schema_version</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">candidates</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">schema_version, candidates]</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">schemaVersion</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">verification</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">localChecks</span><span class="p">:</span><span class="w">
@@ -440,8 +433,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/checks/verify.sh</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional (defaults to 30)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allowReadOnlyGitHubToken</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional safe environment variable names</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">CHECK_MODE</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">CHECK_MODE]</span><span class="w"> </span><span class="c"># Optional safe environment variable names</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">ci-smoke</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">gateId</span><span class="p">:</span><span class="w"> </span><span class="l">catalog-smoke</span><span class="w">
@@ -460,22 +452,14 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">schedule</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">workflowDispatch</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">releasePublished</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">retry</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">revise</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">status</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to [&#39;/loopwright&#39;])</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">/loopwright</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">retry, revise, status]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/loopwright]</span><span class="w"> </span><span class="c"># Optional (defaults to [&#39;/loopwright&#39;])</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional ordered model pool (defaults to zai / glm-5.3 / high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional (defaults to high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional (defaults to provider token env)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">cost</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional USD per million tokens</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">input</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">cacheRead</span><span class="p">:</span><span class="w"> </span><span class="m">0.1</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">cacheWrite</span><span class="p">:</span><span class="w"> </span><span class="m">1.25</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">cost</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">input: 1, output: 2, cacheRead: 0.1, cacheWrite</span><span class="p">:</span><span class="w"> </span><span class="m">1.25</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional USD per million tokens</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate on quota exhaustion</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
@@ -485,34 +469,29 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">github</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">stdio</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l">github-mcp-server</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">stdio</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- --<span class="l">read-only</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- --<span class="l">toolsets</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">repos,pull_requests,issues</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">stdio, --read-only, --toolsets, &#34;repos,pull_requests,issues&#34;]</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">60</span><span class="w"> </span><span class="c"># Optional (defaults to 60)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">deepwiki</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">http</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l">https://mcp.deepwiki.com/mcp</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional execution ceiling overrides</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional canonical execution ceilings</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="c"># Optional (defaults to 3600)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">20000000</span><span class="w"> </span><span class="c"># Optional (defaults to 20000000)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">200000</span><span class="w"> </span><span class="c"># Optional model context window override</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional (defaults to 32768)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="c"># Optional (defaults to 256)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional (defaults to 5)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxFormatRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">6</span><span class="w"> </span><span class="c"># Optional (defaults to 6)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxImplementationRepairs</span><span class="p">:</span><span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="c"># Optional (defaults to 32)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTransportRetries</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="c"># Optional (defaults to 3)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">300</span><span class="w"> </span><span class="c"># Optional (defaults to 300)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commandTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional (defaults to 30)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">json, github-step-summary]</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sandbox</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host isolation policy</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">macos-seatbelt</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">linux-bwrap</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">linux-landlock</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docker</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">macos-seatbelt, linux-bwrap, linux-landlock, docker]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">networkMode</span><span class="p">:</span><span class="w"> </span><span class="l">none</span><span class="w"> </span><span class="c"># Optional (defaults to none)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemReadContainment</span><span class="w">
@@ -520,8 +499,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">protectedPathReadOnlyMask</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">networkIsolation</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">processTreeCleanup</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">~/.ssh</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">~/.ssh]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional System-One triage policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional (defaults to typesafe-jev)</span><span class="w">
@@ -642,9 +620,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">204800</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">maxTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">reasoning</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">samplingParams</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">temperature</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">top_p</span><span class="p">:</span><span class="w"> </span><span class="m">0.95</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">samplingParams</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">temperature: 0.6, top_p</span><span class="p">:</span><span class="w"> </span><span class="m">0.95</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">compat</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional OpenAI-compatible wire dialect tuning</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">thinkingFormat</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxTokensField</span><span class="p">:</span><span class="w"> </span><span class="l">max_tokens</span><span class="w">
@@ -765,7 +741,8 @@
 </table>
 <p>Provider-reported cost retains <code>reported</code> provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains <code>unknown</code>.</p>
 <h2 id="mcp-and-limits">MCP and limits</h2>
-<p><code>spec.mcp.servers</code> connects <code>stdio</code> and Streamable <code>http</code> MCP servers on the host and exposes tools as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>. OAuth MCP declarations fail closed (<code>MCP_OAUTH_UNSUPPORTED</code>). <code>spec.limits</code> raises or lowers execution ceilings; Action inputs and <code>LOOPWRIGHT_*</code> variables override manifest values.</p>
+<p><code>spec.mcp.servers</code> connects <code>stdio</code> and Streamable <code>http</code> MCP servers on the host and exposes tools as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>. OAuth MCP declarations fail closed (<code>MCP_OAUTH_UNSUPPORTED</code>).</p>
+<h3 id="mcp-server-fields">MCP server fields</h3>
 <table>
   <thead>
       <tr>
@@ -791,7 +768,7 @@
       <tr>
           <td><code>servers[].command</code> / <code>args</code></td>
           <td>Conditional</td>
-          <td>Executable / string list (<code>0..32</code>)</td>
+          <td>Executable / string list (<code>0..64</code>)</td>
           <td><code>stdio</code> binary resolved on trusted host <code>PATH</code> and fixed CLI arguments</td>
       </tr>
       <tr>
@@ -815,44 +792,142 @@
       <tr>
           <td><code>servers[].includeTools</code> / <code>timeoutSeconds</code></td>
           <td>No</td>
-          <td>Tool list (<code>1..64</code>) / <code>5..600</code></td>
+          <td>Tool list (<code>1..64</code>) / <code>1..600</code></td>
           <td>Optional upstream tool allowlist and per-call timeout in seconds (default <code>60</code>)</td>
       </tr>
+  </tbody>
+</table>
+<h3 id="execution-limits">Execution limits</h3>
+<p>Explicit Action <code>with:</code> inputs override <code>spec.limits</code>, and <code>spec.limits</code> overrides <code>LOOPWRIGHT_*</code> environment variables before compiler defaults apply. Every limit uses one canonical field and environment variable name; unknown alias keys fail closed with <code>TASKPACK_MANIFEST_INVALID</code>.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Field</th>
+          <th>Environment variable</th>
+          <th>Default and bounds</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
       <tr>
           <td><code>limits.wallTimeSeconds</code></td>
-          <td>No</td>
-          <td>Integer (<code>60..21600</code>, default <code>3600</code>)</td>
-          <td>Total run wall-time budget in seconds (<code>wallTimeMs</code> also accepted)</td>
+          <td><code>LOOPWRIGHT_WALL_TIME_SECONDS</code></td>
+          <td><code>3600</code> (<code>60..21600</code>)</td>
+          <td>Run wall-clock ceiling in seconds (Action input <code>wall-time-seconds</code>)</td>
       </tr>
       <tr>
           <td><code>limits.totalTokens</code></td>
-          <td>No</td>
-          <td>Integer (<code>1000..1000000000</code>, default <code>20000000</code>)</td>
-          <td>Aggregate input + output token ceiling across all model calls</td>
+          <td><code>LOOPWRIGHT_TOTAL_TOKENS</code></td>
+          <td><code>20000000</code> (<code>1000..1000000000</code>)</td>
+          <td>Aggregate input and output token ceiling across calls (Action input <code>total-tokens</code>)</td>
       </tr>
       <tr>
           <td><code>limits.contextWindow</code></td>
-          <td>No</td>
-          <td>Integer (<code>1024..10000000</code>)</td>
-          <td>Model context window override (<code>LOOPWRIGHT_CONTEXT_WINDOW</code> or <code>context-window</code> overrides)</td>
+          <td><code>LOOPWRIGHT_CONTEXT_WINDOW</code></td>
+          <td>Catalog or <code>128000</code> (<code>1024..10000000</code>)</td>
+          <td>Model context window token ceiling (Action input <code>context-window</code>)</td>
       </tr>
       <tr>
           <td><code>limits.maxOutputTokens</code></td>
-          <td>No</td>
-          <td>Integer (<code>256..262144</code>, default <code>32768</code>)</td>
-          <td>Per-call output token ceiling (<code>perCallOutputTokens</code> alias supported)</td>
+          <td><code>LOOPWRIGHT_MAX_OUTPUT_TOKENS</code></td>
+          <td><code>32768</code> (<code>256..262144</code>)</td>
+          <td>Per-call output token ceiling clamped to model and window caps (Action input <code>max-output-tokens</code>)</td>
       </tr>
       <tr>
-          <td><code>limits.maxModelCalls</code> / <code>maxAttempts</code></td>
-          <td>No</td>
-          <td><code>1..1024</code> (<code>256</code>) / <code>1..16</code> (<code>4</code>)</td>
-          <td>Model turn ceiling and controller attempt ceiling</td>
+          <td><code>limits.maxModelCalls</code></td>
+          <td><code>LOOPWRIGHT_MAX_MODEL_CALLS</code></td>
+          <td><code>256</code> (<code>1..1024</code>)</td>
+          <td>Maximum model calls per run within store capacity (Action input <code>max-model-calls</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxAttempts</code></td>
+          <td><code>LOOPWRIGHT_MAX_ATTEMPTS</code></td>
+          <td><code>5</code> (<code>1..16</code>)</td>
+          <td>Maximum controller attempts within 64-checkpoint cap (Action input <code>max-attempts</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxFormatRepairs</code></td>
+          <td><code>LOOPWRIGHT_MAX_FORMAT_REPAIRS</code></td>
+          <td><code>6</code> (<code>0..1024</code>)</td>
+          <td>Maximum model calls spent repairing malformed submission JSON</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxImplementationRepairs</code></td>
+          <td><code>LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS</code></td>
+          <td><code>32</code> (<code>0..1024</code>)</td>
+          <td>Maximum model calls spent repairing failed verification checks</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxTransportRetries</code></td>
+          <td><code>LOOPWRIGHT_MAX_TRANSPORT_RETRIES</code></td>
+          <td><code>3</code> (<code>0..8</code>)</td>
+          <td>Maximum in-session retries on transient network or rate-limit errors</td>
       </tr>
       <tr>
           <td><code>limits.toolTimeoutSeconds</code></td>
-          <td>No</td>
-          <td>Integer (<code>5..1800</code>, default <code>300</code>)</td>
-          <td>Per-tool wall-time ceiling in seconds; <code>toolResultBytes</code> (<code>65536..4194304</code>) also configurable</td>
+          <td><code>LOOPWRIGHT_TOOL_TIMEOUT_SECONDS</code></td>
+          <td><code>300</code> (<code>1..1800</code>)</td>
+          <td>Per-tool wall-clock timeout in seconds (Action input <code>tool-timeout-seconds</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.commandTimeoutSeconds</code></td>
+          <td><code>LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS</code></td>
+          <td><code>30</code> (<code>1..3600</code>)</td>
+          <td>Fallback <code>command.v1</code> script timeout in seconds (Action input <code>command-timeout-seconds</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.workingWindowBytes</code></td>
+          <td><code>LOOPWRIGHT_WORKING_WINDOW_BYTES</code></td>
+          <td><code>8388608..16777216</code> (<code>131072..16777216</code>)</td>
+          <td>Retained session working window bytes (<code>min(16 MiB, max(8 MiB, contextWindow))</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.maxRequestBytes</code></td>
+          <td><code>LOOPWRIGHT_MAX_REQUEST_BYTES</code></td>
+          <td><code>8388608</code> (<code>65536..16777216</code>)</td>
+          <td>Single outbound model HTTP payload byte ceiling (<code>&lt;= workingWindowBytes</code>)</td>
+      </tr>
+      <tr>
+          <td><code>limits.promptBytes</code></td>
+          <td><code>LOOPWRIGHT_PROMPT_BYTES</code></td>
+          <td><code>262144</code> (<code>4096..1048576</code>)</td>
+          <td>Maximum UTF-8 role prompt byte size</td>
+      </tr>
+      <tr>
+          <td><code>limits.responseBytes</code></td>
+          <td><code>LOOPWRIGHT_RESPONSE_BYTES</code></td>
+          <td><code>67108864</code> (<code>65536..67108864</code>)</td>
+          <td>Maximum single provider response stream byte size</td>
+      </tr>
+      <tr>
+          <td><code>limits.toolArgsBytes</code></td>
+          <td><code>LOOPWRIGHT_TOOL_ARGS_BYTES</code></td>
+          <td><code>1048576</code> (<code>16384..4194304</code>)</td>
+          <td>Maximum serialized tool call arguments byte size</td>
+      </tr>
+      <tr>
+          <td><code>limits.toolResultBytes</code></td>
+          <td><code>LOOPWRIGHT_TOOL_RESULT_BYTES</code></td>
+          <td><code>1048576</code> (<code>16384..4194304</code>)</td>
+          <td>Maximum serialized tool result byte size</td>
+      </tr>
+      <tr>
+          <td><code>limits.fileBytes</code></td>
+          <td><code>LOOPWRIGHT_FILE_BYTES</code></td>
+          <td><code>33554432</code> (<code>65536..67108864</code>)</td>
+          <td>Maximum candidate file byte size read or written by workspace tools</td>
+      </tr>
+      <tr>
+          <td><code>limits.sessionBytes</code></td>
+          <td><code>LOOPWRIGHT_SESSION_BYTES</code></td>
+          <td><code>33554432</code> (<code>524288..67108864</code>)</td>
+          <td>Maximum cumulative isolated Pi session transcript byte size</td>
+      </tr>
+      <tr>
+          <td><code>limits.candidateEntries</code></td>
+          <td><code>LOOPWRIGHT_CANDIDATE_ENTRIES</code></td>
+          <td><code>4096</code> (<code>16..4096</code>)</td>
+          <td>Maximum tracked candidate workspace entries</td>
       </tr>
   </tbody>
 </table>
@@ -1304,7 +1379,12 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
         <li><a href="#model-fields">Model fields</a></li>
       </ul>
     </li>
-    <li><a href="#mcp-and-limits">MCP and limits</a></li>
+    <li><a href="#mcp-and-limits">MCP and limits</a>
+      <ul>
+        <li><a href="#mcp-server-fields">MCP server fields</a></li>
+        <li><a href="#execution-limits">Execution limits</a></li>
+      </ul>
+    </li>
     <li><a href="#upstreams-and-proposal">Upstreams and proposal</a>
       <ul>
         <li><a href="#upstream-and-proposal-fields">Upstream and proposal fields</a></li>

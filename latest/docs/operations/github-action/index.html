@@ -619,23 +619,23 @@
       </tr>
       <tr>
           <td><code>max-attempts</code></td>
-          <td><code>4</code></td>
+          <td><code>5</code></td>
           <td>Maximum controller attempt count (<code>1..16</code>; <code>LOOPWRIGHT_MAX_ATTEMPTS</code>).</td>
       </tr>
       <tr>
           <td><code>tool-timeout-seconds</code></td>
           <td><code>300</code></td>
-          <td>Per-tool execution timeout in seconds (<code>5..1800</code>; <code>LOOPWRIGHT_TOOL_TIMEOUT_SECONDS</code>).</td>
+          <td>Per-tool execution timeout in seconds (<code>1..1800</code>; <code>LOOPWRIGHT_TOOL_TIMEOUT_SECONDS</code>).</td>
       </tr>
       <tr>
           <td><code>command-timeout-seconds</code></td>
-          <td><code>30</code> (<code>&lt;= 3600</code>)</td>
-          <td><code>command.v1</code> local check timeout override (<code>1..3600</code>; <code>LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS</code>).</td>
+          <td><code>30</code></td>
+          <td>Fallback <code>command.v1</code> check timeout in seconds (<code>1..3600</code>; <code>LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS</code>).</td>
       </tr>
   </tbody>
 </table>
-<p>Limit overrides apply in strict order (<code>INPUT_*</code> &gt; <code>LOOPWRIGHT_*</code> &gt; <code>spec.limits</code> &gt; compiler defaults). Additional byte and session ceilings (<code>LOOPWRIGHT_RESPONSE_BYTES</code>, <code>LOOPWRIGHT_TOOL_RESULT_BYTES</code>, <code>LOOPWRIGHT_FILE_BYTES</code>, <code>LOOPWRIGHT_SESSION_BYTES</code>) also accept environment overrides. Interactive OAuth and CLI providers or MCP servers are unsupported. Model and MCP options are listed in <a href="/loopwright/latest/docs/configuration/taskpack/#model-configuration">Taskpack</a>
-.</p>
+<p>Explicit configuration takes precedence over environment variables (<code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> environment variables &gt; compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical <code>spec.limits</code> keys and <code>LOOPWRIGHT_*</code> fallbacks; see <a href="/loopwright/latest/docs/configuration/taskpack/#execution-limits">Execution limits</a>
+. Interactive OAuth and CLI providers or MCP servers are unsupported.</p>
 <h2 id="outputs">Outputs</h2>
 <p>The Action writes a compact, scrubbed <code>result</code> JSON summary (with SHA-256 digests and byte lengths rather than raw binary buffers) to stdout and <code>GITHUB_OUTPUT</code>. Live runs stream <code>[loopwright]</code> progress lines (upstream discovery, connected MCP servers, per-turn token/duration metrics, tool calls, and check outcomes) plus a plain-text run summary to stderr. A <code>compiled</code> result alone does not establish successful publication; inspect <code>delegateOutcome</code> and the run report.</p>
 <table>

@@ -706,6 +706,12 @@
           <td>Selects the <code>provider</code> credential injected into the broker</td>
       </tr>
       <tr>
+          <td><code>roleProfiles[].limits</code></td>
+          <td>No</td>
+          <td>Positive integer map (<code>promptBytes</code>, <code>responseBytes</code>, <code>toolArgsBytes</code>, <code>toolResultBytes</code>, <code>sessionBytes</code>, <code>fileBytes</code>, <code>candidateEntries</code>, <code>toolWallMs</code>, etc.)</td>
+          <td>Optional per-role byte, entry, and tool runtime ceilings</td>
+      </tr>
+      <tr>
           <td><code>runtimeProfiles[].id</code></td>
           <td>Yes</td>
           <td>Identifier (<code>1..64</code> chars)</td>
@@ -765,13 +771,13 @@
       <tr>
           <td><code>context.workingWindowCeiling</code></td>
           <td>Yes</td>
-          <td>Integer <code>1 .. 98304</code> bytes</td>
+          <td>Integer <code>1 .. 16777216</code> bytes</td>
           <td>Maximum retained conversation window bytes before compaction</td>
       </tr>
       <tr>
           <td><code>context.maxRequestBytes</code></td>
           <td>Yes</td>
-          <td>Integer <code>1 .. 65536</code> bytes</td>
+          <td>Integer <code>1 .. 16777216</code> bytes</td>
           <td>Maximum single outbound provider HTTP payload size</td>
       </tr>
       <tr>
@@ -789,7 +795,7 @@
       <tr>
           <td><code>context.maxOutputTokens</code></td>
           <td>Yes</td>
-          <td>Integer <code>1 .. 1024</code> tokens</td>
+          <td>Integer <code>1 .. 262144</code> tokens</td>
           <td>Per-call output token ceiling enforced by the adapter</td>
       </tr>
   </tbody>

@@ -161,7 +161,7 @@ Every retry and repair attempt draws from the same parent `budgets` envelope. Va
 | --- | --- | --- | --- |
 | `budgets.wallTimeMs` | Yes | Integer (`>= 1` ms) | Total wall-clock timeout; must exceed `ControllerConfig.spec.controls.drainReserveMs` |
 | `budgets.totalTokens` | Yes | Integer (`>= 1`) | Cumulative prompt + completion token ceiling across the entire run |
-| `budgets.perCallOutputTokens` | Yes | Integer (`1 .. totalTokens`) | Maximum completion tokens per model call (`<= 1024` in Pi profiles) |
+| `budgets.perCallOutputTokens` | Yes | Integer (`1 .. totalTokens`) | Maximum completion tokens per model call (`<= 262144` in Pi profiles) |
 | `budgets.maxModelCalls` | Yes | Integer (`>= 1`) | Maximum total model API invocations across authoring, compaction, and repairs |
 | `budgets.maxConcurrency` | Yes | Integer (`1 .. maxModelCalls`) | Maximum steps dispatched concurrently by the scheduler |
 | `budgets.maxFormatRepairs` | Yes | Integer (`0 .. maxModelCalls`) | Allowed repair turns when agent output fails structured submission parsing |

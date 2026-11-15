@@ -123,11 +123,11 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `context-window` | Model catalog or `128000` | Model context window token override (`1024..10000000`; `LOOPWRIGHT_CONTEXT_WINDOW`). |
 | `max-output-tokens` | `32768` | Per-call output token ceiling (`256..262144`; `LOOPWRIGHT_MAX_OUTPUT_TOKENS`). |
 | `max-model-calls` | `256` | Maximum model call count per run (`1..1024`; `LOOPWRIGHT_MAX_MODEL_CALLS`). |
-| `max-attempts` | `4` | Maximum controller attempt count (`1..16`; `LOOPWRIGHT_MAX_ATTEMPTS`). |
-| `tool-timeout-seconds` | `300` | Per-tool execution timeout in seconds (`5..1800`; `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS`). |
-| `command-timeout-seconds` | `30` (`<= 3600`) | `command.v1` local check timeout override (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
+| `max-attempts` | `5` | Maximum controller attempt count (`1..16`; `LOOPWRIGHT_MAX_ATTEMPTS`). |
+| `tool-timeout-seconds` | `300` | Per-tool execution timeout in seconds (`1..1800`; `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS`). |
+| `command-timeout-seconds` | `30` | Fallback `command.v1` check timeout in seconds (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
 
-Limit overrides apply in strict order (`INPUT_*` > `LOOPWRIGHT_*` > `spec.limits` > compiler defaults). Additional byte and session ceilings (`LOOPWRIGHT_RESPONSE_BYTES`, `LOOPWRIGHT_TOOL_RESULT_BYTES`, `LOOPWRIGHT_FILE_BYTES`, `LOOPWRIGHT_SESSION_BYTES`) also accept environment overrides. Interactive OAuth and CLI providers or MCP servers are unsupported. Model and MCP options are listed in [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md#model-configuration).
+Explicit configuration takes precedence over environment variables (`Action with:` inputs > `taskpack.yaml` `spec.limits` > `LOOPWRIGHT_*` environment variables > compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical `spec.limits` keys and `LOOPWRIGHT_*` fallbacks; see [Execution limits](/loopwright/main/docs/configuration/taskpack/index.md#execution-limits). Interactive OAuth and CLI providers or MCP servers are unsupported.
 
 ## Outputs
 
