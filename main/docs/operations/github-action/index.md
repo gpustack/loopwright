@@ -41,7 +41,7 @@ jobs:
           event-path: ${{ github.event_path }}
           github-app-id: ${{ secrets.LOOPWRIGHT_APP_ID }}
           github-app-private-key: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
-          github-app-installation-id: ${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}
+          github-app-installation-id: ${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }} # Optional
           output: json,github-step-summary # Optional
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
@@ -74,14 +74,14 @@ Protected paths override writable paths. Workflow files and taskpack control ass
 
 ## Secrets and environment
 
-Pass a token with `github-token`, or provide all three App inputs to mint an installation token inside the Action. A nonempty `github-token` takes precedence, followed by `GITHUB_TOKEN`; either prevents App token minting. `GH_TOKEN` is not the Action token fallback.
+Pass `github-token` directly, or pass `github-app-id` and `github-app-private-key` to mint an installation token. Explicit `github-token` takes precedence over App credentials, and App credentials take precedence over ambient `GITHUB_TOKEN`. When `github-app-installation-id` is omitted, the Action discovers the repository installation automatically. `GH_TOKEN` is not the Action token fallback.
 
-The App ID and installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub's App event rules.
+The App ID and optional installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub's App event rules.
 
 | Credential | Purpose |
 | --- | --- |
 | `github-token` or `GITHUB_TOKEN` | GitHub discovery and native PR publication; permissions depend on the operations used. |
-| `github-app-id`, `github-app-private-key`, `github-app-installation-id` | Mint an installation token when no direct token is supplied. |
+| `github-app-id`, `github-app-private-key`, `github-app-installation-id` | Mint a repository installation token; installation ID is auto-discovered when omitted. |
 | Provider token environment | Authenticate live model calls; token variables can contain comma-separated token pools. |
 | `LOOPWRIGHT_GATE_SIGNING_SECRET` | Sign external gate requests when a gate endpoint is configured. |
 | `LOOPWRIGHT_PUBLICATION_SIGNING_SECRET` | Sign requests to an external publication endpoint. |
@@ -110,10 +110,12 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
 | `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
 | `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |
-| `github-token` | `GITHUB_TOKEN` or unset | GitHub token for discovery, opted-in checks, and publication. |
-| `github-app-id` | Unset | App ID for installation token minting. |
+| `github-token` | `GITHUB_TOKEN` fallback | GitHub token for discovery, opted-in checks, and publication; explicit input overrides App auth. |
+| `github-app-id` | Unset | App ID for installation token minting (overrides ambient `GITHUB_TOKEN`). |
 | `github-app-private-key` | Unset | App PEM private key for installation token minting. |
-| `github-app-installation-id` | Unset | Installation ID for token minting. |
+| `github-app-installation-id` | Auto-discovered | Optional installation ID; discovered from `owner/repo` when omitted. |
+| `git-author-name` | Dynamic or `github-actions[bot]` | Optional commit author, committer, and DCO `Signed-off-by` name override. |
+| `git-author-email` | Dynamic noreply email | Optional commit author, committer, and DCO `Signed-off-by` email override. |
 | `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
 | `mcp-servers` | Taskpack `spec.mcp.servers` | JSON or YAML MCP server declarations merged by `id` (`LOOPWRIGHT_MCP_SERVERS` fallback). |
 | `wall-time-seconds` | `3600` | Run wall-time limit override in seconds (`60..21600`; `LOOPWRIGHT_WALL_TIME_SECONDS`). |

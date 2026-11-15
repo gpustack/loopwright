@@ -385,7 +385,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-installation-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-installation-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="l">json,github-step-summary</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">env</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span></span></span></code></pre></div>
@@ -428,8 +428,8 @@
 <p>Protected paths override writable paths. Workflow files and taskpack control assets remain protected. See <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
  for scope, instructions, and check configuration.</p>
 <h2 id="secrets-and-environment">Secrets and environment</h2>
-<p>Pass a token with <code>github-token</code>, or provide all three App inputs to mint an installation token inside the Action. A nonempty <code>github-token</code> takes precedence, followed by <code>GITHUB_TOKEN</code>; either prevents App token minting. <code>GH_TOKEN</code> is not the Action token fallback.</p>
-<p>The App ID and installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub&rsquo;s App event rules.</p>
+<p>Pass <code>github-token</code> directly, or pass <code>github-app-id</code> and <code>github-app-private-key</code> to mint an installation token. Explicit <code>github-token</code> takes precedence over App credentials, and App credentials take precedence over ambient <code>GITHUB_TOKEN</code>. When <code>github-app-installation-id</code> is omitted, the Action discovers the repository installation automatically. <code>GH_TOKEN</code> is not the Action token fallback.</p>
+<p>The App ID and optional installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub&rsquo;s App event rules.</p>
 <table>
   <thead>
       <tr>
@@ -444,7 +444,7 @@
       </tr>
       <tr>
           <td><code>github-app-id</code>, <code>github-app-private-key</code>, <code>github-app-installation-id</code></td>
-          <td>Mint an installation token when no direct token is supplied.</td>
+          <td>Mint a repository installation token; installation ID is auto-discovered when omitted.</td>
       </tr>
       <tr>
           <td>Provider token environment</td>
@@ -554,13 +554,13 @@
       </tr>
       <tr>
           <td><code>github-token</code></td>
-          <td><code>GITHUB_TOKEN</code> or unset</td>
-          <td>GitHub token for discovery, opted-in checks, and publication.</td>
+          <td><code>GITHUB_TOKEN</code> fallback</td>
+          <td>GitHub token for discovery, opted-in checks, and publication; explicit input overrides App auth.</td>
       </tr>
       <tr>
           <td><code>github-app-id</code></td>
           <td>Unset</td>
-          <td>App ID for installation token minting.</td>
+          <td>App ID for installation token minting (overrides ambient <code>GITHUB_TOKEN</code>).</td>
       </tr>
       <tr>
           <td><code>github-app-private-key</code></td>
@@ -569,8 +569,18 @@
       </tr>
       <tr>
           <td><code>github-app-installation-id</code></td>
-          <td>Unset</td>
-          <td>Installation ID for token minting.</td>
+          <td>Auto-discovered</td>
+          <td>Optional installation ID; discovered from <code>owner/repo</code> when omitted.</td>
+      </tr>
+      <tr>
+          <td><code>git-author-name</code></td>
+          <td>Dynamic or <code>github-actions[bot]</code></td>
+          <td>Optional commit author, committer, and DCO <code>Signed-off-by</code> name override.</td>
+      </tr>
+      <tr>
+          <td><code>git-author-email</code></td>
+          <td>Dynamic noreply email</td>
+          <td>Optional commit author, committer, and DCO <code>Signed-off-by</code> email override.</td>
       </tr>
       <tr>
           <td><code>upstream-records</code></td>
