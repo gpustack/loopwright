@@ -150,7 +150,7 @@ Use `loopwright step next --taskpack` for local compilation without provider sec
 - **Control root**: Set Action `taskpack-path` to select a manifest. Its parent becomes the control root.
 - **Root fallback**: Root-level manifests and raw bytes use `.loopwright` as the control root.
 - **Built-in masks**: `PROTECTED_AUTOMATION_PATHS` protects `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
-- **Control root mask**: The active control root also remains protected.
+- **Control root mask**: The active control root stays protected except for an exact non-overlapping `spec.proposal.path` file.
 - **Protected assets**: The exact manifest path, instruction files, and command scripts also remain protected.
 
 ## Metadata and scope
@@ -167,9 +167,9 @@ Use `loopwright step next --taskpack` for local compilation without provider sec
 | `spec.scope.protected` | No | String list (`0..128` paths) | Relative paths excluded from writes in addition to built-in masks |
 | `spec.instructions` | No | Relative path or list (`1..16` paths) | UTF-8 files compiled as SHA-256-pinned `instruction` trusted resources; aggregate size `<= 262144` bytes |
 
-Scope paths name a file or directory and include descendants. Raw globs, traversal, and spaces are not accepted. Protected paths always win, so a writable ancestor may contain protected descendants. A writable path covered by a protected path is rejected. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.
+Scope paths normally include descendants, except an exact `spec.proposal.path` file inside the control root. Raw globs, traversal, and spaces are rejected. Protected paths win over writable ancestors, and writable paths covered by protected paths fail. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.
 
-Instruction files must be regular files without symlinks in the path. The manifest path also rejects symlinked ancestors.
+A control-root `spec.proposal.path` requires an exact `spec.scope.writable` file entry; omitted or broad control-root scope fails. Instruction, manifest, and control-root proposal paths reject symlinks.
 
 ## Model configuration
 

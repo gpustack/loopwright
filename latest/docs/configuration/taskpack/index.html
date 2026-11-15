@@ -526,7 +526,7 @@
 <li><strong>Control root</strong>: Set Action <code>taskpack-path</code> to select a manifest. Its parent becomes the control root.</li>
 <li><strong>Root fallback</strong>: Root-level manifests and raw bytes use <code>.loopwright</code> as the control root.</li>
 <li><strong>Built-in masks</strong>: <code>PROTECTED_AUTOMATION_PATHS</code> protects <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code>.</li>
-<li><strong>Control root mask</strong>: The active control root also remains protected.</li>
+<li><strong>Control root mask</strong>: The active control root stays protected except for an exact non-overlapping <code>spec.proposal.path</code> file.</li>
 <li><strong>Protected assets</strong>: The exact manifest path, instruction files, and command scripts also remain protected.</li>
 </ul>
 <h2 id="metadata-and-scope">Metadata and scope</h2>
@@ -596,8 +596,8 @@
       </tr>
   </tbody>
 </table>
-<p>Scope paths name a file or directory and include descendants. Raw globs, traversal, and spaces are not accepted. Protected paths always win, so a writable ancestor may contain protected descendants. A writable path covered by a protected path is rejected. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.</p>
-<p>Instruction files must be regular files without symlinks in the path. The manifest path also rejects symlinked ancestors.</p>
+<p>Scope paths normally include descendants, except an exact <code>spec.proposal.path</code> file inside the control root. Raw globs, traversal, and spaces are rejected. Protected paths win over writable ancestors, and writable paths covered by protected paths fail. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.</p>
+<p>A control-root <code>spec.proposal.path</code> requires an exact <code>spec.scope.writable</code> file entry; omitted or broad control-root scope fails. Instruction, manifest, and control-root proposal paths reject symlinks.</p>
 <h2 id="model-configuration">Model configuration</h2>
 <p>Loopwright inherits <code>provider</code>, <code>model</code>, <code>thinking</code>, wire <code>api</code>, and custom <code>models.json</code> semantics from the <a href="https://pi.dev/models">Pi model catalog</a>
  and Pi&rsquo;s <a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md">providers</a>
