@@ -137,6 +137,7 @@ The Action writes a compact, scrubbed `result` JSON summary (with SHA-256 digest
 | --- | --- |
 | `result` | Compact structured entrypoint summary and `delegateOutcome` (`ok`, `detail`). |
 | `pr-url` | Published PR URL when available; otherwise empty. |
+| `memory-pr-url` | Separate memory PR URL when published or updated; otherwise empty. |
 | `total-tokens` | Exact integer token subtotal, or `0` when usage is unavailable. |
 | `cost-usd` | Six-decimal USD known subtotal when cost provenance is `reported` or `estimated`; otherwise omitted. |
 

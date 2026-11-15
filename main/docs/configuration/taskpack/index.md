@@ -348,7 +348,7 @@ The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `
 | `publication.titleTemplate` | Yes | String (`1..256` chars) | Pull request title string |
 | `memory.directory` | Yes | `<controlRoot>/memory` or descendant | Storage directory for reviewed CAS memory, protected even inside a writable ancestor |
 | `memory.apply` | Yes | `'separate-pull-request'` | Proposes memory updates in a separate PR outside candidate changes |
-| `memory.onNoModelBudget` | Yes | `'deterministic-observations-only'` | Records deterministic run facts without extra LLM calls when budget ends |
+| `memory.onNoModelBudget` | Yes | `'deterministic-observations-only'` or `'skip'` | Records deterministic facts without LLM calls or skips memory emission |
 
 ## Triggers and policies
 
