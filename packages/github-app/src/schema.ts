@@ -1,14 +1,15 @@
 import { CST, isAlias, isMap, isScalar, isSeq, Lexer, parseDocument } from 'yaml';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import {
-  GitHubAppError, DEFAULT_COMMENT_PREFIXES, LOCAL_COMMAND_GATE_ENDPOINT_ID, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
-  TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS,
+  GitHubAppError, DEFAULT_COMMENT_PREFIXES, LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_TASKPACK_ROLES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
+  TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS, TASKPACK_TOOL_NAMES,
   type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
   type TaskpackCheckDeclaration, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
   type TaskpackDecisionsDeclaration, type TaskpackHttpMcpServerDeclaration, type TaskpackLimitsDeclaration, type TaskpackManifest,
   type TaskpackMcpDeclaration, type TaskpackMcpServerDeclaration, type TaskpackModelDeclaration,
-  type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackSandboxDeclaration,
-  type TaskpackStdioMcpServerDeclaration, type TaskpackUpstreamDescriptor,
+  type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackRoleDeclaration,
+  type TaskpackRolePurpose, type TaskpackSandboxDeclaration, type TaskpackStdioMcpServerDeclaration,
+  type TaskpackToolName, type TaskpackUpstreamDescriptor,
 } from './types.js';
 import { validateTaskpackModelsDeclaration } from './models-config.js';
 
@@ -274,9 +275,11 @@ export function effectiveProtectedPaths(
 
 function requireObject(value: unknown, path: string, fields: readonly string[]): Record<string, Json> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) manifestInvalid('expected an object', path);
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) manifestInvalid('expected an object', path);
   const record = value as Record<string, Json>;
   for (const key of Object.keys(record)) {
-    if (!fields.includes(key)) manifestInvalid(`unknown field "${key}"`, path);
+    if (FORBIDDEN_KEYS.has(key) || !fields.includes(key)) manifestInvalid(`unknown field "${key}"`, path);
   }
   return record;
 }
@@ -297,6 +300,12 @@ function requireBoolean(value: unknown, path: string): boolean {
 function requireIdentifier(value: unknown, path: string): string {
   const text = requireString(value, path, 1, 64);
   if (!IDENTIFIER_PATTERN.test(text)) manifestInvalid('expected a lowercase identifier', path);
+  return text;
+}
+
+function requireLabel(value: unknown, path: string): string {
+  const text = requireString(value, path, 1, 128);
+  if (/[\s\p{C}]/u.test(text)) manifestInvalid('expected a 1..128 character non-whitespace label', path);
   return text;
 }
 
@@ -626,7 +635,7 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
 
   const spec = requireObject(root['spec'], '/spec', [
     'goal', 'scope', 'instructions', 'upstreams', 'proposal', 'verification',
-    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'output',
+    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'roles', 'output',
   ]);
   const limits: TaskpackLimitsDeclaration | undefined = spec['limits'] === undefined
     ? undefined
@@ -1059,6 +1068,95 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     }
   }
 
+  let roles: readonly TaskpackRoleDeclaration[] | undefined;
+  if (spec['roles'] !== undefined) {
+    const rawRoles = spec['roles'];
+    if (!Array.isArray(rawRoles) || rawRoles.length < 1 || rawRoles.length > MAX_TASKPACK_ROLES) {
+      manifestInvalid(`spec.roles must contain 1..${MAX_TASKPACK_ROLES} entries`, '/spec/roles');
+    }
+    const roleIds = new Set<string>();
+    const reservedRoleIds = new Set([
+      ...reservedIds,
+      'controller.scope',
+      'controller.no-change',
+      'author-candidate',
+      'author-assessment',
+    ]);
+    const roleIndexById = new Map<string, number>();
+    const parsedRoles: TaskpackRoleDeclaration[] = rawRoles.map((item, idx) => {
+      const rPath = `/spec/roles/${idx}`;
+      const rawRole = requireObject(item, rPath, [
+        'id', 'purpose', 'provider', 'model', 'thinking', 'tools', 'dependsOn',
+      ]);
+      const roleId = requireIdentifier(rawRole['id'], `${rPath}/id`);
+      if (roleIds.has(roleId)) manifestInvalid(`duplicate role id "${roleId}"`, `${rPath}/id`);
+      if (checkIds.has(roleId)) manifestInvalid(`role id "${roleId}" collides with check id`, `${rPath}/id`);
+      if (reservedRoleIds.has(roleId)) manifestInvalid(`role id "${roleId}" is reserved`, `${rPath}/id`);
+      roleIds.add(roleId);
+
+      let purpose: TaskpackRolePurpose = 'task';
+      if (rawRole['purpose'] !== undefined) {
+        const pStr = requireString(rawRole['purpose'], `${rPath}/purpose`, 1, 16);
+        if (pStr !== 'task' && pStr !== 'review') {
+          manifestInvalid('role purpose must be "task" or "review"', `${rPath}/purpose`);
+        }
+        purpose = pStr;
+      }
+
+      const provider = requireLabel(rawRole['provider'], `${rPath}/provider`);
+      const model = requireLabel(rawRole['model'], `${rPath}/model`);
+      const thinking = rawRole['thinking'] === undefined
+        ? 'medium'
+        : requireLabel(rawRole['thinking'], `${rPath}/thinking`);
+
+      let tools: readonly TaskpackToolName[];
+      if (rawRole['tools'] === undefined) {
+        tools = purpose === 'review'
+          ? Object.freeze(['read'] as const)
+          : Object.freeze(['read', 'write', 'edit', 'bash'] as const);
+      } else {
+        const rawTools = requireStringList(rawRole['tools'], `${rPath}/tools`, 1, TASKPACK_TOOL_NAMES.length);
+        const validatedTools: TaskpackToolName[] = [];
+        for (const [tIdx, toolStr] of rawTools.entries()) {
+          if (!(TASKPACK_TOOL_NAMES as readonly string[]).includes(toolStr)) {
+            manifestInvalid(`unsupported role tool "${toolStr}"`, `${rPath}/tools/${tIdx}`);
+          }
+          validatedTools.push(toolStr as TaskpackToolName);
+        }
+        tools = Object.freeze(validatedTools);
+      }
+
+      let dependsOn: readonly string[] = Object.freeze([]);
+      if (rawRole['dependsOn'] !== undefined) {
+        const rawDeps = requireStringList(rawRole['dependsOn'], `${rPath}/dependsOn`, 0, MAX_TASKPACK_ROLES - 1);
+        for (const [dIdx, depId] of rawDeps.entries()) {
+          requireIdentifier(depId, `${rPath}/dependsOn/${dIdx}`);
+          const parentIdx = roleIndexById.get(depId);
+          if (parentIdx === undefined || parentIdx >= idx) {
+            manifestInvalid(
+              `role "${roleId}" dependsOn "${depId}" must reference a prior role id`,
+              `${rPath}/dependsOn/${dIdx}`,
+            );
+          }
+        }
+        dependsOn = Object.freeze([...rawDeps]);
+      }
+
+      roleIndexById.set(roleId, idx);
+      return Object.freeze({
+        id: roleId,
+        purpose,
+        provider,
+        model,
+        thinking,
+        tools,
+        dependsOn,
+      });
+    });
+
+    roles = Object.freeze(parsedRoles);
+  }
+
   let output: TaskpackOutputDeclaration | undefined;
   if (spec['output'] !== undefined) {
     const parseOutputFormats = (rawFormats: unknown, fmtPath: string): readonly TaskpackOutputFormat[] => {
@@ -1128,6 +1226,7 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     ...(models === undefined ? {} : { models }),
     ...(mcp === undefined ? {} : { mcp }),
     ...(limits === undefined ? {} : { limits }),
+    ...(roles === undefined ? {} : { roles }),
     ...(output === undefined ? {} : { output }),
   };
   const specRecord: TaskpackManifest['spec'] = Object.freeze(baseSpec);

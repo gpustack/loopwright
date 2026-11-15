@@ -6,10 +6,24 @@ import { isExternalMcpToolName } from '@loopwright/agent-pi/mcp';
 import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation, type GateEndpoint, type PublicationEndpoint } from './types.js';
 import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
-import { refuse } from './errors.js';
+import { refuse, type ControllerDiagnostic } from './errors.js';
 const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1', 'gate.v1'];
 function unique(value: readonly { readonly id: string }[], path: string): void { if (new Set(value.map(item => item.id)).size !== value.length) refuse('CONFIG_SCHEMA', path); }
 function enumValue(value: unknown, values: readonly string[], path: string): void { if (typeof value !== 'string' || !values.includes(value)) refuse('CONFIG_SCHEMA', path); }
+export function labelValue(value: unknown, path: string): string {
+  const s = text(value, path, 128);
+  if (s.length < 1 || /[\s\p{C}]/u.test(s)) refuse('CONFIG_SCHEMA', path);
+  return s;
+}
+export function validatePiSelectionOrRefuse(selection: unknown, path: string, phase: ControllerDiagnostic['phase'] = 'configuration'): void {
+  try { validateSelection(selection, path); }
+  catch (err) {
+    const detailCode = err && typeof err === 'object' && 'detail' in err && err.detail && typeof err.detail === 'object' && 'code' in err.detail
+      ? String((err.detail as { code: unknown }).code)
+      : err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+    refuse(detailCode === 'INPUT_INVALID' ? 'CONFIG_SCHEMA' : 'CAPABILITY_UNSUPPORTED', path, phase);
+  }
+}
 export function validateHandler(raw: unknown, path: string): Handler {
   const value = record(raw, ['id', 'version', 'digest', 'kind', 'implementation', 'parameters', 'capabilities'], path);
   id(value.id, path + '/id'); integer(value.version, 1, 1, path + '/version'); digestValue(value.digest, path + '/digest');
@@ -48,7 +62,7 @@ function context(raw: unknown, path: string): RoleProfile['context'] {
   if (value.estimator !== 'lw-pi-final-json-bytes-v1' || value.proofId !== null || value.version !== 1 || value.evidence !== 'estimated') refuse('CAPABILITY_UNSUPPORTED', path);
   integer(value.workingWindowCeiling, 1, 16777216, path); integer(value.maxRequestBytes, 1, 16777216, path); integer(value.serviceMargin, 32768, Number.MAX_SAFE_INTEGER, path);
   integer(value.toolReserve, 16384, Number.MAX_SAFE_INTEGER, path); integer(value.maxOutputTokens, 1, 262144, path);
-  return value as unknown as RoleProfile['context'];
+  return { ...value } as unknown as RoleProfile['context'];
 }
 function mcp(raw: unknown, tools: readonly string[], path: string): void {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('CONFIG_SCHEMA', path);
@@ -81,25 +95,64 @@ function roleLimits(raw: unknown, path: string): NonNullable<RoleProfile['limits
   for (const key of keys) integer(value[key], 1, Number.MAX_SAFE_INTEGER, path + '/' + key);
   return value as unknown as NonNullable<RoleProfile['limits']>;
 }
+const DEFAULT_DELEGATED_CONTEXT: RoleProfile['context'] = Object.freeze({
+  mode: 'estimated_guard' as const,
+  estimator: 'lw-pi-final-json-bytes-v1' as const,
+  proofId: null,
+  version: 1 as const,
+  evidence: 'estimated' as const,
+  workingWindowCeiling: 200000,
+  maxRequestBytes: 524288,
+  serviceMargin: 32768,
+  toolReserve: 16384,
+  maxOutputTokens: 65536,
+});
 function role(raw: unknown, path: string): RoleProfile {
-  const hasLimits = raw !== null && typeof raw === 'object' && Object.hasOwn(raw, 'limits');
-  const value = record(raw, ['id', 'selection', 'tools', 'context', 'runtimeRef', 'providerCredentialRef', 'mcp', ...(hasLimits ? ['limits' as const] : [])], path);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) refuse('CONFIG_SCHEMA', path);
+  const hasAdapter = Object.hasOwn(raw, 'adapter'), hasContext = Object.hasOwn(raw, 'context'), hasLimits = Object.hasOwn(raw, 'limits');
+  const keys = ['id', ...(hasAdapter ? ['adapter' as const] : []), 'selection', 'tools', ...(hasContext ? ['context' as const] : []), 'runtimeRef', 'providerCredentialRef', 'mcp', ...(hasLimits ? ['limits' as const] : [])];
+  const value = record(raw, keys, path);
+  const adapterRaw = hasAdapter ? value.adapter : 'pi';
+  if (adapterRaw !== 'pi' && adapterRaw !== 'delegated') refuse('CONFIG_SCHEMA', path + '/adapter');
+  const checkedLimits = hasLimits ? roleLimits(value.limits, path + '/limits') : undefined;
+  if (adapterRaw === 'delegated') {
+    id(value.id, path + '/id');
+    if (value.runtimeRef !== null) id(value.runtimeRef, path + '/runtimeRef');
+    if (value.providerCredentialRef !== null) refuse('CONFIG_SCHEMA', path + '/providerCredentialRef');
+    const sel = record(value.selection, ['provider', 'model', 'thinking'], path + '/selection');
+    const provider = labelValue(sel.provider, path + '/selection/provider');
+    const model = labelValue(sel.model, path + '/selection/model');
+    const thinking = labelValue(sel.thinking, path + '/selection/thinking');
+    const tools = list(value.tools, path + '/tools', 8).map(item => text(item, path + '/tools', 128));
+    if (value.mcp === null) {
+      if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
+    } else {
+      if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
+      mcp(value.mcp, tools, path + '/mcp');
+    }
+    const checkedContext = hasContext && value.context !== undefined ? context(value.context, path + '/context') : DEFAULT_DELEGATED_CONTEXT;
+    return {
+      id: value.id as string,
+      adapter: 'delegated',
+      selection: { provider, model, thinking },
+      tools,
+      context: checkedContext,
+      runtimeRef: value.runtimeRef === null ? null : (value.runtimeRef as string),
+      providerCredentialRef: null,
+      mcp: value.mcp === null ? null : (value.mcp as RoleProfile['mcp']),
+      ...(checkedLimits !== undefined ? { limits: checkedLimits } : {}),
+    };
+  }
+  if (!hasContext) refuse('CONFIG_SCHEMA', path + '/context');
   id(value.id, path + '/id'); id(value.runtimeRef, path + '/runtimeRef'); if (value.providerCredentialRef !== null) id(value.providerCredentialRef, path + '/providerCredentialRef');
   if (!value.selection || typeof value.selection !== 'object' || Array.isArray(value.selection)) refuse('CONFIG_SCHEMA', path + '/selection');
   const hasCustom = Object.hasOwn(value.selection, 'customProvider');
   record(value.selection, hasCustom ? ['provider', 'model', 'thinking', 'api', 'customProvider'] : ['provider', 'model', 'thinking', 'api'], path + '/selection');
-  try { validateSelection(value.selection, path + '/selection'); }
-  catch (err) {
-    const detailCode = err && typeof err === 'object' && 'detail' in err && err.detail && typeof err.detail === 'object' && 'code' in err.detail
-      ? String((err.detail as { code: unknown }).code)
-      : err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
-    refuse(detailCode === 'INPUT_INVALID' ? 'CONFIG_SCHEMA' : 'CAPABILITY_UNSUPPORTED', path + '/selection');
-  }
+  validatePiSelectionOrRefuse(value.selection, path + '/selection');
   const tools = list(value.tools, path + '/tools', 128).map(item => text(item, path + '/tools', 128));
   if (new Set(tools).size !== tools.length || tools.some(name => !['read', 'bash', 'write', 'edit', 'delete', 'codemode', 'mcp__workspace__read_file'].includes(name) && !isExternalMcpToolName(name))) refuse('CAPABILITY_UNSUPPORTED', path + '/tools');
   const checkedContext = context(value.context, path + '/context'); mcp(value.mcp, tools, path + '/mcp');
-  const checkedLimits = hasLimits ? roleLimits(value.limits, path + '/limits') : undefined;
-  return { ...(raw as RoleProfile), context: checkedContext, ...(checkedLimits !== undefined ? { limits: checkedLimits } : {}) };
+  return { ...(raw as RoleProfile), adapter: 'pi', context: checkedContext, ...(checkedLimits !== undefined ? { limits: checkedLimits } : {}) };
 }
 /** Outbound endpoints accept exact https URLs or explicit-port loopback http; credentials, query strings and fragments never pass. */
 function endpointUrl(raw: unknown, path: string): string {

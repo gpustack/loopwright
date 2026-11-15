@@ -1,16 +1,14 @@
 import { reopenLocalRun, type LocalRunStore, type RunView } from '@loopwright/state';
-import { decodePiCapture } from '@loopwright/agent-pi';
 import { aggregateUsage, digestArtifact, validateDocument, type RequestUsage, type UsageSummary } from '@loopwright/core';
 import { result, refuse, type ControllerResult } from './errors.js';
 import { readRetained, type RetainedRunInput } from './retained.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
+import { decodeCandidateCapture } from './capture.js';
+import { countDelegatedBudgets } from './budget-observations.js';
 import { stateValue, checkedRef } from './storage.js';
 import { parsePrivateJson } from './parser.js';
-import { freeze, hash, id, list, record, same } from './schema.js';
-import { canonicalizeCandidateManifest } from './source.js';
-import { formatPolicy } from './repair.js';
+import { freeze, id, isRecord, list, record, same } from './schema.js';
 import { PublicBundle, type ExportManifest } from './bundle.js';
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 export type CurrentState = Pick<RunView, 'revision' | 'clockStatus' | 'counts' | 'ledger' | 'clock'>;
 export interface RunStatus {
   readonly runId: string; readonly source: 'current' | 'retained' | 'unavailable'; readonly stage: string | null; readonly status: string | null;
@@ -28,11 +26,18 @@ async function snapshot(input: RetainedRunInput) {
     if (head?.progress.terminalIntent?.observations) observed = parsePrivateJson(await retained.artifacts.read(head.progress.terminalIntent.observations, 1048576), 1048576) as Record<string, unknown>;
     const facts = records.view; let valid = facts.clockStatus === 'trusted', decision: ReturnType<typeof progress.decision> | null = null;
     try { decision = progress.decision(head); } catch { valid = false; }
+    const delegated = head ? countDelegatedBudgets(retained.plan, head.progress.attempts) : { modelCalls: 0, formatRepairs: 0, implementationRepairs: 0 };
+    const effectiveLedger = {
+      ...facts.ledger,
+      admittedCalls: facts.ledger.admittedCalls + delegated.modelCalls,
+      formatRepairs: facts.ledger.formatRepairs + delegated.formatRepairs,
+      implementationRepairs: facts.ledger.implementationRepairs + delegated.implementationRepairs,
+    };
     const status: RunStatus = freeze({ runId: input.runId, source: valid ? 'current' : 'retained', stage: head?.progress.stage.kind ?? 'not_started', status: valid ? head?.progress.terminalIntent?.primary ?? (decision === 'reconcile_required' ? 'reconcile_required' : 'in_progress') : null,
-      currentState: { revision: facts.revision, clockStatus: facts.clockStatus, counts: facts.counts, ledger: facts.ledger, clock: facts.clock }, checkpoint: head?.checkpoint.checkpointId ?? null,
+      currentState: { revision: facts.revision, clockStatus: facts.clockStatus, counts: facts.counts, ledger: effectiveLedger, clock: facts.clock }, checkpoint: head?.checkpoint.checkpointId ?? null,
       cleanup: observed && ['complete', 'pending', 'failed'].includes(String(observed.cleanup)) ? observed.cleanup as RunStatus['cleanup'] : null,
       unavailable: [...(valid ? [] : ['status']), ...(observed ? [] : ['cleanup'])] });
-    return { ...retained, head, records, status, observed, primary };
+    return { ...retained, head, records, status, observed, primary, effectiveLedger };
   } finally { if (store) stateValue(store.close()); }
 }
 /** Owner-free, credential-free current observation; unavailable facts are explicit data. */
@@ -44,7 +49,7 @@ export function readStatus(input: RetainedRunInput) {
 }
 type Snapshot = Awaited<ReturnType<typeof snapshot>>;
 async function candidateFiles(saved: Snapshot, head: ProgressHead) {
-  if (head.progress.candidate.privateSession === null) {
+  if (same(head.progress.candidate.workspace, saved.descriptor.sourceWorkspace)) {
     const rawSource = parsePrivateJson(await saved.artifacts.read(saved.descriptor.source, 262144), 262144);
     const sourceVersion = isRecord(rawSource) ? rawSource.version : undefined;
     if (sourceVersion === 2) {
@@ -62,11 +67,18 @@ async function candidateFiles(saved: Snapshot, head: ProgressHead) {
   }
   const attempt = [...head.progress.attempts].reverse().find(item => item.finished?.nativeCheckpointId && same(saved.records.checkpoints.find(cp => cp.checkpointId === item.finished!.nativeCheckpointId)?.workspace, head.progress.candidate.workspace));
   if (!attempt) refuse('EVIDENCE_UNAVAILABLE', '', 'inspection');
-  const checkpoint = saved.records.checkpoints.find(cp => cp.checkpointId === attempt.finished!.nativeCheckpointId)!, role = saved.plan.roles.find(role => role.roleId === saved.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
-  const decoded = await decodePiCapture({ version: 1, lock: saved.lock, policy: attempt.repair === 'format' ? formatPolicy(role.policy) : role.policy, checkpoint, sessionId: attempt.sessionId, roleId: role.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await saved.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await saved.artifacts.read(checkpoint.privateSession!, 67108864) },
-    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await saved.artifacts.read(attempt.command, 1048576)), requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId) } });
-  if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('ARTIFACT_INVALID', '', 'inspection'); return decoded.value.artifacts;
+  const checkpoint = saved.records.checkpoints.find(cp => cp.checkpointId === attempt.finished!.nativeCheckpointId)!;
+  const decoded = await decodeCandidateCapture({
+    artifacts: saved.artifacts,
+    lock: saved.lock,
+    plan: saved.plan,
+    checkpoint,
+    attempt,
+    expectedManifest: head.manifest,
+    requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId),
+    phase: 'inspection',
+  });
+  return decoded.artifacts;
 }
 export interface InspectRunInput extends RetainedRunInput { readonly output?: string }
 export interface InspectRunValue {
@@ -114,7 +126,7 @@ export function inspectRun(input: InspectRunInput): Promise<ControllerResult<Ins
     if (observed?.events) {
       try { bundle.add('events.jsonl', await saved.artifacts.read(checkedRef(observed.events), 4194304)); } catch { bundle.absent('events.jsonl'); }
     } else bundle.absent('events.jsonl');
-    bundle.json('usage.json', { version: 1, ledger: saved.records.view.ledger, requests: saved.records.requests.map(row => ({ requestId: row.admission.requestId, state: row.state, usage: (row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation)?.usage ?? null })), summary: usage });
+    bundle.json('usage.json', { version: 1, ledger: saved.effectiveLedger, requests: saved.records.requests.map(row => ({ requestId: row.admission.requestId, state: row.state, usage: (row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation)?.usage ?? null })), summary: usage });
     bundle.json('checkpoint.manifest.json', { version: 1, runId, lockHash: saved.lock.spec.lockHash, checkpoints: saved.records.checkpoints.map(cp => ({ checkpointId: cp.checkpointId, sequence: cp.sequence, subject: cp.subject, artifacts: cp.additionalArtifacts })) });
     for (const name of ['review.json', 'memory.json']) bundle.absent(name, 'outside_scope', 'not_run');
     let externalUrl: string | null = null;

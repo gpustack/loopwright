@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { lstat, realpath, rm } from 'node:fs/promises';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, runCycle, type ControllerDiagnostic, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput } from '@loopwright/controller';
-import { startConfiguredGitHubApp } from '@loopwright/github-app';
+import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, runCycle, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput, type StepTickResult } from '@loopwright/controller';
+import { GitHubAppError, openStagedTaskpackStepGate, SecretScrubber, stageTaskpackForStep, startConfiguredGitHubApp, type GitHubAppErrorCode, type StagedTaskpackStepGateHandle } from '@loopwright/github-app';
 import { parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
@@ -15,8 +16,8 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--json] [--output-format FORMATS] [--step-summary-file FILE]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
-export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
 }
@@ -71,7 +72,7 @@ interface EmitOutcomeReportInput {
   readonly runRoot: string;
   readonly runId: string;
   readonly json: boolean;
-  readonly configuration: LoadedConfiguration;
+  readonly configuration?: LoadedConfiguration;
   readonly report: Omit<RunReportInput, 'runId' | 'model' | 'usage' | 'externalUrl'> & { readonly usage?: RunReportInput['usage'] };
   readonly emitDefault: () => Promise<void>;
 }
@@ -94,7 +95,7 @@ async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> 
     reasonCode: report.reasonCode ?? null,
     phase: report.phase ?? inspected?.status.stage ?? null,
     checks: report.checks ?? [],
-    model: primaryModelInfo(configuration),
+    model: configuration ? primaryModelInfo(configuration) : null,
     usage: report.usage ?? inspected?.usage ?? null,
     externalUrl: inspected?.externalUrl ?? null,
   };
@@ -113,6 +114,329 @@ async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> 
   }
   for (const fmt of stdoutFormats) {
     await stdout(formatRunReport(reportInput, fmt) + '\n');
+  }
+}
+type EmitFn = (kind: Envelope['kind'], data: unknown, summary?: string) => Promise<void>;
+async function emitExecutionOutcome(
+  args: Arguments,
+  runRoot: string,
+  runId: string,
+  json: boolean,
+  outcome: CycleExecution,
+  configuration: LoadedConfiguration | undefined,
+  emit: EmitFn,
+): Promise<void> {
+  await emitOutcomeReports({
+    args,
+    runRoot,
+    runId,
+    json,
+    ...(configuration !== undefined ? { configuration } : {}),
+    report: outcome.kind === 'incident'
+      ? { status: 'incident', reasonCode: outcome.incident.code, phase: outcome.incident.stage, checks: [] }
+      : {
+          status: outcome.result.spec.status,
+          reasonCode: outcome.result.spec.verification.spec.diagnostics[0]?.code ?? null,
+          phase: null,
+          checks: [...outcome.result.spec.verification.spec.required, ...outcome.result.spec.verification.spec.optional].map(
+            (row): ReportCheckItem => ({ checkId: row.checkId, status: row.status, code: row.reason, detail: row.detail }),
+          ),
+          usage: outcome.result.spec.usage,
+        },
+    emitDefault: () => outcome.kind === 'incident'
+      ? emit('incident', outcome.incident, outcome.incident.code)
+      : emit('result', outcome, outcome.result.spec.status),
+  });
+}
+/** Map every GitHubAppErrorCode exhaustively to its documented CLI exit code. */
+export function gitHubAppExitCode(code: GitHubAppErrorCode): number {
+  switch (code) {
+    case 'TASKPACK_MANIFEST_INVALID':
+    case 'TASKPACK_UNTRUSTED_INTERPOLATION':
+    case 'TASKPACK_SCOPE_VIOLATION':
+    case 'TASKPACK_HOST_BINDING_INVALID':
+    case 'SANDBOX_POLICY_INVALID':
+    case 'GITHUB_APP_CONFIG_INVALID':
+    case 'TOKEN_BROKER_CONFIG_INVALID':
+    case 'ACTION_INPUT_INVALID':
+    case 'TENANT_IDENTITY_INVALID':
+    case 'WEBHOOK_GUIDANCE_INVALID':
+    case 'WEBHOOK_DELIVERY_INVALID':
+      return 2;
+    case 'PROVIDER_OAUTH_UNSUPPORTED':
+    case 'SANDBOX_BACKEND_UNAVAILABLE':
+    case 'SANDBOX_CAPABILITY_INSUFFICIENT':
+    case 'MCP_OAUTH_UNSUPPORTED':
+    case 'MCP_AUTHENTICATION_REQUIRED':
+    case 'HOST_PROFILE_UNQUALIFIED':
+    case 'WEBHOOK_ACTOR_UNAUTHORIZED':
+    case 'WEBHOOK_SIGNATURE_INVALID':
+    case 'TENANT_BOUNDARY_VIOLATION':
+    case 'TENANT_INSTALLATION_REVOKED':
+    case 'TOKEN_SCOPE_VIOLATION':
+      return 3;
+    case 'SANDBOX_EXECUTION_FAILED':
+      return 4;
+    case 'QUEUE_CAPACITY_EXCEEDED':
+      return 5;
+    case 'TOKEN_TTL_EXCEEDED':
+      return 6;
+    case 'HOST_CLOCK_UNTRUSTED':
+    case 'QUEUE_LEASE_FENCED':
+    case 'WEBHOOK_DELIVERY_CONFLICT':
+      return 7;
+    case 'STORAGE_PROFILE_INSUFFICIENT':
+    case 'TOKEN_SECRET_LEAK_DETECTED':
+    case 'SERVICE_FAULT':
+    case 'QUEUE_STATE_INVALID':
+    case 'WEBHOOK_PAYLOAD_TOO_LARGE':
+      return 8;
+    default: {
+      const _exhaustive: never = code;
+      return _exhaustive;
+    }
+  }
+}
+function createCliScrubber(extraKeys: readonly string[] = []): SecretScrubber {
+  const scrubber = new SecretScrubber();
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraKeys]) {
+    const value = process.env[key];
+    if (typeof value === 'string' && value.length > 0) scrubber.register(value);
+  }
+  return scrubber;
+}
+async function canonicalPath(target: string): Promise<string> {
+  const resolved = resolve(target);
+  return await realpath(resolved).catch(() => resolved);
+}
+function isInsidePathRoot(target: string, root: string): boolean {
+  return target === root || target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+async function inspectExistingDisjointRunRoot(resolvedRunRoot: string, requestedRepo: string): Promise<{
+  readonly exists: boolean;
+  readonly prospectiveRunRoot: string | null;
+  readonly disjoint: boolean;
+}> {
+  let anc = resolvedRunRoot;
+  let ancStat: Awaited<ReturnType<typeof lstat>>;
+  for (;;) {
+    try {
+      ancStat = await lstat(anc);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return { exists: false, prospectiveRunRoot: null, disjoint: false };
+      }
+      const parent = dirname(anc);
+      if (parent === anc) {
+        return { exists: false, prospectiveRunRoot: null, disjoint: false };
+      }
+      anc = parent;
+    }
+  }
+  const exists = anc === resolvedRunRoot;
+  if (exists && (ancStat.isSymbolicLink() || !ancStat.isDirectory())) {
+    return { exists: false, prospectiveRunRoot: null, disjoint: false };
+  }
+  if (!exists && !ancStat.isDirectory() && !ancStat.isSymbolicLink()) {
+    return { exists: false, prospectiveRunRoot: null, disjoint: false };
+  }
+  let realAnc: string;
+  try {
+    realAnc = await realpath(anc);
+    const realAncStat = await lstat(realAnc);
+    if (!realAncStat.isDirectory()) {
+      return { exists: false, prospectiveRunRoot: null, disjoint: false };
+    }
+  } catch {
+    return { exists: false, prospectiveRunRoot: null, disjoint: false };
+  }
+  const prospectiveRunRoot = exists ? realAnc : resolve(realAnc, relative(anc, resolvedRunRoot));
+  const disjoint = !isInsidePathRoot(prospectiveRunRoot, requestedRepo)
+    && !isInsidePathRoot(requestedRepo, prospectiveRunRoot);
+  return { exists, prospectiveRunRoot, disjoint };
+}
+async function withSignalAbort<T>(
+  fn: (signal: AbortSignal, getCaughtSignal: () => string | null) => Promise<T>,
+): Promise<T> {
+  const abort = new AbortController();
+  let caughtSignal: string | null = null;
+  const interrupt = () => { caughtSignal ??= 'SIGINT'; abort.abort(); };
+  const terminate = () => { caughtSignal ??= 'SIGTERM'; abort.abort(); };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', terminate);
+  try {
+    return await fn(abort.signal, () => caughtSignal);
+  } finally {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', terminate);
+  }
+}
+async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Promise<number> {
+  const get = (key: string) => args.values.get(key)!;
+  const runId = get('run-id');
+  const runRoot = resolve(get('run-root'));
+  let gateHandle: StagedTaskpackStepGateHandle | null = null;
+  let stagedDirToCleanOnUnadmittedFailure: string | null = null;
+  try {
+    let loadedConfiguration: LoadedConfiguration | undefined;
+    let resolvedRepo: string | undefined;
+    let stepped: Awaited<ReturnType<typeof stepNext>> | Awaited<ReturnType<typeof stepCancel>>;
+    let caughtSignal: string | null = null;
+    try {
+      const overrideOpt = args.roleModelOverrides ? { roleModelOverrides: args.roleModelOverrides } : {};
+      if (args.stepAction === 'next' && args.values.has('taskpack')) {
+        const requestedRepo = await canonicalPath(get('repo'));
+        const preflightRunRoot = await inspectExistingDisjointRunRoot(runRoot, requestedRepo);
+        let hadRunDir = false;
+        if (preflightRunRoot.exists && preflightRunRoot.disjoint && preflightRunRoot.prospectiveRunRoot !== null) {
+          const runDirPath = join(preflightRunRoot.prospectiveRunRoot, runId);
+          hadRunDir = await lstat(runDirPath).then(() => true, () => false);
+          if (!hadRunDir) {
+            const stageCandidate = join(preflightRunRoot.prospectiveRunRoot, `.taskpack-${runId}`);
+            const stageStat = await lstat(stageCandidate).catch(() => null);
+            if (
+              stageStat !== null
+              && !stageStat.isSymbolicLink()
+              && stageStat.isDirectory()
+              && !isInsidePathRoot(requestedRepo, stageCandidate)
+            ) {
+              await rm(stageCandidate, { recursive: true, force: true }).catch(() => {});
+            }
+          }
+        }
+        const staged = await stageTaskpackForStep({
+          taskpackPath: get('taskpack'),
+          repositoryRoot: requestedRepo,
+          runRoot,
+          runId,
+          mode: (args.values.get('mode') as 'candidate' | 'no-change' | undefined) ?? 'candidate',
+        });
+        if (!hadRunDir) stagedDirToCleanOnUnadmittedFailure = staged.stageDir;
+        const prevSecret = Object.hasOwn(process.env, staged.signingEnvName)
+          ? process.env[staged.signingEnvName]
+          : undefined;
+        process.env[staged.signingEnvName] = staged.signingSecret;
+        let loaded;
+        try {
+          loaded = await loadTrustedConfiguration({
+            configPath: staged.configPath,
+            registryPath: staged.registryPath,
+            registrySha256: staged.registrySha256,
+            untrustedRoots: [requestedRepo, ...(requestedRepo !== staged.repositoryRoot ? [staged.repositoryRoot] : [])],
+            ...overrideOpt,
+          });
+        } finally {
+          if (prevSecret === undefined) delete process.env[staged.signingEnvName];
+          else process.env[staged.signingEnvName] = prevSecret;
+        }
+        if (!loaded.ok) {
+          await emit('diagnostic', loaded.error, loaded.error.code);
+          return diagnosticExit(loaded.error);
+        }
+        loadedConfiguration = loaded.value;
+        resolvedRepo = requestedRepo;
+      } else if (args.stepAction === 'next' && args.values.has('config')) {
+        resolvedRepo = resolve(get('repo'));
+        const loaded = await loadTrustedConfiguration({
+          configPath: resolve(get('config')),
+          registryPath: resolve(get('registry')),
+          registrySha256: get('registry-sha256'),
+          untrustedRoots: [resolvedRepo],
+          ...overrideOpt,
+        });
+        if (!loaded.ok) {
+          await emit('diagnostic', loaded.error, loaded.error.code);
+          return diagnosticExit(loaded.error);
+        }
+        loadedConfiguration = loaded.value;
+      }
+
+      gateHandle = args.stepAction === 'next' && args.values.has('config')
+        ? null
+        : await openStagedTaskpackStepGate({ runRoot, runId });
+      const gateEnvOpt = gateHandle ? { environment: gateHandle.environment } : {};
+      const gatePorts = gateHandle ? { gateUrlOverrides: gateHandle.gateUrlOverrides } : {};
+
+      if (args.stepAction === 'next') {
+        const modeOpt = args.values.has('mode') ? { mode: get('mode') as 'candidate' | 'no-change' } : {};
+        const reissueOpt = args.flags.has('reissue-lease') ? { reissueLease: true } : {};
+        if (resolvedRepo === undefined && args.values.has('repo')) {
+          resolvedRepo = gateHandle !== null ? await canonicalPath(get('repo')) : resolve(get('repo'));
+        }
+        ({ stepped, caughtSignal } = await withSignalAbort(async (signal, getSignal) => ({
+          stepped: await stepNext(
+            {
+              ...(loadedConfiguration ? { configuration: loadedConfiguration } : {}),
+              ...(resolvedRepo !== undefined ? { repository: resolvedRepo } : {}),
+              runRoot,
+              runId,
+              ...modeOpt,
+              ...reissueOpt,
+              ...gateEnvOpt,
+              signal,
+            },
+            gatePorts,
+          ),
+          caughtSignal: getSignal(),
+        })));
+      } else if (args.stepAction === 'submit') {
+        ({ stepped, caughtSignal } = await withSignalAbort(async (signal, getSignal) => ({
+          stepped: await stepSubmit(
+            {
+              runRoot,
+              runId,
+              leaseToken: get('lease'),
+              ...(args.values.has('submission-file') ? { submissionFile: resolve(get('submission-file')) } : {}),
+              ...(args.values.has('status') ? { status: get('status') as 'completed' | 'no_change' | 'failed' | 'blocked' } : {}),
+              ...(args.values.has('reason') ? { reason: get('reason') } : {}),
+              ...gateEnvOpt,
+              signal,
+            },
+            gatePorts,
+          ),
+          caughtSignal: getSignal(),
+        })));
+      } else {
+        stepped = await stepCancel({ runRoot, runId, ...gateEnvOpt }, gatePorts);
+      }
+    } catch (err) {
+      if (err instanceof GitHubAppError) {
+        const scrubber = createCliScrubber();
+        const message = scrubber.scrub(err.message);
+        const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
+        await emit(
+          'diagnostic',
+          { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
+          err.code,
+        );
+        return gitHubAppExitCode(err.code);
+      }
+      throw err;
+    }
+
+    if (!stepped.ok) {
+      await emit('diagnostic', stepped.error, stepped.error.code);
+      if (stepped.error.code === 'CANCELLED' && caughtSignal !== null) {
+        return caughtSignal === 'SIGTERM' ? 143 : 130;
+      }
+      return diagnosticExit(stepped.error);
+    }
+    const value: StepTickResult = stepped.value;
+    if (value.kind === 'step') {
+      await emit('step', value, `awaiting_role: ${value.roleId} (${value.attemptId})`);
+      return 0;
+    }
+    await emitExecutionOutcome(args, runRoot, runId, json, value, loadedConfiguration, emit);
+    return executionExit(value, caughtSignal);
+  } finally {
+    await gateHandle?.close();
+    if (stagedDirToCleanOnUnadmittedFailure !== null) {
+      const hasRunDirNow = await lstat(join(dirname(stagedDirToCleanOnUnadmittedFailure), runId)).then(() => true, () => false);
+      if (!hasRunDirNow) {
+        await rm(stagedDirToCleanOnUnadmittedFailure, { recursive: true, force: true }).catch(() => {});
+      }
+    }
   }
 }
 export async function main(argv: readonly string[]): Promise<number> {
@@ -141,7 +465,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       } catch (err) {
         if (err !== null && typeof err === 'object' && 'code' in err && typeof (err as { code: unknown }).code === 'string') {
           const code = (err as { code: string }).code;
-          const message = err instanceof Error ? err.message : code;
+          const rawMessage = err instanceof Error ? err.message : code;
+          const message = createCliScrubber(['GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_PRIVATE_KEY']).scrub(rawMessage);
           await emit('diagnostic', { version: 1, code, message }, code);
           return 2;
         }
@@ -184,45 +509,35 @@ export async function main(argv: readonly string[]): Promise<number> {
       });
       return reconciled.value.kind === 'settled' ? reconciled.value.status === 'completed' ? 0 : reconciled.value.status === 'blocked' ? 3 : 4 : 7;
     }
-    const loaded = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: args.values.has('repo') ? [resolve(get('repo'))] : [] });
+    if (args.command === 'step') {
+      runId = get('run-id');
+      return await runStepCommand(args, json, emit);
+    }
+    const loaded = await loadTrustedConfiguration({
+      configPath: resolve(get('config')),
+      registryPath: resolve(get('registry')),
+      registrySha256: get('registry-sha256'),
+      untrustedRoots: args.values.has('repo') ? [resolve(get('repo'))] : [],
+      ...(args.roleModelOverrides ? { roleModelOverrides: args.roleModelOverrides } : {}),
+    });
     if (!loaded.ok) { await emit('diagnostic', loaded.error, loaded.error.code); return diagnosticExit(loaded.error); }
     if (args.command === 'check' || args.flags.has('dry-run')) {
       const compiled = await compilePlan(loaded.value); if (!compiled.ok) { await emit('diagnostic', compiled.error, compiled.error.code); return diagnosticExit(compiled.error); }
       if (output !== undefined) await writeOutput(output, Buffer.from(encoded(compiled.value) + '\n'));
       await emit('plan', compiled.value, 'Plan checked; admission not performed; execution readiness not checked.'); return 0;
     }
-    runId = get('run-id'); const abort = new AbortController(); let caughtSignal: string | null = null;
-    const interrupt = () => { caughtSignal ??= 'SIGINT'; abort.abort(); }, terminate = () => { caughtSignal ??= 'SIGTERM'; abort.abort(); };
-    process.on('SIGINT', interrupt); process.on('SIGTERM', terminate);
-    try {
-      const input = { configuration: loaded.value, repository: resolve(get('repo')), runRoot: resolve(get('run-root')), runId, signal: abort.signal,
-        onEvent: async (event: unknown) => { if (json) await emit('event', event); else process.stderr.write('progress\n'); } };
+    const targetRunId = get('run-id');
+    runId = targetRunId;
+    return await withSignalAbort(async (signal, getSignal) => {
+      const input = {
+        configuration: loaded.value, repository: resolve(get('repo')), runRoot: resolve(get('run-root')), runId: targetRunId, signal,
+        onEvent: async (event: unknown) => { if (json) await emit('event', event); else process.stderr.write('progress\n'); },
+      };
       const execution = args.command === 'resume' ? await resumeCycle(input) : await runCycle(input);
       if (!execution.ok) { await emit('diagnostic', execution.error, execution.error.code); return diagnosticExit(execution.error); }
-      const outcome = execution.value;
-      await emitOutcomeReports({
-        args,
-        runRoot: resolve(get('run-root')),
-        runId,
-        json,
-        configuration: loaded.value,
-        report: outcome.kind === 'incident'
-          ? { status: 'incident', reasonCode: outcome.incident.code, phase: outcome.incident.stage, checks: [] }
-          : {
-              status: outcome.result.spec.status,
-              reasonCode: outcome.result.spec.verification.spec.diagnostics[0]?.code ?? null,
-              phase: null,
-              checks: [...outcome.result.spec.verification.spec.required, ...outcome.result.spec.verification.spec.optional].map(
-                (row): ReportCheckItem => ({ checkId: row.checkId, status: row.status, code: row.reason, detail: row.detail }),
-              ),
-              usage: outcome.result.spec.usage,
-            },
-        emitDefault: () => outcome.kind === 'incident'
-          ? emit('incident', outcome.incident, outcome.incident.code)
-          : emit('result', outcome, outcome.result.spec.status),
-      });
-      return executionExit(execution.value, caughtSignal);
-    } finally { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); }
+      await emitExecutionOutcome(args, resolve(get('run-root')), targetRunId, json, execution.value, loaded.value, emit);
+      return executionExit(execution.value, getSignal());
+    });
   } catch (error) {
     const code = error instanceof UsageError ? 'CLI_USAGE' : 'CLI_UNAVAILABLE';
     await emit('diagnostic', { version: 1, code }, code); return error instanceof UsageError ? 2 : 8;

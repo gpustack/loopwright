@@ -131,6 +131,37 @@ spec:
 - **Proposal**: The proposal must be writable and end in `.yaml`, `.yml`, or `.json`.
 - **Secrets**: Never place tokens or `${ENV}` templates inside `taskpack.yaml`; the parser rejects untrusted interpolation.
 
+### Delegated role DAG
+
+Add roles to the taskpack from Step 1. This example runs a read-only review after the author:
+
+```yaml
+apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: example
+spec:
+  roles:
+    - id: author
+      provider: example
+      model: author-model
+    - id: review
+      purpose: review
+      provider: example
+      model: review-model
+      tools: [read]
+      dependsOn: [author]
+```
+
+Merge these roles into the complete taskpack above; this excerpt omits its other required fields. Run the local delegated loop without Loopwright provider secrets:
+
+```sh
+loopwright step next --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json
+loopwright step submit --run-root ../runs --run-id demo-1 --lease TOKEN --status completed --json
+```
+
+Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See [CLI](../operations/cli.md) for leases and [Taskpack](../configuration/taskpack.md#role-dag) for role bounds.
+
 ## Step 2: Validate taskpack
 
 Verify your host meets the [runtime baseline](../getting-started/architecture.md#runtime-baseline), then test compilation in dry-run mode before enabling live mutations.

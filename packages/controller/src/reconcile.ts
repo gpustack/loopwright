@@ -3,12 +3,12 @@ import { lstat, open, realpath, rename } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { reopenLocalRun, type Authority, type LocalRunStore, type OperationReceipt } from '@loopwright/state';
-import { admitTask, validateDocument } from '@loopwright/core';
-import { approvedState } from './config.js';
+import { validateDocument } from '@loopwright/core';
+import { approvedState, loadConfiguration } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result } from './errors.js';
-import { ControllerOwner, bootIdentity } from './ownership.js';
-import { readRetained } from './retained.js';
+import { ControllerOwner } from './ownership.js';
+import { admitRetainedRun, readRetained } from './retained.js';
 import { resumeCycleWithPorts } from './recovery.js';
 import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
@@ -17,7 +17,6 @@ import { parsePrivateJson } from './parser.js';
 import { canonical, freeze, hash, record, same, text } from './schema.js';
 import { preparePublication, verifyPublicationReceipt } from './publication.js';
 import { verifySignedPayload } from './gate.js';
-import { resolveStoreLeaseMs } from './controller.js';
 import type { LoadedConfiguration } from './types.js';
 export interface ReconcileCycleInput { readonly configuration: LoadedConfiguration; readonly runRoot: string; readonly runId: string; readonly receipt: string; readonly signal?: AbortSignal }
 export type ReconcileExecution =
@@ -47,25 +46,28 @@ export function reconcileCycle(input: ReconcileCycleInput) {
     let raw: unknown; try { raw = parsePrivateJson(receiptBytes, 65536); } catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
     const kind = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).kind : null;
     if (kind !== 'publication_receipt' && kind !== 'gate_verdict') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
-    const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration);
+    let effectiveConfig = input.configuration;
+    let state = approvedState(effectiveConfig);
+    try {
+      const retained = await readRetained({ runRoot: input.runRoot, runId: input.runId });
+      if (retained.descriptor.configuration.roleModelOverrides !== undefined && state.input.roleModelOverrides === undefined) {
+        const reloaded = await loadConfiguration({ ...state.input, roleModelOverrides: retained.descriptor.configuration.roleModelOverrides }, { environment: name => process.env[name] });
+        if (reloaded.ok) { effectiveConfig = reloaded.value; state = approvedState(effectiveConfig); }
+      }
+    } catch { /* admit() below will validate retained run and report the canonical diagnostic */ }
+    const compiled = await compilePlan(effectiveConfig);
     if (!compiled.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const plan = compiled.value;
-    if (kind === 'gate_verdict') return await reconcileGate(input, state, plan, receiptBytes);
+    if (kind === 'gate_verdict') return await reconcileGate({ ...input, configuration: effectiveConfig }, state, plan, receiptBytes);
     if (plan.publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
-    return await reconcilePublication(input, state, plan, raw);
+    return await reconcilePublication({ ...input, configuration: effectiveConfig }, state, plan, raw);
   }, 'recovery');
 }
 /** Shared retained-run admission for both reconciliation paths. */
 async function admit(input: ReconcileCycleInput, plan: import('./types.js').CompiledPlan) {
-  const retained = await readRetained({ runRoot: input.runRoot, runId: input.runId }), { directory, descriptor, lock } = retained;
-  const state = approvedState(input.configuration);
-  const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + input.runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId: input.runId });
-  if (!admitted.ok || !same(admitted.value, lock) || !same(plan, retained.plan)
-    || !same(descriptor.configuration, { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 })) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const expected = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + input.runId).hex.slice(0, 40), lock,
-    policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
-  if (!same(descriptor.identity, expected)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return { retained, directory, descriptor, lock, state };
+  const admitted = await admitRetainedRun({ runRoot: input.runRoot, runId: input.runId, configuration: input.configuration, phase: 'recovery' });
+  if (!same(plan, admitted.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  return admitted;
 }
 async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, receiptBytes: Buffer) {
   const { directory, descriptor, lock } = await admit(input, plan);
@@ -136,6 +138,9 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     stateValue(store.close()); store = null;
     await owner.release(); owner = null;
     const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId });
+    if (!execution.ok && execution.error.code === 'CAPABILITY_UNSUPPORTED') {
+      return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'delegated_step_required' }) as ReconcileExecution;
+    }
     if (!execution.ok || execution.value.kind !== 'result') refuse('RECOVERY_REQUIRED', '', 'recovery');
     if (execution.value.result.spec.status === 'reconcile_required') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
     const receipt = settledReceipt as OperationReceipt;

@@ -1,12 +1,14 @@
 import { fileURLToPath } from 'node:url';
-import { describePiAdapterFiles } from '@loopwright/agent-pi';
+import { describePiAdapterFiles, type AdapterPolicy } from '@loopwright/agent-pi';
+import { resolveBuiltInPiCatalogModel, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { approvedState } from './config.js';
+import { validatePiSelectionOrRefuse } from './registry.js';
 import { readBoundedFile } from './files.js';
 import { installedHandlerDigests } from './handlers.js';
 import { freeze, canonical, hash, same } from './schema.js';
 import { refuse, result } from './errors.js';
 import { compactionTarget } from './scheduler.js';
-import type { CheckpointCapacity, CompiledPlan, LoadedConfiguration, PlannedRole, VerifierSlot } from './types.js';
+import type { CheckpointCapacity, CompiledPlan, LoadedConfiguration, PlannedRole, RuntimeProfile, VerifierSlot } from './types.js';
 export function checkpointCapacity(A: number, N: number, I: number, C: number, publication: boolean): CheckpointCapacity {
   if (![A, N, I, C].every(Number.isSafeInteger) || A < 1 || A > 16 || N < 0 || I < 0 || C < 2 || C > 16 || typeof publication !== 'boolean') refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
   const V = 1 + Math.min(A, N + I), J = C * V, D = 4 + 3 * A + 2 * J + (publication ? 3 : 0);
@@ -29,7 +31,15 @@ export function compilePlan(loaded: LoadedConfiguration) {
       if (!handler || handler.id !== ready.uses || handler.kind !== ready.kind) refuse('CONFIG_REFERENCE', '/spec/profiles/steps', 'compile');
       orderedDAG.push({ id: ready.id, kind: ready.kind, dependsOn: [...ready.dependsOn].sort(), roleId: ready.roleId, handler: handler.implementation === 'pi.agent.v1' ? { ...handler, parameters: { ...handler.parameters, prompt: '[private command sha256:' + hash(String(handler.parameters.prompt)).hex + ']' } } : handler }); done.add(ready.id); pending.splice(pending.indexOf(ready), 1);
     }
-    for (const node of orderedDAG) if (node.handler.implementation === 'pi.compact.v1') compactionTarget({ orderedDAG }, node.id);
+    for (const node of orderedDAG) {
+      if (node.handler.implementation === 'pi.compact.v1') {
+        const compactRole = task.spec.roles.find(item => item.id === node.roleId);
+        const compactSelected = config.spec.profiles.roles.find(item => item.roleId === node.roleId);
+        const compactProfile = registry.roleProfiles.find(item => item.id === compactSelected?.profileRef);
+        if (compactRole?.adapter === 'delegated' || compactProfile?.adapter === 'delegated') refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+        compactionTarget({ orderedDAG }, node.id);
+      }
+    }
     const verifierSlots: VerifierSlot[] = [], networkCredentials: { readonly ref: string; readonly consumer: 'gate' | 'publisher' }[] = [];
     const networkCredential = (ref: string, consumer: 'gate' | 'publisher', path: string): void => {
       const binding = registry.credentialBindings.find(item => item.id === ref);
@@ -76,23 +86,37 @@ export function compilePlan(loaded: LoadedConfiguration) {
     const roles: PlannedRole[] = [], neededCredentials = new Set<string>();
     for (const role of task.spec.roles) {
       const selected = config.spec.profiles.roles.find(item => item.roleId === role.id), profile = registry.roleProfiles.find(item => item.id === selected?.profileRef);
-      if (!profile || role.adapter !== 'pi' || profile.selection.provider !== role.provider || profile.selection.model !== role.model || profile.selection.thinking !== role.thinking || role.tools.some(tool => !profile.tools.includes(tool))) refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
-      const runtime = registry.runtimeProfiles.find(item => item.id === profile.runtimeRef);
-      if (!runtime || runtime.identity.sdkIntegrity !== files.sdkIntegrity || !same(runtime.identity.graphDigest, graphDigest) || !same(runtime.identity.configDigest, files.restrictionDigest)) refuse('CONFIG_REFERENCE', '/registry/spec/runtimeProfiles', 'compile');
+      if (!selected || !profile) refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
+      const adapter = profile.adapter ?? 'pi';
+      if (role.adapter !== adapter || role.tools.some(tool => !profile.tools.includes(tool))) refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
+      const hasOverride = selected.selection !== undefined || Boolean(state.input.roleModelOverrides?.some(item => item.roleId === role.id));
+      const hasThinkingOverride = selected.selection?.thinking !== undefined || Boolean(state.input.roleModelOverrides?.some(item => item.roleId === role.id && item.thinking !== undefined));
+      if ((!hasOverride && (profile.selection.provider !== role.provider || profile.selection.model !== role.model)) || (!hasThinkingOverride && profile.selection.thinking !== role.thinking)) {
+        refuse('CONFIG_REFERENCE', '/spec/profiles/roles', 'compile');
+      }
       const active = orderedDAG.some(node => node.roleId === role.id);
-      if (active && (task.spec.budgets.enforcement.tokens !== 'soft_accounting' || profile.context.mode !== 'estimated_guard' || task.spec.budgets.perCallOutputTokens > profile.context.maxOutputTokens)) refuse('CAPABILITY_UNSUPPORTED', '/registry/spec/roleProfiles', 'compile');
-      if (active) {
-        const provider = registry.credentialBindings.find(item => item.id === profile.providerCredentialRef);
-        if (!provider || provider.consumer !== 'provider' || provider.destinationRef !== profile.selection.provider) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
-        neededCredentials.add(provider.id);
+      if (active && (task.spec.budgets.enforcement.tokens !== 'soft_accounting' || profile.context.mode !== 'estimated_guard' || task.spec.budgets.perCallOutputTokens > profile.context.maxOutputTokens)) {
+        refuse('CAPABILITY_UNSUPPORTED', '/registry/spec/roleProfiles', 'compile');
       }
       const mcpEnabled = role.tools.includes('mcp__workspace__read_file');
-      const mcp = { ...profile.mcp, names: mcpEnabled ? ['mcp__workspace__read_file'] as const : [], effects: mcpEnabled ? ['read_only'] as const : [] };
-      if ('transport' in mcp && active && mcpEnabled) {
-        const credential = registry.credentialBindings.find(item => item.id === mcp.credentialRef);
-        if (!credential || credential.consumer !== 'mcp' || credential.destinationRef !== mcp.destinationRef) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
-        neededCredentials.add(credential.id);
-      } else if (!('transport' in mcp) && !same(mcp.scriptDigest, files.localMcpScriptDigest)) refuse('CONFIG_REFERENCE', '/registry/spec/roleProfiles', 'compile');
+      let mcp: PlannedRole['policy']['mcp'];
+      if (adapter === 'delegated' && profile.mcp === null) {
+        if (role.tools.some(tool => tool === 'codemode' || tool === 'mcp__workspace__read_file')) {
+          refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'compile');
+        }
+        mcp = { serverId: 'workspace', scriptDigest: files.localMcpScriptDigest, names: [], effects: [], idleTimeoutSeconds: 2, absoluteTimeoutSeconds: 10 };
+      } else {
+        if (!profile.mcp) refuse('CONFIG_REFERENCE', '/registry/spec/roleProfiles', 'compile');
+        const configuredMcp = { ...profile.mcp, names: mcpEnabled ? ['mcp__workspace__read_file'] as const : [], effects: mcpEnabled ? ['read_only'] as const : [] };
+        if ('transport' in configuredMcp && active && mcpEnabled) {
+          const credential = registry.credentialBindings.find(item => item.id === configuredMcp.credentialRef);
+          if (!credential || credential.consumer !== 'mcp' || credential.destinationRef !== configuredMcp.destinationRef) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
+          neededCredentials.add(credential.id);
+        } else if (!('transport' in configuredMcp) && !same(configuredMcp.scriptDigest, files.localMcpScriptDigest)) {
+          refuse('CONFIG_REFERENCE', '/registry/spec/roleProfiles', 'compile');
+        }
+        mcp = configuredMcp;
+      }
       if (profile.limits) {
         for (const [limitKey, limitVal] of Object.entries(profile.limits)) {
           const maxVal = files.limits[limitKey as keyof typeof files.limits];
@@ -110,9 +134,104 @@ export function compilePlan(loaded: LoadedConfiguration) {
         operations: Math.min(profile.limits?.operations ?? maxAvailableOps, maxAvailableOps),
       };
       if (active && task.spec.budgets.maxModelCalls > roleLimits.requests) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
-      roles.push({ roleId: role.id, profileRef: profile.id, providerCredentialRef: profile.providerCredentialRef, runtime,
+      if (adapter === 'delegated') {
+        if (profile.providerCredentialRef !== null) refuse('CONFIG_SCHEMA', '/registry/spec/roleProfiles', 'compile');
+        let runtime: RuntimeProfile;
+        if (profile.runtimeRef === null) {
+          runtime = {
+            id: 'delegated.none',
+            dockerExecutable: '/nonexistent/delegated',
+            dockerSocket: '/nonexistent/delegated.sock',
+            identity: {
+              sdkIntegrity: files.sdkIntegrity,
+              graphDigest,
+              configDigest: files.restrictionDigest,
+              imageDigest: 'sha256:' + '0'.repeat(64),
+              profile: 'linux/arm64',
+            },
+          };
+        } else {
+          const found = registry.runtimeProfiles.find(item => item.id === profile.runtimeRef);
+          if (!found || found.identity.sdkIntegrity !== files.sdkIntegrity || !same(found.identity.graphDigest, graphDigest) || !same(found.identity.configDigest, files.restrictionDigest)) {
+            refuse('CONFIG_REFERENCE', '/registry/spec/runtimeProfiles', 'compile');
+          }
+          runtime = found;
+        }
+        roles.push({
+          roleId: role.id,
+          adapter: 'delegated',
+          profileRef: profile.id,
+          providerCredentialRef: null,
+          runtime,
+          policy: {
+            version: 2,
+            policyId: 'controller.' + loaded.registryDigest.hex.slice(0, 32),
+            resourceVersion: registry.resourceVersion,
+            adapterId: 'pi',
+            adapterVersion: '0.0.0',
+            runtime: runtime.identity,
+            selection: { provider: role.provider, model: role.model, thinking: role.thinking, api: 'openai-responses' },
+            resources: [files.preamble, ...task.spec.trustedContext.resources],
+            tools: role.tools,
+            mcp,
+            context: profile.context,
+            accounting: 'soft_only',
+            retry: 'sender_only',
+            extensions: [],
+            privateArtifacts: true,
+            limits: roleLimits,
+          },
+        });
+        continue;
+      }
+      const baseSel = profile.selection as AdapterPolicy['selection'];
+      let effectiveSelection: AdapterPolicy['selection'] = baseSel;
+      if (hasOverride) {
+        let api: AdapterPolicy['selection']['api'];
+        let customProvider: AdapterPolicy['selection']['customProvider'];
+        if (role.provider === baseSel.provider && baseSel.customProvider !== undefined) {
+          api = baseSel.api;
+          customProvider = baseSel.customProvider;
+        } else if (role.provider === 'github-copilot') {
+          api = 'anthropic-messages';
+          customProvider = undefined;
+        } else {
+          const catalogEntry = resolveBuiltInPiCatalogModel(role.provider, role.model);
+          api = catalogEntry ? catalogEntry.api : baseSel.api;
+          customProvider = undefined;
+        }
+        const candidateSelection: AdapterPolicy['selection'] = {
+          provider: role.provider,
+          model: role.model,
+          thinking: role.thinking,
+          api,
+          ...(customProvider !== undefined ? { customProvider } : {}),
+        };
+        validatePiSelectionOrRefuse(candidateSelection, '/spec/profiles/roles', 'compile');
+        effectiveSelection = candidateSelection;
+        if (active) {
+          const { record } = resolveCatalogModel(effectiveSelection);
+          if (
+            !Number.isSafeInteger(record.contextWindow) ||
+            record.contextWindow <= 0 ||
+            record.maxTokens < profile.context.maxOutputTokens ||
+            Math.min(record.contextWindow, profile.context.workingWindowCeiling) <
+              profile.context.serviceMargin + profile.context.toolReserve + profile.context.maxOutputTokens
+          ) {
+            refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'compile');
+          }
+        }
+      }
+      const runtime = registry.runtimeProfiles.find(item => item.id === profile.runtimeRef);
+      if (!runtime || runtime.identity.sdkIntegrity !== files.sdkIntegrity || !same(runtime.identity.graphDigest, graphDigest) || !same(runtime.identity.configDigest, files.restrictionDigest)) refuse('CONFIG_REFERENCE', '/registry/spec/runtimeProfiles', 'compile');
+      if (active) {
+        const provider = registry.credentialBindings.find(item => item.id === profile.providerCredentialRef);
+        if (!provider || provider.consumer !== 'provider' || provider.destinationRef !== effectiveSelection.provider) refuse('CONFIG_REFERENCE', '/spec/credentials', 'compile');
+        neededCredentials.add(provider.id);
+      }
+      roles.push({ roleId: role.id, adapter: 'pi', profileRef: profile.id, providerCredentialRef: profile.providerCredentialRef, runtime,
         policy: { version: 2, policyId: 'controller.' + loaded.registryDigest.hex.slice(0, 32), resourceVersion: registry.resourceVersion, adapterId: 'pi', adapterVersion: '0.0.0', runtime: runtime.identity,
-          selection: profile.selection, resources: [files.preamble, ...task.spec.trustedContext.resources], tools: role.tools, mcp,
+          selection: effectiveSelection, resources: [files.preamble, ...task.spec.trustedContext.resources], tools: role.tools, mcp,
           context: profile.context, accounting: 'soft_only', retry: 'sender_only', extensions: [], privateArtifacts: true,
           limits: roleLimits } });
     }

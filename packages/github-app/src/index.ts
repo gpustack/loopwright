@@ -1,4 +1,8 @@
-export { GitHubAppError, GITHUB_APP_ERROR_CODES, MAX_EXPANDED_MODEL_CANDIDATES, MAX_TASKPACK_MODEL_CANDIDATES, type GitHubAppErrorCode } from './types.js';
+export {
+  CANONICAL_TASKPACK_STEP_GATE_URL, DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, GITHUB_APP_ERROR_CODES,
+  LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_EXPANDED_MODEL_CANDIDATES, MAX_TASKPACK_MODEL_CANDIDATES,
+  MAX_TASKPACK_ROLES, TASKPACK_TOOL_NAMES, type GitHubAppErrorCode,
+} from './types.js';
 export type * from './types.js';
 export {
   IDENTIFIER_PATTERN, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy,
@@ -60,10 +64,13 @@ export {
 export {
   buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle,
   isRetryablePerRequestTimeout, makeAttemptRunId,
-  normalizeControllerRunId, startLocalCommandGateServer, startNativePullRequestPublisherServer,
+  normalizeControllerRunId, openStagedTaskpackStepGate, stageTaskpackForStep,
+  startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type ExecuteTurnkeyActionCycleOptions, type LocalCommandGateServer,
   type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,
-  type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
+  type NativePullRequestPublisherServer, type OpenStagedTaskpackStepGateOptions,
+  type StagedTaskpackForStep, type StagedTaskpackStepGateHandle,
+  type StageTaskpackForStepOptions, type TurnkeyCycleAttemptSummary,
   type TurnkeyCycleDelegateOptions,
 } from './turnkey.js';
 export { startGitHubAppControlPlane, type ControlPlaneHandle, type ControlPlaneOptions } from './service.js';

@@ -7,14 +7,34 @@ import { journal } from './progress.js';
 import { refuse } from './errors.js';
 import type { ArtifactStore } from './storage.js';
 import type { ByteInventory } from './verification.js';
-import type { ControllerProgress } from './types.js';
+import type { CompiledPlan, ControllerProgress } from './types.js';
+
+export function countDelegatedBudgets(plan: CompiledPlan, attempts: ControllerProgress['attempts']): {
+  readonly modelCalls: number;
+  readonly formatRepairs: number;
+  readonly implementationRepairs: number;
+} {
+  const isDelegated = (nodeId: string): boolean => {
+    const node = plan.orderedDAG.find(item => item.id === nodeId);
+    const role = node?.roleId ? plan.roles.find(item => item.roleId === node.roleId) : undefined;
+    return role?.adapter === 'delegated';
+  };
+  let modelCalls = 0, formatRepairs = 0, implementationRepairs = 0;
+  for (const attempt of attempts) {
+    if (!isDelegated(attempt.nodeId)) continue;
+    if (attempt.purpose !== 'compaction') modelCalls++;
+    if (attempt.repair === 'format') formatRepairs++;
+    if (attempt.repair === 'implementation') implementationRepairs++;
+  }
+  return { modelCalls, formatRepairs, implementationRepairs };
+}
 
 /** Observation only: this may revoke scheduling, but never grants admission or a dispatch permit. */
-export function observeParentExhaustion(view: RunView, lock: TaskLock): void {
+export function observeParentExhaustion(view: RunView, lock: TaskLock, delegatedModelCalls = 0): void {
   if (view.runId !== lock.spec.runId || !same(view.lockHash, lock.spec.lockHash) || view.clockStatus !== 'trusted'
     || view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', 'execution');
   const limits = lock.spec.contract.spec.budgets;
-  if (view.ledger.admittedCalls >= limits.maxModelCalls || BigInt(view.ledger.chargedTokens.decimal) >= BigInt(limits.totalTokens)) refuse('BUDGET_EXHAUSTED', '', 'execution');
+  if (view.ledger.admittedCalls + delegatedModelCalls >= limits.maxModelCalls || BigInt(view.ledger.chargedTokens.decimal) >= BigInt(limits.totalTokens)) refuse('BUDGET_EXHAUSTED', '', 'execution');
 }
 export function isNoEffectBudgetRefusal(error: PiErrorV2): boolean {
   return ['REQUEST_REFUSED', 'STATE_REFUSED'].includes(error.code) && error.phase === 'admission' && error.stateErrorCode === 'BUDGET_EXHAUSTED'

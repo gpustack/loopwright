@@ -76,8 +76,22 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
     else if (index !== attempts.length - 1) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
   const typedAttempts = attempts as unknown as ControllerProgress['attempts'];
-  const ordinary = typedAttempts.filter(attempt => attempt.repair === 'none' && attempt.purpose !== 'compaction');
-  if (new Set(ordinary.map(attempt => attempt.nodeId)).size !== ordinary.length || typedAttempts.filter(attempt => attempt.repair === 'implementation').length > plan.budgets.maxImplementationRepairs
+  const taskOrdinary = typedAttempts.filter(attempt => attempt.repair === 'none' && attempt.purpose === 'task');
+  const implCount = typedAttempts.filter(attempt => attempt.repair === 'implementation').length;
+  const reviewerCounts = new Map<string, number>();
+  const awaitingRepairBeforeNextReview = new Set<string>();
+  let invalidReviewerSequence = false;
+  for (const attempt of typedAttempts) {
+    if (attempt.repair === 'implementation') awaitingRepairBeforeNextReview.clear();
+    else if (attempt.repair === 'none' && attempt.purpose === 'reviewer') {
+      if (awaitingRepairBeforeNextReview.has(attempt.nodeId)) invalidReviewerSequence = true;
+      awaitingRepairBeforeNextReview.add(attempt.nodeId);
+      reviewerCounts.set(attempt.nodeId, (reviewerCounts.get(attempt.nodeId) ?? 0) + 1);
+    }
+  }
+  if (new Set(taskOrdinary.map(attempt => attempt.nodeId)).size !== taskOrdinary.length || invalidReviewerSequence
+    || [...reviewerCounts.values()].some(count => count > 1 + implCount)
+    || implCount > plan.budgets.maxImplementationRepairs
     || typedAttempts.filter(attempt => attempt.repair === 'format').length > plan.budgets.maxFormatRepairs) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (phase.startsWith('role.')) {
     const ordinal = Number(phase.split('.')[1]), attempt = typedAttempts.at(-1);
@@ -179,8 +193,8 @@ export class ProgressStore {
       const phase = schedule.find(phase => phaseCheckpointId(this.lock.spec.runId, phase) === checkpoint.checkpointId);
       if (!phase || emitted.includes(phase) || !same(checkpoint.clockBasis, before.view.clock.basis)) refuse('RECOVERY_REQUIRED', '', 'recovery'); emitted.push(phase);
       if (phase.endsWith('.native')) {
-        if (checkpoint.additionalArtifacts.length !== 0 || checkpoint.privateSession === null || !emitted.includes(phase.replace('.native', '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-        await verify(checkpoint.workspace); await verify(checkpoint.privateSession, 67108864); continue;
+        if (checkpoint.additionalArtifacts.length !== 0 || !emitted.includes(phase.replace('.native', '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        await verify(checkpoint.workspace); if (checkpoint.privateSession !== null) await verify(checkpoint.privateSession, 67108864); continue;
       }
       if (checkpoint.additionalArtifacts.length !== 4 || !same(checkpoint.additionalArtifacts.slice(2), [this.planRef, this.sourceRef])) refuse('RECOVERY_REQUIRED', '', 'recovery');
       const ref = checkpoint.additionalArtifacts[0]!, progress = validateProgress(parsePrivateJson(await this.artifacts.read(ref, 65536), 65536), this.plan, this.lock);

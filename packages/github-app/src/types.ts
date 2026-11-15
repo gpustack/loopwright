@@ -163,6 +163,21 @@ export interface TaskpackExternalGateDeclaration {
   readonly required: boolean;
 }
 
+export type TaskpackRolePurpose = 'task' | 'review';
+export type TaskpackToolName = 'read' | 'write' | 'edit' | 'bash' | 'delete';
+export const TASKPACK_TOOL_NAMES: readonly TaskpackToolName[] = Object.freeze(['read', 'write', 'edit', 'bash', 'delete']);
+export const MAX_TASKPACK_ROLES = 4;
+
+export interface TaskpackRoleDeclaration {
+  readonly id: string;
+  readonly purpose?: TaskpackRolePurpose | undefined;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinking?: string | undefined;
+  readonly tools?: readonly TaskpackToolName[] | undefined;
+  readonly dependsOn?: readonly string[] | undefined;
+}
+
 export interface TaskpackManifest {
   readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
   readonly kind: 'Taskpack';
@@ -190,6 +205,7 @@ export interface TaskpackManifest {
     readonly models?: readonly TaskpackModelDeclaration[] | undefined;
     readonly mcp?: TaskpackMcpDeclaration | undefined;
     readonly limits?: TaskpackLimitsDeclaration | undefined;
+    readonly roles?: readonly TaskpackRoleDeclaration[] | undefined;
     readonly output?: TaskpackOutputDeclaration | undefined;
   };
 }
@@ -425,7 +441,7 @@ export interface HostPublicationEndpointPlan {
 
 /** Environment variable names the host injects credentials through; templates stay `${NAME}`. */
 export interface HostCredentialEnvMap {
-  readonly provider: string;
+  readonly provider?: string | undefined;
   readonly gate?: string | undefined;
   readonly localCommandGate?: string | undefined;
   readonly publication?: string | undefined;
@@ -434,6 +450,7 @@ export interface HostCredentialEnvMap {
 
 export const LOCAL_COMMAND_GATE_ENDPOINT_ID = 'loopwright-local-command' as const;
 export const DEFAULT_LOCAL_COMMAND_GATE_ENV = 'LOOPWRIGHT_LOCAL_GATE_SECRET' as const;
+export const CANONICAL_TASKPACK_STEP_GATE_URL = `http://127.0.0.1:65535/${LOCAL_COMMAND_GATE_ENDPOINT_ID}` as const;
 
 export interface CompiledInstructionResource {
   readonly id: string;
@@ -456,6 +473,7 @@ export interface CompiledLocalCommandGate {
 
 export interface HostTaskpackBindings {
   readonly mode: 'candidate' | 'no-change';
+  readonly executionMode?: 'pi' | 'delegated' | undefined;
   readonly repository: string;
   readonly repositoryRoot?: string | undefined;
   readonly taskpackPath?: string | undefined;
@@ -475,9 +493,10 @@ export interface HostTaskpackBindings {
   readonly limits?: TaskpackLimitsDeclaration | undefined;
   readonly envLimits?: TaskpackLimitsDeclaration | undefined;
   readonly externalMcpTools?: readonly string[] | undefined;
+  readonly maxAttempts?: number | undefined;
   readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
   readonly publicationEndpoint?: HostPublicationEndpointPlan | null | undefined;
-  readonly credentialEnvMap: HostCredentialEnvMap;
+  readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
   readonly sourceTokenEnvNames?: readonly string[] | undefined;
   readonly resourceVersion?: string | undefined;
   readonly authorPrompt?: string | undefined;

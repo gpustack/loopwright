@@ -77,5 +77,5 @@ function assertValidYamlValue(value: unknown): void {
  */
 export function serializePrettyYaml(value: unknown): string {
   assertValidYamlValue(value);
-  return stringify(value, { indent: 2, schema: 'core', lineWidth: 0 });
+  return stringify(value, { indent: 2, schema: 'core', lineWidth: 0, aliasDuplicateObjects: false });
 }

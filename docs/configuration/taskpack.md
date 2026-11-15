@@ -15,7 +15,6 @@ For multi-step DAGs or operator-owned `TrustedRegistry` files stored outside the
 - [Verification checks](#verification-checks)
 - [Publication and memory](#publication-and-memory)
 - [Triggers and policies](#triggers-and-policies)
-- [Output formats](#output-formats)
 
 ## Compilation model
 
@@ -40,6 +39,19 @@ spec:
   goal:
     candidate: Update catalog manifests from upstream releases and pass checks.
     noChange: Confirm upstream versions match current manifests and settle cleanly.
+  roles: # Optional delegated or Pi role DAG
+    - id: author
+      purpose: task # Optional
+      provider: example
+      model: author-model
+      thinking: medium # Optional
+      tools: [read, write, edit] # Optional
+    - id: review
+      purpose: review # Optional
+      provider: example
+      model: review-model
+      tools: [read] # Optional
+      dependsOn: [author] # Optional prior role IDs
   scope: # Optional whitelist and blacklist
     writable: [manifests, docs/versions.md] # Optional (defaults to repository-wide writes)
     protected: [manifests/frozen-policy.yaml] # Optional blacklist
@@ -58,8 +70,7 @@ spec:
     localChecks:
       - id: proposal-schema
         implementation: json-artifact.v1
-        parameters: # Optional scalar overrides
-          release_channel: stable
+        parameters: { release_channel: stable } # Optional scalar overrides
       - id: static-check
         implementation: command.v1
         parameters:
@@ -103,35 +114,20 @@ spec:
         transport: stdio
         command: github-mcp-server
         args: [stdio, --read-only, --toolsets, "repos,pull_requests,issues"] # Optional command arguments
-        envFrom: # Optional secret env mapping
-          GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
+        envFrom: { GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN } # Optional secret env mapping
         timeoutSeconds: 60 # Optional (defaults to 60)
       - id: deepwiki
         transport: http
         url: https://mcp.deepwiki.com/mcp
-  limits: # Optional canonical execution ceilings
-    wallTimeSeconds: 3600 # Optional (defaults to 3600)
-    totalTokens: 20000000 # Optional (defaults to 20000000)
-    contextWindow: 200000 # Optional model context window override
-    maxOutputTokens: 32768 # Optional (defaults to 32768)
-    maxModelCalls: 256 # Optional (defaults to 256)
-    maxAttempts: 5 # Optional (defaults to 5)
-    maxFormatRepairs: 6 # Optional (defaults to 6)
-    maxImplementationRepairs: 32 # Optional (defaults to 32)
-    maxTransportRetries: 3 # Optional (defaults to 3)
-    toolTimeoutSeconds: 300 # Optional (defaults to 300)
-    commandTimeoutSeconds: 30 # Optional (defaults to 30)
-  output: # Optional (defaults to json)
-    formats: [json, github-step-summary]
+  limits: { wallTimeSeconds: 3600, totalTokens: 20000000, contextWindow: 200000, # Optional; see Execution limits
+    maxOutputTokens: 32768, maxModelCalls: 256, maxAttempts: 5,
+    maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries: 3,
+    toolTimeoutSeconds: 300, commandTimeoutSeconds: 30 }
+  output: { formats: [json, github-step-summary] } # Optional (defaults to json)
   sandbox: # Optional host isolation policy
     preferredBackends: [macos-seatbelt, linux-bwrap, linux-landlock, docker] # Optional
     networkMode: none # Optional (defaults to none)
-    requiredCapabilities: # Optional
-      - filesystemReadContainment
-      - filesystemWriteContainment
-      - protectedPathReadOnlyMask
-      - networkIsolation
-      - processTreeCleanup
+    requiredCapabilities: [filesystemReadContainment, filesystemWriteContainment, protectedPathReadOnlyMask, networkIsolation, processTreeCleanup] # Optional
     deniedReadPaths: [~/.ssh] # Optional
   decisions: # Optional System-One triage policy
     enabled: true
@@ -143,6 +139,12 @@ spec:
     maxAttempts: 1 # Optional (defaults to 1)
     allowImages: false # Optional (defaults to false)
 ```
+
+### Role DAG
+
+`spec.roles` contains one to four roles. Each requires `id`, `provider`, and `model`. Optional `purpose` is `task` or `review`; optional `thinking` selects a reasoning label. Optional `tools` selects from `read`, `write`, `edit`, `bash`, and `delete`. `dependsOn` can reference only earlier roles, so the graph is acyclic. The first check depends on every sink role. The compiler adjusts `controls.maxAttempts` to fit checkpoint capacity `D <= 64`.
+
+Use `loopwright step next --taskpack` for local compilation without provider secrets. It selects `executionMode: 'delegated'` and stages configuration under `.taskpack-<runId>/` in the run root. See [CLI](../operations/cli.md) for the pull and submit protocol.
 
 - **Strict YAML 1.2**: The parser rejects symlinks (`O_NOFOLLOW`), `..` traversal, duplicate keys, YAML anchors/aliases, and `${NAME}` interpolation (`TASKPACK_UNTRUSTED_INTERPOLATION`; see [Environment interpolation](controller-and-registry.md#environment-interpolation)).
 - **Control root**: Set Action `taskpack-path` to select a manifest. Its parent becomes the control root.
@@ -199,10 +201,7 @@ spec:
       maxTokens: 32768 # Optional
       reasoning: true # Optional
       samplingParams: { temperature: 0.6, top_p: 0.95 } # Optional
-      compat: # Optional OpenAI-compatible wire dialect tuning
-        thinkingFormat: zai
-        maxTokensField: max_tokens
-        zaiToolStream: true
+      compat: { thinkingFormat: zai, maxTokensField: max_tokens, zaiToolStream: true } # Optional OpenAI-compatible wire dialect tuning
     - provider: zai-coding-cn # Optional fallback candidate
       id: glm-5.3
       thinking: high # Optional
@@ -375,7 +374,7 @@ The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `
 
 A bare prefix on the first line followed by non-empty guidance on later lines also invokes `revise`. The `revise` command must be enabled.
 
-## Output formats
+### Output formats
 
 `spec.output` accepts a format string, a list, or an object with a `formats` list. Omission defaults to `json`.
 Action `output` overrides the taskpack default. The managed CLI selects formats separately with `--output-format`.

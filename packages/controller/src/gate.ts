@@ -8,10 +8,35 @@ import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
 import { canonical, freeze, hash, integer, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
-import { ControllerFailure, refuse } from './errors.js';
+import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 import { verifierOperationId } from './progress.js';
 import type { GateEndpoint, CompiledPlan, VerifierSlot } from './types.js';
 import type { ByteInventory, VerifiedCheck } from './verification.js';
+export function validateGateUrlOverrides(
+  overrides: Readonly<Record<string, string>> | undefined,
+  phase: ControllerDiagnostic['phase'] = 'verification',
+  endpoints?: readonly GateEndpoint[],
+): void {
+  if (overrides === undefined) return;
+  if (overrides === null || typeof overrides !== 'object' || Array.isArray(overrides)) refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase);
+  const keys = Object.keys(overrides); record(overrides, keys, '/gateUrlOverrides');
+  for (const key of keys) {
+    const raw = overrides[key]; if (raw === undefined) continue;
+    if (typeof raw !== 'string' || raw.length === 0 || raw.length > 2048) refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase);
+    let url: URL; try { url = new URL(raw); } catch { refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase); }
+    const loopback = url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === '[::1]') && url.port !== ''
+      && !url.username && !url.password && !url.hash && !url.search && url.href === raw;
+    if (!loopback) refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase);
+    if (endpoints !== undefined) {
+      const endpoint = endpoints.find(ep => ep.id === key);
+      if (!endpoint || endpoint.authCredentialRef !== null) refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase);
+      let base: URL; try { base = new URL(endpoint.url); } catch { refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase); }
+      if (!(base.protocol === 'http:' && (base.hostname === '127.0.0.1' || base.hostname === '[::1]') && base.port !== '')) {
+        refuse('CONFIG_SCHEMA', '/gateUrlOverrides', phase);
+      }
+    }
+  }
+}
 /** Exactly one HMAC verifier for gates, publication, and reconciliation; comparison is constant time. */
 export function verifySignedPayload(secret: string, payload: Uint8Array | string, expectedHex: string): boolean {
   const hex = expectedHex.startsWith('sha256=') ? expectedHex.slice(7) : expectedHex;
@@ -62,7 +87,8 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 /** Authenticated external gate client; follows the Verifier intent/permit/receipt discipline with signed HTTP instead of a Worker. */
 export class Gate {
   constructor(readonly store: LocalRunStore, readonly authority: Authority, readonly artifacts: ArtifactStore, readonly plan: CompiledPlan, readonly lock: TaskLock,
-    readonly resolveCredential: (ref: string) => string, readonly currentSubject: () => Subject, readonly onWait: ((detail: GateWaitDetail) => Promise<void>) | null = null) {}
+    readonly resolveCredential: (ref: string) => string, readonly currentSubject: () => Subject, readonly onWait: ((detail: GateWaitDetail) => Promise<void>) | null = null,
+    readonly gateUrlOverrides?: Readonly<Record<string, string>>) {}
   #identity() {
     const view = stateValue(this.store.inspect());
     if (view.storeId !== this.authority.storeId || view.runId !== this.lock.spec.runId || !same(view.lockHash, this.lock.spec.lockHash)
@@ -84,12 +110,18 @@ export class Gate {
     try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
   }
   async #roundTrip(endpoint: GateEndpoint, secret: string, request: Record<string, unknown>, permit: DispatchPermit, signal: AbortSignal, binding: Record<string, unknown>, timeoutMs: number): Promise<RoundTrip> {
+    let transportUrl = endpoint.url;
+    if (this.gateUrlOverrides && Object.hasOwn(this.gateUrlOverrides, endpoint.id) && this.gateUrlOverrides[endpoint.id] !== undefined) {
+      const overrideUrl = this.gateUrlOverrides[endpoint.id]!;
+      validateGateUrlOverrides({ [endpoint.id]: overrideUrl }, 'verification', [endpoint]);
+      transportUrl = overrideUrl;
+    }
     const body = Buffer.from(canonical(request)), headers: Record<string, string> = { 'content-type': 'application/json', 'x-loopwright-signature': signPayload(secret, body) };
     if (endpoint.authCredentialRef !== null) headers.authorization = 'Bearer ' + this.resolveCredential(endpoint.authCredentialRef);
     const composed = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     let bytes: Uint8Array, signature: string;
     try {
-      const response = await fetch(endpoint.url, { method: 'POST', headers, body: new Uint8Array(body), redirect: 'error', signal: composed });
+      const response = await fetch(transportUrl, { method: 'POST', headers, body: new Uint8Array(body), redirect: 'error', signal: composed });
       if (response.status !== 200 || !(response.headers.get('content-type') ?? '').startsWith('application/json')) return { kind: 'invalid' };
       bytes = new Uint8Array(await response.arrayBuffer());
       signature = response.headers.get('x-loopwright-signature') ?? '';

@@ -4,6 +4,9 @@ import { validateDocument, type ArtifactRef, type Digest } from '@loopwright/cor
 import { refuse } from './errors.js';
 export type Scalar = string | number | boolean | null;
 export type Json = Scalar | readonly Json[] | { readonly [key: string]: Json };
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 export function record(value: unknown, keys: readonly string[], path = ''): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) refuse('CONFIG_SCHEMA', path);
   const descriptors = Object.getOwnPropertyDescriptors(value);

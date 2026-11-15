@@ -1,52 +1,57 @@
 import { join, resolve } from 'node:path';
-import { decodePiCapture } from '@loopwright/agent-pi';
-import { admitTask, validateDocument } from '@loopwright/core';
+import { validateDocument } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
-import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result } from './errors.js';
-import { ControllerOwner, bootIdentity } from './ownership.js';
-import { readRetained } from './retained.js';
+import { ControllerOwner } from './ownership.js';
+import { admitRetainedRun } from './retained.js';
 import { ArtifactStore, stateValue } from './storage.js';
-import { assertCanonicalMinimalOverlay, canonicalizeCandidateManifest, restoreSource } from './source.js';
+import { assertCanonicalMinimalOverlay, restoreSource } from './source.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
+import { decodeCandidateCapture } from './capture.js';
 import { ControllerEvents } from './events.js';
 import { Finalizer } from './finalize.js';
-import { formatPolicy } from './repair.js';
 import { parsePrivateJson } from './parser.js';
 import { normalizeSubmission, type RetainedSubmission } from './submission.js';
-import { freeze, hash, record, same, text } from './schema.js';
+import { freeze, record, same, text } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
-import { Gate, prepareGate } from './gate.js';
+import { Gate, prepareGate, validateGateUrlOverrides } from './gate.js';
 import { Publication, preparePublication } from './publication.js';
-import { executeCycleContext, resolveStoreLeaseMs, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
+import { countDelegatedBudgets } from './budget-observations.js';
+import { executeCycleContext, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
 import type { CycleExecution, ControllerIncident } from './finalize.js';
+import type { PlannedRole } from './types.js';
 
-async function restoredCandidate(context: CycleContext, head: ProgressHead | null): Promise<ByteInventory> {
-  if (!head || head.progress.candidate.privateSession === null) {
-    if (head && (!same(head.manifest, context.source.manifest) || !same(head.progress.candidate.workspace, context.source.workspace))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+export async function restoredCandidate(context: CycleContext, head: ProgressHead | null): Promise<ByteInventory> {
+  if (!head || same(head.progress.candidate.workspace, context.source.workspace)) {
+    if (head && (!same(head.manifest, context.source.manifest) || !same(head.progress.candidate.workspace, context.source.workspace) || head.progress.candidate.privateSession !== null)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     return { manifest: context.source.manifest, ref: head?.progress.candidate.manifest ?? await context.artifacts.json('manifest', context.source.manifest, 32768), files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
   }
   const attempt = [...head.progress.attempts].reverse().find(item => item.finished?.nativeCheckpointId && same(journal(context.store).checkpoints.find(cp => cp.checkpointId === item.finished!.nativeCheckpointId)?.workspace, head.progress.candidate.workspace));
   if (!attempt) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const checkpoint = stateValue(context.store.getCheckpoint(attempt.finished!.nativeCheckpointId!)), originalRole = context.plan.roles.find(role => role.roleId === context.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
-  const policy = attempt.repair === 'format' ? formatPolicy(originalRole.policy) : originalRole.policy;
+  const checkpoint = stateValue(context.store.getCheckpoint(attempt.finished!.nativeCheckpointId!));
   const interval = journal(context.store).requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests);
-  const decoded = await decodePiCapture({ version: 1, lock: context.lock, policy, checkpoint, sessionId: attempt.sessionId, roleId: originalRole.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await context.artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await context.artifacts.read(checkpoint.privateSession!, 67108864) },
-    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await context.artifacts.read(attempt.command, 1048576)), requestIds: interval.map(row => row.admission.requestId) } });
-  if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), head.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  assertCanonicalMinimalOverlay(head.manifest, decoded.value.artifacts, context.source, 'recovery');
-  return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.value.artifacts, baselineProofs: context.source.baselineProofs };
+  const decoded = await decodeCandidateCapture({
+    artifacts: context.artifacts,
+    lock: context.lock,
+    plan: context.plan,
+    checkpoint,
+    attempt,
+    expectedManifest: head.manifest,
+    requestIds: interval.map(row => row.admission.requestId),
+    phase: 'recovery',
+  });
+  assertCanonicalMinimalOverlay(head.manifest, decoded.artifacts, context.source, 'recovery');
+  return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.artifacts, baselineProofs: context.source.baselineProofs };
 }
-async function retainedPrimary(context: CycleContext, head: ProgressHead): Promise<CycleExecution> {
+export async function retainedPrimary(context: CycleContext, head: ProgressHead): Promise<CycleExecution> {
   const intent = head.progress.terminalIntent; if (!intent?.result) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const raw = parsePrivateJson(await context.artifacts.read(intent.result, 1048576), 1048576);
   let complete = head.progress.stage.kind === 'terminal_observations' || head.progress.stage.kind === 'reconcile_result', observations = intent.observations;
   if (observations) await context.artifacts.read(observations, 1048576);
   const checked = validateDocument(raw, 'RunResult');
   if (!complete && checked.ok) {
-    const finalizer = new Finalizer(context.artifacts, stateValue(context.store.inspect()).clock.remainingTaskMs.safeValue ?? 0);
+    const finalizer = new Finalizer(context.artifacts, Math.max(stateValue(context.store.inspect()).clock.remainingTaskMs.safeValue ?? 0, 15000));
     let events: ControllerEvents | null = null;
     try {
       events = new ControllerEvents(context.store, context.artifacts, context.onEvent, () => {}, head.progress.eventSequence, true); await events.ready();
@@ -74,20 +79,49 @@ async function retainedPrimary(context: CycleContext, head: ProgressHead): Promi
   if (incident.version !== 1 || incident.runId !== context.lock.spec.runId || !same(incident.lockHash, context.lock.spec.lockHash) || incident.code !== intent.primary) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return freeze({ kind: 'incident', version: 1, incident: incident as unknown as ControllerIncident });
 }
+export async function reconcileInterruptedOperations(context: CycleContext, head: ProgressHead | null, candidate: ByteInventory, storeId: string): Promise<void> {
+  const { plan, lock, store, authority, artifacts, loaded, source, descriptor, ports } = context;
+  if (head?.progress.stage.kind === 'verifier_pre') {
+    const row = head.progress.verifierReceipts.find(item => item.generation === head.progress.candidate.generation && item.receipt === null);
+    if (row) {
+      const operation = store.getOperation(row.operationId);
+      if (operation.ok && operation.value.dispatch !== null) {
+        const slot = plan.verifierSlots.find(item => item.id === row.slot)!, subject = head.checkpoint.subject;
+        if (slot.handler.implementation === 'gate.v1') {
+          const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, loaded.registry.spec.gateEndpoints);
+          await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(loaded).vault.resolveNetworkCredential(ref), () => subject, null, ports.gateUrlOverrides).restore(prepared);
+        } else {
+          const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
+          await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
+        }
+      }
+    }
+  }
+  const publicationConfig = plan.publication;
+  if (head?.progress.stage.kind === 'publication_pre' && head.progress.publication.operationId !== null && publicationConfig.mode === 'pull_request') {
+    const operation = store.getOperation(head.progress.publication.operationId);
+    const endpoint = loaded.registry.spec.publicationEndpoints.find(item => item.id === publicationConfig.endpointRef);
+    if (operation.ok && operation.value.dispatch !== null && operation.value.state === 'dispatch_uncertain' && endpoint) {
+      const prepared = preparePublication(plan, lock, storeId, endpoint, head.checkpoint.subject);
+      await new Publication(store, authority, artifacts, plan, lock, ref => approvedState(loaded).vault.resolveNetworkCredential(ref), () => head.checkpoint.subject, descriptor.repository).restore(prepared, endpoint);
+    }
+  }
+}
 export function resumeCycle(input: RunCycleInput) { return resumeCycleWithPorts(input); }
 /** Test observation ports are private; resume has the same production execution route as run. */
 export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPorts = {}) {
   return result(async () => {
     const fields = Object.keys(input); record(input, fields);
     if (fields.some(key => !['configuration', 'repository', 'runRoot', 'runId', 'signal', 'onEvent'].includes(key)) || input.signal !== undefined && !(input.signal instanceof AbortSignal) || input.onEvent !== undefined && typeof input.onEvent !== 'function') refuse('CONFIG_SCHEMA', '', 'recovery');
-    const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error);
-    const retained = await readRetained(input), { directory, descriptor, lock } = retained, plan = compiled.value;
-    const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + input.runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId: input.runId });
-    if (!admitted.ok || !same(admitted.value, lock) || !same(plan, retained.plan) || descriptor.repository !== resolve(input.repository)
-      || !same(descriptor.configuration, { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 })) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    const expected = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + input.runId).hex.slice(0, 40), lock,
-      policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
-    if (!same(descriptor.identity, expected)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery');
+    const { directory, descriptor, lock, effectiveConfig, state, plan } = await admitRetainedRun({
+      runRoot: input.runRoot,
+      runId: input.runId,
+      configuration: input.configuration,
+      repository: input.repository,
+      phase: 'recovery',
+    });
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery', effectiveConfig.registry.spec.gateEndpoints);
     let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null, handedOff = false;
     try {
       owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
@@ -98,49 +132,98 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path)))];
       const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
-      let context: CycleContext = { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
+      let context: CycleContext = { loaded: effectiveConfig, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
       const candidate = await restoredCandidate(context, head);
-      // A verifier proof can reconcile its original dispatch, but can never authorize a replacement Worker or request.
-      if (head?.progress.stage.kind === 'verifier_pre') {
-        const row = head.progress.verifierReceipts.find(item => item.generation === head!.progress.candidate.generation && item.receipt === null);
-        if (row) {
-          const operation = store.getOperation(row.operationId);
-          if (operation.ok && operation.value.dispatch !== null) {
-            const slot = plan.verifierSlots.find(item => item.id === row.slot)!, subject = head.checkpoint.subject;
-            if (slot.handler.implementation === 'gate.v1') {
-              const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, input.configuration.registry.spec.gateEndpoints);
-              await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(input.configuration).vault.resolveNetworkCredential(ref), () => subject).restore(prepared);
-            } else {
-              const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
-              await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
-            }
-          }
-        }
-      }
-      // A publication operation parked at publication_pre reconciles under recovery authority: a settled live proof
-      // confirms the dispatch (resume completes), an absent proof marks it unresolved (resume finishes reconcile_required).
-      const publicationConfig = plan.publication;
-      if (head?.progress.stage.kind === 'publication_pre' && head.progress.publication.operationId !== null && publicationConfig.mode === 'pull_request') {
-        const operation = store.getOperation(head.progress.publication.operationId);
-        const endpoint = input.configuration.registry.spec.publicationEndpoints.find(item => item.id === publicationConfig.endpointRef);
-        if (operation.ok && operation.value.dispatch !== null && operation.value.state === 'dispatch_uncertain' && endpoint) {
-          const prepared = preparePublication(plan, lock, original.storeId, endpoint, head.checkpoint.subject);
-          await new Publication(store, authority, artifacts, plan, lock, ref => approvedState(input.configuration).vault.resolveNetworkCredential(ref), () => head.checkpoint.subject, descriptor.repository).restore(prepared, endpoint);
-        }
-      }
+      await reconcileInterruptedOperations(context, head, candidate, original.storeId);
       const decision = progress.decision(head);
       if (decision === 'terminal') return await retainedPrimary(context, head!);
+      let submission: RetainedSubmission | null = null;
+      if (head?.progress.submission) {
+        try { submission = { version: 1, origin: plan.orderedDAG.some(node => node.kind === 'agent') ? 'assistant' : 'controller', raw: head.progress.submission, value: normalizeSubmission(await artifacts.read(head.progress.submission, 1048576), plan.task) }; }
+        catch (error) { if (!(error instanceof ControllerFailure) || error.diagnostic.code !== 'SUBMISSION_INVALID') throw error; }
+      }
+      const isDelegatedNode = (nodeId: string): boolean => {
+        const dagNode = plan.orderedDAG.find(item => item.id === nodeId);
+        const role = dagNode?.roleId ? plan.roles.find(item => item.roleId === dagNode.roleId) : undefined;
+        return dagNode?.kind === 'agent' && role?.adapter === 'delegated';
+      };
+      const isMutatingRole = (role: PlannedRole): boolean =>
+        role.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
+      const activeNodes = head ? head.progress.nodes : plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' as const }));
+      const attempts = head?.progress.attempts ?? [];
+      const lastAttempt = attempts.at(-1);
+      const unfinishedDelegated = lastAttempt !== undefined && lastAttempt.finished === null && isDelegatedNode(lastAttempt.nodeId);
+      const reachableDelegated = activeNodes.some(node => (node.state === 'pending' || node.state === 'running') && isDelegatedNode(node.id));
+      const formatRepairDelegated = Boolean(lastAttempt?.finished?.nativeCheckpointId)
+        && submission === null
+        && lastAttempt!.purpose !== 'compaction'
+        && activeNodes.find(node => node.id === lastAttempt!.nodeId)?.state === 'failed'
+        && isDelegatedNode(lastAttempt!.nodeId);
+      let implRepairDelegated = false;
+      const priorMutatingTask = attempts
+        .filter(attempt => {
+          if (attempt.purpose !== 'task' || attempt.repair === 'format' || !attempt.finished?.nativeCheckpointId) return false;
+          const dagNode = plan.orderedDAG.find(item => item.id === attempt.nodeId);
+          const role = dagNode?.roleId ? plan.roles.find(item => item.roleId === dagNode.roleId) : undefined;
+          return role !== undefined && isMutatingRole(role);
+        })
+        .at(-1);
+      if (priorMutatingTask && isDelegatedNode(priorMutatingTask.nodeId) && plan.budgets.maxImplementationRepairs > 0) {
+        const delegatedCounts = countDelegatedBudgets(plan, attempts);
+        if (
+          attempts.length < plan.capacity.A
+          && original.ledger.implementationRepairs + delegatedCounts.implementationRepairs < plan.budgets.maxImplementationRepairs
+        ) {
+          const generation = head?.progress.candidate.generation ?? 0;
+          const requiredExplicitSlots = plan.verifierSlots.filter(
+            slot => slot.implicit === null && plan.task.spec.acceptance.required.includes(slot.checkId),
+          );
+          let allRequiredPassed = head !== null;
+          for (const slot of requiredExplicitSlots) {
+            if (!allRequiredPassed) break;
+            if (head!.progress.verifierRefusals.some(row => row.slot === slot.id && row.generation === generation)) {
+              allRequiredPassed = false;
+              break;
+            }
+            const receiptRow = head!.progress.verifierReceipts.find(row => row.slot === slot.id && row.generation === generation);
+            if (!receiptRow) {
+              allRequiredPassed = false;
+              break;
+            }
+            const op = store.getOperation(receiptRow.operationId);
+            const settledReceipt = op.ok && op.value.state === 'confirmed'
+              ? (op.value.reconciliation ?? op.value.initialReceipt)
+              : null;
+            if (!settledReceipt) {
+              allRequiredPassed = false;
+              break;
+            }
+            try {
+              const rawOut = parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, 65536), 65536) as Record<string, unknown>;
+              const status = slot.handler.implementation === 'gate.v1'
+                ? (rawOut.disposition as Record<string, unknown> | undefined)?.status
+                : (rawOut.response as Record<string, unknown> | undefined)?.status;
+              if (status !== 'passed') {
+                allRequiredPassed = false;
+                break;
+              }
+            } catch {
+              allRequiredPassed = false;
+              break;
+            }
+          }
+          if (!allRequiredPassed) implRepairDelegated = true;
+        }
+      }
+      if (unfinishedDelegated || reachableDelegated || formatRepairDelegated || implRepairDelegated) {
+        refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'recovery');
+      }
       if (input.signal?.aborted) refuse('CANCELLED', '', 'recovery');
       // No new authority implementation: release recovery claim, then claim active through S02's original CAS.
       stateValue(store.release(authority)); authority = null; const current = stateValue(store.inspect());
       authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: current.owner.generation, expectedRevision: current.revision, mode: 'active' })).authority;
       progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source);
       context = { ...context, authority, progress };
-      let submission: RetainedSubmission | null = null;
-      if (head?.progress.submission) {
-        try { submission = { version: 1, origin: plan.orderedDAG.some(node => node.kind === 'agent') ? 'assistant' : 'controller', raw: head.progress.submission, value: normalizeSubmission(await artifacts.read(head.progress.submission, 1048576), plan.task) }; }
-        catch (error) { if (!(error instanceof ControllerFailure) || error.diagnostic.code !== 'SUBMISSION_INVALID') throw error; }
-      }
       handedOff = true; return await executeCycleContext(context, { head, candidate, submission, adopt: decision === 'adopt_capture' });
     } finally {
       if (!handedOff) { if (store) { if (authority) stateValue(store.release(authority)); stateValue(store.close()); } if (owner) await owner.release(); }

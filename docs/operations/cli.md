@@ -10,6 +10,7 @@ The CLI validates trusted configuration and manages bounded local runs. Install 
 - [Step 4: Run work](#step-4-run-work)
 - [Step 5: Inspect recovery](#step-5-inspect-recovery)
 - [Step 6: Audit closure](#step-6-audit-closure)
+- [Delegated stepping](#delegated-stepping)
 - [Command reference](#command-reference)
 - [Exit codes](#exit-codes)
 
@@ -104,6 +105,23 @@ Closure exits `0` for a valid report, `3` for falsification or unsupported capab
 | `blocked_external` | Unprovisioned external dependency | Live service, host, or hardware remains external |
 | `deferred_owned` | Deferred owned capability | Recorded prerequisite remains unimplemented or deferred |
 
+## Delegated stepping
+
+Use `step` to hand each delegated role to a host agent. Start with either trusted configuration or a taskpack:
+
+```sh
+loopwright step next --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
+loopwright step next --taskpack TASKPACK --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
+loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --status completed --json
+loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json
+```
+
+Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`. A parked run rejects another pull unless `--reissue-lease` replaces a lost lease. Submit each single-use `--lease` token once. `--submission-file` supplies an artifact; `--status` accepts `completed`, `no_change`, `failed`, or `blocked`. Use `--reason` for a failure or block.
+
+JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'awaiting_role'`, selection, prompt, allowed tools, scope, workspace paths, and lease token. Follow those bounds before submitting. Cancellation exits `130`; SIGINT and SIGTERM exit `130` and `143`, subject to uncertainty precedence.
+
+`check`, `run`, `resume`, and `step next` accept repeatable `--role-model ROLE=PROVIDER/MODEL[:THINKING]`. Supply at most eight entries. The CLI limits the argument vector to 64 entries. See [Controller and Registry](../configuration/controller-and-registry.md) for precedence and persistence.
+
 ## Command reference
 
 | Subcommand | Required flags | Optional flags | Purpose |
@@ -113,6 +131,7 @@ Closure exits `0` for a valid report, `3` for falsification or unsupported capab
 | `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Execute a bounded controller run |
 | `run --dry-run` | `--dry-run`, `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile plan statically (`--repo`, `--run-root`, `--run-id` disallowed) |
 | `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
+| `step` | `--run-root`, `--run-id`, action | `--action`, `--json` | Pull, submit, or cancel delegated work |
 | `status` | `--run-root`, `--run-id` | `--json` | Read current run stage, lease state, and checkpoint summary |
 | `inspect` | `--run-root`, `--run-id` | `--output`, `--json` | Export redacted run receipts, checkpoints, and diagnostics |
 | `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json`, `--output-format`, `--step-summary-file` | Settle an unknown external outcome with an authenticated receipt |
@@ -137,7 +156,7 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 | 6 | Deadline expired |
 | 7 | Reconciliation or ownership needed |
 | 8 | Authoritative result unavailable or incident |
-| 130 | Accounted SIGINT, subject to uncertainty precedence |
+| 130 | Step cancellation or accounted SIGINT, subject to uncertainty precedence |
 | 143 | Accounted SIGTERM, subject to uncertainty precedence |
 
 ---

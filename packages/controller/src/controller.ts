@@ -7,36 +7,39 @@ import { admitTask, bindSubject, identifyManifest, type ArtifactRef, type TaskLo
 import { createLocalRun, type Authority, type LocalRunIdentity, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
 import { compilePlan } from './compile.js';
-import { ControllerFailure, refuse, result, type ControllerDiagnostic } from './errors.js';
+import { ControllerFailure, refuse, result, safeDiagnostic, type ControllerDiagnostic } from './errors.js';
 import { privateDirectory, ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { ControllerOwner, bootIdentity } from './ownership.js';
+import { resolveStoreLeaseMs } from './retained.js';
+export { resolveStoreLeaseMs };
 import { freezeSource, materializeBaseline, verifySource, type FrozenSource } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
 import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
 import { retainSubmission, normalizeSubmission, type Submission, type RetainedSubmission } from './submission.js';
 import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
-import { prepareGate, Gate, authenticatedGate, type PreparedGate } from './gate.js';
+import { prepareGate, Gate, authenticatedGate, validateGateUrlOverrides, type PreparedGate } from './gate.js';
 import { preparePublication, Publication, headRevision, type PreparedPublication } from './publication.js';
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
 import { nextNode, descendants, compactionTarget } from './scheduler.js';
 import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt } from './repair.js';
 import { WorkDeadline } from './deadlines.js';
-import { observeParentExhaustion, schedulingSnapshot, isNoEffectBudgetRefusal } from './budget-observations.js';
+import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isNoEffectBudgetRefusal } from './budget-observations.js';
 import { ControllerEvents, type ControllerEvent } from './events.js';
 import { Finalizer, incident, type ControllerIncident, type CycleExecution } from './finalize.js';
-import { canonical, freeze, hash, id, record, same, text } from './schema.js';
+import { canonical, freeze, hash, id, isRecord, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
-import type { CompiledPlan, ControllerAttempt, ControllerProgress, LoadedConfiguration, PlannedRole } from './types.js';
+import type { CompiledPlan, ControllerAttempt, ControllerProgress, LoadedConfiguration, PlannedRole, RoleModelOverride } from './types.js';
 
 export interface RunCycleInput { readonly configuration: LoadedConfiguration; readonly repository: string; readonly runRoot: string; readonly runId: string; readonly signal?: AbortSignal; readonly onEvent?: (event: ControllerEvent) => Promise<void> }
 export interface RunDescriptor {
   readonly version: 1; readonly identity: LocalRunIdentity; readonly plan: ArtifactRef; readonly source: ArtifactRef; readonly sourceWorkspace: ArtifactRef;
-  readonly configuration: { readonly configPath: string; readonly registryPath: string; readonly registrySha256: string }; readonly repository: string;
+  readonly configuration: { readonly configPath: string; readonly registryPath: string; readonly registrySha256: string; readonly roleModelOverrides?: readonly RoleModelOverride[] }; readonly repository: string;
 }
 /** Trusted local observations only, absent from root exports and all configuration/CLI fields. */
 export interface ControllerPorts {
   readonly openAdapter?: (host: PiHostV2, input: PiOpenInputV2) => ReturnType<typeof openPiAdapterV2>;
   readonly afterCheckpoint?: (phase: string, head: ProgressHead) => Promise<void>;
+  readonly gateUrlOverrides?: Readonly<Record<string, string>>;
 }
 export interface CycleContext {
   readonly loaded: LoadedConfiguration; readonly plan: CompiledPlan; readonly lock: TaskLock; readonly directory: string; readonly source: FrozenSource;
@@ -44,24 +47,14 @@ export interface CycleContext {
   readonly signal: AbortSignal; readonly onEvent: RunCycleInput['onEvent']; readonly ports: ControllerPorts;
 }
 type Draft = Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { readonly stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> };
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
-const safeDiagnostic = (error: unknown, phase: ControllerDiagnostic['phase']): ControllerDiagnostic => error instanceof ControllerFailure ? error.diagnostic : { version: 1, code: 'STATE_UNAVAILABLE', phase, path: '', stateCode: null, piCode: null, effect: 'possible', retryable: false };
 async function exclusiveJson(path: string, value: unknown): Promise<void> {
   const bytes = Buffer.from(canonical(value)); if (bytes.length > 1048576) refuse('OUTPUT_LIMIT', '', 'admission');
   const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
   const parent = await open(resolve(path, '..'), constants.O_RDONLY | constants.O_NOFOLLOW); try { await parent.sync(); } finally { await parent.close(); }
 }
-export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: CompiledPlan): number {
-  let maxEndpointTimeoutMs = 0;
-  for (const slot of plan.verifierSlots) {
-    if (slot.handler.implementation !== 'gate.v1') continue;
-    const ep = configuration.registry.spec.gateEndpoints.find(item => item.id === slot.handler.parameters.endpointRef);
-    if (ep && ep.timeoutMs > maxEndpointTimeoutMs) maxEndpointTimeoutMs = ep.timeoutMs;
-  }
-  return maxEndpointTimeoutMs > 58000 ? Math.min(3700000, maxEndpointTimeoutMs + 30000) : 60000;
-}
 export async function createCycle(input: RunCycleInput, ports: ControllerPorts): Promise<CycleContext> {
   const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error); const plan = compiled.value;
+  validateGateUrlOverrides(ports.gateUrlOverrides, 'admission', input.configuration.registry.spec.gateEndpoints);
   const runId = id(input.runId), root = resolve(text(input.runRoot)), repository = resolve(text(input.repository)), directory = join(root, runId);
   const excluded = [repository, process.cwd(), ...state.input.untrustedRoots];
   await privateDirectory(root, excluded);
@@ -78,11 +71,12 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
     for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
     const planRef = await artifacts.json('plan', plan, 4194304), lockRef = await artifacts.json('task-lock', lock, 4194304);
+    const adapters = [...new Set(plan.task.spec.roles.map(role => role.adapter))].sort().map(id => ({ id, version: '0.0.0' }));
     const identity: LocalRunIdentity = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + runId).hex.slice(0, 40), lock,
-      policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters: [{ id: 'pi', version: '0.0.0' }],
+      policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters,
         resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
     const descriptor: RunDescriptor = { version: 1, identity, plan: planRef, source: source.inventory, sourceWorkspace: source.workspace,
-      configuration: { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256 }, repository };
+      configuration: { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256, ...(state.input.roleModelOverrides !== undefined ? { roleModelOverrides: state.input.roleModelOverrides } : {}) }, repository };
     state.vault.assertClean(descriptor); await exclusiveJson(join(directory, 'run.json'), descriptor);
     store = stateValue(createLocalRun(identity)); const current = stateValue(store.inspect()), authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: current.owner.generation, expectedRevision: current.revision, mode: 'active' })).authority;
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, planRef, source.inventory);
@@ -100,10 +94,11 @@ export class Cycle {
     this.head = head; this.candidate = candidate ?? { manifest: context.source.manifest, ref: { name: '', digest: hash(''), byteLength: 0 }, files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
     this.deadline = new WorkDeadline(context.store, context.authority, context.plan.controls.drainReserveMs, context.signal);
     this.events = new ControllerEvents(context.store, context.artifacts, context.onEvent, () => this.deadline.stop('OUTPUT_LIMIT'), head?.progress.eventSequence ?? 0);
+    if (head) this.events.setDelegatedBudget(countDelegatedBudgets(context.plan, head.progress.attempts));
     this.verifier = new Verifier(context.store, context.authority, context.artifacts, context.plan, context.lock, () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; });
     this.gate = new Gate(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
       () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
-      detail => this.events.push('gate_waiting', null, null, null, [], detail));
+      detail => this.events.push('gate_waiting', null, null, null, [], detail), context.ports.gateUrlOverrides);
     this.publisher = new Publication(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
       () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; }, context.descriptor.repository);
     if (head && head.progress.publication.status !== 'idle') {
@@ -118,6 +113,7 @@ export class Cycle {
   }
   async publish(draft: Draft, phase: string): Promise<void> {
     this.head = await this.context.progress.publish({ ...draft, eventSequence: this.events.sequence }, phase);
+    this.events.setDelegatedBudget(countDelegatedBudgets(this.context.plan, this.head.progress.attempts));
     await this.context.ports.afterCheckpoint?.(phase, this.head);
   }
   async bootstrap(): Promise<void> {
@@ -208,7 +204,7 @@ export class Cycle {
     }
     return nodes;
   }
-  async captureSubmission(captured: CapturedRole, repair: ControllerAttempt['repair'], originalSubmission: ArtifactRef | null): Promise<RetainedSubmission | null> {
+  async captureSubmission(captured: CapturedRole, repair: ControllerAttempt['repair'], originalSubmission: ArtifactRef | null, ignoreArtifactPath = false): Promise<RetainedSubmission | null> {
     const { artifacts, plan } = this.context;
     if (repair === 'format') {
       if (!captured.submission || !originalSubmission) refuse('RECOVERY_REQUIRED', '', 'execution');
@@ -216,19 +212,20 @@ export class Cycle {
       await artifacts.json('format-lineage', { version: 1, original: originalSubmission, repaired: raw, candidate: captured.digest, attemptId: this.draft.attempts.at(-1)!.id }, 65536);
       return { version: 1, origin: 'assistant', raw, value: normalizeSubmission(rawBytes, plan.task) };
     }
-    return retainSubmission(captured, plan.controls.submission, plan.task, artifacts);
+    const submissionControls = ignoreArtifactPath ? { ...plan.controls.submission, path: null } : plan.controls.submission;
+    return retainSubmission(captured, submissionControls, plan.task, artifacts);
   }
-  async completeCapture(attempt: ControllerAttempt, captured: CapturedRole): Promise<ControllerDiagnostic['code'] | null> {
+  async completeCapture(attempt: ControllerAttempt, captured: CapturedRole, options?: { readonly ignoreArtifactPath?: boolean }): Promise<ControllerDiagnostic['code'] | null> {
     const { plan, store, artifacts } = this.context, { nodeId, repair, purpose, ordinal, id: commandId } = attempt;
     const oldDigest = this.draft.candidate.digest, originalSubmission = this.draft.submission;
     const manifest = await this.context.progress.manifest(captured.manifest), changed = !same(captured.digest, oldDigest), generation = this.generation + (changed ? 1 : 0);
       if (generation >= plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
       this.candidate = { manifest, ref: captured.manifest, files: captured.artifacts }; this.#candidateKnown = true;
       let submission = this.submission, failure: ControllerDiagnostic['code'] | null = null, failedRaw: ArtifactRef | null = null;
-      try { if (purpose !== 'compaction') submission = await this.captureSubmission(captured, repair, originalSubmission); }
+      try { if (purpose !== 'compaction') submission = await this.captureSubmission(captured, repair, originalSubmission, options?.ignoreArtifactPath === true); }
       catch (error) { if (error instanceof ControllerFailure && ['SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS'].includes(error.diagnostic.code)) failure = error.diagnostic.code; else throw error; }
       if (failure) {
-        submission = null; const selected = plan.controls.submission.path === null ? undefined : captured.artifacts.find(file => file.name === plan.controls.submission.path)?.bytes;
+        submission = null; const selected = options?.ignoreArtifactPath === true || plan.controls.submission.path === null ? undefined : captured.artifacts.find(file => file.name === plan.controls.submission.path)?.bytes;
         failedRaw = repair === 'format' || selected === undefined ? captured.submission : await artifacts.put('submission', selected, 1048576);
       }
       this.submission = submission;
@@ -244,16 +241,29 @@ export class Cycle {
         const requiredOutputs = this.currentChecks().filter(check => check.status === 'failed' && plan.task.spec.acceptance.required.includes(check.checkId)).map(check => check.output);
         draft = { ...draft, failures: draft.failures.map(item => item.evidence && requiredOutputs.some(output => same(item.evidence, output)) ? { ...item, count: Math.min(2, item.count + 1) } : item) };
       }
-      if (changed) draft = { ...draft, nodes: draft.nodes.map(item => plan.orderedDAG.find(node => node.id === item.id)!.kind === 'check' && item.state !== 'not_run' ? { ...item, state: 'pending' } : item) };
+      if (changed) {
+        const downstreamSet = repair === 'implementation' ? new Set(descendants(plan, nodeId)) : null;
+        draft = {
+          ...draft,
+          nodes: draft.nodes.map(item => {
+            const dagNode = plan.orderedDAG.find(node => node.id === item.id)!;
+            if (dagNode.kind === 'check' && (repair === 'implementation' || item.state !== 'not_run')) return { ...item, state: 'pending' };
+            if (downstreamSet && downstreamSet.has(item.id) && dagNode.kind === 'agent' && dagNode.handler.parameters.purpose === 'review') return { ...item, state: 'pending' };
+            return item;
+          }),
+        };
+      }
       draft = { ...draft, nodes: this.nodeDispositions(draft.nodes, generation) };
       await this.publish(draft, 'role.' + ordinal + '.post'); return failure;
   }
   async role(nodeId: string, repair: ControllerAttempt['repair'] = 'none', prompt?: string, retained?: ControllerAttempt): Promise<void> {
     await this.guard(); const { plan, lock, store, artifacts, authority, loaded, directory } = this.context;
-    observeParentExhaustion(this.deadline.assert(), lock);
+    const delegatedCounts = countDelegatedBudgets(plan, this.draft.attempts);
+    observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
     const node = plan.orderedDAG.find(node => node.id === nodeId); if (!node || node.kind !== 'agent') refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
     if (!retained && this.draft.attempts.length >= plan.capacity.A) refuse('ATTEMPT_LIMIT', '', 'execution');
     const originalRole = plan.roles.find(role => role.roleId === node.roleId)!;
+    if (originalRole.adapter === 'delegated') refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'execution');
     const role: PlannedRole = repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
     const purpose = node.handler.implementation === 'pi.compact.v1' ? 'compaction' : node.handler.parameters.purpose === 'review' ? 'reviewer' : 'task';
     const nativeStepId = purpose === 'compaction' ? compactionTarget(plan, nodeId) : nodeId, ordinal = retained?.ordinal ?? this.draft.attempts.length + 1;
@@ -264,7 +274,7 @@ export class Cycle {
     const command = await artifacts.put('command', Buffer.from(commandText), Math.min(1048576, role.policy.limits.promptBytes));
     const originalSubmission = this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
     const originalState = await schedulingSnapshot(store, authority, lock, artifacts, this.candidate, this.draft.candidate);
-    observeParentExhaustion(this.deadline.assert(), lock);
+    observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
     const attempt: ControllerAttempt = retained ?? { ordinal, id: commandId, nodeId, nativeStepId, sessionId, purpose, repair, command, before: { requests: before.requests, operations: before.operations }, finished: null };
     if (retained) {
       if (!same(retained, { ...attempt, command, id: commandId, sessionId, nativeStepId, nodeId, purpose, repair }) || !same(this.draft.attempts.at(-1), retained) || retained.finished !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -327,6 +337,11 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source);
       if ((repair === 'format' || purpose === 'compaction') && !same(captured.digest, oldDigest)) refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'confirmed' });
       structureFailure = await this.completeCapture(attempt, captured);
+      if (stateValue(store.inspect()).ledger.admittedCalls + delegatedCounts.modelCalls > lock.spec.contract.spec.budgets.maxModelCalls) {
+        cleanupKnown = true;
+        this.#candidateKnown = true;
+        refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: 'BUDGET_EXHAUSTED', effect: 'none' });
+      }
     } catch (error) {
       let failure = error;
       if (noEffectBudget || noEffectMcpAuth) {
@@ -362,9 +377,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (failure === 'SUBMISSION_INVALID') await this.repairFormat(attempt.nodeId);
   }
   repairBound(kind: 'format' | 'implementation', actionable: boolean, repeats?: number): void {
-    const view = this.deadline.assert(), { plan } = this.context;
+    const view = this.deadline.assert(), { plan } = this.context, delegated = countDelegatedBudgets(plan, this.draft.attempts);
     const latest = this.draft.failures.at(-1), refusal = repairDisposition(kind, { attempts: this.draft.attempts.length, maxAttempts: plan.capacity.A,
-      formatRepairs: view.ledger.formatRepairs, implementationRepairs: view.ledger.implementationRepairs, maxFormatRepairs: plan.budgets.maxFormatRepairs, maxImplementationRepairs: plan.budgets.maxImplementationRepairs,
+      formatRepairs: view.ledger.formatRepairs + delegated.formatRepairs, implementationRepairs: view.ledger.implementationRepairs + delegated.implementationRepairs, maxFormatRepairs: plan.budgets.maxFormatRepairs, maxImplementationRepairs: plan.budgets.maxImplementationRepairs,
       repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: view.clockStatus !== 'trusted' || Boolean(view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) });
     if (refusal) refuse(refusal, '', 'execution');
   }
@@ -401,16 +416,17 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     }
     await this.verifyEligible();
   }
-  async implementationRepair(): Promise<boolean> {
-    const { plan } = this.context; if (plan.budgets.maxImplementationRepairs === 0) return false;
+  prepareImplementationRepair(): { readonly targetNodeId: string; readonly role: PlannedRole; readonly prompt: string } | null {
+    const { plan } = this.context; if (plan.budgets.maxImplementationRepairs === 0) return null;
     const checks = this.currentChecks(), required = plan.verifierSlots.filter(slot => slot.implicit === null && plan.task.spec.acceptance.required.includes(slot.checkId));
     const failed = checks.filter(check => check.status === 'failed' && required.some(slot => slot.id === check.slotId));
-    if (!failed.length || this.submission?.value.status === 'no_change' && !plan.noChangeEligibility.available) return false;
+    if (!failed.length || this.submission?.value.status === 'no_change' && !plan.noChangeEligibility.available) return null;
     const allAvailable = required.every(slot => checks.some(check => check.slotId === slot.id && check.status !== 'blocked'));
-    if (!allAvailable || checks.some(check => plan.verifierSlots.find(slot => slot.id === check.slotId)!.implicit === 'scope' && check.status !== 'passed')) return false;
-    const prior = this.draft.attempts.filter(attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete')).at(-1);
+    if (!allAvailable || checks.some(check => plan.verifierSlots.find(slot => slot.id === check.slotId)!.implicit === 'scope' && check.status !== 'passed')) return null;
+    const isMutating = (role: PlannedRole) => role.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
+    const prior = this.draft.attempts.filter(attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && isMutating(plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!)).at(-1);
     const target = prior?.nodeId, node = plan.orderedDAG.find(node => node.id === target), role = plan.roles.find(role => role.roleId === node?.roleId);
-    if (!node || !role?.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete')) return false;
+    if (!node || !role || !isMutating(role)) return null;
     this.repairBound('implementation', true, Math.max(0, ...this.draft.failures.filter(item => failed.some(check => same(check.output, item.evidence))).map(item => item.count)));
     const candidateDigest = this.draft.candidate.digest;
     const findings: {
@@ -459,7 +475,13 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         prompt = prefix + canonical(findings);
       }
     }
-    await this.role(target!, 'implementation', prompt); return true;
+    return { targetNodeId: target!, role, prompt };
+  }
+  async implementationRepair(): Promise<boolean> {
+    const spec = this.prepareImplementationRepair();
+    if (!spec) return false;
+    await this.role(spec.targetNodeId, 'implementation', spec.prompt);
+    return true;
   }
   async execute(): Promise<AcceptanceObservation> {
     if (!this.head) await this.bootstrap();
@@ -526,11 +548,11 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     }
     return evaluateControllerAcceptance(plan, lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission!.value, store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals());
   }
-  async terminal(primary: AcceptanceObservation | ControllerIncident): Promise<CycleExecution> {
+  async terminal(primary: AcceptanceObservation | ControllerIncident, drainWindowMs = 0): Promise<CycleExecution> {
     const { store, artifacts, lock } = this.context, secondary: ControllerDiagnostic['code'][] = [];
     const accepted = 'result' in primary, status = accepted ? primary.result.spec.status : primary.code;
     let observations: ArtifactRef | null = null, primaryRef: ArtifactRef | null = null, admitted = false;
-    const current = stateValue(store.inspect()), finalizer = new Finalizer(artifacts, current.clock.remainingTaskMs.safeValue ?? 0);
+    const current = stateValue(store.inspect()), finalizer = new Finalizer(artifacts, Math.max(current.clock.remainingTaskMs.safeValue ?? 0, drainWindowMs));
     const checkpoint = async (kind: 'terminal_intent' | 'terminal_result' | 'terminal_observations', phase: string): Promise<void> => {
       // Worst-case logical progress, receipt index and checkpoint framing; no extra allowance is granted.
       finalizer.reserve(65536 + 65536 + 40960);
@@ -559,6 +581,10 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     try { primary = await this.execute(); }
     catch (error) {
       const diagnostic = safeDiagnostic(error, 'execution');
+      if (diagnostic.code === 'CAPABILITY_UNSUPPORTED' && diagnostic.path === '/spec/profiles/roles') {
+        try { await this.deadline.dispose(); } catch { /* ignore */ }
+        throw error;
+      }
       const facts = this.context.store.inspect();
       const certain = facts.ok && facts.value.clockStatus === 'trusted' && !facts.value.counts.dispatchedRequests && !facts.value.counts.unresolvedRequests && !facts.value.counts.unresolvedOperations && !facts.value.ledger.violations.length;
       if (this.#candidateKnown && facts.ok && (['DEADLINE', 'CANCELLED', 'BUDGET_EXHAUSTED', 'ATTEMPT_LIMIT', 'REPEAT_FAILURE'].includes(diagnostic.code) || (certain && ['CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED', 'EVIDENCE_UNAVAILABLE', 'SUBMISSION_AMBIGUOUS', 'SUBMISSION_INVALID'].includes(diagnostic.code)))) {
@@ -574,17 +600,25 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
   }
 }
 export async function executeCycleContext(context: CycleContext, restored?: { readonly head: ProgressHead | null; readonly candidate: ByteInventory; readonly submission: RetainedSubmission | null; readonly adopt: boolean }): Promise<CycleExecution> {
-  let execution: CycleExecution;
+  let execution: CycleExecution | undefined;
+  let delegatedUnsupported: ControllerFailure | null = null;
   try {
     const cycle = new Cycle(context, restored?.head, restored?.candidate, restored?.adopt);
     cycle.submission = restored?.submission ?? null;
     execution = await cycle.finish();
   }
-  catch (error) { execution = { kind: 'incident', version: 1, incident: incident(safeDiagnostic(error, 'execution'), context.lock.spec.runId, context.lock.spec.lockHash, [context.descriptor.plan, context.source.inventory], ['authoritative_result'], 'pending') }; }
+  catch (error) {
+    if (error instanceof ControllerFailure && error.diagnostic.code === 'CAPABILITY_UNSUPPORTED' && error.diagnostic.path === '/spec/profiles/roles') {
+      delegatedUnsupported = error;
+    } else {
+      execution = { kind: 'incident', version: 1, incident: incident(safeDiagnostic(error, 'execution'), context.lock.spec.runId, context.lock.spec.lockHash, [context.descriptor.plan, context.source.inventory], ['authoritative_result'], 'pending') };
+    }
+  }
   let cleanup: boolean;
   try { const released = context.store.release(context.authority); const closed = context.store.close(); cleanup = released.ok && closed.ok; if (cleanup) await context.owner.release(); } catch { cleanup = false; }
   if (!cleanup) return { kind: 'incident', version: 1, incident: incident({ version: 1, code: 'CLEANUP_FAILED', phase: 'finalization', path: '', stateCode: null, piCode: null, effect: 'possible', retryable: false }, context.lock.spec.runId, context.lock.spec.lockHash, [context.descriptor.plan, context.source.inventory], ['owner_release', 'authoritative_cleanup'], 'pending') };
-  return execution;
+  if (delegatedUnsupported) throw delegatedUnsupported;
+  return execution!;
 }
 export function runCycle(input: RunCycleInput) { return runCycleWithPorts(input); }
 export function runCycleWithPorts(input: RunCycleInput, ports: ControllerPorts = {}) {
@@ -592,7 +626,11 @@ export function runCycleWithPorts(input: RunCycleInput, ports: ControllerPorts =
     const fields = Object.keys(input); record(input, fields);
     if (fields.some(key => !['configuration', 'repository', 'runRoot', 'runId', 'signal', 'onEvent'].includes(key))) refuse('CONFIG_SCHEMA', '', 'admission');
     if (input.onEvent !== undefined && typeof input.onEvent !== 'function' || input.signal !== undefined && !(input.signal instanceof AbortSignal)) refuse('CONFIG_SCHEMA', '', 'admission');
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'admission');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'admission');
+    const compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error);
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'admission', input.configuration.registry.spec.gateEndpoints);
+    if (compiled.value.orderedDAG.some(node => node.kind === 'agent' && compiled.value.roles.find(role => role.roleId === node.roleId)?.adapter === 'delegated')) refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'admission');
     const context = await createCycle(input, ports); return executeCycleContext(context);
   }, 'admission');
 }

@@ -7,7 +7,8 @@ import { PI_THINKING_LEVELS, PI_WIRE_APIS, isOAuthOnlyPiProvider, resolveCatalog
 import { HostMcpRegistry, type ExternalMcpServerConfig } from '@loopwright/agent-pi/mcp';
 import { formatDurationMs, formatTokenCount, type ReportMcpServerInfo } from '@loopwright/controller';
 import {
-  LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveTaskpackModelCandidates, selectHealthyModelCandidate,
+  LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveDefaultProviderTokenEnv, resolveTaskpackModelCandidates,
+  resolveTaskpackModelSelection, selectHealthyModelCandidate,
   type ParsedPiModelsJson,
 } from './models-config.js';
 import { resolveActionOutputFormats, writeActionOutputSinks, type RunReportInput } from './output-format.js';
@@ -71,7 +72,7 @@ function systemSample(): ClockSample {
   return { wallMs: Date.now(), monotonicMs: (process.hrtime.bigint() / 1_000_000n).toString() };
 }
 
-function insideRoot(path: string, root: string): boolean {
+export function insideRoot(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
@@ -288,7 +289,7 @@ export function serializeActionResultSummary(
   return scrubber.scrub(safeJson);
 }
 
-function boundUtf8Lines(text: string, maxBytes: number): string {
+export function boundUtf8Lines(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
   const lines = text.split('\n');
   const suffix = '\n...[truncated to fit prompt budget]';
@@ -963,9 +964,67 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     };
   };
 
+  const roleProviderEnvNames: string[] = [];
+  if (manifest.spec.roles !== undefined && manifest.spec.roles.length > 0) {
+    try {
+      for (const [roleIdx, role] of manifest.spec.roles.entries()) {
+        const normalizedProvider = role.provider.trim().toLowerCase();
+        if (isOAuthOnlyPiProvider(normalizedProvider) || normalizedProvider === 'antigravity' || normalizedProvider === 'pi-oauth') {
+          throw new GitHubAppError(
+            'PROVIDER_OAUTH_UNSUPPORTED',
+            `Pi provider "${role.provider}" uses OAuth or CLI login, which Loopwright refuses; configure a token-authenticated Pi provider`,
+            `/spec/roles/${roleIdx}/provider`,
+          );
+        }
+        if (role.thinking !== undefined && !(PI_THINKING_LEVELS as readonly string[]).includes(role.thinking)) {
+          throw new GitHubAppError(
+            'TASKPACK_MANIFEST_INVALID',
+            `spec.roles[].thinking must be one of ${PI_THINKING_LEVELS.join(', ')}`,
+            `/spec/roles/${roleIdx}/thinking`,
+          );
+        }
+        const roleBindings: HostTaskpackBindings = {
+          ...buildBindings(),
+          candidateIndex: undefined,
+          roleSelection: {
+            provider: role.provider,
+            model: role.model,
+            ...(role.thinking !== undefined ? { thinking: role.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+          },
+        };
+        const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
+        const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
+        roleProviderEnvNames.push(resolveDefaultProviderTokenEnv(selection.provider, {
+          modelsJsonApiKeyEnv,
+          manifestApiKeyEnv: apiKeyEnv,
+          env: runtimeEnv,
+        }));
+      }
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+        }
+        return blocked(error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
   let candidates: readonly ResolvedModelCandidate[];
   try {
-    candidates = resolveTaskpackModelCandidates(manifest, buildBindings(), {
+    const firstRole = manifest.spec.roles?.[0];
+    const candidateBaseBindings = (manifest.spec.models === undefined && firstRole !== undefined && roleSelection === undefined)
+      ? {
+        ...buildBindings(),
+        roleSelection: {
+          provider: firstRole.provider,
+          model: firstRole.model,
+          ...(firstRole.thinking !== undefined ? { thinking: firstRole.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+        },
+      }
+      : buildBindings();
+    candidates = resolveTaskpackModelCandidates(manifest, candidateBaseBindings, {
       modelsConfig,
       env: runtimeEnv,
       explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
@@ -986,6 +1045,8 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       candidate.providerEnvName,
       ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
     ]),
+    ...roleProviderEnvNames,
+    ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
     ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
     ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
     ...collectMcpReferencedEnvNames(effectiveMcpDecls),

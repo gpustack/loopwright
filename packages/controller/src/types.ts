@@ -3,13 +3,17 @@ import type { AdapterPolicyV2, AdapterPolicy, RuntimeIdentity } from '@loopwrigh
 import type { Json, Scalar } from './schema.js';
 export const CONTROLLER_API_VERSION = 'loopwright.dev/v1alpha1' as const;
 export type Implementation = 'pi.agent.v1' | 'pi.compact.v1' | 'scope.v1' | 'json-artifact.v1' | 'no-change.v1' | 'gate.v1';
+export type RoleAdapterKind = 'pi' | 'delegated';
+export interface DelegatedSelection { readonly provider: string; readonly model: string; readonly thinking: string; readonly api?: AdapterPolicy['selection']['api']; readonly customProvider?: AdapterPolicy['selection']['customProvider'] }
+export interface RoleSelectionOverride { readonly provider: string; readonly model: string; readonly thinking?: string }
+export interface RoleModelOverride extends RoleSelectionOverride { readonly roleId: string }
 export interface Handler {
   readonly id: string; readonly version: 1; readonly digest: Digest; readonly kind: 'agent' | 'check'; readonly implementation: Implementation;
   readonly parameters: Readonly<Record<string, Json>>; readonly capabilities: readonly string[];
 }
 export interface RoleProfile {
-  readonly id: string; readonly selection: AdapterPolicy['selection']; readonly tools: readonly string[]; readonly context: AdapterPolicy['context'];
-  readonly runtimeRef: string; readonly providerCredentialRef: string | null; readonly mcp: AdapterPolicyV2['mcp'];
+  readonly id: string; readonly adapter?: RoleAdapterKind; readonly selection: AdapterPolicy['selection'] | DelegatedSelection; readonly tools: readonly string[]; readonly context: AdapterPolicy['context'];
+  readonly runtimeRef: string | null; readonly providerCredentialRef: string | null; readonly mcp: AdapterPolicyV2['mcp'] | null;
   readonly limits?: Partial<AdapterPolicy['limits']> | undefined;
 }
 export interface RegistryResource { readonly id: string; readonly kind: 'instruction' | 'skill' | 'document'; readonly path: string; readonly digest: Digest }
@@ -39,7 +43,7 @@ export interface Controls {
 export interface ControllerConfiguration {
   readonly apiVersion: typeof CONTROLLER_API_VERSION; readonly kind: 'ControllerConfig';
   readonly spec: { readonly task: TaskContract; readonly registry: { readonly name: string; readonly digest: Digest };
-    readonly profiles: { readonly roles: readonly { readonly roleId: string; readonly profileRef: string }[]; readonly steps: readonly { readonly stepId: string; readonly handlerRef: string }[] };
+    readonly profiles: { readonly roles: readonly { readonly roleId: string; readonly profileRef: string; readonly selection?: RoleSelectionOverride }[]; readonly steps: readonly { readonly stepId: string; readonly handlerRef: string }[] };
     /** Original approved templates, never their expansions. */
     readonly credentials: readonly { readonly ref: string; readonly template: string }[]; readonly controls: Controls; readonly publication: PublicationConfig };
 }
@@ -47,6 +51,7 @@ export interface LoadConfigurationInput {
   readonly configPath: string; readonly registryPath: string; readonly registrySha256: string;
   /** Additional repository/candidate/task-writable roots, beyond cwd and the configuration directory. */
   readonly untrustedRoots: readonly string[];
+  readonly roleModelOverrides?: readonly RoleModelOverride[];
 }
 /** Only loader-owned instances are accepted by compile/run. This view contains no resolved credential. */
 export interface LoadedConfiguration {
@@ -56,7 +61,7 @@ export interface LoadedConfiguration {
 export interface CheckpointCapacity { readonly A: number; readonly N: number; readonly I: number; readonly C: number; readonly V: number; readonly J: number; readonly D: number;
   readonly publication: boolean; readonly additionalRefs: 4; readonly requiredRefs: 6; readonly checkpointBytes: 40960 }
 export interface VerifierSlot { readonly id: string; readonly checkId: string; readonly implicit: 'scope' | 'no_change' | null; readonly handler: Handler }
-export interface PlannedRole { readonly roleId: string; readonly profileRef: string; readonly providerCredentialRef: string | null; readonly runtime: RuntimeProfile; readonly policy: AdapterPolicyV2 }
+export interface PlannedRole { readonly roleId: string; readonly adapter: RoleAdapterKind; readonly profileRef: string; readonly providerCredentialRef: string | null; readonly runtime: RuntimeProfile; readonly policy: AdapterPolicyV2 }
 export interface CompiledPlan {
   readonly version: 1; readonly runId: null; readonly lock: null; readonly admission: 'not_performed'; readonly effectfulReadiness: 'not_checked';
   readonly sourceDocumentDigest: Digest; readonly taskByteDigest: Digest; readonly registryDigest: Digest; readonly planDigest: Digest;
@@ -98,4 +103,23 @@ export interface ControllerProgress {
 export interface ReceiptIndex {
   readonly version: 1; readonly runId: string;
   readonly entries: readonly { readonly id: string; readonly kind: 'plan' | 'source' | 'role' | 'verifier-output' | 'verifier-receipt' | 'preflight-refusal' | 'publication-receipt' | 'result' | 'observations'; readonly ref: ArtifactRef }[];
+}
+export interface StepYield {
+  readonly kind: 'step';
+  readonly status: 'awaiting_role';
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly stepId: string;
+  readonly roleId: string;
+  readonly purpose: 'task' | 'reviewer';
+  readonly repair: 'none' | 'format' | 'implementation';
+  readonly selection: DelegatedSelection;
+  readonly allowedTools: readonly string[];
+  readonly scope: TaskContract['spec']['scope'];
+  readonly candidateDir: string;
+  readonly contextFiles: readonly string[];
+  readonly prompt: string;
+  readonly submissionMode: 'artifact_or_assistant';
+  readonly submissionPath: string | null;
+  readonly leaseToken: string;
 }

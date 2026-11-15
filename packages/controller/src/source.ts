@@ -61,7 +61,7 @@ const decoded = (value: Buffer): string => {
 };
 
 // Must stay in lockstep with `matches()` in `@loopwright/core` (`packages/core/src/scope.ts`).
-function matchesScopePattern(pattern: string, name: string): boolean {
+export function matchesScopePattern(pattern: string, name: string): boolean {
   if (pattern === '**') return true;
   if (!pattern.endsWith('/**')) return pattern === name;
   const prefix = pattern.slice(0, -3);

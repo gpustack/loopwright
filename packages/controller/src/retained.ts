@@ -1,15 +1,46 @@
 import { join, resolve } from 'node:path';
 import { lstat } from 'node:fs/promises';
-import { validateDocument } from '@loopwright/core';
+import { admitTask, validateDocument } from '@loopwright/core';
 import type { LocalRunIdentity } from '@loopwright/state';
+import { approvedState, loadConfiguration } from './config.js';
+import { compilePlan } from './compile.js';
 import { readBoundedFile, canonicalComponents } from './files.js';
 import { checkedRef, readArtifact, type ArtifactReader } from './storage.js';
 import { parsePrivateJson } from './parser.js';
-import { id, record, same, text } from './schema.js';
-import { refuse } from './errors.js';
+import { hash, id, list, record, same, text } from './schema.js';
+import { labelValue } from './registry.js';
+import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
+import { bootIdentity } from './ownership.js';
 import type { RunDescriptor } from './controller.js';
-import type { CompiledPlan } from './types.js';
+import type { CompiledPlan, LoadedConfiguration, RoleModelOverride } from './types.js';
 export interface RetainedRunInput { readonly runRoot: string; readonly runId: string }
+export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: CompiledPlan): number {
+  let maxEndpointTimeoutMs = 0;
+  for (const slot of plan.verifierSlots) {
+    if (slot.handler.implementation !== 'gate.v1') continue;
+    const ep = configuration.registry.spec.gateEndpoints.find(item => item.id === slot.handler.parameters.endpointRef);
+    if (ep && ep.timeoutMs > maxEndpointTimeoutMs) maxEndpointTimeoutMs = ep.timeoutMs;
+  }
+  return maxEndpointTimeoutMs > 58000 ? Math.min(3700000, maxEndpointTimeoutMs + 30000) : 60000;
+}
+function retainedRoleModelOverrides(raw: unknown): readonly RoleModelOverride[] | undefined {
+  if (raw === undefined) return undefined;
+  const items = list(raw, '/configuration/roleModelOverrides', Number.MAX_SAFE_INTEGER);
+  if (items.length > 8) refuse('RECOVERY_REQUIRED', '/configuration/roleModelOverrides', 'recovery');
+  const entries = items.map((item, index) => {
+    const path = '/configuration/roleModelOverrides/' + index;
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) refuse('RECOVERY_REQUIRED', path, 'recovery');
+    const hasThinking = Object.hasOwn(item, 'thinking');
+    const fields = record(item, hasThinking ? ['roleId', 'provider', 'model', 'thinking'] : ['roleId', 'provider', 'model'], path);
+    const roleId = id(fields.roleId, path + '/roleId');
+    const provider = labelValue(fields.provider, path + '/provider');
+    const model = labelValue(fields.model, path + '/model');
+    const thinking = hasThinking && fields.thinking !== undefined ? labelValue(fields.thinking, path + '/thinking') : undefined;
+    return thinking !== undefined ? { roleId, provider, model, thinking } : { roleId, provider, model };
+  });
+  if (new Set(entries.map(item => item.roleId)).size !== entries.length) refuse('RECOVERY_REQUIRED', '/configuration/roleModelOverrides', 'recovery');
+  return entries;
+}
 /** Read only: never mkdir, claim, discover configuration, inspect Docker or resolve credentials. */
 export async function readRetained(input: RetainedRunInput) {
   const root = resolve(text(input.runRoot)), runId = id(input.runId), directory = join(root, runId);
@@ -20,12 +51,61 @@ export async function readRetained(input: RetainedRunInput) {
   const raw = record(parsePrivateJson(await readBoundedFile(join(directory, 'run.json'), 1048576, true), 1048576), ['version', 'identity', 'plan', 'source', 'sourceWorkspace', 'configuration', 'repository']);
   const identity = record(raw.identity, ['directory', 'storeId', 'lock', 'policy', 'binding']), lock = validateDocument(identity.lock, 'TaskLock');
   if (raw.version !== 1 || !lock.ok || lock.value.spec.runId !== runId || identity.directory !== join(directory, 'state')) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const configuration = record(raw.configuration, ['configPath', 'registryPath', 'registrySha256']);
+  const hasOverrides = raw.configuration !== null && typeof raw.configuration === 'object' && !Array.isArray(raw.configuration) && Object.hasOwn(raw.configuration, 'roleModelOverrides');
+  const configuration = record(raw.configuration, hasOverrides ? ['configPath', 'registryPath', 'registrySha256', 'roleModelOverrides'] : ['configPath', 'registryPath', 'registrySha256']);
   text(configuration.configPath); text(configuration.registryPath); if (!/^[a-f0-9]{64}$/.test(text(configuration.registrySha256))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const roleModelOverrides = hasOverrides ? retainedRoleModelOverrides(configuration.roleModelOverrides) : undefined;
   const descriptor: RunDescriptor = { version: 1, identity: identity as unknown as LocalRunIdentity, plan: checkedRef(raw.plan), source: checkedRef(raw.source), sourceWorkspace: checkedRef(raw.sourceWorkspace),
-    configuration: configuration as unknown as RunDescriptor['configuration'], repository: text(raw.repository) };
+    configuration: { configPath: text(configuration.configPath), registryPath: text(configuration.registryPath), registrySha256: text(configuration.registrySha256), ...(roleModelOverrides !== undefined ? { roleModelOverrides } : {}) }, repository: text(raw.repository) };
   const artifacts: ArtifactReader = { read: (ref, maximum) => readArtifact(join(directory, 'artifacts'), ref, maximum) };
   const plan = parsePrivateJson(await artifacts.read(descriptor.plan, 4194304), 4194304) as unknown as CompiledPlan;
   if (plan.version !== 1 || !same(plan.task, lock.value.spec.contract)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return { directory, descriptor, plan, lock: lock.value, artifacts };
+}
+export async function admitRetainedRun(input: {
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly configuration?: LoadedConfiguration;
+  readonly repository?: string;
+  readonly environment?: (name: string) => string | undefined;
+  readonly phase?: ControllerDiagnostic['phase'];
+}) {
+  const phase = input.phase ?? 'recovery';
+  const retained = await readRetained({ runRoot: input.runRoot, runId: input.runId });
+  const { directory, descriptor, lock } = retained;
+  const envFn = input.environment ?? (name => process.env[name]);
+  let effectiveConfig = input.configuration;
+  if (!effectiveConfig) {
+    const loaded = await loadConfiguration(
+      {
+        configPath: descriptor.configuration.configPath,
+        registryPath: descriptor.configuration.registryPath,
+        registrySha256: descriptor.configuration.registrySha256,
+        untrustedRoots: [descriptor.repository],
+        ...(descriptor.configuration.roleModelOverrides !== undefined ? { roleModelOverrides: descriptor.configuration.roleModelOverrides } : {}),
+      },
+      { environment: envFn },
+    );
+    if (!loaded.ok) throw new ControllerFailure(loaded.error);
+    effectiveConfig = loaded.value;
+  } else {
+    const state0 = approvedState(effectiveConfig);
+    if (descriptor.configuration.roleModelOverrides !== undefined && state0.input.roleModelOverrides === undefined) {
+      const reloaded = await loadConfiguration({ ...state0.input, roleModelOverrides: descriptor.configuration.roleModelOverrides }, { environment: envFn });
+      if (!reloaded.ok) throw new ControllerFailure(reloaded.error);
+      effectiveConfig = reloaded.value;
+    }
+  }
+  const state = approvedState(effectiveConfig);
+  const compiled = await compilePlan(effectiveConfig);
+  if (!compiled.ok) throw new ControllerFailure(compiled.error);
+  const plan = compiled.value;
+  const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + input.runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId: input.runId });
+  if (!admitted.ok || !same(admitted.value, lock) || !same(plan, retained.plan) || (input.repository !== undefined && descriptor.repository !== resolve(input.repository))
+    || !same(descriptor.configuration, { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256, ...(state.input.roleModelOverrides !== undefined ? { roleModelOverrides: state.input.roleModelOverrides } : {}) })) refuse('RECOVERY_REQUIRED', '', phase);
+  const adapters = [...new Set(plan.task.spec.roles.map(role => role.adapter))].sort().map(id => ({ id, version: '0.0.0' }));
+  const expected = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + input.runId).hex.slice(0, 40), lock,
+    policy: { version: 1, leaseMs: resolveStoreLeaseMs(effectiveConfig, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters, resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
+  if (!same(descriptor.identity, expected)) refuse('RECOVERY_REQUIRED', '', phase);
+  return { ...retained, effectiveConfig, state, plan };
 }

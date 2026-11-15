@@ -4,8 +4,9 @@ import { constants as fsConstants, existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
+import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { openPiHostSessionAdapterV2, type HostSessionProgressEvent } from '@loopwright/agent-pi/host-session';
 import type { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import {
@@ -31,18 +32,33 @@ import {
   type UsageSummary,
 } from '@loopwright/core';
 import { reopenLocalRun, type LocalRunIdentity, type PageCursor } from '@loopwright/state';
+import { buildDefaultAuthorPrompt, insideRoot } from './action.js';
 import { LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV } from './models-config.js';
 import { sanitizeReportText } from './output-format.js';
-import { SecretScrubber } from './token-broker.js';
+import { IDENTIFIER_PATTERN, normalizeRelativePath } from './schema.js';
 import {
+  compileDeclarativeTaskpack,
+  DEFAULT_HOST_BUDGETS,
+  loadDeclarativeTaskpack,
+  mergeTaskpackLimits,
+  parseActionInputLimits,
+  parseLoopwrightEnvLimits,
+  stageCompiledInstructionResources,
+} from './taskpack.js';
+import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
+import {
+  CANONICAL_TASKPACK_STEP_GATE_URL,
+  DEFAULT_LOCAL_COMMAND_GATE_ENV,
   GitHubAppError,
   LOCAL_COMMAND_GATE_ENDPOINT_ID,
   PROTECTED_AUTOMATION_PATHS,
+  REPOSITORY_FULL_NAME_PATTERN,
   type ActionDelegateOutcome,
   type CompiledLocalCommandGate,
   type GitCommitIdentity,
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
+  type TaskpackUpstreamRecord,
   type WrittenCompiledTaskpack,
 } from './types.js';
 import {
@@ -50,13 +66,19 @@ import {
   buildCleanGitEnv,
   COMMIT_SHA_PATTERN,
   DEFAULT_GIT_COMMIT_IDENTITY,
+  discoverTaskpackUpstreams,
   fetchBoundedText,
   isPlainRecord,
+  parseUpstreamRecordsJson,
   resolveGitExecutable,
+  resolveRepositoryAndRevisions,
   type ManagedPullRequestInfo,
   validateGitCommitIdentity,
   validateGitRemoteSource,
 } from './upstreams.js';
+import { serializePrettyYaml } from './yaml.js';
+
+export { CANONICAL_TASKPACK_STEP_GATE_URL };
 
 const MAX_REQUEST_BODY_BYTES = 262_144;
 const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
@@ -88,6 +110,7 @@ const FORBIDDEN_CHILD_ENV_NAMES: ReadonlySet<string> = new Set([
   'GROQ_API_KEY',
   'MISTRAL_API_KEY',
   'OPENROUTER_API_KEY',
+  ...Object.values(STANDARD_PI_PROVIDER_ENV),
 ]);
 
 const FORBIDDEN_CHILD_ENV_PREFIXES: readonly string[] = Object.freeze([
@@ -135,6 +158,8 @@ function truncateCodePoints(text: string, maxCodePoints: number): string {
 
 function isForbiddenChildEnvName(key: string): boolean {
   if (FORBIDDEN_CHILD_ENV_NAMES.has(key)) return true;
+  const poolMatch = /^(.+)_([1-9]|1[0-6])$/.exec(key);
+  if (poolMatch !== null && FORBIDDEN_CHILD_ENV_NAMES.has(poolMatch[1]!)) return true;
   for (const prefix of FORBIDDEN_CHILD_ENV_PREFIXES) {
     if (key.startsWith(prefix)) return true;
   }
@@ -2371,12 +2396,30 @@ export async function executeTurnkeyActionCycle(
           }
           const bindingMeta = binding as { readonly env?: unknown; readonly ref?: unknown };
           const hasExplicitMeta = bindingMeta.env !== undefined || bindingMeta.ref !== undefined;
+          const boundRoleMapping = options.taskpack.config.spec.profiles.roles.find(
+            item => item.roleId === adapterInput.roleId,
+          );
+          const roleProfile = boundRoleMapping === undefined
+            ? undefined
+            : options.taskpack.registry.spec.roleProfiles.find(
+              item => item.id === boundRoleMapping.profileRef,
+            );
+          const explicitEntry = hasExplicitMeta
+            ? options.taskpack.registry.spec.credentialBindings.find(entry =>
+              entry.consumer === 'provider'
+              && (
+                (typeof bindingMeta.ref === 'string' && entry.id === bindingMeta.ref)
+                || (typeof bindingMeta.env === 'string' && entry.environmentNames.includes(bindingMeta.env))
+              ))
+            : undefined;
           const matchesExplicitMeta =
             bindingMeta.env === LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV
-            || bindingMeta.ref === 'taskpack-provider-token';
+            || bindingMeta.ref === 'taskpack-provider-token'
+            || (explicitEntry?.environmentNames.includes(LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV) ?? false);
           const matchesRegistryProviderBinding = options.taskpack.registry.spec.credentialBindings.some(entry =>
             entry.consumer === 'provider'
             && entry.destinationRef === binding.provider
+            && (roleProfile?.providerCredentialRef === undefined || entry.id === roleProfile.providerCredentialRef)
             && (entry.id === 'taskpack-provider-token' || entry.environmentNames.includes(LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV)),
           );
           if ((hasExplicitMeta && matchesExplicitMeta) || (!hasExplicitMeta && matchesRegistryProviderBinding)) {
@@ -2772,5 +2815,621 @@ export function createTurnkeyCycleDelegate(
       attemptSeq,
     });
     return result.outcome;
+  };
+}
+
+export interface StageTaskpackForStepOptions {
+  readonly taskpackPath: string;
+  readonly repositoryRoot: string;
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly mode?: 'candidate' | 'no-change' | undefined;
+  readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
+  readonly upstreamRecordsJson?: string | undefined;
+  readonly discoverUpstreams?: boolean | undefined;
+}
+
+export interface StagedTaskpackForStep {
+  readonly stageDir: string;
+  readonly configPath: string;
+  readonly registryPath: string;
+  readonly registrySha256: string;
+  readonly signingSecret: string;
+  readonly signingEnvName: string;
+  readonly localCommandGates: readonly CompiledLocalCommandGate[];
+  readonly repositoryRoot: string;
+}
+
+export interface OpenStagedTaskpackStepGateOptions {
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
+}
+
+export interface StagedTaskpackStepGateHandle {
+  readonly staged: StagedTaskpackForStep;
+  readonly environment: (name: string) => string | undefined;
+  readonly gateUrlOverrides: Readonly<Record<string, string>>;
+  readonly serverUrl?: string | undefined;
+  close(): Promise<void>;
+}
+
+const MAX_STAGED_SECRETS_BYTES = 65_536;
+const STAGED_COMMAND_ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const STAGED_FORBIDDEN_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+const STAGED_SECRETS_KEYS: ReadonlySet<string> = new Set([
+  'version',
+  'runId',
+  'repositoryRoot',
+  'configPath',
+  'registryPath',
+  'registrySha256',
+  'signingSecret',
+  'signingEnvName',
+  'localCommandGates',
+]);
+const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
+  'checkId',
+  'gateId',
+  'endpointRef',
+  'script',
+  'scriptSha256',
+  'timeoutSeconds',
+  'allowReadOnlyGitHubToken',
+  'env',
+]);
+
+async function assertOwnedPrivateDirectory(dirPath: string): Promise<void> {
+  let st;
+  try {
+    st = await lstat(dirPath);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack directory "${dirPath}" could not be inspected`);
+  }
+  const expectedUid = process.getuid?.();
+  if (
+    st.isSymbolicLink()
+    || !st.isDirectory()
+    || (expectedUid !== undefined && st.uid !== expectedUid)
+    || (st.mode & 0o777) !== 0o700
+  ) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `staged taskpack directory "${dirPath}" must be an owner-only (0o700) non-symlink directory`,
+    );
+  }
+}
+
+async function writeExclusiveFile(path: string, bytes: Buffer, mode: number): Promise<void> {
+  let handle;
+  try {
+    handle = await open(
+      path,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      mode,
+    );
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack file "${path}" could not be created exclusively`);
+  }
+  try {
+    await handle.writeFile(bytes);
+    await handle.chmod(mode);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readAndValidateStagedTaskpackSecrets(
+  stageDir: string,
+  expectedRunId: string,
+): Promise<StagedTaskpackForStep> {
+  await assertOwnedPrivateDirectory(stageDir);
+  const secretsPath = join(stageDir, 'secrets.json');
+  let secretsLstat;
+  try {
+    secretsLstat = await lstat(secretsPath);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json at "${secretsPath}" is missing or unreadable`);
+  }
+  const expectedUid = process.getuid?.();
+  if (
+    secretsLstat.isSymbolicLink()
+    || !secretsLstat.isFile()
+    || secretsLstat.nlink !== 1
+    || (expectedUid !== undefined && secretsLstat.uid !== expectedUid)
+    || (secretsLstat.mode & 0o777) !== 0o600
+    || secretsLstat.size > MAX_STAGED_SECRETS_BYTES
+  ) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json at "${secretsPath}" must be a regular 0o600 file with nlink === 1`);
+  }
+  let handle;
+  try {
+    handle = await open(secretsPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json at "${secretsPath}" could not be opened safely`);
+  }
+  let rawText: string;
+  try {
+    const info = await handle.stat();
+    if (
+      !info.isFile()
+      || info.nlink !== 1
+      || info.dev !== secretsLstat.dev
+      || info.ino !== secretsLstat.ino
+      || info.size !== secretsLstat.size
+      || (expectedUid !== undefined && info.uid !== expectedUid)
+      || (info.mode & 0o777) !== 0o600
+      || info.size > MAX_STAGED_SECRETS_BYTES
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json at "${secretsPath}" failed ownership, mode, or link verification`);
+    }
+    const buf = Buffer.alloc(info.size + 1);
+    let readBytes = 0;
+    while (readBytes < buf.length) {
+      const next = await handle.read(buf, readBytes, buf.length - readBytes, readBytes);
+      if (next.bytesRead === 0) break;
+      readBytes += next.bytesRead;
+    }
+    const after = await handle.stat();
+    const currentLstat = await lstat(secretsPath);
+    if (
+      readBytes !== info.size
+      || after.size !== info.size
+      || after.mtimeMs !== info.mtimeMs
+      || after.ctimeMs !== info.ctimeMs
+      || currentLstat.dev !== info.dev
+      || currentLstat.ino !== info.ino
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json at "${secretsPath}" changed during read`);
+    }
+    rawText = buf.subarray(0, readBytes).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack secrets.json is not valid JSON');
+  }
+  if (!isPlainRecord(parsed) || parsed['version'] !== 1) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack secrets.json has unsupported schema');
+  }
+  for (const key of Object.keys(parsed)) {
+    if (STAGED_FORBIDDEN_KEYS.has(key) || !STAGED_SECRETS_KEYS.has(key)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack secrets.json contains invalid key "${key}"`);
+    }
+  }
+  const runId = parsed['runId'];
+  const repositoryRoot = parsed['repositoryRoot'];
+  const configPath = parsed['configPath'];
+  const registryPath = parsed['registryPath'];
+  const registrySha256 = parsed['registrySha256'];
+  const signingSecret = parsed['signingSecret'];
+  const signingEnvName = parsed['signingEnvName'];
+  const rawGates = parsed['localCommandGates'];
+  const expectedConfigPath = join(stageDir, 'config', 'controller.yaml');
+  const expectedRegistryPath = join(stageDir, 'registry', 'registry.yaml');
+  if (
+    runId !== expectedRunId
+    || typeof repositoryRoot !== 'string' || repositoryRoot.length === 0 || !isAbsolute(repositoryRoot)
+    || configPath !== expectedConfigPath
+    || registryPath !== expectedRegistryPath
+    || typeof registrySha256 !== 'string' || !SHA256_HEX_PATTERN.test(registrySha256)
+    || typeof signingSecret !== 'string' || signingSecret.length < 16
+    || typeof signingEnvName !== 'string' || !/^[A-Z][A-Z0-9_]*$/.test(signingEnvName)
+    || !Array.isArray(rawGates) || rawGates.length > 32
+  ) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack secrets.json fields are invalid');
+  }
+
+  const localCommandGates: CompiledLocalCommandGate[] = [];
+  for (const gate of rawGates) {
+    if (!isPlainRecord(gate)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates entry is invalid');
+    }
+    for (const key of Object.keys(gate)) {
+      if (STAGED_FORBIDDEN_KEYS.has(key) || !STAGED_GATE_KEYS.has(key)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack localCommandGates entry has invalid key "${key}"`);
+      }
+    }
+    if (
+      typeof gate['checkId'] !== 'string' || !IDENTIFIER_PATTERN.test(gate['checkId'])
+      || typeof gate['gateId'] !== 'string' || !IDENTIFIER_PATTERN.test(gate['gateId'])
+      || (gate['endpointRef'] !== undefined && gate['endpointRef'] !== LOCAL_COMMAND_GATE_ENDPOINT_ID)
+      || typeof gate['script'] !== 'string' || gate['script'].length === 0
+      || typeof gate['scriptSha256'] !== 'string' || !SHA256_HEX_PATTERN.test(gate['scriptSha256'])
+      || typeof gate['timeoutSeconds'] !== 'number'
+      || !Number.isSafeInteger(gate['timeoutSeconds'])
+      || gate['timeoutSeconds'] < 1
+      || gate['timeoutSeconds'] > 3_600
+      || !Array.isArray(gate['env'])
+      || gate['env'].length > 16
+      || gate['env'].some(e => typeof e !== 'string' || !STAGED_COMMAND_ENV_NAME_PATTERN.test(e) || isForbiddenChildEnvName(e))
+      || typeof gate['allowReadOnlyGitHubToken'] !== 'boolean'
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates entry is invalid');
+    }
+    let normalizedScript: string;
+    try {
+      normalizedScript = normalizeCandidateRelativePath(gate['script']);
+    } catch {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates script path is invalid');
+    }
+    localCommandGates.push({
+      checkId: gate['checkId'],
+      gateId: gate['gateId'],
+      endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+      script: normalizedScript,
+      scriptSha256: gate['scriptSha256'],
+      timeoutSeconds: gate['timeoutSeconds'],
+      env: Object.freeze([...(gate['env'] as string[])]),
+      allowReadOnlyGitHubToken: gate['allowReadOnlyGitHubToken'],
+    });
+  }
+
+  return {
+    stageDir,
+    configPath,
+    registryPath,
+    registrySha256,
+    signingSecret,
+    signingEnvName,
+    localCommandGates: Object.freeze(localCommandGates),
+    repositoryRoot,
+  };
+}
+
+/**
+ * Stage a declarative Taskpack for non-blocking `loopwright step next` / `submit`
+ * execution (`executionMode: 'delegated'`), reusing existing staged files for the
+ * same `(runRoot, runId)` so `TaskLock` and `registrySha256` remain identical across steps.
+ */
+export async function stageTaskpackForStep(
+  options: StageTaskpackForStepOptions,
+): Promise<StagedTaskpackForStep> {
+  const runId = normalizeControllerRunId(options.runId);
+  if (runId !== options.runId) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid controller runId "${options.runId}"`);
+  }
+  if (typeof options.repositoryRoot !== 'string' || options.repositoryRoot.trim().length === 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'repositoryRoot must exist');
+  }
+  let realRepositoryRoot: string;
+  try {
+    realRepositoryRoot = await realpath(options.repositoryRoot);
+    const repoStat = await lstat(realRepositoryRoot);
+    if (!repoStat.isDirectory()) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'repositoryRoot must exist');
+    }
+  } catch (error) {
+    if (error instanceof GitHubAppError) throw error;
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'repositoryRoot must exist');
+  }
+
+  if (typeof options.runRoot !== 'string' || options.runRoot.trim().length === 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+  }
+  const resolvedRunRoot = resolve(options.runRoot);
+  let anc = resolvedRunRoot;
+  let ancStat: Awaited<ReturnType<typeof lstat>>;
+  for (;;) {
+    try {
+      ancStat = await lstat(anc);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+      }
+      const parent = dirname(anc);
+      if (parent === anc) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+      }
+      anc = parent;
+    }
+  }
+  if (anc === resolvedRunRoot && (ancStat.isSymbolicLink() || !ancStat.isDirectory())) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+  }
+  if (!ancStat.isDirectory() && !ancStat.isSymbolicLink()) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+  }
+  let realAnc: string;
+  try {
+    realAnc = await realpath(anc);
+    const realAncStat = await lstat(realAnc);
+    if (!realAncStat.isDirectory()) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+    }
+  } catch (error) {
+    if (error instanceof GitHubAppError) throw error;
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+  }
+  const prospectiveRunRoot = anc === resolvedRunRoot ? realAnc : resolve(realAnc, relative(anc, resolvedRunRoot));
+  if (
+    insideRoot(prospectiveRunRoot, realRepositoryRoot)
+    || insideRoot(realRepositoryRoot, prospectiveRunRoot)
+    || insideRoot(realRepositoryRoot, join(prospectiveRunRoot, runId))
+    || insideRoot(realRepositoryRoot, join(prospectiveRunRoot, `.taskpack-${runId}`))
+    || insideRoot(realRepositoryRoot, join(prospectiveRunRoot, 'workspaces'))
+  ) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must live outside the target repository checkout');
+  }
+
+  await mkdir(resolvedRunRoot, { recursive: true, mode: 0o700 });
+  const createdRunRootStat = await lstat(resolvedRunRoot);
+  if (createdRunRootStat.isSymbolicLink() || !createdRunRootStat.isDirectory()) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+  }
+  await chmod(resolvedRunRoot, 0o700);
+  const realRunRoot = await realpath(resolvedRunRoot);
+  if (insideRoot(realRunRoot, realRepositoryRoot) || insideRoot(realRepositoryRoot, realRunRoot)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must live outside the target repository checkout');
+  }
+
+  const stageDir = join(realRunRoot, `.taskpack-${runId}`);
+  const secretsPath = join(stageDir, 'secrets.json');
+  let existingStageStat = null;
+  try {
+    existingStageStat = await lstat(stageDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `staged taskpack directory "${stageDir}" could not be inspected`);
+    }
+  }
+  if (existingStageStat !== null) {
+    const expectedUid = process.getuid?.();
+    if (
+      existingStageStat.isSymbolicLink()
+      || !existingStageStat.isDirectory()
+      || (expectedUid !== undefined && existingStageStat.uid !== expectedUid)
+      || (existingStageStat.mode & 0o777) !== 0o700
+    ) {
+      throw new GitHubAppError(
+        'ACTION_INPUT_INVALID',
+        `staged taskpack directory "${stageDir}" must be an owner-only (0o700) non-symlink directory`,
+      );
+    }
+    return await readAndValidateStagedTaskpackSecrets(stageDir, runId);
+  }
+
+  const runtimeEnv = options.runtimeEnv ?? process.env;
+  const scrubber = new SecretScrubber();
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY']) {
+    const val = runtimeEnv[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      scrubber.register(val.trim());
+    }
+  }
+  const mode = options.mode ?? 'candidate';
+
+  const manifestFullPath = isAbsolute(options.taskpackPath)
+    ? resolve(options.taskpackPath)
+    : join(realRepositoryRoot, options.taskpackPath);
+  const relToRoot = relative(realRepositoryRoot, manifestFullPath);
+  if (relToRoot.length === 0 || relToRoot === '..' || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
+    throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', 'taskpack manifest escapes the repository root', '/');
+  }
+  const relativeTaskpackPath = normalizeRelativePath(relToRoot.split(sep).join('/'), '/');
+  const manifest = await loadDeclarativeTaskpack({
+    manifestPath: relativeTaskpackPath,
+    repositoryRoot: realRepositoryRoot,
+  });
+
+  const envRepo = runtimeEnv['LOOPWRIGHT_REPOSITORY']?.trim() || runtimeEnv['GITHUB_REPOSITORY']?.trim();
+  const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
+    ? envRepo
+    : 'local/repo';
+
+  const resolvedRepo = await resolveRepositoryAndRevisions({
+    repositoryRoot: realRepositoryRoot,
+    repositoryFullName,
+    baseRevision: runtimeEnv['GITHUB_SHA']?.trim() || 'HEAD',
+    eventName: 'workflow_dispatch',
+    scrubber,
+    env: runtimeEnv,
+  });
+
+  let upstreamRecords: readonly TaskpackUpstreamRecord[] = [];
+  if (options.upstreamRecordsJson !== undefined) {
+    upstreamRecords = parseUpstreamRecordsJson(options.upstreamRecordsJson);
+  } else if (options.discoverUpstreams !== false && manifest.spec.upstreams.length > 0) {
+    upstreamRecords = await discoverTaskpackUpstreams(manifest, {
+      repositoryRoot: realRepositoryRoot,
+      scrubber,
+      env: runtimeEnv,
+    });
+  }
+
+  const signingSecret = randomBytes(32).toString('hex');
+  scrubber.register(signingSecret);
+  const signingEnvName = DEFAULT_LOCAL_COMMAND_GATE_ENV;
+
+  const envLimits = parseLoopwrightEnvLimits(runtimeEnv);
+  const actionInputLimits = parseActionInputLimits(runtimeEnv);
+  const effectiveStepLimits = mergeTaskpackLimits(envLimits, manifest.spec.limits, actionInputLimits);
+
+  const commandChecks = mode === 'candidate'
+    ? manifest.spec.verification.localChecks.filter(check => check.implementation === 'command.v1')
+    : [];
+  const gateEndpoints: HostGateEndpointPlan[] = [];
+  if (commandChecks.length > 0) {
+    let maxTimeoutSeconds = effectiveStepLimits.commandTimeoutSeconds ?? 30;
+    for (const check of commandChecks) {
+      const rawTimeout = check.parameters?.['timeoutSeconds'];
+      if (typeof rawTimeout === 'number' && Number.isSafeInteger(rawTimeout) && rawTimeout > maxTimeoutSeconds) {
+        maxTimeoutSeconds = rawTimeout;
+      }
+    }
+    const timeoutMs = Math.min(3_600_000, Math.max(35_000, maxTimeoutSeconds * 1000 + 15_000));
+    const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
+    gateEndpoints.push({
+      id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+      url: CANONICAL_TASKPACK_STEP_GATE_URL,
+      signingCredentialRef: 'taskpack-local-command-signing',
+      authCredentialRef: null,
+      timeoutMs,
+      maxPollMs,
+      pollInitialMs: 100,
+      pollMaxMs: 500,
+      jitter: 0,
+    });
+  }
+
+  const authorPrompt = buildDefaultAuthorPrompt({
+    mode,
+    repositoryFullName,
+    upstreamRecords,
+    acceptanceCheckIds: [
+      ...manifest.spec.verification.localChecks.map(c => c.id),
+      ...manifest.spec.verification.externalGates.map(g => g.id),
+    ],
+    runtimeEnv,
+    scrubber,
+  });
+  const compiled = await compileDeclarativeTaskpack(manifest, {
+    mode,
+    executionMode: 'delegated',
+    repository: repositoryFullName,
+    repositoryRoot: realRepositoryRoot,
+    taskpackPath: relativeTaskpackPath,
+    baseRevision: resolvedRepo.baseRevision,
+    sourceRevision: resolvedRepo.sourceRevision,
+    budgets: DEFAULT_HOST_BUDGETS,
+    limits: actionInputLimits,
+    envLimits,
+    gateEndpoints,
+    credentialEnvMap: {
+      localCommandGate: signingEnvName,
+    },
+    authorPrompt,
+  });
+
+  const registryDirectory = join(stageDir, 'registry');
+  const configDirectory = join(stageDir, 'config');
+  await mkdir(stageDir, { recursive: true, mode: 0o700 });
+  await chmod(stageDir, 0o700);
+  await assertOwnedPrivateDirectory(stageDir);
+  await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+  await chmod(registryDirectory, 0o700);
+  await assertOwnedPrivateDirectory(registryDirectory);
+  await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+  await chmod(configDirectory, 0o700);
+  await assertOwnedPrivateDirectory(configDirectory);
+
+  const registryPath = join(registryDirectory, 'registry.yaml');
+  const configPath = join(configDirectory, 'controller.yaml');
+  const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+
+  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+  assertCleanArtifact(configBytes, scrubber, '/config');
+  if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+    await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+    for (const resource of compiled.instructionResources) {
+      assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+    }
+  }
+
+  await writeExclusiveFile(registryPath, compiled.registryBytes, 0o600);
+  await writeExclusiveFile(configPath, configBytes, 0o600);
+
+  const localCommandGates = compiled.localCommandGates ?? [];
+  const secretsPayload = Buffer.from(
+    `${JSON.stringify({
+      version: 1,
+      runId,
+      repositoryRoot: realRepositoryRoot,
+      configPath,
+      registryPath,
+      registrySha256: compiled.registrySha256,
+      signingSecret,
+      signingEnvName,
+      localCommandGates,
+    }, null, 2)}\n`,
+    'utf8',
+  );
+  await writeExclusiveFile(secretsPath, secretsPayload, 0o600);
+
+  return {
+    stageDir,
+    configPath,
+    registryPath,
+    registrySha256: compiled.registrySha256,
+    signingSecret,
+    signingEnvName,
+    localCommandGates: Object.freeze([...localCommandGates]),
+    repositoryRoot: realRepositoryRoot,
+  };
+}
+
+/**
+ * Open the staged Taskpack step gate handle for `(runRoot, runId)`. Returns `null`
+ * when `<runRoot>/.taskpack-<runId>` does not exist, or starts an ephemeral loopback
+ * `startLocalCommandGateServer` when `localCommandGates` are staged.
+ */
+export async function openStagedTaskpackStepGate(
+  options: OpenStagedTaskpackStepGateOptions,
+): Promise<StagedTaskpackStepGateHandle | null> {
+  const runId = normalizeControllerRunId(options.runId);
+  if (runId !== options.runId) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid controller runId "${options.runId}"`);
+  }
+  let realRunRoot: string;
+  try {
+    realRunRoot = await realpath(options.runRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+
+  const stageDir = join(realRunRoot, `.taskpack-${runId}`);
+  try {
+    await lstat(stageDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+
+  const staged = await readAndValidateStagedTaskpackSecrets(stageDir, runId);
+  const baseEnv = options.runtimeEnv ?? process.env;
+  const environment = (name: string): string | undefined =>
+    name === staged.signingEnvName
+      ? staged.signingSecret
+      : (Object.hasOwn(baseEnv, name) ? baseEnv[name] : undefined);
+
+  if (staged.localCommandGates.length === 0) {
+    return {
+      staged,
+      environment,
+      gateUrlOverrides: Object.freeze({}),
+      close: async () => undefined,
+    };
+  }
+
+  const readOnlyGitHubToken = baseEnv['INPUT_GITHUB-TOKEN']?.trim()
+    || baseEnv['GITHUB_TOKEN']?.trim()
+    || baseEnv['GH_TOKEN']?.trim()
+    || undefined;
+  const server = await startLocalCommandGateServer({
+    runRoot: realRunRoot,
+    repositoryRoot: staged.repositoryRoot,
+    gates: staged.localCommandGates,
+    signingSecret: staged.signingSecret,
+    runtimeEnv: baseEnv,
+    readOnlyGitHubToken,
+    forbiddenEnvNames: new Set([staged.signingEnvName, ...Object.values(STANDARD_PI_PROVIDER_ENV)]),
+  });
+
+  return {
+    staged,
+    environment,
+    gateUrlOverrides: Object.freeze({ [LOCAL_COMMAND_GATE_ENDPOINT_ID]: server.url }),
+    serverUrl: server.url,
+    close: () => server.close(),
   };
 }

@@ -13,6 +13,8 @@ export type { CycleExecution, ControllerIncident } from './finalize.js';
 export type { ControllerEvent } from './events.js';
 export { resumeCycle } from './recovery.js';
 export { resumeCycleWithPorts } from './recovery.js';
+export { stepNext, stepSubmit, stepCancel } from './step.js';
+export type { StepNextInput, StepSubmitInput, StepCancelInput, StepTickResult, RunExecution } from './step.js';
 export { reconcileCycle } from './reconcile.js';
 export type { ReconcileCycleInput, ReconcileExecution } from './reconcile.js';
 export { readStatus, inspectRun } from './inspect.js';

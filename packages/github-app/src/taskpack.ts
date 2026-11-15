@@ -3,21 +3,21 @@ import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/prom
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles } from '@loopwright/agent-pi';
-import { resolveCatalogModel } from '@loopwright/agent-pi/catalog';
+import { isOAuthOnlyPiProvider, PI_THINKING_LEVELS, resolveCatalogModel, STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { validateDocument, type TaskContract } from '@loopwright/core';
 import { CONTROLLER_API_VERSION, installedHandlerDigests, type ControllerConfiguration, type TrustedRegistry } from '@loopwright/controller';
 import {
   collectMcpReferencedEnvNames, effectiveProtectedPaths, normalizeRelativePath, parseTaskpackDocument,
   pathCoveredBy, validateTaskpackLimitsDeclaration, validateTaskpackManifest, type Json,
 } from './schema.js';
-import { loadPiModelsJson, resolveTaskpackModelCandidates, resolveTaskpackModelSelection } from './models-config.js';
+import { loadPiModelsJson, resolveDefaultProviderTokenEnv, resolveTaskpackModelCandidates, resolveTaskpackModelSelection } from './models-config.js';
 import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
 import {
-  AUTHORIZED_ASSOCIATIONS, DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID, TASKPACK_MANIFEST_BYTES,
+  AUTHORIZED_ASSOCIATIONS, CANONICAL_TASKPACK_STEP_GATE_URL, DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID, TASKPACK_MANIFEST_BYTES,
   type CompiledInstructionResource, type CompiledLocalCommandGate, type CompiledTaskpack, type HostGateEndpointPlan,
-  type HostTaskpackBindings, type ParsedCommentCommand, type PiModelSelection, type TaskpackCommentCommand,
+  type HostRoleSelection, type HostTaskpackBindings, type ParsedCommentCommand, type PiModelSelection, type TaskpackCommentCommand,
   type TaskpackIntakeInput, type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration, type TaskpackManifest,
-  type TaskpackRunDiagnostic,
+  type TaskpackRolePurpose, type TaskpackRunDiagnostic, type TaskpackToolName,
 } from './types.js';
 
 /** Default controller budgets for host bindings that do not pin their own. */
@@ -346,6 +346,27 @@ function requireEnvName(value: string | undefined, what: string): string {
   return value;
 }
 
+interface CompiledRoleSpec {
+  readonly roleId: string;
+  readonly profileId: string;
+  readonly handlerId: string;
+  readonly stepId: string;
+  readonly dependsOn: readonly string[];
+  readonly adapter: 'pi' | 'delegated';
+  readonly purpose: TaskpackRolePurpose;
+  readonly prompt: string;
+  readonly tools: readonly string[];
+  readonly selection: PiModelSelection | { readonly provider: string; readonly model: string; readonly thinking: string };
+  readonly providerCredentialRef: string | null;
+  readonly providerEnvName: string | null;
+}
+
+function checkpointDistance(A: number, N: number, I: number, C: number, publication: boolean): number {
+  const V = 1 + Math.min(A, N + I);
+  const J = C * V;
+  return 4 + 3 * A + 2 * J + (publication ? 3 : 0);
+}
+
 /**
  * Compile a validated manifest with trusted host bindings into registry/config documents accepted by
  * `validateDocument`, `loadTrustedConfiguration`, and `compilePlan`. Signing secrets appear only inside
@@ -354,16 +375,162 @@ function requireEnvName(value: string | undefined, what: string): string {
 export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bindings: HostTaskpackBindings): Promise<CompiledTaskpack> {
   const mode = bindings.mode;
   const candidate = mode === 'candidate';
+  const executionMode = bindings.executionMode ?? 'pi';
+  const isDelegated = executionMode === 'delegated';
   const resourceVersion = bindings.resourceVersion ?? `taskpack-${manifest.metadata.name}`;
   if (!REVISION_PATTERN.test(resourceVersion)) bindingInvalid('resourceVersion is not a valid revision identifier');
   if (bindings.budgets.wallTimeMs <= DRAIN_RESERVE_MS) bindingInvalid(`budget wallTimeMs must exceed the ${DRAIN_RESERVE_MS}ms drain reserve`);
-  const modelsConfig = bindings.modelsJsonPath === undefined ? undefined : await loadPiModelsJson(bindings.modelsJsonPath);
-  const resolvedCandidates = resolveTaskpackModelCandidates(manifest, bindings, { modelsConfig });
-  const { selection } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
-  const providerEnv = requireEnvName(bindings.credentialEnvMap.provider, 'provider');
-  const runtime = await runtimeIdentity();
-  const installed = await installedHandlerDigests();
   const authorPrompt = bindings.authorPrompt ?? DEFAULT_AUTHOR_PROMPT_HEAD;
+  const defaultReviewPrompt = [
+    'Review the candidate changes against repository scope, acceptance checks, and instructions.',
+    'Your final assistant message MUST be ONLY one raw UTF-8 JSON object matching:',
+    '{"version":1,"status":"completed"|"no_change"|"failed"|"blocked","checks":[],"reason":"<single-line printable summary or null>"}',
+  ].join(' ');
+  const modelsConfig = (!isDelegated && bindings.modelsJsonPath !== undefined)
+    ? await loadPiModelsJson(bindings.modelsJsonPath)
+    : undefined;
+  const hasManifestRoles = manifest.spec.roles !== undefined && manifest.spec.roles.length > 0;
+  const resolvedCandidates = isDelegated
+    ? []
+    : resolveTaskpackModelCandidates(manifest, bindings, { modelsConfig });
+  const providerEnv = (isDelegated || hasManifestRoles)
+    ? (bindings.credentialEnvMap?.provider !== undefined ? requireEnvName(bindings.credentialEnvMap.provider, 'provider') : null)
+    : requireEnvName(bindings.credentialEnvMap?.provider, 'provider');
+  const runtime = isDelegated ? null : await runtimeIdentity();
+  const installed = await installedHandlerDigests();
+
+  const compiledRoles: CompiledRoleSpec[] = [];
+  if (!hasManifestRoles) {
+    const authorStepId = candidate ? 'author-candidate' : 'author-assessment';
+    if (isDelegated) {
+      const tools: readonly string[] = Object.freeze(['read', 'write', 'edit', 'bash', 'delete']);
+      const firstModel = manifest.spec.models?.[0];
+      const provider = bindings.roleSelection?.provider ?? firstModel?.provider ?? 'delegated';
+      const model = bindings.roleSelection?.model ?? firstModel?.id ?? 'default';
+      const thinking = bindings.roleSelection?.thinking ?? firstModel?.thinking ?? 'medium';
+      compiledRoles.push({
+        roleId: 'author',
+        profileId: 'taskpack-author-role',
+        handlerId: 'taskpack-author',
+        stepId: authorStepId,
+        dependsOn: Object.freeze([]),
+        adapter: 'delegated',
+        purpose: 'task',
+        prompt: authorPrompt,
+        tools,
+        selection: Object.freeze({ provider, model, thinking }),
+        providerCredentialRef: null,
+        providerEnvName: null,
+      });
+    } else {
+      const tools: readonly string[] = Object.freeze([
+        'read', 'write', 'edit', 'bash', 'delete',
+        ...(bindings.externalMcpTools ?? []),
+      ]);
+      const { selection } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
+      compiledRoles.push({
+        roleId: 'author',
+        profileId: 'taskpack-author-role',
+        handlerId: 'taskpack-author',
+        stepId: authorStepId,
+        dependsOn: Object.freeze([]),
+        adapter: 'pi',
+        purpose: 'task',
+        prompt: authorPrompt,
+        tools,
+        selection,
+        providerCredentialRef: 'taskpack-provider-token',
+        providerEnvName: providerEnv,
+      });
+    }
+  } else {
+    for (const [roleIdx, role] of manifest.spec.roles!.entries()) {
+      const purpose: TaskpackRolePurpose = role.purpose ?? 'task';
+      const baseTools: readonly TaskpackToolName[] = role.tools ?? (
+        purpose === 'review' ? Object.freeze(['read']) : Object.freeze(['read', 'write', 'edit', 'bash'])
+      );
+      const tools: readonly string[] = isDelegated
+        ? baseTools
+        : Object.freeze([...baseTools, ...(bindings.externalMcpTools ?? [])]);
+      const rolePrompt = purpose === 'review' ? defaultReviewPrompt : authorPrompt;
+      const profileId = `taskpack.profile.${role.id}`;
+      const handlerId = `agent.${role.id}`;
+      if (isDelegated) {
+        compiledRoles.push({
+          roleId: role.id,
+          profileId,
+          handlerId,
+          stepId: role.id,
+          dependsOn: Object.freeze([...(role.dependsOn ?? [])]),
+          adapter: 'delegated',
+          purpose,
+          prompt: rolePrompt,
+          tools,
+          selection: Object.freeze({
+            provider: role.provider,
+            model: role.model,
+            thinking: role.thinking ?? 'medium',
+          }),
+          providerCredentialRef: null,
+          providerEnvName: null,
+        });
+      } else {
+        if (role.thinking !== undefined && !(PI_THINKING_LEVELS as readonly string[]).includes(role.thinking)) {
+          manifestInvalid(
+            `spec.roles[].thinking must be one of ${PI_THINKING_LEVELS.join(', ')}`,
+            `/spec/roles/${roleIdx}/thinking`,
+          );
+        }
+        const normalizedProvider = role.provider.trim().toLowerCase();
+        if (isOAuthOnlyPiProvider(normalizedProvider) || normalizedProvider === 'antigravity' || normalizedProvider === 'pi-oauth') {
+          throw new GitHubAppError(
+            'PROVIDER_OAUTH_UNSUPPORTED',
+            `Pi provider "${role.provider}" uses OAuth or CLI login, which Loopwright refuses; configure a token-based Pi provider`,
+            `/spec/roles/${roleIdx}/provider`,
+          );
+        }
+        const roleBindings: HostTaskpackBindings = {
+          ...bindings,
+          candidateIndex: undefined,
+          roleSelection: {
+            provider: role.provider,
+            model: role.model,
+            ...(role.thinking !== undefined ? { thinking: role.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+          },
+        };
+        const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
+        const credRef = roleIdx === 0 ? 'taskpack-provider-token' : `taskpack-provider-token-${role.id}`;
+        const credentialMapRecord = bindings.credentialEnvMap as Readonly<Record<string, string | undefined>> | undefined;
+        const explicitRoleProviderEnv = credentialMapRecord !== undefined && Object.hasOwn(credentialMapRecord, role.provider)
+          ? credentialMapRecord[role.provider]
+          : undefined;
+        const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
+        const resolvedRoleProviderEnv = requireEnvName(
+          explicitRoleProviderEnv
+            ?? modelsJsonApiKeyEnv
+            ?? apiKeyEnv
+            ?? (manifest.spec.roles!.length > 1
+              ? (STANDARD_PI_PROVIDER_ENV[selection.provider] ?? providerEnv ?? resolveDefaultProviderTokenEnv(selection.provider))
+              : (providerEnv ?? STANDARD_PI_PROVIDER_ENV[selection.provider] ?? resolveDefaultProviderTokenEnv(selection.provider))),
+          'provider',
+        );
+        compiledRoles.push({
+          roleId: role.id,
+          profileId,
+          handlerId,
+          stepId: role.id,
+          dependsOn: Object.freeze([...(role.dependsOn ?? [])]),
+          adapter: 'pi',
+          purpose,
+          prompt: rolePrompt,
+          tools,
+          selection,
+          providerCredentialRef: credRef,
+          providerEnvName: resolvedRoleProviderEnv,
+        });
+      }
+    }
+  }
   const { controlRoot, manifestPath } = resolveManifestControlRoot(manifest, bindings.taskpackPath);
   const memoryRoot = `${controlRoot}/memory`;
   if (!pathCoveredBy(manifest.spec.memory.directory, memoryRoot)) {
@@ -422,26 +589,41 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     if (candidate && (bindings.repositoryRoot === undefined || bindings.repositoryRoot.trim().length === 0)) {
       bindingInvalid('command.v1 checks require bindings.repositoryRoot', '/spec/verification/localChecks');
     }
-    const activeCredentialEnvs = new Set<string>([
-      providerEnv,
-      ...(bindings.credentialEnvMap.provider !== undefined ? [bindings.credentialEnvMap.provider] : []),
+    const baseCredentialEnvs = new Set<string>([
+      ...Object.values(STANDARD_PI_PROVIDER_ENV),
+      'LOOPWRIGHT_PROVIDER_TOKEN',
+      ...(providerEnv !== null ? [providerEnv] : []),
+      ...compiledRoles.map(r => r.providerEnvName).filter((v): v is string => v !== null),
+      ...(bindings.credentialEnvMap?.provider !== undefined ? [bindings.credentialEnvMap.provider] : []),
       ...(bindings.sourceTokenEnvNames ?? []),
-      ...resolvedCandidates.flatMap(candidate => [
-        candidate.providerEnvName,
-        ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
+      ...resolvedCandidates.flatMap(cand => [
+        cand.providerEnvName,
+        ...(cand.sourceTokenEnvName !== undefined ? [cand.sourceTokenEnvName] : []),
       ]),
-      ...(bindings.credentialEnvMap.gate !== undefined ? [bindings.credentialEnvMap.gate] : []),
-      ...(bindings.credentialEnvMap.localCommandGate !== undefined ? [bindings.credentialEnvMap.localCommandGate] : []),
-      ...(bindings.credentialEnvMap.publication !== undefined ? [bindings.credentialEnvMap.publication] : []),
-      ...(bindings.credentialEnvMap.publicationAuth !== undefined ? [bindings.credentialEnvMap.publicationAuth] : []),
+      ...(bindings.credentialEnvMap?.gate !== undefined ? [bindings.credentialEnvMap.gate] : []),
+      ...(bindings.credentialEnvMap?.localCommandGate !== undefined ? [bindings.credentialEnvMap.localCommandGate] : []),
+      ...(bindings.credentialEnvMap?.publication !== undefined ? [bindings.credentialEnvMap.publication] : []),
+      ...(bindings.credentialEnvMap?.publicationAuth !== undefined ? [bindings.credentialEnvMap.publicationAuth] : []),
       ...(modelsConfig === undefined
         ? []
         : [...modelsConfig.providers.values()].map(p => p.apiKeyEnv).filter((v): v is string => v !== undefined)),
       ...(manifest.spec.models === undefined
         ? []
-        : manifest.spec.models.map(m => m.apiKeyEnv).filter((v): v is string => v !== undefined)),
+        : manifest.spec.models.flatMap(m => [
+          ...(m.apiKeyEnv !== undefined ? [m.apiKeyEnv] : []),
+          resolveDefaultProviderTokenEnv(m.provider, { manifestApiKeyEnv: m.apiKeyEnv }),
+        ])),
+      ...(manifest.spec.roles === undefined
+        ? []
+        : manifest.spec.roles.map(r => resolveDefaultProviderTokenEnv(r.provider))),
       ...collectMcpReferencedEnvNames(manifest.spec.mcp?.servers),
     ]);
+    const activeCredentialEnvs = new Set<string>(baseCredentialEnvs);
+    for (const envName of baseCredentialEnvs) {
+      for (let poolIndex = 1; poolIndex <= 16; poolIndex += 1) {
+        activeCredentialEnvs.add(`${envName}_${poolIndex}`);
+      }
+    }
     for (const [index, declared] of manifest.spec.verification.localChecks.entries()) {
       if (declared.implementation !== 'command.v1') continue;
       const rawEnv = declared.parameters?.['env'];
@@ -495,9 +677,9 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
   }
 
-  const publicationEnabled = candidate && manifest.spec.publication.mode === 'pull_request';
+  const publicationEnabled = candidate && manifest.spec.publication.mode === 'pull_request' && (!isDelegated || bindings.publicationEndpoint != null);
   const publicationEndpoint = publicationEnabled ? bindings.publicationEndpoint : undefined;
-  if (publicationEnabled && (publicationEndpoint === undefined || publicationEndpoint === null)) {
+  if (candidate && manifest.spec.publication.mode === 'pull_request' && !isDelegated && (publicationEndpoint === undefined || publicationEndpoint === null)) {
     bindingInvalid('candidate mode with pull_request publication requires a publicationEndpoint host binding');
   }
   const gatePlans = candidate ? [...(bindings.gateEndpoints ?? [])] : [];
@@ -510,15 +692,15 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     const externalSigningRefs = new Set(externalEndpointPlans.map(plan => plan.signingCredentialRef));
     if (externalSigningRefs.size !== 1) bindingInvalid('all gate endpoints must share one signingCredentialRef');
   }
-  const externalGateEnv = gates.length > 0 ? requireEnvName(bindings.credentialEnvMap.gate, 'gate') : null;
+  const externalGateEnv = gates.length > 0 ? requireEnvName(bindings.credentialEnvMap?.gate, 'gate') : null;
   const externalGateSigningRef = gates.length > 0 ? externalEndpointPlans[0]!.signingCredentialRef : null;
-  const publicationEnv = publicationEnabled ? requireEnvName(bindings.credentialEnvMap.publication, 'publication') : null;
+  const publicationEnv = publicationEnabled ? requireEnvName(bindings.credentialEnvMap?.publication, 'publication') : null;
   const publicationAuthEnabled = publicationEnabled
     && publicationEndpoint != null
     && publicationEndpoint.authCredentialRef != null
     && publicationEndpoint.authCredentialRef !== publicationEndpoint.signingCredentialRef;
   const publicationAuthEnv = publicationAuthEnabled
-    ? requireEnvName(bindings.credentialEnvMap.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN', 'publicationAuth')
+    ? requireEnvName(bindings.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN', 'publicationAuth')
     : null;
 
   interface ActiveCheck {
@@ -582,7 +764,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       const localMaxPollMs = Math.min(3_600_000, Math.max(120_000, localTimeoutMs + 15_000));
       localPlan = {
         id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
-        url: 'http://127.0.0.1:65535/loopwright-local-command',
+        url: CANONICAL_TASKPACK_STEP_GATE_URL,
         signingCredentialRef: 'taskpack-local-command-signing',
         authCredentialRef: null,
         timeoutMs: localTimeoutMs,
@@ -595,27 +777,47 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
     localCmdGateSigningRef = localPlan.signingCredentialRef;
     localCmdGateEnv = requireEnvName(
-      bindings.credentialEnvMap.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
+      bindings.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
       'localCommandGate',
     );
   }
   // The frozen compile capability accepts only a null task matrix; host targetMatrix stays intake metadata.
   void bindings.targetMatrix;
 
-  const authorStepId = candidate ? 'author-candidate' : 'author-assessment';
-  const steps: { id: string; kind: 'agent' | 'check'; uses: string; roleId: string | null; dependsOn: string[] }[] = [
-    { id: authorStepId, kind: 'agent', uses: 'taskpack-author', roleId: 'author', dependsOn: [] },
-  ];
-  for (const [index, check] of activeChecks.entries()) {
-    steps.push({ id: check.id, kind: 'check', uses: check.id, roleId: null, dependsOn: index === 0 ? [authorStepId] : [activeChecks[index - 1]!.id] });
-  }
+  const sinkStepIds = compiledRoles
+    .filter(role => !compiledRoles.some(other => other.dependsOn.includes(role.roleId)))
+    .map(role => role.stepId)
+    .sort();
+  const agentSteps: { id: string; kind: 'agent' | 'check'; uses: string; roleId: string | null; dependsOn: string[] }[] = compiledRoles.map(role => ({
+    id: role.stepId,
+    kind: 'agent' as const,
+    uses: role.handlerId,
+    roleId: role.roleId,
+    dependsOn: [...role.dependsOn],
+  }));
+
   if (candidate) {
+    const steps: { id: string; kind: 'agent' | 'check'; uses: string; roleId: string | null; dependsOn: string[] }[] = [...agentSteps];
+    for (const [index, check] of activeChecks.entries()) {
+      steps.push({
+        id: check.id,
+        kind: 'check',
+        uses: check.id,
+        roleId: null,
+        dependsOn: index === 0 ? [...sinkStepIds] : [activeChecks[index - 1]!.id],
+      });
+    }
     const required = activeChecks.filter((_, index) => index < manifest.spec.verification.localChecks.length || gates[index - manifest.spec.verification.localChecks.length]?.required === true).map(check => check.id);
-    if (required.length === 0) bindingInvalid('candidate mode requires at least one required check');
+    if (required.length === 0) {
+      if (hasManifestRoles) {
+        manifestInvalid('spec.roles requires at least one verification check', '/spec/verification');
+      }
+      bindingInvalid('candidate mode requires at least one required check');
+    }
     return assemble({
-      manifest, bindings, selection, mode: 'candidate', resourceVersion, authorPrompt, runtime, installed,
-      providerEnv, externalGateEnv, externalGateSigningRef, localCmdGateEnv, localCmdGateSigningRef,
-      publicationEnv, publicationAuthEnv, activeChecks, steps, required: [...required], authorStepId, gatePlans, publicationEndpoint,
+      manifest, bindings, compiledRoles, hasManifestRoles, isDelegated, mode: 'candidate', resourceVersion, runtime, installed,
+      externalGateEnv, externalGateSigningRef, localCmdGateEnv, localCmdGateSigningRef,
+      publicationEnv, publicationAuthEnv, activeChecks, steps, required: [...required], gatePlans, publicationEndpoint,
       controlRoot, manifestPath, instructionResources, localCommandGates, commandScripts,
     });
   }
@@ -624,14 +826,14 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     parameters: { checkId: 'taskpack-no-change' }, allowedEvidenceLevels: ['local_execution'],
   };
   const noChangeSteps = [
-    { id: authorStepId, kind: 'agent' as const, uses: 'taskpack-author', roleId: 'author' as const, dependsOn: [] as string[] },
-    { id: noChangeCheck.id, kind: 'check' as const, uses: noChangeCheck.id, roleId: null, dependsOn: [authorStepId] },
+    ...agentSteps,
+    { id: noChangeCheck.id, kind: 'check' as const, uses: noChangeCheck.id, roleId: null, dependsOn: [...sinkStepIds] },
   ];
   return assemble({
-    manifest, bindings, selection, mode: 'no-change', resourceVersion, authorPrompt, runtime, installed, providerEnv,
+    manifest, bindings, compiledRoles, hasManifestRoles, isDelegated, mode: 'no-change', resourceVersion, runtime, installed,
     externalGateEnv: null, externalGateSigningRef: null, localCmdGateEnv: null, localCmdGateSigningRef: null,
     publicationEnv: null, publicationAuthEnv: null, activeChecks: [noChangeCheck], steps: noChangeSteps,
-    required: [noChangeCheck.id], authorStepId, gatePlans: [], publicationEndpoint: undefined,
+    required: [noChangeCheck.id], gatePlans: [], publicationEndpoint: undefined,
     controlRoot, manifestPath, instructionResources, localCommandGates: [], commandScripts,
   });
 }
@@ -639,13 +841,13 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
 interface AssembleInput {
   readonly manifest: TaskpackManifest;
   readonly bindings: HostTaskpackBindings;
-  readonly selection: PiModelSelection;
+  readonly compiledRoles: readonly CompiledRoleSpec[];
+  readonly hasManifestRoles: boolean;
+  readonly isDelegated: boolean;
   readonly mode: 'candidate' | 'no-change';
   readonly resourceVersion: string;
-  readonly authorPrompt: string;
-  readonly runtime: RuntimeIdentity;
+  readonly runtime: RuntimeIdentity | null;
   readonly installed: Readonly<Record<string, { algorithm: 'sha256'; hex: string }>>;
-  readonly providerEnv: string;
   readonly externalGateEnv: string | null;
   readonly externalGateSigningRef: string | null;
   readonly localCmdGateEnv: string | null;
@@ -655,7 +857,6 @@ interface AssembleInput {
   readonly activeChecks: readonly { readonly id: string; readonly implementation: string; readonly parameters: Record<string, unknown>; readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service')[] }[];
   readonly steps: readonly { id: string; kind: 'agent' | 'check'; uses: string; roleId: string | null; dependsOn: string[] }[];
   readonly required: readonly string[];
-  readonly authorStepId: string;
   readonly gatePlans: readonly HostGateEndpointPlan[];
   readonly publicationEndpoint: HostTaskpackBindings['publicationEndpoint'];
   readonly controlRoot: string;
@@ -666,7 +867,7 @@ interface AssembleInput {
 }
 
 function assemble(input: AssembleInput): CompiledTaskpack {
-  const { manifest, bindings, selection, runtime, installed } = input;
+  const { manifest, bindings, compiledRoles, isDelegated, runtime, installed } = input;
   const candidate = input.mode === 'candidate';
   const digestOf = (bytes: Buffer) => ({ algorithm: 'sha256' as const, hex: createHash('sha256').update(bytes).digest('hex') });
   const registryName = `taskpack-${manifest.metadata.name}`;
@@ -682,9 +883,23 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     authCredentialRef: input.publicationEndpoint.authCredentialRef ?? null,
     timeoutMs: input.publicationEndpoint.timeoutMs ?? 30_000,
   }];
-  const credentialBindings: { id: string; consumer: 'provider' | 'gate' | 'publisher'; destinationRef: string; environmentNames: readonly string[]; template: string }[] = [
-    { id: 'taskpack-provider-token', consumer: 'provider', destinationRef: selection.provider, environmentNames: [input.providerEnv], template: `\${${input.providerEnv}}` },
-  ];
+  const credentialBindings: { id: string; consumer: 'provider' | 'gate' | 'publisher'; destinationRef: string; environmentNames: readonly string[]; template: string }[] = [];
+  if (!isDelegated) {
+    const providerBindingByProvider = new Map<string, string>();
+    for (const role of compiledRoles) {
+      if (role.providerCredentialRef === null || role.providerEnvName === null) continue;
+      const existingId = providerBindingByProvider.get(role.selection.provider);
+      if (existingId !== undefined) continue;
+      providerBindingByProvider.set(role.selection.provider, role.providerCredentialRef);
+      credentialBindings.push({
+        id: role.providerCredentialRef,
+        consumer: 'provider',
+        destinationRef: role.selection.provider,
+        environmentNames: [role.providerEnvName],
+        template: `\${${role.providerEnvName}}`,
+      });
+    }
+  }
   if (input.externalGateEnv !== null && input.externalGateSigningRef !== null) {
     credentialBindings.push({
       id: input.externalGateSigningRef,
@@ -737,10 +952,15 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     name, classification: 'credential' as const, paths,
   }));
   const handlers = [
-    {
-      id: 'taskpack-author', kind: 'agent' as const, implementation: 'pi.agent.v1' as const, version: 1 as const,
-      digest: { ...installed['pi.agent.v1']! }, parameters: { prompt: input.authorPrompt, purpose: 'task' }, capabilities: ['pi'],
-    },
+    ...compiledRoles.map(role => ({
+      id: role.handlerId,
+      kind: 'agent' as const,
+      implementation: 'pi.agent.v1' as const,
+      version: 1 as const,
+      digest: { ...installed['pi.agent.v1']! },
+      parameters: { prompt: role.prompt, purpose: role.purpose },
+      capabilities: ['pi'],
+    })),
     ...input.activeChecks.map(check => ({
       id: check.id, kind: 'check' as const, implementation: check.implementation as 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'gate.v1',
       version: 1 as const, digest: { ...installed[check.implementation]! }, parameters: check.parameters as Readonly<Record<string, Json>>,
@@ -755,55 +975,150 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       digest: { ...installed['no-change.v1']! }, parameters: { checkId: null }, capabilities: ['inert_bytes', 'read_only'],
     },
   ];
-  const catalogRecord = resolveCatalogModel(selection).record;
   const mergedLimits = mergeTaskpackLimits(bindings.envLimits, manifest.spec.limits, bindings.limits);
   const baseBudgetsWithManifest = bindings.budgets === DEFAULT_HOST_BUDGETS
     ? applyLimitsToBudgets(applyLimitsToBudgets(DEFAULT_HOST_BUDGETS, bindings.envLimits), manifest.spec.limits)
     : bindings.budgets;
   const requestedBudgets = applyLimitsToBudgets(baseBudgetsWithManifest, bindings.limits);
-  const defaultWorkingWindow = Math.min(16_777_216, Math.max(8_388_608, catalogRecord.contextWindow));
-  const workingWindowCeiling = mergedLimits.workingWindowBytes ?? defaultWorkingWindow;
-  const maxRequestBytes = Math.min(mergedLimits.maxRequestBytes ?? 8_388_608, workingWindowCeiling);
-  const serviceMargin = Math.min(32_768, Math.floor(workingWindowCeiling / 4));
-  const toolReserve = Math.min(16_384, Math.floor(workingWindowCeiling / 8));
-  const usableWindow = Math.min(catalogRecord.contextWindow, workingWindowCeiling) - serviceMargin - toolReserve;
   const externalToolCount = bindings.externalMcpTools?.length ?? 0;
   const instructionBytes = input.instructionResources.reduce((sum, r) => sum + r.bytes.byteLength, 0);
-  const promptBytesEst = Buffer.byteLength(input.authorPrompt, 'utf8');
-  const baseInputHeadroom = usableWindow > 8_192
-    ? Math.min(65_536, Math.floor(usableWindow * 0.8))
-    : 4_096;
-  const estimatedFixedInput = externalToolCount > 0 || instructionBytes > 8_192
-    ? 12_288 + instructionBytes + promptBytesEst + externalToolCount * 1_600 + 8_192
-    : 0;
-  const maxInputHeadroom = usableWindow >= 24_576
-    ? usableWindow - 8_192
-    : Math.max(0, usableWindow - Math.max(1_024, Math.floor(usableWindow * 0.2)));
-  const inputHeadroom = usableWindow > 8_192
-    ? Math.min(maxInputHeadroom, Math.max(baseInputHeadroom, estimatedFixedInput))
-    : 4_096;
-  const maxWindowOutput = Math.max(1, usableWindow - inputHeadroom);
-  const effectiveOutputTokens = Math.min(requestedBudgets.perCallOutputTokens, catalogRecord.maxTokens, maxWindowOutput, 262_144);
+  const roleLimits = {
+    promptBytes: mergedLimits.promptBytes ?? 262_144,
+    responseBytes: mergedLimits.responseBytes ?? 67_108_864,
+    toolArgsBytes: mergedLimits.toolArgsBytes ?? 1_048_576,
+    toolResultBytes: mergedLimits.toolResultBytes ?? 1_048_576,
+    sessionBytes: mergedLimits.sessionBytes ?? 33_554_432,
+    artifactBytes: 268_435_456,
+    candidateEntries: mergedLimits.candidateEntries ?? 4_096,
+    fileBytes: mergedLimits.fileBytes ?? 33_554_432,
+    toolWallMs: mergedLimits.toolTimeoutSeconds !== undefined ? mergedLimits.toolTimeoutSeconds * 1000 : 300_000,
+  };
 
-  const hasPublication = candidate && publicationEndpoints.length > 0;
-  const verifierSlotCount = input.activeChecks.length + 2;
-  const calcD = (attempts: number, implRepairs: number): number =>
-    4 + 3 * attempts + 2 * verifierSlotCount * (1 + Math.min(attempts, 1 + implRepairs)) + (hasPublication ? 3 : 0);
-  let effectiveMaxAttempts = mergedLimits.maxAttempts ?? 5;
-  let effectiveImplRepairs = requestedBudgets.maxImplementationRepairs;
-  while (effectiveMaxAttempts > 1 && calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
-    effectiveMaxAttempts -= 1;
-  }
-  if (effectiveMaxAttempts === 1 && calcD(1, effectiveImplRepairs) > 64) {
-    while (effectiveImplRepairs > 0 && calcD(1, effectiveImplRepairs) > 64) {
-      effectiveImplRepairs -= 1;
+  const providerRefByProvider = new Map<string, string>();
+  for (const b of credentialBindings) {
+    if (b.consumer === 'provider') {
+      providerRefByProvider.set(b.destinationRef, b.id);
     }
   }
-  if (calcD(effectiveMaxAttempts, effectiveImplRepairs) > 64) {
-    manifestInvalid('verification check count exceeds controller 64-checkpoint schedule capacity', '/spec/verification');
+
+  const perRoleMaxOutputTokens: number[] = [];
+  const roleProfiles: TrustedRegistry['spec']['roleProfiles'][number][] = compiledRoles.map(role => {
+    if (role.adapter === 'delegated') {
+      perRoleMaxOutputTokens.push(Math.min(requestedBudgets.perCallOutputTokens, 65_536));
+      return {
+        id: role.profileId,
+        adapter: 'delegated' as const,
+        selection: {
+          provider: role.selection.provider,
+          model: role.selection.model,
+          thinking: role.selection.thinking,
+        },
+        tools: [...role.tools],
+        limits: { ...roleLimits },
+        runtimeRef: null,
+        providerCredentialRef: null,
+        mcp: null,
+      } as unknown as TrustedRegistry['spec']['roleProfiles'][number];
+    }
+    const catalogRecord = resolveCatalogModel(role.selection as PiModelSelection).record;
+    const defaultWorkingWindow = Math.min(16_777_216, Math.max(8_388_608, catalogRecord.contextWindow));
+    const workingWindowCeiling = mergedLimits.workingWindowBytes ?? defaultWorkingWindow;
+    const maxRequestBytes = Math.min(mergedLimits.maxRequestBytes ?? 8_388_608, workingWindowCeiling);
+    const serviceMargin = Math.min(32_768, Math.floor(workingWindowCeiling / 4));
+    const toolReserve = Math.min(16_384, Math.floor(workingWindowCeiling / 8));
+    const usableWindow = Math.min(catalogRecord.contextWindow, workingWindowCeiling) - serviceMargin - toolReserve;
+    const promptBytesEst = Buffer.byteLength(role.prompt, 'utf8');
+    const baseInputHeadroom = usableWindow > 8_192
+      ? Math.min(65_536, Math.floor(usableWindow * 0.8))
+      : 4_096;
+    const estimatedFixedInput = externalToolCount > 0 || instructionBytes > 8_192
+      ? 12_288 + instructionBytes + promptBytesEst + externalToolCount * 1_600 + 8_192
+      : 0;
+    const maxInputHeadroom = usableWindow >= 24_576
+      ? usableWindow - 8_192
+      : Math.max(0, usableWindow - Math.max(1_024, Math.floor(usableWindow * 0.2)));
+    const inputHeadroom = usableWindow > 8_192
+      ? Math.min(maxInputHeadroom, Math.max(baseInputHeadroom, estimatedFixedInput))
+      : 4_096;
+    const maxWindowOutput = Math.max(1, usableWindow - inputHeadroom);
+    const roleMaxOutput = Math.min(requestedBudgets.perCallOutputTokens, catalogRecord.maxTokens, maxWindowOutput, 262_144);
+    perRoleMaxOutputTokens.push(roleMaxOutput);
+    return {
+      id: role.profileId,
+      selection: role.selection as PiModelSelection,
+      tools: [...role.tools],
+      context: {
+        mode: 'estimated_guard' as const,
+        estimator: 'lw-pi-final-json-bytes-v1',
+        proofId: null,
+        version: 1,
+        evidence: 'estimated' as const,
+        workingWindowCeiling,
+        maxRequestBytes,
+        serviceMargin,
+        toolReserve,
+        maxOutputTokens: roleMaxOutput,
+      },
+      limits: { ...roleLimits },
+      runtimeRef: 'taskpack-runtime',
+      providerCredentialRef: providerRefByProvider.get(role.selection.provider) ?? role.providerCredentialRef,
+      mcp: {
+        serverId: 'workspace',
+        scriptDigest: runtime!.localMcpScriptDigest,
+        names: [],
+        effects: [],
+        idleTimeoutSeconds: 2,
+        absoluteTimeoutSeconds: 10,
+      },
+    };
+  });
+
+  const effectiveOutputTokens = Math.min(requestedBudgets.perCallOutputTokens, ...perRoleMaxOutputTokens, 262_144);
+  const hasPublication = candidate && publicationEndpoints.length > 0;
+  const verifierSlotCount = input.activeChecks.length + 2;
+  const explicitMaxAttempts = bindings.maxAttempts ?? mergedLimits.maxAttempts;
+  let effectiveMaxAttempts: number;
+  let effectiveImplRepairs = requestedBudgets.maxImplementationRepairs;
+  if (input.hasManifestRoles) {
+    const N = compiledRoles.length;
+    if (verifierSlotCount > 16 || checkpointDistance(N, N, effectiveImplRepairs, verifierSlotCount, hasPublication) > 64) {
+      manifestInvalid(
+        `taskpack roles (${N}), checks (${input.activeChecks.length}), and repairs (${effectiveImplRepairs}) exceed controller checkpoint capacity D <= 64`,
+        '/spec/roles',
+      );
+    }
+    const desiredMax = Math.min(
+      16,
+      Math.max(
+        N,
+        explicitMaxAttempts ?? 0,
+        N + requestedBudgets.maxFormatRepairs + effectiveImplRepairs,
+      ),
+    );
+    effectiveMaxAttempts = N;
+    for (let A = desiredMax; A >= N; A--) {
+      if (checkpointDistance(A, N, effectiveImplRepairs, verifierSlotCount, hasPublication) <= 64) {
+        effectiveMaxAttempts = A;
+        break;
+      }
+    }
+  } else {
+    effectiveMaxAttempts = explicitMaxAttempts ?? 5;
+    while (effectiveMaxAttempts > 1 && checkpointDistance(effectiveMaxAttempts, 1, effectiveImplRepairs, verifierSlotCount, hasPublication) > 64) {
+      effectiveMaxAttempts -= 1;
+    }
+    if (effectiveMaxAttempts === 1 && checkpointDistance(1, 1, effectiveImplRepairs, verifierSlotCount, hasPublication) > 64) {
+      while (effectiveImplRepairs > 0 && checkpointDistance(1, 1, effectiveImplRepairs, verifierSlotCount, hasPublication) > 64) {
+        effectiveImplRepairs -= 1;
+      }
+    }
+    if (checkpointDistance(effectiveMaxAttempts, 1, effectiveImplRepairs, verifierSlotCount, hasPublication) > 64) {
+      manifestInvalid('verification check count exceeds controller 64-checkpoint schedule capacity', '/spec/verification');
+    }
   }
+
   // Ensure total operation capacity fits LocalRunStore's 2048-operation lifetime cap.
-  const capV = 1 + Math.min(effectiveMaxAttempts, 1 + effectiveImplRepairs);
+  const capV = 1 + Math.min(effectiveMaxAttempts, compiledRoles.length + effectiveImplRepairs);
   const capJ = verifierSlotCount * capV;
   const maxAllowedModelCalls = Math.max(1, Math.min(1024, 2048 - capJ - (hasPublication ? 1 : 0) - 3 * effectiveMaxAttempts));
   const effectiveModelCalls = Math.min(requestedBudgets.maxModelCalls, maxAllowedModelCalls);
@@ -821,46 +1136,18 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     ? DRAIN_RESERVE_MS
     : Math.max(5_000, Math.floor(effectiveBudgets.wallTimeMs / 5));
 
-  const authorTools = Object.freeze([
-    'read', 'write', 'edit', 'bash', 'delete',
-    ...(bindings.externalMcpTools ?? []),
-  ]);
-  const roleLimits = {
-    promptBytes: mergedLimits.promptBytes ?? 262_144,
-    responseBytes: mergedLimits.responseBytes ?? 67_108_864,
-    toolArgsBytes: mergedLimits.toolArgsBytes ?? 1_048_576,
-    toolResultBytes: mergedLimits.toolResultBytes ?? 1_048_576,
-    sessionBytes: mergedLimits.sessionBytes ?? 33_554_432,
-    artifactBytes: 268_435_456,
-    candidateEntries: mergedLimits.candidateEntries ?? 4_096,
-    fileBytes: mergedLimits.fileBytes ?? 33_554_432,
-    toolWallMs: mergedLimits.toolTimeoutSeconds !== undefined ? mergedLimits.toolTimeoutSeconds * 1000 : 300_000,
-  };
-
   const registry: TrustedRegistry = {
     apiVersion: CONTROLLER_API_VERSION, kind: 'TrustedRegistry', metadata: { name: registryName },
     spec: {
       version: 1 as const, resourceVersion: input.resourceVersion, handlers,
-      roleProfiles: [{
-        id: 'taskpack-author-role',
-        selection,
-        tools: authorTools,
-        context: {
-          mode: 'estimated_guard' as const, estimator: 'lw-pi-final-json-bytes-v1', proofId: null, version: 1,
-          evidence: 'estimated' as const, workingWindowCeiling, maxRequestBytes, serviceMargin,
-          toolReserve, maxOutputTokens: effectiveOutputTokens,
-        },
-        limits: roleLimits,
-        runtimeRef: 'taskpack-runtime', providerCredentialRef: 'taskpack-provider-token',
-        mcp: { serverId: 'workspace', scriptDigest: runtime.localMcpScriptDigest, names: [], effects: [], idleTimeoutSeconds: 2, absoluteTimeoutSeconds: 10 },
-      }],
+      roleProfiles,
       resources: input.instructionResources.map(r => ({
         id: r.id,
         kind: r.kind,
         path: r.path,
         digest: r.digest,
       })),
-      runtimeProfiles: [{
+      runtimeProfiles: isDelegated || runtime === null ? [] : [{
         id: 'taskpack-runtime',
         dockerExecutable: bindings.runtimeOptions?.dockerExecutable ?? '/usr/local/bin/docker',
         dockerSocket: bindings.runtimeOptions?.dockerSocket ?? '/var/run/docker.sock',
@@ -897,10 +1184,14 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         writable: [...compileScopePatterns(manifest.spec.scope.writable, 'writable')],
         protected: [...compileScopePatterns(fullProtected, 'protected')],
       },
-      roles: [{
-        id: 'author', adapter: 'pi', provider: selection.provider, model: selection.model,
-        thinking: selection.thinking, tools: [...authorTools],
-      }],
+      roles: compiledRoles.map(role => ({
+        id: role.roleId,
+        adapter: role.adapter,
+        provider: role.selection.provider,
+        model: role.selection.model,
+        thinking: role.selection.thinking,
+        tools: [...role.tools],
+      })),
       trustedContext: { revision: input.resourceVersion, discovery: 'disabled' as const, resources: compiledResources },
       budgets: effectiveBudgets,
       steps: input.steps.map(step => ({ ...step, dependsOn: [...step.dependsOn] })),
@@ -919,7 +1210,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     spec: {
       task: validated.value, registry: { name: registryName, digest: digestOf(registryBytes) },
       profiles: {
-        roles: [{ roleId: 'author', profileRef: 'taskpack-author-role' }],
+        roles: compiledRoles.map(role => ({ roleId: role.roleId, profileRef: role.profileId })),
         steps: input.steps.map(step => ({ stepId: step.id, handlerRef: step.uses })),
       },
       credentials: credentialBindings.map(binding => ({ ref: binding.id, template: binding.template })),

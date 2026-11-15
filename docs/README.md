@@ -50,10 +50,10 @@
 - Use for: compile trusted configuration and coordinate bounded runs
 - Aliases: controller
 - Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [operations/cli.md](operations/cli.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
-- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md)
+- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md)
 - Code: [controller](../packages/controller/), [cli](../packages/cli/)
 - Related: [contracts](#contracts-and-evidence), [state](#persistent-state-store)
-- Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
+- Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
 
 ### Declarative Taskpacks and Runner Parity
 
@@ -61,10 +61,10 @@
 - Use for: author taskpacks and assess offline runner parity
 - Aliases: taskpacks
 - Guides: [walkthroughs/declarative-taskpack.md](walkthroughs/declarative-taskpack.md), [configuration/taskpack.md](configuration/taskpack.md), [contribute/runner-taskpack.md](contribute/runner-taskpack.md)
-- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md)
+- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md)
 - Code: [taskpack-runner](../packages/taskpack-runner/)
 - Related: [github-app](#github-app-and-action-control-plane), [controller](#bounded-controller-and-cli)
-- Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
+- Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
 
 ### Reviewed Memory and Compaction
 
@@ -129,6 +129,7 @@
 | [2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md](../specs/2026-11-12-governance-yaml-configuration-connected-docs-and-branded-site.md) | YAML configuration, connected guides, and branded site |
 | [2026-11-13-tree-overlay-manifest-and-candidate-delete.md](../specs/2026-11-13-tree-overlay-manifest-and-candidate-delete.md) | tree overlay manifests and candidate deletion |
 | [2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md) | Turnkey execution, scope, and output modes |
+| [2026-11-14-delegated-role-stepping-and-multi-model-routing.md](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md) | Delegated role stepping and multi-model routing |
 
 ## All pages
 
