@@ -1439,6 +1439,30 @@ process.exit(45);
       assert.equal(overrideCfg.modelProvider, 'openai');
       assert.equal(overrideCfg.modelId, 'gpt-4.1');
 
+      // 3b) Custom internal gateway host + explicit CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER=zai-coding-cn
+      // receives ZAI default thinking ('low', reasoning=true) and zaiCompat in models.json
+      const customZaiModelsOut = join(dir, 'models-custom-zai.json');
+      const customZaiCfg = await preflight.resolveSelfUpgradeModelConfig({
+        env: {
+          CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER: 'zai-coding-cn',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: 'https://llm-gateway.internal.example/v1',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: 'coding-model-v1',
+        },
+        modelsOutPath: customZaiModelsOut,
+      });
+      assert.equal(customZaiCfg.configured, true);
+      assert.equal(customZaiCfg.modelProvider, 'zai-coding-cn');
+      assert.equal(customZaiCfg.modelThinking, 'low');
+      const customZaiModelsRaw = JSON.parse(await readFile(customZaiModelsOut, 'utf8')) as {
+        providers: Record<string, { models: readonly { id: string; reasoning: boolean; compat?: Record<string, unknown> }[] }>;
+      };
+      const customZaiModelEntry = customZaiModelsRaw.providers['zai-coding-cn']?.models[0];
+      assert.equal(customZaiModelEntry?.reasoning, true);
+      assert.deepEqual(customZaiModelEntry?.compat, {
+        thinkingFormat: 'zai',
+        supportsReasoningEffort: true,
+      });
+
       // 4) Negative cases fail closed
       await assert.rejects(
         () => preflight.resolveSelfUpgradeModelConfig({ env: { CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://api.openai.com/v1' } }),

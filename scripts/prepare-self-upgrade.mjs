@@ -1424,7 +1424,13 @@ function firstNonEmptyEnv(env, ...keys) {
   return '';
 }
 
-function isZaiOrGlmTarget(modelId, baseUrl) {
+const ZAI_PROVIDER_IDS = new Set(['zai', 'zai-cn', 'zai-coding-cn']);
+
+function isZaiOrGlmTarget(modelId, baseUrl, providerId = '') {
+  const lowerProvider = String(providerId ?? '').trim().toLowerCase();
+  if (ZAI_PROVIDER_IDS.has(lowerProvider)) {
+    return true;
+  }
   const lowerModel = modelId.trim().toLowerCase();
   if (lowerModel.startsWith('glm-') || lowerModel.includes('/glm-')) {
     return true;
@@ -1437,7 +1443,7 @@ function isZaiOrGlmTarget(modelId, baseUrl) {
   }
 }
 
-function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl) {
+function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl, providerId = '') {
   const think = thinkingRaw.trim().toLowerCase();
   const effort = effortRaw.trim().toLowerCase();
   if (think === 'disabled' || think === 'off') {
@@ -1454,7 +1460,7 @@ function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl) {
     if (SELF_UPGRADE_THINKING_LEVELS.has(think)) return { level: think, reasoning: think !== 'off' };
     throw new Error(`Unsupported thinking mode "${thinkingRaw}"`);
   }
-  if (isZaiOrGlmTarget(modelId, baseUrl)) {
+  if (isZaiOrGlmTarget(modelId, baseUrl, providerId)) {
     return { level: 'low', reasoning: true };
   }
   return { level: 'off', reasoning: false };
@@ -1496,7 +1502,12 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
     firstNonEmptyEnv(env, 'SELF_UPGRADE_INPUT_REASONING_EFFORT', 'CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT', 'CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT'),
     rawModel,
     baseUrl,
+    providerId,
   );
+  // Bypass snapThinkingToCatalogMap when resolvedThinking.level === 'off':
+  // models.json sets `reasoning: thinkingLevel !== 'off'`, which @loopwright/agent-pi validates
+  // directly without consulting @earendil-works/pi-ai's built-in thinkingLevelMap (whose fallback
+  // table would otherwise snap 'off' to 'low' for ZAI/GLM catalog entries).
   const thinkingLevel = resolvedThinking.level === 'off'
     ? 'off'
     : snapThinkingToCatalogMap(resolvedThinking.level, providerId, rawModel, api);
@@ -1534,7 +1545,7 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
   }
 
   const lowerModel = rawModel.toLowerCase();
-  const zaiCompat = api === 'openai-completions' && isZaiOrGlmTarget(rawModel, baseUrl)
+  const zaiCompat = api === 'openai-completions' && isZaiOrGlmTarget(rawModel, baseUrl, providerId)
     ? {
       thinkingFormat: 'zai',
       ...(!(lowerModel.startsWith('glm-4') || lowerModel.includes('/glm-4')) ? { supportsReasoningEffort: true } : {}),

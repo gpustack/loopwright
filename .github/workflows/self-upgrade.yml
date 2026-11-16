@@ -325,5 +325,7 @@ jobs:
             ${{ runner.temp }}/loopwright-self-upgrade/*/artifacts/**/*.json
             ${{ runner.temp }}/loopwright-self-upgrade/lw-action-*/config/config.yaml
             ${{ runner.temp }}/loopwright-self-upgrade/lw-action-*/registry/registry.yaml
+            !${{ runner.temp }}/loopwright-self-upgrade/**/secrets.json
+            !${{ runner.temp }}/loopwright-self-upgrade/**/*.sqlite*
           retention-days: 30
           if-no-files-found: ignore
