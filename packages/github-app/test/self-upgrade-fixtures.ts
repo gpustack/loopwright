@@ -380,7 +380,6 @@ export async function createMiniSelfUpgradeRepo(
   for (const rel of [
     '.loopwright/taskpack.yaml',
     '.loopwright/instructions.md',
-    '.loopwright/proposal.json',
     '.loopwright/checks/verify.sh',
   ]) {
     const raw = await readFile(join(REPO_ROOT, rel));
@@ -388,6 +387,13 @@ export async function createMiniSelfUpgradeRepo(
       mode: rel.endsWith('.sh') ? 0o755 : 0o600,
     });
   }
+
+  const preflight = await loadPreflightModule();
+  await writeFile(
+    join(repoRoot, '.loopwright/proposal.json'),
+    `${JSON.stringify(preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'), null, 2)}\n`,
+    { mode: 0o600 },
+  );
 
   await writeFile(
     join(repoRoot, '.agents/skills/loopwright-step/SKILL.md'),

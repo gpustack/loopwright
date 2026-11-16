@@ -1372,6 +1372,7 @@ test('openPiHostSessionAdapterV2 paginates quote-heavy >140KB JSON read cleanly 
     }
   } finally {
     fixture.cleanup();
+    server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
@@ -1455,6 +1456,7 @@ test('openPiHostSessionAdapterV2 recovers across missing-file/directory read, mi
     }
   } finally {
     fixture.cleanup();
+    server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 
@@ -1482,6 +1484,7 @@ test('openPiHostSessionAdapterV2 recovers across missing-file/directory read, mi
     }
   } finally {
     denyFixture.cleanup();
+    denyServer.closeAllConnections();
     await new Promise<void>(resolve => denyServer.close(() => resolve()));
   }
 });
@@ -1603,6 +1606,7 @@ test('openPiHostSessionAdapterV2 normalizes bash candidate path aliases, support
     }
   } finally {
     fixture.cleanup();
+    server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 
@@ -1649,6 +1653,7 @@ test('openPiHostSessionAdapterV2 normalizes bash candidate path aliases, support
     }
   } finally {
     denyFixture.cleanup();
+    denyServer.closeAllConnections();
     await new Promise<void>(resolve => denyServer.close(() => resolve()));
   }
 });
@@ -1728,6 +1733,7 @@ test('HostSession handles malformed tool args softly and strips null optional pa
     }
   } finally {
     fixture.cleanup();
+    server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
