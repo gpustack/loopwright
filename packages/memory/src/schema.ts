@@ -133,6 +133,69 @@ function artifactRef(value: unknown, path: string): ArtifactRef {
   if (name.startsWith('/') || name.split('/').includes('..')) fail('MEMORY_SCHEMA_INVALID', `${path}/name`, 'artifact name must stay relative');
   return { name, digest: digestShape(input['digest'], `${path}/digest`), byteLength: integer(input['byteLength'], `${path}/byteLength`, 0) };
 }
+const CONTROLLER_INCIDENT_CODES = [
+  'CONFIG_SYNTAX', 'CONFIG_DUPLICATE_KEY', 'CONFIG_LIMIT', 'CONFIG_SCHEMA', 'CONFIG_REFERENCE', 'CONFIG_ENV_MISSING',
+  'CONFIG_ENV_SYNTAX', 'CONFIG_ENV_DENIED', 'CONFIG_CREDENTIAL_INVALID', 'REGISTRY_UNTRUSTED', 'TARGET_MISMATCH', 'CAPABILITY_UNSUPPORTED',
+  'MCP_AUTHENTICATION_REQUIRED', 'SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS', 'VERIFICATION_FAILED', 'EVIDENCE_UNAVAILABLE', 'GATE_TIMEOUT', 'RECEIPT_CONFLICT', 'REPEAT_FAILURE',
+  'ATTEMPT_LIMIT', 'BUDGET_EXHAUSTED', 'DEADLINE', 'CANCELLED', 'OWNER_BUSY', 'AUTHORITY_REFUSED', 'RECOVERY_REQUIRED', 'ARTIFACT_INVALID',
+  'OUTPUT_LIMIT', 'CLEANUP_FAILED', 'STATE_UNAVAILABLE',
+] as const;
+const CONTROLLER_INCIDENT_STAGES = [
+  'configuration', 'compile', 'admission', 'execution', 'verification', 'recovery', 'finalization', 'inspection',
+] as const;
+const CONTROLLER_CLEANUP_STATES = ['complete', 'pending', 'failed'] as const;
+
+export function controllerIncidentSchema(
+  value: unknown,
+  expectedLock: { readonly spec: { readonly runId: string; readonly lockHash: Digest } },
+  path = 'artifacts/incident',
+): ControllerIncident {
+  const input = objectShape(value, path);
+  field(input, ['version', 'code', 'runId', 'lockHash', 'stage', 'knownReferences', 'unavailable', 'cleanup'], path);
+  if (input['version'] !== 1) fail('MEMORY_SCHEMA_INVALID', `${path}/version`, 'unsupported incident version');
+  const code = text(input['code'], `${path}/code`, 1, 64);
+  if (!CONTROLLER_INCIDENT_CODES.includes(code as (typeof CONTROLLER_INCIDENT_CODES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/code`, 'unknown controller incident code');
+  }
+  const runId = identifier(input['runId'], `${path}/runId`, 128);
+  if (runId !== expectedLock.spec.runId) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/runId`, 'incident runId does not match retained TaskLock');
+  }
+  const lockHash = digestShape(input['lockHash'], `${path}/lockHash`);
+  if (!digestEqual(lockHash, expectedLock.spec.lockHash)) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/lockHash`, 'incident lockHash does not match retained TaskLock');
+  }
+  const stage = text(input['stage'], `${path}/stage`, 1, 32);
+  if (!CONTROLLER_INCIDENT_STAGES.includes(stage as (typeof CONTROLLER_INCIDENT_STAGES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/stage`, 'unknown controller incident stage');
+  }
+  if (!Array.isArray(input['knownReferences']) || input['knownReferences'].length > 64) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/knownReferences`, 'knownReferences length outside 0..64');
+  }
+  const knownReferences = input['knownReferences'].map((item, index) => artifactRef(item, `${path}/knownReferences/${index}`));
+  if (!Array.isArray(input['unavailable']) || input['unavailable'].length > 32) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/unavailable`, 'unavailable length outside 0..32');
+  }
+  const unavailable = input['unavailable'].map((item, index) => {
+    const entry = text(item, `${path}/unavailable/${index}`, 1, 128);
+    if (hasControlCharacter(entry)) fail('MEMORY_SCHEMA_INVALID', `${path}/unavailable/${index}`, 'control character in unavailable item');
+    return entry;
+  });
+  const cleanup = text(input['cleanup'], `${path}/cleanup`, 1, 16);
+  if (!CONTROLLER_CLEANUP_STATES.includes(cleanup as (typeof CONTROLLER_CLEANUP_STATES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/cleanup`, 'unknown cleanup state');
+  }
+  return Object.freeze({
+    version: 1 as const,
+    code: code as ControllerIncident['code'],
+    runId,
+    lockHash,
+    stage: stage as ControllerIncident['stage'],
+    knownReferences: Object.freeze(knownReferences),
+    unavailable: Object.freeze(unavailable),
+    cleanup: cleanup as ControllerIncident['cleanup'],
+  });
+}
 function evidenceRef(value: unknown, path: string): MemoryEvidenceRef {
   const input = objectShape(value, path);
   field(input, ['evidenceId', 'checkId', 'level', 'observedStatus', 'artifact'], path);

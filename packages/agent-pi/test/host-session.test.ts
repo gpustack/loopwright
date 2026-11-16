@@ -1652,3 +1652,82 @@ test('openPiHostSessionAdapterV2 normalizes bash candidate path aliases, support
     await new Promise<void>(resolve => denyServer.close(() => resolve()));
   }
 });
+
+test('HostSession handles malformed tool args softly and strips null optional parameters end-to-end across turns', async () => {
+  let turn = 0;
+  const observedToolMessages: string[] = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    req.on('end', () => {
+      const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { messages?: { role?: string; content?: unknown }[] };
+      const toolMsgs = (parsed.messages ?? []).filter(m => m.role === 'tool');
+      const lastToolMsg = toolMsgs.at(-1);
+      if (lastToolMsg) {
+        observedToolMessages.push(typeof lastToolMsg.content === 'string' ? lastToolMsg.content : JSON.stringify(lastToolMsg.content));
+      }
+      turn++;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (turn === 1) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-1', 'edit', { path: 'packages/example.ts', old_string: '1', new_string: '2' }));
+      } else if (turn === 2) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-2', 'edit', { path: 'packages/example.ts', oldText: 'value = 1' }));
+      } else if (turn === 3) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-3', 'edit', { path: 'packages/example.ts', edits: [{ oldText: 'value = 1', newText: 'value = 55' }], oldText: null, newText: null }));
+      } else if (turn === 4) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-4', 'edit', { path: 'packages/example.ts', edits: null, oldText: 'value = 55', newText: 'value = 88' }));
+      } else if (turn === 5) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-5', 'read', { path: 'packages/example.ts', offset: null, limit: null }));
+      } else if (turn === 6) {
+        res.end(sseToolCall('glm-5.3', 'call-soft-6', 'bash', { command: 'echo ok', timeout: null }));
+      } else {
+        res.end(sseStop('glm-5.3', 'All edits verified cleanly.'));
+      }
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('listen failed');
+
+  const progressEvents: HostSessionProgressEvent[] = [];
+  const fixture = await createHostSessionFixture({ baseUrl: `http://127.0.0.1:${addr.port}/v1` });
+  try {
+    const opened = await openPiHostSessionAdapterV2(
+      fixture.hostV2,
+      fixture.inputV2,
+      { onProgress: event => progressEvents.push(event) },
+    );
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) return;
+    try {
+      const executed = await opened.value.execute({ commandId: 'cmd-soft-args-e2e', text: 'Update packages/example.ts', purpose: 'task', repair: 'none' });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) return;
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+      assert.equal(turn, 7);
+      assert.match(observedToolMessages[0] ?? '', /Invalid arguments for tool "edit"/);
+      assert.match(observedToolMessages[1] ?? '', /Invalid arguments for tool "edit"/);
+      assert.match(observedToolMessages[4] ?? '', /export const value = 88;/);
+      assert.match(observedToolMessages[5] ?? '', /ok/);
+
+      const candidateDir = join(fixture.runtimeDir, 'sdk-' + fixture.inputV2.sessionId, 'candidate');
+      assert.equal(readFileSync(join(candidateDir, 'packages/example.ts'), 'utf8'), 'export const value = 88;\n');
+
+      const toolEnds = progressEvents.filter((e): e is Extract<HostSessionProgressEvent, { kind: 'tool_end' }> => e.kind === 'tool_end');
+      assert.equal(toolEnds.length, 6);
+      assert.equal(toolEnds[0]?.isError, true);
+      assert.equal(toolEnds[0]?.errorCode, undefined);
+      assert.equal(toolEnds[1]?.isError, true);
+      assert.equal(toolEnds[1]?.errorCode, undefined);
+      assert.equal(toolEnds[2]?.isError, false);
+      assert.equal(toolEnds[3]?.isError, false);
+      assert.equal(toolEnds[4]?.isError, false);
+      assert.equal(toolEnds[5]?.isError, false);
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    fixture.cleanup();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});

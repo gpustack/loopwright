@@ -662,7 +662,7 @@ function validateMemoryPullRequestApiResponse(
 }
 
 function validateRetainedSettledRunBindings(
-  settled: Pick<ResolvedSettledCycleContext, 'lock' | 'result'>,
+  settled: Pick<ResolvedSettledCycleContext, 'lock' | 'result'> & { readonly incident?: ResolvedSettledCycleContext['incident'] },
   expected: {
     readonly runId: string;
     readonly repositoryFullName: string;
@@ -692,6 +692,14 @@ function validateRetainedSettledRunBindings(
       || subject.baseRevision.toLowerCase() !== expected.baseRevision.toLowerCase()
     ) {
       return 'MEMORY_SCOPE_VIOLATION: retained RunResult subject does not match retained TaskLock and publication target';
+    }
+  }
+  if (settled.incident !== undefined && settled.incident !== null) {
+    if (
+      settled.incident.runId !== expected.runId
+      || settled.incident.lockHash.hex !== settled.lock.spec.lockHash.hex
+    ) {
+      return 'MEMORY_SCOPE_VIOLATION: retained ControllerIncident does not match retained TaskLock';
     }
   }
   return null;

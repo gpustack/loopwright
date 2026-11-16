@@ -470,6 +470,13 @@ export class Candidate {
     return name;
   }
 
+  enforceHardPathInvariants(raw: string, options?: { readonly allowRootAlias?: boolean | undefined }): string {
+    if (typeof raw !== 'string') refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    if (options?.allowRootAlias && this.#isRootCandidateDirectoryAlias(raw)) return '.';
+    const hadTrailingSlash = raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
+    return this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+  }
+
   #writable(name: string): void {
     if (!this.isWritable(name)) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
   }
@@ -857,18 +864,58 @@ export class Candidate {
   async tryPrepareEdit(
     raw: string,
     input: unknown,
-    options?: { readonly softScopeError?: boolean | undefined },
+    options?: { readonly softScopeError?: boolean | undefined; readonly softArgumentError?: boolean | undefined },
   ): Promise<CandidateMutationPreparation> {
     const hadTrailingSlash = typeof raw === 'string' && raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
     const path = this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
-    const items = list(input, 32, '/edits');
-    const validatedEntries = items.map(value => {
-      const entry = object(value, ['oldText', 'newText'], '/edits');
-      if (typeof entry.oldText !== 'string' || typeof entry.newText !== 'string' || Buffer.from(entry.newText).toString('utf8') !== entry.newText) {
-        refuse('TOOL_DENIED', '/edits', { phase: 'tool' });
+    let validatedEntries: { oldText: string; newText: string }[];
+    if (options?.softArgumentError) {
+      let items: unknown[];
+      try {
+        items = list(input, 32, '/edits');
+      } catch {
+        return freeze({
+          kind: 'error' as const,
+          targetPath: path,
+          message: `Invalid arguments for tool "edit" on ${path}: "edits" must be an array of 1..32 {"oldText": "...", "newText": "..."} objects.`,
+        });
       }
-      return { oldText: entry.oldText, newText: entry.newText };
-    });
+      validatedEntries = [];
+      for (const [idx, value] of items.entries()) {
+        let entry: Record<string, unknown>;
+        try {
+          entry = object(value, ['oldText', 'newText'], '/edits');
+        } catch {
+          return freeze({
+            kind: 'error' as const,
+            targetPath: path,
+            message: `Invalid arguments for tool "edit" on ${path}: edits[${idx}] must be an object with exact string fields {"oldText": "...", "newText": "..."}.`,
+          });
+        }
+        if (
+          typeof entry.oldText !== 'string'
+          || typeof entry.newText !== 'string'
+          || Buffer.from(entry.oldText).toString('utf8') !== entry.oldText
+          || Buffer.from(entry.newText).toString('utf8') !== entry.newText
+        ) {
+          return freeze({
+            kind: 'error' as const,
+            targetPath: path,
+            message: `Invalid arguments for tool "edit" on ${path}: edits[${idx}].oldText and edits[${idx}].newText must be valid UTF-8 strings.`,
+          });
+        }
+        validatedEntries.push({ oldText: entry.oldText, newText: entry.newText });
+      }
+    } else {
+      const items = list(input, 32, '/edits');
+      validatedEntries = items.map(value => {
+        const entry = object(value, ['oldText', 'newText'], '/edits');
+        if (typeof entry.oldText !== 'string' || typeof entry.newText !== 'string' || Buffer.from(entry.newText).toString('utf8') !== entry.newText) {
+          refuse('TOOL_DENIED', '/edits', { phase: 'tool' });
+        }
+        return { oldText: entry.oldText, newText: entry.newText };
+      });
+    }
     if (!this.isWritable(path)) {
       if (options?.softScopeError) return this.#scopeDeniedError('edit', path);
       refuse('TOOL_DENIED', '/path', { phase: 'tool' });

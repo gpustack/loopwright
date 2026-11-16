@@ -5,11 +5,11 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { ControllerIncident } from '@loopwright/controller';
 import { applyMemoryProposalCAS } from '../src/cas.js';
-import { finalizeRunMemory } from '../src/finalizer.js';
+import { finalizeRunMemory, resolveSettledCycleContext } from '../src/finalizer.js';
 import { canonical, incidentReferenceDigest, storeDigestOf, syntheticIncidentArtifact } from '../src/schema.js';
 import { loadMemoryStore, memoryDirectoryFor } from '../src/store.js';
 import { verifyMemoryProposal } from '../src/verifier.js';
-import { BASE_REVISION, CONTRACT, SOURCE_REVISION, buildRun, digestOf, hexText, inventoryMap, type RunFixture } from './run-fixtures.js';
+import { BASE_REVISION, CONTRACT, SOURCE_REVISION, artifactOf, buildRun, digestOf, hexText, inventoryMap, refOf, type RunFixture } from './run-fixtures.js';
 import type { MemoryBudgetLedger, MemoryCuratorPort, MemoryEntry, MemoryFinalizerConfig, MemoryFinalizerOutcome, MemoryOperation, MemoryProposal, MemoryStoreIndex, MemoryVerificationInput } from '../src/types.js';
 
 async function withSandbox(run: (root: string) => Promise<void>): Promise<void> {
@@ -414,6 +414,272 @@ describe('five-gate proposal verifier', () => {
       const report = verifyMemoryProposal(verificationInput(outcome.proposal!, (await loadMemoryStore(root, 'demo', 'org/repo')).index, fixture, ''));
       assert.equal(report.satisfied, true);
       assert.equal(report.gates.length, 5);
+    });
+  });
+
+  it('resolves incident-only run_directory runs with knownReferences or synthetic fallback, verifies all 5 gates, and applies CAS', async () => {
+    const writeRunDir = async (
+      runRoot: string,
+      runId: string,
+      fixture: RunFixture,
+      incident: ControllerIncident,
+      extraArtifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[] = [],
+      writeResult = false,
+    ) => {
+      const runDir = join(runRoot, runId);
+      const artifactsDir = join(runDir, 'artifacts');
+      await mkdir(artifactsDir, { recursive: true });
+      await writeFile(join(runDir, 'run.json'), JSON.stringify({ version: 1, identity: { lock: fixture.lock } }), 'utf8');
+      const incidentBytes = Buffer.from(canonical(incident), 'utf8');
+      const incidentRef = refOf({ name: `incident-${runId}.bin`, bytes: incidentBytes });
+      await writeFile(join(artifactsDir, incidentRef.name), incidentBytes);
+      if (writeResult) {
+        const resultBytes = Buffer.from(canonical(fixture.result), 'utf8');
+        await writeFile(join(artifactsDir, `result-${runId}.bin`), resultBytes);
+      }
+      for (const extra of extraArtifacts) {
+        await writeFile(join(artifactsDir, extra.name), extra.bytes);
+      }
+      return { runDir, artifactsDir };
+    };
+
+    // Case 1: incident-only run directory with retained knownReferences[0]
+    const fixture1 = await buildRun('failed', 'run.incident.dir.one');
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const planArtifact = artifactOf('plan-one.bin', JSON.stringify({ step: 'build', status: 'failed' }));
+      const planRef = refOf(planArtifact);
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: fixture1.lock.spec.runId,
+        lockHash: fixture1.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [planRef],
+        unavailable: ['candidate'],
+        cleanup: 'complete',
+      };
+      await writeRunDir(runRoot, fixture1.lock.spec.runId, fixture1, incident, [planArtifact]);
+
+      const settled = await resolveSettledCycleContext({
+        kind: 'run_directory',
+        runRoot,
+        runId: fixture1.lock.spec.runId,
+        repository: root,
+        ledger: LEDGER,
+      });
+      assert.equal(settled.result, null);
+      assert.deepEqual(settled.incident, incident);
+      assert.ok(settled.inventory.has(planRef.name));
+
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: fixture1.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'proposed');
+      assert.equal(outcome.deterministicEntries.length, 1);
+      assert.equal(outcome.deterministicEntries[0]!.kind, 'failure_observation');
+      assert.equal(outcome.deterministicEntries[0]!.id, 'entry.run.incident.dir.one.incident');
+      assert.ok(outcome.deterministicEntries[0]!.claim.includes('DEADLINE'));
+
+      const store = (await loadMemoryStore(root, 'demo', 'org/repo')).index;
+      const report = verifyMemoryProposal({
+        proposal: outcome.proposal!,
+        store,
+        lock: settled.lock,
+        result: null,
+        incident: settled.incident,
+        evidence: settled.evidence,
+        artifacts: settled.inventory,
+        candidateDigest: null,
+        patch: outcome.patch ?? '',
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+      });
+      assert.equal(report.satisfied, true, JSON.stringify(report.gates));
+
+      const cas = await applyMemoryProposalCAS({
+        repository: root,
+        taskpack: 'demo',
+        proposal: outcome.proposal!,
+        lock: settled.lock,
+        result: null,
+        incident: settled.incident,
+        evidence: settled.evidence,
+        artifacts: settled.inventory,
+        candidateDigest: null,
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+        targetBranch: 'main',
+        currentRevision: BASE_REVISION,
+        baseStore: store,
+        allowRebase: true,
+        nowMs: 1500,
+      });
+      assert.equal(cas.applied, true);
+    });
+
+    // Case 2: incident-only run directory with knownReferences: [] uses syntheticIncidentArtifact
+    const fixture2 = await buildRun('failed', 'run.incident.dir.empty');
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'BUDGET_EXHAUSTED',
+        runId: fixture2.lock.spec.runId,
+        lockHash: fixture2.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      await writeRunDir(runRoot, fixture2.lock.spec.runId, fixture2, incident);
+      const settled = await resolveSettledCycleContext({ kind: 'run_directory', runRoot, runId: fixture2.lock.spec.runId, repository: root, ledger: LEDGER });
+      assert.ok(settled.inventory.has(syntheticIncidentArtifact(incident).name));
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: fixture2.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'proposed');
+      const store = (await loadMemoryStore(root, 'demo', 'org/repo')).index;
+      const cas = await applyMemoryProposalCAS({
+        repository: root,
+        taskpack: 'demo',
+        proposal: outcome.proposal!,
+        lock: settled.lock,
+        result: null,
+        incident: settled.incident,
+        evidence: settled.evidence,
+        artifacts: settled.inventory,
+        candidateDigest: null,
+        secretValues: [],
+        memoryWritable: [memoryDirectoryFor('demo')],
+        protectedPaths: [],
+        targetBranch: 'main',
+        currentRevision: BASE_REVISION,
+        baseStore: store,
+        allowRebase: true,
+        nowMs: 1500,
+      });
+      assert.equal(cas.applied, true);
+    });
+
+    // Negative fail-closed cases (all return status: 'unavailable', MEMORY_SCHEMA_INVALID)
+    // 1. Both result-*.bin and incident-*.bin exist
+    const negFixture = await buildRun('failed', 'run.incident.dir.neg');
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident, [], true);
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+
+    // 2. Multiple incident-*.bin files exist
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      const secondBytes = Buffer.from(canonical({ ...incident, code: 'CANCELLED' }), 'utf8');
+      await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident, [{ name: 'incident-extra.bin', bytes: secondBytes }]);
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+
+    // 3. Mismatched runId / lockHash or invalid code/stage/cleanup
+    for (const badIncident of [
+      { version: 1, code: 'DEADLINE', runId: 'run.other', lockHash: negFixture.lock.spec.lockHash, stage: 'execution', knownReferences: [], unavailable: [], cleanup: 'complete' },
+      { version: 1, code: 'DEADLINE', runId: negFixture.lock.spec.runId, lockHash: digestOf('wrong-lock'), stage: 'execution', knownReferences: [], unavailable: [], cleanup: 'complete' },
+      { version: 1, code: 'NOT_A_CODE', runId: negFixture.lock.spec.runId, lockHash: negFixture.lock.spec.lockHash, stage: 'execution', knownReferences: [], unavailable: [], cleanup: 'complete' },
+      { version: 1, code: 'DEADLINE', runId: negFixture.lock.spec.runId, lockHash: negFixture.lock.spec.lockHash, stage: 'bogus_stage', knownReferences: [], unavailable: [], cleanup: 'complete' },
+      { version: 1, code: 'DEADLINE', runId: negFixture.lock.spec.runId, lockHash: negFixture.lock.spec.lockHash, stage: 'execution', knownReferences: [], unavailable: [], cleanup: 'unknown' },
+    ]) {
+      await withSandbox(async root => {
+        const runRoot = join(root, 'runs');
+        await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, badIncident as unknown as ControllerIncident);
+        const outcome = await finalizeRunMemory({
+          context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+          config: finalizerConfig(),
+        });
+        assert.equal(outcome.status, 'unavailable');
+        assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+      });
+    }
+
+    // 4a. knownReferences[0] missing on disk
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const missingRef = refOf(artifactOf('plan-missing.bin', 'missing'));
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [missingRef],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident);
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+
+    // 4b. knownReferences[0] tampered digest/byteLength on disk
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const expectedArtifact = artifactOf('plan-tampered.bin', 'expected-plan-content');
+      const expectedRef = refOf(expectedArtifact);
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [expectedRef],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident, [
+        { name: expectedRef.name, bytes: Buffer.from('tampered-plan-content', 'utf8') },
+      ]);
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
     });
   });
 });

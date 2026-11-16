@@ -1164,7 +1164,7 @@ class HostExecution extends Execution {
     ports: ExecutionPorts,
     readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined,
   ) {
-    super(host, input, candidateDir, { ...ports, softScopeErrors: true });
+    super(host, input, candidateDir, { ...ports, softScopeErrors: true, softArgumentErrors: true });
   }
 
   #extractTargetPath(identity: AdmittedToolIdentity, bytes: Uint8Array): string | null {

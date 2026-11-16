@@ -6,9 +6,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
+import type { ControllerIncident } from '@loopwright/controller';
+import { admitTask, digestArtifact } from '@loopwright/core';
 import { loadMemoryStore } from '@loopwright/memory';
 import {
+  DEFAULT_HOST_BUDGETS,
   SecretScrubber,
+  compileDeclarativeTaskpack,
   finalizeAndPublishTurnkeyMemory,
   findOpenManagedPullRequest,
   findOpenMemoryPullRequest,
@@ -1159,6 +1163,174 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
     } finally {
       await openAiServer?.close();
       await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes a failure_observation memory PR from an incident-only run directory and refuses mismatched incident bindings', async () => {
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-turnkey-incident-mem-'));
+    const work = await realpath(rawWork);
+    const bareRemote = join(work, 'remote.git');
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+
+    const memoryPrPayloads: Record<string, unknown>[] = [];
+    const githubServer = await startHttpServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/repos/acme/repo/pulls') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/repos/acme/repo/pulls') {
+        const body = await readJsonBody(req);
+        memoryPrPayloads.push(body);
+        const headRef = String(body['head'] ?? '');
+        const lsOut = await git(repo, ['ls-remote', bareRemote, `refs/heads/${headRef}`]);
+        const remoteSha = lsOut.split(/\s+/)[0] ?? '';
+        const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          number: 71,
+          html_url: 'https://github.invalid/acme/repo/pull/71',
+          state: 'open',
+          head: { ref: headRef, sha: remoteSha, repo: { full_name: 'acme/repo', fork: false } },
+          base: { ref: 'main', sha: baseSha, repo: { full_name: 'acme/repo', fork: false } },
+        }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unexpected route' }));
+    });
+
+    try {
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(repo, { recursive: true });
+      await mkdir(runRoot, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '--initial-branch=main']);
+      await git(repo, ['init', '--initial-branch=main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'docs'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml('http://127.0.0.1:1'), 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), '# Incident test\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'checks', 'verify.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      await writeFile(join(repo, 'docs', 'status.md'), '# Status\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'proposal.json'), '{"schema_version":1,"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'frozen.json'), '{"locked":true}\n', 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'chore: bootstrap incident test repo']);
+      const headSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      const manifest = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: repo });
+      const compiled = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        repository: 'acme/repo',
+        baseRevision: headSha,
+        sourceRevision: headSha,
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+
+      const runId = 'run-incident-only-1';
+      const locked = admitTask(compiled.config.spec.task, { admissionId: 'admission-inc-1', runId });
+      assert.equal(locked.ok, true);
+      if (!locked.ok) throw new Error('admitTask failed');
+
+      const runDir = join(runRoot, runId);
+      const artifactsDir = join(runDir, 'artifacts');
+      await mkdir(artifactsDir, { recursive: true });
+      await writeFile(join(runDir, 'run.json'), JSON.stringify({ version: 1, identity: { lock: locked.value } }), 'utf8');
+
+      const planBytes = Buffer.from(JSON.stringify({ stage: 'execution', note: 'timed out' }), 'utf8');
+      const planRefRes = digestArtifact('plan-incident.bin', planBytes);
+      assert.equal(planRefRes.ok, true);
+      if (!planRefRes.ok) throw new Error('digestArtifact failed');
+      await writeFile(join(artifactsDir, planRefRes.value.name), planBytes);
+
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId,
+        lockHash: locked.value.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [planRefRes.value],
+        unavailable: ['candidate'],
+        cleanup: 'complete',
+      };
+      const incidentBytes = Buffer.from(JSON.stringify(incident), 'utf8');
+      await writeFile(join(artifactsDir, `incident-${runId}.bin`), incidentBytes);
+
+      const scrubber = new SecretScrubber();
+      scrubber.register('ghp_incident_token_123456');
+
+      const published = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: headSha,
+        runRoot,
+        runId,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_incident_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+      });
+
+      assert.equal(published.status, 'published', JSON.stringify(published));
+      assert.equal(published.entryCount, 1);
+      assert.equal(published.pullRequestNumber, 71);
+      assert.equal(memoryPrPayloads.length, 1);
+
+      const memClone = join(work, 'mem-clone');
+      await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, memClone]);
+      const loadedStore = await loadMemoryStore(memClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      assert.equal(loadedStore.index.entries.length, 1);
+      assert.equal(loadedStore.index.entries[0]?.kind, 'failure_observation');
+      assert.match(loadedStore.index.entries[0]?.claim ?? '', /DEADLINE/);
+
+      // Negative check: tampered incident lockHash is refused fail-closed
+      const badRunId = 'run-incident-tampered';
+      const badRunDir = join(runRoot, badRunId);
+      const badArtifactsDir = join(badRunDir, 'artifacts');
+      await mkdir(badArtifactsDir, { recursive: true });
+      const badLocked = admitTask(compiled.config.spec.task, { admissionId: 'admission-inc-bad', runId: badRunId });
+      assert.equal(badLocked.ok, true);
+      if (!badLocked.ok) throw new Error('admitTask failed');
+      await writeFile(join(badRunDir, 'run.json'), JSON.stringify({ version: 1, identity: { lock: badLocked.value } }), 'utf8');
+      const tamperedIncident: ControllerIncident = {
+        ...incident,
+        runId: badRunId,
+        lockHash: { algorithm: 'sha256', hex: 'f'.repeat(64) },
+      };
+      await writeFile(join(badArtifactsDir, `incident-${badRunId}.bin`), JSON.stringify(tamperedIncident), 'utf8');
+
+      const refused = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: headSha,
+        runRoot,
+        runId: badRunId,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_incident_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+      });
+      assert.equal(refused.status, 'refused');
+      assert.match(refused.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    } finally {
+      await githubServer.close();
       await rm(work, { recursive: true, force: true });
     }
   });
