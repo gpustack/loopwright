@@ -48,7 +48,7 @@ export {
 export {
   checkManagedPrMatchesDiscoveredState, compareVersionTags, DEFAULT_GIT_COMMIT_IDENTITY,
   discoverTaskpackUpstreams, findOpenManagedPullRequest, findOpenMemoryPullRequest,
-  MEMORY_PULL_REQUEST_BRANCH_PREFIX, parseOptionalGitIdentityInput,
+  isPrereleaseVersionTag, MEMORY_PULL_REQUEST_BRANCH_PREFIX, parseOptionalGitIdentityInput,
   parseUpstreamRecordsJson, resolveGitHubAuth, resolveGitHubToken,
   resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
   validateGitCommitIdentity,

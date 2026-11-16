@@ -9,6 +9,7 @@ import { inspectRun, signPayload } from '@loopwright/controller';
 import {
   discoverTaskpackUpstreams,
   GitHubAppError,
+  isPrereleaseVersionTag,
   loadDeclarativeTaskpack,
   runGitHubActionEntrypoint,
   startLocalCommandGateServer,
@@ -2151,6 +2152,405 @@ spec:
       }
     } finally {
       await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects untagged SemVer / PEP-440 prerelease tags when allowPrerelease is false while keeping post-releases and allowPrerelease: true intact', async () => {
+    for (const tag of [
+      'v0.33.0rc3',
+      '0.32.0rc1',
+      'v1.0.0-rc.1',
+      'v2.0.0-rc.1',
+      'v1.0.0-alpha.2',
+      'v1.0.0-beta1',
+      'v1.0.0.dev3',
+      'v1.0.0-pre.1',
+      'v1.0.0-preview1',
+      'v1.0.0-nightly.20261116',
+      'v1.0.0a1',
+      'v1.0.0b2',
+      '  V0.33.0RC3  ',
+    ]) {
+      assert.equal(isPrereleaseVersionTag(tag), true, `expected prerelease tag: ${tag}`);
+    }
+    for (const tag of [
+      'v0.32.0',
+      'v0.5.23',
+      'v0.5.5.post1',
+      'v0.5.5-post1',
+      '1.0.0.post1',
+      'v1.2.3+b100',
+      'v1.2.3+dev1',
+    ]) {
+      assert.equal(isPrereleaseVersionTag(tag), false, `expected stable tag: ${tag}`);
+    }
+
+    const work = await mkdtemp(join(tmpdir(), 'lw-untagged-prerelease-'));
+    const repo = join(work, 'repo');
+    let server: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      await mkdir(join(repo, '.auto-sync'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: untagged-prerelease-filter
+spec:
+  goal:
+    candidate: Sync runner upstreams.
+    noChange: Verify no upstream drift.
+  scope:
+    writable:
+      - pack
+    protected:
+      - .github
+  upstreams:
+    - id: vllm-stable
+      kind: github-release
+      source: vllm-project/vllm
+      allowPrerelease: false
+      watchedPaths: ["pack/proposal.json"]
+    - id: vllm-post
+      kind: github-release
+      source: vllm-project/post-release
+      allowPrerelease: false
+      watchedPaths: ["pack/proposal.json"]
+    - id: vllm-pre
+      kind: github-release
+      source: vllm-project/vllm
+      allowPrerelease: true
+      watchedPaths: ["pack/proposal.json"]
+    - id: vllm-tags-stable
+      kind: git-tag
+      source: vllm-project/vllm-tags
+      allowPrerelease: false
+      watchedPaths: ["pack/proposal.json"]
+    - id: vllm-tags-only-pre
+      kind: git-tag
+      source: vllm-project/vllm-tags-pre
+      allowPrerelease: false
+      watchedPaths: ["pack/proposal.json"]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version]
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+    externalGates: []
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: auto-sync/
+    titleTemplate: "chore: sync"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+`);
+
+      server = await startHttpServer((req, res) => {
+        const url = req.url ?? '';
+        if (url === '/api/repos/vllm-project/vllm/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.33.0rc3', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { tag_name: 'v0.33.0rc3', prerelease: false, draft: false },
+            { tag_name: 'v0.33.0-beta.1', prerelease: true, draft: false },
+            { tag_name: 'v0.31.5', prerelease: false, draft: false },
+            { tag_name: 'v0.32.0', prerelease: false, draft: false },
+            { tag_name: 'v0.5.5.post1', prerelease: false, draft: false },
+          ]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/post-release/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.5.5.post1', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/post-release/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { tag_name: 'v0.33.0rc3', prerelease: false, draft: false },
+            { tag_name: 'v0.5.5.post1', prerelease: false, draft: false },
+          ]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-tags/tags?per_page=100') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { name: 'v0.33.0rc3', commit: { sha: '1'.repeat(40) } },
+            { name: 'v0.32.0', commit: { sha: '2'.repeat(40) } },
+          ]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-tags-pre/tags?per_page=100') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([
+            { name: 'v0.33.0rc3', commit: { sha: '1'.repeat(40) } },
+          ]));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: join(repo, '.auto-sync', 'taskpack.yaml'),
+        repositoryRoot: repo,
+      });
+      const discovered = await discoverTaskpackUpstreams(manifest, {
+        repositoryRoot: repo,
+        apiBaseUrl: `${server.url}/api`,
+        githubToken: 'ghp_test_untagged_prerelease_secret',
+      });
+
+      assert.deepEqual(discovered[0], {
+        upstreamId: 'vllm-stable',
+        status: 'available',
+        version: 'v0.32.0',
+        recentVersions: ['v0.32.0', 'v0.31.5', 'v0.5.5.post1'],
+      });
+      assert.deepEqual(discovered[1], {
+        upstreamId: 'vllm-post',
+        status: 'available',
+        version: 'v0.5.5.post1',
+        recentVersions: ['v0.5.5.post1'],
+      });
+      assert.deepEqual(discovered[2], {
+        upstreamId: 'vllm-pre',
+        status: 'available',
+        version: 'v0.33.0rc3',
+        recentVersions: ['v0.33.0rc3', 'v0.33.0-beta.1', 'v0.31.5', 'v0.32.0', 'v0.5.5.post1'],
+      });
+      assert.deepEqual(discovered[3], {
+        upstreamId: 'vllm-tags-stable',
+        status: 'available',
+        version: 'v0.32.0',
+      });
+      assert.equal(discovered[4]?.upstreamId, 'vllm-tags-only-pre');
+      assert.equal(discovered[4]?.status, 'failed');
+    } finally {
+      await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses empty initial PR branch push in startNativePullRequestPublisherServer when candidate tree matches baseTreeOid', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-empty-pr-refuse-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let pubServer: Awaited<ReturnType<typeof startNativePullRequestPublisherServer>> | undefined;
+
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(repo, { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update proposal if needed.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null })));
+      });
+
+      let postPullsCalled = 0;
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 99 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          postPullsCalled += 1;
+          res.writeHead(422, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ message: 'Validation Failed', errors: [{ message: 'No commits between main and auto-sync/main' }] }));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: empty-pr-refuse
+spec:
+  goal:
+    candidate: Sync pack
+    noChange: No change
+  scope:
+    writable:
+      - pack
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: auto-sync/
+    titleTemplate: "chore: empty pr refuse"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await mkdir(bareRemote, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+
+      const runResult = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 99,
+        baseRevision: baseSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-empty-pr-refuse',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_empty_pr_refuse_secret_1234',
+        gitRemoteUrl: bareRemote,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-empty-pr-refuse-token-1234',
+        },
+      });
+      assert.equal(runResult.kind, 'compiled', `unexpected runResult: ${JSON.stringify(runResult)}`);
+      assert.equal(runResult.delegateOutcome?.detail.includes('reconcile_required'), false);
+      assert.equal(postPullsCalled, 0);
+      assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+
+      const inspectOut = join(work, 'inspect-empty-pr');
+      const inspected = await inspectRun({ runRoot, runId: 'run-empty-pr-refuse', output: inspectOut });
+      assert.equal(inspected.ok, true);
+      const publicationDoc = JSON.parse(await readFile(join(inspectOut, 'publication.json'), 'utf8')) as {
+        status: string;
+        receipt: { outcome: string };
+      };
+      assert.equal(publicationDoc.receipt.outcome, 'not_executed');
+      const runResultDoc = JSON.parse(await readFile(join(inspectOut, 'result.json'), 'utf8')) as {
+        spec: { subject: { candidateDigest: { hex: string } } };
+      };
+
+      pubServer = await startNativePullRequestPublisherServer({
+        runRoot,
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        targetBranch: 'main',
+        headBranchPrefix: 'auto-sync/',
+        remoteUrl: bareRemote,
+        apiBaseUrl: githubServer.url,
+        gitWriteToken: 'ghp_empty_pr_refuse_secret_1234',
+      });
+      const rawBody = Buffer.from(JSON.stringify({
+        storeId: 'store',
+        runId: 'run-empty-pr-refuse',
+        lockHash: null,
+        operationId: 'op-empty-pr-1',
+        dispatchId: 'disp-empty-pr-1',
+        dispatchGeneration: 1,
+        idempotencyKey: 'idem-empty-pr-1',
+        candidateDigest: runResultDoc.spec.subject.candidateDigest.hex,
+      }), 'utf8');
+      const pubResponse = await fetch(pubServer.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'authorization': `Bearer ${pubServer.authToken}`,
+          'x-loopwright-signature': signPayload(pubServer.signingSecret, rawBody),
+        },
+        body: rawBody,
+      });
+      assert.equal(pubResponse.status, 200);
+      const rawReceiptText = await pubResponse.text();
+      assert.equal(
+        pubResponse.headers.get('x-loopwright-signature'),
+        signPayload(pubServer.signingSecret, Buffer.from(rawReceiptText, 'utf8')),
+      );
+      const receipt = JSON.parse(rawReceiptText) as { outcome: string; externalUrl: string | null; reason: string | null };
+      assert.equal(receipt.outcome, 'not_executed');
+      assert.equal(receipt.externalUrl, null);
+      assert.match(receipt.reason ?? '', /candidate tree matches base tree/);
+      assert.equal(postPullsCalled, 0);
+      assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+    } finally {
+      await pubServer?.close();
+      await openAiServer?.close();
+      await githubServer?.close();
       await rm(work, { recursive: true, force: true });
     }
   });

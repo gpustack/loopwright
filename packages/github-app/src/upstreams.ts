@@ -18,6 +18,7 @@ const MAX_PROPOSAL_BYTES = 262_144;
 export const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const SAFE_GIT_REF_PATTERN = /^[A-Za-z0-9_./@^~{}-]{1,256}$/;
 const SEMVER_TAG_PATTERN = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/i;
+const PRERELEASE_VERSION_TAG_PATTERN = /^v?\d+(?:\.\d+)+(?:[._-]?(?:alpha|beta|rc|dev|pre|preview|nightly|canary)\d*|[ab]\d+)(?:[._-]|$)/i;
 const UPSTREAM_STATUSES: ReadonlySet<string> = new Set<UpstreamAcquisitionStatus>([
   'available',
   'up_to_date',
@@ -487,6 +488,11 @@ function compareNaturalChunks(a: string, b: string): number {
   return chunksA.length - chunksB.length;
 }
 
+export function isPrereleaseVersionTag(tag: string): boolean {
+  const coreAndPre = tag.trim().split('+', 1)[0]!;
+  return PRERELEASE_VERSION_TAG_PATTERN.test(coreAndPre);
+}
+
 export function compareVersionTags(a: string, b: string): number {
   const semA = parseSemverTag(a);
   const semB = parseSemverTag(b);
@@ -549,6 +555,35 @@ function extractReleaseTag(record: Record<string, unknown>): string | undefined 
   return undefined;
 }
 
+function collectReleaseTags(
+  items: readonly unknown[],
+  options: { readonly allowPrerelease: boolean; readonly rejectTagPrerelease: boolean },
+): string[] {
+  const tags: string[] = [];
+  for (const item of items) {
+    if (!isPlainRecord(item) || item['draft'] === true) continue;
+    if (!options.allowPrerelease && item['prerelease'] === true) continue;
+    const itemTag = extractReleaseTag(item);
+    if (itemTag === undefined) continue;
+    if (options.rejectTagPrerelease && isPrereleaseVersionTag(itemTag)) continue;
+    if (!tags.includes(itemTag)) tags.push(itemTag);
+  }
+  return tags;
+}
+
+// When allowPrerelease === false is explicitly configured and every tag is a prerelease,
+// fail closed with ACTION_INPUT_INVALID rather than silently falling back to a prerelease commit SHA.
+function selectLatestVersionTag(tags: readonly string[], upstream: TaskpackUpstreamDescriptor): string {
+  const candidates = upstream.allowPrerelease === false
+    ? tags.filter(tag => !isPrereleaseVersionTag(tag))
+    : [...tags];
+  if (candidates.length === 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `no non-prerelease tags found for ${upstream.source}`);
+  }
+  candidates.sort(compareVersionTags);
+  return candidates[candidates.length - 1]!;
+}
+
 async function resolveSingleUpstreamDetails(
   upstream: TaskpackUpstreamDescriptor,
   context: {
@@ -571,12 +606,7 @@ async function resolveSingleUpstreamDetails(
       if (upstream.allowPrerelease === true) {
         const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
         if (list30.ok && Array.isArray(list30.data)) {
-          const tags: string[] = [];
-          for (const item of list30.data) {
-            if (!isPlainRecord(item) || item['draft'] === true) continue;
-            const itemTag = extractReleaseTag(item);
-            if (itemTag !== undefined && !tags.includes(itemTag)) tags.push(itemTag);
-          }
+          const tags = collectReleaseTags(list30.data, { allowPrerelease: true, rejectTagPrerelease: false });
           if (tags.length > 0) {
             return { version: tags[0]!, recentVersions: Object.freeze(tags.slice(0, 20)) };
           }
@@ -596,30 +626,46 @@ async function resolveSingleUpstreamDetails(
         throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub releases lookup failed (${list.status}) for ${upstream.source}`);
       }
 
+      const rejectTagPrerelease = upstream.allowPrerelease === false;
       const latestUrl = `${apiBaseUrl}/repos/${upstream.source}/releases/latest`;
       const latest = await fetchJson(latestUrl, fetchImpl, githubHeaders, timeoutMs, scrubber);
+      let rejectedLatestTag = false;
       if (latest.ok && isPlainRecord(latest.data) && latest.data['prerelease'] !== true) {
         const latestTag = extractReleaseTag(latest.data);
         if (latestTag !== undefined) {
-          let recentVersions: readonly string[] | undefined;
-          try {
-            const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
-            if (list30.ok && Array.isArray(list30.data)) {
-              const tags: string[] = [];
-              for (const item of list30.data) {
-                if (!isPlainRecord(item) || item['draft'] === true || item['prerelease'] === true) continue;
-                const itemTag = extractReleaseTag(item);
-                if (itemTag !== undefined && !tags.includes(itemTag)) tags.push(itemTag);
+          if (rejectTagPrerelease && isPrereleaseVersionTag(latestTag)) {
+            rejectedLatestTag = true;
+          } else {
+            let recentVersions: readonly string[] | undefined;
+            try {
+              const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
+              if (list30.ok && Array.isArray(list30.data)) {
+                const tags = collectReleaseTags(list30.data, { allowPrerelease: false, rejectTagPrerelease });
+                if (tags.length > 0) {
+                  recentVersions = Object.freeze([latestTag, ...tags.filter(item => item !== latestTag)].slice(0, 20));
+                }
               }
-              if (tags.length > 0) {
-                recentVersions = Object.freeze([latestTag, ...tags.filter(item => item !== latestTag)].slice(0, 20));
-              }
+            } catch {
+              // Best-effort history enrichment; primary /releases/latest result stands.
             }
-          } catch {
-            // Best-effort history enrichment; primary /releases/latest result stands.
+            return recentVersions !== undefined ? { version: latestTag, recentVersions } : { version: latestTag };
           }
-          return recentVersions !== undefined ? { version: latestTag, recentVersions } : { version: latestTag };
         }
+      }
+      if (rejectedLatestTag) {
+        const list30 = await fetchJson(list30Url, fetchImpl, githubHeaders, timeoutMs, scrubber);
+        if (!list30.ok || !Array.isArray(list30.data)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub releases lookup failed (${list30.status}) for ${upstream.source}`);
+        }
+        const stableTags = collectReleaseTags(list30.data, { allowPrerelease: false, rejectTagPrerelease: true });
+        if (stableTags.length > 0) {
+          const bestVersion = [...stableTags].sort(compareVersionTags).at(-1)!;
+          return {
+            version: bestVersion,
+            recentVersions: Object.freeze([bestVersion, ...stableTags.filter(item => item !== bestVersion)].slice(0, 20)),
+          };
+        }
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `no non-prerelease releases found for ${upstream.source}`);
       }
       throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub release lookup failed (${latest.status}) for ${upstream.source}`);
     }
@@ -645,8 +691,7 @@ async function resolveSingleUpstreamDetails(
           }
         }
         if (tagNames.length > 0) {
-          tagNames.sort(compareVersionTags);
-          return { version: tagNames[tagNames.length - 1]! };
+          return { version: selectLatestVersionTag(tagNames, upstream) };
         }
         if (fallbackSha !== undefined) return { version: fallbackSha };
         throw new GitHubAppError('ACTION_INPUT_INVALID', `GitHub tags payload lacked tag name for ${upstream.source}`);
@@ -669,8 +714,7 @@ async function resolveSingleUpstreamDetails(
       if (tags.length === 0) {
         throw new GitHubAppError('ACTION_INPUT_INVALID', `git ls-remote returned no tags for ${upstream.source}`);
       }
-      tags.sort(compareVersionTags);
-      return { version: tags[tags.length - 1]! };
+      return { version: selectLatestVersionTag(tags, upstream) };
     }
 
     case 'git-commit': {

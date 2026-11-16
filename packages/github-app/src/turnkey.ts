@@ -1977,6 +1977,12 @@ export async function startNativePullRequestPublisherServer(
       }
 
       const treeOid = (await gitWithIndex(['write-tree'])).toString('utf8').trim();
+      if (treeOid === baseTreeOid && (options.openManagedPr === undefined || options.openManagedPr === null)) {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          'candidate tree matches base tree; refusing to push empty pull request branch',
+        );
+      }
       let headOid = baseRevision;
       if (treeOid !== baseTreeOid) {
         const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
