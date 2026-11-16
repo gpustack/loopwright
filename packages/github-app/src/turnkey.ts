@@ -2673,6 +2673,7 @@ export async function executeTurnkeyActionCycle(
     let requestedStatus: string | null = null;
     let requestedStatusSource: string | null = null;
     let publicationDiagnostic: string | null = null;
+    let candidateVerifiedNoChange = false;
     if (!passed && execution.observations !== null && /^[a-z0-9._-]+$/i.test(execution.observations.name)) {
       try {
         const obsRaw = JSON.parse(
@@ -2697,6 +2698,26 @@ export async function executeTurnkeyActionCycle(
                 : pubStatus;
             }
           }
+          const verifierMatrixRaw = obsRaw['verifierMatrix'];
+          const targetSpec = options.taskpack.config.spec.task.spec.target;
+          if (
+            runResultStatus === 'blocked'
+            && observationsDiagnostic === 'EVIDENCE_UNAVAILABLE'
+            && requestedStatus === 'no_change'
+            && requestedStatusSource === 'captured_submission'
+            && targetSpec.baseRevision === targetSpec.sourceRevision
+            && Array.isArray(verifierMatrixRaw)
+          ) {
+            const rows = verifierMatrixRaw.filter((entry): entry is Record<string, unknown> => isPlainRecord(entry));
+            const hasNoChangePassed = rows.some(row => row['implicit'] === 'no_change' && row['status'] === 'passed');
+            const hasScopePassed = rows.some(row => row['implicit'] === 'scope' && row['status'] === 'passed');
+            const allExplicitPassed = rows
+              .filter(row => row['implicit'] === null)
+              .every(row => row['status'] === 'passed');
+            if (rows.length === verifierMatrixRaw.length && hasNoChangePassed && hasScopePassed && allExplicitPassed) {
+              candidateVerifiedNoChange = true;
+            }
+          }
         }
       } catch {
         // Best-effort observations read for operator diagnostic detail.
@@ -2706,12 +2727,16 @@ export async function executeTurnkeyActionCycle(
     const specReason = typeof rawSpecReason === 'string' && rawSpecReason.trim().length > 0
       ? rawSpecReason.trim()
       : null;
+    const effectiveOk = passed || candidateVerifiedNoChange;
     return {
       kind: 'settled_result' as const,
-      ok: passed,
-      code: passed ? null : runResultStatus.toUpperCase(),
-      detail: `run ${attemptRunId} settled as ${runResultStatus}`,
-      settledStatus: passed ? null : runResultStatus,
+      ok: effectiveOk,
+      code: effectiveOk ? null : runResultStatus.toUpperCase(),
+      detail: candidateVerifiedNoChange
+        ? `run ${attemptRunId} settled as no_change (candidate unchanged)`
+        : `run ${attemptRunId} settled as ${runResultStatus}`,
+      settledStatus: effectiveOk ? null : runResultStatus,
+      candidateVerifiedNoChange,
       specReason,
       observationsDiagnostic,
       requestedStatus,
@@ -2758,6 +2783,9 @@ export async function executeTurnkeyActionCycle(
     }
   } finally {
     await rm(summaryHolder, { recursive: true, force: true }).catch(() => undefined);
+  }
+  if (cycleOutcome.kind === 'settled_result' && cycleOutcome.candidateVerifiedNoChange) {
+    inspectedStatus = 'no_change';
   }
 
   let effectiveDetail = cycleOutcome.detail;

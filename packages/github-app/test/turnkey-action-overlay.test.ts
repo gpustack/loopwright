@@ -2554,4 +2554,296 @@ spec:
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('discoverTaskpackUpstreams treats SemVer resolved <= baseline as up_to_date and resolved > baseline as available', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-semver-baseline-')));
+    let server: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      const repo = join(work, 'repo');
+      await mkdir(join(repo, '.auto-sync'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'instructions.md'), '# Sync\n');
+      await writeFile(
+        join(repo, 'pack', 'proposal.json'),
+        JSON.stringify({
+          schema_version: 1,
+          upstreams: {
+            vllm_older: 'v0.33.0',
+            vllm_newer: 'v0.33.0',
+            vllm_tag_older: 'v0.33.0',
+          },
+        }) + '\n',
+      );
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: semver-baseline-check
+spec:
+  goal:
+    candidate: Sync pack
+    noChange: No change
+  scope:
+    writable: [pack]
+  instructions: [.auto-sync/instructions.md]
+  upstreams:
+    - id: vllm_older
+      kind: github-release
+      source: vllm-project/vllm-older
+      watchedPaths: [pack]
+    - id: vllm_newer
+      kind: github-release
+      source: vllm-project/vllm-newer
+      watchedPaths: [pack]
+    - id: vllm_tag_older
+      kind: git-tag
+      source: vllm-project/vllm-tag-older
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version]
+    schemaVersion: 1
+  verification:
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+    externalGates: []
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: auto-sync/
+    titleTemplate: "chore: sync"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+`);
+
+      server = await startHttpServer((req, res) => {
+        const url = req.url ?? '';
+        if (url === '/api/repos/vllm-project/vllm-older/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.32.0', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-older/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([{ tag_name: 'v0.32.0', prerelease: false, draft: false }]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-newer/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v0.34.0', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-newer/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([{ tag_name: 'v0.34.0', prerelease: false, draft: false }]));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-tag-older/tags?per_page=100') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([{ name: 'v0.32.0', commit: { sha: '2'.repeat(40) } }]));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: join(repo, '.auto-sync', 'taskpack.yaml'),
+        repositoryRoot: repo,
+      });
+      const discovered = await discoverTaskpackUpstreams(manifest, {
+        repositoryRoot: repo,
+        apiBaseUrl: `${server.url}/api`,
+      });
+
+      assert.equal(discovered[0]?.upstreamId, 'vllm_older');
+      assert.equal(discovered[0]?.status, 'up_to_date');
+      assert.equal(discovered[0]?.version, 'v0.32.0');
+
+      assert.equal(discovered[1]?.upstreamId, 'vllm_newer');
+      assert.equal(discovered[1]?.status, 'available');
+      assert.equal(discovered[1]?.version, 'v0.34.0');
+
+      assert.equal(discovered[2]?.upstreamId, 'vllm_tag_older');
+      assert.equal(discovered[2]?.status, 'up_to_date');
+      assert.equal(discovered[2]?.version, 'v0.32.0');
+    } finally {
+      await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts verified unchanged candidate no_change submission in turnkey candidate mode when implicit no_change and scope checks pass', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-candidate-no-change-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(repo, { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Verify upstream and submit no_change if unchanged.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'no_change', checks: [], reason: 'candidate unchanged' })));
+      });
+
+      let postPullsCalled = 0;
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 99 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          postPullsCalled += 1;
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ number: 1, html_url: 'https://github.com/acme/repo/pull/1' }));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: candidate-no-change-accept
+spec:
+  goal:
+    candidate: Sync pack
+    noChange: No change
+  scope:
+    writable:
+      - pack
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: auto-sync/
+    titleTemplate: "chore: candidate no change"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await mkdir(bareRemote, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+
+      let capturedReport: {
+        readonly report?: {
+          readonly status: string;
+          readonly reasonCode?: string | null;
+          readonly detail?: string | null;
+        };
+      } | undefined;
+      const runResult = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 99,
+        baseRevision: baseSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-candidate-no-change',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_candidate_no_change_secret_1234',
+        gitRemoteUrl: bareRemote,
+        onTurnkeyReport: info => {
+          capturedReport = info as typeof capturedReport;
+        },
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-candidate-no-change-token-1234',
+        },
+      });
+      assert.equal(runResult.kind, 'compiled', `unexpected runResult: ${JSON.stringify(runResult)}`);
+      assert.equal(runResult.delegateOutcome?.ok, true);
+      assert.match(runResult.delegateOutcome?.detail ?? '', /settled as no_change \(candidate unchanged\)/);
+      assert.equal(capturedReport?.report?.status, 'no_change');
+      assert.equal(capturedReport?.report?.reasonCode, null);
+      assert.equal(capturedReport?.report?.detail, null);
+      assert.equal(postPullsCalled, 0);
+      assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
 });

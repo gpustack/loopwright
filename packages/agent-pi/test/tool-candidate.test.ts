@@ -760,3 +760,47 @@ test('tryPrepareEdit with softArgumentError returns soft errors on malformed edi
     await f.cleanup();
   }
 });
+
+test('classifySoftToolPath returns soft_outside_candidate for clean non-candidate absolute paths and throws hard TOOL_DENIED on traversal or malformed segments', async () => {
+  const f = await fixture();
+  try {
+    assert.deepEqual(
+      f.candidate.classifySoftToolPath('/home/runner/work/_temp/loopwright-self-upgrade-stage/target-versions.json', { allowRootAlias: true }),
+      {
+        kind: 'soft_outside_candidate',
+        message: 'Cannot access "/home/runner/work/_temp/loopwright-self-upgrade-stage/target-versions.json": path is outside the candidate workspace. Pass a repository-relative path inside candidateDir, or use "bash" to inspect allowed host stage/scratch files.',
+      },
+    );
+    assert.deepEqual(
+      f.candidate.classifySoftToolPath('/workspace/candidate/packages/example.ts', { allowRootAlias: true }),
+      { kind: 'ok', normalized: 'packages/example.ts' },
+    );
+    assert.deepEqual(
+      f.candidate.classifySoftToolPath('/workspace/candidate', { allowRootAlias: true }),
+      { kind: 'ok', normalized: '.' },
+    );
+    assert.throws(
+      () => f.candidate.classifySoftToolPath('/workspace/candidate', { allowRootAlias: false }),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+    for (const badPath of [
+      '/tmp/../etc/passwd',
+      '/home/../etc/passwd',
+      'packages/../escape.txt',
+      './candidate/../escape.txt',
+      '/tmp/.GIT/config',
+      'packages//example.ts',
+      'packages\\example.ts',
+      'packages/\0example.ts',
+      'a'.repeat(256),
+    ]) {
+      assert.throws(
+        () => f.candidate.classifySoftToolPath(badPath, { allowRootAlias: true }),
+        err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+        `expected TOOL_DENIED for ${JSON.stringify(badPath)}`,
+      );
+    }
+  } finally {
+    await f.cleanup();
+  }
+});

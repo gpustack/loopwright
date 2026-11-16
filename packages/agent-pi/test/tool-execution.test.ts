@@ -18,8 +18,8 @@ function input(extraTools: readonly string[] = []) {
   const lock = admitTask(task, { admissionId: 'admission-1', runId: 'run-1' }); assert.equal(lock.ok, true); if (!lock.ok) throw new Error('fixture lock');
   return { ...base, lock: lock.value, policy: { ...base.policy, tools } };
 }
-async function fixture(extraTools: readonly string[] = []) {
-  const f = await requestFixture(undefined, () => input(extraTools)), candidate = join(f.directory, 'candidate');
+async function fixture(extraTools: readonly string[] = [], leaseMs?: number) {
+  const f = await requestFixture(undefined, () => input(extraTools), leaseMs), candidate = join(f.directory, 'candidate');
   for (const file of f.input.candidate.artifacts) { await mkdir(join(candidate, file.name, '..'), { recursive: true }); await writeFile(join(candidate, file.name), file.bytes, { mode: 0o444 }); }
   const actor = () => new Execution(f.host, f.input, candidate, { process: () => { throw new Error('Host mutations must not run an interpreter'); } });
   return { ...f, candidate, actor };
@@ -241,7 +241,7 @@ test('execution accepts single-edit { path, oldText, newText } shorthand, record
 });
 
 test('softArgumentErrors strips optional null keys, records read_only hints on malformed args, and keeps hard path/opt-out invariants', async () => {
-  const f = await fixture(['delete']);
+  const f = await fixture(['delete'], 5000);
   const executedBytes: { name: string; parsed: Record<string, unknown> }[] = [];
   const softArgActor = new Execution(f.host, f.input, f.candidate, {
     process: () => ({
@@ -286,6 +286,15 @@ test('softArgumentErrors strips optional null keys, records read_only hints on m
       () => strictArgActor.invoke(
         { ...identity, callId: 'call-strict-bad-edit', name: 'edit' },
         Buffer.from(JSON.stringify({ path: 'packages/example.ts', old_string: '1', new_string: '2' })),
+        signal,
+        () => {},
+      ),
+      error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED',
+    );
+    await assert.rejects(
+      strictArgActor.invoke(
+        { ...identity, callId: 'call-strict-abs-read', name: 'read' },
+        Buffer.from(JSON.stringify({ path: '/tmp/loopwright-self-upgrade-stage/target-versions.json' })),
         signal,
         () => {},
       ),
@@ -380,11 +389,43 @@ test('softArgumentErrors strips optional null keys, records read_only hints on m
     }
     assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 3;\n');
 
-    // Hard TOOL_DENIED on path traversal / .git even when softScopeErrors + softArgumentErrors + malformed keys
+    // Clean non-candidate absolute paths return soft isError: true hints and record read_only failed operations
+    for (const [idx, outsideCase] of [
+      { name: 'read' as const, args: { path: '/tmp/loopwright-self-upgrade-stage/target-versions.json' } },
+      { name: 'read' as const, args: { path: '/home/runner/work/_temp/loopwright-self-upgrade-stage/target-versions.json' } },
+      { name: 'write' as const, args: { path: '/tmp/stage/target-versions.json', content: 'nope' } },
+    ].entries()) {
+      let recordedOpId = '';
+      const res = await softArgActor.invoke(
+        { ...identity, callId: `call-soft-outside-${idx}`, name: outsideCase.name },
+        Buffer.from(JSON.stringify(outsideCase.args)),
+        signal,
+        id => { recordedOpId = id; },
+      );
+      assert.equal(res.isError, true, `expected isError for outsideCase ${idx}`);
+      assert.match(res.content[0]?.text ?? '', /outside the candidate workspace/);
+      assert.match(res.content[0]?.text ?? '', /use "bash"/);
+      const record = stateGood(f.host.store.getOperation(recordedOpId));
+      assert.equal(record.state, 'confirmed');
+      assert.equal(record.intent.effect, 'read_only');
+      assert.equal(record.intent.targetIdentity, `arguments:${outsideCase.name}`);
+      assert.equal(record.initialReceipt?.outcome, 'failed');
+    }
+
+    // Hard TOOL_DENIED on path traversal, .git, NUL, backslash, //, and >255-byte segments even when softScopeErrors + softArgumentErrors
     for (const [idx, badPathCase] of [
       { name: 'edit', args: { path: '../outside/escape.ts', old_string: '1' } },
       { name: 'read', args: { path: '../outside/escape.ts', offset: 'bad' } },
+      { name: 'read', args: { path: '/tmp/../etc/passwd' } },
+      { name: 'read', args: { path: '/home/../etc/passwd' } },
+      { name: 'read', args: { path: 'packages/../escape.txt' } },
+      { name: 'edit', args: { path: './candidate/../escape.txt', oldText: '1', newText: '2' } },
       { name: 'write', args: { path: '.git/config', content: 123 } },
+      { name: 'read', args: { path: '/tmp/.git/config' } },
+      { name: 'read', args: { path: 'packages//example.ts' } },
+      { name: 'read', args: { path: 'packages\\example.ts' } },
+      { name: 'read', args: { path: 'packages/\0example.ts' } },
+      { name: 'read', args: { path: 'packages/' + 'a'.repeat(256) } },
     ].entries()) {
       assert.throws(
         () => softArgActor.invoke(

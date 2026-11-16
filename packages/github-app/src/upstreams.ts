@@ -881,7 +881,13 @@ export async function discoverTaskpackUpstreams(
         scrubber,
       });
       const baseline = baselines.get(upstream.id);
-      const status: UpstreamAcquisitionStatus = baseline !== undefined && baseline === resolved.version
+      const isSemverTagKind = upstream.kind === 'github-release' || upstream.kind === 'git-tag';
+      const upToDateBySemver = isSemverTagKind
+        && baseline !== undefined
+        && parseSemverTag(baseline) !== null
+        && parseSemverTag(resolved.version) !== null
+        && compareVersionTags(resolved.version, baseline) <= 0;
+      const status: UpstreamAcquisitionStatus = baseline !== undefined && (baseline === resolved.version || upToDateBySemver)
         ? 'up_to_date'
         : 'available';
       records.push({
