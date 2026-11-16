@@ -448,8 +448,19 @@ export class Candidate {
     this.#baselineStatsCaptured = true;
   }
 
+  #assertHardPathSegments(raw: string): void {
+    if (typeof raw !== 'string' || raw.length === 0 || raw.includes('\0') || raw.includes('\\') || raw.includes('//')) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    for (const segment of raw.split('/')) {
+      if (segment === '..' || segment.toLowerCase() === '.git' || Buffer.byteLength(segment, 'utf8') > 255) {
+        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      }
+    }
+  }
+
   normalize(raw: string): string {
-    if (typeof raw !== 'string') refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    this.#assertHardPathSegments(raw);
     const { rest, stripped } = this.#stripCandidateRootPrefix(raw);
     let name = rest;
     while (name.startsWith('./')) {
@@ -462,11 +473,6 @@ export class Candidate {
       }
     }
     artifact(name, new Uint8Array());
-    for (const segment of name.split('/')) {
-      if (segment.toLowerCase() === '.git' || Buffer.byteLength(segment, 'utf8') > 255) {
-        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-      }
-    }
     return name;
   }
 
@@ -475,6 +481,30 @@ export class Candidate {
     if (options?.allowRootAlias && this.#isRootCandidateDirectoryAlias(raw)) return '.';
     const hadTrailingSlash = raw.length > 1 && raw.endsWith('/') && !raw.endsWith('//');
     return this.normalize(hadTrailingSlash ? raw.slice(0, -1) : raw);
+  }
+
+  /**
+   * Classify candidate-tool paths for softArgumentErrors while keeping traversal/.git/malformed paths hard-denied.
+   * Calling `enforceHardPathInvariants` on the `ok` path is load-bearing for `digestArtifact` path invariants
+   * (`normalized` is returned for direct callers while `Execution` re-normalizes downstream).
+   */
+  classifySoftToolPath(
+    raw: string,
+    options?: { readonly allowRootAlias?: boolean | undefined },
+  ): { readonly kind: 'ok'; readonly normalized: string } | { readonly kind: 'soft_outside_candidate'; readonly message: string } {
+    this.#assertHardPathSegments(raw);
+    if (options?.allowRootAlias && this.#isRootCandidateDirectoryAlias(raw)) {
+      return freeze({ kind: 'ok' as const, normalized: '.' });
+    }
+    const { stripped } = this.#stripCandidateRootPrefix(raw);
+    if (!stripped && raw.startsWith('/') && !this.#isRootCandidateDirectoryAlias(raw)) {
+      return freeze({
+        kind: 'soft_outside_candidate' as const,
+        message: `Cannot access "${raw}": path is outside the candidate workspace. Pass a repository-relative path inside candidateDir, or use "bash" to inspect allowed host stage/scratch files.`,
+      });
+    }
+    const normalized = this.enforceHardPathInvariants(raw, options);
+    return freeze({ kind: 'ok' as const, normalized });
   }
 
   #writable(name: string): void {

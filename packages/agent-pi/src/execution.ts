@@ -100,9 +100,12 @@ export class Execution implements ToolExecutor {
       return { kind: 'ok', args: raw };
     }
     if ((name === 'read' || name === 'write' || name === 'edit' || name === 'delete') && typeof raw.path === 'string' && raw.path.length > 0) {
-      // Path traversal, .git segments, and non-workspace paths are hard security boundary violations
-      // (TOOL_DENIED) rather than soft schema errors, so intentionally do not catch here.
-      this.candidate.enforceHardPathInvariants(raw.path, { allowRootAlias: name === 'read' });
+      // Path traversal, .git segments, and malformed paths are hard security boundary violations
+      // (TOOL_DENIED), while clean non-candidate absolute paths return a soft guidance error.
+      const pathCheck = this.candidate.classifySoftToolPath(raw.path, { allowRootAlias: name === 'read' });
+      if (pathCheck.kind === 'soft_outside_candidate') {
+        return { kind: 'error', message: pathCheck.message };
+      }
     }
     const optionalNullKeys: readonly string[] = name === 'edit'
       ? ['edits', 'oldText', 'newText']
