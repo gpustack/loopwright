@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-release/
 .test-build/
+*.tsbuildinfo
 coverage/
 .claude/*
 !.claude/skills

@@ -1,5 +1,13 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": { "noEmit": false, "declaration": true, "rootDir": "src", "outDir": "dist" },
+  "compilerOptions": {
+    "composite": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../../.test-build/tsbuildinfo/core.tsbuildinfo",
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
   "include": ["src/**/*.ts"]
 }

@@ -1,5 +1,18 @@
 {
   "extends": "../../tsconfig.json",
-  "compilerOptions": { "noEmit": false, "declaration": true, "rootDir": "src", "outDir": "dist" },
-  "include": ["src/**/*.ts"]
+  "compilerOptions": {
+    "composite": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../../.test-build/tsbuildinfo/taskpack-runner.tsbuildinfo",
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../agent-pi" },
+    { "path": "../controller" },
+    { "path": "../core" }
+  ]
 }

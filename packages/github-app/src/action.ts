@@ -23,10 +23,11 @@ import {
 } from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
 import {
-  createTurnkeyCycleDelegate, finalizeAndPublishTurnkeyMemory, normalizeControllerRunId,
+  createTurnkeyCycleDelegate, normalizeControllerRunId,
   startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type LocalCommandGateServer, type NativePullRequestPublisherServer, type TurnkeyCycleAttemptSummary,
 } from './turnkey.js';
+import { finalizeAndPublishTurnkeyMemory } from './turnkey-memory.js';
 import {
   checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
   discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,

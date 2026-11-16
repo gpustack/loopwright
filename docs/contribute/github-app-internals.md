@@ -26,6 +26,7 @@ The GitHub App accepts authenticated events and queues repository work by tenant
 | `src/action.ts` | `runGitHubActionEntrypoint` and the `INPUT_*` CLI shim |
 | `src/upstreams.ts` | Native upstream discovery and GitHub token resolution |
 | `src/turnkey.ts` | Local HMAC command gate, private-index publisher, and host-session cycle delegate |
+| `src/turnkey-memory.ts` | Post-settlement memory finalization, CAS verification, and separate PR publication |
 | `src/output-format.ts` | Action output sinks and step outputs |
 | `src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver and queue dispatcher |
 
@@ -160,8 +161,8 @@ Publication uses `--force-with-lease`; the cycle uses `openPiHostSessionAdapterV
 Before authoring, `compileDeclarativeTaskpack` runs `selectActiveMemory` on `spec.memory.directory`.
 Non-empty snapshots bound or omit the `0o400` `document` resource and `<active_memory>` excerpt within model request limits.
 
-After settlement, `finalizeAndPublishTurnkeyMemory` runs `finalizeRunMemory` and `applyMemoryProposalCAS` in a scratch clone.
-When `publication.mode` is `pull_request`, verified proposals fence the branch, journal target-bound progress in `memory-publication.json`, and sign off commits.
+After settlement, `turnkey-memory.ts` runs `finalizeRunMemory` and `applyMemoryProposalCAS` in a scratch clone.
+When `publication.mode` is `pull_request`, verified proposals claim a per-run `memory-publication.json` receipt, push with `--force-with-lease`, and sign off commits.
 Squash or rebase merges resolve current entries first, while uncertain mutations stay `reconcile_required` without changing `RunResult`.
 
 `runGitHubActionEntrypoint` qualifies the deployment host first (platform/arch allowlist, qualified 26.x Node runtime, non-network filesystem, clock drift within 1000ms, an exclusive fsync-plus-rename storage probe, and storage-profile budget rules), refuses interactive MCP authentication, evaluates trigger intake, compiles, and writes the registry and configuration into a trusted directory outside the checkout with `untrustedRoots: [<checkout>]`.

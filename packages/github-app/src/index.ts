@@ -68,19 +68,21 @@ export {
 } from './output-format.js';
 export {
   buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle,
-  finalizeAndPublishTurnkeyMemory, isRetryablePerRequestTimeout, makeAttemptRunId,
-  normalizeControllerRunId, openStagedTaskpackStepGate, readMemoryPublicationJournal,
-  reconcileTurnkeyMemoryPublication, stageTaskpackForStep,
+  isRetryablePerRequestTimeout, makeAttemptRunId,
+  normalizeControllerRunId, openStagedTaskpackStepGate, stageTaskpackForStep,
   startLocalCommandGateServer, startNativePullRequestPublisherServer,
-  type ExecuteTurnkeyActionCycleOptions, type FinalizeAndPublishTurnkeyMemoryOptions,
+  type ExecuteTurnkeyActionCycleOptions,
   type LocalCommandGateServer,
   type LocalCommandGateServerOptions, type NativePullRequestPublisherOptions,
   type NativePullRequestPublisherServer, type OpenStagedTaskpackStepGateOptions,
-  type ReconcileTurnkeyMemoryPublicationOptions,
   type StagedTaskpackForStep, type StagedTaskpackStepGateHandle,
   type StageTaskpackForStepOptions, type TurnkeyCycleAttemptSummary,
-  type TurnkeyCycleDelegateOptions, type TurnkeyMemoryPublicationJournal,
+  type TurnkeyCycleDelegateOptions,
 } from './turnkey.js';
+export {
+  finalizeAndPublishTurnkeyMemory,
+  type FinalizeAndPublishTurnkeyMemoryOptions,
+} from './turnkey-memory.js';
 export { startGitHubAppControlPlane, type ControlPlaneHandle, type ControlPlaneOptions } from './service.js';
 export { serializePrettyYaml } from './yaml.js';
 export {
