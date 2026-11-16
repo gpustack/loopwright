@@ -78,7 +78,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: gpustack/loopwright
-          ref: 20a338bfffce693ef481da972393d13496cd9eab
+          ref: d29940d3e6f600cf5783af807b1e2bd260be2eb2
           path: bootstrap-loopwright
           fetch-depth: 1
           persist-credentials: false
@@ -285,7 +285,6 @@ jobs:
           INPUT_RUN-ID: self-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
           INPUT_STORAGE-PROFILE: actions-basic
           INPUT_DRY-RUN: ${{ inputs.dry-run || 'false' }}
-          INPUT_PUBLICATION-ENDPOINT-URL: ${{ inputs.dry-run == 'true' && 'http://127.0.0.1:65535/loopwright-dry-run-publication' || '' }}
           INPUT_PROVIDER: ${{ steps.preflight.outputs.model_provider }}
           INPUT_MODEL: ${{ steps.preflight.outputs.model_id }}
           INPUT_THINKING: ${{ steps.preflight.outputs.model_thinking }}
@@ -296,7 +295,6 @@ jobs:
           INPUT_PROVIDER-TOKEN-ENV: ${{ steps.preflight.outputs.provider_token_env }}
           INPUT_GITHUB-APP-ID: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_ID || vars.CI_GPUSTACK_LOOPWRIGHT_APP_ID || secrets.LOOPWRIGHT_APP_ID }}
           INPUT_GITHUB-APP-PRIVATE-KEY: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_PRIVATE_KEY || secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
-          INPUT_GITHUB-APP-INSTALLATION-ID: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_INSTALLATION_ID || vars.CI_GPUSTACK_LOOPWRIGHT_APP_INSTALLATION_ID || secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}
           INPUT_OUTPUT: json,github-step-summary
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_LLM_AUTH_TOKEN || secrets.CI_GPUSTACK_CODEREVIEW_LLM_AUTH_TOKEN }}
