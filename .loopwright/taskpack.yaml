@@ -116,24 +116,6 @@ spec:
       - revise
     commentPrefixes:
       - /loopwright
-  sandbox:
-    preferredBackends:
-      - linux-bwrap
-      - linux-landlock
-      - macos-seatbelt
-    networkMode: none
-    requiredCapabilities:
-      - filesystemReadContainment
-      - filesystemWriteContainment
-      - protectedPathReadOnlyMask
-      - networkIsolation
-      - processTreeCleanup
-    deniedReadPaths:
-      - ~/.ssh
-      - ~/.aws
-      - ~/.gnupg
-      - ~/.npmrc
-      - ~/.netrc
   limits:
     wallTimeSeconds: 2700
     commandTimeoutSeconds: 900

@@ -430,9 +430,6 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
       assert.equal(nestedMinimatch.version, '11.0.3');
 
       // Part B: Exercise real verify.sh WITHOUT SELF_UPGRADE_TEST_NODE_MODULES (full offline npm ci + compile + runtime gates)
-      if (!CAN_RUN_KERNEL_CONTAINMENT) {
-        return;
-      }
       const realOfflineStage = join(dir, 'stage-real-offline-verify');
       const tgzScratch = join(dir, 'tgz-scratch');
       await mkdir(tgzScratch, { recursive: true, mode: 0o700 });
@@ -552,17 +549,88 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         await writeFile(wsManifestPath, `${JSON.stringify(wsManifest, null, 2)}\n`, { mode: 0o600 });
       }
 
-      // Execute verify.sh with ZERO SELF_UPGRADE_TEST_NODE_MODULES bypass AND /usr/bin/python3 when present
-      const realOfflineRes = runVerifyScript(repoRoot, {
+      // 1) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) runs offline gates without requiring bwrap
+      const ghaDirectRes = runVerifyScript(repoRoot, {
+        GITHUB_ACTIONS: 'true',
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         SELF_UPGRADE_STAGE_DIR: realOfflineStage,
         PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
       });
       assert.equal(
-        realOfflineRes.status,
+        ghaDirectRes.status,
         0,
-        `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
+        `expected GITHUB_ACTIONS=true direct-dedicated offline verify.sh to succeed: ${ghaDirectRes.stderr}`,
       );
+
+      // 1b) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) catches stealth same-UID chmod +
+      // same-byte in-place overwrite + nanosecond-exact timestamp restore against a masked file inside build_dir,
+      // triggered from an allowed `packages/` file so Phase 1's git HEAD protected-prefix gate passes first.
+      const agentPiIndexPath = join(repoRoot, 'packages/agent-pi/src/index.ts');
+      const cleanAgentPiIndex = await readFile(agentPiIndexPath, 'utf8');
+      await writeFile(
+        agentPiIndexPath,
+        `import { execFileSync } from 'node:child_process';
+import { chmodSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+export const PACKAGE_ID = '@loopwright/agent-pi';
+const maskedDir = 'scripts';
+const maskedFile = 'scripts/check-docs.mjs';
+const dirStat = statSync(maskedDir);
+const fileStat = statSync(maskedFile);
+const origText = readFileSync(maskedFile, 'utf8');
+const tamperedText = origText.replace("'utf8'", "'UTF8'");
+if (Buffer.byteLength(tamperedText) !== fileStat.size || tamperedText === origText) {
+  process.exit(87);
+}
+const tmpDir = process.env['TMPDIR'] || '/tmp';
+const fileStamp = join(tmpDir, 'masked-file-stamp');
+const dirStamp = join(tmpDir, 'masked-dir-stamp');
+execFileSync('touch', ['-r', maskedFile, fileStamp]);
+execFileSync('touch', ['-r', maskedDir, dirStamp]);
+chmodSync(maskedDir, 0o755);
+chmodSync(maskedFile, 0o644);
+writeFileSync(maskedFile, tamperedText, 'utf8');
+execFileSync('touch', ['-r', fileStamp, maskedFile]);
+chmodSync(maskedFile, fileStat.mode & 0o777);
+execFileSync('touch', ['-r', dirStamp, maskedDir]);
+chmodSync(maskedDir, dirStat.mode & 0o777);
+`,
+        { mode: 0o600 },
+      );
+      try {
+        const ghaStealthTamperRes = runVerifyScript(repoRoot, {
+          GITHUB_ACTIONS: 'true',
+          SELF_UPGRADE_REPO_ROOT: repoRoot,
+          SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+          PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
+        });
+        assert.notEqual(
+          ghaStealthTamperRes.status,
+          0,
+          'GITHUB_ACTIONS=true must reject same-size + timestamp-restored tamper of masked file',
+        );
+        assert.equal(
+          ghaStealthTamperRes.stderr.includes('masked file modified during stage:'),
+          true,
+          `expected tamper diagnostic in stderr, got: ${ghaStealthTamperRes.stderr}`,
+        );
+      } finally {
+        await writeFile(agentPiIndexPath, cleanAgentPiIndex, { mode: 0o600 });
+      }
+
+      // 2) Local workstation mode (`GITHUB_ACTIONS` unset) enforces OS kernel containment (`sandbox-exec` / `bwrap`)
+      if (CAN_RUN_KERNEL_CONTAINMENT) {
+        const realOfflineRes = runVerifyScript(repoRoot, {
+          SELF_UPGRADE_REPO_ROOT: repoRoot,
+          SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+          PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
+        });
+        assert.equal(
+          realOfflineRes.status,
+          0,
+          `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
+        );
+      }
     });
   });
 
@@ -583,6 +651,14 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
     assert.equal(workflowRaw.includes('Fetch pull request commit object without checkout'), true);
     assert.equal(
       workflowRaw.includes('+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}'),
+      true,
+    );
+    assert.equal(
+      workflowRaw.includes('!${{ runner.temp }}/loopwright-self-upgrade/**/secrets.json'),
+      true,
+    );
+    assert.equal(
+      workflowRaw.includes('!${{ runner.temp }}/loopwright-self-upgrade/**/*.sqlite*'),
       true,
     );
 

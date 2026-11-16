@@ -144,6 +144,20 @@ export interface PrepareSelfUpgradeModule {
       readonly npmCacheDir: string;
     }) => Promise<Buffer>;
   }) => Promise<PrepareSelfUpgradeRunResult>;
+  readonly resolveSelfUpgradeModelConfig: (options?: {
+    readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+    readonly modelsOutPath?: string | undefined;
+  }) => Promise<{
+    readonly configured: boolean;
+    readonly modelProvider: string;
+    readonly modelId: string;
+    readonly modelThinking: string;
+    readonly modelApi: string;
+    readonly modelBaseUrl: string;
+    readonly modelsJsonPath: string;
+    readonly allowCustomBaseUrl: string;
+    readonly providerTokenEnv: string;
+  }>;
 }
 
 export async function loadPreflightModule(): Promise<PrepareSelfUpgradeModule> {
@@ -500,8 +514,13 @@ export async function createMiniSelfUpgradeRepo(
 
   await writeFile(
     join(repoRoot, 'scripts/build.mjs'),
-    options?.buildScriptBody ?? `import { mkdirSync, writeFileSync } from 'node:fs';
-${sideEffectSnippet}mkdirSync('packages/cli/dist', { recursive: true });
+    options?.buildScriptBody ?? `import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+${sideEffectSnippet}if (existsSync('packages/agent-pi/src/index.ts')) {
+  await import(pathToFileURL(resolve('packages/agent-pi/src/index.ts')).href);
+}
+mkdirSync('packages/cli/dist', { recursive: true });
 writeFileSync('packages/cli/dist/main.js', ${JSON.stringify(effectiveCliMain)});
 `,
     { mode: 0o600 },

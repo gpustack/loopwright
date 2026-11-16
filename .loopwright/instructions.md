@@ -19,9 +19,9 @@ You are maintaining Loopwright's own runtime dependency Taskpack (`self-upgrade`
    - Writable paths are strictly limited to `.loopwright/proposal.json`, `package-lock.json`, `packages/agent-pi`, `packages/cli`, `packages/controller`, `packages/decisions`, `packages/github-app`, and `docs` (excluding `packages/agent-pi/qualification`, `packages/controller/qualification`, `packages/cli/src/closure.ts`, `packages/cli/src/failure-matrix.ts`, and `docs/contribute`).
    - Root `package.json`, `scripts/**`, `tsconfig*.json`, `eslint.config.mjs`, `action.yml`, `.github/**`, `.loopwright/taskpack.yaml`, `.loopwright/instructions.md`, and `.loopwright/checks/**` are non-writable.
 
-## Offline Sandbox & Pre-Staged Bundle Workflow
+## Isolated Runner & Pre-Staged Bundle Workflow
 
-In GitHub Actions Turnkey mode (`packages/agent-pi/src/host-session.ts`), `bash` runs in `scratchDir` with network disabled (`--unshare-net` / `sandbox-exec`) and `CANDIDATE_DIR` mounted read-only:
+In GitHub Actions Turnkey mode (`GITHUB_ACTIONS=true`), Loopwright runs in `direct-dedicated` isolation on the ephemeral runner VM with `CANDIDATE_DIR` mounted read-only; locally (`GITHUB_ACTIONS != true`), Loopwright enforces host OS containment (`macos-seatbelt` / `linux-bwrap`) with network disabled:
 
 - **Never run `npm install`, `npm ci`, or `npm update` inside `CANDIDATE_DIR`.** Creating `node_modules/` or running networked `npm` commands inside the candidate tree will fail or violate capture limits.
 - Read the host-staged bundle prepared by `scripts/prepare-self-upgrade.mjs`. The read-only stage directory defaults to `/tmp/loopwright-self-upgrade-stage` (`SELF_UPGRADE_STAGE_DIR`) and is also recorded as `stageDir=<path>` in the `reason` field of `available` entries in `upstreamRecords`:
