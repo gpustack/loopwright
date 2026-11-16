@@ -430,9 +430,6 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
       assert.equal(nestedMinimatch.version, '11.0.3');
 
       // Part B: Exercise real verify.sh WITHOUT SELF_UPGRADE_TEST_NODE_MODULES (full offline npm ci + compile + runtime gates)
-      if (!CAN_RUN_KERNEL_CONTAINMENT) {
-        return;
-      }
       const realOfflineStage = join(dir, 'stage-real-offline-verify');
       const tgzScratch = join(dir, 'tgz-scratch');
       await mkdir(tgzScratch, { recursive: true, mode: 0o700 });
@@ -552,17 +549,32 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         await writeFile(wsManifestPath, `${JSON.stringify(wsManifest, null, 2)}\n`, { mode: 0o600 });
       }
 
-      // Execute verify.sh with ZERO SELF_UPGRADE_TEST_NODE_MODULES bypass AND /usr/bin/python3 when present
-      const realOfflineRes = runVerifyScript(repoRoot, {
+      // 1) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) runs offline gates without requiring bwrap
+      const ghaDirectRes = runVerifyScript(repoRoot, {
+        GITHUB_ACTIONS: 'true',
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         SELF_UPGRADE_STAGE_DIR: realOfflineStage,
         PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
       });
       assert.equal(
-        realOfflineRes.status,
+        ghaDirectRes.status,
         0,
-        `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
+        `expected GITHUB_ACTIONS=true direct-dedicated offline verify.sh to succeed: ${ghaDirectRes.stderr}`,
       );
+
+      // 2) Local workstation mode (`GITHUB_ACTIONS` unset) enforces OS kernel containment (`sandbox-exec` / `bwrap`)
+      if (CAN_RUN_KERNEL_CONTAINMENT) {
+        const realOfflineRes = runVerifyScript(repoRoot, {
+          SELF_UPGRADE_REPO_ROOT: repoRoot,
+          SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+          PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
+        });
+        assert.equal(
+          realOfflineRes.status,
+          0,
+          `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
+        );
+      }
     });
   });
 

@@ -103,10 +103,10 @@ Loopwright dogfoods `.loopwright/taskpack.yaml` to upgrade `@earendil-works/pi-*
 
 ```sh
 node scripts/prepare-self-upgrade.mjs --offline-check
-npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/github-app/test/self-upgrade-taskpack.test.js
+npx tsc -p tsconfig.test.json && node --test --test-concurrency=2 .test-build/packages/github-app/test/self-upgrade-taskpack.test.js .test-build/packages/github-app/test/self-upgrade-verifier.test.js
 ```
 
-`scripts/prepare-self-upgrade.mjs` checks `.loopwright/proposal.json` against workspace manifests and `package-lock.json` before staging offline lockfile and cache bundles. `.loopwright/checks/verify.sh` audits candidate manifests before executing pinned verification gates offline inside `bwrap` or `sandbox-exec`.
+`scripts/prepare-self-upgrade.mjs` checks `.loopwright/proposal.json` against workspace manifests and `package-lock.json` before staging offline lockfile and cache bundles. `.loopwright/checks/verify.sh` audits candidate manifests before executing pinned offline verification gates (`direct-dedicated` on ephemeral GitHub Actions runners; `bwrap` or `sandbox-exec` locally).
 
 ---
 

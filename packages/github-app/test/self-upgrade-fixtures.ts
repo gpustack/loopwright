@@ -144,6 +144,20 @@ export interface PrepareSelfUpgradeModule {
       readonly npmCacheDir: string;
     }) => Promise<Buffer>;
   }) => Promise<PrepareSelfUpgradeRunResult>;
+  readonly resolveSelfUpgradeModelConfig: (options?: {
+    readonly env?: Readonly<Record<string, string | undefined>> | undefined;
+    readonly modelsOutPath?: string | undefined;
+  }) => Promise<{
+    readonly configured: boolean;
+    readonly modelProvider: string;
+    readonly modelId: string;
+    readonly modelThinking: string;
+    readonly modelApi: string;
+    readonly modelBaseUrl: string;
+    readonly modelsJsonPath: string;
+    readonly allowCustomBaseUrl: string;
+    readonly providerTokenEnv: string;
+  }>;
 }
 
 export async function loadPreflightModule(): Promise<PrepareSelfUpgradeModule> {

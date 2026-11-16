@@ -14,7 +14,10 @@ import {
   DEFAULT_HOST_BUDGETS,
   DEFAULT_LOCAL_COMMAND_GATE_ENV,
   loadDeclarativeTaskpack,
+  loadPiModelsJson,
   openStagedTaskpackStepGate,
+  resolveEffectiveTaskpackSandboxPolicy,
+  runActionCli,
   stageTaskpackForStep,
   type TaskpackUpstreamRecord,
 } from '../src/index.js';
@@ -46,9 +49,27 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       repositoryRoot: REPO_ROOT,
     });
     assert.equal(manifest.metadata.name, 'self-upgrade');
+    assert.equal(manifest.spec.sandbox, undefined);
     assert.equal(manifest.spec.limits?.commandTimeoutSeconds, 900);
     assert.deepEqual(manifest.spec.triggers.commentCommands, ['retry', 'revise']);
     assert.equal(manifest.spec.upstreams.length, 7);
+
+    // Omitted spec.sandbox resolves to direct-dedicated on GitHub Actions and host OS sandbox locally
+    const ghaPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+      workspaceRoot: REPO_ROOT,
+      relativeTaskpackPath: '.loopwright/taskpack.yaml',
+      env: { GITHUB_ACTIONS: 'true' },
+    });
+    assert.deepEqual(ghaPolicy.preferredBackends, ['direct-dedicated']);
+    assert.equal(ghaPolicy.allowDedicatedDirectOverride, true);
+
+    const localPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+      workspaceRoot: REPO_ROOT,
+      relativeTaskpackPath: '.loopwright/taskpack.yaml',
+      env: {},
+    });
+    assert.equal(localPolicy.preferredBackends, undefined);
+    assert.equal(localPolicy.allowDedicatedDirectOverride, undefined);
 
     const checkEntry = manifest.spec.verification.localChecks.find(c => c.id === 'self-upgrade-verify');
     const allowedEnv = checkEntry?.parameters?.['env'] as readonly string[] | undefined;
@@ -1343,6 +1364,124 @@ process.exit(45);
       };
       assert.equal(exportedLock.packages['node_modules/yaml']?.version, '2.10.0');
       assert.equal(exportedLock.packages['node_modules/@earendil-works/pi-coding-agent']?.version, '1.6.0');
+    });
+  });
+
+  it('resolves org LLM gateway config into 0o600 models.json and succeeds on dry-run candidate compilation without publicationEndpoint', async () => {
+    const preflight = await loadPreflightModule();
+    await withTempDir(async dir => {
+      const modelsOut = join(dir, 'models.json');
+
+      // 1) Empty env falls back cleanly without writing models.json
+      const emptyCfg = await preflight.resolveSelfUpgradeModelConfig({ env: {}, modelsOutPath: modelsOut });
+      assert.equal(emptyCfg.configured, false);
+      assert.equal(emptyCfg.allowCustomBaseUrl, 'false');
+
+      // 2) Org CI_GPUSTACK_CODEREVIEW_LLM_* resolves zai-coding-cn, strips /chat/completions, and writes valid 0o600 models.json
+      const orgCfg = await preflight.resolveSelfUpgradeModelConfig({
+        env: {
+          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/',
+          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
+          CI_GPUSTACK_CODEREVIEW_LLM_THINKING: 'enabled',
+          CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT: 'medium',
+          CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE: '0.4',
+          CI_GPUSTACK_CODEREVIEW_LLM_TOP_P: '0.9',
+        },
+        modelsOutPath: modelsOut,
+      });
+      assert.equal(orgCfg.configured, true);
+      assert.equal(orgCfg.modelProvider, 'zai-coding-cn');
+      assert.equal(orgCfg.modelId, 'glm-5.3');
+      assert.equal(orgCfg.modelThinking, 'high');
+      assert.equal(orgCfg.modelApi, 'openai-completions');
+      assert.equal(orgCfg.modelBaseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+      assert.equal(orgCfg.allowCustomBaseUrl, 'true');
+      assert.equal(orgCfg.providerTokenEnv, 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN');
+
+      const st = await stat(modelsOut);
+      assert.equal(st.mode & 0o777, 0o600);
+      const parsedModels = await loadPiModelsJson(modelsOut);
+      const providerEntry = parsedModels.providers.get('zai-coding-cn');
+      assert.equal(providerEntry?.apiKeyEnv, 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN');
+      assert.equal(providerEntry?.models.get('glm-5.3')?.contextWindow, 1_000_000);
+      assert.equal(providerEntry?.models.get('glm-5.3')?.maxTokens, 65_536);
+
+      // 3) Dedicated CI_GPUSTACK_LOOPWRIGHT_LLM_* takes precedence over CI_GPUSTACK_CODEREVIEW_LLM_*
+      const overrideCfg = await preflight.resolveSelfUpgradeModelConfig({
+        env: {
+          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: 'https://api.openai.com/v1',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: 'gpt-4.1',
+          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4',
+          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
+        },
+      });
+      assert.equal(overrideCfg.modelProvider, 'openai');
+      assert.equal(overrideCfg.modelId, 'gpt-4.1');
+
+      // 4) Negative cases fail closed
+      await assert.rejects(
+        () => preflight.resolveSelfUpgradeModelConfig({ env: { CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://api.openai.com/v1' } }),
+        /must be configured together/,
+      );
+      await assert.rejects(
+        () => preflight.resolveSelfUpgradeModelConfig({
+          env: {
+            CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER: 'openai-codex',
+            CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://api.openai.com/v1',
+            CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'gpt-5',
+          },
+        }),
+        /Unsupported LLM provider/,
+      );
+      await assert.rejects(
+        () => preflight.resolveSelfUpgradeModelConfig({
+          env: {
+            CI_GPUSTACK_CODEREVIEW_LLM_URL: 'http://example.com/v1',
+            CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
+          },
+        }),
+        /must use https/,
+      );
+
+      // 5) runActionCli with INPUT_DRY-RUN='true' and candidate mode succeeds without INPUT_PUBLICATION-ENDPOINT-URL
+      const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir);
+      const runRoot = join(dir, 'dry-runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      const ghOut = join(dir, 'gh-out.txt');
+      const exitCode = await runActionCli({
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repoRoot,
+        GITHUB_REPOSITORY: 'gpustack/loopwright',
+        GITHUB_SHA: headSha,
+        'INPUT_TASKPACK-PATH': '.loopwright/taskpack.yaml',
+        'INPUT_MODE': 'candidate',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'dry-run-self-upgrade-1',
+        'INPUT_DRY-RUN': 'true',
+        'INPUT_PROVIDER': orgCfg.modelProvider,
+        'INPUT_MODEL': orgCfg.modelId,
+        'INPUT_THINKING': orgCfg.modelThinking,
+        'INPUT_API': orgCfg.modelApi,
+        'INPUT_BASE-URL': orgCfg.modelBaseUrl,
+        'INPUT_MODELS-JSON': orgCfg.modelsJsonPath,
+        'INPUT_ALLOW-CUSTOM-BASE-URL': orgCfg.allowCustomBaseUrl,
+        'INPUT_PROVIDER-TOKEN-ENV': orgCfg.providerTokenEnv,
+        'INPUT_UPSTREAM-RECORDS': JSON.stringify(
+          preflight.ALL_UPSTREAM_IDS.map(id => ({
+            upstreamId: id,
+            status: 'available',
+            version: id === 'yaml' ? '2.10.0' : '1.6.0',
+          })),
+        ),
+        LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN: 'sk-org-gateway-token-123456',
+        GITHUB_OUTPUT: ghOut,
+      });
+      assert.equal(exitCode, 0);
+      const outRaw = await readFile(ghOut, 'utf8');
+      assert.equal(outRaw.includes('sk-org-gateway-token-123456'), false);
+      assert.equal(outRaw.includes('"kind":"compiled"'), true);
     });
   });
 });

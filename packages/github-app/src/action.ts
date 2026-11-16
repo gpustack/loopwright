@@ -907,7 +907,17 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     : undefined;
 
   let activeGateEndpoints: readonly HostGateEndpointPlan[] = input.gateEndpoints ?? [];
-  let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? null;
+  let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? (
+    input.dryRun === true
+    && manifest.spec.publication.mode === 'pull_request'
+    && input.mode === 'candidate'
+      ? {
+        id: 'dry-run-publication',
+        url: 'http://127.0.0.1:65535/loopwright-dry-run-publication',
+        signingCredentialRef: 'taskpack-publication-signing',
+      }
+      : null
+  );
   let mcpRegistry: HostMcpRegistry | undefined;
 
   let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined

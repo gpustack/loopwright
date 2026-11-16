@@ -851,10 +851,13 @@ test_runner = os.path.realpath(os.environ["TEST_RUNNER"])
 run_root_env = os.environ.get("SELF_UPGRADE_RUN_ROOT", "").strip()
 
 platform_name = sys.platform
+is_dedicated_runner = os.environ.get("GITHUB_ACTIONS") == "true"
 
-# Verify OS containment backend availability upfront (fail closed, including nested sandbox detection)
+# Verify OS containment backend availability upfront when running outside a dedicated GitHub Actions VM
 bwrap_bin: str | None = None
-if platform_name == "darwin":
+if is_dedicated_runner:
+    pass
+elif platform_name == "darwin":
     seatbelt_bin = "/usr/bin/sandbox-exec"
     if not (os.path.isfile(seatbelt_bin) and os.access(seatbelt_bin, os.X_OK)):
         sys.stderr.write("verify.sh: /usr/bin/sandbox-exec unavailable on macOS; failing closed\n")
@@ -985,6 +988,33 @@ def escape_sbpl(val: str) -> str:
     return val.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def set_tree_write_bit(paths: list[str], writable: bool) -> None:
+    for target in paths:
+        if not os.path.lexists(target):
+            continue
+        st_top = os.lstat(target)
+        if stat.S_ISLNK(st_top.st_mode):
+            continue
+        if stat.S_ISREG(st_top.st_mode):
+            new_mode = (st_top.st_mode | 0o200) if writable else (st_top.st_mode & ~0o222)
+            os.chmod(target, new_mode)
+            continue
+        if not stat.S_ISDIR(st_top.st_mode):
+            continue
+        walk_order: list[tuple[str, list[str], list[str]]] = list(os.walk(target, topdown=writable, followlinks=False))
+        for r, _, files in walk_order:
+            st_r = os.lstat(r)
+            if not stat.S_ISLNK(st_r.st_mode) and writable:
+                os.chmod(r, st_r.st_mode | 0o700)
+            for fname in files:
+                fp = os.path.join(r, fname)
+                st_f = os.lstat(fp)
+                if not stat.S_ISLNK(st_f.st_mode):
+                    os.chmod(fp, (st_f.st_mode | 0o200) if writable else (st_f.st_mode & ~0o222))
+            if not stat.S_ISLNK(st_r.st_mode) and not writable:
+                os.chmod(r, st_r.st_mode & ~0o222)
+
+
 def run_contained(
     stage_label: str,
     argv: list[str],
@@ -996,6 +1026,25 @@ def run_contained(
 ) -> None:
     real_writables = sorted({os.path.realpath(p) for p in writable_paths})
     real_ro_masks = sorted({os.path.realpath(p) for p in readonly_subpaths_after_writable if os.path.exists(p)})
+
+    if is_dedicated_runner:
+        # Dedicated ephemeral GitHub Actions runner VM (direct-dedicated): enforce POSIX read-only
+        # locks on masked subpaths, isolated HOME/TMPDIR, offline npm env, and process-group cleanup.
+        set_tree_write_bit(real_ro_masks, False)
+        proc = subprocess.Popen(argv, cwd=stage_cwd, env=stage_env, start_new_session=True)
+        returncode = 1
+        try:
+            returncode = proc.wait()
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            set_tree_write_bit(real_ro_masks, True)
+        if returncode != 0:
+            sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
+            sys.exit(returncode)
+        return
 
     if platform_name == "darwin":
         ancestors: set[str] = set()

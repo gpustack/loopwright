@@ -2,7 +2,7 @@
 import { Buffer } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, existsSync } from 'node:fs';
+import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -1280,20 +1280,317 @@ async function readJsonArgOrFile(rawArg, repoRoot) {
   return JSON.parse(rawArg);
 }
 
+const SELF_UPGRADE_PROVIDER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const SELF_UPGRADE_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+const SELF_UPGRADE_DISALLOWED_OAUTH_PROVIDERS = new Set([
+  'github-copilot',
+  'openai-codex',
+  'claude-code',
+  'gemini',
+  'google',
+  'gemini-cli',
+  'google-gemini-cli',
+  'google-antigravity',
+]);
+function snapThinkingToCatalogMap(desiredLevel, providerId, modelId, api) {
+  try {
+    const dataUrl = new URL(`./providers/data/${providerId}.json`, import.meta.resolve('@earendil-works/pi-ai'));
+    const dataPath = fileURLToPath(dataUrl);
+    if (!existsSync(dataPath)) return desiredLevel;
+    const raw = JSON.parse(String(readFileSync(dataPath, 'utf8')));
+    const entry = raw?.[api]?.[`chat:${modelId}`];
+    const levelMap = entry?.thinkingLevelMap;
+    if (!isPlainRecord(levelMap)) return desiredLevel;
+    if (typeof levelMap[desiredLevel] === 'string' && levelMap[desiredLevel].length > 0) {
+      return desiredLevel;
+    }
+    const fallbacksByDesired = {
+      off: ['low', 'minimal', 'medium', 'high', 'max'],
+      minimal: ['low', 'medium', 'high', 'off', 'max'],
+      low: ['medium', 'high', 'minimal', 'max', 'off'],
+      medium: ['high', 'low', 'max', 'minimal', 'off'],
+      high: ['max', 'medium', 'low', 'xhigh'],
+      xhigh: ['high', 'max', 'medium', 'low'],
+      max: ['high', 'xhigh', 'medium', 'low'],
+    };
+    for (const candidate of fallbacksByDesired[desiredLevel] ?? ['low', 'high', 'max', 'off']) {
+      if (typeof levelMap[candidate] === 'string' && levelMap[candidate].length > 0) {
+        return candidate;
+      }
+    }
+  } catch {
+    // ignore missing or non-standard catalog files
+  }
+  return desiredLevel;
+}
+
+function normalizeGatewayBaseUrl(rawUrl) {
+  let cleaned = rawUrl.trim();
+  while (cleaned.endsWith('/')) {
+    cleaned = cleaned.slice(0, -1);
+  }
+  if (cleaned.toLowerCase().endsWith('/chat/completions')) {
+    cleaned = cleaned.slice(0, -'/chat/completions'.length);
+    while (cleaned.endsWith('/')) {
+      cleaned = cleaned.slice(0, -1);
+    }
+  }
+  if (cleaned.length < 8 || cleaned.length > 2048 || /[\s\0\r\n?#]/.test(cleaned)) {
+    throw new Error('LLM gateway URL must be a single-line URL without whitespace, query, or fragment');
+  }
+  let parsed;
+  try {
+    parsed = new URL(cleaned);
+  } catch {
+    throw new Error('LLM gateway URL is invalid');
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error('LLM gateway URL must not embed credentials');
+  }
+  const isLoopback = parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port.length > 0;
+  if (!(parsed.protocol === 'https:' || isLoopback)) {
+    throw new Error('LLM gateway URL must use https:// or http://127.0.0.1:<port>');
+  }
+  return cleaned;
+}
+
+function inferGatewayProviderId(explicitProvider, baseUrl) {
+  const trimmed = explicitProvider.trim().toLowerCase();
+  if (trimmed.length > 0) {
+    if (
+      !SELF_UPGRADE_PROVIDER_ID_RE.test(trimmed)
+      || trimmed.includes('..')
+      || SELF_UPGRADE_DISALLOWED_OAUTH_PROVIDERS.has(trimmed)
+    ) {
+      throw new Error(`Unsupported LLM provider identifier "${explicitProvider}"`);
+    }
+    return trimmed;
+  }
+  const parsed = new URL(baseUrl);
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  if (host === 'open.bigmodel.cn' || host.endsWith('.bigmodel.cn')) {
+    return path.includes('/api/coding') ? 'zai-coding-cn' : 'zai-cn';
+  }
+  if (host === 'api.z.ai' || host.endsWith('.z.ai')) {
+    return 'zai';
+  }
+  const hostMap = {
+    'api.anthropic.com': 'anthropic',
+    'api.openai.com': 'openai',
+    'api.deepseek.com': 'deepseek',
+    'openrouter.ai': 'openrouter',
+    'api.moonshot.cn': 'moonshotai-cn',
+    'api.moonshot.ai': 'moonshotai',
+    'api.kimi.com': 'kimi-coding',
+    'api.minimaxi.com': 'minimax-cn',
+    'api.minimax.io': 'minimax',
+    'token-plan.cn-beijing.maas.aliyuncs.com': 'qwen-token-plan-cn',
+    'dashscope.aliyuncs.com': 'qwen-token-plan-cn',
+    'token-plan.ap-southeast-1.maas.aliyuncs.com': 'qwen-token-plan',
+    'dashscope-intl.aliyuncs.com': 'qwen-token-plan',
+  };
+  return hostMap[host] ?? 'custom-gateway';
+}
+
+function resolveGatewayWireApi(protocol, useAnthropic) {
+  const proto = protocol.trim().toLowerCase();
+  if (proto.length > 0) {
+    const map = {
+      openai: 'openai-completions',
+      'openai-completions': 'openai-completions',
+      'openai-responses': 'openai-responses',
+      anthropic: 'anthropic-messages',
+      'anthropic-messages': 'anthropic-messages',
+    };
+    if (!Object.hasOwn(map, proto)) {
+      throw new Error(`Unsupported LLM wire protocol "${protocol}"`);
+    }
+    return map[proto];
+  }
+  const flag = useAnthropic.trim().toLowerCase();
+  if (flag === 'true' || flag === '1' || flag === 'yes') return 'anthropic-messages';
+  if (flag === '' || flag === 'false' || flag === '0' || flag === 'no') return 'openai-completions';
+  throw new Error(`Invalid LLM use-anthropic flag "${useAnthropic}"`);
+}
+
+function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl) {
+  const think = thinkingRaw.trim().toLowerCase();
+  const effort = effortRaw.trim().toLowerCase();
+  if (think === 'disabled' || think === 'off') {
+    return { level: 'off', reasoning: false };
+  }
+  if (effort.length > 0) {
+    if (!SELF_UPGRADE_THINKING_LEVELS.has(effort) || effort === 'off') {
+      throw new Error(`Unsupported reasoning effort "${effortRaw}"`);
+    }
+    return { level: effort, reasoning: true };
+  }
+  if (think.length > 0) {
+    if (think === 'enabled') return { level: 'low', reasoning: true };
+    if (SELF_UPGRADE_THINKING_LEVELS.has(think)) return { level: think, reasoning: think !== 'off' };
+    throw new Error(`Unsupported thinking mode "${thinkingRaw}"`);
+  }
+  const hint = `${modelId} ${baseUrl}`.toLowerCase();
+  if (hint.includes('glm') || hint.includes('zai') || hint.includes('bigmodel.cn')) {
+    return { level: 'low', reasoning: true };
+  }
+  return { level: 'off', reasoning: false };
+}
+
+export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsOutPath } = {}) {
+  const rawUrl = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_URL ?? env.CI_GPUSTACK_CODEREVIEW_LLM_URL ?? '').trim();
+  const rawModel = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL ?? env.CI_GPUSTACK_CODEREVIEW_LLM_MODEL ?? '').trim();
+  const rawProvider = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER ?? '').trim();
+
+  if (rawUrl.length === 0 && rawModel.length === 0) {
+    return Object.freeze({
+      configured: false,
+      modelProvider: '',
+      modelId: '',
+      modelThinking: '',
+      modelApi: '',
+      modelBaseUrl: '',
+      modelsJsonPath: '',
+      allowCustomBaseUrl: 'false',
+      providerTokenEnv: '',
+    });
+  }
+  if (rawUrl.length === 0 || rawModel.length === 0) {
+    throw new Error('Both LLM gateway URL and model must be configured together');
+  }
+  if (rawModel.length > 128 || /[\s\0\r\n]/.test(rawModel)) {
+    throw new Error('LLM model identifier must be 1..128 non-whitespace characters');
+  }
+
+  const baseUrl = normalizeGatewayBaseUrl(rawUrl);
+  const providerId = inferGatewayProviderId(rawProvider, baseUrl);
+  const api = resolveGatewayWireApi(
+    env.CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL ?? '',
+    env.CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC ?? env.CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC ?? '',
+  );
+  const resolvedThinking = resolveGatewayThinking(
+    env.SELF_UPGRADE_INPUT_THINKING ?? env.CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING ?? env.CI_GPUSTACK_CODEREVIEW_LLM_THINKING ?? '',
+    env.SELF_UPGRADE_INPUT_REASONING_EFFORT ?? env.CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT ?? env.CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT ?? '',
+    rawModel,
+    baseUrl,
+  );
+  const thinkingLevel = snapThinkingToCatalogMap(resolvedThinking.level, providerId, rawModel, api);
+  const reasoning = thinkingLevel !== 'off' ? true : resolvedThinking.reasoning;
+
+  const isGlm5 = rawModel.toLowerCase().startsWith('glm-5') || rawModel.toLowerCase().includes('/glm-5');
+  const rawCtx = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE ?? '').trim();
+  const contextWindow = rawCtx.length > 0 ? Number.parseInt(rawCtx, 10) : (isGlm5 ? 1_000_000 : 128_000);
+  if (!Number.isSafeInteger(contextWindow) || contextWindow < 4096 || contextWindow > 2_000_000) {
+    throw new Error('LLM context window must be an integer in [4096, 2000000]');
+  }
+  const rawMaxTok = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS ?? '').trim();
+  const desiredMaxTok = rawMaxTok.length > 0 ? Number.parseInt(rawMaxTok, 10) : (isGlm5 ? 65_536 : 32_768);
+  if (!Number.isSafeInteger(desiredMaxTok) || desiredMaxTok < 256 || desiredMaxTok > 262_144) {
+    throw new Error('LLM max tokens must be an integer in [256, 262144]');
+  }
+  const maxTokens = Math.min(desiredMaxTok, contextWindow);
+
+  const samplingParams = {};
+  const rawTemp = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE ?? env.CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE ?? '').trim();
+  if (rawTemp.length > 0) {
+    const temp = Number.parseFloat(rawTemp);
+    if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
+      throw new Error('LLM temperature must be a finite number in [0, 2]');
+    }
+    samplingParams.temperature = temp;
+  }
+  const rawTopP = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P ?? env.CI_GPUSTACK_CODEREVIEW_LLM_TOP_P ?? '').trim();
+  if (rawTopP.length > 0) {
+    const topP = Number.parseFloat(rawTopP);
+    if (!Number.isFinite(topP) || topP <= 0 || topP > 1) {
+      throw new Error('LLM top_p must be a finite number in (0, 1]');
+    }
+    samplingParams.top_p = topP;
+  }
+
+  const lowerModel = rawModel.toLowerCase();
+  const lowerUrl = baseUrl.toLowerCase();
+  const zaiCompat = api === 'openai-completions' && (lowerModel.includes('glm') || lowerUrl.includes('zai') || lowerUrl.includes('bigmodel.cn'))
+    ? {
+      thinkingFormat: 'zai',
+      ...(!(lowerModel.startsWith('glm-4') || lowerModel.includes('/glm-4')) ? { supportsReasoningEffort: true } : {}),
+    }
+    : undefined;
+
+  const tokenEnvName = 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN';
+  const modelEntry = {
+    id: rawModel,
+    contextWindow,
+    maxTokens,
+    reasoning,
+    ...(Object.keys(samplingParams).length > 0 ? { samplingParams } : {}),
+    ...(zaiCompat !== undefined ? { compat: zaiCompat } : {}),
+  };
+  const modelsDoc = {
+    providers: {
+      [providerId]: {
+        baseUrl,
+        api,
+        apiKey: `$${tokenEnvName}`,
+        models: [modelEntry],
+      },
+    },
+  };
+
+  let writtenModelsPath = '';
+  if (typeof modelsOutPath === 'string' && modelsOutPath.trim().length > 0) {
+    const resolvedModelsOut = resolve(modelsOutPath);
+    await mkdir(dirname(resolvedModelsOut), { recursive: true, mode: 0o700 });
+    const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0);
+    const handle = await open(resolvedModelsOut, flags, 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(modelsDoc, null, 2)}\n`, 'utf8');
+    } finally {
+      await handle.close();
+    }
+    writtenModelsPath = resolvedModelsOut;
+  }
+
+  return Object.freeze({
+    configured: true,
+    modelProvider: providerId,
+    modelId: rawModel,
+    modelThinking: thinkingLevel,
+    modelApi: api,
+    modelBaseUrl: baseUrl,
+    modelsJsonPath: writtenModelsPath,
+    allowCustomBaseUrl: 'true',
+    providerTokenEnv: tokenEnvName,
+  });
+}
+
 function formatGithubOutputBlock(key, value) {
   const delimiter = `LOOPWRIGHT_EOF_${createHash('sha256').update(`${key}:${value}`, 'utf8').digest('hex').slice(0, 16)}`;
   return `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
 }
 
-async function writeGithubOutputs(outputPath, summary) {
-  const payload = [
+async function writeGithubOutputs(outputPath, summary, modelConfig) {
+  const blocks = [
     formatGithubOutputBlock('recommended_mode', summary.recommendedMode),
     formatGithubOutputBlock('action_mode', summary.actionMode),
     formatGithubOutputBlock('stage_dir', summary.stageDir),
     formatGithubOutputBlock('npm_cache_dir', summary.npmCacheDir),
     formatGithubOutputBlock('upstream_records', JSON.stringify(summary.upstreamRecords)),
-  ].join('');
-  await appendFile(outputPath, payload, 'utf8');
+  ];
+  if (modelConfig !== undefined) {
+    blocks.push(
+      formatGithubOutputBlock('model_provider', modelConfig.modelProvider),
+      formatGithubOutputBlock('model_id', modelConfig.modelId),
+      formatGithubOutputBlock('model_thinking', modelConfig.modelThinking),
+      formatGithubOutputBlock('model_api', modelConfig.modelApi),
+      formatGithubOutputBlock('model_base_url', modelConfig.modelBaseUrl),
+      formatGithubOutputBlock('models_json', modelConfig.modelsJsonPath),
+      formatGithubOutputBlock('allow_custom_base_url', modelConfig.allowCustomBaseUrl),
+      formatGithubOutputBlock('provider_token_env', modelConfig.providerTokenEnv),
+    );
+  }
+  await appendFile(outputPath, blocks.join(''), 'utf8');
 }
 
 function parseCliArgs(argv) {
@@ -1306,6 +1603,7 @@ function parseCliArgs(argv) {
     skipStage: false,
     offlineCheck: false,
     githubOutput: undefined,
+    modelsOut: undefined,
     json: false,
   };
 
@@ -1335,6 +1633,9 @@ function parseCliArgs(argv) {
     } else if (arg === '--github-output' && i + 1 < argv.length) {
       i += 1;
       parsed.githubOutput = argv[i];
+    } else if (arg === '--models-out' && i + 1 < argv.length) {
+      i += 1;
+      parsed.modelsOut = argv[i];
     } else {
       throw new Error(`Unknown or incomplete CLI argument: "${arg}"`);
     }
@@ -1355,6 +1656,10 @@ async function main() {
     ? await readJsonArgOrFile(cli.registryJsonRaw, resolvedRepo)
     : undefined;
 
+  const modelConfig = cli.modelsOut !== undefined
+    ? await resolveSelfUpgradeModelConfig({ env: process.env, modelsOutPath: cli.modelsOut })
+    : undefined;
+
   const result = await runPrepareSelfUpgrade({
     repoRoot: resolvedRepo,
     stageDir: cli.stageDir,
@@ -1366,7 +1671,7 @@ async function main() {
   });
 
   if (cli.githubOutput !== undefined && cli.githubOutput.length > 0) {
-    await writeGithubOutputs(resolve(cli.githubOutput), result);
+    await writeGithubOutputs(resolve(cli.githubOutput), result, modelConfig);
   }
 
   const outputSummary = {
