@@ -2161,6 +2161,7 @@ spec:
       'v0.33.0rc3',
       '0.32.0rc1',
       'v1.0.0-rc.1',
+      'v2.0.0-rc.1',
       'v1.0.0-alpha.2',
       'v1.0.0-beta1',
       'v1.0.0.dev3',
@@ -2173,7 +2174,15 @@ spec:
     ]) {
       assert.equal(isPrereleaseVersionTag(tag), true, `expected prerelease tag: ${tag}`);
     }
-    for (const tag of ['v0.32.0', 'v0.5.23', 'v0.5.5.post1', 'v0.5.5-post1']) {
+    for (const tag of [
+      'v0.32.0',
+      'v0.5.23',
+      'v0.5.5.post1',
+      'v0.5.5-post1',
+      '1.0.0.post1',
+      'v1.2.3+b100',
+      'v1.2.3+dev1',
+    ]) {
       assert.equal(isPrereleaseVersionTag(tag), false, `expected stable tag: ${tag}`);
     }
 
@@ -2258,6 +2267,7 @@ spec:
           res.end(JSON.stringify([
             { tag_name: 'v0.33.0rc3', prerelease: false, draft: false },
             { tag_name: 'v0.33.0-beta.1', prerelease: true, draft: false },
+            { tag_name: 'v0.31.5', prerelease: false, draft: false },
             { tag_name: 'v0.32.0', prerelease: false, draft: false },
             { tag_name: 'v0.5.5.post1', prerelease: false, draft: false },
           ]));
@@ -2309,7 +2319,7 @@ spec:
         upstreamId: 'vllm-stable',
         status: 'available',
         version: 'v0.32.0',
-        recentVersions: ['v0.32.0', 'v0.5.5.post1'],
+        recentVersions: ['v0.32.0', 'v0.31.5', 'v0.5.5.post1'],
       });
       assert.deepEqual(discovered[1], {
         upstreamId: 'vllm-post',
@@ -2321,7 +2331,7 @@ spec:
         upstreamId: 'vllm-pre',
         status: 'available',
         version: 'v0.33.0rc3',
-        recentVersions: ['v0.33.0rc3', 'v0.33.0-beta.1', 'v0.32.0', 'v0.5.5.post1'],
+        recentVersions: ['v0.33.0rc3', 'v0.33.0-beta.1', 'v0.31.5', 'v0.32.0', 'v0.5.5.post1'],
       });
       assert.deepEqual(discovered[3], {
         upstreamId: 'vllm-tags-stable',

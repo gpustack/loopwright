@@ -18,7 +18,7 @@ const MAX_PROPOSAL_BYTES = 262_144;
 export const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const SAFE_GIT_REF_PATTERN = /^[A-Za-z0-9_./@^~{}-]{1,256}$/;
 const SEMVER_TAG_PATTERN = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/i;
-const PRERELEASE_VERSION_TAG_PATTERN = /^v?\d+(?:\.\d+)+(?:[._+-]?(?:alpha|beta|rc|dev|pre|preview|nightly|canary)\d*|[ab]\d+)(?:[._+-]|$)/i;
+const PRERELEASE_VERSION_TAG_PATTERN = /^v?\d+(?:\.\d+)+(?:[._-]?(?:alpha|beta|rc|dev|pre|preview|nightly|canary)\d*|[ab]\d+)(?:[._-]|$)/i;
 const UPSTREAM_STATUSES: ReadonlySet<string> = new Set<UpstreamAcquisitionStatus>([
   'available',
   'up_to_date',
@@ -489,7 +489,8 @@ function compareNaturalChunks(a: string, b: string): number {
 }
 
 export function isPrereleaseVersionTag(tag: string): boolean {
-  return PRERELEASE_VERSION_TAG_PATTERN.test(tag.trim());
+  const coreAndPre = tag.trim().split('+', 1)[0]!;
+  return PRERELEASE_VERSION_TAG_PATTERN.test(coreAndPre);
 }
 
 export function compareVersionTags(a: string, b: string): number {
@@ -570,6 +571,8 @@ function collectReleaseTags(
   return tags;
 }
 
+// When allowPrerelease === false is explicitly configured and every tag is a prerelease,
+// fail closed with ACTION_INPUT_INVALID rather than silently falling back to a prerelease commit SHA.
 function selectLatestVersionTag(tags: readonly string[], upstream: TaskpackUpstreamDescriptor): string {
   const candidates = upstream.allowPrerelease === false
     ? tags.filter(tag => !isPrereleaseVersionTag(tag))
@@ -656,7 +659,11 @@ async function resolveSingleUpstreamDetails(
         }
         const stableTags = collectReleaseTags(list30.data, { allowPrerelease: false, rejectTagPrerelease: true });
         if (stableTags.length > 0) {
-          return { version: stableTags[0]!, recentVersions: Object.freeze(stableTags.slice(0, 20)) };
+          const bestVersion = [...stableTags].sort(compareVersionTags).at(-1)!;
+          return {
+            version: bestVersion,
+            recentVersions: Object.freeze([bestVersion, ...stableTags.filter(item => item !== bestVersion)].slice(0, 20)),
+          };
         }
         throw new GitHubAppError('ACTION_INPUT_INVALID', `no non-prerelease releases found for ${upstream.source}`);
       }
