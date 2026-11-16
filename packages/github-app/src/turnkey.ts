@@ -2711,10 +2711,8 @@ export async function executeTurnkeyActionCycle(
             const rows = verifierMatrixRaw.filter((entry): entry is Record<string, unknown> => isPlainRecord(entry));
             const hasNoChangePassed = rows.some(row => row['implicit'] === 'no_change' && row['status'] === 'passed');
             const hasScopePassed = rows.some(row => row['implicit'] === 'scope' && row['status'] === 'passed');
-            const allExplicitPassed = rows
-              .filter(row => row['implicit'] === null)
-              .every(row => row['status'] === 'passed');
-            if (rows.length === verifierMatrixRaw.length && hasNoChangePassed && hasScopePassed && allExplicitPassed) {
+            const allRowsPassed = rows.every(row => row['status'] === 'passed');
+            if (rows.length === verifierMatrixRaw.length && hasNoChangePassed && hasScopePassed && allRowsPassed) {
               candidateVerifiedNoChange = true;
             }
           }

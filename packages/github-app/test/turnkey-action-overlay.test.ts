@@ -2571,6 +2571,7 @@ spec:
             vllm_older: 'v0.33.0',
             vllm_newer: 'v0.33.0',
             vllm_tag_older: 'v0.33.0',
+            vllm_build_meta: 'v1.2.3+build.1',
           },
         }) + '\n',
       );
@@ -2597,6 +2598,10 @@ spec:
     - id: vllm_tag_older
       kind: git-tag
       source: vllm-project/vllm-tag-older
+      watchedPaths: [pack]
+    - id: vllm_build_meta
+      kind: github-release
+      source: vllm-project/vllm-build-meta
       watchedPaths: [pack]
   proposal:
     path: pack/proposal.json
@@ -2650,6 +2655,16 @@ spec:
           res.end(JSON.stringify([{ name: 'v0.32.0', commit: { sha: '2'.repeat(40) } }]));
           return;
         }
+        if (url === '/api/repos/vllm-project/vllm-build-meta/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v1.2.3+build.2', prerelease: false, draft: false }));
+          return;
+        }
+        if (url === '/api/repos/vllm-project/vllm-build-meta/releases?per_page=30') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([{ tag_name: 'v1.2.3+build.2', prerelease: false, draft: false }]));
+          return;
+        }
         res.writeHead(404);
         res.end('{}');
       });
@@ -2674,6 +2689,10 @@ spec:
       assert.equal(discovered[2]?.upstreamId, 'vllm_tag_older');
       assert.equal(discovered[2]?.status, 'up_to_date');
       assert.equal(discovered[2]?.version, 'v0.32.0');
+
+      assert.equal(discovered[3]?.upstreamId, 'vllm_build_meta');
+      assert.equal(discovered[3]?.status, 'available');
+      assert.equal(discovered[3]?.version, 'v1.2.3+build.2');
     } finally {
       await server?.close();
       await rm(work, { recursive: true, force: true });
