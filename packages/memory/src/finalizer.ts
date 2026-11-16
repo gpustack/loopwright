@@ -1,5 +1,5 @@
-import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
+import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
@@ -21,7 +21,33 @@ function addInventory(inventory: Inventory, reference: ArtifactRef): void {
 interface RetainedArtifact { readonly reference: ArtifactRef; readonly bytes: Uint8Array }
 async function readArtifactFile(directory: string, name: string): Promise<RetainedArtifact> {
   const path = join(directory, name);
-  const bytes = await readFile(path);
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must be a regular file');
+  }
+  if (info.size > ARTIFACT_BYTES_LIMIT) {
+    fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
+  }
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  let bytes: Buffer;
+  try {
+    fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const fdInfo = await fd.stat();
+    if (!fdInfo.isFile()) {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must be a regular file');
+    }
+    if (fdInfo.size > ARTIFACT_BYTES_LIMIT) {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
+    }
+    bytes = await fd.readFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must not be a symlink');
+    }
+    throw error;
+  } finally {
+    if (fd !== null) await fd.close();
+  }
   if (bytes.byteLength > ARTIFACT_BYTES_LIMIT) fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
   const digest = digestArtifact(name, bytes);
   if (!digest.ok) fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact digest refused');

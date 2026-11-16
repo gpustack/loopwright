@@ -697,6 +697,7 @@ function validateRetainedSettledRunBindings(
   if (settled.incident !== undefined && settled.incident !== null) {
     if (
       settled.incident.runId !== expected.runId
+      || settled.incident.lockHash.algorithm !== settled.lock.spec.lockHash.algorithm
       || settled.incident.lockHash.hex !== settled.lock.spec.lockHash.hex
     ) {
       return 'MEMORY_SCOPE_VIOLATION: retained ControllerIncident does not match retained TaskLock';

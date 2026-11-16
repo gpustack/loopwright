@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -674,6 +674,60 @@ describe('five-gate proposal verifier', () => {
       await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident, [
         { name: expectedRef.name, bytes: Buffer.from('tampered-plan-content', 'utf8') },
       ]);
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+
+    // 4c. symlinked retained artifact (knownReferences[0] and incident-*.bin pointing outside artifacts/)
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const outsideTarget = join(root, 'outside-secret.bin');
+      const expectedBytes = Buffer.from('outside-secret-content', 'utf8');
+      await writeFile(outsideTarget, expectedBytes);
+      const expectedRef = refOf({ name: 'plan-symlink.bin', bytes: expectedBytes });
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [expectedRef],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      const { artifactsDir } = await writeRunDir(runRoot, negFixture.lock.spec.runId, negFixture, incident);
+      await symlink(outsideTarget, join(artifactsDir, expectedRef.name));
+      const outcome = await finalizeRunMemory({
+        context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
+        config: finalizerConfig(),
+      });
+      assert.equal(outcome.status, 'unavailable');
+      assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+
+    await withSandbox(async root => {
+      const runRoot = join(root, 'runs');
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId: negFixture.lock.spec.runId,
+        lockHash: negFixture.lock.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [],
+        unavailable: [],
+        cleanup: 'complete',
+      };
+      const runDir = join(runRoot, negFixture.lock.spec.runId);
+      const artifactsDir = join(runDir, 'artifacts');
+      await mkdir(artifactsDir, { recursive: true });
+      await writeFile(join(runDir, 'run.json'), JSON.stringify({ version: 1, identity: { lock: negFixture.lock } }), 'utf8');
+      const outsideIncident = join(root, 'outside-incident.bin');
+      await writeFile(outsideIncident, Buffer.from(canonical(incident), 'utf8'));
+      await symlink(outsideIncident, join(artifactsDir, `incident-${negFixture.lock.spec.runId}.bin`));
       const outcome = await finalizeRunMemory({
         context: { kind: 'run_directory', runRoot, runId: negFixture.lock.spec.runId, repository: root, ledger: LEDGER },
         config: finalizerConfig(),

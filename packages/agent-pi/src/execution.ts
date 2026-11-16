@@ -100,6 +100,8 @@ export class Execution implements ToolExecutor {
       return { kind: 'ok', args: raw };
     }
     if ((name === 'read' || name === 'write' || name === 'edit' || name === 'delete') && typeof raw.path === 'string' && raw.path.length > 0) {
+      // Path traversal, .git segments, and non-workspace paths are hard security boundary violations
+      // (TOOL_DENIED) rather than soft schema errors, so intentionally do not catch here.
       this.candidate.enforceHardPathInvariants(raw.path, { allowRootAlias: name === 'read' });
     }
     const optionalNullKeys: readonly string[] = name === 'edit'
@@ -306,7 +308,24 @@ export class Execution implements ToolExecutor {
           : softError !== null && softError.targetPath === null
             ? 'arguments:' + identity.name
             : 'candidate:' + (softError?.targetPath ?? change?.path ?? read!.path);
-      const requestDigest = digest(Buffer.from('loopwright.dev/pi-tool/v1\0' + canonical({ identity: { ...identity, slot: digest(Buffer.from(identity.slot)) }, argumentsDigest: digest(bytes), lock: this.input.lock.spec.lockHash, policy: digest(Buffer.from(canonical(this.input.policy))), runtime: this.input.policy.runtime, targetIdentity, before: change?.before ?? null, after: change?.after ?? null, ...(change?.deleted ? { deleted: true } : {}) })));
+      const execBytes = !softError && !change && !isExternalMcp && this.#softArgumentErrors && parsedArgs.kind === 'ok'
+        ? Buffer.from(JSON.stringify(parsedArgs.args))
+        : bytes;
+      // argumentsDigest commits to the raw model wire bytes (digest(bytes), matching Sender wire admission).
+      // When normalization changes dispatched bytes (execBytes !== bytes), also pin effectiveArgumentsDigest.
+      const effectiveArgumentsDigest = Buffer.compare(execBytes, bytes) !== 0 ? digest(execBytes) : null;
+      const requestDigest = digest(Buffer.from('loopwright.dev/pi-tool/v1\0' + canonical({
+        identity: { ...identity, slot: digest(Buffer.from(identity.slot)) },
+        argumentsDigest: digest(bytes),
+        ...(effectiveArgumentsDigest !== null ? { effectiveArgumentsDigest } : {}),
+        lock: this.input.lock.spec.lockHash,
+        policy: digest(Buffer.from(canonical(this.input.policy))),
+        runtime: this.input.policy.runtime,
+        targetIdentity,
+        before: change?.before ?? null,
+        after: change?.after ?? null,
+        ...(change?.deleted ? { deleted: true } : {}),
+      })));
       const intent: OperationIntent = { operationId, nodeId: this.input.stepId, attemptId: 'tool-attempt-' + randomBytes(12).toString('hex'), effect: (identity.name === 'read' || isExternalMcp || softError !== null) ? 'read_only' : 'local_write', requestDigest, targetIdentity };
       onOperation(operationId); const written = stateValue(this.host.store.putIntent(this.host.authority, intent), 'tool');
       if (written.kind !== 'created') refuse('RECOVERY_REQUIRED', '', { phase: 'tool', operationId });
@@ -332,9 +351,6 @@ export class Execution implements ToolExecutor {
         });
         result = clampToolResultBytes(rawMcp, this.input.policy.limits.toolResultBytes, { tool: 'bash' });
       } else {
-        const execBytes = this.#softArgumentErrors && parsedArgs.kind === 'ok'
-          ? Buffer.from(JSON.stringify(parsedArgs.args))
-          : bytes;
         const reply: ToolProcessReply = await process!.execute(identity.name as 'read' | 'bash', execBytes, read, guard); result = reply.result;
         if (reply.code !== null) refuse(reply.code, '', { phase: 'tool', effect: effect ? 'possible' : 'none', operationId });
       }

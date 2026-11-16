@@ -873,6 +873,7 @@ export class Candidate {
       let items: unknown[];
       try {
         items = list(input, 32, '/edits');
+        if (items.length < 1) throw new Error('empty-edits');
       } catch {
         return freeze({
           kind: 'error' as const,

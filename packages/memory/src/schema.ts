@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { ArtifactRef, Digest } from '@loopwright/core';
-import type { ControllerIncident } from '@loopwright/controller';
+import {
+  CONTROLLER_CLEANUP_STATES,
+  CONTROLLER_DIAGNOSTIC_PHASES,
+  CONTROLLER_INCIDENT_CODES,
+  type ControllerIncident,
+} from '@loopwright/controller';
 import type { MemoryDiagnostic, MemoryErrorCode, MemoryEntry, MemoryEvidenceRef, MemoryOperation, MemoryProposal, MemoryStoreIndex, RetiredMemoryEntry } from './types.js';
 
 export class MemoryDiagnosticError extends Error {
@@ -133,17 +138,6 @@ function artifactRef(value: unknown, path: string): ArtifactRef {
   if (name.startsWith('/') || name.split('/').includes('..')) fail('MEMORY_SCHEMA_INVALID', `${path}/name`, 'artifact name must stay relative');
   return { name, digest: digestShape(input['digest'], `${path}/digest`), byteLength: integer(input['byteLength'], `${path}/byteLength`, 0) };
 }
-const CONTROLLER_INCIDENT_CODES = [
-  'CONFIG_SYNTAX', 'CONFIG_DUPLICATE_KEY', 'CONFIG_LIMIT', 'CONFIG_SCHEMA', 'CONFIG_REFERENCE', 'CONFIG_ENV_MISSING',
-  'CONFIG_ENV_SYNTAX', 'CONFIG_ENV_DENIED', 'CONFIG_CREDENTIAL_INVALID', 'REGISTRY_UNTRUSTED', 'TARGET_MISMATCH', 'CAPABILITY_UNSUPPORTED',
-  'MCP_AUTHENTICATION_REQUIRED', 'SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS', 'VERIFICATION_FAILED', 'EVIDENCE_UNAVAILABLE', 'GATE_TIMEOUT', 'RECEIPT_CONFLICT', 'REPEAT_FAILURE',
-  'ATTEMPT_LIMIT', 'BUDGET_EXHAUSTED', 'DEADLINE', 'CANCELLED', 'OWNER_BUSY', 'AUTHORITY_REFUSED', 'RECOVERY_REQUIRED', 'ARTIFACT_INVALID',
-  'OUTPUT_LIMIT', 'CLEANUP_FAILED', 'STATE_UNAVAILABLE',
-] as const;
-const CONTROLLER_INCIDENT_STAGES = [
-  'configuration', 'compile', 'admission', 'execution', 'verification', 'recovery', 'finalization', 'inspection',
-] as const;
-const CONTROLLER_CLEANUP_STATES = ['complete', 'pending', 'failed'] as const;
 
 export function controllerIncidentSchema(
   value: unknown,
@@ -166,7 +160,7 @@ export function controllerIncidentSchema(
     fail('MEMORY_SCHEMA_INVALID', `${path}/lockHash`, 'incident lockHash does not match retained TaskLock');
   }
   const stage = text(input['stage'], `${path}/stage`, 1, 32);
-  if (!CONTROLLER_INCIDENT_STAGES.includes(stage as (typeof CONTROLLER_INCIDENT_STAGES)[number])) {
+  if (!CONTROLLER_DIAGNOSTIC_PHASES.includes(stage as (typeof CONTROLLER_DIAGNOSTIC_PHASES)[number])) {
     fail('MEMORY_SCHEMA_INVALID', `${path}/stage`, 'unknown controller incident stage');
   }
   if (!Array.isArray(input['knownReferences']) || input['knownReferences'].length > 64) {

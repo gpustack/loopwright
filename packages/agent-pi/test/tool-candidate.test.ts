@@ -707,6 +707,13 @@ test('tryPrepareEdit with softArgumentError returns soft errors on malformed edi
       assert.match(nonArray.message, /"edits" must be an array/);
     }
 
+    const emptyEdits = await f.candidate.tryPrepareEdit('packages/example.ts', [], { softScopeError: true, softArgumentError: true });
+    assert.equal(emptyEdits.kind, 'error');
+    if (emptyEdits.kind === 'error') {
+      assert.equal(emptyEdits.targetPath, 'packages/example.ts');
+      assert.match(emptyEdits.message, /Invalid arguments for tool "edit"/);
+    }
+
     const tooMany = await f.candidate.tryPrepareEdit(
       'packages/example.ts',
       Array.from({ length: 33 }, () => ({ oldText: 'a', newText: 'b' })),

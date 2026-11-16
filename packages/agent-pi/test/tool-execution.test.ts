@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { admitTask } from '@loopwright/core';
+import { canonical, digest } from '../src/boundary.js';
 import { Execution, type AdmittedToolIdentity } from '../src/execution.js';
 import { PiFailure } from '../src/errors.js';
 import { requestFixture, stateGood } from './request-fixtures.js';
@@ -310,13 +311,30 @@ test('softArgumentErrors strips optional null keys, records read_only hints on m
     assert.equal(editShorthandWithNull.isError, undefined);
     assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 3;\n');
 
+    const readIdentity: AdmittedToolIdentity = { ...identity, callId: 'call-soft-read-nulls', name: 'read' };
+    const rawReadBytes = Buffer.from(JSON.stringify({ path: 'packages/example.ts', offset: null, limit: null }));
+    let readOpId = '';
     const readWithNulls = await softArgActor.invoke(
-      { ...identity, callId: 'call-soft-read-nulls', name: 'read' },
-      Buffer.from(JSON.stringify({ path: 'packages/example.ts', offset: null, limit: null })),
+      readIdentity,
+      rawReadBytes,
       signal,
-      id => operations.push(id),
+      id => { readOpId = id; operations.push(id); },
     );
     assert.equal(readWithNulls.isError, undefined);
+    const readRecord = stateGood(f.host.store.getOperation(readOpId));
+    const normalizedReadBytes = Buffer.from(JSON.stringify({ path: 'packages/example.ts' }));
+    const expectedReadDigest = digest(Buffer.from('loopwright.dev/pi-tool/v1\0' + canonical({
+      identity: { ...readIdentity, slot: digest(Buffer.from(readIdentity.slot)) },
+      argumentsDigest: digest(rawReadBytes),
+      effectiveArgumentsDigest: digest(normalizedReadBytes),
+      lock: f.input.lock.spec.lockHash,
+      policy: digest(Buffer.from(canonical(f.input.policy))),
+      runtime: f.input.policy.runtime,
+      targetIdentity: 'candidate:packages/example.ts',
+      before: null,
+      after: null,
+    })));
+    assert.deepEqual(readRecord.intent.requestDigest, expectedReadDigest);
 
     const bashWithNull = await softArgActor.invoke(
       { ...identity, callId: 'call-soft-bash-null', name: 'bash' },
