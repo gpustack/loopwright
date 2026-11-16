@@ -1377,9 +1377,15 @@ process.exit(45);
       assert.equal(emptyCfg.configured, false);
       assert.equal(emptyCfg.allowCustomBaseUrl, 'false');
 
-      // 2) Org CI_GPUSTACK_CODEREVIEW_LLM_* resolves zai-coding-cn, strips /chat/completions, and writes valid 0o600 models.json
+      // 2) Empty-string workflow inputs/vars fall through to org CI_GPUSTACK_CODEREVIEW_LLM_*, strip /chat/completions, and write 0o600 models.json
       const orgCfg = await preflight.resolveSelfUpgradeModelConfig({
         env: {
+          SELF_UPGRADE_INPUT_THINKING: '',
+          SELF_UPGRADE_INPUT_REASONING_EFFORT: '',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: '',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: '',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING: '',
+          CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT: '',
           CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/',
           CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
           CI_GPUSTACK_CODEREVIEW_LLM_THINKING: 'enabled',
@@ -1397,6 +1403,21 @@ process.exit(45);
       assert.equal(orgCfg.modelBaseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
       assert.equal(orgCfg.allowCustomBaseUrl, 'true');
       assert.equal(orgCfg.providerTokenEnv, 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN');
+
+      // Explicit disabled/off thinking stays 'off' with reasoning=false instead of snapping back on
+      const disabledThinkingOut = join(dir, 'models-disabled.json');
+      const disabledCfg = await preflight.resolveSelfUpgradeModelConfig({
+        env: {
+          SELF_UPGRADE_INPUT_THINKING: 'disabled',
+          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4',
+          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
+          CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT: 'medium',
+        },
+        modelsOutPath: disabledThinkingOut,
+      });
+      assert.equal(disabledCfg.modelThinking, 'off');
+      const parsedDisabledModels = await loadPiModelsJson(disabledThinkingOut);
+      assert.equal(parsedDisabledModels.providers.get('zai-coding-cn')?.models.get('glm-5.3')?.reasoning, false);
 
       const st = await stat(modelsOut);
       assert.equal(st.mode & 0o777, 0o600);

@@ -906,14 +906,17 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     }
     : undefined;
 
+  const needsNativePublicationEndpoint = manifest.spec.publication.mode === 'pull_request'
+    && input.publicationEndpoint === undefined
+    && input.mode === 'candidate';
+  const DRY_RUN_PUBLICATION_SENTINEL_URL = 'http://127.0.0.1:65535/loopwright-dry-run-publication';
+
   let activeGateEndpoints: readonly HostGateEndpointPlan[] = input.gateEndpoints ?? [];
   let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? (
-    input.dryRun === true
-    && manifest.spec.publication.mode === 'pull_request'
-    && input.mode === 'candidate'
+    input.dryRun === true && needsNativePublicationEndpoint
       ? {
         id: 'dry-run-publication',
-        url: 'http://127.0.0.1:65535/loopwright-dry-run-publication',
+        url: DRY_RUN_PUBLICATION_SENTINEL_URL,
         signingCredentialRef: 'taskpack-publication-signing',
       }
       : null
@@ -1146,11 +1149,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         }
       }
 
-      if (
-        manifest.spec.publication.mode === 'pull_request'
-        && input.publicationEndpoint === undefined
-        && input.mode === 'candidate'
-      ) {
+      if (needsNativePublicationEndpoint) {
         publisherServer = await startNativePullRequestPublisherServer({
           runRoot: realRunRoot,
           repositoryRoot: realRepositoryRoot,

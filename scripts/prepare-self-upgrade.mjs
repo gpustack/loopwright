@@ -1414,6 +1414,29 @@ function resolveGatewayWireApi(protocol, useAnthropic) {
   throw new Error(`Invalid LLM use-anthropic flag "${useAnthropic}"`);
 }
 
+function firstNonEmptyEnv(env, ...keys) {
+  for (const key of keys) {
+    const val = env[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      return val.trim();
+    }
+  }
+  return '';
+}
+
+function isZaiOrGlmTarget(modelId, baseUrl) {
+  const lowerModel = modelId.trim().toLowerCase();
+  if (lowerModel.startsWith('glm-') || lowerModel.includes('/glm-')) {
+    return true;
+  }
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return host === 'api.z.ai' || host.endsWith('.z.ai') || host === 'open.bigmodel.cn' || host.endsWith('.bigmodel.cn');
+  } catch {
+    return false;
+  }
+}
+
 function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl) {
   const think = thinkingRaw.trim().toLowerCase();
   const effort = effortRaw.trim().toLowerCase();
@@ -1431,17 +1454,16 @@ function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl) {
     if (SELF_UPGRADE_THINKING_LEVELS.has(think)) return { level: think, reasoning: think !== 'off' };
     throw new Error(`Unsupported thinking mode "${thinkingRaw}"`);
   }
-  const hint = `${modelId} ${baseUrl}`.toLowerCase();
-  if (hint.includes('glm') || hint.includes('zai') || hint.includes('bigmodel.cn')) {
+  if (isZaiOrGlmTarget(modelId, baseUrl)) {
     return { level: 'low', reasoning: true };
   }
   return { level: 'off', reasoning: false };
 }
 
 export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsOutPath } = {}) {
-  const rawUrl = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_URL ?? env.CI_GPUSTACK_CODEREVIEW_LLM_URL ?? '').trim();
-  const rawModel = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL ?? env.CI_GPUSTACK_CODEREVIEW_LLM_MODEL ?? '').trim();
-  const rawProvider = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER ?? '').trim();
+  const rawUrl = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_URL', 'CI_GPUSTACK_CODEREVIEW_LLM_URL');
+  const rawModel = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL', 'CI_GPUSTACK_CODEREVIEW_LLM_MODEL');
+  const rawProvider = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER');
 
   if (rawUrl.length === 0 && rawModel.length === 0) {
     return Object.freeze({
@@ -1466,25 +1488,27 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
   const baseUrl = normalizeGatewayBaseUrl(rawUrl);
   const providerId = inferGatewayProviderId(rawProvider, baseUrl);
   const api = resolveGatewayWireApi(
-    env.CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL ?? '',
-    env.CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC ?? env.CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC ?? '',
+    firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL'),
+    firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC', 'CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC'),
   );
   const resolvedThinking = resolveGatewayThinking(
-    env.SELF_UPGRADE_INPUT_THINKING ?? env.CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING ?? env.CI_GPUSTACK_CODEREVIEW_LLM_THINKING ?? '',
-    env.SELF_UPGRADE_INPUT_REASONING_EFFORT ?? env.CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT ?? env.CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT ?? '',
+    firstNonEmptyEnv(env, 'SELF_UPGRADE_INPUT_THINKING', 'CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING', 'CI_GPUSTACK_CODEREVIEW_LLM_THINKING'),
+    firstNonEmptyEnv(env, 'SELF_UPGRADE_INPUT_REASONING_EFFORT', 'CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT', 'CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT'),
     rawModel,
     baseUrl,
   );
-  const thinkingLevel = snapThinkingToCatalogMap(resolvedThinking.level, providerId, rawModel, api);
-  const reasoning = thinkingLevel !== 'off' ? true : resolvedThinking.reasoning;
+  const thinkingLevel = resolvedThinking.level === 'off'
+    ? 'off'
+    : snapThinkingToCatalogMap(resolvedThinking.level, providerId, rawModel, api);
+  const reasoning = thinkingLevel !== 'off';
 
   const isGlm5 = rawModel.toLowerCase().startsWith('glm-5') || rawModel.toLowerCase().includes('/glm-5');
-  const rawCtx = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE ?? '').trim();
+  const rawCtx = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE');
   const contextWindow = rawCtx.length > 0 ? Number.parseInt(rawCtx, 10) : (isGlm5 ? 1_000_000 : 128_000);
   if (!Number.isSafeInteger(contextWindow) || contextWindow < 4096 || contextWindow > 2_000_000) {
     throw new Error('LLM context window must be an integer in [4096, 2000000]');
   }
-  const rawMaxTok = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS ?? '').trim();
+  const rawMaxTok = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS');
   const desiredMaxTok = rawMaxTok.length > 0 ? Number.parseInt(rawMaxTok, 10) : (isGlm5 ? 65_536 : 32_768);
   if (!Number.isSafeInteger(desiredMaxTok) || desiredMaxTok < 256 || desiredMaxTok > 262_144) {
     throw new Error('LLM max tokens must be an integer in [256, 262144]');
@@ -1492,7 +1516,7 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
   const maxTokens = Math.min(desiredMaxTok, contextWindow);
 
   const samplingParams = {};
-  const rawTemp = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE ?? env.CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE ?? '').trim();
+  const rawTemp = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE', 'CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE');
   if (rawTemp.length > 0) {
     const temp = Number.parseFloat(rawTemp);
     if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
@@ -1500,7 +1524,7 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
     }
     samplingParams.temperature = temp;
   }
-  const rawTopP = (env.CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P ?? env.CI_GPUSTACK_CODEREVIEW_LLM_TOP_P ?? '').trim();
+  const rawTopP = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P', 'CI_GPUSTACK_CODEREVIEW_LLM_TOP_P');
   if (rawTopP.length > 0) {
     const topP = Number.parseFloat(rawTopP);
     if (!Number.isFinite(topP) || topP <= 0 || topP > 1) {
@@ -1510,8 +1534,7 @@ export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsO
   }
 
   const lowerModel = rawModel.toLowerCase();
-  const lowerUrl = baseUrl.toLowerCase();
-  const zaiCompat = api === 'openai-completions' && (lowerModel.includes('glm') || lowerUrl.includes('zai') || lowerUrl.includes('bigmodel.cn'))
+  const zaiCompat = api === 'openai-completions' && isZaiOrGlmTarget(rawModel, baseUrl)
     ? {
       thinkingFormat: 'zai',
       ...(!(lowerModel.startsWith('glm-4') || lowerModel.includes('/glm-4')) ? { supportsReasoningEffort: true } : {}),

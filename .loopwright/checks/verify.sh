@@ -988,7 +988,9 @@ def escape_sbpl(val: str) -> str:
     return val.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def set_tree_write_bit(paths: list[str], writable: bool) -> None:
+def snapshot_and_lock_masks(paths: list[str]) -> tuple[dict[str, int], dict[str, tuple[int, int, int, int]]]:
+    dir_modes: dict[str, int] = {}
+    file_snap: dict[str, tuple[int, int, int, int]] = {}
     for target in paths:
         if not os.path.lexists(target):
             continue
@@ -996,23 +998,89 @@ def set_tree_write_bit(paths: list[str], writable: bool) -> None:
         if stat.S_ISLNK(st_top.st_mode):
             continue
         if stat.S_ISREG(st_top.st_mode):
-            new_mode = (st_top.st_mode | 0o200) if writable else (st_top.st_mode & ~0o222)
-            os.chmod(target, new_mode)
+            orig_mode = stat.S_IMODE(st_top.st_mode)
+            file_snap[target] = (orig_mode, st_top.st_size, st_top.st_mtime_ns, st_top.st_ino)
+            os.chmod(target, orig_mode & ~0o222)
             continue
         if not stat.S_ISDIR(st_top.st_mode):
             continue
-        walk_order: list[tuple[str, list[str], list[str]]] = list(os.walk(target, topdown=writable, followlinks=False))
-        for r, _, files in walk_order:
+        for r, _, files in os.walk(target, topdown=False, followlinks=False):
             st_r = os.lstat(r)
-            if not stat.S_ISLNK(st_r.st_mode) and writable:
-                os.chmod(r, st_r.st_mode | 0o700)
+            if stat.S_ISLNK(st_r.st_mode):
+                continue
+            orig_dir_mode = stat.S_IMODE(st_r.st_mode)
+            dir_modes[r] = orig_dir_mode
             for fname in files:
                 fp = os.path.join(r, fname)
                 st_f = os.lstat(fp)
-                if not stat.S_ISLNK(st_f.st_mode):
-                    os.chmod(fp, (st_f.st_mode | 0o200) if writable else (st_f.st_mode & ~0o222))
-            if not stat.S_ISLNK(st_r.st_mode) and not writable:
-                os.chmod(r, st_r.st_mode & ~0o222)
+                if not stat.S_ISLNK(st_f.st_mode) and stat.S_ISREG(st_f.st_mode):
+                    orig_f_mode = stat.S_IMODE(st_f.st_mode)
+                    file_snap[fp] = (orig_f_mode, st_f.st_size, st_f.st_mtime_ns, st_f.st_ino)
+                    os.chmod(fp, orig_f_mode & ~0o222)
+            os.chmod(r, orig_dir_mode & ~0o222)
+    return dir_modes, file_snap
+
+
+def restore_and_verify_masks(
+    paths: list[str],
+    dir_modes: dict[str, int],
+    file_snap: dict[str, tuple[int, int, int, int]],
+) -> str | None:
+    tampered: str | None = None
+    seen_files: set[str] = set()
+    for dpath in sorted(dir_modes.keys(), key=len):
+        try:
+            if os.path.lexists(dpath) and not os.path.islink(dpath):
+                os.chmod(dpath, dir_modes[dpath])
+        except OSError:
+            pass
+    for target in paths:
+        if not os.path.lexists(target):
+            if target in file_snap or target in dir_modes:
+                tampered = tampered or f"masked path deleted during stage: {target}"
+            continue
+        st_top = os.lstat(target)
+        if stat.S_ISLNK(st_top.st_mode):
+            continue
+        if stat.S_ISREG(st_top.st_mode):
+            seen_files.add(target)
+            expected = file_snap.get(target)
+            if expected is None:
+                tampered = tampered or f"unexpected file created at masked path: {target}"
+            else:
+                orig_mode, exp_size, exp_mtime, exp_ino = expected
+                if st_top.st_size != exp_size or st_top.st_mtime_ns != exp_mtime or st_top.st_ino != exp_ino:
+                    tampered = tampered or f"masked file modified during stage: {target}"
+                try:
+                    os.chmod(target, orig_mode)
+                except OSError:
+                    pass
+            continue
+        if not stat.S_ISDIR(st_top.st_mode):
+            continue
+        for r, _, files in os.walk(target, topdown=True, followlinks=False):
+            for fname in files:
+                fp = os.path.join(r, fname)
+                st_f = os.lstat(fp)
+                if stat.S_ISLNK(st_f.st_mode) or not stat.S_ISREG(st_f.st_mode):
+                    continue
+                seen_files.add(fp)
+                expected = file_snap.get(fp)
+                if expected is None:
+                    tampered = tampered or f"unexpected file created inside masked tree: {fp}"
+                else:
+                    orig_mode, exp_size, exp_mtime, exp_ino = expected
+                    if st_f.st_size != exp_size or st_f.st_mtime_ns != exp_mtime or st_f.st_ino != exp_ino:
+                        tampered = tampered or f"masked file modified during stage: {fp}"
+                    try:
+                        os.chmod(fp, orig_mode)
+                    except OSError:
+                        pass
+    if tampered is None and len(seen_files) != len(file_snap):
+        missing = sorted(set(file_snap.keys()) - seen_files)
+        if missing:
+            tampered = f"masked file removed during stage: {missing[0]}"
+    return tampered
 
 
 def run_contained(
@@ -1024,23 +1092,44 @@ def run_contained(
     readonly_subpaths_after_writable: list[str],
     network_mode: str,
 ) -> None:
+    if network_mode not in ("none", "loopback-only"):
+        raise ValueError(f"unsupported network_mode {network_mode!r}")
     real_writables = sorted({os.path.realpath(p) for p in writable_paths})
     real_ro_masks = sorted({os.path.realpath(p) for p in readonly_subpaths_after_writable if os.path.exists(p)})
 
     if is_dedicated_runner:
-        # Dedicated ephemeral GitHub Actions runner VM (direct-dedicated): enforce POSIX read-only
-        # locks on masked subpaths, isolated HOME/TMPDIR, offline npm env, and process-group cleanup.
-        set_tree_write_bit(real_ro_masks, False)
-        proc = subprocess.Popen(argv, cwd=stage_cwd, env=stage_env, start_new_session=True)
+        # Trust boundary (`direct-dedicated` on ephemeral single-job GitHub-hosted runner VMs):
+        # The VM itself is destroyed after the job, `actions/checkout` runs with `persist-credentials: false`,
+        # and `command.v1` strips all tokens/keys from `env` (no `.taskpack-*/secrets.json` exists in Action mode).
+        # We lock masked subpaths read-only, snapshot inodes/sizes/mtimes to detect same-UID `chmod` tampering,
+        # and reap any lingering background process-group members before reaping the session leader zombie.
+        dir_modes, file_snap = snapshot_and_lock_masks(real_ro_masks)
+        proc: subprocess.Popen[bytes] | None = None
         returncode = 1
+        tamper_reason: str | None = None
         try:
+            proc = subprocess.Popen(argv, cwd=stage_cwd, env=stage_env, start_new_session=True)
+            if hasattr(os, "waitid") and hasattr(os, "WEXITED") and hasattr(os, "WNOWAIT"):
+                os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
             returncode = proc.wait()
         finally:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            set_tree_write_bit(real_ro_masks, True)
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            tamper_reason = restore_and_verify_masks(real_ro_masks, dir_modes, file_snap)
+        if tamper_reason is not None:
+            sys.stderr.write(f"verify.sh: {tamper_reason} in stage {stage_label!r}\n")
+            sys.exit(1)
         if returncode != 0:
             sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
             sys.exit(returncode)
