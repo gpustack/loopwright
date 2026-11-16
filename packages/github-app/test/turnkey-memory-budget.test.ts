@@ -18,10 +18,18 @@ import {
   type MemoryOperation,
 } from '@loopwright/memory';
 import {
+  loadTrustedConfiguration,
+  stepNext,
+  stepSubmit,
+} from '@loopwright/controller';
+import {
   DEFAULT_HOST_BUDGETS,
   compileDeclarativeTaskpack,
+  finalizeAndPublishTurnkeyMemory,
   loadDeclarativeTaskpack,
+  openStagedTaskpackStepGate,
   runGitHubActionEntrypoint,
+  SecretScrubber,
   stageTaskpackForStep,
 } from '../src/index.js';
 
@@ -258,15 +266,46 @@ async function writeProjectedStoreToDisk(
   const entriesDir = join(memDir, 'entries');
   await rm(memDir, { recursive: true, force: true });
   await mkdir(entriesDir, { recursive: true });
+  const writes: Promise<void>[] = [];
   for (const [entryId, bytes] of projection.entryFiles.entries()) {
-    await writeFile(join(entriesDir, `${entryId}.md`), bytes);
+    writes.push(writeFile(join(entriesDir, `${entryId}.md`), bytes));
   }
   for (const row of projection.index.retired) {
     if (!projection.entryFiles.has(row.entry.id)) {
-      await writeFile(join(entriesDir, `${row.entry.id}.md`), entryFileBytes(row.entry));
+      writes.push(writeFile(join(entriesDir, `${row.entry.id}.md`), entryFileBytes(row.entry)));
     }
   }
-  await writeFile(join(memDir, 'index.json'), canonical(projection.index), 'utf8');
+  writes.push(writeFile(join(memDir, 'index.json'), canonical(projection.index), 'utf8'));
+  await Promise.all(writes);
+}
+
+function buildActiveOpsBatch(params: {
+  readonly count: number;
+  readonly idPrefix: string;
+  readonly claimPrefix: string;
+  readonly paddingChar: string;
+  readonly paddingLen: number;
+  readonly baseRevision: string;
+  readonly codeFingerprint: { readonly algorithm: 'sha256'; readonly hex: string };
+  readonly verifiedAtMs: number;
+}): MemoryOperation[] {
+  const pad = params.paddingChar.repeat(params.paddingLen);
+  const ops: MemoryOperation[] = [];
+  for (let i = 0; i < params.count; i += 1) {
+    const padded = String(i).padStart(3, '0');
+    ops.push({
+      kind: 'upsert',
+      entry: buildSyntheticMemoryEntry({
+        id: `entry.${params.idPrefix}-${padded}`,
+        claimKey: `claim.${params.idPrefix}-${padded}`,
+        claim: `${params.claimPrefix} ${padded}: ${pad}`,
+        baseRevision: params.baseRevision,
+        codeFingerprint: params.codeFingerprint,
+        verifiedAtMs: params.verifiedAtMs,
+      }),
+    });
+  }
+  return ops;
 }
 
 describe('turnkey @loopwright/memory window budgeting and large store merges', () => {
@@ -380,21 +419,16 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
 
       const docsFp = await computeCodeFingerprint(repo, ['docs/**', 'pack/**'], '.auto-sync/memory');
       const nowMs = Date.now();
-      const ops130: MemoryOperation[] = [];
-      for (let i = 0; i < 130; i += 1) {
-        const padded = String(i).padStart(3, '0');
-        ops130.push({
-          kind: 'upsert',
-          entry: buildSyntheticMemoryEntry({
-            id: `entry.item-${padded}`,
-            claimKey: `claim.item-${padded}`,
-            claim: `Verified invariant ${padded}: ${'x'.repeat(1_250)}`,
-            baseRevision: baseSha0,
-            codeFingerprint: docsFp,
-            verifiedAtMs: nowMs - 1_000,
-          }),
-        });
-      }
+      const ops130 = buildActiveOpsBatch({
+        count: 130,
+        idPrefix: 'item',
+        claimPrefix: 'Verified invariant',
+        paddingChar: 'x',
+        paddingLen: 1_250,
+        baseRevision: baseSha0,
+        codeFingerprint: docsFp,
+        verifiedAtMs: nowMs - 1_000,
+      });
       const proj130 = projectMemoryStore(emptyMemoryStoreIndex('auto-sync', 'acme/repo', nowMs - 2_000), ops130, nowMs, 'prop.seed-130');
       await writeProjectedStoreToDisk(repo, proj130);
       await git(repo, ['add', '.auto-sync/memory']);
@@ -468,21 +502,16 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
       await git(bareRemote, ['update-ref', '-d', 'refs/heads/loopwright/memory/auto-sync/main']).catch(() => undefined);
 
       // 220-entry store (> 450 KiB `index.json`) + retired/active same-id replacement + squash-merge + disjoint target addition
-      const ops220: MemoryOperation[] = [];
-      for (let i = 0; i < 220; i += 1) {
-        const padded = String(i).padStart(3, '0');
-        ops220.push({
-          kind: 'upsert',
-          entry: buildSyntheticMemoryEntry({
-            id: `entry.item-${padded}`,
-            claimKey: `claim.item-${padded}`,
-            claim: `Large store entry ${padded} v1: ${'y'.repeat(1_450)}`,
-            baseRevision: mainSha,
-            codeFingerprint: docsFp,
-            verifiedAtMs: nowMs + 1_000,
-          }),
-        });
-      }
+      const ops220 = buildActiveOpsBatch({
+        count: 220,
+        idPrefix: 'item',
+        claimPrefix: 'Large store entry',
+        paddingChar: 'y',
+        paddingLen: 1_450,
+        baseRevision: mainSha,
+        codeFingerprint: docsFp,
+        verifiedAtMs: nowMs + 1_000,
+      });
       const proj220V1 = projectMemoryStore(
         emptyMemoryStoreIndex('auto-sync', 'acme/repo', nowMs),
         ops220,
@@ -542,33 +571,90 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
       mainSha = await git(repo, ['rev-parse', 'HEAD']);
       await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
 
-      turn = 0;
-      const run220Res = await runGitHubActionEntrypoint({
+      // Seed a settled run via stepNext + stepSubmit (avoiding a redundant HostSession boot) and exercise finalizeAndPublishTurnkeyMemory directly.
+      const manifest220 = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: repo });
+      const staged220 = await stageTaskpackForStep({
         repositoryRoot: repo,
         taskpackPath: '.auto-sync/taskpack.yaml',
-        repositoryFullName: 'acme/repo',
-        repositoryId: 801,
-        baseRevision: mainSha,
-        mode: 'candidate',
-        eventName: 'workflow_dispatch',
         runRoot,
         runId: 'run-p3-220-squash',
-        turnkey: true,
-        allowManifestCustomBaseUrl: true,
-        githubApiBaseUrl: githubServer.url,
-        githubToken: 'ghp_p3b_token_123456',
-        gitRemoteUrl: bareRemote,
-        env: {
+        mode: 'candidate',
+        discoverUpstreams: false,
+        upstreamRecordsJson: JSON.stringify([{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }]),
+        runtimeEnv: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-          GITHUB_ACTIONS: 'true',
-          LLM_TOKEN: 'sk-p3b-llm-token-123456',
+          LOOPWRIGHT_REPOSITORY: 'acme/repo',
+          GITHUB_SHA: mainSha,
         },
       });
-      assert.equal(run220Res.kind, 'compiled');
-      if (run220Res.kind === 'compiled') {
-        assert.equal(run220Res.delegateOutcome?.ok, true);
-        assert.equal(run220Res.memory?.status, 'published');
+      const gate220 = await openStagedTaskpackStepGate({ runRoot, runId: 'run-p3-220-squash' });
+      let sub220: Awaited<ReturnType<typeof stepSubmit>>;
+      try {
+        const prevGateSecret = process.env[staged220.signingEnvName];
+        process.env[staged220.signingEnvName] = staged220.signingSecret;
+        let loaded220: Awaited<ReturnType<typeof loadTrustedConfiguration>>;
+        try {
+          loaded220 = await loadTrustedConfiguration({
+            configPath: staged220.configPath,
+            registryPath: staged220.registryPath,
+            registrySha256: staged220.registrySha256,
+            untrustedRoots: [repo],
+          });
+        } finally {
+          if (prevGateSecret === undefined) {
+            delete process.env[staged220.signingEnvName];
+          } else {
+            process.env[staged220.signingEnvName] = prevGateSecret;
+          }
+        }
+        assert.equal(loaded220.ok, true, loaded220.ok ? '' : JSON.stringify(loaded220.error));
+        if (!loaded220.ok) return;
+        const next220 = await stepNext(
+          {
+            configuration: loaded220.value,
+            repository: repo,
+            runRoot,
+            runId: 'run-p3-220-squash',
+            mode: 'candidate',
+            ...(gate220 ? { environment: gate220.environment } : {}),
+          },
+          gate220 ? { gateUrlOverrides: gate220.gateUrlOverrides } : {},
+        );
+        assert.equal(next220.ok, true);
+        if (!next220.ok || next220.value.kind !== 'step') return;
+        await writeFile(join(next220.value.candidateDir, 'docs', 'status.md'), 'verified-v2\n', { mode: 0o600 });
+        await writeFile(join(next220.value.candidateDir, 'pack', 'proposal.json'), '{"schema_version":1,"version":"2.0.0"}\n', { mode: 0o600 });
+        sub220 = await stepSubmit(
+          {
+            runRoot,
+            runId: 'run-p3-220-squash',
+            leaseToken: next220.value.leaseToken,
+            status: 'completed',
+            ...(gate220 ? { environment: gate220.environment } : {}),
+          },
+          gate220 ? { gateUrlOverrides: gate220.gateUrlOverrides } : {},
+        );
+      } finally {
+        await gate220?.close();
       }
+      assert.equal(sub220.ok, true, sub220.ok ? '' : JSON.stringify(sub220.error));
+
+      const memSummary220 = await finalizeAndPublishTurnkeyMemory({
+        manifest: manifest220,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        runRoot,
+        runId: 'run-p3-220-squash',
+        baseRevision: mainSha,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        remoteUrl: bareRemote,
+        apiBaseUrl: githubServer.url,
+        githubToken: 'ghp_p3b_token_123456',
+        scrubber: new SecretScrubber(),
+        nowMs: nowMs + 7_000,
+      });
+      assert.equal(memSummary220.status, 'published', memSummary220.reason ?? '');
 
       const verify220Clone = join(work, 'verify-220-clone');
       await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, verify220Clone]);
@@ -728,21 +814,16 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
       const docsFp = await computeCodeFingerprint(repo, ['docs/**', 'pack/**'], '.auto-sync/memory');
       const nowMs = Date.now();
 
-      const ops130: MemoryOperation[] = [];
-      for (let i = 0; i < 130; i += 1) {
-        const padded = String(i).padStart(3, '0');
-        ops130.push({
-          kind: 'upsert',
-          entry: buildSyntheticMemoryEntry({
-            id: `entry.mcp-${padded}`,
-            claimKey: `claim.mcp-${padded}`,
-            claim: `Active memory entry ${padded}: ${'m'.repeat(320)}`,
-            baseRevision: baseSha0,
-            codeFingerprint: docsFp,
-            verifiedAtMs: nowMs,
-          }),
-        });
-      }
+      const ops130 = buildActiveOpsBatch({
+        count: 130,
+        idPrefix: 'mcp',
+        claimPrefix: 'Active memory entry',
+        paddingChar: 'm',
+        paddingLen: 320,
+        baseRevision: baseSha0,
+        codeFingerprint: docsFp,
+        verifiedAtMs: nowMs,
+      });
       const proj130 = projectMemoryStore(
         emptyMemoryStoreIndex('auto-sync', 'acme/repo', nowMs),
         ops130,

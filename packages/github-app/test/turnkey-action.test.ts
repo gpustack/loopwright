@@ -4,8 +4,8 @@ import { constants as fsConstants, existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, it } from 'node:test';
-import { inspectRun, signPayload, verifySignedPayload } from '@loopwright/controller';
+import { describe, it, before, after } from 'node:test';
+import { inspectRun, loadTrustedConfiguration, signPayload, stepNext, stepSubmit, verifySignedPayload } from '@loopwright/controller';
 import {
   compareVersionTags,
   compileDeclarativeTaskpack,
@@ -25,6 +25,7 @@ import {
   SecretScrubber,
   serializePrettyYaml,
   stageCompiledInstructionResources,
+  stageTaskpackForStep,
   startLocalCommandGateServer,
   startNativePullRequestPublisherServer,
   writeActionOutputSinks,
@@ -2104,6 +2105,141 @@ spec:
     };
   }
 
+  async function seedStepCandidateSnapshot(options: {
+    readonly work: string;
+    readonly runId: string;
+    readonly scripts: Readonly<Record<string, string>>;
+  }): Promise<{
+    readonly repo: string;
+    readonly runRoot: string;
+    readonly candidateDigest: string;
+    readonly scriptSha256ByRel: Readonly<Record<string, string>>;
+  }> {
+    const repo = join(options.work, 'repo');
+    const runRoot = join(options.work, 'runs');
+    await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+    await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+    await mkdir(join(repo, 'pack'), { recursive: true });
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await chmod(runRoot, 0o700);
+
+    await git(repo, ['init', '-b', 'main']);
+    await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update pack/proposal.json.\n');
+    await writeFile(join(repo, 'pack', 'proposal.json'), `${JSON.stringify({ schema_version: 1, version: '1.0.0' })}\n`);
+    await writeFile(join(repo, 'docs', 'upstream.json'), `${JSON.stringify({ version: '2.0.0' })}\n`);
+
+    const scriptSha256ByRel: Record<string, string> = {};
+    for (const [rel, content] of Object.entries(options.scripts)) {
+      const full = join(repo, rel);
+      await writeFile(full, content, { mode: 0o755 });
+      await chmod(full, 0o755);
+      scriptSha256ByRel[rel] = createHash('sha256').update(content).digest('hex');
+    }
+
+    await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: step-seed-gate
+spec:
+  goal:
+    candidate: Seed candidate snapshot for command gate tests
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - docs
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: custom-table
+      source: docs/upstream.json
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: seed"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  output:
+    formats: [json]
+`);
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'init step seed fixture']);
+
+    const staged = await stageTaskpackForStep({
+      taskpackPath: '.auto-sync/taskpack.yaml',
+      repositoryRoot: repo,
+      runRoot,
+      runId: options.runId,
+      mode: 'candidate',
+      discoverUpstreams: false,
+      upstreamRecordsJson: JSON.stringify([{ upstreamId: 'engine', status: 'available', version: '2.0.0' }]),
+    });
+    const loaded = await loadTrustedConfiguration({
+      configPath: staged.configPath,
+      registryPath: staged.registryPath,
+      registrySha256: staged.registrySha256,
+      untrustedRoots: [repo],
+    });
+    assert.equal(loaded.ok, true);
+    if (!loaded.ok) throw new Error('loadTrustedConfiguration failed');
+
+    const next = await stepNext({
+      configuration: loaded.value,
+      repository: repo,
+      runRoot,
+      runId: options.runId,
+      mode: 'candidate',
+    });
+    assert.equal(next.ok, true);
+    if (!next.ok || next.value.kind !== 'step') throw new Error('stepNext failed');
+
+    await writeFile(
+      join(next.value.candidateDir, 'pack', 'proposal.json'),
+      `${JSON.stringify({ schema_version: 1, version: '2.0.0' })}\n`,
+      { mode: 0o600 },
+    );
+    const submitted = await stepSubmit({
+      runRoot,
+      runId: options.runId,
+      leaseToken: next.value.leaseToken,
+      status: 'completed',
+    });
+    assert.equal(submitted.ok, true);
+
+    const inspectOut = join(options.work, `inspect-${options.runId}`);
+    const inspected = await inspectRun({ runRoot, runId: options.runId, output: inspectOut });
+    assert.equal(inspected.ok, true);
+    const resultDoc = JSON.parse(await readFile(join(inspectOut, 'result.json'), 'utf8')) as {
+      spec: { subject: { candidateDigest: { hex: string } } };
+    };
+    return {
+      repo,
+      runRoot,
+      candidateDigest: resultDoc.spec.subject.candidateDigest.hex,
+      scriptSha256ByRel,
+    };
+  }
+
   it('returns pending after syncWaitMs, deduplicates repeated/concurrent POSTs to one execution, and settles pending->approved end-to-end', async () => {
     const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-async-')));
     let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
@@ -2278,15 +2414,26 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
     }
   });
 
-  it('close() kills in-flight child process groups and awaits cleanup before removing owned scratch directory', async () => {
-    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-close-')));
-    let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
-    let seeded: Awaited<ReturnType<typeof seedCommandGateCandidateRun>> | undefined;
+  const sharedWorkDirPromise = (async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-shared-')));
+    return work;
+  })();
+  let sharedWork = '';
+  let sharedSeed: {
+    readonly repo: string;
+    readonly runRoot: string;
+    readonly candidateDigest: string;
+    readonly scriptSha256ByRel: Readonly<Record<string, string>>;
+    readonly pidFile: string;
+    readonly scratchMarkerFile: string;
+  } | undefined;
 
-    try {
-      const pidFile = join(work, 'pids.txt');
-      const scratchMarkerFile = join(work, 'scratch-base.txt');
-      const scriptContent = `#!/usr/bin/env bash
+  before(async () => {
+    sharedWork = await sharedWorkDirPromise;
+    const pidFile = join(sharedWork, 'pids.txt');
+    const scratchMarkerFile = join(sharedWork, 'scratch-base.txt');
+    const longSleepRel = '.auto-sync/checks/long-sleep.sh';
+    const longSleepContent = `#!/usr/bin/env bash
 set -euo pipefail
 sleep 30 &
 bg_pid=$!
@@ -2294,84 +2441,57 @@ printf '%s\\n' "$HOME" > ${JSON.stringify(scratchMarkerFile)}
 printf '%s %s\\n' "$$" "$bg_pid" > ${JSON.stringify(pidFile)}
 wait "$bg_pid"
 `;
-      seeded = await seedCommandGateCandidateRun({
-        work,
-        runId: 'run-close-kill-seed',
-        scriptContent,
-        timeoutSeconds: 60,
-      });
-      const baseSha = await git(seeded.repo, ['rev-parse', 'HEAD']);
+    const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
+    const tailScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+echo "npm warn deprecated legacy-pkg@0.1.0: please migrate to newer release" >&2
+${JSON.stringify(process.execPath)} -e 'for (let i = 0; i < 1500; i++) process.stdout.write("ok " + i + " passing check padding line for buffer test\\n"); process.stdout.write("FAIL: runtime assertion XYZ\\n");'
+exit 1
+`;
+    const overflowScriptRel = '.auto-sync/checks/verify-overflow.sh';
+    const overflowScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+echo "npm warn deprecated legacy-pkg@0.1.0: please migrate" >&2
+${JSON.stringify(process.execPath)} -e 'const line = "ok passing test line padding 0123456789abcdef0123456789abcdef\\n"; for (let i = 0; i < 20000; i++) process.stdout.write(line); process.stdout.write("FAIL: tail overflow sentinel\\n");'
+exit 1
+`;
+    const seeded = await seedStepCandidateSnapshot({
+      work: sharedWork,
+      runId: 'run-shared-gate-seed',
+      scripts: {
+        [longSleepRel]: longSleepContent,
+        [tailScriptRel]: tailScriptContent,
+        [overflowScriptRel]: overflowScriptContent,
+      },
+    });
+    sharedSeed = { ...seeded, pidFile, scratchMarkerFile };
+  });
 
-      // Seed a quick passing run snapshot using an inline fast gate server so inspectAndVerifyCandidate succeeds.
-      const fastScriptRel = '.auto-sync/checks/fast.sh';
-      await writeFile(join(seeded.repo, fastScriptRel), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-      await chmod(join(seeded.repo, fastScriptRel), 0o755);
-      const fastSha = createHash('sha256').update('#!/usr/bin/env bash\nexit 0\n').digest('hex');
+  after(async () => {
+    if (sharedWork.length > 0) {
+      await rm(sharedWork, { recursive: true, force: true });
+    }
+  });
 
-      const manifest = await loadDeclarativeTaskpack({
-        repositoryRoot: seeded.repo,
-        manifestPath: '.auto-sync/taskpack.yaml',
-      });
-      const compiledSeed = await compileDeclarativeTaskpack(manifest, {
-        mode: 'candidate',
-        executionMode: 'pi',
-        repository: 'acme/repo',
-        baseRevision: baseSha,
-        sourceRevision: baseSha,
-        repositoryRoot: seeded.repo,
-        taskpackPath: '.auto-sync/taskpack.yaml',
-        budgets: DEFAULT_HOST_BUDGETS,
-        credentialEnvMap: { provider: 'LLM_TOKEN', localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV },
-        allowManifestCustomBaseUrl: true,
-      });
-      const longGate = (compiledSeed.localCommandGates ?? [])[0]!;
+  it('close() kills in-flight child process groups and awaits cleanup before removing owned scratch directory', async () => {
+    let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
 
-      const fastGateServer = await startLocalCommandGateServer({
-        runRoot: seeded.runRoot,
-        repositoryRoot: seeded.repo,
-        gates: [{ ...longGate, script: fastScriptRel, scriptSha256: fastSha }],
-      });
-      let candidateDigest = '';
-      try {
-        const seedRes = await runGitHubActionEntrypoint({
-          repositoryRoot: seeded.repo,
-          taskpackPath: '.auto-sync/taskpack.yaml',
-          repositoryFullName: 'acme/repo',
-          repositoryId: 42,
-          baseRevision: baseSha,
-          mode: 'candidate',
-          eventName: 'workflow_dispatch',
-          runRoot: seeded.runRoot,
-          runId: 'run-close-kill-seed',
-          turnkey: true,
-          allowManifestCustomBaseUrl: true,
-          githubApiBaseUrl: seeded.githubServer.url,
-          gateEndpoints: [fastGateServer.endpointPlan],
-          env: {
-            PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-            GITHUB_ACTIONS: 'true',
-            LLM_TOKEN: 'sk-close-seed-token-1234',
-            [DEFAULT_LOCAL_COMMAND_GATE_ENV]: fastGateServer.signingSecret,
-          },
-        });
-        assert.equal(seedRes.kind, 'compiled');
-        assert.equal(seedRes.delegateOutcome?.ok, true);
-        const inspectOut = join(work, 'inspected-close');
-        const inspected = await inspectRun({ runRoot: seeded.runRoot, runId: 'run-close-kill-seed', output: inspectOut });
-        assert.equal(inspected.ok, true);
-        const resultDoc = JSON.parse(await readFile(join(inspectOut, 'result.json'), 'utf8')) as {
-          spec: { subject: { candidateDigest: { hex: string } } };
-        };
-        candidateDigest = resultDoc.spec.subject.candidateDigest.hex;
-      } finally {
-        await fastGateServer.close();
-      }
-
-      // Now start the real gateServer with owned scratch (no scratchRoot) and syncWaitMs: 10_000.
+    try {
+      const seeded = sharedSeed!;
+      const scriptRel = '.auto-sync/checks/long-sleep.sh';
       gateServer = await startLocalCommandGateServer({
         runRoot: seeded.runRoot,
         repositoryRoot: seeded.repo,
-        gates: [longGate],
+        gates: [{
+          checkId: 'verify-cmd',
+          gateId: 'verify-cmd',
+          endpointRef: 'loopwright-local-command',
+          script: scriptRel,
+          scriptSha256: seeded.scriptSha256ByRel[scriptRel]!,
+          timeoutSeconds: 60,
+          allowReadOnlyGitHubToken: false,
+          env: [],
+        }],
         syncWaitMs: 10_000,
       });
 
@@ -2379,31 +2499,31 @@ wait "$bg_pid"
         gateServer.url,
         {
           storeId: 'store-close',
-          runId: 'run-close-kill-seed',
+          runId: 'run-shared-gate-seed',
           lockHash: null,
           operationId: 'op-close-1',
           dispatchId: 'disp-close-1',
           dispatchGeneration: 1,
-          gateId: longGate.gateId,
-          checkId: longGate.checkId,
-          candidateDigest,
+          gateId: 'verify-cmd',
+          checkId: 'verify-cmd',
+          candidateDigest: seeded.candidateDigest,
         },
         gateServer.signingSecret,
       ).catch(() => undefined);
 
       // Wait until script + background grandchild PIDs are recorded.
       const waitStart = Date.now();
-      while (!existsSync(pidFile) && Date.now() - waitStart < 5_000) {
+      while (!existsSync(seeded.pidFile) && Date.now() - waitStart < 5_000) {
         await new Promise(r => setTimeout(r, 25));
       }
-      assert.equal(existsSync(pidFile), true, 'long-running gate child must have started');
-      const [childPidStr, grandchildPidStr] = (await readFile(pidFile, 'utf8')).trim().split(/\s+/);
+      assert.equal(existsSync(seeded.pidFile), true, 'long-running gate child must have started');
+      const [childPidStr, grandchildPidStr] = (await readFile(seeded.pidFile, 'utf8')).trim().split(/\s+/);
       const childPid = Number(childPidStr);
       const grandchildPid = Number(grandchildPidStr);
       assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
       assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
 
-      const scratchHomePath = (await readFile(scratchMarkerFile, 'utf8')).trim();
+      const scratchHomePath = (await readFile(seeded.scratchMarkerFile, 'utf8')).trim();
       const scratchBasePath = dirname(dirname(scratchHomePath));
       assert.equal(existsSync(scratchBasePath), true);
 
@@ -2431,116 +2551,40 @@ wait "$bg_pid"
       }
     } finally {
       await gateServer?.close();
-      await seeded?.openAiServer.close();
-      await seeded?.githubServer.close();
-      await rm(work, { recursive: true, force: true });
     }
   });
 
   it('surfaces stdout failure tail diagnostics in denied verdict reason even when stderr emits warnings and stdout exceeds 70 KiB or MAX_STDIO_BYTES', async () => {
-    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-tail-')));
     let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
-    let seeded: Awaited<ReturnType<typeof seedCommandGateCandidateRun>> | undefined;
 
     try {
-      const tailScriptContent = `#!/usr/bin/env bash
-set -euo pipefail
-echo "npm warn deprecated legacy-pkg@0.1.0: please migrate to newer release" >&2
-${JSON.stringify(process.execPath)} -e 'for (let i = 0; i < 1500; i++) process.stdout.write("ok " + i + " passing check padding line for buffer test\\n"); process.stdout.write("FAIL: runtime assertion XYZ\\n");'
-exit 1
-`;
+      const seeded = sharedSeed!;
+      const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
       const overflowScriptRel = '.auto-sync/checks/verify-overflow.sh';
-      const overflowScriptContent = `#!/usr/bin/env bash
-set -euo pipefail
-echo "npm warn deprecated legacy-pkg@0.1.0: please migrate" >&2
-${JSON.stringify(process.execPath)} -e 'const line = "ok passing test line padding 0123456789abcdef0123456789abcdef\\n"; for (let i = 0; i < 20000; i++) process.stdout.write(line); process.stdout.write("FAIL: tail overflow sentinel\\n");'
-exit 1
-`;
-      seeded = await seedCommandGateCandidateRun({
-        work,
-        runId: 'run-tail-seed',
-        scriptContent: tailScriptContent,
-      });
-      await writeFile(join(seeded.repo, overflowScriptRel), overflowScriptContent, { mode: 0o755 });
-      await chmod(join(seeded.repo, overflowScriptRel), 0o755);
-      const overflowSha = createHash('sha256').update(overflowScriptContent).digest('hex');
-
-      const fastScriptRel = '.auto-sync/checks/fast.sh';
-      await writeFile(join(seeded.repo, fastScriptRel), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
-      await chmod(join(seeded.repo, fastScriptRel), 0o755);
-      const fastSha = createHash('sha256').update('#!/usr/bin/env bash\nexit 0\n').digest('hex');
-
-      const baseSha = await git(seeded.repo, ['rev-parse', 'HEAD']);
-      const manifest = await loadDeclarativeTaskpack({
-        repositoryRoot: seeded.repo,
-        manifestPath: '.auto-sync/taskpack.yaml',
-      });
-      const compiledSeed = await compileDeclarativeTaskpack(manifest, {
-        mode: 'candidate',
-        executionMode: 'pi',
-        repository: 'acme/repo',
-        baseRevision: baseSha,
-        sourceRevision: baseSha,
-        repositoryRoot: seeded.repo,
-        taskpackPath: '.auto-sync/taskpack.yaml',
-        budgets: DEFAULT_HOST_BUDGETS,
-        credentialEnvMap: { provider: 'LLM_TOKEN', localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV },
-        allowManifestCustomBaseUrl: true,
-      });
-      const baseGate = (compiledSeed.localCommandGates ?? [])[0]!;
-
-      const fastGateServer = await startLocalCommandGateServer({
-        runRoot: seeded.runRoot,
-        repositoryRoot: seeded.repo,
-        gates: [{ ...baseGate, script: fastScriptRel, scriptSha256: fastSha }],
-      });
-      let candidateDigest = '';
-      try {
-        const seedRes = await runGitHubActionEntrypoint({
-          repositoryRoot: seeded.repo,
-          taskpackPath: '.auto-sync/taskpack.yaml',
-          repositoryFullName: 'acme/repo',
-          repositoryId: 42,
-          baseRevision: baseSha,
-          mode: 'candidate',
-          eventName: 'workflow_dispatch',
-          runRoot: seeded.runRoot,
-          runId: 'run-tail-seed',
-          turnkey: true,
-          allowManifestCustomBaseUrl: true,
-          githubApiBaseUrl: seeded.githubServer.url,
-          gateEndpoints: [fastGateServer.endpointPlan],
-          env: {
-            PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-            GITHUB_ACTIONS: 'true',
-            LLM_TOKEN: 'sk-tail-seed-token-1234',
-            [DEFAULT_LOCAL_COMMAND_GATE_ENV]: fastGateServer.signingSecret,
-          },
-        });
-        assert.equal(seedRes.kind, 'compiled');
-        assert.equal(seedRes.delegateOutcome?.ok, true);
-        const inspectOut = join(work, 'inspected-tail');
-        const inspected = await inspectRun({ runRoot: seeded.runRoot, runId: 'run-tail-seed', output: inspectOut });
-        assert.equal(inspected.ok, true);
-        const resultDoc = JSON.parse(await readFile(join(inspectOut, 'result.json'), 'utf8')) as {
-          spec: { subject: { candidateDigest: { hex: string } } };
-        };
-        candidateDigest = resultDoc.spec.subject.candidateDigest.hex;
-      } finally {
-        await fastGateServer.close();
-      }
 
       gateServer = await startLocalCommandGateServer({
         runRoot: seeded.runRoot,
         repositoryRoot: seeded.repo,
         gates: [
-          baseGate,
           {
-            ...baseGate,
+            checkId: 'verify-cmd',
+            gateId: 'verify-cmd',
+            endpointRef: 'loopwright-local-command',
+            script: tailScriptRel,
+            scriptSha256: seeded.scriptSha256ByRel[tailScriptRel]!,
+            timeoutSeconds: 15,
+            allowReadOnlyGitHubToken: false,
+            env: [],
+          },
+          {
             checkId: 'verify-overflow',
             gateId: 'verify-overflow',
+            endpointRef: 'loopwright-local-command',
             script: overflowScriptRel,
-            scriptSha256: overflowSha,
+            scriptSha256: seeded.scriptSha256ByRel[overflowScriptRel]!,
+            timeoutSeconds: 15,
+            allowReadOnlyGitHubToken: false,
+            env: [],
           },
         ],
       });
@@ -2549,14 +2593,14 @@ exit 1
         gateServer.url,
         {
           storeId: 'store-tail',
-          runId: 'run-tail-seed',
+          runId: 'run-shared-gate-seed',
           lockHash: null,
           operationId: 'op-tail-1',
           dispatchId: 'disp-tail-1',
           dispatchGeneration: 1,
-          gateId: baseGate.gateId,
-          checkId: baseGate.checkId,
-          candidateDigest,
+          gateId: 'verify-cmd',
+          checkId: 'verify-cmd',
+          candidateDigest: seeded.candidateDigest,
         },
         gateServer.signingSecret,
       );
@@ -2571,14 +2615,14 @@ exit 1
         gateServer.url,
         {
           storeId: 'store-tail',
-          runId: 'run-tail-seed',
+          runId: 'run-shared-gate-seed',
           lockHash: null,
           operationId: 'op-tail-overflow',
           dispatchId: 'disp-tail-overflow',
           dispatchGeneration: 1,
           gateId: 'verify-overflow',
           checkId: 'verify-overflow',
-          candidateDigest,
+          candidateDigest: seeded.candidateDigest,
         },
         gateServer.signingSecret,
       );
@@ -2590,9 +2634,6 @@ exit 1
       assert.equal(overflowReason.includes('[output truncated]'), true, `expected truncation marker in reason, got: ${overflowReason}`);
     } finally {
       await gateServer?.close();
-      await seeded?.openAiServer.close();
-      await seeded?.githubServer.close();
-      await rm(work, { recursive: true, force: true });
     }
   });
 });

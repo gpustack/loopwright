@@ -12,6 +12,9 @@ import { ControllerOwner, bootIdentity, processBirth } from '../src/ownership.js
 import { ProgressStore } from '../src/progress.js';
 import { hash } from '../src/schema.js';
 import type { ControllerProgress } from '../src/types.js';
+const SELF_BIRTH_PROMISE = processBirth(process.pid);
+const BOOT_ID_PROMISE = bootIdentity();
+
 export function setFixture(value: unknown, path: readonly (string | number)[], replacement: unknown): void {
   let object = value as Record<string | number, unknown>;
   for (const key of path.slice(0, -1)) object = object[key] as Record<string | number, unknown>;
@@ -32,7 +35,8 @@ export async function retainedFixture(checks = 1, A = 3, I = 2, leaseMs = 60000,
   const plan = compiled.value, directory = join(f.root, 'retained'); await privateDirectory(directory, [f.taskDirectory, process.cwd()]);
   const registryDirectory = resolve('.claude/s04-qualification'); mkdirSync(registryDirectory, { recursive: true, mode: 0o700 });
   const registry = join(registryDirectory, 'progress-fixtures.ndjson');
-  appendFileSync(registry, JSON.stringify({ version: 1, root: f.root, directory, pid: process.pid, birth: await processBirth(process.pid), boot: await bootIdentity(), kind: 's02-unit-fixture' }) + '\n', { mode: 0o600 });
+  const [selfBirth, bootId] = await Promise.all([SELF_BIRTH_PROMISE, BOOT_ID_PROMISE]);
+  appendFileSync(registry, JSON.stringify({ version: 1, root: f.root, directory, pid: process.pid, birth: selfBirth, boot: bootId, kind: 's02-unit-fixture' }) + '\n', { mode: 0o600 });
   const registryFile = openSync(registry, 'r'); try { fsyncSync(registryFile); } finally { closeSync(registryFile); }
   const owner = await ControllerOwner.acquire(directory, 'run-1', plan.planDigest), artifactDirectory = join(directory, 'artifacts');
   let storeHandle: LocalRunStore | null = null;
@@ -41,7 +45,7 @@ export async function retainedFixture(checks = 1, A = 3, I = 2, leaseMs = 60000,
     const artifacts = new ArtifactStore(artifactDirectory, owner, approvedState(loaded.value).vault);
     const admitted = admitTask(plan.task, { admissionId: 'admission-1', runId: 'run-1' }); assert.equal(admitted.ok, true); if (!admitted.ok) throw new Error('fixture'); const lock = admitted.value;
     const identity = { directory: join(directory, 'state'), storeId: 'store-1', lock, policy: { version: 1 as const, leaseMs, cost: 'observe_only' as const },
-      binding: { coreApiVersion: 'loopwright.dev/v1alpha1' as const, hostVersion: 's04-controller-unit', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.roles[0]!.policy.resourceVersion, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
+      binding: { coreApiVersion: 'loopwright.dev/v1alpha1' as const, hostVersion: 's04-controller-unit', adapters: [{ id: 'pi', version: '0.0.0' }], resourceVersion: plan.roles[0]!.policy.resourceVersion, clockEpoch: 'boot.' + hash(bootId).hex.slice(0, 40) } };
     const store = stateValue(createLocalRun(identity)); storeHandle = store;
     const initial = stateValue(store.inspect());
     const authority = stateValue(store.claim({ ownerId: 'controller-unit', expectedGeneration: initial.owner.generation, expectedRevision: initial.revision, mode: 'active' })).authority;

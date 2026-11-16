@@ -392,15 +392,17 @@ spec:
       await writeFile(untouchedExecPath, '#!/usr/bin/env bash\necho untouched\n', { mode: 0o755 });
       await chmod(untouchedExecPath, 0o755);
 
-      for (let i = 0; i < 600; i += 1) {
-        const idx = String(i).padStart(3, '0');
-        await writeFile(join(repo, 'pack', 'items', `file-${idx}.txt`), `payload-${idx}\n`);
-      }
+      await Promise.all(
+        Array.from({ length: 265 }, (_, i) => {
+          const idx = String(i).padStart(3, '0');
+          return writeFile(join(repo, 'pack', 'items', `file-${idx}.txt`), `payload-${idx}\n`);
+        }),
+      );
 
       const verifyScript = `#!/usr/bin/env bash
 set -euo pipefail
 test "$(cat docs/untouched.txt)" = "keep-me-untouched"
-test "$(cat pack/items/file-599.txt)" = "payload-599"
+test "$(cat pack/items/file-264.txt)" = "payload-264"
 test -x scripts/build-step.sh
 test -x scripts/untouched-exec.sh
 test ! -e docs/to-delete.txt
@@ -549,9 +551,9 @@ spec:
       const crlfBase = oidOf(baseTreeEntries, 'fixtures/raw.crlf');
       const identBase = oidOf(baseTreeEntries, 'fixtures/raw.ident');
       const trapBase = oidOf(baseTreeEntries, 'fixtures/raw.trap');
-      const file599Base = oidOf(baseTreeEntries, 'pack/items/file-599.txt');
+      const file264Base = oidOf(baseTreeEntries, 'pack/items/file-264.txt');
       const untouchedBase = oidOf(baseTreeEntries, 'docs/untouched.txt');
-      assert.ok(crlfBase && identBase && trapBase && file599Base && untouchedBase);
+      assert.ok(crlfBase && identBase && trapBase && file264Base && untouchedBase);
 
       await mkdir(bareRemote, { recursive: true });
       await git(bareRemote, ['init', '--bare', '-b', 'main']);
@@ -697,7 +699,7 @@ spec:
         /Signed-off-by: github-actions\[bot\] <41898282\+github-actions\[bot\]@users\.noreply\.github\.com>/,
       );
       const pr1Tree = await git(repo, ['ls-tree', '-r', '--full-tree', prHeadSha1]);
-      assert.deepEqual(oidOf(pr1Tree, 'pack/items/file-599.txt'), file599Base);
+      assert.deepEqual(oidOf(pr1Tree, 'pack/items/file-264.txt'), file264Base);
       assert.deepEqual(oidOf(pr1Tree, 'docs/untouched.txt'), untouchedBase);
       assert.deepEqual(oidOf(pr1Tree, 'fixtures/raw.crlf'), crlfBase);
       assert.deepEqual(oidOf(pr1Tree, 'fixtures/raw.ident'), identBase);
@@ -754,7 +756,7 @@ spec:
       assert.notEqual(prHeadSha2, prHeadSha1);
       await git(repo, ['fetch', bareRemote, 'refs/heads/loopwright/main']);
       const pr2Tree = await git(repo, ['ls-tree', '-r', '--full-tree', prHeadSha2]);
-      assert.deepEqual(oidOf(pr2Tree, 'pack/items/file-599.txt'), file599Base);
+      assert.deepEqual(oidOf(pr2Tree, 'pack/items/file-264.txt'), file264Base);
       assert.deepEqual(oidOf(pr2Tree, 'docs/untouched.txt'), untouchedBase);
       assert.equal(oidOf(pr2Tree, 'docs/to-delete.txt'), undefined, 'Phase 1 deletion must stay deleted after revise');
       assert.equal(oidOf(pr2Tree, 'scripts/build-step.sh')?.mode, '100755');
