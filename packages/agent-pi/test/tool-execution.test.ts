@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { admitTask } from '@loopwright/core';
+import { canonical, digest } from '../src/boundary.js';
 import { Execution, type AdmittedToolIdentity } from '../src/execution.js';
 import { PiFailure } from '../src/errors.js';
 import { requestFixture, stateGood } from './request-fixtures.js';
@@ -235,6 +236,169 @@ test('execution accepts single-edit { path, oldText, newText } shorthand, record
     }
   } finally {
     await softActor.close();
+    await f.cleanup();
+  }
+});
+
+test('softArgumentErrors strips optional null keys, records read_only hints on malformed args, and keeps hard path/opt-out invariants', async () => {
+  const f = await fixture(['delete']);
+  const executedBytes: { name: string; parsed: Record<string, unknown> }[] = [];
+  const softArgActor = new Execution(f.host, f.input, f.candidate, {
+    process: () => ({
+      ready: async () => {},
+      execute: async (name, bytes, _read, guard) => {
+        guard();
+        executedBytes.push({ name, parsed: JSON.parse(Buffer.from(bytes).toString('utf8')) as Record<string, unknown> });
+        return { result: { content: [{ type: 'text', text: `${name}:ok` }], details: null }, code: null, produced: 0 };
+      },
+      close: async () => null,
+    }),
+    softScopeErrors: true,
+    softArgumentErrors: true,
+  });
+  const strictArgActor = new Execution(f.host, f.input, f.candidate, {
+    process: () => { throw new Error('Strict actor must refuse null optional args before process'); },
+    softScopeErrors: true,
+  });
+  const operations: string[] = [];
+  const signal = new AbortController().signal;
+  try {
+    // Omitting softArgumentErrors keeps hard synchronous refusal (INPUT_INVALID / TOOL_DENIED) on optional null or invalid args
+    assert.throws(
+      () => strictArgActor.invoke(
+        { ...identity, callId: 'call-strict-null-read', name: 'read' },
+        Buffer.from(JSON.stringify({ path: 'packages/example.ts', offset: null, limit: null })),
+        signal,
+        () => {},
+      ),
+      error => error instanceof PiFailure && error.detail.code === 'INPUT_INVALID',
+    );
+    assert.throws(
+      () => strictArgActor.invoke(
+        { ...identity, callId: 'call-strict-null-bash', name: 'bash' },
+        Buffer.from(JSON.stringify({ command: 'echo ok', timeout: null })),
+        signal,
+        () => {},
+      ),
+      error => error instanceof PiFailure && error.detail.code === 'INPUT_INVALID',
+    );
+    assert.throws(
+      () => strictArgActor.invoke(
+        { ...identity, callId: 'call-strict-bad-edit', name: 'edit' },
+        Buffer.from(JSON.stringify({ path: 'packages/example.ts', old_string: '1', new_string: '2' })),
+        signal,
+        () => {},
+      ),
+      error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED',
+    );
+
+    // Strip null/undefined optional keys on edit (both forms), read, and bash
+    const editArrayWithNulls = await softArgActor.invoke(
+      { ...identity, callId: 'call-soft-edit-array-nulls', name: 'edit' },
+      Buffer.from(JSON.stringify({ path: 'packages/example.ts', edits: [{ oldText: 'value = 1', newText: 'value = 2' }], oldText: null, newText: null })),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(editArrayWithNulls.isError, undefined);
+    assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 2;\n');
+
+    const editShorthandWithNull = await softArgActor.invoke(
+      { ...identity, callId: 'call-soft-edit-shorthand-null', name: 'edit' },
+      Buffer.from(JSON.stringify({ path: 'packages/example.ts', edits: null, oldText: 'value = 2', newText: 'value = 3' })),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(editShorthandWithNull.isError, undefined);
+    assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 3;\n');
+
+    const readIdentity: AdmittedToolIdentity = { ...identity, callId: 'call-soft-read-nulls', name: 'read' };
+    const rawReadBytes = Buffer.from(JSON.stringify({ path: 'packages/example.ts', offset: null, limit: null }));
+    let readOpId = '';
+    const readWithNulls = await softArgActor.invoke(
+      readIdentity,
+      rawReadBytes,
+      signal,
+      id => { readOpId = id; operations.push(id); },
+    );
+    assert.equal(readWithNulls.isError, undefined);
+    const readRecord = stateGood(f.host.store.getOperation(readOpId));
+    const normalizedReadBytes = Buffer.from(JSON.stringify({ path: 'packages/example.ts' }));
+    const expectedReadDigest = digest(Buffer.from('loopwright.dev/pi-tool/v1\0' + canonical({
+      identity: { ...readIdentity, slot: digest(Buffer.from(readIdentity.slot)) },
+      argumentsDigest: digest(rawReadBytes),
+      effectiveArgumentsDigest: digest(normalizedReadBytes),
+      lock: f.input.lock.spec.lockHash,
+      policy: digest(Buffer.from(canonical(f.input.policy))),
+      runtime: f.input.policy.runtime,
+      targetIdentity: 'candidate:packages/example.ts',
+      before: null,
+      after: null,
+    })));
+    assert.deepEqual(readRecord.intent.requestDigest, expectedReadDigest);
+
+    const bashWithNull = await softArgActor.invoke(
+      { ...identity, callId: 'call-soft-bash-null', name: 'bash' },
+      Buffer.from(JSON.stringify({ command: 'echo ok', timeout: null })),
+      signal,
+      id => operations.push(id),
+    );
+    assert.equal(bashWithNull.isError, undefined);
+
+    assert.deepEqual(executedBytes, [
+      { name: 'read', parsed: { path: 'packages/example.ts' } },
+      { name: 'bash', parsed: { command: 'echo ok' } },
+    ]);
+
+    // Malformed arguments return isError: true + schema hint and record read_only failed operations
+    const malformedCases: readonly { readonly name: 'edit' | 'write' | 'read' | 'bash' | 'delete'; readonly args: unknown; readonly expectedTarget: string }[] = [
+      { name: 'edit', args: { path: 'packages/example.ts', old_string: '3', new_string: '4' }, expectedTarget: 'arguments:edit' },
+      { name: 'edit', args: { path: 'packages/example.ts', oldText: '3' }, expectedTarget: 'arguments:edit' },
+      { name: 'edit', args: { path: 'packages/example.ts', edits: [{ oldText: '3', newText: '4' }], oldText: '3', newText: '4' }, expectedTarget: 'arguments:edit' },
+      { name: 'edit', args: { path: 'packages/example.ts', edits: [] }, expectedTarget: 'arguments:edit' },
+      { name: 'edit', args: { path: 'packages/example.ts', edits: [{ oldText: '3', newText: 4 }] }, expectedTarget: 'arguments:edit' },
+      { name: 'write', args: { path: 'packages/example.ts', content: 123 }, expectedTarget: 'arguments:write' },
+      { name: 'read', args: { path: 'packages/example.ts', offset: 0 }, expectedTarget: 'arguments:read' },
+      { name: 'bash', args: { command: '' }, expectedTarget: 'scratch:' + f.input.sessionId },
+      { name: 'bash', args: { command: 'echo ok', timeout: 0 }, expectedTarget: 'scratch:' + f.input.sessionId },
+      { name: 'delete', args: { path: 'packages/example.ts', extra: true }, expectedTarget: 'arguments:delete' },
+    ];
+    for (const [idx, testCase] of malformedCases.entries()) {
+      let recordedOpId = '';
+      const res = await softArgActor.invoke(
+        { ...identity, callId: `call-soft-bad-${idx}`, name: testCase.name },
+        Buffer.from(JSON.stringify(testCase.args)),
+        signal,
+        id => { recordedOpId = id; },
+      );
+      assert.equal(res.isError, true, `expected isError for case ${idx}`);
+      assert.match(res.content[0]?.text ?? '', /Invalid arguments|Expected/);
+      const record = stateGood(f.host.store.getOperation(recordedOpId));
+      assert.equal(record.state, 'confirmed');
+      assert.equal(record.intent.effect, 'read_only');
+      assert.equal(record.intent.targetIdentity, testCase.expectedTarget);
+      assert.equal(record.initialReceipt?.outcome, 'failed');
+    }
+    assert.equal(await readFile(join(f.candidate, 'packages/example.ts'), 'utf8'), 'export const value = 3;\n');
+
+    // Hard TOOL_DENIED on path traversal / .git even when softScopeErrors + softArgumentErrors + malformed keys
+    for (const [idx, badPathCase] of [
+      { name: 'edit', args: { path: '../outside/escape.ts', old_string: '1' } },
+      { name: 'read', args: { path: '../outside/escape.ts', offset: 'bad' } },
+      { name: 'write', args: { path: '.git/config', content: 123 } },
+    ].entries()) {
+      assert.throws(
+        () => softArgActor.invoke(
+          { ...identity, callId: `call-hard-traversal-${idx}`, name: badPathCase.name },
+          Buffer.from(JSON.stringify(badPathCase.args)),
+          signal,
+          () => {},
+        ),
+        error => error instanceof PiFailure && error.detail.code === 'TOOL_DENIED',
+      );
+    }
+  } finally {
+    await softArgActor.close();
+    await strictArgActor.close();
     await f.cleanup();
   }
 });

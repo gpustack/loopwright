@@ -176,6 +176,7 @@ export function pruneContextForBudget(context: Context, maxBodyBytes: number, ap
 
 /** Internal trusted constructor; fixture tools are supplied only by separate test entrypoints. */
 export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinition[]; onSettled?: () => unknown; onToolCall?: () => void; onAgentEnd?: (session: AgentSession) => Promise<void> } = {}): void {
+  const isHostSession = process.env.LOOPWRIGHT_HOST_SESSION === '1';
   const channel = new Channel(nonce, process.stdin, process.stdout), snapshots = new SnapshotTransfer(channel);
   let session: Awaited<ReturnType<typeof createAgentSession>>['session'] | null = null;
   let runtime: ModelRuntime, active = false, outputTokens = 1024, ordinal = 0, toolOrdinal = 0, commandOrdinal = 0;
@@ -187,7 +188,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
   const parsedWaiters = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   const toolWaiters = new Map<number, (admitted: boolean) => void>();
   const executionWaiters = new Map<number, { resolve: (result: ToolResult) => void; reject: (error: Error) => void }>();
-  const roots = new Map<string, { invocation: number; slot: string; parentId: string | null }>();
+  const roots = new Map<string, { invocation: number; slot: string; parentId: string | null; rawArguments?: unknown }>();
   const codemodeRoots = new Set<string>(); const nativeWaiters = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   const mcp = new OwnerMcpTransport(channel, () => { void channel.send('runtime-fault', { code: 'MCP_FAILED' }).catch(() => channel.fail()); });
   let pendingFetch: { invocation: number; slot: string; resolve: (value: Response) => void; reject: (error: Error) => void } | null = null;
@@ -198,27 +199,36 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
     const parent = event.parentToolCallId ?? event.toolCallId, producer = roots.get(parent);
     if (!producer) return { block: true, reason: 'No admitted model parent' };
     const query = ++toolOrdinal, call = { invocation: producer.invocation, slot: producer.slot, callId: event.toolCallId, name: event.toolName, parentId: event.parentToolCallId ?? null };
-    const args = Buffer.from(JSON.stringify(event.input)); if (args.length > toolArgsBytes) return { block: true, reason: 'Argument bound' };
+    const toolInput = isHostSession && call.parentId === null && producer.rawArguments !== undefined ? producer.rawArguments : event.input;
+    const args = Buffer.from(JSON.stringify(toolInput)); if (args.length > toolArgsBytes) return { block: true, reason: 'Argument bound' };
     const answer = new Promise<boolean>(resolve => { toolWaiters.set(query, resolve); });
     await channel.sendBytes('root-tool', { query, ...call }, args);
     if (!await answer) return { block: true, reason: 'Model parent not admitted' };
-    roots.set(event.toolCallId, { invocation: producer.invocation, slot: producer.slot, parentId: call.parentId });
+    roots.set(event.toolCallId, {
+      invocation: producer.invocation,
+      slot: producer.slot,
+      parentId: call.parentId,
+      ...(call.parentId === null && producer.rawArguments !== undefined ? { rawArguments: producer.rawArguments } : {}),
+    });
     if (event.toolName === 'codemode' && call.parentId === null) codemodeRoots.add(event.toolCallId);
     if (event.toolName === 'mcp__workspace__read_file') mcp.admit(call, event.input);
   });
   pi.on('tool_result', async event => {
     const result = { content: event.content, details: event.details ?? null, isError: event.isError, ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) };
-    const body = Buffer.from(JSON.stringify({ argumentsDigest: toolArgumentsDigest(event.input), result }));
+    const producer = roots.get(event.toolCallId);
+    const rawInput = isHostSession && producer?.parentId === null && producer.rawArguments !== undefined ? producer.rawArguments : event.input;
+    const body = Buffer.from(JSON.stringify({ argumentsDigest: toolArgumentsDigest(rawInput), result }));
     if (body.length > toolResultBytes || event.content.some(block => block.type !== 'text')) { await channel.send('runtime-fault', { code: 'OUTPUT_LIMIT' }); return { content: [{ type: 'text', text: 'OUTPUT_LIMIT' }], details: null, isError: true }; }
     if (!codemodeRoots.has(event.toolCallId)) return;
-    const producer = roots.get(event.toolCallId); if (!producer) throw new Error('Missing native result parent');
+    if (!producer) throw new Error('Missing native result parent');
     const query = ++toolOrdinal, answer = new Promise<void>((resolve, reject) => { nativeWaiters.set(query, { resolve, reject }); }); void answer.catch(() => {});
     try { await channel.sendBytes('native-result', { query, invocation: producer.invocation, slot: producer.slot, callId: event.toolCallId, name: event.toolName, parentId: null }, body); await answer; }
     finally { nativeWaiters.delete(query); codemodeRoots.delete(event.toolCallId); }
   }); };
   const executeTool = async (name: BridgedToolName, id: string, args: unknown, signal?: AbortSignal): Promise<ToolResult> => {
     const producer = roots.get(id); if (!active || !producer || executionWaiters.size >= 32) throw new Error('No admitted tool parent');
-    const bytes = Buffer.from(JSON.stringify(args)); if (bytes.length > toolArgsBytes) throw new Error('Tool argument bound');
+    const effectiveArgs = isHostSession && producer.parentId === null && producer.rawArguments !== undefined ? producer.rawArguments : args;
+    const bytes = Buffer.from(JSON.stringify(effectiveArgs)); if (bytes.length > toolArgsBytes) throw new Error('Tool argument bound');
     const query = ++toolOrdinal, answer = new Promise<ToolResult>((resolve, reject) => { executionWaiters.set(query, { resolve, reject }); }); void answer.catch(() => {});
     const call = { invocation: producer.invocation, slot: producer.slot, callId: id, name, parentId: producer.parentId }, cancel = () => { void channel.send('tool-cancel', call).catch(() => channel.fail()); }; signal?.addEventListener('abort', cancel, { once: true });
     try { await channel.sendBytes('tool', { query, ...call }, bytes); if (signal?.aborted) cancel(); return await answer; }
@@ -347,8 +357,9 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
         const sendContext = pruneContextForBudget(context, maxBodyBytes, value.selection.api);
         const native = runtime.streamSimple(selectedModel, sendContext, { ...restStreamOptions, ...reasoningPart, fetch: fetch as typeof globalThis.fetch, apiKey: 'loopwright-non-secret-placeholder', env: {}, maxTokens: outputTokens, maxRetries: 0, cacheRetention: 'short' });
         const receipt = native.result().then(async message => {
-          const toolCalls = message.content.filter(block => block.type === 'toolCall').map(call => ({ id: call.id, name: call.name, argumentsDigest: toolArgumentsDigest(call.arguments) }));
-          if (slot) for (const call of toolCalls) roots.set(call.id, { invocation, slot, parentId: null });
+          const rawToolCalls = message.content.filter(block => block.type === 'toolCall');
+          const toolCalls = rawToolCalls.map(call => ({ id: call.id, name: call.name, argumentsDigest: toolArgumentsDigest(call.arguments) }));
+          if (slot) for (const call of rawToolCalls) roots.set(call.id, { invocation, slot, parentId: null, rawArguments: call.arguments });
           let granted: string; try { granted = await grant; } catch { return; }
           const candidate: ParsedCandidate = { invocation, slot: granted, stopReason: message.stopReason, rawStopReason: message.rawStopReason ?? null,
             usage: { input: message.usage.input, output: message.usage.output, cacheRead: message.usage.cacheRead, cacheWrite: message.usage.cacheWrite }, toolCalls };

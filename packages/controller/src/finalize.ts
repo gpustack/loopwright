@@ -2,10 +2,11 @@ import type { ArtifactRef, Digest, RunResult } from '@loopwright/core';
 import { ControllerFailure, type ControllerDiagnostic } from './errors.js';
 import { canonical, freeze } from './schema.js';
 import type { ArtifactStore } from './storage.js';
+export const CONTROLLER_CLEANUP_STATES = Object.freeze(['complete', 'pending', 'failed'] as const);
 export interface ControllerIncident {
   readonly version: 1; readonly code: ControllerDiagnostic['code']; readonly runId: string; readonly lockHash: Digest;
   readonly stage: ControllerDiagnostic['phase']; readonly knownReferences: readonly ArtifactRef[]; readonly unavailable: readonly string[];
-  readonly cleanup: 'complete' | 'pending' | 'failed';
+  readonly cleanup: typeof CONTROLLER_CLEANUP_STATES[number];
 }
 export type CycleExecution = { readonly kind: 'result'; readonly version: 1; readonly runId: string; readonly result: RunResult;
   readonly observations: ArtifactRef | null; readonly secondary: readonly ControllerDiagnostic['code'][] }

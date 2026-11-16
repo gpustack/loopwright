@@ -696,3 +696,67 @@ test('tryPrepareWrite, tryPrepareEdit, and tryPrepareDelete return soft scope/di
     await f.cleanup();
   }
 });
+
+test('tryPrepareEdit with softArgumentError returns soft errors on malformed edits while keeping hard TOOL_DENIED on traversal and default strict mode', async () => {
+  const f = await fixture();
+  try {
+    const nonArray = await f.candidate.tryPrepareEdit('packages/example.ts', { oldText: '1', newText: '2' }, { softScopeError: true, softArgumentError: true });
+    assert.equal(nonArray.kind, 'error');
+    if (nonArray.kind === 'error') {
+      assert.equal(nonArray.targetPath, 'packages/example.ts');
+      assert.match(nonArray.message, /"edits" must be an array/);
+    }
+
+    const emptyEdits = await f.candidate.tryPrepareEdit('packages/example.ts', [], { softScopeError: true, softArgumentError: true });
+    assert.equal(emptyEdits.kind, 'error');
+    if (emptyEdits.kind === 'error') {
+      assert.equal(emptyEdits.targetPath, 'packages/example.ts');
+      assert.match(emptyEdits.message, /Invalid arguments for tool "edit"/);
+    }
+
+    const tooMany = await f.candidate.tryPrepareEdit(
+      'packages/example.ts',
+      Array.from({ length: 33 }, () => ({ oldText: 'a', newText: 'b' })),
+      { softScopeError: true, softArgumentError: true },
+    );
+    assert.equal(tooMany.kind, 'error');
+
+    const badEntryShape = await f.candidate.tryPrepareEdit(
+      'packages/example.ts',
+      [{ oldText: '1', new_string: '2' }],
+      { softScopeError: true, softArgumentError: true },
+    );
+    assert.equal(badEntryShape.kind, 'error');
+    if (badEntryShape.kind === 'error') {
+      assert.match(badEntryShape.message, /edits\[0\]/);
+    }
+
+    const badEntryTypes = await f.candidate.tryPrepareEdit(
+      'packages/example.ts',
+      [{ oldText: 1, newText: '2' }],
+      { softScopeError: true, softArgumentError: true },
+    );
+    assert.equal(badEntryTypes.kind, 'error');
+
+    const loneSurrogate = await f.candidate.tryPrepareEdit(
+      'packages/example.ts',
+      [{ oldText: '1', newText: 'bad\uD800' }],
+      { softScopeError: true, softArgumentError: true },
+    );
+    assert.equal(loneSurrogate.kind, 'error');
+
+    // Default (softArgumentError omitted) still throws hard TOOL_DENIED
+    await assert.rejects(
+      f.candidate.tryPrepareEdit('packages/example.ts', [{ oldText: 1, newText: '2' }], { softScopeError: true }),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+
+    // Path traversal still throws hard TOOL_DENIED even with softScopeError: true and softArgumentError: true
+    await assert.rejects(
+      f.candidate.tryPrepareEdit('../outside/escape.ts', 'not-an-array', { softScopeError: true, softArgumentError: true }),
+      err => err instanceof PiFailure && err.detail.code === 'TOOL_DENIED',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

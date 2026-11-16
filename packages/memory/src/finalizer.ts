@@ -1,9 +1,9 @@
-import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { constants, existsSync } from 'node:fs';
+import { lstat, open, readdir, readFile } from 'node:fs/promises';
+import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
-import { canonical, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
+import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
 import { computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import type { MemoryBudgetLedger, MemoryCuratorRequest, MemoryEntry, MemoryEvidenceRef, MemoryFinalizerInput, MemoryFinalizerOutcome, MemoryOperation, MemoryProposal, SettledCycleContext } from './types.js';
 
@@ -21,7 +21,33 @@ function addInventory(inventory: Inventory, reference: ArtifactRef): void {
 interface RetainedArtifact { readonly reference: ArtifactRef; readonly bytes: Uint8Array }
 async function readArtifactFile(directory: string, name: string): Promise<RetainedArtifact> {
   const path = join(directory, name);
-  const bytes = await readFile(path);
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must be a regular file');
+  }
+  if (info.size > ARTIFACT_BYTES_LIMIT) {
+    fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
+  }
+  let fd: Awaited<ReturnType<typeof open>> | null = null;
+  let bytes: Buffer;
+  try {
+    fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const fdInfo = await fd.stat();
+    if (!fdInfo.isFile()) {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must be a regular file');
+    }
+    if (fdInfo.size > ARTIFACT_BYTES_LIMIT) {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
+    }
+    bytes = await fd.readFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact must not be a symlink');
+    }
+    throw error;
+  } finally {
+    if (fd !== null) await fd.close();
+  }
   if (bytes.byteLength > ARTIFACT_BYTES_LIMIT) fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact exceeds the byte bound');
   const digest = digestArtifact(name, bytes);
   if (!digest.ok) fail('MEMORY_SCHEMA_INVALID', path, 'retained artifact digest refused');
@@ -84,7 +110,65 @@ export async function resolveSettledCycleContext(context: SettledCycleContext): 
   if (!lock.ok) fail('MEMORY_SCHEMA_INVALID', 'run.json/identity/lock', 'retained run descriptor carries no valid TaskLock');
   const artifacts = join(directory, 'artifacts');
   const results = await findArtifacts(artifacts, 'result-');
-  if (results.length !== 1) fail('MEMORY_SCHEMA_INVALID', 'artifacts/result', `expected exactly one retained result artifact, found ${results.length}`);
+  const incidents = await findArtifacts(artifacts, 'incident-');
+  const ledger = context.ledger ?? { revision: 0, remainingTokens: 0, remainingModelCalls: 0, remainingWallMs: 0 };
+  if (results.length === 0 && incidents.length === 1) {
+    let parsedIncident: unknown;
+    try {
+      parsedIncident = JSON.parse(Buffer.from(incidents[0]!.bytes).toString('utf8')) as unknown;
+    } catch {
+      fail('MEMORY_SCHEMA_INVALID', 'artifacts/incident', 'retained incident artifact is not valid JSON');
+    }
+    const incident = controllerIncidentSchema(parsedIncident, lock.value, 'artifacts/incident');
+    const inventory: Inventory = new Map();
+    addInventory(inventory, incidents[0]!.reference);
+    for (const retained of await findArtifacts(artifacts, 'observations-')) addInventory(inventory, retained.reference);
+    if (incident.knownReferences.length === 0) {
+      addInventory(inventory, syntheticIncidentArtifact(incident));
+    } else {
+      const artifactsRoot = resolve(artifacts);
+      for (const [refIndex, ref] of incident.knownReferences.entries()) {
+        const refPath = `artifacts/incident/knownReferences/${refIndex}`;
+        const resolvedRef = resolve(artifactsRoot, ref.name);
+        if (ref.name.includes('\\') || !resolvedRef.startsWith(artifactsRoot + sep)) {
+          fail('MEMORY_SCHEMA_INVALID', refPath, 'retained incident knownReference escapes artifacts directory');
+        }
+        let retained: RetainedArtifact;
+        try {
+          retained = await readArtifactFile(artifacts, ref.name);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (refIndex === 0) {
+              fail('MEMORY_SCHEMA_INVALID', 'artifacts/incident/knownReferences/0', 'retained incident primary knownReference is missing on disk');
+            }
+            continue;
+          }
+          throw error;
+        }
+        if (retained.reference.byteLength !== ref.byteLength || !digestEqual(retained.reference.digest, ref.digest)) {
+          fail('MEMORY_SCHEMA_INVALID', refPath, 'retained incident knownReference digest or byteLength mismatch');
+        }
+        addInventory(inventory, retained.reference);
+      }
+    }
+    return {
+      repository: context.repository,
+      lock: lock.value,
+      result: null,
+      incident,
+      ledger,
+      candidateManifest: [],
+      evidence: [],
+      inventory,
+      gateVerdictReasons: new Map(),
+    };
+  }
+  if (results.length !== 1 || incidents.length !== 0) {
+    if (incidents.length === 0) {
+      fail('MEMORY_SCHEMA_INVALID', 'artifacts/result', `expected exactly one retained result artifact, found ${results.length}`);
+    }
+    fail('MEMORY_SCHEMA_INVALID', 'artifacts/incident', `expected either one result or one incident artifact, found ${results.length} results and ${incidents.length} incidents`);
+  }
   const result = validateDocument(JSON.parse(Buffer.from(results[0]!.bytes).toString('utf8')), 'RunResult');
   if (!result.ok) fail('MEMORY_SCHEMA_INVALID', 'artifacts/result', 'retained result artifact is not a RunResult');
   let candidateManifest: readonly ArtifactRef[] = [];
@@ -112,7 +196,6 @@ export async function resolveSettledCycleContext(context: SettledCycleContext): 
       }
     }
   }
-  const ledger = context.ledger ?? { revision: 0, remainingTokens: 0, remainingModelCalls: 0, remainingWallMs: 0 };
   return { repository: context.repository, lock: lock.value, result: result.value, incident: null, ledger, candidateManifest, evidence, inventory, gateVerdictReasons };
 }
 function evidenceRefFor(row: { readonly checkId: string; readonly status: string; readonly evidenceId: string | null }, evidence: readonly Evidence[]): MemoryEvidenceRef | null {

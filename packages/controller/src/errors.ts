@@ -1,10 +1,14 @@
-export const CODES = ['CONFIG_SYNTAX', 'CONFIG_DUPLICATE_KEY', 'CONFIG_LIMIT', 'CONFIG_SCHEMA', 'CONFIG_REFERENCE', 'CONFIG_ENV_MISSING',
+export const CODES = Object.freeze(['CONFIG_SYNTAX', 'CONFIG_DUPLICATE_KEY', 'CONFIG_LIMIT', 'CONFIG_SCHEMA', 'CONFIG_REFERENCE', 'CONFIG_ENV_MISSING',
   'CONFIG_ENV_SYNTAX', 'CONFIG_ENV_DENIED', 'CONFIG_CREDENTIAL_INVALID', 'REGISTRY_UNTRUSTED', 'TARGET_MISMATCH', 'CAPABILITY_UNSUPPORTED',
   'MCP_AUTHENTICATION_REQUIRED', 'SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS', 'VERIFICATION_FAILED', 'EVIDENCE_UNAVAILABLE', 'GATE_TIMEOUT', 'RECEIPT_CONFLICT', 'REPEAT_FAILURE',
   'ATTEMPT_LIMIT', 'BUDGET_EXHAUSTED', 'DEADLINE', 'CANCELLED', 'OWNER_BUSY', 'AUTHORITY_REFUSED', 'RECOVERY_REQUIRED', 'ARTIFACT_INVALID',
-  'OUTPUT_LIMIT', 'CLEANUP_FAILED', 'STATE_UNAVAILABLE'] as const;
+  'OUTPUT_LIMIT', 'CLEANUP_FAILED', 'STATE_UNAVAILABLE'] as const);
+export const CONTROLLER_INCIDENT_CODES = CODES;
+export const CONTROLLER_DIAGNOSTIC_PHASES = Object.freeze([
+  'configuration', 'compile', 'admission', 'execution', 'verification', 'recovery', 'finalization', 'inspection',
+] as const);
 export interface ControllerDiagnostic {
-  readonly version: 1; readonly code: typeof CODES[number]; readonly phase: 'configuration' | 'compile' | 'admission' | 'execution' | 'verification' | 'recovery' | 'finalization' | 'inspection';
+  readonly version: 1; readonly code: typeof CODES[number]; readonly phase: typeof CONTROLLER_DIAGNOSTIC_PHASES[number];
   readonly path: string; readonly stateCode: string | null; readonly piCode: string | null;
   readonly effect: 'none' | 'possible' | 'confirmed'; readonly retryable: boolean;
 }

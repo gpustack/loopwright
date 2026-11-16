@@ -1,6 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { ArtifactRef, Digest } from '@loopwright/core';
-import type { ControllerIncident } from '@loopwright/controller';
+import {
+  CONTROLLER_CLEANUP_STATES,
+  CONTROLLER_DIAGNOSTIC_PHASES,
+  CONTROLLER_INCIDENT_CODES,
+  type ControllerIncident,
+} from '@loopwright/controller';
 import type { MemoryDiagnostic, MemoryErrorCode, MemoryEntry, MemoryEvidenceRef, MemoryOperation, MemoryProposal, MemoryStoreIndex, RetiredMemoryEntry } from './types.js';
 
 export class MemoryDiagnosticError extends Error {
@@ -132,6 +137,58 @@ function artifactRef(value: unknown, path: string): ArtifactRef {
   const name = text(input['name'], `${path}/name`, 1, 1024);
   if (name.startsWith('/') || name.split('/').includes('..')) fail('MEMORY_SCHEMA_INVALID', `${path}/name`, 'artifact name must stay relative');
   return { name, digest: digestShape(input['digest'], `${path}/digest`), byteLength: integer(input['byteLength'], `${path}/byteLength`, 0) };
+}
+
+export function controllerIncidentSchema(
+  value: unknown,
+  expectedLock: { readonly spec: { readonly runId: string; readonly lockHash: Digest } },
+  path = 'artifacts/incident',
+): ControllerIncident {
+  const input = objectShape(value, path);
+  field(input, ['version', 'code', 'runId', 'lockHash', 'stage', 'knownReferences', 'unavailable', 'cleanup'], path);
+  if (input['version'] !== 1) fail('MEMORY_SCHEMA_INVALID', `${path}/version`, 'unsupported incident version');
+  const code = text(input['code'], `${path}/code`, 1, 64);
+  if (!CONTROLLER_INCIDENT_CODES.includes(code as (typeof CONTROLLER_INCIDENT_CODES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/code`, 'unknown controller incident code');
+  }
+  const runId = identifier(input['runId'], `${path}/runId`, 128);
+  if (runId !== expectedLock.spec.runId) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/runId`, 'incident runId does not match retained TaskLock');
+  }
+  const lockHash = digestShape(input['lockHash'], `${path}/lockHash`);
+  if (!digestEqual(lockHash, expectedLock.spec.lockHash)) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/lockHash`, 'incident lockHash does not match retained TaskLock');
+  }
+  const stage = text(input['stage'], `${path}/stage`, 1, 32);
+  if (!CONTROLLER_DIAGNOSTIC_PHASES.includes(stage as (typeof CONTROLLER_DIAGNOSTIC_PHASES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/stage`, 'unknown controller incident stage');
+  }
+  if (!Array.isArray(input['knownReferences']) || input['knownReferences'].length > 64) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/knownReferences`, 'knownReferences length outside 0..64');
+  }
+  const knownReferences = input['knownReferences'].map((item, index) => artifactRef(item, `${path}/knownReferences/${index}`));
+  if (!Array.isArray(input['unavailable']) || input['unavailable'].length > 32) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/unavailable`, 'unavailable length outside 0..32');
+  }
+  const unavailable = input['unavailable'].map((item, index) => {
+    const entry = text(item, `${path}/unavailable/${index}`, 1, 128);
+    if (hasControlCharacter(entry)) fail('MEMORY_SCHEMA_INVALID', `${path}/unavailable/${index}`, 'control character in unavailable item');
+    return entry;
+  });
+  const cleanup = text(input['cleanup'], `${path}/cleanup`, 1, 16);
+  if (!CONTROLLER_CLEANUP_STATES.includes(cleanup as (typeof CONTROLLER_CLEANUP_STATES)[number])) {
+    fail('MEMORY_SCHEMA_INVALID', `${path}/cleanup`, 'unknown cleanup state');
+  }
+  return Object.freeze({
+    version: 1 as const,
+    code: code as ControllerIncident['code'],
+    runId,
+    lockHash,
+    stage: stage as ControllerIncident['stage'],
+    knownReferences: Object.freeze(knownReferences),
+    unavailable: Object.freeze(unavailable),
+    cleanup: cleanup as ControllerIncident['cleanup'],
+  });
 }
 function evidenceRef(value: unknown, path: string): MemoryEvidenceRef {
   const input = objectShape(value, path);
