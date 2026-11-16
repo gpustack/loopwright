@@ -1044,6 +1044,26 @@ def snapshot_and_lock_masks(
     return dir_modes, file_snap
 
 
+def restore_and_verify_regular_file(
+    path: str,
+    st_entry: os.stat_result,
+    expected: tuple[int, str, int],
+) -> str | None:
+    orig_mode, exp_sha256, exp_ino = expected
+    issue: str | None = None
+    try:
+        os.chmod(path, orig_mode)
+    except OSError:
+        issue = f"masked file restore failed during stage: {path}"
+    try:
+        actual_sha256 = file_sha256(path)
+    except OSError as exc:
+        return issue or f"masked file unreadable during verify: {path} ({exc.strerror or exc})"
+    if st_entry.st_ino != exp_ino or actual_sha256 != exp_sha256:
+        return issue or f"masked file modified during stage: {path}"
+    return issue
+
+
 def restore_and_verify_masks(
     paths: list[str],
     dir_modes: dict[str, int],
@@ -1083,17 +1103,7 @@ def restore_and_verify_masks(
             if expected is None:
                 tampered = tampered or f"unexpected file created at masked path: {target}"
             else:
-                orig_mode, exp_sha256, exp_ino = expected
-                try:
-                    os.chmod(target, orig_mode)
-                except OSError:
-                    pass
-                try:
-                    actual_sha256 = file_sha256(target)
-                except OSError:
-                    actual_sha256 = ""
-                if st_top.st_ino != exp_ino or actual_sha256 != exp_sha256:
-                    tampered = tampered or f"masked file modified during stage: {target}"
+                tampered = tampered or restore_and_verify_regular_file(target, st_top, expected)
             continue
         if not stat.S_ISDIR(st_top.st_mode):
             if target in file_snap or target in dir_modes:
@@ -1130,17 +1140,7 @@ def restore_and_verify_masks(
                 if expected is None:
                     tampered = tampered or f"unexpected file created inside masked tree: {fp}"
                 else:
-                    orig_mode, exp_sha256, exp_ino = expected
-                    try:
-                        os.chmod(fp, orig_mode)
-                    except OSError:
-                        pass
-                    try:
-                        actual_sha256 = file_sha256(fp)
-                    except OSError:
-                        actual_sha256 = ""
-                    if st_f.st_ino != exp_ino or actual_sha256 != exp_sha256:
-                        tampered = tampered or f"masked file modified during stage: {fp}"
+                    tampered = tampered or restore_and_verify_regular_file(fp, st_f, expected)
     if tampered is None and len(seen_dirs) < len(dir_modes):
         missing_dirs = sorted(set(dir_modes.keys()) - seen_dirs)
         if missing_dirs:
