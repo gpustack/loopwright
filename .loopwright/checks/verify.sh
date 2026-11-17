@@ -716,28 +716,68 @@ REAL_TMP_BASE="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.a
 WORK_ROOT="$(mktemp -d "${REAL_TMP_BASE%/}/lwv.XXXXXX")"
 chmod 0700 "$WORK_ROOT"
 RUNTIME_TMP="${WORK_ROOT}/tr"
+SHM_RUNTIME_TMP=""
 cleanup() {
   chmod -R u+w "$WORK_ROOT" >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT" >/dev/null 2>&1 || true
-  if [[ -n "${RUNTIME_TMP:-}" && "$RUNTIME_TMP" != "${WORK_ROOT}/tr" ]]; then
-    chmod -R u+w "$RUNTIME_TMP" >/dev/null 2>&1 || true
-    rm -rf "$RUNTIME_TMP" >/dev/null 2>&1 || true
+  if [[ -n "${SHM_RUNTIME_TMP:-}" && -d "$SHM_RUNTIME_TMP" ]]; then
+    chmod -R u+w "$SHM_RUNTIME_TMP" >/dev/null 2>&1 || true
+    rm -rf "$SHM_RUNTIME_TMP" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
 if [[ "$(uname -s)" == "Linux" && -d /dev/shm ]]; then
-  SHM_RUNTIME_TMP="$("$PYTHON_EXEC" - <<'PY'
+  SHM_RUNTIME_TMP="$("$PYTHON_EXEC" - "$REAL_TMP_BASE" <<'PY'
 from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
+def is_path_on_tmpfs(path: str) -> bool:
+    real = os.path.realpath(path)
+    best_mp = ""
+    best_fs = ""
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mp = parts[1].replace("\\040", " ")
+                fs_type = parts[2]
+                if real == mp or (mp == "/" and real.startswith("/")) or real.startswith(mp.rstrip("/") + "/"):
+                    if len(mp) > len(best_mp):
+                        best_mp = mp
+                        best_fs = fs_type
+    except OSError:
+        return False
+    return best_fs in ("tmpfs", "ramfs")
+
+def mem_available_kb() -> int:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+    except (OSError, ValueError):
+        return 0
+    return 0
+
 try:
+    tmp_base = sys.argv[1]
+    if is_path_on_tmpfs(tmp_base):
+        raise SystemExit(0)
     if not os.path.isdir("/dev/shm"):
         raise SystemExit(0)
-    if shutil.disk_usage("/dev/shm").free < 2 * 1024 * 1024 * 1024:
+    usage = shutil.disk_usage("/dev/shm")
+    if usage.total < 3 * 1024 * 1024 * 1024 or usage.free < 2 * 1024 * 1024 * 1024:
+        raise SystemExit(0)
+    if mem_available_kb() < 2621440:
         raise SystemExit(0)
     rt = os.path.realpath(tempfile.mkdtemp(prefix="lwv-rt.", dir="/dev/shm"))
     os.chmod(rt, 0o700)
@@ -836,9 +876,9 @@ set -euo pipefail
 "$VERIFY_NODE_BIN" scripts/build.mjs
 
 LOG_DIR="${TMPDIR:-/tmp}"
-LOG_TSC="${LOG_DIR%/}/lw-tsc.log"
-LOG_ESLINT="${LOG_DIR%/}/lw-eslint.log"
-LOG_DOCS="${LOG_DIR%/}/lw-docs.log"
+LOG_TSC="$(mktemp "${LOG_DIR%/}/lw-tsc.XXXXXX")"
+LOG_ESLINT="$(mktemp "${LOG_DIR%/}/lw-eslint.XXXXXX")"
+LOG_DOCS="$(mktemp "${LOG_DIR%/}/lw-docs.XXXXXX")"
 
 "$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json >"$LOG_TSC" 2>&1 &
 PID_TSC=$!
@@ -875,7 +915,7 @@ cat >"$TEST_RUNNER" <<'EOF'
 set -euo pipefail
 
 "$VERIFY_NODE_BIN" packages/cli/dist/main.js closure --verify-failures
-"$VERIFY_NODE_BIN" scripts/run-tests.mjs
+LW_TEST_CONCURRENCY="${LW_TEST_CONCURRENCY:-3}" "$VERIFY_NODE_BIN" scripts/run-tests.mjs
 EOF
 chmod 0555 "$TEST_RUNNER"
 
@@ -1589,6 +1629,28 @@ os.replace(runtime_stage, runtime_dir)
 force_remove_dir(build_dir)
 force_remove_dir(build_home)
 force_remove_dir(build_tmp)
+
+if platform_name == "linux" and os.path.isdir("/dev/shm"):
+    shm_root = os.path.realpath("/dev/shm")
+    if runtime_tmp == shm_root or runtime_tmp.startswith(shm_root + "/") or runtime_tmp.startswith("/dev/shm/"):
+        mem_avail_kb = 0
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as mf:
+                for line in mf:
+                    if line.startswith("MemAvailable:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            mem_avail_kb = int(parts[1])
+                        break
+        except (OSError, ValueError):
+            mem_avail_kb = 0
+        try:
+            shm_free = shutil.disk_usage("/dev/shm").free
+        except OSError:
+            shm_free = 0
+        if shm_free < 1536 * 1024 * 1024 or mem_avail_kb < 2 * 1024 * 1024:
+            force_remove_dir(runtime_tmp)
+            runtime_tmp = os.path.join(work_root, "tr")
 
 os.makedirs(runtime_home, mode=0o700, exist_ok=True)
 os.makedirs(runtime_tmp, mode=0o700, exist_ok=True)

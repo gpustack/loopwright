@@ -85,9 +85,11 @@ jobs:
         env:
           TEST_ARGS: ${{ matrix.args }}
         run: |
+          set -euo pipefail
           read -r -a args <<< "$TEST_ARGS"
+          list_out="$(node scripts/run-tests.mjs "${args[@]}" --list)"
           NEED_PYTEST=0
-          if node scripts/run-tests.mjs "${args[@]}" --list | grep -q 'python-bridge\.test\.js'; then
+          if grep -q 'python-bridge\.test\.js' <<<"$list_out"; then
             NEED_PYTEST=1
           fi
           if [[ "$NEED_PYTEST" -eq 1 ]]; then
@@ -99,9 +101,17 @@ jobs:
           else
             echo "System Python already has packaging/yaml/requests and shard skips pytest; skipping apt-get."
           fi
+      - name: Setup Python for runtime bridge (macOS)
+        if: runner.os == 'macOS' && matrix.label == 'platform-runtime'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install Python bridge runtime modules (macOS)
         if: runner.os == 'macOS' && matrix.label == 'platform-runtime'
-        run: python3 -m pip install --break-system-packages --disable-pip-version-check --no-input -q packaging pyyaml requests || python3 -m pip install --user --disable-pip-version-check --no-input -q packaging pyyaml requests
+        run: |
+          python -m pip install --disable-pip-version-check --no-input -q packaging pyyaml requests
+          python -c "import packaging, yaml, requests"
+          python3 -c "import packaging, yaml, requests"
       - name: Mount tmpfs scratch directory (Linux)
         if: runner.os == 'Linux'
         run: |
