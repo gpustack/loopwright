@@ -250,7 +250,10 @@ function isProtectedCandidatePath(name: string, protectedPaths: readonly string[
   return false;
 }
 
-function isAllowedCandidateWrite(name: string, snapshot: InspectedCandidateSnapshot): boolean {
+function isAllowedCandidateWrite(
+  name: string,
+  snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
+): boolean {
   if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
     return false;
   }
@@ -1497,23 +1500,15 @@ export async function startLocalCommandGateServer(
             join(workDir, 'gate-script.sh'),
           );
           const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
+          const gitEnv = buildCleanGitEnv();
+          const deletedPaths = snapshot.manifest.spec.deleted ?? [];
           if (snapshot.manifest.spec.baseTree !== undefined) {
             await verifyBaseTreeAnchor(
               options.repositoryRoot,
               snapshot.manifest.spec.baseTree,
-              buildCleanGitEnv(),
+              gitEnv,
               snapshot.sourceRevision,
             );
-            const baselineEntries = await listBaselineRegularEntries(
-              options.repositoryRoot,
-              snapshot.manifest.spec.baseTree.commitOid,
-              snapshot.protectedPaths,
-            );
-            const baselineModes = new Map<string, '100644' | '100755'>();
-            for (const entry of baselineEntries) {
-              baselineModes.set(entry.path, entry.mode);
-            }
-            const deletedPaths = snapshot.manifest.spec.deleted ?? [];
             for (const file of snapshot.files) {
               if (!isAllowedCandidateWrite(file.name, snapshot)) {
                 throw new GitHubAppError(
@@ -1530,6 +1525,127 @@ export async function startLocalCommandGateServer(
                   `candidate deleted path "${deletedName}" is outside writable scope`,
                 );
               }
+            }
+          }
+
+          if (snapshot.sourceRevision !== snapshot.baseRevision) {
+            if (!COMMIT_SHA_PATTERN.test(snapshot.baseRevision) || !COMMIT_SHA_PATTERN.test(snapshot.sourceRevision)) {
+              throw new GitHubAppError('ACTION_INPUT_INVALID', 'baseRevision and sourceRevision must be 40-hex commit SHAs');
+            }
+            await execGit(
+              options.repositoryRoot,
+              ['rev-parse', '--verify', '--end-of-options', `${snapshot.baseRevision}^{commit}`],
+              { env: gitEnv, timeoutMs: 15_000 },
+            );
+            await execGit(
+              options.repositoryRoot,
+              ['rev-parse', '--verify', '--end-of-options', `${snapshot.sourceRevision}^{commit}`],
+              { env: gitEnv, timeoutMs: 15_000 },
+            );
+
+            const baseTreeMap = await listTreeEntriesAtRevision(options.repositoryRoot, snapshot.baseRevision, gitEnv);
+            const sourceTreeMap = await listTreeEntriesAtRevision(options.repositoryRoot, snapshot.sourceRevision, gitEnv);
+            const baseRegularEntries = await listBaselineRegularEntries(
+              options.repositoryRoot,
+              snapshot.baseRevision,
+              snapshot.protectedPaths,
+            );
+            const sourceRegularEntries = await listBaselineRegularEntries(
+              options.repositoryRoot,
+              snapshot.sourceRevision,
+              snapshot.protectedPaths,
+            );
+            const sourceRegularByPath = new Map(sourceRegularEntries.map(entry => [entry.path, entry] as const));
+            const { carryRemovals, carryUpdates } = computeAllowedSourceRevisionCarryDelta(
+              snapshot,
+              baseTreeMap,
+              sourceTreeMap,
+            );
+
+            const effectiveBaseline = new Map<string, BaselineRegularEntry>(
+              baseRegularEntries.map(entry => [entry.path, entry] as const),
+            );
+            await applyCarryDeltaToEffectiveBaseline(
+              options.repositoryRoot,
+              effectiveBaseline,
+              sourceRegularByPath,
+              carryRemovals,
+              carryUpdates,
+              gitEnv,
+            );
+
+            const baselineModes = new Map<string, '100644' | '100755'>();
+            for (const entry of effectiveBaseline.values()) {
+              baselineModes.set(entry.path, entry.mode);
+            }
+
+            const overlayFilesToMaterialize = snapshot.manifest.spec.baseTree !== undefined
+              ? snapshot.files
+              : snapshot.files.filter(file => isAllowedCandidateWrite(file.name, snapshot));
+            for (const file of overlayFilesToMaterialize) {
+              if (hasSymlinkAtOrAbove(file.name, baseTreeMap, sourceTreeMap)) {
+                throw new GitHubAppError(
+                  'ACTION_INPUT_INVALID',
+                  'Refusing to materialize symlinked candidate path during command.v1 verification.',
+                );
+              }
+            }
+
+            const effectiveDeletedPaths: string[] = [];
+            if (snapshot.manifest.spec.baseTree !== undefined) {
+              for (const rawDeleted of deletedPaths) {
+                const deletedName = normalizeCandidateRelativePath(rawDeleted);
+                if (!hasSymlinkAtOrAbove(deletedName, baseTreeMap, sourceTreeMap)) {
+                  effectiveDeletedPaths.push(deletedName);
+                }
+              }
+            } else {
+              // ArtifactManifest under loopwright.dev/v1alpha1 with baseTree === undefined and deleted === undefined
+              // is classic full-snapshot mode where snapshot.files holds the complete candidate file set.
+              if (snapshot.manifest.spec.deleted !== undefined || snapshot.manifest.apiVersion !== 'loopwright.dev/v1alpha1') {
+                throw new GitHubAppError(
+                  'ACTION_INPUT_INVALID',
+                  'candidate manifest missing baseTree in non-classic snapshot mode',
+                );
+              }
+              const candidateNames = new Set(snapshot.files.map(file => file.name));
+              for (const [sourceName, sourceEntry] of sourceTreeMap.entries()) {
+                if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
+                if (
+                  !candidateNames.has(sourceName)
+                  && isAllowedCandidateWrite(sourceName, snapshot)
+                  && !hasSymlinkAtOrAbove(sourceName, baseTreeMap, sourceTreeMap)
+                ) {
+                  effectiveDeletedPaths.push(sourceName);
+                }
+              }
+            }
+
+            const deletedSet = new Set(effectiveDeletedPaths);
+            const overlayNames = new Set(overlayFilesToMaterialize.map(file => file.name));
+            const toMaterialize = Array.from(effectiveBaseline.values()).filter(
+              entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
+            );
+            // Classic mode requires 40-hex SHA-1 commit OIDs via COMMIT_SHA_PATTERN above.
+            const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
+            await materializeBaselineBatchForGate(
+              options.repositoryRoot,
+              objectFormat,
+              toMaterialize,
+              candidateDir,
+              Math.max(60_000, gate.timeoutSeconds * 1000),
+            );
+            await materializeOverlayCandidateFiles(candidateDir, overlayFilesToMaterialize, baselineModes);
+            await assertDeletedPathsAbsent(candidateDir, effectiveDeletedPaths);
+          } else if (snapshot.manifest.spec.baseTree !== undefined) {
+            const baselineEntries = await listBaselineRegularEntries(
+              options.repositoryRoot,
+              snapshot.manifest.spec.baseTree.commitOid,
+              snapshot.protectedPaths,
+            );
+            const baselineModes = new Map<string, '100644' | '100755'>();
+            for (const entry of baselineEntries) {
+              baselineModes.set(entry.path, entry.mode);
             }
             const deletedSet = new Set(deletedPaths);
             const overlayNames = new Set(snapshot.files.map(file => file.name));
@@ -1762,6 +1878,105 @@ export function hasSymlinkAtOrAbove(
     slash = path.indexOf('/', slash + 1);
   }
   return false;
+}
+
+export interface CarryDeltaEntry {
+  readonly path: string;
+  readonly mode: '100644' | '100755';
+  readonly oid: string;
+}
+
+/**
+ * Compute writable, symlink-free carry removals and updates between `baseEntries`
+ * and `sourceEntries` for a candidate snapshot.
+ */
+export function computeAllowedSourceRevisionCarryDelta(
+  snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
+  baseEntries: ReadonlyMap<string, GitTreeEntry>,
+  sourceEntries: ReadonlyMap<string, GitTreeEntry>,
+): {
+  readonly carryRemovals: readonly string[];
+  readonly carryUpdates: readonly CarryDeltaEntry[];
+} {
+  const carryRemovals: string[] = [];
+  for (const [path, baseEntry] of baseEntries.entries()) {
+    if (baseEntry.mode !== '100644' && baseEntry.mode !== '100755') continue;
+    const sourceEntry = sourceEntries.get(path);
+    if (sourceEntry !== undefined && (sourceEntry.mode === '100644' || sourceEntry.mode === '100755')) {
+      continue;
+    }
+    if (!isAllowedCandidateWrite(path, snapshot)) continue;
+    if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
+    carryRemovals.push(path);
+  }
+
+  const carryUpdates: CarryDeltaEntry[] = [];
+  for (const [path, sourceEntry] of sourceEntries.entries()) {
+    if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
+    const baseEntry = baseEntries.get(path);
+    if (baseEntry !== undefined && baseEntry.mode === sourceEntry.mode && baseEntry.oid === sourceEntry.oid) {
+      continue;
+    }
+    if (!isAllowedCandidateWrite(path, snapshot)) continue;
+    if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
+    carryUpdates.push({ path, mode: sourceEntry.mode, oid: sourceEntry.oid });
+  }
+
+  return { carryRemovals, carryUpdates };
+}
+
+/**
+ * Apply `carryRemovals` and `carryUpdates` onto `effectiveBaseline`, looking up
+ * missing blob sizes via `git cat-file -s` and failing closed on missing objects.
+ */
+export async function applyCarryDeltaToEffectiveBaseline(
+  repositoryRoot: string,
+  effectiveBaseline: Map<string, BaselineRegularEntry>,
+  sourceRegularByPath: ReadonlyMap<string, BaselineRegularEntry>,
+  carryRemovals: readonly string[],
+  carryUpdates: readonly CarryDeltaEntry[],
+  gitEnv: Record<string, string>,
+): Promise<void> {
+  for (const removedPath of carryRemovals) {
+    effectiveBaseline.delete(removedPath);
+  }
+  for (const update of carryUpdates) {
+    const cleanCarryPath = validateBaselineGitPath(update.path);
+    const existing = sourceRegularByPath.get(cleanCarryPath);
+    let byteLength: number;
+    if (existing !== undefined) {
+      byteLength = existing.byteLength;
+    } else {
+      let sizeRaw: string;
+      try {
+        sizeRaw = (
+          await execGit(
+            repositoryRoot,
+            ['cat-file', '-s', update.oid],
+            { env: gitEnv, timeoutMs: 15_000 },
+          )
+        ).toString('utf8').trim();
+      } catch {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `failed to read carried baseline blob size for "${cleanCarryPath}" (${update.oid})`,
+        );
+      }
+      byteLength = Number(sizeRaw);
+    }
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new GitHubAppError(
+        'ACTION_INPUT_INVALID',
+        `invalid carried baseline blob byteLength for "${cleanCarryPath}"`,
+      );
+    }
+    effectiveBaseline.set(cleanCarryPath, {
+      path: cleanCarryPath,
+      mode: update.mode,
+      oid: update.oid,
+      byteLength,
+    });
+  }
 }
 
 export async function stageEntriesInIndex(
@@ -2149,35 +2364,21 @@ export async function startNativePullRequestPublisherServer(
         ? baseEntries
         : await listTreeEntriesAtRevision(options.repositoryRoot, sourceRevision, gitEnv);
 
+      const carriedUpdatesByPath = new Map<string, CarryDeltaEntry>();
       if (sourceRevision !== baseRevision) {
-        const carryRemovals: string[] = [];
-        for (const [path, baseEntry] of baseEntries.entries()) {
-          if (baseEntry.mode !== '100644' && baseEntry.mode !== '100755') continue;
-          const sourceEntry = sourceEntries.get(path);
-          if (sourceEntry !== undefined && (sourceEntry.mode === '100644' || sourceEntry.mode === '100755')) {
-            continue;
-          }
-          if (!isAllowedCandidateWrite(path, snapshot)) continue;
-          if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
-          carryRemovals.push(path);
-        }
+        const { carryRemovals, carryUpdates } = computeAllowedSourceRevisionCarryDelta(
+          snapshot,
+          baseEntries,
+          sourceEntries,
+        );
         if (carryRemovals.length > 0) {
           await removePathsFromIndex(options.repositoryRoot, indexFile, carryRemovals, gitEnv);
         }
-
-        const carryUpdates: Array<{ readonly path: string; readonly mode: '100644' | '100755'; readonly oid: string }> = [];
-        for (const [path, sourceEntry] of sourceEntries.entries()) {
-          if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
-          const baseEntry = baseEntries.get(path);
-          if (baseEntry !== undefined && baseEntry.mode === sourceEntry.mode && baseEntry.oid === sourceEntry.oid) {
-            continue;
-          }
-          if (!isAllowedCandidateWrite(path, snapshot)) continue;
-          if (hasSymlinkAtOrAbove(path, baseEntries, sourceEntries)) continue;
-          carryUpdates.push({ path, mode: sourceEntry.mode, oid: sourceEntry.oid });
-        }
         if (carryUpdates.length > 0) {
           await stageEntriesInIndex(options.repositoryRoot, indexFile, carryUpdates, gitEnv);
+          for (const entry of carryUpdates) {
+            carriedUpdatesByPath.set(entry.path, entry);
+          }
         }
       }
 
@@ -2319,11 +2520,58 @@ export async function startNativePullRequestPublisherServer(
           apiHeaders['authorization'] = `Bearer ${options.gitWriteToken}`;
         }
         const stagedPathSet = new Set(stagedFiles.map(entry => entry.path));
+        let prBodyFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[] = snapshot.files;
+        if (options.proposalPath !== undefined && options.proposalPath.trim().length > 0) {
+          let cleanProposalPath: string | undefined;
+          try {
+            cleanProposalPath = normalizeCandidateRelativePath(options.proposalPath.trim().replace(/^(?:\.\/)+/, ''));
+          } catch {
+            cleanProposalPath = undefined;
+          }
+          if (
+            cleanProposalPath !== undefined
+            && !stagedPathSet.has(cleanProposalPath)
+            && !filesToRemove.includes(cleanProposalPath)
+          ) {
+            const carriedProposal = carriedUpdatesByPath.get(cleanProposalPath);
+            if (carriedProposal !== undefined && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(carriedProposal.oid)) {
+              try {
+                const sizeText = (
+                  await gitRepo(['cat-file', '-s', carriedProposal.oid])
+                ).toString('utf8').trim();
+                const byteSize = Number(sizeText);
+                if (Number.isSafeInteger(byteSize) && byteSize > 0 && byteSize <= MAX_PROPOSAL_JSON_BYTES) {
+                  const proposalBytes = await execGit(
+                    options.repositoryRoot,
+                    ['cat-file', 'blob', carriedProposal.oid],
+                    { env: gitEnv, maxStdoutBytes: MAX_PROPOSAL_JSON_BYTES },
+                  );
+                  stagedPathSet.add(cleanProposalPath);
+                  prBodyFiles = [...snapshot.files, { name: cleanProposalPath, bytes: proposalBytes }];
+                } else if (Number.isSafeInteger(byteSize) && byteSize > MAX_PROPOSAL_JSON_BYTES) {
+                  process.stderr.write(
+                    `${scrubber.scrub(
+                      `[loopwright] warning: carried proposal "${cleanProposalPath}" (${byteSize} bytes) exceeds ${MAX_PROPOSAL_JSON_BYTES} byte limit; falling back to provenance footer`,
+                    )}\n`,
+                  );
+                }
+              } catch (error) {
+                // Best-effort carried proposal read; fall back to provenance footer if blob read fails.
+                const detail = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
+                process.stderr.write(
+                  `${scrubber.scrub(
+                    `[loopwright] warning: failed to read carried proposal "${cleanProposalPath}" from ${carriedProposal.oid}: ${detail}`,
+                  )}\n`,
+                );
+              }
+            }
+          }
+        }
         const prBody = buildNativePullRequestBody({
           runId,
           candidateDigest,
           proposalPath: options.proposalPath,
-          files: snapshot.files,
+          files: prBodyFiles,
           stagedPaths: stagedPathSet,
           scrubber,
         });

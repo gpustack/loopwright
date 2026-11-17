@@ -95,6 +95,9 @@ inputs:
   upstream-records:
     description: 'Optional JSON array of precomputed upstream acquisition records.'
     required: false
+  source-revision:
+    description: 'Optional Git commit SHA or ref materialized as the candidate source tree while keeping GITHUB_SHA as the target base revision.'
+    required: false
   mcp-servers:
     description: 'Optional JSON or YAML array of MCP server declarations overriding or extending spec.mcp.servers by id.'
     required: false
@@ -177,6 +180,7 @@ runs:
         INPUT_GIT-AUTHOR-NAME: ${{ inputs.git-author-name }}
         INPUT_GIT-AUTHOR-EMAIL: ${{ inputs.git-author-email }}
         INPUT_UPSTREAM-RECORDS: ${{ inputs.upstream-records }}
+        INPUT_SOURCE-REVISION: ${{ inputs.source-revision }}
         INPUT_MCP-SERVERS: ${{ inputs.mcp-servers }}
         INPUT_WALL-TIME-SECONDS: ${{ inputs.wall-time-seconds }}
         INPUT_TOTAL-TOKENS: ${{ inputs.total-tokens }}

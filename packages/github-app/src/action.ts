@@ -31,7 +31,8 @@ import { finalizeAndPublishTurnkeyMemory } from './turnkey-memory.js';
 import {
   checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
   discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
-  resolveGitHubAuth, resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
+  resolveGitCommitSha, resolveGitHubAuth, resolveRepositoryAndRevisions, shouldPreserveExplicitSourceRevision,
+  validateGitAuthorEmail, validateGitAuthorName,
   type ManagedPullRequestInfo,
 } from './upstreams.js';
 import { serializePrettyYaml } from './yaml.js';
@@ -626,7 +627,8 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let effectiveRepositoryId = input.repositoryId ?? 0;
   let effectiveInstallationId = input.installationId ?? 0;
   let effectiveBaseRevision = input.baseRevision;
-  let effectiveSourceRevision = input.sourceRevision ?? input.baseRevision;
+  const explicitSourceRevision = (input.sourceRevision ?? runtimeEnv['INPUT_SOURCE-REVISION'])?.trim() || undefined;
+  let effectiveSourceRevision = explicitSourceRevision ?? input.baseRevision;
   let effectiveUpstreamRecords = input.upstreamRecords;
   let githubToken: string | undefined;
   let gitCommitIdentity: GitCommitIdentity = Object.freeze({
@@ -636,6 +638,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let openManagedPr: ManagedPullRequestInfo | null = null;
   let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
   const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim();
+  let preEvaluatedComment: ReturnType<typeof evaluateCommentPayload> | undefined;
 
   if (turnkeyEnabled) {
     try {
@@ -681,11 +684,30 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       if (effectiveInstallationId <= 0 && resolvedAuth.installationId !== undefined) {
         effectiveInstallationId = resolvedAuth.installationId;
       }
+      if (input.eventName === 'issue_comment') {
+        preEvaluatedComment = evaluateCommentPayload(input.eventPayload, {
+          eventName: input.eventName,
+          commentPrefixes: input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes,
+          commentCommands: manifest.spec.triggers.commentCommands,
+          operatorAllowlist: input.operatorAllowlist,
+        });
+      }
+      const commentCommand = preEvaluatedComment !== undefined
+        && !('ignoredReason' in preEvaluatedComment)
+        && !('blockedReason' in preEvaluatedComment)
+        ? preEvaluatedComment.command
+        : undefined;
+      const preserveExplicitSourceRevision = shouldPreserveExplicitSourceRevision({
+        eventName: input.eventName,
+        explicitSourceRevision,
+        commentCommand,
+      });
       const resolvedRepo = await resolveRepositoryAndRevisions({
         repositoryRoot: input.repositoryRoot,
         repositoryFullName: input.repositoryFullName,
         baseRevision: effectiveBaseRevision,
-        sourceRevision: effectiveSourceRevision,
+        sourceRevision: explicitSourceRevision,
+        preserveExplicitSourceRevision,
         eventName: input.eventName,
         eventPayload: input.eventPayload,
         apiBaseUrl: effectiveApiBaseUrl,
@@ -772,19 +794,34 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         env: runtimeEnv,
       });
     }
-  } else if (input.upstreamRecords === undefined && input.upstreamRecordsJson !== undefined) {
-    try {
-      effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
-        repositoryRoot: input.repositoryRoot,
-        upstreamRecordsJson: input.upstreamRecordsJson,
-        scrubber: turnkeyScrubber,
-        env: runtimeEnv,
-      });
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+  } else {
+    if (explicitSourceRevision !== undefined && existsSync(join(input.repositoryRoot, '.git'))) {
+      try {
+        effectiveBaseRevision = await resolveGitCommitSha(input.repositoryRoot, effectiveBaseRevision);
+        effectiveSourceRevision = explicitSourceRevision === input.baseRevision
+          ? effectiveBaseRevision
+          : await resolveGitCommitSha(input.repositoryRoot, explicitSourceRevision);
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+        }
+        throw error;
       }
-      throw error;
+    }
+    if (input.upstreamRecords === undefined && input.upstreamRecordsJson !== undefined) {
+      try {
+        effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
+          repositoryRoot: input.repositoryRoot,
+          upstreamRecordsJson: input.upstreamRecordsJson,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+        }
+        throw error;
+      }
     }
   }
 
@@ -818,7 +855,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     }
     intake = outcome;
   } else if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
-    const evaluation = evaluateCommentPayload(input.eventPayload, {
+    const evaluation = preEvaluatedComment ?? evaluateCommentPayload(input.eventPayload, {
       eventName: input.eventName,
       commentPrefixes: input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes,
       commentCommands: manifest.spec.triggers.commentCommands,
@@ -1470,6 +1507,7 @@ export async function runActionCli(
   const dryRun = env['INPUT_DRY-RUN'] === 'true';
   const inputRunId = env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local';
   const inputOutput = env['INPUT_OUTPUT']?.trim() || undefined;
+  const sourceRevision = env['INPUT_SOURCE-REVISION']?.trim() || undefined;
   const prevalidatedInputFormats = inputOutput !== undefined
     ? resolveActionOutputFormats(inputOutput, undefined)
     : undefined;
@@ -1481,6 +1519,7 @@ export async function runActionCli(
     taskpackPath: env['INPUT_TASKPACK-PATH']?.trim() || undefined,
     repositoryFullName: env['LOOPWRIGHT_REPOSITORY'] ?? env['GITHUB_REPOSITORY'] ?? basename(repositoryRoot),
     baseRevision: env['GITHUB_SHA'] ?? 'HEAD',
+    sourceRevision,
     mode: mode === 'no-change' ? 'no-change' : 'candidate',
     eventName: env['INPUT_EVENT-NAME']?.trim() || env['GITHUB_EVENT_NAME'] || 'workflow_dispatch',
     eventPayload,

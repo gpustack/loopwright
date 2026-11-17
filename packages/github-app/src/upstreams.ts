@@ -70,6 +70,7 @@ export interface ResolveRepositoryAndRevisionsOptions {
   readonly repositoryFullName: string;
   readonly baseRevision: string;
   readonly sourceRevision?: string | undefined;
+  readonly preserveExplicitSourceRevision?: boolean | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;
   readonly apiBaseUrl?: string | undefined;
@@ -1164,10 +1165,15 @@ function extractRepositoryIdFromPayload(payload: unknown): number | undefined {
   return undefined;
 }
 
-async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
-  if (COMMIT_SHA_PATTERN.test(ref)) {
-    return ref.toLowerCase();
-  }
+/**
+ * Verify and resolve a Git commit reference or SHA against local `repositoryRoot`
+ * using `git rev-parse --verify` so nonexistent SHAs and missing refs fail closed.
+ */
+export async function resolveGitCommitSha(
+  repositoryRoot: string,
+  ref: string,
+  timeoutMs = 15_000,
+): Promise<string> {
   if (!SAFE_GIT_REF_PATTERN.test(ref) || ref.startsWith('-')) {
     throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid git revision reference "${ref}"`);
   }
@@ -1175,7 +1181,7 @@ async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeou
   try {
     const { stdout } = await execFileAsync(
       gitBin,
-      ['-C', repositoryRoot, 'rev-parse', '--verify', `${ref}^{commit}`],
+      ['-C', repositoryRoot, 'rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
       { timeout: timeoutMs, maxBuffer: 4096, encoding: 'utf8' },
     );
     const sha = stdout.trim().toLowerCase();
@@ -1188,6 +1194,32 @@ async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeou
     const detail = error instanceof Error ? error.message : String(error);
     throw new GitHubAppError('ACTION_INPUT_INVALID', `failed to resolve git revision "${ref}": ${detail}`);
   }
+}
+
+/**
+ * Fast-path pre-validated 40-hex commit SHAs for PR metadata and non-explicit
+ * `baseRevision` values (such as unfetched fork PR head SHAs or shallow base
+ * clones), while resolving symbolic Git refs locally via `resolveGitCommitSha`.
+ * Caller-supplied `options.sourceRevision` in a local Git checkout intentionally
+ * bypasses this fast path and calls `resolveGitCommitSha` directly so missing
+ * preflight commits fail closed at intake.
+ */
+async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
+  if (COMMIT_SHA_PATTERN.test(ref)) {
+    return ref.toLowerCase();
+  }
+  return resolveGitCommitSha(repositoryRoot, ref, timeoutMs);
+}
+
+export function shouldPreserveExplicitSourceRevision(options: {
+  readonly eventName: string;
+  readonly explicitSourceRevision?: string | undefined;
+  readonly commentCommand?: string | undefined;
+}): boolean {
+  return options.eventName === 'issue_comment'
+    && options.explicitSourceRevision !== undefined
+    && options.explicitSourceRevision.trim().length > 0
+    && options.commentCommand === 'retry';
 }
 
 /**
@@ -1215,8 +1247,12 @@ export async function resolveRepositoryAndRevisions(
 
   let baseRev = options.baseRevision;
   let sourceRev = options.sourceRevision ?? options.baseRevision;
+  let resolvedFromPr = false;
+  const preserveExplicitOnComment = options.preserveExplicitSourceRevision === true
+    && options.sourceRevision !== undefined
+    && options.sourceRevision.trim().length > 0;
 
-  if (options.eventName === 'issue_comment' || options.eventName === 'pull_request_review') {
+  if (!preserveExplicitOnComment && (options.eventName === 'issue_comment' || options.eventName === 'pull_request_review')) {
     const prNumber = extractPrNumberFromPayload(options.eventPayload);
     const payloadPr = isPlainRecord(options.eventPayload) && isPlainRecord(options.eventPayload['pull_request'])
       ? options.eventPayload['pull_request']
@@ -1259,6 +1295,7 @@ export async function resolveRepositoryAndRevisions(
       }
       baseRev = fetchedBaseSha.toLowerCase();
       sourceRev = fetchedHeadSha.toLowerCase();
+      resolvedFromPr = true;
     } else if (payloadPr !== undefined) {
       const baseObj = isPlainRecord(payloadPr['base']) ? payloadPr['base'] : undefined;
       const headObj = isPlainRecord(payloadPr['head']) ? payloadPr['head'] : undefined;
@@ -1278,14 +1315,28 @@ export async function resolveRepositoryAndRevisions(
         }
         baseRev = payloadBaseSha.toLowerCase();
         sourceRev = payloadHeadSha.toLowerCase();
+        resolvedFromPr = true;
       }
     }
   }
 
   const resolvedBase = await resolveGitRevisionSha(options.repositoryRoot, baseRev, timeoutMs);
-  const resolvedSource = sourceRev === baseRev
-    ? resolvedBase
-    : await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
+  // Explicit sourceRevision values in a local Git checkout (including /loopwright retry
+  // with preserveExplicitOnComment) are verified via resolveGitCommitSha even when already
+  // 40-hex, because carried-tree gate materialization and native PR publishing read from
+  // the local object store and must fail closed on missing commits.
+  const verifyExplicitSourceLocally = !resolvedFromPr
+    && options.sourceRevision !== undefined
+    && options.sourceRevision.trim().length > 0
+    && existsSync(join(options.repositoryRoot, '.git'));
+  let resolvedSource: string;
+  if (verifyExplicitSourceLocally) {
+    resolvedSource = await resolveGitCommitSha(options.repositoryRoot, sourceRev, timeoutMs);
+  } else if (sourceRev === baseRev) {
+    resolvedSource = resolvedBase;
+  } else {
+    resolvedSource = await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
+  }
 
   let repositoryId: number | undefined;
   const envRepoIdRaw = options.env?.['GITHUB_REPOSITORY_ID']?.trim();

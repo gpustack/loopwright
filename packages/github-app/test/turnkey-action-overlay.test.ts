@@ -3,19 +3,30 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
+import { parse as parseYaml } from 'yaml';
 import { inspectRun, signPayload } from '@loopwright/controller';
 import {
   discoverTaskpackUpstreams,
   GitHubAppError,
   isPrereleaseVersionTag,
   loadDeclarativeTaskpack,
+  resolveRepositoryAndRevisions,
+  runActionCli,
   runGitHubActionEntrypoint,
   startLocalCommandGateServer,
   startNativePullRequestPublisherServer,
 } from '../src/index.js';
-import { listBaselineRegularEntries, verifyBaseTreeAnchor } from '../src/turnkey.js';
+import {
+  applyCarryDeltaToEffectiveBaseline,
+  computeAllowedSourceRevisionCarryDelta,
+  listBaselineRegularEntries,
+  verifyBaseTreeAnchor,
+} from '../src/turnkey.js';
+import { compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS } from '../src/taskpack.js';
+import { shouldPreserveExplicitSourceRevision } from '../src/upstreams.js';
 import {
   GIT_TEST_ENV,
   git,
@@ -2870,6 +2881,1379 @@ spec:
     } finally {
       await openAiServer?.close();
       await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('exposes optional source-revision in action.yml and materializes >128-file tree_overlay INPUT_SOURCE-REVISION with baseSha authority across command.v1 and PR publication', async () => {
+    let repoRoot = dirname(fileURLToPath(import.meta.url));
+    for (let depth = 0; depth < 8; depth += 1) {
+      if (existsSync(join(repoRoot, 'action.yml')) && existsSync(join(repoRoot, 'package.json'))) break;
+      const parent = resolve(repoRoot, '..');
+      if (parent === repoRoot) break;
+      repoRoot = parent;
+    }
+    const actionYmlRaw = await readFile(join(repoRoot, 'action.yml'), 'utf8');
+    const actionDoc = parseYaml(actionYmlRaw, { uniqueKeys: true }) as {
+      inputs?: Record<string, { required?: boolean; description?: string }>;
+      runs?: { steps?: Array<{ id?: string; env?: Record<string, string> }> };
+    };
+    const sourceRevInput = actionDoc.inputs?.['source-revision'];
+    assert.ok(sourceRevInput, 'action.yml must declare inputs.source-revision');
+    assert.equal(sourceRevInput.required, false);
+    assert.equal(typeof sourceRevInput.description, 'string');
+    assert.ok((sourceRevInput.description ?? '').trim().length > 0);
+    const entrypointStep = actionDoc.runs?.steps?.find(step => step.id === 'loopwright-entrypoint');
+    assert.equal(
+      entrypointStep?.env?.['INPUT_SOURCE-REVISION'],
+      '${{ inputs.source-revision }}',
+      'action.yml must wire INPUT_SOURCE-REVISION: ${{ inputs.source-revision }}',
+    );
+
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-cli-source-rev-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(repo, { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await mkdir(join(repo, '.github', 'workflows'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack', 'items'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await writeFile(join(repo, '.github', 'workflows', 'ci.yml'), 'name: base-ci\n');
+      await writeFile(join(repo, 'README.md'), 'base-readme\n');
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Add vendor overlay note.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'README.md'), 'vendor baseline\n');
+      await writeFile(join(repo, 'vendor', 'stale.txt'), 'stale-content\n');
+      for (let i = 0; i < 135; i += 1) {
+        await writeFile(join(repo, 'pack', 'items', `item-${String(i).padStart(3, '0')}.txt`), `item-${i}\n`);
+      }
+
+      const verifyScript = `#!/usr/bin/env bash
+set -euo pipefail
+test "$(cat pack/items/item-134.txt)" = "item-134"
+test "$(cat .github/workflows/ci.yml)" = "name: base-ci"
+test "$(cat README.md)" = "base-readme"
+if [[ -f vendor/subchart/overlay-note.txt ]]; then
+  test "$(cat vendor/subchart/Chart.yaml)" = $'apiVersion: v2\\nname: subchart\\nversion: 1.2.3'
+  test "$(cat vendor/subchart/values.yaml)" = $'replicaCount: 2\\nimage:\\n  tag: v1.2.3'
+  test "$(cat vendor/README.md)" = "vendor preflight updated"
+  test ! -e vendor/stale.txt
+  test "$(cat vendor/subchart/overlay-note.txt)" = "agent overlay edit"
+fi
+`;
+      await writeFile(join(repo, '.auto-sync', 'checks', 'verify.sh'), verifyScript, { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'verify.sh'), 0o755);
+
+      let mode: 'completed' | 'no_change' = 'completed';
+      let turn = 0;
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        const step = turn++;
+        let sseBody: string;
+        if (mode === 'no_change') {
+          sseBody = sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'no_change', checks: [], reason: 'whitespace source-revision fallback' }));
+        } else if (step === 0) {
+          // Intentionally do NOT re-touch pack/proposal.json so it is carried from sourceRev via carryUpdates.
+          sseBody = sseToolCall('gpt-4.1-mini', 'sr-1', 'write', {
+            path: 'vendor/subchart/overlay-note.txt',
+            content: 'agent overlay edit\n',
+          });
+        } else {
+          sseBody = sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null }));
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseBody);
+      });
+
+      let baseSha = '';
+      let prPosts = 0;
+      let createdPrBody = '';
+      let openPrHeadSha = '';
+      githubServer = await startHttpServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 707 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          const payload = await readJsonBody(req);
+          const headRef = String(payload['head'] ?? '');
+          if (headRef.startsWith('loopwright/memory/')) {
+            res.writeHead(201, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({
+              number: 102,
+              html_url: 'https://github.invalid/acme/repo/pull/102',
+              head: { ref: headRef, sha: '0'.repeat(40) },
+              base: { ref: 'main', sha: baseSha },
+            }));
+            return;
+          }
+          prPosts += 1;
+          createdPrBody = String(payload['body'] ?? '');
+          const remoteLs = await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main']);
+          openPrHeadSha = remoteLs.split(/\s+/)[0]!;
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 101,
+            html_url: 'https://github.invalid/acme/repo/pull/101',
+            head: { ref: 'loopwright/main', sha: openPrHeadSha },
+            base: { ref: 'main', sha: baseSha },
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: cli-source-revision
+spec:
+  goal:
+    candidate: Sync vendor subchart from preflight source revision
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+      - id: verify-cmd
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/verify.sh
+          timeoutSeconds: 15
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: source revision sync"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base main commit']);
+      baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await mkdir(bareRemote, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+
+      // Stage bulk writable vendor files, carried proposal, removal, AND tampered protected/non-writable files on detached sourceRev.
+      await git(repo, ['checkout', '--detach', baseSha]);
+      await mkdir(join(repo, 'vendor', 'subchart'), { recursive: true });
+      const stagedChartYaml = 'apiVersion: v2\nname: subchart\nversion: 1.2.3\n';
+      const stagedValuesYaml = 'replicaCount: 2\nimage:\n  tag: v1.2.3\n';
+      const stagedProposal = {
+        schema_version: 1,
+        version: '2.0.0',
+        summary: 'Preflight staged vendor subchart update.',
+        subscriptions: [
+          {
+            subscription: 'acme/engine',
+            status: 'updated',
+            engine_version: '2.0.0',
+            plugin_version: '1.2.3',
+            reason: 'Synced via source-revision.',
+          },
+        ],
+      };
+      await writeFile(join(repo, 'pack', 'proposal.json'), `${JSON.stringify(stagedProposal)}\n`);
+      await writeFile(join(repo, 'vendor', 'subchart', 'Chart.yaml'), stagedChartYaml);
+      await writeFile(join(repo, 'vendor', 'subchart', 'values.yaml'), stagedValuesYaml);
+      await writeFile(join(repo, 'vendor', 'README.md'), 'vendor preflight updated\n');
+      await rm(join(repo, 'vendor', 'stale.txt'));
+      await writeFile(join(repo, '.github', 'workflows', 'ci.yml'), 'name: tampered-in-source-rev\n');
+      await writeFile(join(repo, 'README.md'), 'tampered-readme-in-source-rev\n');
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-m', 'preflight: stage vendor subchart']);
+      const sourceRev = await git(repo, ['rev-parse', 'HEAD']);
+      assert.notEqual(sourceRev, baseSha);
+
+      await git(repo, ['checkout', 'main']);
+      assert.equal(await git(repo, ['rev-parse', 'HEAD']), baseSha);
+
+      const exitCode = await runActionCli(
+        {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          GITHUB_WORKSPACE: repo,
+          LOOPWRIGHT_REPOSITORY: 'acme/repo',
+          GITHUB_SHA: baseSha,
+          GITHUB_API_URL: githubServer.url,
+          'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+          'INPUT_MODE': 'candidate',
+          'INPUT_EVENT-NAME': 'workflow_dispatch',
+          'INPUT_RUN-ROOT': runRoot,
+          'INPUT_RUN-ID': 'run-cli-source-rev',
+          'INPUT_DRY-RUN': 'false',
+          'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
+          'INPUT_GITHUB-TOKEN': 'ghp_cli_source_rev_secret_1234',
+          'INPUT_REMOTE-URL': bareRemote,
+          'INPUT_SOURCE-REVISION': sourceRev,
+          LLM_TOKEN: 'sk-cli-source-rev-token-1234',
+        },
+        { openHostSessionAdapter: fastAdapter },
+      );
+
+      assert.equal(exitCode, 0, 'runActionCli with INPUT_SOURCE-REVISION must exit 0');
+      assert.equal(prPosts, 1);
+
+      // a) Inspect candidate.files.json: version 2 tree_overlay anchored at sourceRev containing ONLY the agent overlay edit.
+      const inspectOut = join(work, 'inspect-source-rev');
+      const inspected = await inspectRun({ runRoot, runId: 'run-cli-source-rev', output: inspectOut });
+      assert.equal(inspected.ok, true);
+      const candidateFilesDoc = JSON.parse(await readFile(join(inspectOut, 'candidate.files.json'), 'utf8')) as {
+        manifest: {
+          spec: {
+            baseTree?: { commitOid: string; treeOid: string };
+            entries: readonly { name: string }[];
+          };
+        };
+      };
+      assert.equal(candidateFilesDoc.manifest.spec.baseTree?.commitOid, sourceRev);
+      assert.deepEqual(
+        candidateFilesDoc.manifest.spec.entries.map(e => e.name),
+        ['vendor/subchart/overlay-note.txt'],
+        'candidate.files.json must contain only the agent overlay edit, not 135 baseline or untouched sourceRev files',
+      );
+
+      // c) PR body must still render summary & subscriptions table from carried pack/proposal.json.
+      assert.match(createdPrBody, /Preflight staged vendor subchart update\./);
+      assert.match(createdPrBody, /\| acme\/engine \| updated \| 2\.0\.0 \| 1\.2\.3 \| Synced via source-revision\. \|/);
+
+      const prHeadSha = (await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main'])).split(/\s+/)[0]!;
+      assert.match(prHeadSha, /^[0-9a-f]{40}$/);
+      await git(repo, ['fetch', bareRemote, 'refs/heads/loopwright/main']);
+
+      // Single squashed PR commit parented solely on baseSha (NOT sourceRev).
+      const revParents = (await git(repo, ['rev-list', '--parents', '-n', '1', prHeadSha])).trim().split(/\s+/);
+      assert.deepEqual(
+        revParents,
+        [prHeadSha, baseSha],
+        'pushed PR head commit must have baseSha as its sole parent, not sourceRev',
+      );
+
+      // Verify writable sourceRev additions/updates/removals + agent overlay + baseSha authority on protected/non-writable paths.
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:vendor/subchart/Chart.yaml`]),
+        stagedChartYaml.trimEnd(),
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:vendor/subchart/values.yaml`]),
+        stagedValuesYaml.trimEnd(),
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:vendor/README.md`]),
+        'vendor preflight updated',
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:vendor/subchart/overlay-note.txt`]),
+        'agent overlay edit',
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:pack/proposal.json`]),
+        JSON.stringify(stagedProposal),
+      );
+      await assert.rejects(
+        () => git(repo, ['cat-file', '-e', `${prHeadSha}:vendor/stale.txt`]),
+        'writable file deleted in sourceRev must remain absent in PR head',
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:.github/workflows/ci.yml`]),
+        'name: base-ci',
+        'protected path modified in sourceRev must retain baseSha content',
+      );
+      assert.equal(
+        await git(repo, ['cat-file', 'blob', `${prHeadSha}:README.md`]),
+        'base-readme',
+        'non-writable path modified in sourceRev must retain baseSha content',
+      );
+
+      // Whitespace-only INPUT_SOURCE-REVISION must trim to undefined and fall back cleanly to baseRevision without ACTION_INPUT_INVALID.
+      mode = 'no_change';
+      turn = 0;
+      const blankExitCode = await runActionCli(
+        {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          GITHUB_WORKSPACE: repo,
+          LOOPWRIGHT_REPOSITORY: 'acme/repo',
+          GITHUB_SHA: baseSha,
+          GITHUB_API_URL: githubServer.url,
+          'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+          'INPUT_MODE': 'candidate',
+          'INPUT_EVENT-NAME': 'workflow_dispatch',
+          'INPUT_RUN-ROOT': runRoot,
+          'INPUT_RUN-ID': 'run-cli-source-rev-blank',
+          'INPUT_DRY-RUN': 'false',
+          'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
+          'INPUT_GITHUB-TOKEN': 'ghp_cli_source_rev_secret_1234',
+          'INPUT_REMOTE-URL': bareRemote,
+          'INPUT_SOURCE-REVISION': '   ',
+          LLM_TOKEN: 'sk-cli-source-rev-token-1234',
+        },
+        { openHostSessionAdapter: fastAdapter },
+      );
+      assert.equal(blankExitCode, 0, 'whitespace-only INPUT_SOURCE-REVISION must trim to undefined and fall back to baseRevision');
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces baseRevision authority on protected and non-writable paths inside startLocalCommandGateServer even in classic <=128-file mode', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-classic-gate-auth-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+
+    try {
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(repo, { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await mkdir(join(repo, '.github', 'workflows'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await writeFile(join(repo, '.github', 'workflows', 'ci.yml'), 'name: base-ci\n');
+      await writeFile(join(repo, 'README.md'), 'base-readme\n');
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update vendor note.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'keep.txt'), 'base-keep\n');
+      await writeFile(join(repo, 'vendor', 'drop.txt'), 'drop-me\n');
+
+      const verifyScript = `#!/usr/bin/env bash
+set -euo pipefail
+test "$(cat .github/workflows/ci.yml)" = "name: base-ci"
+test "$(cat README.md)" = "base-readme"
+test "$(cat vendor/keep.txt)" = "source-keep"
+test ! -e vendor/drop.txt
+test "$(cat vendor/agent.txt)" = "agent-added"
+`;
+      await writeFile(join(repo, '.auto-sync', 'checks', 'verify.sh'), verifyScript, { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'verify.sh'), 0o755);
+
+      let turn = 0;
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        const step = turn++;
+        const sseBody = step === 0
+          ? sseToolCall('gpt-4.1-mini', 'cl-1', 'write', {
+              path: 'vendor/agent.txt',
+              content: 'agent-added\n',
+            })
+          : sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null }));
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseBody);
+      });
+
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 708 }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: classic-source-rev-gate
+spec:
+  goal:
+    candidate: Enforce baseRevision authority in classic command.v1 gate
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+      - id: verify-cmd
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/verify.sh
+          timeoutSeconds: 15
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: classic source rev"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base commit']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await git(repo, ['checkout', '--detach', baseSha]);
+      await writeFile(join(repo, '.github', 'workflows', 'ci.yml'), 'name: tampered-ci\n');
+      await writeFile(join(repo, 'README.md'), 'tampered-readme\n');
+      await writeFile(join(repo, 'vendor', 'keep.txt'), 'source-keep\n');
+      await rm(join(repo, 'vendor', 'drop.txt'));
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-m', 'sourceRev commit']);
+      const sourceRev = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['checkout', 'main']);
+
+      const result = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 708,
+        baseRevision: baseSha,
+        sourceRevision: sourceRev,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-classic-gate-auth',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
+        githubApiBaseUrl: githubServer.url,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-classic-gate-token-1234',
+        },
+      });
+      assert.equal(result.kind, 'compiled', `unexpected result: ${JSON.stringify(result)}`);
+      assert.equal(result.delegateOutcome?.ok, true, `classic command.v1 gate failed: ${result.delegateOutcome?.detail}`);
+
+      const inspectOut = join(work, 'inspect-classic');
+      const inspected = await inspectRun({ runRoot, runId: 'run-classic-gate-auth', output: inspectOut });
+      assert.equal(inspected.ok, true);
+      const candidateFilesDoc = JSON.parse(await readFile(join(inspectOut, 'candidate.files.json'), 'utf8')) as {
+        manifest: { spec: { baseTree?: unknown } };
+      };
+      assert.equal(candidateFilesDoc.manifest.spec.baseTree, undefined, '<=128 files must enter classic mode');
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes and resolves source-revision in dry-run mode on git repos while keeping non-git fixtures working', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-dryrun-source-rev-')));
+    try {
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Dry run source revision.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: dryrun-source-rev
+spec:
+  goal:
+    candidate: Dry run source revision resolution
+    noChange: No change
+  scope:
+    writable:
+      - pack
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: dryrun"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'first commit']);
+      const firstSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.1' }) + '\n');
+      await git(repo, ['add', 'pack/proposal.json']);
+      await git(repo, ['commit', '-m', 'second commit']);
+      const secondSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      // 1) Valid ref expression HEAD~1 resolves to firstSha in INPUT_DRY-RUN=true.
+      const resolvedDryExit = await runActionCli({
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repo,
+        LOOPWRIGHT_REPOSITORY: 'acme/repo',
+        GITHUB_SHA: secondSha,
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        'INPUT_MODE': 'candidate',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'run-dry-head1',
+        'INPUT_DRY-RUN': 'true',
+        'INPUT_SOURCE-REVISION': 'HEAD~1',
+        'INPUT_UPSTREAM-RECORDS': JSON.stringify([{ upstreamId: 'engine', status: 'available', version: '2.0.0' }]),
+      });
+      assert.equal(resolvedDryExit, 0, 'dry-run with HEAD~1 must resolve and succeed');
+
+      // Direct entrypoint with runtimeEnv['INPUT_SOURCE-REVISION'] fallback and HEAD~1 resolution.
+      const directRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        baseRevision: secondSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-dry-direct',
+        dryRun: true,
+        turnkey: false,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          'INPUT_SOURCE-REVISION': '  HEAD~1  ',
+        },
+      });
+      assert.equal(directRes.kind, 'compiled');
+      const compiledConfig = parseYaml(await readFile(directRes.taskpack.configPath, 'utf8')) as {
+        spec: { task: { spec: { target: { baseRevision: string; sourceRevision: string } } } };
+      };
+      assert.equal(compiledConfig.spec.task.spec.target.baseRevision, secondSha);
+      assert.equal(compiledConfig.spec.task.spec.target.sourceRevision, firstSha, 'resolved HEAD~1 SHA must be bound in compiled TaskContract');
+
+      // 2) Whitespace-only direct sourceRevision trims to undefined and falls back to baseRevision.
+      const whitespaceRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        baseRevision: secondSha,
+        sourceRevision: '   ',
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-dry-ws',
+        dryRun: true,
+        turnkey: false,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      });
+      assert.equal(whitespaceRes.kind, 'compiled');
+
+      // 3) Missing ref and nonexistent 40-hex SHA both fail closed in dry-run mode.
+      const missingRefRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        baseRevision: secondSha,
+        sourceRevision: 'refs/heads/does-not-exist',
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-dry-missing-ref',
+        dryRun: true,
+        turnkey: false,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      });
+      assert.equal(missingRefRes.kind, 'blocked');
+      assert.equal(missingRefRes.reason, 'ACTION_INPUT_INVALID');
+
+      const missingShaRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        baseRevision: secondSha,
+        sourceRevision: 'f'.repeat(40),
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-dry-missing-sha',
+        dryRun: true,
+        turnkey: false,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      });
+      assert.equal(missingShaRes.kind, 'blocked');
+      assert.equal(missingShaRes.reason, 'ACTION_INPUT_INVALID');
+
+      // 4) Non-git synthetic directory keeps working when .git does not exist.
+      const nonGitRepo = join(work, 'non-git');
+      await cp(repo, nonGitRepo, {
+        recursive: true,
+        filter: src => !src.endsWith('/.git') && !src.includes('/.git/'),
+      });
+      const nonGitRes = await runGitHubActionEntrypoint({
+        repositoryRoot: nonGitRepo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'a'.repeat(40),
+        sourceRevision: 'b'.repeat(40),
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-dry-nongit',
+        dryRun: true,
+        turnkey: false,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      });
+      assert.equal(nonGitRes.kind, 'compiled');
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves explicit source-revision on issue_comment /loopwright retry while binding revise and unpinned retry to PR base/head', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-comment-retry-sr-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+
+    try {
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Retry or revise.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'base\n');
+
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null })));
+      });
+
+      let prBaseSha = '';
+      let prHeadSha = '';
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 709 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls/12') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 12,
+            base: { ref: 'main', sha: prBaseSha },
+            head: { ref: 'loopwright/main', sha: prHeadSha },
+          }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: comment-retry-source-rev
+spec:
+  goal:
+    candidate: Comment command source revision resolution
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: comment retry"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands:
+      - retry
+      - revise
+    commentPrefixes:
+      - /loopwright
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'prBaseSha']);
+      prBaseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await git(repo, ['checkout', '--detach', prBaseSha]);
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'pr-head\n');
+      await git(repo, ['add', 'vendor/note.txt']);
+      await git(repo, ['commit', '-m', 'prHeadSha']);
+      prHeadSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await git(repo, ['checkout', 'main']);
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'new-main\n');
+      await git(repo, ['add', 'vendor/note.txt']);
+      await git(repo, ['commit', '-m', 'mainSha']);
+      const mainSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await git(repo, ['checkout', '--detach', mainSha]);
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'preflight-retry\n');
+      await git(repo, ['add', 'vendor/note.txt']);
+      await git(repo, ['commit', '-m', 'explicitSourceRev']);
+      const explicitSourceRev = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['checkout', 'main']);
+
+      const makeCommentPayload = (bodyText: string) => ({
+        action: 'created',
+        issue: { number: 12, pull_request: {} },
+        comment: { id: 901, body: bodyText, author_association: 'MEMBER', user: { login: 'maintainer' } },
+      });
+
+      const runCase = async (runId: string, bodyText: string, sourceRevision?: string) => {
+        const res = await runGitHubActionEntrypoint({
+          repositoryRoot: repo,
+          taskpackPath: '.auto-sync/taskpack.yaml',
+          repositoryFullName: 'acme/repo',
+          repositoryId: 709,
+          baseRevision: mainSha,
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+          mode: 'candidate',
+          eventName: 'issue_comment',
+          eventPayload: makeCommentPayload(bodyText),
+          runRoot,
+          runId,
+          turnkey: true,
+          allowManifestCustomBaseUrl: true,
+          openHostSessionAdapter: fastAdapter,
+          githubApiBaseUrl: githubServer!.url,
+          env: {
+            PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+            GITHUB_ACTIONS: 'true',
+            LLM_TOKEN: 'sk-comment-retry-token-1234',
+          },
+        });
+        assert.equal(res.kind, 'compiled', `unexpected result for ${runId}: ${JSON.stringify(res)}`);
+        const inspectOut = join(work, `inspect-${runId}`);
+        const inspected = await inspectRun({ runRoot, runId, output: inspectOut });
+        assert.equal(inspected.ok, true);
+        const lockDoc = JSON.parse(await readFile(join(inspectOut, 'task.lock.json'), 'utf8')) as {
+          spec: { contract: { spec: { target: { baseRevision: string; sourceRevision: string } } } };
+        };
+        return lockDoc.spec.contract.spec.target;
+      };
+
+      // 1) /loopwright retry WITH explicit sourceRevision preserves (mainSha, explicitSourceRev).
+      const retryExplicit = await runCase('run-comment-retry-explicit', '/loopwright retry', explicitSourceRev);
+      assert.deepEqual(
+        { baseRevision: retryExplicit.baseRevision, sourceRevision: retryExplicit.sourceRevision },
+        { baseRevision: mainSha, sourceRevision: explicitSourceRev },
+      );
+
+      // 2) /loopwright retry WITHOUT explicit sourceRevision preserves existing (prBaseSha, prHeadSha) behavior.
+      const retryDefault = await runCase('run-comment-retry-default', '/loopwright retry');
+      assert.deepEqual(
+        { baseRevision: retryDefault.baseRevision, sourceRevision: retryDefault.sourceRevision },
+        { baseRevision: prBaseSha, sourceRevision: prHeadSha },
+      );
+
+      // 3) /loopwright revise WITH explicit sourceRevision MUST still bind (prBaseSha, prHeadSha).
+      const reviseExplicit = await runCase('run-comment-revise-explicit', '/loopwright revise fix something', explicitSourceRev);
+      assert.deepEqual(
+        { baseRevision: reviseExplicit.baseRevision, sourceRevision: reviseExplicit.sourceRevision },
+        { baseRevision: prBaseSha, sourceRevision: prHeadSha },
+      );
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveRepositoryAndRevisions fails closed on nonexistent 40-hex SHAs in real .git repos while allowing non-git fixtures', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-resolve-sha-git-')));
+    let server: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      server = await startHttpServer((req, res) => {
+        if (req.url === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 901 }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const gitRepo = join(work, 'git-repo');
+      await mkdir(gitRepo, { recursive: true });
+      await git(gitRepo, ['init', '-b', 'main']);
+      await writeFile(join(gitRepo, 'README.md'), 'hello\n');
+      await git(gitRepo, ['add', 'README.md']);
+      await git(gitRepo, ['commit', '-m', 'init']);
+      const headSha = await git(gitRepo, ['rev-parse', 'HEAD']);
+
+      await assert.rejects(
+        () => resolveRepositoryAndRevisions({
+          repositoryRoot: gitRepo,
+          repositoryFullName: 'acme/repo',
+          baseRevision: headSha,
+          sourceRevision: 'f'.repeat(40),
+          eventName: 'workflow_dispatch',
+          apiBaseUrl: server!.url,
+        }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'ACTION_INPUT_INVALID',
+      );
+
+      const nonGitDir = join(work, 'non-git-dir');
+      await mkdir(nonGitDir, { recursive: true });
+      const resolvedNonGit = await resolveRepositoryAndRevisions({
+        repositoryRoot: nonGitDir,
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'a'.repeat(40),
+        sourceRevision: 'b'.repeat(40),
+        eventName: 'workflow_dispatch',
+        apiBaseUrl: server.url,
+      });
+      assert.equal(resolvedNonGit.baseRevision, 'a'.repeat(40));
+      assert.equal(resolvedNonGit.sourceRevision, 'b'.repeat(40));
+
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: headSha,
+          commentCommand: 'retry',
+        }),
+        true,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: headSha,
+          commentCommand: 'revise',
+        }),
+        false,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: '   ',
+          commentCommand: 'retry',
+        }),
+        false,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'pull_request_review',
+          explicitSourceRevision: headSha,
+          commentCommand: 'retry',
+        }),
+        false,
+      );
+    } finally {
+      await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('emits scrubbed stderr warning when carried proposal exceeds MAX_PROPOSAL_JSON_BYTES in startNativePullRequestPublisherServer', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-carried-proposal-warn-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    const origStderrWrite = process.stderr.write.bind(process.stderr);
+    const stderrChunks: string[] = [];
+
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack', 'items'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update vendor note only.\n');
+      await writeFile(join(repo, '.auto-sync', 'checks', 'pass.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'pass.sh'), 0o755);
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'base\n');
+      for (let i = 0; i < 135; i += 1) {
+        await writeFile(join(repo, 'pack', 'items', `item-${String(i).padStart(3, '0')}.txt`), `item-${i}\n`);
+      }
+
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null })));
+      });
+
+      let prPostCount = 0;
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 710 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          prPostCount += 1;
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 55,
+            html_url: 'https://github.invalid/acme/repo/pull/55',
+            head: { ref: 'loopwright/main', sha: '0'.repeat(40) },
+            base: { ref: 'main', sha: '0'.repeat(40) },
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: carried-proposal-warn
+spec:
+  goal:
+    candidate: Carried oversize proposal warning
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: pass-cmd
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/pass.sh
+          timeoutSeconds: 15
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: carried proposal warn"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base commit']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await mkdir(bareRemote, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+
+      // Create detached sourceRevision where carried pack/proposal.json exceeds MAX_PROPOSAL_JSON_BYTES (2 MiB).
+      await git(repo, ['checkout', '--detach', baseSha]);
+      const oversizeProposal = JSON.stringify({
+        schema_version: 1,
+        version: '2.0.0',
+        summary: 'x'.repeat(2_200_000),
+      });
+      await writeFile(join(repo, 'pack', 'proposal.json'), oversizeProposal);
+      await git(repo, ['add', 'pack/proposal.json']);
+      await git(repo, ['commit', '-m', 'oversize carried proposal']);
+      const sourceRev = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['checkout', 'main']);
+
+      process.stderr.write = ((chunk: Uint8Array | string) => {
+        stderrChunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        return true;
+      }) as typeof process.stderr.write;
+
+      const carriedWarnResult = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 710,
+        baseRevision: baseSha,
+        sourceRevision: sourceRev,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-carried-proposal-warn',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_carried_proposal_secret_1234',
+        gitRemoteUrl: bareRemote,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-carried-proposal-token-1234',
+        },
+      });
+      assert.equal(carriedWarnResult.kind, 'compiled', `unexpected result: ${JSON.stringify(carriedWarnResult)}`);
+      assert.equal(carriedWarnResult.delegateOutcome?.ok, true, `unexpected delegateOutcome: ${carriedWarnResult.delegateOutcome?.detail}`);
+      assert.ok(prPostCount >= 1, `expected PR POST, delegateOutcome=${carriedWarnResult.delegateOutcome?.detail}`);
+      const stderrText = stderrChunks.join('');
+      assert.match(stderrText, /carried proposal .*pack\/proposal\.json.*exceeds/i);
+      assert.equal(stderrText.includes('ghp_carried_proposal_secret_1234'), false);
+    } finally {
+      process.stderr.write = origStderrWrite;
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing carried blob OIDs with GitHubAppError ACTION_INPUT_INVALID during gate carry baseline resolution', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-carry-missing-oid-')));
+    try {
+      const repo = join(work, 'repo');
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Verify carry delta.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'keep.txt'), 'base-keep\n');
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: carry-missing-oid
+spec:
+  goal:
+    candidate: Verify carry delta error handling
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: carry missing oid"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'init']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: join(repo, '.auto-sync', 'taskpack.yaml'),
+        repositoryRoot: repo,
+      });
+      const compiled = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        repository: 'acme/repo',
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+      const snapshotContext = {
+        contract: compiled.config.spec.task,
+        protectedPaths: compiled.config.spec.task.spec.scope.protected,
+      };
+
+      const presentBlobOid = await gitWithInput(repo, ['hash-object', '-w', '--stdin'], 'carried-present\n');
+      const missingBlobOid = 'd'.repeat(40);
+      const baseEntries = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+      ]);
+      const sourceEntriesPresent = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+        ['vendor/present.txt', { mode: '100644', type: 'blob', oid: presentBlobOid }],
+      ]);
+
+      const presentDelta = computeAllowedSourceRevisionCarryDelta(snapshotContext, baseEntries, sourceEntriesPresent);
+      assert.deepEqual(presentDelta.carryUpdates, [
+        { path: 'vendor/present.txt', mode: '100644', oid: presentBlobOid },
+      ]);
+      const presentBaseline = new Map<string, { path: string; mode: '100644' | '100755'; oid: string; byteLength: number }>();
+      await applyCarryDeltaToEffectiveBaseline(
+        repo,
+        presentBaseline,
+        new Map(),
+        presentDelta.carryRemovals,
+        presentDelta.carryUpdates,
+        GIT_TEST_ENV,
+      );
+      assert.deepEqual(presentBaseline.get('vendor/present.txt'), {
+        path: 'vendor/present.txt',
+        mode: '100644',
+        oid: presentBlobOid,
+        byteLength: Buffer.byteLength('carried-present\n'),
+      });
+
+      const sourceEntriesMissing = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+        ['vendor/missing.txt', { mode: '100644', type: 'blob', oid: missingBlobOid }],
+      ]);
+      const missingDelta = computeAllowedSourceRevisionCarryDelta(snapshotContext, baseEntries, sourceEntriesMissing);
+      assert.deepEqual(missingDelta.carryUpdates, [
+        { path: 'vendor/missing.txt', mode: '100644', oid: missingBlobOid },
+      ]);
+
+      await assert.rejects(
+        () => applyCarryDeltaToEffectiveBaseline(
+          repo,
+          new Map(),
+          new Map(),
+          missingDelta.carryRemovals,
+          missingDelta.carryUpdates,
+          GIT_TEST_ENV,
+        ),
+        (err: unknown) => err instanceof GitHubAppError
+          && err.code === 'ACTION_INPUT_INVALID'
+          && err.message === `failed to read carried baseline blob size for "vendor/missing.txt" (${missingBlobOid})`,
+      );
+    } finally {
       await rm(work, { recursive: true, force: true });
     }
   });
