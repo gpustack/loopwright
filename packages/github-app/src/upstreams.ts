@@ -70,6 +70,7 @@ export interface ResolveRepositoryAndRevisionsOptions {
   readonly repositoryFullName: string;
   readonly baseRevision: string;
   readonly sourceRevision?: string | undefined;
+  readonly preserveExplicitSourceRevision?: boolean | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;
   readonly apiBaseUrl?: string | undefined;
@@ -1164,10 +1165,15 @@ function extractRepositoryIdFromPayload(payload: unknown): number | undefined {
   return undefined;
 }
 
-async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
-  if (COMMIT_SHA_PATTERN.test(ref)) {
-    return ref.toLowerCase();
-  }
+/**
+ * Resolve and verify a Git commit reference or SHA against `repositoryRoot` using
+ * `git rev-parse --verify` so nonexistent SHAs and missing refs fail closed.
+ */
+export async function resolveGitCommitSha(
+  repositoryRoot: string,
+  ref: string,
+  timeoutMs = 15_000,
+): Promise<string> {
   if (!SAFE_GIT_REF_PATTERN.test(ref) || ref.startsWith('-')) {
     throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid git revision reference "${ref}"`);
   }
@@ -1175,7 +1181,7 @@ async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeou
   try {
     const { stdout } = await execFileAsync(
       gitBin,
-      ['-C', repositoryRoot, 'rev-parse', '--verify', `${ref}^{commit}`],
+      ['-C', repositoryRoot, 'rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
       { timeout: timeoutMs, maxBuffer: 4096, encoding: 'utf8' },
     );
     const sha = stdout.trim().toLowerCase();
@@ -1188,6 +1194,13 @@ async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeou
     const detail = error instanceof Error ? error.message : String(error);
     throw new GitHubAppError('ACTION_INPUT_INVALID', `failed to resolve git revision "${ref}": ${detail}`);
   }
+}
+
+async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
+  if (COMMIT_SHA_PATTERN.test(ref)) {
+    return ref.toLowerCase();
+  }
+  return resolveGitCommitSha(repositoryRoot, ref, timeoutMs);
 }
 
 /**
@@ -1215,8 +1228,12 @@ export async function resolveRepositoryAndRevisions(
 
   let baseRev = options.baseRevision;
   let sourceRev = options.sourceRevision ?? options.baseRevision;
+  const preserveExplicitOnComment = options.eventName === 'issue_comment'
+    && options.preserveExplicitSourceRevision === true
+    && options.sourceRevision !== undefined
+    && options.sourceRevision.trim().length > 0;
 
-  if (options.eventName === 'issue_comment' || options.eventName === 'pull_request_review') {
+  if (!preserveExplicitOnComment && (options.eventName === 'issue_comment' || options.eventName === 'pull_request_review')) {
     const prNumber = extractPrNumberFromPayload(options.eventPayload);
     const payloadPr = isPlainRecord(options.eventPayload) && isPlainRecord(options.eventPayload['pull_request'])
       ? options.eventPayload['pull_request']
