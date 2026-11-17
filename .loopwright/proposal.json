@@ -1,56 +1,56 @@
 {
   "schema_version": 1,
-  "summary": "Baseline Loopwright runtime dependency ledger for @earendil-works/pi-* 1.5.0 and yaml 2.9.0.",
+  "summary": "Loopwright runtime dependency ledger for @earendil-works/pi-* 1.5.2 and yaml 2.9.1.",
   "upstreams": {
     "pi-coding-agent": {
       "package": "@earendil-works/pi-coding-agent",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "pi-ai": {
       "package": "@earendil-works/pi-ai",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "pi-agent-core": {
       "package": "@earendil-works/pi-agent-core",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "pi-mcp": {
       "package": "@earendil-works/pi-mcp",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "pi-codemode": {
       "package": "@earendil-works/pi-codemode",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "pi-tui": {
       "package": "@earendil-works/pi-tui",
-      "version": "1.5.0"
+      "version": "1.5.2"
     },
     "yaml": {
       "package": "yaml",
-      "version": "2.9.0"
+      "version": "2.9.1"
     }
   },
   "packages": {
     "packages/agent-pi": {
-      "@earendil-works/pi-agent-core": "1.5.0",
-      "@earendil-works/pi-ai": "1.5.0",
-      "@earendil-works/pi-codemode": "1.5.0",
-      "@earendil-works/pi-coding-agent": "1.5.0",
-      "@earendil-works/pi-mcp": "1.5.0",
-      "@earendil-works/pi-tui": "1.5.0"
+      "@earendil-works/pi-agent-core": "1.5.2",
+      "@earendil-works/pi-ai": "1.5.2",
+      "@earendil-works/pi-codemode": "1.5.2",
+      "@earendil-works/pi-coding-agent": "1.5.2",
+      "@earendil-works/pi-mcp": "1.5.2",
+      "@earendil-works/pi-tui": "1.5.2"
     },
     "packages/cli": {
-      "yaml": "2.9.0"
+      "yaml": "2.9.1"
     },
     "packages/controller": {
-      "yaml": "2.9.0"
+      "yaml": "2.9.1"
     },
     "packages/decisions": {
-      "yaml": "2.9.0"
+      "yaml": "2.9.1"
     },
     "packages/github-app": {
-      "yaml": "2.9.0"
+      "yaml": "2.9.1"
     }
   }
 }

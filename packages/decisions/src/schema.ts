@@ -247,7 +247,7 @@ export function validateDecisionQuestions(questions: unknown, policy?: DecisionP
 type PolicyJson = null | boolean | number | string | PolicyJson[] | { [key: string]: PolicyJson };
 
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-// Twin yaml@2.9.0 AST traversal caps shared with packages/github-app/src/schema.ts (4096 nodes, depth 16, 512 collection items, 8192 string chars).
+// Twin yaml@2.9.1 AST traversal caps shared with packages/github-app/src/schema.ts (4096 nodes, depth 16, 512 collection items, 8192 string chars).
 const MAX_NODES = 4096;
 const MAX_DEPTH = 16;
 const MAX_COLLECTION = 512;
