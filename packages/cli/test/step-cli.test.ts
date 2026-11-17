@@ -9,8 +9,8 @@ import { parseArguments, UsageError } from '../src/arguments.js';
 import { gitHubAppExitCode, main as cliMain } from '../src/main.js';
 
 import {
-  CLEAN_ENV,
   runCli,
+  runCliInProcess,
   parseNdjson,
   gitStatusPorcelain,
   createManagedDelegatedRepoFixture,
@@ -202,7 +202,7 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
     const target = ['--run-root', f.runRoot, '--run-id', runId];
 
     // 1. check --role-model reflects overridden role selections in plan
-    const checked = runCli(['check', ...common, ...roleModels, '--json']);
+    const checked = await runCliInProcess(['check', ...common, ...roleModels, '--json']);
     assert.equal(checked.status, 0, checked.stdout + checked.stderr);
     const planEnv = parseNdjson(checked.stdout)[0]!;
     assert.equal(planEnv.kind, 'plan');
@@ -213,14 +213,14 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
     assert.equal(planRoles.find(r => r.roleId === 'review')?.policy.selection.thinking, 'low');
 
     // 2. unattended run on delegated role fails closed with CAPABILITY_UNSUPPORTED (exit 3)
-    const runBlocked = runCli(['run', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
+    const runBlocked = await runCliInProcess(['run', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
     assert.equal(runBlocked.status, 3, runBlocked.stdout + runBlocked.stderr);
     const runDiag = parseNdjson(runBlocked.stdout).at(-1)!;
     assert.equal(runDiag.kind, 'diagnostic');
     assert.equal(runDiag.data['code'], 'CAPABILITY_UNSUPPORTED');
 
     // 3. step next yields awaiting_role for author (gemini-4-carbon)
-    const step1 = runCli(['step', 'next', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
+    const step1 = await runCliInProcess(['step', 'next', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
     assert.equal(step1.status, 0, step1.stdout + step1.stderr);
     const step1Env = parseNdjson(step1.stdout)[0]!;
     assert.equal(step1Env.kind, 'step');
@@ -232,30 +232,30 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
     const candidateDir1 = step1Env.data['candidateDir'] as string;
 
     // 4. resume while parked at awaiting_role fails closed with CAPABILITY_UNSUPPORTED (exit 3)
-    const resumed = runCli(['resume', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
+    const resumed = await runCliInProcess(['resume', ...common, '--repo', f.repository, ...target, ...roleModels, '--json']);
     assert.equal(resumed.status, 3, resumed.stdout + resumed.stderr);
     assert.equal(parseNdjson(resumed.stdout).at(-1)!.data['code'], 'CAPABILITY_UNSUPPORTED');
 
     // 5. duplicate step next without --reissue-lease exits 7 (OWNER_BUSY)
-    const dupNext = runCli(['step', 'next', ...target, '--json']);
+    const dupNext = await runCliInProcess(['step', 'next', ...target, '--json']);
     assert.equal(dupNext.status, 7, dupNext.stdout + dupNext.stderr);
     assert.equal(parseNdjson(dupNext.stdout)[0]!.data['code'], 'OWNER_BUSY');
 
     // 6. step next --reissue-lease rotates leaseToken (exit 0); old lease fails with exit 7 (AUTHORITY_REFUSED)
-    const reissued = runCli(['step', 'next', ...target, '--reissue-lease', '--json']);
+    const reissued = await runCliInProcess(['step', 'next', ...target, '--reissue-lease', '--json']);
     assert.equal(reissued.status, 0, reissued.stdout + reissued.stderr);
     const reissuedEnv = parseNdjson(reissued.stdout)[0]!;
     assert.equal(reissuedEnv.kind, 'step');
     const newLease = reissuedEnv.data['leaseToken'] as string;
     assert.notEqual(newLease, oldLease);
 
-    const staleSubmit = runCli(['step', 'submit', ...target, '--lease', oldLease, '--json']);
+    const staleSubmit = await runCliInProcess(['step', 'submit', ...target, '--lease', oldLease, '--json']);
     assert.equal(staleSubmit.status, 7, staleSubmit.stdout + staleSubmit.stderr);
     assert.equal(parseNdjson(staleSubmit.stdout)[0]!.data['code'], 'AUTHORITY_REFUSED');
 
     // 7. author leaves { ok: false, attempt: 1 } -> submit -> review (gemini-4-argon, read-only)
     await writeFile(join(candidateDir1, 'packages', 'result.json'), JSON.stringify({ ok: false, attempt: 1 }), { mode: 0o600 });
-    const step2 = runCli(['step', 'submit', ...target, '--lease', newLease, '--json']);
+    const step2 = await runCliInProcess(['step', 'submit', ...target, '--lease', newLease, '--json']);
     assert.equal(step2.status, 0, step2.stdout + step2.stderr);
     const step2Env = parseNdjson(step2.stdout)[0]!;
     assert.equal(step2Env.kind, 'step');
@@ -265,7 +265,7 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
     assert.deepEqual(step2Env.data['allowedTools'], ['read']);
 
     // 8. review approves -> json-artifact check fails -> bounded implementation repair yields author
-    const step3 = runCli(['step', 'submit', ...target, '--lease', step2Env.data['leaseToken'] as string, '--json']);
+    const step3 = await runCliInProcess(['step', 'submit', ...target, '--lease', step2Env.data['leaseToken'] as string, '--json']);
     assert.equal(step3.status, 0, step3.stdout + step3.stderr);
     const step3Env = parseNdjson(step3.stdout)[0]!;
     assert.equal(step3Env.kind, 'step');
@@ -275,14 +275,14 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
 
     // 9. author fixes packages/result.json -> yields review -> review approves -> settles completed (exit 0)
     await writeFile(join(step3Env.data['candidateDir'] as string, 'packages', 'result.json'), JSON.stringify({ ok: true }), { mode: 0o600 });
-    const step4 = runCli(['step', 'submit', ...target, '--lease', step3Env.data['leaseToken'] as string, '--json']);
+    const step4 = await runCliInProcess(['step', 'submit', ...target, '--lease', step3Env.data['leaseToken'] as string, '--json']);
     assert.equal(step4.status, 0, step4.stdout + step4.stderr);
     const step4Env = parseNdjson(step4.stdout)[0]!;
     assert.equal(step4Env.kind, 'step');
     assert.equal(step4Env.data['roleId'], 'review');
 
     const summaryPath = join(f.root, 'managed-summary.md');
-    const settled = runCli([
+    const settled = await runCliInProcess([
       'step', 'submit', ...target, '--lease', step4Env.data['leaseToken'] as string,
       '--output-format', 'json,github-step-summary', '--step-summary-file', summaryPath, '--json',
     ]);
@@ -307,7 +307,7 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
   try {
     const common = ['--config', fScope.input.configPath, '--registry', fScope.input.registryPath, '--registry-sha256', fScope.input.registrySha256];
     const target = ['--run-root', fScope.runRoot, '--run-id', 'cli-scope-fail'];
-    const step1 = runCli(['step', 'next', ...common, '--repo', fScope.repository, ...target, '--json']);
+    const step1 = await runCliInProcess(['step', 'next', ...common, '--repo', fScope.repository, ...target, '--json']);
     assert.equal(step1.status, 0, step1.stdout + step1.stderr);
     const step1Env = parseNdjson(step1.stdout)[0]!;
     const candDir = step1Env.data['candidateDir'] as string;
@@ -315,10 +315,10 @@ test('step-cli: Managed Controller two-role multi-model CLI lifecycle, lease rot
     await writeFile(join(candDir, 'docs', 'readme.md'), '# Tampered\n', { mode: 0o600 });
     await writeFile(join(candDir, 'packages', 'result.json'), JSON.stringify({ ok: true }), { mode: 0o600 });
 
-    const submitAuthor = runCli(['step', 'submit', ...target, '--lease', step1Env.data['leaseToken'] as string, '--json']);
+    const submitAuthor = await runCliInProcess(['step', 'submit', ...target, '--lease', step1Env.data['leaseToken'] as string, '--json']);
     assert.equal(submitAuthor.status, 0, submitAuthor.stdout + submitAuthor.stderr);
     const reviewEnv = parseNdjson(submitAuthor.stdout)[0]!;
-    const submitReview = runCli(['step', 'submit', ...target, '--lease', reviewEnv.data['leaseToken'] as string, '--json']);
+    const submitReview = await runCliInProcess(['step', 'submit', ...target, '--lease', reviewEnv.data['leaseToken'] as string, '--json']);
     assert.equal(submitReview.status, 4, submitReview.stdout + submitReview.stderr);
     const failEnv = parseNdjson(submitReview.stdout)[0]!;
     assert.equal(failEnv.kind, 'result');
@@ -496,7 +496,7 @@ test('step-cli: zero-secret --taskpack turnkey CLI step lifecycle with ephemeral
     assert.equal(inspected.status, 0, inspected.stdout + inspected.stderr);
 
     // Invalid taskpack path escapes repo -> GitHubAppError TASKPACK_MANIFEST_INVALID -> exit 2
-    const badTp = runCli([
+    const badTp = await runCliInProcess([
       'step', 'next',
       '--taskpack', '../outside.yaml',
       '--repo', repoRoot,
@@ -517,23 +517,23 @@ test('step-cli: --mode no-change, step cancel exit 130, human output, and help t
     const common = ['--config', f.input.configPath, '--registry', f.input.registryPath, '--registry-sha256', f.input.registrySha256];
 
     // 1. --mode no-change settles status: 'no_change' (exit 0)
-    const ncNext = runCli(['step', 'next', ...common, '--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'nc-1', '--mode', 'no-change', '--json']);
+    const ncNext = await runCliInProcess(['step', 'next', ...common, '--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'nc-1', '--mode', 'no-change', '--json']);
     assert.equal(ncNext.status, 0, ncNext.stdout + ncNext.stderr);
     const ncNextEnv = parseNdjson(ncNext.stdout)[0]!;
     assert.equal(ncNextEnv.kind, 'step');
 
-    const ncSubmit = runCli(['step', 'submit', '--run-root', f.runRoot, '--run-id', 'nc-1', '--lease', ncNextEnv.data['leaseToken'] as string, '--json']);
+    const ncSubmit = await runCliInProcess(['step', 'submit', '--run-root', f.runRoot, '--run-id', 'nc-1', '--lease', ncNextEnv.data['leaseToken'] as string, '--json']);
     assert.equal(ncSubmit.status, 0, ncSubmit.stdout + ncSubmit.stderr);
     const ncResultEnv = parseNdjson(ncSubmit.stdout)[0]!;
     assert.equal(ncResultEnv.kind, 'result');
     assert.equal((ncResultEnv.data['result'] as { spec: { status: string } }).spec.status, 'no_change');
 
     // 2. step cancel cleans up workspace, settles cancelled, and exits 130 (also test human-mode output on step next)
-    const humanNext = runCli(['step', 'next', ...common, '--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'cancel-1']);
+    const humanNext = await runCliInProcess(['step', 'next', ...common, '--repo', f.repository, '--run-root', f.runRoot, '--run-id', 'cancel-1']);
     assert.equal(humanNext.status, 0, humanNext.stdout + humanNext.stderr);
     assert.match(humanNext.stdout, /awaiting_role: author/);
 
-    const cancelled = runCli(['step', 'cancel', '--run-root', f.runRoot, '--run-id', 'cancel-1', '--json']);
+    const cancelled = await runCliInProcess(['step', 'cancel', '--run-root', f.runRoot, '--run-id', 'cancel-1', '--json']);
     assert.equal(cancelled.status, 130, cancelled.stdout + cancelled.stderr);
     const cancelEnv = parseNdjson(cancelled.stdout)[0]!;
     assert.equal(cancelEnv.kind, 'result');
@@ -541,7 +541,7 @@ test('step-cli: --mode no-change, step cancel exit 130, human output, and help t
     assert.equal(await lstat(join(f.runRoot, 'workspaces', 'cancel-1')).then(() => true, () => false), false);
 
     // 3. --help documents step next/submit/cancel and --role-model
-    const helpRes = runCli(['--help']);
+    const helpRes = await runCliInProcess(['--help']);
     assert.equal(helpRes.status, 0);
     assert.match(helpRes.stdout, /--role-model/);
     assert.match(helpRes.stdout, /step next/);
@@ -619,7 +619,7 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
   try {
     // 1. TASKPACK_SCOPE_VIOLATION -> exit 2
     await createTaskpackRepo(repoRoot, { writable: ['.github/workflows'], withCommandCheck: false });
-    const scopeRes = runCli([
+    const scopeRes = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoRoot,
@@ -632,7 +632,7 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
 
     // 2. TASKPACK_UNTRUSTED_INTERPOLATION -> exit 2
     await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), 'apiVersion: loopwright.dev/v1alpha1\nkind: Taskpack\nmetadata:\n  name: ${SECRET}\n', { mode: 0o600 });
-    const interpRes = runCli([
+    const interpRes = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoRoot,
@@ -647,7 +647,7 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
     const cleanRepo = join(root, 'clean-repo');
     await createTaskpackRepo(cleanRepo, { withCommandCheck: false });
     const leakedToken = 'ghp_secret_scrub_test_123456';
-    const scrubRes = runCli(
+    const scrubRes = await runCliInProcess(
       [
         'step', 'next',
         '--taskpack', '.loopwright/taskpack.yaml',
@@ -657,7 +657,6 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
         '--json',
       ],
       {
-        ...CLEAN_ENV,
         GITHUB_TOKEN: leakedToken,
         GITHUB_SHA: leakedToken,
       },

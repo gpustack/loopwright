@@ -1272,6 +1272,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         ephemeralEnv,
         scrubber,
         mcpRegistry,
+        openHostSessionAdapter: input.openHostSessionAdapter,
         onLog: emitProgress,
         onAttemptSettled: summary => {
           lastTurnkeySummary = summary;
@@ -1443,7 +1444,10 @@ function eventNameIsTrigger(eventName: string): boolean {
 }
 
 /** Minimal GitHub Actions CLI shim: map INPUT_* environment variables and run the entrypoint. */
-export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promise<number> {
+export async function runActionCli(
+  env: NodeJS.ProcessEnv = process.env,
+  options?: { readonly openHostSessionAdapter?: ActionEntrypointInput['openHostSessionAdapter'] },
+): Promise<number> {
   const repositoryRoot = env['GITHUB_WORKSPACE'] ?? process.cwd();
   const eventPath = env['INPUT_EVENT-PATH'];
   let eventPayload: unknown;
@@ -1516,6 +1520,9 @@ export async function runActionCli(env: NodeJS.ProcessEnv = process.env): Promis
     onTurnkeyReport: info => {
       capturedReport = info;
     },
+    ...(options?.openHostSessionAdapter !== undefined
+      ? { openHostSessionAdapter: options.openHostSessionAdapter }
+      : {}),
   });
 
   const fallbackScrubber = capturedReport?.scrubber ?? new SecretScrubber();

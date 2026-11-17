@@ -21,6 +21,9 @@ import {
   runGitHubActionEntrypoint,
   stageTaskpackForStep,
 } from '../src/index.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 const execFileAsync = promisify(execFile);
 
@@ -427,7 +430,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         'INPUT_GIT-AUTHOR-NAME': 'Memory Sync Bot',
         'INPUT_GIT-AUTHOR-EMAIL': '777+memory-bot[bot]@users.noreply.github.com',
         LLM_TOKEN: 'sk-turnkey-mem-llm-123456',
-      });
+      }, { openHostSessionAdapter: fastAdapter });
       assert.equal(exitCode1, 0);
       assert.equal(candidatePostCount, 1);
       assert.equal(memoryPostCount, 1);
@@ -503,6 +506,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-mem-phase2a',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_turnkey_mem_token_123456',
         gitRemoteUrl: bareRemote,
@@ -527,7 +531,11 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       assert.equal(await git(memoryClone2, ['rev-parse', 'HEAD^']), mainSha);
       const loadedOnBranch = await loadMemoryStore(memoryClone2, 'auto-sync', 'acme/repo', '.auto-sync/memory');
       assert.equal(loadedOnBranch.index.entries.some(e => e.kind === 'fact' && e.claimKey === 'claim.check.proposal-json'), true);
-      assert.equal(loadedOnBranch.index.entries.some(e => e.kind === 'failure_observation' && e.claimKey === 'claim.check.verify-status'), true);
+      assert.equal(
+        loadedOnBranch.index.entries.some(e => e.kind === 'failure_observation' && e.claimKey === 'claim.check.verify-status'),
+        true,
+        `phase2Res detail=${phase2Res.kind === 'compiled' ? (phase2Res.delegateOutcome?.detail ?? '') : ''}`,
+      );
       assert.equal(loadedOnBranch.index.retired.some(r => r.entry.kind === 'fact' && r.entry.claimKey === 'claim.check.verify-status'), true);
 
       // --- Phase 3: Squash-merge memory PR #11 into `main` (leaving remote memory branch intact!), then verify Run 2b ---
@@ -571,6 +579,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-mem-phase2b',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_turnkey_mem_token_123456',
         gitRemoteUrl: bareRemote,
@@ -756,6 +765,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-neg-skip',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_neg_token_123456',
         gitRemoteUrl: bareRemote,
@@ -840,7 +850,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         'INPUT_GITHUB-TOKEN': 'ghp_neg_token_123456',
         'INPUT_REMOTE-URL': bareRemote,
         LLM_TOKEN: 'sk-neg-llm-token-123456',
-      });
+      }, { openHostSessionAdapter: fastAdapter });
       assert.equal(exit500, 0, 'memory PR HTTP 500 must NEVER fail primary candidate sync');
       assert.equal(memoryPrPostAttempts, 1);
       const parsedOut500 = parseGithubOutputs(await readFile(out500, 'utf8'));
@@ -937,6 +947,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-neg-secret-leak',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_neg_token_123456',
         gitRemoteUrl: bareRemote,
@@ -972,6 +983,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-neg-html-200',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_neg_token_123456',
         gitRemoteUrl: bareRemote,
@@ -1100,6 +1112,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-neg-race-lease',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_neg_token_123456',
         gitRemoteUrl: bareRemote,
@@ -1142,6 +1155,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         runId: 'run-neg-disabled-fresh',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_neg_token_123456',
         gitRemoteUrl: bareRemote,

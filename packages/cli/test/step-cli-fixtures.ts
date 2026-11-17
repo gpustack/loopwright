@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedHandlerDigests } from '@loopwright/controller';
 import { serializePrettyYaml } from '@loopwright/github-app';
+import { main as cliMain } from '../src/main.js';
 import { configurationFixture } from '../../controller/test/config-fixtures.js';
 import { setFixture } from '../../controller/test/progress-fixtures.js';
 
@@ -16,6 +17,63 @@ export function runCli(argv: readonly string[], env: Record<string, string> = CL
     timeout: 20_000,
     env,
   });
+}
+
+export async function runCliInProcess(
+  argv: readonly string[],
+  env: Readonly<Record<string, string | undefined>> = CLEAN_ENV,
+): Promise<{ readonly status: number; readonly stdout: string; readonly stderr: string }> {
+  const stdoutChunks: string[] = [];
+  const stderrChunks: string[] = [];
+  const origStdoutWrite = process.stdout.write.bind(process.stdout);
+  const origStderrWrite = process.stderr.write.bind(process.stderr);
+  const savedEnv = { ...process.env };
+  for (const key of Object.keys(process.env)) {
+    if (!(key in env) || env[key] === undefined) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, val] of Object.entries(env)) {
+    if (val !== undefined) {
+      process.env[key] = val;
+    }
+  }
+  process.stdout.write = ((
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ) => {
+    stdoutChunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    const done = typeof encoding === 'function' ? encoding : cb;
+    if (done) done(null);
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((
+    chunk: string | Uint8Array,
+    encoding?: BufferEncoding | ((err?: Error | null) => void),
+    cb?: (err?: Error | null) => void,
+  ) => {
+    stderrChunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    const done = typeof encoding === 'function' ? encoding : cb;
+    if (done) done(null);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const status = await cliMain(argv);
+    return { status, stdout: stdoutChunks.join(''), stderr: stderrChunks.join('') };
+  } finally {
+    process.stdout.write = origStdoutWrite;
+    process.stderr.write = origStderrWrite;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, prior] of Object.entries(savedEnv)) {
+      if (prior === undefined) delete process.env[key];
+      else process.env[key] = prior;
+    }
+  }
 }
 
 export function parseNdjson(stdout: string): readonly {

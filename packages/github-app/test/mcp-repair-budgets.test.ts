@@ -24,6 +24,9 @@ import {
   sseToolCalls,
   sseStop,
 } from './mcp-test-fixtures.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 describe('MCP repair sub-budgets, proposal PR formatting, and retryable provider failures', () => {
   it('renders proposal-enriched PR bodies with escaped Markdown tables, secret scrubbing, length bounds, and clean fallback', () => {
@@ -347,6 +350,7 @@ spec:
         runRoot: r1Root,
         runId: 'run-repair-e2e',
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         gitRemoteUrl: bareRemote,
         githubApiBaseUrl: githubApiServer.url,
         githubToken: 'ghp_test_write_token_1234',
@@ -396,6 +400,7 @@ spec:
         runRoot: r2Root,
         runId: 'run-exhaust-diag',
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         gitRemoteUrl: bareRemote,
         githubApiBaseUrl: githubApiServer.url,
         githubToken: 'ghp_test_write_token_1234',
@@ -690,6 +695,7 @@ spec:
         runRoot,
         runId: 'run-multi-impl-repair',
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         upstreamRecords: [{ upstreamId: 'vllm', status: 'available', version: 'v0.19.1' }],
         progressSink: line => logs.push(line),
         env: {

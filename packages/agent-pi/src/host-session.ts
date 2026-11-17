@@ -989,16 +989,6 @@ class HostToolProcess implements ToolProcessPort {
               let resolveExit!: () => void;
               this.#activeExit = new Promise<void>(resolvePromise => { resolveExit = resolvePromise; });
 
-              const onAbort = () => {
-                killProcessGroup(child.pid, child.exitCode === null && child.signalCode === null);
-              };
-              combined.addEventListener('abort', onAbort, { once: true });
-              if (combined.aborted) onAbort();
-
-              if (child.pid && child.exitCode === null && child.signalCode === null) {
-                await registerAttach(this.host, this.nonce, child.pid, true);
-              }
-
               const onData = (chunk: Buffer) => {
                 const prevProduced = produced;
                 produced += chunk.length;
@@ -1018,7 +1008,7 @@ class HostToolProcess implements ToolProcessPort {
                 killProcessGroup(child.pid, false);
               });
 
-              const exitCode = await new Promise<number | null>((resolveClose, rejectClose) => {
+              const closePromise = new Promise<number | null>((resolveClose, rejectClose) => {
                 child.once('error', err => {
                   resolveExit();
                   rejectClose(err);
@@ -1027,9 +1017,27 @@ class HostToolProcess implements ToolProcessPort {
                   resolveExit();
                   resolveClose(exit);
                 });
-              }).finally(() => {
-                combined.removeEventListener('abort', onAbort);
               });
+              void closePromise.catch(() => {});
+
+              const onAbort = () => {
+                killProcessGroup(child.pid, child.exitCode === null && child.signalCode === null);
+              };
+              combined.addEventListener('abort', onAbort, { once: true });
+              if (combined.aborted) onAbort();
+
+              let exitCode: number | null;
+              try {
+                if (child.pid && child.exitCode === null && child.signalCode === null) {
+                  await registerAttach(this.host, this.nonce, child.pid, true);
+                }
+                exitCode = await closePromise;
+              } catch (err) {
+                killProcessGroup(child.pid, child.exitCode === null && child.signalCode === null);
+                throw err;
+              } finally {
+                combined.removeEventListener('abort', onAbort);
+              }
 
               killProcessGroup(child.pid, false);
 

@@ -85,6 +85,10 @@ export const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 262_144;
 const MAX_STDIO_BYTES = 1_048_576;
 export const MAX_REASON_CODEPOINTS = 256;
+const DEFAULT_LOCAL_COMMAND_SYNC_WAIT_MS = 10_000;
+const MAX_LOCAL_COMMAND_SYNC_WAIT_MS = 60_000;
+const MAX_SETTLED_GATE_JOBS = 64;
+const LOCAL_GATE_HTTP_HEADERS_TIMEOUT_MS = 60_000;
 const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 export const SAFE_BRANCH_PATTERN = /^[A-Za-z0-9._/-]{1,200}$/;
 export const CONTROLLER_ID_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -193,6 +197,7 @@ function writeSignedJsonResponse(
   signingSecret: string,
   payload: unknown,
 ): void {
+  if (res.destroyed || res.writableEnded) return;
   const body = Buffer.from(canonicalJson(payload), 'utf8');
   const signature = signPayload(signingSecret, body);
   res.writeHead(statusCode, {
@@ -204,6 +209,7 @@ function writeSignedJsonResponse(
 }
 
 function writePlainJsonResponse(res: ServerResponse, statusCode: number, payload: unknown): void {
+  if (res.destroyed || res.writableEnded) return;
   const body = Buffer.from(JSON.stringify(payload), 'utf8');
   res.writeHead(statusCode, {
     'content-type': 'application/json',
@@ -1067,12 +1073,122 @@ function buildSandboxedChildEnv(
   return childEnv;
 }
 
+class BoundedTailBuffer {
+  readonly #maxBytes: number;
+  #chunks: Buffer[] = [];
+  #totalBytes = 0;
+  overflow = false;
+
+  constructor(maxBytes: number) {
+    this.#maxBytes = maxBytes;
+  }
+
+  append(chunk: Buffer): void {
+    if (chunk.byteLength === 0) return;
+    if (chunk.byteLength >= this.#maxBytes) {
+      this.overflow = true;
+      this.#chunks = [chunk.subarray(chunk.byteLength - this.#maxBytes)];
+      this.#totalBytes = this.#maxBytes;
+      return;
+    }
+    this.#chunks.push(chunk);
+    this.#totalBytes += chunk.byteLength;
+    while (this.#totalBytes > this.#maxBytes && this.#chunks.length > 0) {
+      this.overflow = true;
+      const excess = this.#totalBytes - this.#maxBytes;
+      const head = this.#chunks[0]!;
+      if (head.byteLength <= excess) {
+        this.#chunks.shift();
+        this.#totalBytes -= head.byteLength;
+      } else {
+        this.#chunks[0] = head.subarray(excess);
+        this.#totalBytes -= excess;
+      }
+    }
+  }
+
+  toString(): string {
+    if (this.#chunks.length === 0) return '';
+    let buf = Buffer.concat(this.#chunks);
+    if (this.overflow) {
+      let start = 0;
+      while (start < buf.byteLength && start < 3 && (buf[start]! & 0xc0) === 0x80) {
+        start += 1;
+      }
+      if (start > 0) buf = buf.subarray(start);
+    }
+    return buf.toString('utf8');
+  }
+}
+
+function tailCodePoints(text: string, maxCodePoints: number): string {
+  if (maxCodePoints <= 0) return '';
+  const chars = Array.from(text);
+  if (chars.length <= maxCodePoints) return text;
+  if (maxCodePoints <= 3) return chars.slice(chars.length - maxCodePoints).join('');
+  return `...${chars.slice(chars.length - (maxCodePoints - 3)).join('')}`;
+}
+
+function formatCommandFailureOutput(
+  stdoutText: string,
+  stderrText: string,
+  overflow: boolean,
+): string {
+  const stdoutClean = stdoutText.replace(/\s+/g, ' ').trim();
+  const stderrClean = stderrText.replace(/\s+/g, ' ').trim();
+  const suffix = overflow ? ' [output truncated]' : '';
+  const budget = Math.max(16, MAX_REASON_CODEPOINTS - 48 - suffix.length);
+
+  if (stderrClean.length === 0 && stdoutClean.length === 0) {
+    return overflow ? '[output truncated]' : '';
+  }
+  if (stderrClean.length === 0) {
+    return `${tailCodePoints(stdoutClean, budget)}${suffix}`;
+  }
+  if (stdoutClean.length === 0) {
+    return `${tailCodePoints(stderrClean, budget)}${suffix}`;
+  }
+
+  const pairBudget = Math.max(8, budget - 3);
+  const stderrLen = Array.from(stderrClean).length;
+  const stdoutLen = Array.from(stdoutClean).length;
+  const half = Math.floor(pairBudget / 2);
+  let stderrBudget: number;
+  let stdoutBudget: number;
+  if (stderrLen <= half) {
+    stderrBudget = stderrLen;
+    stdoutBudget = pairBudget - stderrBudget;
+  } else if (stdoutLen <= half) {
+    stdoutBudget = stdoutLen;
+    stderrBudget = pairBudget - stdoutBudget;
+  } else {
+    stderrBudget = half;
+    stdoutBudget = pairBudget - stderrBudget;
+  }
+  const stderrPart = tailCodePoints(stderrClean, stderrBudget);
+  const stdoutPart = tailCodePoints(stdoutClean, stdoutBudget);
+  return `${stderrPart} | ${stdoutPart}${suffix}`;
+}
+
+interface RunCommandScriptOptions {
+  readonly signal?: AbortSignal | undefined;
+  readonly registerKiller?: ((kill: () => void) => () => void) | undefined;
+}
+
 async function runCommandScript(
   scriptFullPath: string,
   cwd: string,
   env: Record<string, string>,
   timeoutMs: number,
+  options?: RunCommandScriptOptions,
 ): Promise<{ readonly exitCode: number | null; readonly timedOut: boolean; readonly output: string }> {
+  if (options?.signal?.aborted) {
+    return {
+      exitCode: null,
+      timedOut: false,
+      output: 'command aborted during server shutdown',
+    };
+  }
   const shell = resolveShellExecutable();
   return await new Promise((resolvePromise, reject) => {
     const child = spawn(shell, [scriptFullPath], {
@@ -1082,10 +1198,8 @@ async function runCommandScript(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let totalBytes = 0;
-    let outputOverflow = false;
+    const stdoutBuffer = new BoundedTailBuffer(MAX_STDIO_BYTES);
+    const stderrBuffer = new BoundedTailBuffer(MAX_STDIO_BYTES);
     let timedOut = false;
     let settled = false;
 
@@ -1098,48 +1212,75 @@ async function runCommandScript(
       }
     };
 
+    const unregisterKiller = options?.registerKiller?.(killProcessGroup);
+    const onAbort = (): void => {
+      killProcessGroup();
+    };
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options?.signal?.aborted) {
+      killProcessGroup();
+    }
+
     const timer = setTimeout(() => {
       timedOut = true;
       killProcessGroup();
     }, timeoutMs);
     timer.unref?.();
 
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      options?.signal?.removeEventListener('abort', onAbort);
+      unregisterKiller?.();
+    };
+
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      const stderrText = Buffer.concat(stderrChunks).toString('utf8');
-      const stdoutText = Buffer.concat(stdoutChunks).toString('utf8');
-      const combined = stderrText.trim().length > 0 ? stderrText : stdoutText;
+      cleanup();
       resolvePromise({
         exitCode: code,
         timedOut,
-        output: outputOverflow ? `${combined} [output truncated]` : combined,
+        output: formatCommandFailureOutput(
+          stdoutBuffer.toString(),
+          stderrBuffer.toString(),
+          stdoutBuffer.overflow || stderrBuffer.overflow,
+        ),
       });
     };
 
-    const appendChunk = (target: Buffer[], chunk: Buffer): void => {
-      if (totalBytes >= MAX_STDIO_BYTES) {
-        outputOverflow = true;
-        return;
-      }
-      const remaining = MAX_STDIO_BYTES - totalBytes;
-      const slice = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
-      totalBytes += slice.byteLength;
-      if (chunk.byteLength > remaining) outputOverflow = true;
-      target.push(slice);
-    };
-
-    child.stdout.on('data', (chunk: Buffer) => appendChunk(stdoutChunks, chunk));
-    child.stderr.on('data', (chunk: Buffer) => appendChunk(stderrChunks, chunk));
+    child.stdout.on('data', (chunk: Buffer) => stdoutBuffer.append(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderrBuffer.append(chunk));
     child.on('error', err => {
-      clearTimeout(timer);
+      cleanup();
       if (!settled) {
         settled = true;
         reject(new GitHubAppError('ACTION_INPUT_INVALID', `command.v1 script failed to spawn: ${err.message}`));
       }
     });
     child.on('close', code => finish(code));
+  });
+}
+
+async function waitForJobOrTimer(
+  jobPromise: Promise<void>,
+  waitMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (waitMs <= 0 || signal.aborted) return;
+  await new Promise<void>(resolveWait => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolveWait();
+    };
+    const onAbort = (): void => finish();
+    const timer = setTimeout(finish, waitMs);
+    timer.unref?.();
+    signal.addEventListener('abort', onAbort, { once: true });
+    void jobPromise.then(finish, finish);
   });
 }
 
@@ -1154,6 +1295,7 @@ export interface LocalCommandGateServerOptions {
   readonly signingSecret?: string | undefined;
   readonly scratchRoot?: string | undefined;
   readonly forbiddenEnvNames?: ReadonlySet<string> | undefined;
+  readonly syncWaitMs?: number | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
 }
 
@@ -1162,6 +1304,12 @@ export interface LocalCommandGateServer {
   readonly signingSecret: string;
   readonly endpointPlan: HostGateEndpointPlan;
   close(): Promise<void>;
+}
+
+interface LocalCommandGateJob {
+  readonly key: string;
+  promise: Promise<void>;
+  settled: { readonly status: 'approved' | 'denied'; readonly reason: string | null } | null;
 }
 
 /**
@@ -1181,6 +1329,10 @@ export async function startLocalCommandGateServer(
   await chmod(rawScratchBase, 0o700);
   const scratchBase = await realpath(rawScratchBase);
 
+  const syncWaitMs = options.syncWaitMs === undefined || !Number.isFinite(options.syncWaitMs)
+    ? DEFAULT_LOCAL_COMMAND_SYNC_WAIT_MS
+    : Math.min(MAX_LOCAL_COMMAND_SYNC_WAIT_MS, Math.max(0, Math.trunc(options.syncWaitMs)));
+
   const host = options.host ?? '127.0.0.1';
   const gateMap = new Map<string, CompiledLocalCommandGate>();
   let maxTimeoutSeconds = 30;
@@ -1188,6 +1340,33 @@ export async function startLocalCommandGateServer(
     gateMap.set(`${gate.gateId}\0${gate.checkId}`, gate);
     if (gate.timeoutSeconds > maxTimeoutSeconds) maxTimeoutSeconds = gate.timeoutSeconds;
   }
+  const verdictTtlMs = Math.min(86_400_000, Math.max(300_000, maxTimeoutSeconds * 1000 + 60_000));
+
+  const jobs = new Map<string, LocalCommandGateJob>();
+  const settledOrder: string[] = [];
+  const inFlightPromises = new Set<Promise<void>>();
+  const activeKillers = new Set<() => void>();
+  const closeController = new AbortController();
+  let closing = false;
+
+  const recordSettled = (
+    job: LocalCommandGateJob,
+    status: 'approved' | 'denied',
+    reason: string | null,
+  ): void => {
+    if (job.settled !== null) return;
+    job.settled = { status, reason };
+    settledOrder.push(job.key);
+    while (settledOrder.length > MAX_SETTLED_GATE_JOBS) {
+      const oldestKey = settledOrder.shift();
+      if (oldestKey !== undefined) {
+        const entry = jobs.get(oldestKey);
+        if (entry !== undefined && entry.settled !== null) {
+          jobs.delete(oldestKey);
+        }
+      }
+    }
+  };
 
   const server = createServer(async (req, res) => {
     const pathname = (req.url ?? '/').split('?')[0];
@@ -1234,7 +1413,10 @@ export async function startLocalCommandGateServer(
     const checkId = String(request['checkId'] ?? '');
     const candidateDigest = String(request['candidateDigest'] ?? '');
 
-    const makeVerdict = (status: 'approved' | 'denied', reason: string | null) => ({
+    const makeVerdict = (
+      status: 'pending' | 'approved' | 'denied',
+      reason: string | null,
+    ) => ({
       version: 1,
       kind: 'gate_verdict',
       storeId,
@@ -1247,8 +1429,8 @@ export async function startLocalCommandGateServer(
       checkId,
       candidateDigest,
       status,
-      reason,
-      expiresAtMs: String(Date.now() + 300_000),
+      reason: status === 'pending' ? null : reason,
+      expiresAtMs: String(Date.now() + verdictTtlMs),
     });
 
     const sanitizeFailureReason = (raw: string): string => {
@@ -1266,111 +1448,185 @@ export async function startLocalCommandGateServer(
       return;
     }
 
-    const workDir = await mkdtemp(join(scratchBase, 'exec-'));
-    await chmod(workDir, 0o700);
-    const candidateDir = join(workDir, 'candidate');
-    const scratchHome = join(workDir, 'home');
-    const scratchTmp = join(workDir, 'tmp');
+    if (closing) {
+      writePlainJsonResponse(res, 503, { error: 'server_closing' });
+      return;
+    }
 
-    try {
-      await mkdir(candidateDir, { mode: 0o700 });
-      await mkdir(scratchHome, { mode: 0o700 });
-      await mkdir(scratchTmp, { mode: 0o700 });
+    const operationKey = canonicalJson({
+      storeId,
+      runId,
+      lockHash,
+      operationId,
+      dispatchId,
+      dispatchGeneration,
+      gateId,
+      checkId,
+      candidateDigest,
+    });
 
-      const scriptCopyPath = await verifyAndCopyScriptToWorkDir(
-        options.repositoryRoot,
-        gate.script,
-        gate.scriptSha256,
-        join(workDir, 'gate-script.sh'),
-      );
-      const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
-      if (snapshot.manifest.spec.baseTree !== undefined) {
-        await verifyBaseTreeAnchor(
-          options.repositoryRoot,
-          snapshot.manifest.spec.baseTree,
-          buildCleanGitEnv(),
-          snapshot.sourceRevision,
-        );
-        const baselineEntries = await listBaselineRegularEntries(
-          options.repositoryRoot,
-          snapshot.manifest.spec.baseTree.commitOid,
-          snapshot.protectedPaths,
-        );
-        const baselineModes = new Map<string, '100644' | '100755'>();
-        for (const entry of baselineEntries) {
-          baselineModes.set(entry.path, entry.mode);
-        }
-        const deletedPaths = snapshot.manifest.spec.deleted ?? [];
-        for (const file of snapshot.files) {
-          if (!isAllowedCandidateWrite(file.name, snapshot)) {
-            throw new GitHubAppError(
-              'TASKPACK_SCOPE_VIOLATION',
-              `candidate overlay file "${file.name}" is outside writable scope`,
+    let job = jobs.get(operationKey);
+    const isNewJob = job === undefined;
+    if (job === undefined) {
+      const newJob: LocalCommandGateJob = {
+        key: operationKey,
+        promise: Promise.resolve(),
+        settled: null,
+      };
+      const runPromise = (async () => {
+        let workDir: string | undefined;
+        try {
+          if (closeController.signal.aborted) {
+            recordSettled(newJob, 'denied', sanitizeFailureReason('command gate server closed'));
+            return;
+          }
+          workDir = await mkdtemp(join(scratchBase, 'exec-'));
+          await chmod(workDir, 0o700);
+          const candidateDir = join(workDir, 'candidate');
+          const scratchHome = join(workDir, 'home');
+          const scratchTmp = join(workDir, 'tmp');
+
+          await mkdir(candidateDir, { mode: 0o700 });
+          await mkdir(scratchHome, { mode: 0o700 });
+          await mkdir(scratchTmp, { mode: 0o700 });
+
+          const scriptCopyPath = await verifyAndCopyScriptToWorkDir(
+            options.repositoryRoot,
+            gate.script,
+            gate.scriptSha256,
+            join(workDir, 'gate-script.sh'),
+          );
+          const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
+          if (snapshot.manifest.spec.baseTree !== undefined) {
+            await verifyBaseTreeAnchor(
+              options.repositoryRoot,
+              snapshot.manifest.spec.baseTree,
+              buildCleanGitEnv(),
+              snapshot.sourceRevision,
             );
+            const baselineEntries = await listBaselineRegularEntries(
+              options.repositoryRoot,
+              snapshot.manifest.spec.baseTree.commitOid,
+              snapshot.protectedPaths,
+            );
+            const baselineModes = new Map<string, '100644' | '100755'>();
+            for (const entry of baselineEntries) {
+              baselineModes.set(entry.path, entry.mode);
+            }
+            const deletedPaths = snapshot.manifest.spec.deleted ?? [];
+            for (const file of snapshot.files) {
+              if (!isAllowedCandidateWrite(file.name, snapshot)) {
+                throw new GitHubAppError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `candidate overlay file "${file.name}" is outside writable scope`,
+                );
+              }
+            }
+            for (const rawDeleted of deletedPaths) {
+              const deletedName = normalizeCandidateRelativePath(rawDeleted);
+              if (!isAllowedCandidateWrite(deletedName, snapshot)) {
+                throw new GitHubAppError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `candidate deleted path "${deletedName}" is outside writable scope`,
+                );
+              }
+            }
+            const deletedSet = new Set(deletedPaths);
+            const overlayNames = new Set(snapshot.files.map(file => file.name));
+            const toMaterialize = baselineEntries.filter(
+              entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
+            );
+            await materializeBaselineBatchForGate(
+              options.repositoryRoot,
+              snapshot.manifest.spec.baseTree.objectFormat,
+              toMaterialize,
+              candidateDir,
+              Math.max(60_000, gate.timeoutSeconds * 1000),
+            );
+            await materializeOverlayCandidateFiles(candidateDir, snapshot.files, baselineModes);
+            await assertDeletedPathsAbsent(candidateDir, deletedPaths);
+          } else {
+            await materializeCandidateFiles(candidateDir, snapshot.files);
+          }
+
+          if (closeController.signal.aborted) {
+            recordSettled(newJob, 'denied', sanitizeFailureReason('command gate server closed'));
+            return;
+          }
+
+          const childEnv = buildSandboxedChildEnv(
+            gate,
+            candidateDir,
+            scratchHome,
+            scratchTmp,
+            options.runtimeEnv,
+            options.readOnlyGitHubToken,
+            options.forbiddenEnvNames,
+          );
+
+          options.onLog?.(scrubber.scrub(
+            `check ${gate.checkId}: running ${gate.script} (timeout ${formatDurationMs(gate.timeoutSeconds * 1000)})`,
+          ));
+          const cmdStarted = performance.now();
+          const result = await runCommandScript(
+            scriptCopyPath,
+            candidateDir,
+            childEnv,
+            gate.timeoutSeconds * 1000,
+            {
+              signal: closeController.signal,
+              registerKiller: kill => {
+                activeKillers.add(kill);
+                return () => {
+                  activeKillers.delete(kill);
+                };
+              },
+            },
+          );
+          const cmdElapsed = Math.max(1, Math.round(performance.now() - cmdStarted));
+          if (!result.timedOut && result.exitCode === 0) {
+            options.onLog?.(scrubber.scrub(`check ${gate.checkId}: passed (${formatDurationMs(cmdElapsed)})`));
+            recordSettled(newJob, 'approved', null);
+          } else {
+            const prefix = result.timedOut
+              ? `command timed out after ${gate.timeoutSeconds}s`
+              : `command exited with status ${result.exitCode ?? 'signal'}`;
+            const rawReason = result.output.length > 0 ? `${prefix}: ${result.output}` : prefix;
+            const sanitizedReason = sanitizeFailureReason(rawReason);
+            options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed (${formatDurationMs(cmdElapsed)}) — ${sanitizedReason}`));
+            recordSettled(newJob, 'denied', sanitizedReason);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          recordSettled(newJob, 'denied', sanitizeFailureReason(message));
+        } finally {
+          if (workDir !== undefined) {
+            await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
           }
         }
-        for (const rawDeleted of deletedPaths) {
-          const deletedName = normalizeCandidateRelativePath(rawDeleted);
-          if (!isAllowedCandidateWrite(deletedName, snapshot)) {
-            throw new GitHubAppError(
-              'TASKPACK_SCOPE_VIOLATION',
-              `candidate deleted path "${deletedName}" is outside writable scope`,
-            );
-          }
-        }
-        const deletedSet = new Set(deletedPaths);
-        const overlayNames = new Set(snapshot.files.map(file => file.name));
-        const toMaterialize = baselineEntries.filter(
-          entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
-        );
-        await materializeBaselineBatchForGate(
-          options.repositoryRoot,
-          snapshot.manifest.spec.baseTree.objectFormat,
-          toMaterialize,
-          candidateDir,
-          Math.max(60_000, gate.timeoutSeconds * 1000),
-        );
-        await materializeOverlayCandidateFiles(candidateDir, snapshot.files, baselineModes);
-        await assertDeletedPathsAbsent(candidateDir, deletedPaths);
-      } else {
-        await materializeCandidateFiles(candidateDir, snapshot.files);
-      }
+      })();
+      const trackedPromise = runPromise.finally(() => {
+        inFlightPromises.delete(trackedPromise);
+      });
+      inFlightPromises.add(trackedPromise);
+      newJob.promise = trackedPromise;
+      jobs.set(operationKey, newJob);
+      job = newJob;
+    }
 
-      const childEnv = buildSandboxedChildEnv(
-        gate,
-        candidateDir,
-        scratchHome,
-        scratchTmp,
-        options.runtimeEnv,
-        options.readOnlyGitHubToken,
-        options.forbiddenEnvNames,
-      );
+    if (job.settled === null) {
+      const waitMs = isNewJob ? syncWaitMs : Math.min(syncWaitMs, 50);
+      await waitForJobOrTimer(job.promise, waitMs, closeController.signal);
+    }
 
-      options.onLog?.(scrubber.scrub(
-        `check ${gate.checkId}: running ${gate.script} (timeout ${formatDurationMs(gate.timeoutSeconds * 1000)})`,
-      ));
-      const cmdStarted = performance.now();
-      const result = await runCommandScript(scriptCopyPath, candidateDir, childEnv, gate.timeoutSeconds * 1000);
-      const cmdElapsed = Math.max(1, Math.round(performance.now() - cmdStarted));
-      if (!result.timedOut && result.exitCode === 0) {
-        options.onLog?.(scrubber.scrub(`check ${gate.checkId}: passed (${formatDurationMs(cmdElapsed)})`));
-        writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('approved', null));
-      } else {
-        const prefix = result.timedOut
-          ? `command timed out after ${gate.timeoutSeconds}s`
-          : `command exited with status ${result.exitCode ?? 'signal'}`;
-        const rawReason = result.output.length > 0 ? `${prefix}: ${result.output}` : prefix;
-        const sanitizedReason = sanitizeFailureReason(rawReason);
-        options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed (${formatDurationMs(cmdElapsed)}) — ${sanitizedReason}`));
-        writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('denied', sanitizedReason));
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('denied', sanitizeFailureReason(message)));
-    } finally {
-      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+    if (job.settled !== null) {
+      writeSignedJsonResponse(res, 200, signingSecret, makeVerdict(job.settled.status, job.settled.reason));
+    } else {
+      writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('pending', null));
     }
   });
+  server.requestTimeout = 0;
+  server.headersTimeout = LOCAL_GATE_HTTP_HEADERS_TIMEOUT_MS;
 
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject);
@@ -1384,7 +1640,7 @@ export async function startLocalCommandGateServer(
   }
 
   const url = `http://${host}:${address.port}/${LOCAL_COMMAND_GATE_ENDPOINT_ID}`;
-  const timeoutMs = Math.min(3_600_000, Math.max(35_000, maxTimeoutSeconds * 1000 + 15_000));
+  const timeoutMs = Math.min(3_600_000, Math.max(35_000, syncWaitMs + 15_000, maxTimeoutSeconds * 1000 + 15_000));
   const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
 
   return {
@@ -1402,7 +1658,15 @@ export async function startLocalCommandGateServer(
       jitter: 0,
     },
     close: async () => {
-      await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+      closing = true;
+      const closePromise = new Promise<void>(resolveClose => server.close(() => resolveClose()));
+      closeController.abort();
+      for (const kill of [...activeKillers]) {
+        kill();
+      }
+      await Promise.allSettled([...inFlightPromises]);
+      server.closeIdleConnections?.();
+      await closePromise;
       if (ownedScratch) {
         await rm(scratchBase, { recursive: true, force: true }).catch(() => undefined);
       }
@@ -2110,6 +2374,8 @@ export async function startNativePullRequestPublisherServer(
       await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   });
+  server.requestTimeout = 0;
+  server.headersTimeout = LOCAL_GATE_HTTP_HEADERS_TIMEOUT_MS;
 
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject);

@@ -10,7 +10,7 @@ import { main as cliMain } from '../src/main.js';
 import {
   MAIN_PATH,
   CLEAN_ENV,
-  runCli,
+  runCliInProcess,
   parseNdjson,
   gitStatusPorcelain,
   createManagedDelegatedRepoFixture,
@@ -29,7 +29,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     await symlink(repoA, repoALink);
 
     // 1. Admit run using symlinked repoALink -> succeeds (0)
-    const admitted = runCli([
+    const admitted = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoALink,
@@ -40,7 +40,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     assert.equal(admitted.status, 0, admitted.stdout + admitted.stderr);
 
     // 2. Re-invoke via canonical repoA -> matches staged.repositoryRoot and succeeds (0)
-    const sameRepo = runCli([
+    const sameRepo = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoA,
@@ -52,7 +52,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     assert.equal(sameRepo.status, 0, sameRepo.stdout + sameRepo.stderr);
 
     // 3. Re-invoke with DIFFERENT --repo (repoB) via --taskpack -> RECOVERY_REQUIRED (exit 7)
-    const mismatchTaskpack = runCli([
+    const mismatchTaskpack = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoB,
@@ -65,7 +65,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     assert.equal(parseNdjson(mismatchTaskpack.stdout)[0]!.data['code'], 'RECOVERY_REQUIRED');
 
     // 4. Re-invoke with DIFFERENT --repo (repoB) via bare step next -> RECOVERY_REQUIRED (exit 7)
-    const mismatchBare = runCli([
+    const mismatchBare = await runCliInProcess([
       'step', 'next',
       '--repo', repoB,
       '--run-root', runRoot,
@@ -79,7 +79,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     assert.equal((await lstat(join(runRoot, '.taskpack-repo-mismatch'))).isDirectory(), true);
 
     // 5. Pre-admission failure (--role-model nonexistent=...) cleans up .taskpack-orphan-1 so retry with --mode no-change succeeds
-    const orphanFail = runCli([
+    const orphanFail = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoA,
@@ -97,7 +97,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     await mkdir(join(runRoot, '.taskpack-orphan-1'), { recursive: true, mode: 0o700 });
     await writeFile(join(runRoot, '.taskpack-orphan-1', 'stale.txt'), 'stale', { mode: 0o600 });
 
-    const retryNoChange = runCli([
+    const retryNoChange = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoA,
@@ -110,7 +110,7 @@ test('step-cli: step next --taskpack preserves --repo mismatch fencing (exit 7) 
     const retryEnv = parseNdjson(retryNoChange.stdout)[0]!;
     assert.equal(retryEnv.kind, 'step');
 
-    const submitNoChange = runCli([
+    const submitNoChange = await runCliInProcess([
       'step', 'submit',
       '--run-root', runRoot,
       '--run-id', 'orphan-1',
@@ -130,41 +130,41 @@ test('step-cli: step command covers exit codes 2, 3, 4, 5, 6, 7, 8, and 143 plus
   try {
     const common = ['--config', f1.input.configPath, '--registry', f1.input.registryPath, '--registry-sha256', f1.input.registrySha256];
 
-    const badRole = runCli(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'bad-role', '--role-model', 'nonexistent=antigravity/gemini-4-carbon', '--json']);
+    const badRole = await runCliInProcess(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'bad-role', '--role-model', 'nonexistent=antigravity/gemini-4-carbon', '--json']);
     assert.equal(badRole.status, 2, badRole.stdout + badRole.stderr);
     assert.equal(parseNdjson(badRole.stdout)[0]!.data['code'], 'CONFIG_REFERENCE');
 
-    const ineligibleNc = runCli(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'ineligible-nc', '--mode', 'no-change', '--json']);
+    const ineligibleNc = await runCliInProcess(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'ineligible-nc', '--mode', 'no-change', '--json']);
     assert.equal(ineligibleNc.status, 3, ineligibleNc.stdout + ineligibleNc.stderr);
     assert.equal(parseNdjson(ineligibleNc.stdout)[0]!.data['code'], 'CAPABILITY_UNSUPPORTED');
 
-    const cancelMissing = runCli(['step', 'cancel', '--run-root', f1.runRoot, '--run-id', 'missing-cancel', '--json']);
+    const cancelMissing = await runCliInProcess(['step', 'cancel', '--run-root', f1.runRoot, '--run-id', 'missing-cancel', '--json']);
     assert.equal(cancelMissing.status, 8, cancelMissing.stdout + cancelMissing.stderr);
     assert.equal(parseNdjson(cancelMissing.stdout)[0]!.data['code'], 'STATE_UNAVAILABLE');
 
     // Start a run, test bare step next --repo mismatch -> 7, then symlink in candidateDir -> 8
-    const startRun = runCli(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--json']);
+    const startRun = await runCliInProcess(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--json']);
     assert.equal(startRun.status, 0, startRun.stdout + startRun.stderr);
     const startEnv = parseNdjson(startRun.stdout)[0]!;
     const otherRepo = join(f1.root, 'other-repo');
     await mkdir(otherRepo, { recursive: true, mode: 0o700 });
-    const bareRepoMismatch = runCli(['step', 'next', '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--repo', otherRepo, '--reissue-lease', '--json']);
+    const bareRepoMismatch = await runCliInProcess(['step', 'next', '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--repo', otherRepo, '--reissue-lease', '--json']);
     assert.equal(bareRepoMismatch.status, 7, bareRepoMismatch.stdout + bareRepoMismatch.stderr);
     assert.equal(parseNdjson(bareRepoMismatch.stdout)[0]!.data['code'], 'RECOVERY_REQUIRED');
 
     await symlink('/etc/hosts', join(startEnv.data['candidateDir'] as string, 'packages', 'evil-symlink'));
-    const symSubmit = runCli(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--lease', startEnv.data['leaseToken'] as string, '--json']);
+    const symSubmit = await runCliInProcess(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'artifact-sym', '--lease', startEnv.data['leaseToken'] as string, '--json']);
     assert.equal(symSubmit.status, 8, symSubmit.stdout + symSubmit.stderr);
     assert.equal(parseNdjson(symSubmit.stdout)[0]!.data['code'], 'ARTIFACT_INVALID');
 
     // --status failed --reason on step submit -> advances through review and settles failed (exit 4)
-    const failStart = runCli(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--json']);
+    const failStart = await runCliInProcess(['step', 'next', ...common, '--repo', f1.repository, '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--json']);
     assert.equal(failStart.status, 0, failStart.stdout + failStart.stderr);
     const failLease = parseNdjson(failStart.stdout)[0]!.data['leaseToken'] as string;
-    const authorFail = runCli(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--lease', failLease, '--status', 'failed', '--reason', 'delegated_error', '--json']);
+    const authorFail = await runCliInProcess(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--lease', failLease, '--status', 'failed', '--reason', 'delegated_error', '--json']);
     assert.equal(authorFail.status, 0, authorFail.stdout + authorFail.stderr);
     const reviewFailLease = parseNdjson(authorFail.stdout)[0]!.data['leaseToken'] as string;
-    const explicitFail = runCli(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--lease', reviewFailLease, '--status', 'failed', '--reason', 'delegated_error', '--json']);
+    const explicitFail = await runCliInProcess(['step', 'submit', '--run-root', f1.runRoot, '--run-id', 'explicit-fail', '--lease', reviewFailLease, '--status', 'failed', '--reason', 'delegated_error', '--json']);
     assert.equal(explicitFail.status, 4, explicitFail.stdout + explicitFail.stderr);
     assert.equal((parseNdjson(explicitFail.stdout)[0]!.data['result'] as { spec: { status: string } }).spec.status, 'failed');
   } finally {
@@ -175,10 +175,10 @@ test('step-cli: step command covers exit codes 2, 3, 4, 5, 6, 7, 8, and 143 plus
   const fExhausted = await createManagedDelegatedRepoFixture({ maxAttempts: 1, maxImplementationRepairs: 0 });
   try {
     const common = ['--config', fExhausted.input.configPath, '--registry', fExhausted.input.registryPath, '--registry-sha256', fExhausted.input.registrySha256];
-    const s1 = runCli(['step', 'next', ...common, '--repo', fExhausted.repository, '--run-root', fExhausted.runRoot, '--run-id', 'exhaust-1', '--json']);
+    const s1 = await runCliInProcess(['step', 'next', ...common, '--repo', fExhausted.repository, '--run-root', fExhausted.runRoot, '--run-id', 'exhaust-1', '--json']);
     assert.equal(s1.status, 0, s1.stdout + s1.stderr);
     const lease = parseNdjson(s1.stdout)[0]!.data['leaseToken'] as string;
-    const s2 = runCli(['step', 'submit', '--run-root', fExhausted.runRoot, '--run-id', 'exhaust-1', '--lease', lease, '--json']);
+    const s2 = await runCliInProcess(['step', 'submit', '--run-root', fExhausted.runRoot, '--run-id', 'exhaust-1', '--lease', lease, '--json']);
     assert.equal(s2.status, 5, s2.stdout + s2.stderr);
     assert.equal((parseNdjson(s2.stdout)[0]!.data['result'] as { spec: { status: string } }).spec.status, 'exhausted');
   } finally {
@@ -189,11 +189,11 @@ test('step-cli: step command covers exit codes 2, 3, 4, 5, 6, 7, 8, and 143 plus
   const fExpired = await createManagedDelegatedRepoFixture({ drainReserveMs: 120_000, wallTimeMs: 123_500 });
   try {
     const common = ['--config', fExpired.input.configPath, '--registry', fExpired.input.registryPath, '--registry-sha256', fExpired.input.registrySha256];
-    const s1 = runCli(['step', 'next', ...common, '--repo', fExpired.repository, '--run-root', fExpired.runRoot, '--run-id', 'expire-1', '--json']);
+    const s1 = await runCliInProcess(['step', 'next', ...common, '--repo', fExpired.repository, '--run-root', fExpired.runRoot, '--run-id', 'expire-1', '--json']);
     assert.equal(s1.status, 0, s1.stdout + s1.stderr);
     const lease = parseNdjson(s1.stdout)[0]!.data['leaseToken'] as string;
     await new Promise(resolveWait => setTimeout(resolveWait, 3_650));
-    const s2 = runCli(['step', 'submit', '--run-root', fExpired.runRoot, '--run-id', 'expire-1', '--lease', lease, '--json']);
+    const s2 = await runCliInProcess(['step', 'submit', '--run-root', fExpired.runRoot, '--run-id', 'expire-1', '--lease', lease, '--json']);
     assert.equal(s2.status, 6, s2.stdout + s2.stderr);
     assert.equal((parseNdjson(s2.stdout)[0]!.data['result'] as { spec: { status: string } }).spec.status, 'expired');
   } finally {
@@ -206,7 +206,7 @@ test('step-cli: step command covers exit codes 2, 3, 4, 5, 6, 7, 8, and 143 plus
   const runRoot = join(root, 'runs');
   try {
     await createTaskpackRepo(repoRoot, { verifyScript: '#!/bin/sh\nsleep 5\n' });
-    const nextRes = runCli([
+    const nextRes = await runCliInProcess([
       'step', 'next',
       '--taskpack', '.loopwright/taskpack.yaml',
       '--repo', repoRoot,
@@ -537,7 +537,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
     git(['-c', 'user.name=Taskpack CLI', '-c', 'user.email=tp@localhost.invalid', 'commit', '-qm', 'init']);
 
     // 1. Positive: writing .auto-sync/proposal.json + pack/cann/version.txt settles accepted
-    const okNext = runCli([
+    const okNext = await runCliInProcess([
       'step', 'next', '--taskpack', '.auto-sync/taskpack.yaml',
       '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'autosync-ok', '--json',
     ]);
@@ -550,7 +550,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
       { mode: 0o600 },
     );
     await writeFile(join(okCandidateDir, 'pack', 'cann', 'version.txt'), '2.0.0\n', { mode: 0o600 });
-    const okSubmit = runCli([
+    const okSubmit = await runCliInProcess([
       'step', 'submit', '--run-root', runRoot, '--run-id', 'autosync-ok',
       '--lease', okEnv.data['leaseToken'] as string, '--json',
     ]);
@@ -575,7 +575,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
         await writeFile(join(dir, '.auto-sync', 'taskpack.yaml'), 'tampered: true\n', { mode: 0o600 });
       }],
     ] as const) {
-      const badNext = runCli([
+      const badNext = await runCliInProcess([
         'step', 'next', '--taskpack', '.auto-sync/taskpack.yaml',
         '--repo', repoRoot, '--run-root', runRoot, '--run-id', caseId, '--json',
       ]);
@@ -594,7 +594,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
       );
       await violate(badCandidateDir);
 
-      const badSubmit = runCli([
+      const badSubmit = await runCliInProcess([
         'step', 'submit', '--run-root', runRoot, '--run-id', caseId,
         '--lease', badEnv.data['leaseToken'] as string, '--json',
       ]);

@@ -27,6 +27,9 @@ import {
   createEndToEndFixture,
   writeTaskpackYaml,
 } from './turnkey-action-fixtures.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 describe('GitHub App installation auto-discovery, token precedence, and DCO bot commit identity', () => {
   const { privateKey: testAppPrivateKeyObj, publicKey: testAppPublicKeyObj } = generateKeyPairSync('rsa', {
@@ -188,7 +191,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
         'INPUT_REMOTE-URL': fixture.bareRemote,
         LLM_TOKEN: fixture.goodToken,
         CHECK_SECRET: fixture.verifySecret,
-      });
+      }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 0, 'Action run with auto-discovered GitHub App installation must succeed');
       assert.equal(prRequests.length, 2, 'must open managed PR and separate memory PR with minted App token');
@@ -582,7 +585,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
             'INPUT_REMOTE-URL': fixture.bareRemote,
             LLM_TOKEN: fixture.goodToken,
             CHECK_SECRET: fixture.verifySecret,
-          });
+          }, { openHostSessionAdapter: fastAdapter });
           assert.equal(code, 0);
           const verifyClone = join(fixture.work, 'verify-custom-override');
           await git(fixture.work, ['clone', '--branch', 'loopwright/main', fixture.bareRemote, verifyClone]);
@@ -883,7 +886,7 @@ spec:
         'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
         'INPUT_REMOTE-URL': bareRemote,
         LLM_TOKEN: 'sk-test-good-token-123456',
-      });
+      }, { openHostSessionAdapter: fastAdapter });
       assert.equal(exitCode, 0);
 
       // Verify all three unauthorized writes under .auto-sync/ were rejected by candidate scope guard

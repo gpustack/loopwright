@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants, existsSync } from 'node:fs';
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { describe, it } from 'node:test';
-import { signPayload } from '@loopwright/controller';
+import { dirname, join } from 'node:path';
+import { describe, it, before, after } from 'node:test';
+import { inspectRun, loadTrustedConfiguration, signPayload, stepNext, stepSubmit, verifySignedPayload } from '@loopwright/controller';
 import {
   compareVersionTags,
+  compileDeclarativeTaskpack,
+  DEFAULT_HOST_BUDGETS,
+  DEFAULT_LOCAL_COMMAND_GATE_ENV,
   discoverTaskpackUpstreams,
+  executeTurnkeyActionCycle,
   findOpenManagedPullRequest,
   GitHubAppError,
   loadDeclarativeTaskpack,
@@ -19,6 +23,9 @@ import {
   runActionCli,
   runGitHubActionEntrypoint,
   SecretScrubber,
+  serializePrettyYaml,
+  stageCompiledInstructionResources,
+  stageTaskpackForStep,
   startLocalCommandGateServer,
   startNativePullRequestPublisherServer,
   writeActionOutputSinks,
@@ -1932,6 +1939,701 @@ spec:
       assert.match(records[0]?.reason ?? '', /must use https:\/\//);
     } finally {
       await rm(work, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('startLocalCommandGateServer async polling, process-group cleanup, and stdio tail diagnostics', () => {
+  async function postGateSignedWithHeaders(
+    url: string,
+    body: Record<string, unknown>,
+    signingSecret: string,
+  ): Promise<{ readonly status: number; readonly json: Record<string, unknown>; readonly signature: string }> {
+    const raw = Buffer.from(JSON.stringify(body), 'utf8');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-loopwright-signature': signPayload(signingSecret, raw),
+      },
+      body: raw,
+    });
+    const text = await response.text();
+    const signature = response.headers.get('x-loopwright-signature') ?? '';
+    assert.equal(verifySignedPayload(signingSecret, Buffer.from(text, 'utf8'), signature), true);
+    return {
+      status: response.status,
+      json: JSON.parse(text) as Record<string, unknown>,
+      signature,
+    };
+  }
+
+  async function seedCommandGateCandidateRun(options: {
+    readonly work: string;
+    readonly runId: string;
+    readonly scriptContent: string;
+    readonly timeoutSeconds?: number;
+    readonly env?: readonly string[];
+  }): Promise<{
+    readonly repo: string;
+    readonly runRoot: string;
+    readonly openAiServer: Awaited<ReturnType<typeof startHttpServer>>;
+    readonly githubServer: Awaited<ReturnType<typeof startHttpServer>>;
+  }> {
+    const repo = join(options.work, 'repo');
+    const runRoot = join(options.work, 'runs');
+    await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+    await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+    await mkdir(join(repo, 'pack'), { recursive: true });
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await chmod(runRoot, 0o700);
+
+    await git(repo, ['init', '-b', 'main']);
+    await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update docs/status.md.\n');
+    await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+    await writeFile(join(repo, 'docs', 'status.md'), 'initial\n');
+
+    const scriptRel = '.auto-sync/checks/verify.sh';
+    await writeFile(join(repo, scriptRel), options.scriptContent, { mode: 0o755 });
+    await chmod(join(repo, scriptRel), 0o755);
+
+    let turn = 0;
+    const openAiServer = await startHttpServer(async (req, res) => {
+      const body = await readJsonBody(req);
+      if (body['max_tokens'] === 1 && body['stream'] !== true) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+        return;
+      }
+      const step = turn++;
+      const sseBody = step === 0
+        ? sseToolCall('gpt-4.1-mini', 'c1', 'write', {
+          path: 'docs/status.md',
+          content: 'verified-ok\n',
+        })
+        : sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null }));
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sseBody);
+    });
+
+    const githubServer = await startHttpServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (url.pathname === '/repos/acme/engine/releases/latest') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+        return;
+      }
+      if (url.pathname === '/repos/acme/repo') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 42 }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    const envLines = (options.env ?? []).map(name => `            - ${name}`).join('\n');
+    const envBlock = envLines.length > 0 ? `\n          env:\n${envLines}` : '';
+    await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: async-gate-fixture
+spec:
+  goal:
+    candidate: Verify command gate behavior
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - docs
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+      - id: verify-cmd
+        implementation: command.v1
+        parameters:
+          script: ${scriptRel}
+          timeoutSeconds: ${options.timeoutSeconds ?? 15}${envBlock}
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: async gate test"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'init fixture']);
+
+    return {
+      repo,
+      runRoot,
+      openAiServer,
+      githubServer,
+    };
+  }
+
+  async function seedStepCandidateSnapshot(options: {
+    readonly work: string;
+    readonly runId: string;
+    readonly scripts: Readonly<Record<string, string>>;
+  }): Promise<{
+    readonly repo: string;
+    readonly runRoot: string;
+    readonly candidateDigest: string;
+    readonly scriptSha256ByRel: Readonly<Record<string, string>>;
+  }> {
+    const repo = join(options.work, 'repo');
+    const runRoot = join(options.work, 'runs');
+    await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+    await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+    await mkdir(join(repo, 'pack'), { recursive: true });
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await chmod(runRoot, 0o700);
+
+    await git(repo, ['init', '-b', 'main']);
+    await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update pack/proposal.json.\n');
+    await writeFile(join(repo, 'pack', 'proposal.json'), `${JSON.stringify({ schema_version: 1, version: '1.0.0' })}\n`);
+    await writeFile(join(repo, 'docs', 'upstream.json'), `${JSON.stringify({ version: '2.0.0' })}\n`);
+
+    const scriptSha256ByRel: Record<string, string> = {};
+    for (const [rel, content] of Object.entries(options.scripts)) {
+      const full = join(repo, rel);
+      await writeFile(full, content, { mode: 0o755 });
+      await chmod(full, 0o755);
+      scriptSha256ByRel[rel] = createHash('sha256').update(content).digest('hex');
+    }
+
+    await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: step-seed-gate
+spec:
+  goal:
+    candidate: Seed candidate snapshot for command gate tests
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - docs
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: custom-table
+      source: docs/upstream.json
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: seed"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  output:
+    formats: [json]
+`);
+    await git(repo, ['add', '.']);
+    await git(repo, ['commit', '-m', 'init step seed fixture']);
+
+    const staged = await stageTaskpackForStep({
+      taskpackPath: '.auto-sync/taskpack.yaml',
+      repositoryRoot: repo,
+      runRoot,
+      runId: options.runId,
+      mode: 'candidate',
+      discoverUpstreams: false,
+      upstreamRecordsJson: JSON.stringify([{ upstreamId: 'engine', status: 'available', version: '2.0.0' }]),
+    });
+    const loaded = await loadTrustedConfiguration({
+      configPath: staged.configPath,
+      registryPath: staged.registryPath,
+      registrySha256: staged.registrySha256,
+      untrustedRoots: [repo],
+    });
+    assert.equal(loaded.ok, true);
+    if (!loaded.ok) throw new Error('loadTrustedConfiguration failed');
+
+    const next = await stepNext({
+      configuration: loaded.value,
+      repository: repo,
+      runRoot,
+      runId: options.runId,
+      mode: 'candidate',
+    });
+    assert.equal(next.ok, true);
+    if (!next.ok || next.value.kind !== 'step') throw new Error('stepNext failed');
+
+    await writeFile(
+      join(next.value.candidateDir, 'pack', 'proposal.json'),
+      `${JSON.stringify({ schema_version: 1, version: '2.0.0' })}\n`,
+      { mode: 0o600 },
+    );
+    const submitted = await stepSubmit({
+      runRoot,
+      runId: options.runId,
+      leaseToken: next.value.leaseToken,
+      status: 'completed',
+    });
+    assert.equal(submitted.ok, true);
+
+    const inspectOut = join(options.work, `inspect-${options.runId}`);
+    const inspected = await inspectRun({ runRoot, runId: options.runId, output: inspectOut });
+    assert.equal(inspected.ok, true);
+    const resultDoc = JSON.parse(await readFile(join(inspectOut, 'result.json'), 'utf8')) as {
+      spec: { subject: { candidateDigest: { hex: string } } };
+    };
+    return {
+      repo,
+      runRoot,
+      candidateDigest: resultDoc.spec.subject.candidateDigest.hex,
+      scriptSha256ByRel,
+    };
+  }
+
+  it('returns pending after syncWaitMs, deduplicates repeated/concurrent POSTs to one execution, and settles pending->approved end-to-end', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-async-')));
+    let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
+    let seeded: Awaited<ReturnType<typeof seedCommandGateCandidateRun>> | undefined;
+
+    try {
+      const counterFile = join(work, 'exec-counter.txt');
+      const scriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+sleep 0.25
+printf '1\\n' >> ${JSON.stringify(counterFile)}
+`;
+      seeded = await seedCommandGateCandidateRun({
+        work,
+        runId: 'run-async-poll-e2e',
+        scriptContent,
+      });
+
+      const manifest = await loadDeclarativeTaskpack({
+        repositoryRoot: seeded.repo,
+        manifestPath: '.auto-sync/taskpack.yaml',
+      });
+      const baseSha = await git(seeded.repo, ['rev-parse', 'HEAD']);
+      const preview = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'pi',
+        repository: 'acme/repo',
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        repositoryRoot: seeded.repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        budgets: DEFAULT_HOST_BUDGETS,
+        credentialEnvMap: { provider: 'LLM_TOKEN', localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV },
+        allowManifestCustomBaseUrl: true,
+      });
+
+      gateServer = await startLocalCommandGateServer({
+        runRoot: seeded.runRoot,
+        repositoryRoot: seeded.repo,
+        gates: preview.localCommandGates ?? [],
+        syncWaitMs: 50,
+      });
+
+      // Compile written taskpack pointing at our syncWaitMs: 50 gateServer and executeTurnkeyActionCycle end-to-end.
+      const compiledWithGate = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'pi',
+        repository: 'acme/repo',
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        repositoryRoot: seeded.repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        budgets: DEFAULT_HOST_BUDGETS,
+        gateEndpoints: [gateServer.endpointPlan],
+        publicationEndpoint: null,
+        authorPrompt: 'Write docs/status.md with content "verified-ok\\n".',
+        roleSelection: {
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          thinking: 'off',
+          api: 'openai-completions',
+          baseUrl: `${seeded.openAiServer.url}/v1`,
+        },
+        credentialEnvMap: {
+          provider: 'LLM_TOKEN',
+          localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV,
+        },
+        allowManifestCustomBaseUrl: true,
+      });
+
+      const trustedDir = join(seeded.runRoot, 'trusted-async-e2e');
+      const regDir = join(trustedDir, 'registry');
+      const cfgDir = join(trustedDir, 'config');
+      await mkdir(regDir, { recursive: true, mode: 0o700 });
+      await mkdir(cfgDir, { recursive: true, mode: 0o700 });
+      await chmod(trustedDir, 0o700);
+      await chmod(regDir, 0o700);
+      await chmod(cfgDir, 0o700);
+      const registryPath = join(regDir, 'registry.yaml');
+      const configPath = join(cfgDir, 'config.yaml');
+      const configBytes = Buffer.from(serializePrettyYaml(compiledWithGate.config), 'utf8');
+      await writeFile(registryPath, compiledWithGate.registryBytes, { mode: 0o600 });
+      await writeFile(configPath, configBytes, { mode: 0o600 });
+      await chmod(registryPath, 0o600);
+      await chmod(configPath, 0o600);
+      if (compiledWithGate.instructionResources !== undefined && compiledWithGate.instructionResources.length > 0) {
+        await stageCompiledInstructionResources(regDir, compiledWithGate.instructionResources);
+      }
+
+      const cycleRes = await executeTurnkeyActionCycle({
+        runId: 'run-async-poll-e2e',
+        repositoryRoot: seeded.repo,
+        attemptSeq: 0,
+        ephemeralEnv: {
+          LLM_TOKEN: 'sk-async-poll-token-1234',
+          [DEFAULT_LOCAL_COMMAND_GATE_ENV]: gateServer.signingSecret,
+        },
+        taskpack: {
+          ...compiledWithGate,
+          configBytes,
+          trustedDirectory: trustedDir,
+          registryPath,
+          configPath,
+        },
+      });
+      assert.equal(cycleRes.ok, true, `executeTurnkeyActionCycle failed: ${cycleRes.detail}`);
+      assert.equal(cycleRes.status, 'completed');
+
+      const countLinesAfterCycle = (await readFile(counterFile, 'utf8')).trim().split('\n').filter(Boolean);
+      assert.equal(countLinesAfterCycle.length, 1, 'end-to-end multi-poll cycle must execute verify.sh exactly once');
+
+      // Inspect persisted run to verify Gate.run polled >= 2 times (pending -> approved) and grab candidateDigest.
+      const inspectDir = join(work, 'inspected-e2e');
+      const inspected = await inspectRun({ runRoot: seeded.runRoot, runId: 'run-async-poll-e2e', output: inspectDir });
+      assert.equal(inspected.ok, true);
+      const resultDoc = JSON.parse(await readFile(join(inspectDir, 'result.json'), 'utf8')) as {
+        spec: { subject: { candidateDigest: { hex: string } } };
+      };
+      const candidateDigest = resultDoc.spec.subject.candidateDigest.hex;
+      const runDirFiles = await readdir(join(seeded.runRoot, 'run-async-poll-e2e', 'artifacts'));
+      const gateOutputName = runDirFiles.find(name => name.startsWith('gate-output-') && name.endsWith('.bin'));
+      assert.ok(gateOutputName !== undefined, 'expected gate-output artifact from Gate.run');
+      const gateOutput = JSON.parse(
+        await readFile(join(seeded.runRoot, 'run-async-poll-e2e', 'artifacts', gateOutputName!), 'utf8'),
+      ) as { observation: { attempts: number }; verdict: { status: string } };
+      assert.equal(gateOutput.verdict.status, 'approved');
+      assert.equal(gateOutput.observation.attempts >= 2, true, `expected >= 2 polling attempts, got ${gateOutput.observation.attempts}`);
+
+      // Reset counter file and test direct HTTP POST deduplication with syncWaitMs: 50.
+      const gateMeta = (preview.localCommandGates ?? [])[0]!;
+      await writeFile(counterFile, '');
+      const payload = {
+        storeId: 'store-dedup',
+        runId: 'run-async-poll-e2e',
+        lockHash: { algorithm: 'sha256', hex: '0'.repeat(64) },
+        operationId: 'op-dedup-1',
+        dispatchId: 'disp-dedup-1',
+        dispatchGeneration: 1,
+        gateId: gateMeta.gateId,
+        checkId: gateMeta.checkId,
+        candidateDigest,
+      };
+
+      const first = await postGateSignedWithHeaders(gateServer.url, payload, gateServer.signingSecret);
+      assert.equal(first.status, 200);
+      assert.equal(first.json['status'], 'pending');
+      assert.equal(first.json['reason'], null);
+
+      const [concurrentA, concurrentB] = await Promise.all([
+        postGateSignedWithHeaders(gateServer.url, payload, gateServer.signingSecret),
+        postGateSignedWithHeaders(gateServer.url, payload, gateServer.signingSecret),
+      ]);
+      assert.equal(concurrentA.status, 200);
+      assert.equal(concurrentB.status, 200);
+
+      let finalVerdict = concurrentB;
+      const deadline = Date.now() + 5_000;
+      while (finalVerdict.json['status'] === 'pending' && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 50));
+        finalVerdict = await postGateSignedWithHeaders(gateServer.url, payload, gateServer.signingSecret);
+      }
+      assert.equal(finalVerdict.status, 200);
+      assert.equal(finalVerdict.json['status'], 'approved');
+
+      const directLines = (await readFile(counterFile, 'utf8')).trim().split('\n').filter(Boolean);
+      assert.equal(directLines.length, 1, 'concurrent and repeated polls for same operationKey must run script exactly once');
+    } finally {
+      await gateServer?.close();
+      await seeded?.openAiServer.close();
+      await seeded?.githubServer.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  const sharedWorkDirPromise = (async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-shared-')));
+    return work;
+  })();
+  let sharedWork = '';
+  let sharedSeed: {
+    readonly repo: string;
+    readonly runRoot: string;
+    readonly candidateDigest: string;
+    readonly scriptSha256ByRel: Readonly<Record<string, string>>;
+    readonly pidFile: string;
+    readonly scratchMarkerFile: string;
+  } | undefined;
+
+  before(async () => {
+    sharedWork = await sharedWorkDirPromise;
+    const pidFile = join(sharedWork, 'pids.txt');
+    const scratchMarkerFile = join(sharedWork, 'scratch-base.txt');
+    const longSleepRel = '.auto-sync/checks/long-sleep.sh';
+    const longSleepContent = `#!/usr/bin/env bash
+set -euo pipefail
+sleep 30 &
+bg_pid=$!
+printf '%s\\n' "$HOME" > ${JSON.stringify(scratchMarkerFile)}
+printf '%s %s\\n' "$$" "$bg_pid" > ${JSON.stringify(pidFile)}
+wait "$bg_pid"
+`;
+    const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
+    const tailScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+echo "npm warn deprecated legacy-pkg@0.1.0: please migrate to newer release" >&2
+${JSON.stringify(process.execPath)} -e 'for (let i = 0; i < 1500; i++) process.stdout.write("ok " + i + " passing check padding line for buffer test\\n"); process.stdout.write("FAIL: runtime assertion XYZ\\n");'
+exit 1
+`;
+    const overflowScriptRel = '.auto-sync/checks/verify-overflow.sh';
+    const overflowScriptContent = `#!/usr/bin/env bash
+set -euo pipefail
+echo "npm warn deprecated legacy-pkg@0.1.0: please migrate" >&2
+${JSON.stringify(process.execPath)} -e 'const line = "ok passing test line padding 0123456789abcdef0123456789abcdef\\n"; for (let i = 0; i < 20000; i++) process.stdout.write(line); process.stdout.write("FAIL: tail overflow sentinel\\n");'
+exit 1
+`;
+    const seeded = await seedStepCandidateSnapshot({
+      work: sharedWork,
+      runId: 'run-shared-gate-seed',
+      scripts: {
+        [longSleepRel]: longSleepContent,
+        [tailScriptRel]: tailScriptContent,
+        [overflowScriptRel]: overflowScriptContent,
+      },
+    });
+    sharedSeed = { ...seeded, pidFile, scratchMarkerFile };
+  });
+
+  after(async () => {
+    if (sharedWork.length > 0) {
+      await rm(sharedWork, { recursive: true, force: true });
+    }
+  });
+
+  it('close() kills in-flight child process groups and awaits cleanup before removing owned scratch directory', async () => {
+    let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
+
+    try {
+      const seeded = sharedSeed!;
+      const scriptRel = '.auto-sync/checks/long-sleep.sh';
+      gateServer = await startLocalCommandGateServer({
+        runRoot: seeded.runRoot,
+        repositoryRoot: seeded.repo,
+        gates: [{
+          checkId: 'verify-cmd',
+          gateId: 'verify-cmd',
+          endpointRef: 'loopwright-local-command',
+          script: scriptRel,
+          scriptSha256: seeded.scriptSha256ByRel[scriptRel]!,
+          timeoutSeconds: 60,
+          allowReadOnlyGitHubToken: false,
+          env: [],
+        }],
+        syncWaitMs: 10_000,
+      });
+
+      const inFlightPost = postGateSignedWithHeaders(
+        gateServer.url,
+        {
+          storeId: 'store-close',
+          runId: 'run-shared-gate-seed',
+          lockHash: null,
+          operationId: 'op-close-1',
+          dispatchId: 'disp-close-1',
+          dispatchGeneration: 1,
+          gateId: 'verify-cmd',
+          checkId: 'verify-cmd',
+          candidateDigest: seeded.candidateDigest,
+        },
+        gateServer.signingSecret,
+      ).catch(() => undefined);
+
+      // Wait until script + background grandchild PIDs are recorded.
+      const waitStart = Date.now();
+      while (!existsSync(seeded.pidFile) && Date.now() - waitStart < 5_000) {
+        await new Promise(r => setTimeout(r, 25));
+      }
+      assert.equal(existsSync(seeded.pidFile), true, 'long-running gate child must have started');
+      const [childPidStr, grandchildPidStr] = (await readFile(seeded.pidFile, 'utf8')).trim().split(/\s+/);
+      const childPid = Number(childPidStr);
+      const grandchildPid = Number(grandchildPidStr);
+      assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
+      assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
+
+      const scratchHomePath = (await readFile(seeded.scratchMarkerFile, 'utf8')).trim();
+      const scratchBasePath = dirname(dirname(scratchHomePath));
+      assert.equal(existsSync(scratchBasePath), true);
+
+      const closeStarted = performance.now();
+      await gateServer.close();
+      const closeElapsed = performance.now() - closeStarted;
+      await inFlightPost;
+
+      assert.equal(closeElapsed < 3_000, true, `close() took too long (${closeElapsed}ms); expected immediate process-group termination`);
+      assert.equal(existsSync(scratchBasePath), false, 'owned scratchBase must be cleanly removed after in-flight jobs settle');
+
+      // Verify both script PID and its background grandchild PID are terminated.
+      for (const pid of [childPid, grandchildPid]) {
+        let alive = true;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          try {
+            process.kill(pid, 0);
+            await new Promise(r => setTimeout(r, 20));
+          } catch {
+            alive = false;
+            break;
+          }
+        }
+        assert.equal(alive, false, `process ${pid} in child process group should be dead after close()`);
+      }
+    } finally {
+      await gateServer?.close();
+    }
+  });
+
+  it('surfaces stdout failure tail diagnostics in denied verdict reason even when stderr emits warnings and stdout exceeds 70 KiB or MAX_STDIO_BYTES', async () => {
+    let gateServer: Awaited<ReturnType<typeof startLocalCommandGateServer>> | undefined;
+
+    try {
+      const seeded = sharedSeed!;
+      const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
+      const overflowScriptRel = '.auto-sync/checks/verify-overflow.sh';
+
+      gateServer = await startLocalCommandGateServer({
+        runRoot: seeded.runRoot,
+        repositoryRoot: seeded.repo,
+        gates: [
+          {
+            checkId: 'verify-cmd',
+            gateId: 'verify-cmd',
+            endpointRef: 'loopwright-local-command',
+            script: tailScriptRel,
+            scriptSha256: seeded.scriptSha256ByRel[tailScriptRel]!,
+            timeoutSeconds: 15,
+            allowReadOnlyGitHubToken: false,
+            env: [],
+          },
+          {
+            checkId: 'verify-overflow',
+            gateId: 'verify-overflow',
+            endpointRef: 'loopwright-local-command',
+            script: overflowScriptRel,
+            scriptSha256: seeded.scriptSha256ByRel[overflowScriptRel]!,
+            timeoutSeconds: 15,
+            allowReadOnlyGitHubToken: false,
+            env: [],
+          },
+        ],
+      });
+
+      const tailVerdict = await postGateSignedWithHeaders(
+        gateServer.url,
+        {
+          storeId: 'store-tail',
+          runId: 'run-shared-gate-seed',
+          lockHash: null,
+          operationId: 'op-tail-1',
+          dispatchId: 'disp-tail-1',
+          dispatchGeneration: 1,
+          gateId: 'verify-cmd',
+          checkId: 'verify-cmd',
+          candidateDigest: seeded.candidateDigest,
+        },
+        gateServer.signingSecret,
+      );
+      assert.equal(tailVerdict.status, 200);
+      assert.equal(tailVerdict.json['status'], 'denied');
+      const tailReason = String(tailVerdict.json['reason'] ?? '');
+      assert.equal(tailReason.length <= 256, true);
+      assert.equal(tailReason.includes('FAIL: runtime assertion XYZ'), true, `expected stdout tail failure in reason, got: ${tailReason}`);
+      assert.equal(tailReason.includes('npm warn deprecated'), true, `expected stderr warning in reason, got: ${tailReason}`);
+
+      const overflowVerdict = await postGateSignedWithHeaders(
+        gateServer.url,
+        {
+          storeId: 'store-tail',
+          runId: 'run-shared-gate-seed',
+          lockHash: null,
+          operationId: 'op-tail-overflow',
+          dispatchId: 'disp-tail-overflow',
+          dispatchGeneration: 1,
+          gateId: 'verify-overflow',
+          checkId: 'verify-overflow',
+          candidateDigest: seeded.candidateDigest,
+        },
+        gateServer.signingSecret,
+      );
+      assert.equal(overflowVerdict.status, 200);
+      assert.equal(overflowVerdict.json['status'], 'denied');
+      const overflowReason = String(overflowVerdict.json['reason'] ?? '');
+      assert.equal(overflowReason.length <= 256, true);
+      assert.equal(overflowReason.includes('FAIL: tail overflow sentinel'), true, `expected >1MiB stdout tail failure in reason, got: ${overflowReason}`);
+      assert.equal(overflowReason.includes('[output truncated]'), true, `expected truncation marker in reason, got: ${overflowReason}`);
+    } finally {
+      await gateServer?.close();
     }
   });
 });

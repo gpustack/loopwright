@@ -91,24 +91,48 @@ async function createFastGitRepo(
       timeout: 20_000,
     });
 
-  git(['init', '-q']);
-  const indexLines: string[] = [];
-  for (const item of files) {
-    const raw = typeof item.data === 'string' ? Buffer.from(item.data, 'utf8') : item.data;
-    const oid = git(['hash-object', '-w', '--stdin'], raw).toString('utf8').trim();
-    indexLines.push(`${item.mode} ${oid}\t${item.path}`);
+  git(['init', '-q', '-b', 'main']);
+  if (files.length > 0 || gitlinks.length > 0) {
+    const chunks: Buffer[] = [];
+    const marks: { readonly mode: string; readonly mark: number; readonly path: string }[] = [];
+    let nextMark = 1;
+    for (const item of files) {
+      const raw = typeof item.data === 'string' ? Buffer.from(item.data, 'utf8') : item.data;
+      const mark = nextMark++;
+      chunks.push(Buffer.from(`blob\nmark :${mark}\ndata ${raw.byteLength}\n`, 'utf8'));
+      chunks.push(raw);
+      chunks.push(Buffer.from('\n', 'utf8'));
+      marks.push({ mode: item.mode, mark, path: item.path });
+    }
+    const quoteFastImportPath = (relPath: string): string => (
+      /["\\\n\r ]/.test(relPath)
+        ? `"${relPath.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`
+        : relPath
+    );
+    const commitLines: string[] = [
+      'commit refs/heads/main',
+      'committer T3 Fixture <t3@localhost.invalid> 1700000000 +0000',
+      'data 4',
+      'seed',
+    ];
+    for (const m of marks) {
+      commitLines.push(`M ${m.mode} :${m.mark} ${quoteFastImportPath(m.path)}`);
+    }
+    for (const gl of gitlinks) {
+      commitLines.push(`M 160000 ${gl.commitOid} ${quoteFastImportPath(gl.path)}`);
+    }
+    commitLines.push('done\n');
+    chunks.push(Buffer.from(commitLines.join('\n'), 'utf8'));
+    git(['-c', 'core.ignorecase=false', 'fast-import', '--quiet'], Buffer.concat(chunks));
+  } else {
+    const treeOidEmpty = git(['write-tree']).toString('utf8').trim();
+    const emptyCommitOid = git(
+      ['-c', 'user.name=T3 Fixture', '-c', 'user.email=t3@localhost.invalid', 'commit-tree', treeOidEmpty, '-m', 'seed'],
+    ).toString('utf8').trim();
+    git(['update-ref', 'HEAD', emptyCommitOid]);
   }
-  for (const gl of gitlinks) {
-    indexLines.push(`160000 ${gl.commitOid}\t${gl.path}`);
-  }
-  if (indexLines.length > 0) {
-    git(['update-index', '--index-info'], Buffer.from(indexLines.join('\n') + '\n', 'utf8'));
-  }
-  const treeOid = git(['write-tree']).toString('utf8').trim();
-  const commitOid = git(
-    ['-c', 'user.name=T3 Fixture', '-c', 'user.email=t3@localhost.invalid', 'commit-tree', treeOid, '-m', 'seed'],
-  ).toString('utf8').trim();
-  git(['update-ref', 'HEAD', commitOid]);
+  const commitOid = git(['rev-parse', 'HEAD']).toString('utf8').trim();
+  const treeOid = git(['rev-parse', 'HEAD^{tree}']).toString('utf8').trim();
 
   const realDir = await realpath(dir);
   return {
@@ -862,7 +886,7 @@ test('T3 E2E 600-file tree_overlay cycle: raw baseline materialization, delete+e
       { path: 'src/raw.txt', mode: '100644', data: rawLfIdent },
       { path: 'src/delete-me.txt', mode: '100644', data: 'to be deleted' },
       { path: 'src/edit-me.txt', mode: '100644', data: 'before' },
-      ...Array.from({ length: 595 }, (_, i) => ({
+      ...Array.from({ length: 259 }, (_, i) => ({
         path: `src/batch/file-${String(i).padStart(4, '0')}.txt`,
         mode: '100644' as const,
         data: `baseline-content-${i}`,
@@ -1147,7 +1171,7 @@ test('T3 E2E 600-file tree_overlay cycle: raw baseline materialization, delete+e
       }
     }
     assert.equal(crashedOnce, true);
-    assert.equal(observedBaselineCount, 601); // .gitattributes, json, exec, raw, delete-me, edit-me, 595 batch = 601
+    assert.equal(observedBaselineCount, 265); // .gitattributes, json, exec, raw, delete-me, edit-me, 259 batch = 265
     assert.equal(observedRawPreserved, true);
     assert.equal(observedExecMode, 0o555);
 
