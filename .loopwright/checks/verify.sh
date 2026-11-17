@@ -715,18 +715,99 @@ RAW_TMP_BASE="${TMPDIR:-/tmp}"
 REAL_TMP_BASE="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$RAW_TMP_BASE")"
 WORK_ROOT="$(mktemp -d "${REAL_TMP_BASE%/}/lwv.XXXXXX")"
 chmod 0700 "$WORK_ROOT"
+RUNTIME_TMP="${WORK_ROOT}/tr"
+SHM_RUNTIME_TMP=""
 cleanup() {
   chmod -R u+w "$WORK_ROOT" >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT" >/dev/null 2>&1 || true
+  if [[ -n "${SHM_RUNTIME_TMP:-}" && -d "$SHM_RUNTIME_TMP" ]]; then
+    chmod -R u+w "$SHM_RUNTIME_TMP" >/dev/null 2>&1 || true
+    rm -rf "$SHM_RUNTIME_TMP" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+if [[ "$(uname -s)" == "Linux" && -d /dev/shm ]]; then
+  SHM_RUNTIME_TMP="$("$PYTHON_EXEC" - "$REAL_TMP_BASE" <<'PY'
+from __future__ import annotations
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+def is_path_on_tmpfs(path: str) -> bool:
+    real = os.path.realpath(path)
+    best_mp = ""
+    best_fs = ""
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mp = parts[1].replace("\\040", " ")
+                fs_type = parts[2]
+                if real == mp or (mp == "/" and real.startswith("/")) or real.startswith(mp.rstrip("/") + "/"):
+                    if len(mp) > len(best_mp):
+                        best_mp = mp
+                        best_fs = fs_type
+    except OSError:
+        return False
+    return best_fs in ("tmpfs", "ramfs")
+
+def mem_available_kb() -> int:
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1])
+    except (OSError, ValueError):
+        return 0
+    return 0
+
+try:
+    tmp_base = sys.argv[1]
+    if is_path_on_tmpfs(tmp_base):
+        raise SystemExit(0)
+    if not os.path.isdir("/dev/shm"):
+        raise SystemExit(0)
+    usage = shutil.disk_usage("/dev/shm")
+    if usage.total < 3 * 1024 * 1024 * 1024 or usage.free < 2 * 1024 * 1024 * 1024:
+        raise SystemExit(0)
+    if mem_available_kb() < 2621440:
+        raise SystemExit(0)
+    rt = os.path.realpath(tempfile.mkdtemp(prefix="lwv-rt.", dir="/dev/shm"))
+    os.chmod(rt, 0o700)
+    probe = os.path.join(rt, "exec-probe.sh")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(probe, 0o700)
+        res = subprocess.run([probe], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            os.unlink(probe)
+            print(rt)
+        else:
+            shutil.rmtree(rt, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(rt, ignore_errors=True)
+except Exception:
+    pass
+PY
+)"
+  if [[ -n "$SHM_RUNTIME_TMP" ]]; then
+    RUNTIME_TMP="$SHM_RUNTIME_TMP"
+  fi
+fi
 
 BUILD_WORK="${WORK_ROOT}/build"
 RUNTIME_WORK="${WORK_ROOT}/run"
 BUILD_HOME="${WORK_ROOT}/hb"
 BUILD_TMP="${WORK_ROOT}/tb"
 RUNTIME_HOME="${WORK_ROOT}/hr"
-RUNTIME_TMP="${WORK_ROOT}/tr"
 WORK_NPM_CACHE="${WORK_ROOT}/npm-cache"
 mkdir -p "$BUILD_WORK" "$BUILD_HOME" "$BUILD_TMP"
 chmod 0700 "$BUILD_WORK" "$BUILD_HOME" "$BUILD_TMP"
@@ -793,10 +874,35 @@ cat >"$COMPILE_RUNNER" <<'EOF'
 set -euo pipefail
 
 "$VERIFY_NODE_BIN" scripts/build.mjs
-"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit
-"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache .
-"$VERIFY_NODE_BIN" scripts/check-docs.mjs
-"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json
+
+LOG_DIR="${TMPDIR:-/tmp}"
+LOG_TSC="$(mktemp "${LOG_DIR%/}/lw-tsc.XXXXXX")"
+LOG_ESLINT="$(mktemp "${LOG_DIR%/}/lw-eslint.XXXXXX")"
+LOG_DOCS="$(mktemp "${LOG_DIR%/}/lw-docs.XXXXXX")"
+
+"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json >"$LOG_TSC" 2>&1 &
+PID_TSC=$!
+"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache . >"$LOG_ESLINT" 2>&1 &
+PID_ESLINT=$!
+"$VERIFY_NODE_BIN" scripts/check-docs.mjs >"$LOG_DOCS" 2>&1 &
+PID_DOCS=$!
+
+rc_tsc=0
+rc_eslint=0
+rc_docs=0
+wait "$PID_TSC" || rc_tsc=$?
+wait "$PID_ESLINT" || rc_eslint=$?
+wait "$PID_DOCS" || rc_docs=$?
+
+cat "$LOG_TSC"
+cat "$LOG_ESLINT"
+cat "$LOG_DOCS"
+rm -f "$LOG_TSC" "$LOG_ESLINT" "$LOG_DOCS"
+
+if (( rc_tsc != 0 || rc_eslint != 0 || rc_docs != 0 )); then
+  exit 1
+fi
+
 if [[ -n "${HUGO_BIN:-}" ]]; then
   "$VERIFY_NODE_BIN" scripts/site.mjs build
 fi
@@ -809,7 +915,7 @@ cat >"$TEST_RUNNER" <<'EOF'
 set -euo pipefail
 
 "$VERIFY_NODE_BIN" packages/cli/dist/main.js closure --verify-failures
-"$VERIFY_NODE_BIN" scripts/run-tests.mjs
+LW_TEST_CONCURRENCY="${LW_TEST_CONCURRENCY:-3}" "$VERIFY_NODE_BIN" scripts/run-tests.mjs
 EOF
 chmod 0555 "$TEST_RUNNER"
 
@@ -835,7 +941,7 @@ runtime_dir = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "run")
 build_home = os.path.realpath(os.environ["BUILD_HOME"])
 build_tmp = os.path.realpath(os.environ["BUILD_TMP"])
 runtime_home = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "hr")
-runtime_tmp = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "tr")
+runtime_tmp = os.path.realpath(os.environ["RUNTIME_TMP"])
 work_npm_cache = os.path.realpath(os.environ["WORK_NPM_CACHE"])
 work_root = os.path.realpath(os.environ["WORK_ROOT"])
 baseline_repo = os.path.realpath(os.environ["BASELINE_REAL"])
@@ -1514,12 +1620,37 @@ run_contained(
     network_mode="none",
 )
 
-# Promote compiled tree into brand-new RUNTIME_WORK (fresh regular-file inodes) and destroy BUILD_WORK
-# so any compile-stage process that escaped its process group has zero Seatbelt/inode write authority.
-promote_build_to_runtime(build_dir, runtime_dir)
+# Promote compiled tree into brand-new RUNTIME_WORK (fresh regular-file inodes) via staging dir
+# and atomic rename so any compile-stage survivor cannot race file creation in RUNTIME_WORK.
+runtime_stage = os.path.join(work_root, "run.staging")
+force_remove_dir(runtime_stage)
+promote_build_to_runtime(build_dir, runtime_stage)
+os.replace(runtime_stage, runtime_dir)
 force_remove_dir(build_dir)
 force_remove_dir(build_home)
 force_remove_dir(build_tmp)
+
+if platform_name == "linux" and os.path.isdir("/dev/shm"):
+    shm_root = os.path.realpath("/dev/shm")
+    if runtime_tmp == shm_root or runtime_tmp.startswith(shm_root + "/") or runtime_tmp.startswith("/dev/shm/"):
+        mem_avail_kb = 0
+        try:
+            with open("/proc/meminfo", "r", encoding="utf-8") as mf:
+                for line in mf:
+                    if line.startswith("MemAvailable:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            mem_avail_kb = int(parts[1])
+                        break
+        except (OSError, ValueError):
+            mem_avail_kb = 0
+        try:
+            shm_free = shutil.disk_usage("/dev/shm").free
+        except OSError:
+            shm_free = 0
+        if shm_free < 1536 * 1024 * 1024 or mem_avail_kb < 2 * 1024 * 1024:
+            force_remove_dir(runtime_tmp)
+            runtime_tmp = os.path.join(work_root, "tr")
 
 os.makedirs(runtime_home, mode=0o700, exist_ok=True)
 os.makedirs(runtime_tmp, mode=0o700, exist_ok=True)

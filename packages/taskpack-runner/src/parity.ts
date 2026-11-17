@@ -33,6 +33,8 @@ export interface RunnerParityCaseResult {
   readonly patchDigestMatch: boolean | null;
   readonly remoteWrites: number;
   readonly legacyRemoteWrites?: number;
+  readonly legacyAcceptedGroups?: number | null;
+  readonly legacyPatchDigest?: string | null;
   readonly classification: 'exact_match' | 'intentional_improvement' | 'mismatch';
   readonly explanation: string;
 }
@@ -706,7 +708,8 @@ export async function runRunnerParitySuite(options: RunnerParitySuiteOptions = {
       casesByScenario.set(scenario, {
         scenario, legacyStatus: legacyOutcome.status, legacyReason: legacyOutcome.reason, legacyNormalized: normalizeLegacyStatus(legacyOutcome.status),
         loopwrightOutcome: loopwright, acceptedGroupsMatch, patchDigestMatch, remoteWrites: loopwrightWrites,
-        legacyRemoteWrites: legacyOutcome.prCount, classification, explanation,
+        legacyRemoteWrites: legacyOutcome.prCount, legacyAcceptedGroups: legacyOutcome.acceptedGroups,
+        legacyPatchDigest: legacyOutcome.patchDigest, classification, explanation,
       });
     };
     const scenarioTasks: Array<() => Promise<void>> = [];
@@ -963,7 +966,7 @@ export async function runRunnerParitySuite(options: RunnerParitySuiteOptions = {
       }
     });
     let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(3, scenarioTasks.length) }, async () => {
+    const workers = Array.from({ length: Math.min(4, scenarioTasks.length) }, async () => {
       while (nextIndex < scenarioTasks.length) {
         const current = nextIndex++;
         await scenarioTasks[current]!();

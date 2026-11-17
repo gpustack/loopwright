@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
-import { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
 import {
   buildNativePullRequestBody,
   compileDeclarativeTaskpack,
@@ -1072,7 +1071,7 @@ spec:
       };
 
       const fakeDeadlineAdapter: NonNullable<Parameters<typeof executeTurnkeyActionCycle>[0]['openHostSessionAdapter']> = async (host, adapterInput, opts) => {
-        const opened = await openPiHostSessionAdapterV2(host, adapterInput, opts);
+        const opened = await fastAdapter(host, adapterInput, opts);
         if (!opened.ok) return opened;
         const inner = opened.value;
         return {

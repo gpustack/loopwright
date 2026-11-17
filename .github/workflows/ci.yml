@@ -42,22 +42,21 @@ jobs:
         with:
           node-version: '26'
           cache: 'npm'
-      - name: Install Python bridge dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-packaging python3-yaml python3-requests
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefer-offline
       - name: Build
         run: npm run build
-      - name: Typecheck and lint
+      - name: Typecheck, lint, and docs check
         run: |
-          npm run typecheck &
+          ./node_modules/.bin/tsc -p tsconfig.test.json --noEmit &
           PID_TYPECHECK=$!
-          npm run lint &
+          ./node_modules/.bin/eslint . &
           PID_LINT=$!
+          node scripts/check-docs.mjs &
+          PID_DOCS=$!
           wait "${PID_TYPECHECK}"
           wait "${PID_LINT}"
+          wait "${PID_DOCS}"
       - name: Verify closure matrix and failure scenarios
         run: node packages/cli/dist/main.js closure --verify-failures
       - name: Package release bundle

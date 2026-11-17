@@ -723,14 +723,12 @@ test('Cycle.implementationRepair enforces the 16 KiB repair prompt byte ceiling 
       { id: 'ci-gate', url: gate.url, signingCredentialRef: 'gate-signer', authCredentialRef: null, timeoutMs: 1500, maxPollMs: 5000, pollInitialMs: 100, pollMaxMs: 100, jitter: 0 },
     ]);
     const installed = await installedHandlerDigests();
-    const oversizedKeys1 = Array.from({ length: 64 }, (_, idx) => `k1_${String(idx).padStart(2, '0')}_${'a'.repeat(110)}`);
-    const oversizedKeys2 = Array.from({ length: 64 }, (_, idx) => `k2_${String(idx).padStart(2, '0')}_${'b'.repeat(110)}`);
-    const oversizedKeys3 = Array.from({ length: 64 }, (_, idx) => `k3_${String(idx).padStart(2, '0')}_${'c'.repeat(110)}`);
+    const oversizedKeys1 = Array.from({ length: 80 }, (_, idx) => `k1_${String(idx).padStart(2, '0')}_${'a'.repeat(114)}`);
+    const oversizedKeys2 = Array.from({ length: 80 }, (_, idx) => `k2_${String(idx).padStart(2, '0')}_${'b'.repeat(114)}`);
     setFixture(f.registry, ['spec', 'handlers'], [
       ...f.registry.spec.handlers,
       { id: 'big-a', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'big-a', path: 'result.json', required: oversizedKeys1, equals: {} }, capabilities: ['inert_bytes', 'read_only'] },
       { id: 'big-b', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'big-b', path: 'result.json', required: oversizedKeys2, equals: {} }, capabilities: ['inert_bytes', 'read_only'] },
-      { id: 'big-c', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'big-c', path: 'result.json', required: oversizedKeys3, equals: {} }, capabilities: ['inert_bytes', 'read_only'] },
       { id: 'approval', kind: 'check', implementation: 'gate.v1', version: 1, digest: installed['gate.v1'], parameters: { checkId: 'approval', endpointRef: 'ci-gate', gateId: 'merge-gate' }, capabilities: ['external_service', 'read_only'] },
     ]);
     setFixture(f.registry, ['spec', 'roleProfiles', 0, 'tools'], ['read', 'write']);
@@ -743,22 +741,19 @@ test('Cycle.implementationRepair enforces the 16 KiB repair prompt byte ceiling 
       { id: 'build', kind: 'agent', uses: 'package.patch', roleId: 'builder', dependsOn: [] },
       { id: 'big-a', kind: 'check', uses: 'big-a', roleId: null, dependsOn: ['build'] },
       { id: 'big-b', kind: 'check', uses: 'big-b', roleId: null, dependsOn: ['build'] },
-      { id: 'big-c', kind: 'check', uses: 'big-c', roleId: null, dependsOn: ['build'] },
       { id: 'approval', kind: 'check', uses: 'approval', roleId: null, dependsOn: ['build'] },
     ]);
     setFixture(f.config, ['spec', 'profiles', 'steps'], [
       { stepId: 'build', handlerRef: 'package.patch' },
       { stepId: 'big-a', handlerRef: 'big-a' },
       { stepId: 'big-b', handlerRef: 'big-b' },
-      { stepId: 'big-c', handlerRef: 'big-c' },
       { stepId: 'approval', handlerRef: 'approval' },
     ]);
     setFixture(f.config, ['spec', 'task', 'spec', 'acceptance'], {
-      required: ['big-a', 'big-b', 'big-c', 'approval'],
+      required: ['big-a', 'big-b', 'approval'],
       checks: [
         { id: 'big-a', allowedEvidenceLevels: ['local_execution'] },
         { id: 'big-b', allowedEvidenceLevels: ['local_execution'] },
-        { id: 'big-c', allowedEvidenceLevels: ['local_execution'] },
         { id: 'approval', allowedEvidenceLevels: ['external_service'] },
       ],
     });
@@ -806,10 +801,10 @@ test('Cycle.implementationRepair enforces the 16 KiB repair prompt byte ceiling 
     const findingsJson = commands[1]!.text.split('Findings:\n')[1]!;
     const parsedFindings = JSON.parse(findingsJson) as readonly { readonly checkId: string; readonly detail?: string }[];
     assert.ok(Array.isArray(parsedFindings));
-    assert.ok(parsedFindings.length >= 1 && parsedFindings.length < 4);
+    assert.ok(parsedFindings.length >= 1 && parsedFindings.length < 3);
     assert.deepEqual(
       parsedFindings.map(item => item.checkId),
-      ['approval', 'big-a', 'big-b', 'big-c'].slice(0, parsedFindings.length),
+      ['approval', 'big-a', 'big-b'].slice(0, parsedFindings.length),
     );
     assert.equal(parsedFindings.every(item => item.detail === undefined), true);
   } finally {

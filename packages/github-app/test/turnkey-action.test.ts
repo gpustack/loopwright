@@ -42,6 +42,9 @@ import {
   createEndToEndFixture,
   writeTaskpackYaml,
 } from './turnkey-action-fixtures.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 describe('turnkey sandbox policy, upstream discovery, and output formatting', () => {
   it('resolves omitted spec.sandbox to direct-dedicated under GITHUB_ACTIONS=true while keeping standalone defaults fail-closed', async () => {
@@ -687,7 +690,7 @@ describe('turnkey Action cycle end-to-end execution', () => {
         'INPUT_REMOTE-URL': fixture.bareRemote,
         LLM_TOKEN: fixture.goodToken,
         CHECK_SECRET: fixture.verifySecret,
-      });
+      }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 1, 'mutated remote PR head must settle as failed');
       assert.equal(prCreateOrPatchCount, 0, 'REST PR update must not fire when git push fails --force-with-lease');
@@ -1077,7 +1080,7 @@ describe('negative and security regression tests', () => {
         'INPUT_RUN-ID': 'run-existing-branch-refusal',
         'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
         'INPUT_REMOTE-URL': fixture.bareRemote,
-      });
+      }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 1);
       assert.equal(prPostCount, 0, 'must not call POST /pulls when existing unassociated branch refused');
@@ -1178,7 +1181,7 @@ describe('negative and security regression tests', () => {
         'INPUT_RUN-ID': 'run-post-push-rest-fail',
         'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
         'INPUT_REMOTE-URL': fixture.bareRemote,
-      });
+      }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 1, 'REST failure after git push must fail closed');
       assert.equal(postPullsCalls, 1);
@@ -1293,6 +1296,7 @@ describe('negative and security regression tests', () => {
         runId: 'run-pr-matches-discovered',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         baseUrl: `${openAiServer.url}/v1`,
         githubApiBaseUrl: githubServer.url,
         githubToken: fixture.githubToken,
@@ -2333,6 +2337,7 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
         runId: 'run-async-poll-e2e',
         repositoryRoot: seeded.repo,
         attemptSeq: 0,
+        openHostSessionAdapter: fastAdapter,
         ephemeralEnv: {
           LLM_TOKEN: 'sk-async-poll-token-1234',
           [DEFAULT_LOCAL_COMMAND_GATE_ENV]: gateServer.signingSecret,

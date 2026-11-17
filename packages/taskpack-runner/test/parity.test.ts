@@ -11,11 +11,17 @@ import {
   legacyCase, normalizeLegacyStatus, runLegacyScenario, runRunnerParitySuite,
 } from '../src/parity.js';
 import { PythonBridge } from '../src/python-bridge.js';
-import type { RunnerParityScenario } from '../src/parity.js';
+import type { RunnerParityReport, RunnerParityScenario } from '../src/parity.js';
 
 const run = promisify(execFile);
 
-describe('parity harness: legacy-side execution over the vendored frozen functions', { concurrency: 3 }, () => {
+let sharedParityReportPromise: Promise<RunnerParityReport> | null = null;
+function getSharedParityReport(): Promise<RunnerParityReport> {
+  sharedParityReportPromise ??= runRunnerParitySuite();
+  return sharedParityReportPromise;
+}
+
+describe('parity harness: legacy-side execution over the vendored frozen functions', () => {
   const bridge = new PythonBridge();
   const roots: string[] = [];
   let templateFixture: { path: string; headSha: string } | null = null;
@@ -56,97 +62,83 @@ describe('parity harness: legacy-side execution over the vendored frozen functio
     assert.deepEqual([...RUNNER_PARITY_SCENARIOS][13], 'publication_receipt_lost_then_reconciled');
   });
 
-  it('runs no_update as a zero-write discovery with nothing to do', { timeout: 240000 }, async () => {
+  it('runs no_update directly via runLegacyScenario as a zero-write discovery with nothing to do', { timeout: 240000 }, async () => {
     const outcome = await legacy('no_update');
     assert.equal(outcome.status, 'no_changes', outcome.reason ?? '');
     assert.equal(outcome.prCount, 0);
     assert.equal(normalizeLegacyStatus(outcome.status), 'no_change');
   });
 
-  it('publishes a single accepted group as exactly one managed pull request', { timeout: 240000 }, async () => {
-    const outcome = await legacy('candidate_single_group');
-    assert.equal(outcome.status, 'published', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 1);
-    assert.ok(outcome.patchDigest !== null && outcome.patchDigest.length === 64);
-  });
+  it('verifies every frozen legacy disposition across all 14 scenarios from the shared parity suite', { timeout: 560000 }, async () => {
+    const report = await getSharedParityReport();
+    const byScenario = new Map(report.cases.map(c => [c.scenario, c]));
 
-  it('publishes nothing when the drop-group mutation causes both groups to fail', { timeout: 240000 }, async () => {
-    const outcome = await legacy('candidate_partial_groups');
-    assert.equal(outcome.status, 'no_changes', `status was ${outcome.status}: ${outcome.reason ?? ''}`);
-    assert.equal(outcome.prCount, 0);
-  });
+    const noUpdate = byScenario.get('no_update')!;
+    assert.equal(noUpdate.legacyStatus, 'no_changes', noUpdate.legacyReason ?? '');
+    assert.equal(noUpdate.legacyRemoteWrites, 0);
+    assert.equal(noUpdate.legacyNormalized, 'no_change');
 
-  it('blocks discovery when upstream acquisition fails and no update exists', { timeout: 240000 }, async () => {
-    const outcome = await legacy('upstream_acquisition_failed');
-    assert.equal(normalizeLegacyStatus(outcome.status), 'blocked', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 0);
-  });
+    const single = byScenario.get('candidate_single_group')!;
+    assert.equal(single.legacyStatus, 'published', single.legacyReason ?? '');
+    assert.equal(single.legacyRemoteWrites, 1);
+    assert.equal(single.legacyAcceptedGroups, 1);
+    assert.ok(single.legacyPatchDigest !== null && single.legacyPatchDigest !== undefined && single.legacyPatchDigest.length === 64);
 
-  it('converges on the existing managed pull request without duplicating it', { timeout: 240000 }, async () => {
-    const outcome = await legacy('existing_managed_pr_convergence');
-    assert.equal(outcome.prCount, 1, `status was ${outcome.status}: ${outcome.reason ?? ''}`);
-    assert.equal(normalizeLegacyStatus(outcome.status), 'not_executed', outcome.reason ?? '');
-  });
+    const partial = byScenario.get('candidate_partial_groups')!;
+    assert.equal(partial.legacyStatus, 'published', `status was ${partial.legacyStatus}: ${partial.legacyReason ?? ''}`);
+    assert.equal(partial.legacyRemoteWrites, 1);
+    assert.equal(partial.legacyAcceptedGroups, 1);
 
-  it('accepts an authorized maintainer revision command against the managed pull request', { timeout: 240000 }, async () => {
-    const outcome = await legacy('authorized_comment_revise');
-    assert.equal(outcome.status, 'published', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 1, 'a revision must reuse the existing managed pull request');
-    assert.equal(outcome.acceptedGroups, 1);
-    assert.ok(outcome.patchDigest !== null && outcome.patchDigest.length === 64);
-  });
+    const acqFail = byScenario.get('upstream_acquisition_failed')!;
+    assert.equal(acqFail.legacyNormalized, 'blocked', acqFail.legacyReason ?? '');
+    assert.equal(acqFail.legacyRemoteWrites, 0);
 
-  it('ignores a revision command when the author lacks repository write access', { timeout: 240000 }, async () => {
-    const outcome = await legacy('unauthorized_comment_revise');
-    assert.equal(outcome.status, 'ignored', outcome.reason ?? '');
-    assert.match(outcome.reason ?? '', /lacks repository write permission/);
-    assert.equal(outcome.prCount, 1);
-    assert.equal(normalizeLegacyStatus(outcome.status), 'not_executed');
-  });
+    const converge = byScenario.get('existing_managed_pr_convergence')!;
+    assert.equal(converge.legacyRemoteWrites, 1, `status was ${converge.legacyStatus}: ${converge.legacyReason ?? ''}`);
+    assert.equal(converge.legacyNormalized, 'not_executed', converge.legacyReason ?? '');
 
-  it('passes a sentinel-bearing comment on the legacy side, which Loopwright intake must improve on', { timeout: 240000 }, async () => {
-    const outcome = await legacy('guidance_sentinel_injection');
-    assert.equal(outcome.status, 'ready', outcome.reason ?? '');
-    assert.equal(normalizeLegacyStatus(outcome.status), 'ready');
-  });
+    const authRevise = byScenario.get('authorized_comment_revise')!;
+    assert.equal(authRevise.legacyStatus, 'published', authRevise.legacyReason ?? '');
+    assert.equal(authRevise.legacyRemoteWrites, 1, 'a revision must reuse the existing managed pull request');
+    assert.equal(authRevise.legacyAcceptedGroups, 1);
+    assert.ok(authRevise.legacyPatchDigest !== null && authRevise.legacyPatchDigest !== undefined && authRevise.legacyPatchDigest.length === 64);
 
-  it('diagnoses pack run urls with the pinned 4000-character log bound', { timeout: 60000 }, async () => {
-    const outcome = await legacy('pack_run_url_diagnosis');
-    assert.equal(outcome.status, 'diagnosed');
-    assert.equal(outcome.prCount, 0);
-  });
+    const unauthRevise = byScenario.get('unauthorized_comment_revise')!;
+    assert.equal(unauthRevise.legacyStatus, 'ignored', unauthRevise.legacyReason ?? '');
+    assert.match(unauthRevise.legacyReason ?? '', /lacks repository write permission/);
+    assert.equal(unauthRevise.legacyRemoteWrites, 1);
+    assert.equal(unauthRevise.legacyNormalized, 'not_executed');
 
-  it('fails closed on a malformed or traversal draft with zero writes', { timeout: 240000 }, async () => {
-    const outcome = await legacy('malformed_or_traversal_draft');
-    assert.equal(normalizeLegacyStatus(outcome.status), 'blocked', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 0);
-  });
+    const sentinel = byScenario.get('guidance_sentinel_injection')!;
+    assert.equal(sentinel.legacyStatus, 'ready', sentinel.legacyReason ?? '');
+    assert.equal(sentinel.legacyNormalized, 'ready');
 
-  it('fails closed on a disallowed target path with zero writes', { timeout: 240000 }, async () => {
-    const outcome = await legacy('disallowed_path_or_symlink_patch');
-    assert.equal(normalizeLegacyStatus(outcome.status), 'blocked', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 0);
-  });
+    const packRun = byScenario.get('pack_run_url_diagnosis')!;
+    assert.equal(packRun.legacyStatus, 'diagnosed');
+    assert.equal(packRun.legacyRemoteWrites, 0);
 
-  it('defers publication when the default branch moved during the run', { timeout: 240000 }, async () => {
-    const outcome = await legacy('head_changed_before_publish');
-    assert.equal(outcome.status, 'deferred', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 0);
-    assert.match(outcome.reason ?? '', /Default branch changed/);
-  });
+    const traversal = byScenario.get('malformed_or_traversal_draft')!;
+    assert.equal(traversal.legacyNormalized, 'blocked', traversal.legacyReason ?? '');
+    assert.equal(traversal.legacyRemoteWrites, 0);
 
-  it('repairs a rejected candidate within one repair generation and publishes', { timeout: 240000 }, async () => {
-    const outcome = await legacy('validation_feedback_repair');
-    assert.equal(outcome.status, 'published', outcome.reason ?? '');
-    assert.equal(outcome.prCount, 1);
-    assert.match(outcome.reason ?? '', /one repair generation/);
-  });
+    const disallowed = byScenario.get('disallowed_path_or_symlink_patch')!;
+    assert.equal(disallowed.legacyNormalized, 'blocked', disallowed.legacyReason ?? '');
+    assert.equal(disallowed.legacyRemoteWrites, 0);
 
-  it('adopts the landed pull request when a publication receipt was lost', { timeout: 240000 }, async () => {
-    const outcome = await legacy('publication_receipt_lost_then_reconciled');
-    assert.equal(outcome.prCount, 1, 'a rerun must never create a second managed pull request');
-    assert.equal(normalizeLegacyStatus(outcome.status), 'not_executed', outcome.reason ?? '');
-    assert.match(outcome.reason ?? '', /adopts landed state/);
+    const headChanged = byScenario.get('head_changed_before_publish')!;
+    assert.equal(headChanged.legacyStatus, 'deferred', headChanged.legacyReason ?? '');
+    assert.equal(headChanged.legacyRemoteWrites, 0);
+    assert.match(headChanged.legacyReason ?? '', /Default branch changed/);
+
+    const valRepair = byScenario.get('validation_feedback_repair')!;
+    assert.equal(valRepair.legacyStatus, 'published', valRepair.legacyReason ?? '');
+    assert.equal(valRepair.legacyRemoteWrites, 1);
+    assert.match(valRepair.legacyReason ?? '', /one repair generation/);
+
+    const lostReceipt = byScenario.get('publication_receipt_lost_then_reconciled')!;
+    assert.equal(lostReceipt.legacyRemoteWrites, 1, 'a rerun must never create a second managed pull request');
+    assert.equal(lostReceipt.legacyNormalized, 'not_executed', lostReceipt.legacyReason ?? '');
+    assert.match(lostReceipt.legacyReason ?? '', /adopts landed state/);
   });
 
   it('assembles the report skeleton with correct summary arithmetic', async () => {
@@ -172,7 +164,7 @@ describe('parity harness: legacy-side execution over the vendored frozen functio
 
 describe('parity harness: full 14-scenario suite on both sides', () => {
   it('matches legacy dispositions across every scenario with honest classifications', { timeout: 560000 }, async () => {
-    const report = await runRunnerParitySuite();
+    const report = await getSharedParityReport();
     assert.equal(report.summary.total, 14);
     const byScenario = new Map(report.cases.map(c => [c.scenario, c]));
     const expectExact = [

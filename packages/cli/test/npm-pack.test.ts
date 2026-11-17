@@ -52,17 +52,25 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
     );
 
     const prefixDir = join(sandbox, 'global-prefix');
-    try {
-      execFileSync('npm', ['install', '-g', '--prefix', prefixDir, packed.tarballPath, '--offline', '--no-audit', '--no-fund'], {
-        stdio: 'pipe',
-        timeout: 60000
-      });
-    } catch (error) {
-      const stderr = error !== null && typeof error === 'object' && 'stderr' in error && Buffer.isBuffer(error.stderr)
-        ? error.stderr.toString('utf8')
-        : String(error);
-      if (!stderr.includes('ENOTCACHED')) throw error;
-      execFileSync('npm', ['install', '-g', '--prefix', prefixDir, packed.tarballPath, '--prefer-offline', '--no-audit', '--no-fund'], {
+    const useOfflineFirst = Boolean(process.env['SELF_UPGRADE_STAGE_DIR']) || process.env['npm_config_offline'] === 'true';
+    if (useOfflineFirst) {
+      try {
+        execFileSync('npm', ['install', '-g', '--prefix', prefixDir, packed.tarballPath, '--offline', '--ignore-scripts', '--no-audit', '--no-fund'], {
+          stdio: 'pipe',
+          timeout: 60000
+        });
+      } catch (error) {
+        const stderr = error !== null && typeof error === 'object' && 'stderr' in error && Buffer.isBuffer(error.stderr)
+          ? error.stderr.toString('utf8')
+          : String(error);
+        if (!stderr.includes('ENOTCACHED')) throw error;
+        execFileSync('npm', ['install', '-g', '--prefix', prefixDir, packed.tarballPath, '--prefer-offline', '--ignore-scripts', '--no-audit', '--no-fund'], {
+          stdio: 'pipe',
+          timeout: 60000
+        });
+      }
+    } else {
+      execFileSync('npm', ['install', '-g', '--prefix', prefixDir, packed.tarballPath, '--prefer-offline', '--ignore-scripts', '--no-audit', '--no-fund'], {
         stdio: 'pipe',
         timeout: 60000
       });

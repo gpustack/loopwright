@@ -660,6 +660,7 @@ spec:
         runId: 'run-overlay-600-init',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_600_secret_token_1234',
         gitRemoteUrl: bareRemote,
@@ -741,6 +742,7 @@ spec:
         runId: 'run-overlay-600-revise',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_600_secret_token_1234',
         gitRemoteUrl: bareRemote,
@@ -2081,84 +2083,78 @@ spec:
         },
       ]);
 
-      const prevToken = process.env['LOOPWRIGHT_PROVIDER_TOKEN'];
-      const prevPubSecret = process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'];
-      process.env['LOOPWRIGHT_PROVIDER_TOKEN'] = 'sk-prompt-inject-test-1234';
-      process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'] = 'pub-sign-secret-1234';
-      try {
-        const discoverCompiled = await runGitHubActionEntrypoint({
-          repositoryRoot: repo,
-          repositoryFullName: 'gpustack/runner',
-          baseRevision: 'a'.repeat(40),
-          mode: 'candidate',
-          eventName: 'workflow_dispatch',
-          runRoot,
-          runId: 'run-prompt-discover',
-          dryRun: true,
-          upstreamRecords: discovered,
-          publicationEndpoint: {
-            id: 'pub',
-            url: 'https://publisher.example.test/publish',
-            signingCredentialRef: 'pub-signing',
-          },
-          env: {
-            ...process.env,
-            PACK_RUN_URL: 'https://github.com/gpustack/runner/actions/runs/43573667865',
-          },
-        });
-        assert.equal(discoverCompiled.kind, 'compiled');
-        if (discoverCompiled.kind === 'compiled') {
-          const authorHandler = discoverCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
-          const promptText = String(authorHandler?.parameters['prompt'] ?? '');
-          assert.ok(promptText.includes('v0.18.0rc1'), promptText);
-          assert.ok(promptText.includes('v0.19.1'), promptText);
-          assert.ok(promptText.includes('https://github.com/gpustack/runner/actions/runs/43573667865'), promptText);
-          assert.equal(promptText.includes('sk-prompt-inject-test-1234'), false);
-        }
+      const promptEnv = {
+        ...process.env,
+        LOOPWRIGHT_PROVIDER_TOKEN: 'sk-prompt-inject-test-1234',
+        LOOPWRIGHT_PUBLICATION_SIGNING_SECRET: 'pub-sign-secret-1234',
+      };
+      const discoverCompiled = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        repositoryFullName: 'gpustack/runner',
+        baseRevision: 'a'.repeat(40),
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-prompt-discover',
+        dryRun: true,
+        upstreamRecords: discovered,
+        publicationEndpoint: {
+          id: 'pub',
+          url: 'https://publisher.example.test/publish',
+          signingCredentialRef: 'pub-signing',
+        },
+        env: {
+          ...promptEnv,
+          PACK_RUN_URL: 'https://github.com/gpustack/runner/actions/runs/43573667865',
+        },
+      });
+      assert.equal(discoverCompiled.kind, 'compiled');
+      if (discoverCompiled.kind === 'compiled') {
+        const authorHandler = discoverCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
+        const promptText = String(authorHandler?.parameters['prompt'] ?? '');
+        assert.ok(promptText.includes('v0.18.0rc1'), promptText);
+        assert.ok(promptText.includes('v0.19.1'), promptText);
+        assert.ok(promptText.includes('https://github.com/gpustack/runner/actions/runs/43573667865'), promptText);
+        assert.equal(promptText.includes('sk-prompt-inject-test-1234'), false);
+      }
 
-        const reviseCompiled = await runGitHubActionEntrypoint({
-          repositoryRoot: repo,
-          repositoryFullName: 'gpustack/runner',
-          baseRevision: 'a'.repeat(40),
-          sourceRevision: 'b'.repeat(40),
-          mode: 'candidate',
-          eventName: 'issue_comment',
-          eventPayload: {
-            action: 'created',
-            issue: { number: 420, pull_request: { head: { sha: 'b'.repeat(40) } } },
-            comment: {
-              id: 778899,
-              body: '/auto-sync revise\nKeep CUDA vLLM at 0.19.0 and drop ROCm changes.',
-              author_association: 'MEMBER',
-              user: { login: 'thxcode', type: 'User' },
-            },
+      const reviseCompiled = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        repositoryFullName: 'gpustack/runner',
+        baseRevision: 'a'.repeat(40),
+        sourceRevision: 'b'.repeat(40),
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 420, pull_request: { head: { sha: 'b'.repeat(40) } } },
+          comment: {
+            id: 778899,
+            body: '/auto-sync revise\nKeep CUDA vLLM at 0.19.0 and drop ROCm changes.',
+            author_association: 'MEMBER',
+            user: { login: 'thxcode', type: 'User' },
           },
-          runRoot,
-          runId: 'run-prompt-revise',
-          dryRun: true,
-          publicationEndpoint: {
-            id: 'pub',
-            url: 'https://publisher.example.test/publish',
-            signingCredentialRef: 'pub-signing',
-          },
-          env: {
-            ...process.env,
-            PACK_RUN_URL: 'https://github.com/evil/other/actions/runs/999',
-          },
-        });
-        assert.equal(reviseCompiled.kind, 'compiled');
-        if (reviseCompiled.kind === 'compiled') {
-          const authorHandler = reviseCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
-          const promptText = String(authorHandler?.parameters['prompt'] ?? '');
-          assert.ok(promptText.includes('<operator_guidance>'), promptText);
-          assert.ok(promptText.includes('Keep CUDA vLLM at 0.19.0 and drop ROCm changes.'), promptText);
-          assert.equal(promptText.includes('evil/other'), false, 'cross-repository PACK_RUN_URL must never be injected');
-        }
-      } finally {
-        if (prevToken === undefined) delete process.env['LOOPWRIGHT_PROVIDER_TOKEN'];
-        else process.env['LOOPWRIGHT_PROVIDER_TOKEN'] = prevToken;
-        if (prevPubSecret === undefined) delete process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'];
-        else process.env['LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'] = prevPubSecret;
+        },
+        runRoot,
+        runId: 'run-prompt-revise',
+        dryRun: true,
+        publicationEndpoint: {
+          id: 'pub',
+          url: 'https://publisher.example.test/publish',
+          signingCredentialRef: 'pub-signing',
+        },
+        env: {
+          ...promptEnv,
+          PACK_RUN_URL: 'https://github.com/evil/other/actions/runs/999',
+        },
+      });
+      assert.equal(reviseCompiled.kind, 'compiled');
+      if (reviseCompiled.kind === 'compiled') {
+        const authorHandler = reviseCompiled.taskpack.registry.spec.handlers.find(h => h.implementation === 'pi.agent.v1');
+        const promptText = String(authorHandler?.parameters['prompt'] ?? '');
+        assert.ok(promptText.includes('<operator_guidance>'), promptText);
+        assert.ok(promptText.includes('Keep CUDA vLLM at 0.19.0 and drop ROCm changes.'), promptText);
+        assert.equal(promptText.includes('evil/other'), false, 'cross-repository PACK_RUN_URL must never be injected');
       }
     } finally {
       await server?.close();
