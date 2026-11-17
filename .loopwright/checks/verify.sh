@@ -715,18 +715,59 @@ RAW_TMP_BASE="${TMPDIR:-/tmp}"
 REAL_TMP_BASE="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$RAW_TMP_BASE")"
 WORK_ROOT="$(mktemp -d "${REAL_TMP_BASE%/}/lwv.XXXXXX")"
 chmod 0700 "$WORK_ROOT"
+RUNTIME_TMP="${WORK_ROOT}/tr"
 cleanup() {
   chmod -R u+w "$WORK_ROOT" >/dev/null 2>&1 || true
   rm -rf "$WORK_ROOT" >/dev/null 2>&1 || true
+  if [[ -n "${RUNTIME_TMP:-}" && "$RUNTIME_TMP" != "${WORK_ROOT}/tr" ]]; then
+    chmod -R u+w "$RUNTIME_TMP" >/dev/null 2>&1 || true
+    rm -rf "$RUNTIME_TMP" >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
+
+if [[ "$(uname -s)" == "Linux" && -d /dev/shm ]]; then
+  SHM_RUNTIME_TMP="$("$PYTHON_EXEC" - <<'PY'
+from __future__ import annotations
+import os
+import shutil
+import subprocess
+import tempfile
+
+try:
+    if not os.path.isdir("/dev/shm"):
+        raise SystemExit(0)
+    if shutil.disk_usage("/dev/shm").free < 2 * 1024 * 1024 * 1024:
+        raise SystemExit(0)
+    rt = os.path.realpath(tempfile.mkdtemp(prefix="lwv-rt.", dir="/dev/shm"))
+    os.chmod(rt, 0o700)
+    probe = os.path.join(rt, "exec-probe.sh")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(probe, 0o700)
+        res = subprocess.run([probe], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if res.returncode == 0:
+            os.unlink(probe)
+            print(rt)
+        else:
+            shutil.rmtree(rt, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(rt, ignore_errors=True)
+except Exception:
+    pass
+PY
+)"
+  if [[ -n "$SHM_RUNTIME_TMP" ]]; then
+    RUNTIME_TMP="$SHM_RUNTIME_TMP"
+  fi
+fi
 
 BUILD_WORK="${WORK_ROOT}/build"
 RUNTIME_WORK="${WORK_ROOT}/run"
 BUILD_HOME="${WORK_ROOT}/hb"
 BUILD_TMP="${WORK_ROOT}/tb"
 RUNTIME_HOME="${WORK_ROOT}/hr"
-RUNTIME_TMP="${WORK_ROOT}/tr"
 WORK_NPM_CACHE="${WORK_ROOT}/npm-cache"
 mkdir -p "$BUILD_WORK" "$BUILD_HOME" "$BUILD_TMP"
 chmod 0700 "$BUILD_WORK" "$BUILD_HOME" "$BUILD_TMP"
@@ -794,16 +835,33 @@ set -euo pipefail
 
 "$VERIFY_NODE_BIN" scripts/build.mjs
 
-"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json &
+LOG_DIR="${TMPDIR:-/tmp}"
+LOG_TSC="${LOG_DIR%/}/lw-tsc.log"
+LOG_ESLINT="${LOG_DIR%/}/lw-eslint.log"
+LOG_DOCS="${LOG_DIR%/}/lw-docs.log"
+
+"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json >"$LOG_TSC" 2>&1 &
 PID_TSC=$!
-"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache . &
+"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache . >"$LOG_ESLINT" 2>&1 &
 PID_ESLINT=$!
-"$VERIFY_NODE_BIN" scripts/check-docs.mjs &
+"$VERIFY_NODE_BIN" scripts/check-docs.mjs >"$LOG_DOCS" 2>&1 &
 PID_DOCS=$!
 
-wait "$PID_TSC"
-wait "$PID_ESLINT"
-wait "$PID_DOCS"
+rc_tsc=0
+rc_eslint=0
+rc_docs=0
+wait "$PID_TSC" || rc_tsc=$?
+wait "$PID_ESLINT" || rc_eslint=$?
+wait "$PID_DOCS" || rc_docs=$?
+
+cat "$LOG_TSC"
+cat "$LOG_ESLINT"
+cat "$LOG_DOCS"
+rm -f "$LOG_TSC" "$LOG_ESLINT" "$LOG_DOCS"
+
+if (( rc_tsc != 0 || rc_eslint != 0 || rc_docs != 0 )); then
+  exit 1
+fi
 
 if [[ -n "${HUGO_BIN:-}" ]]; then
   "$VERIFY_NODE_BIN" scripts/site.mjs build
@@ -843,7 +901,7 @@ runtime_dir = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "run")
 build_home = os.path.realpath(os.environ["BUILD_HOME"])
 build_tmp = os.path.realpath(os.environ["BUILD_TMP"])
 runtime_home = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "hr")
-runtime_tmp = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "tr")
+runtime_tmp = os.path.realpath(os.environ["RUNTIME_TMP"])
 work_npm_cache = os.path.realpath(os.environ["WORK_NPM_CACHE"])
 work_root = os.path.realpath(os.environ["WORK_ROOT"])
 baseline_repo = os.path.realpath(os.environ["BASELINE_REAL"])
