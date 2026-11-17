@@ -1166,8 +1166,8 @@ function extractRepositoryIdFromPayload(payload: unknown): number | undefined {
 }
 
 /**
- * Resolve and verify a Git commit reference or SHA against `repositoryRoot` using
- * `git rev-parse --verify` so nonexistent SHAs and missing refs fail closed.
+ * Verify and resolve a Git commit reference or SHA against local `repositoryRoot`
+ * using `git rev-parse --verify` so nonexistent SHAs and missing refs fail closed.
  */
 export async function resolveGitCommitSha(
   repositoryRoot: string,
@@ -1196,11 +1196,26 @@ export async function resolveGitCommitSha(
   }
 }
 
+/**
+ * Accept pre-validated 40-hex commit SHAs directly (such as unfetched PR head SHAs)
+ * and resolve symbolic Git refs locally via `resolveGitCommitSha`.
+ */
 async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
   if (COMMIT_SHA_PATTERN.test(ref)) {
     return ref.toLowerCase();
   }
   return resolveGitCommitSha(repositoryRoot, ref, timeoutMs);
+}
+
+export function shouldPreserveExplicitSourceRevision(options: {
+  readonly eventName: string;
+  readonly explicitSourceRevision?: string | undefined;
+  readonly commentCommand?: string | undefined;
+}): boolean {
+  return options.eventName === 'issue_comment'
+    && options.explicitSourceRevision !== undefined
+    && options.explicitSourceRevision.trim().length > 0
+    && options.commentCommand === 'retry';
 }
 
 /**
@@ -1228,8 +1243,8 @@ export async function resolveRepositoryAndRevisions(
 
   let baseRev = options.baseRevision;
   let sourceRev = options.sourceRevision ?? options.baseRevision;
-  const preserveExplicitOnComment = options.eventName === 'issue_comment'
-    && options.preserveExplicitSourceRevision === true
+  let resolvedFromPr = false;
+  const preserveExplicitOnComment = options.preserveExplicitSourceRevision === true
     && options.sourceRevision !== undefined
     && options.sourceRevision.trim().length > 0;
 
@@ -1276,6 +1291,7 @@ export async function resolveRepositoryAndRevisions(
       }
       baseRev = fetchedBaseSha.toLowerCase();
       sourceRev = fetchedHeadSha.toLowerCase();
+      resolvedFromPr = true;
     } else if (payloadPr !== undefined) {
       const baseObj = isPlainRecord(payloadPr['base']) ? payloadPr['base'] : undefined;
       const headObj = isPlainRecord(payloadPr['head']) ? payloadPr['head'] : undefined;
@@ -1295,14 +1311,21 @@ export async function resolveRepositoryAndRevisions(
         }
         baseRev = payloadBaseSha.toLowerCase();
         sourceRev = payloadHeadSha.toLowerCase();
+        resolvedFromPr = true;
       }
     }
   }
 
   const resolvedBase = await resolveGitRevisionSha(options.repositoryRoot, baseRev, timeoutMs);
-  const resolvedSource = sourceRev === baseRev
-    ? resolvedBase
-    : await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
+  const verifyExplicitSourceLocally = !resolvedFromPr
+    && options.sourceRevision !== undefined
+    && options.sourceRevision.trim().length > 0
+    && existsSync(join(options.repositoryRoot, '.git'));
+  const resolvedSource = verifyExplicitSourceLocally
+    ? await resolveGitCommitSha(options.repositoryRoot, sourceRev, timeoutMs)
+    : sourceRev === baseRev
+      ? resolvedBase
+      : await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
 
   let repositoryId: number | undefined;
   const envRepoIdRaw = options.env?.['GITHUB_REPOSITORY_ID']?.trim();

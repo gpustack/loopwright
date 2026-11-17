@@ -13,12 +13,14 @@ import {
   GitHubAppError,
   isPrereleaseVersionTag,
   loadDeclarativeTaskpack,
+  resolveRepositoryAndRevisions,
   runActionCli,
   runGitHubActionEntrypoint,
   startLocalCommandGateServer,
   startNativePullRequestPublisherServer,
 } from '../src/index.js';
 import { listBaselineRegularEntries, verifyBaseTreeAnchor } from '../src/turnkey.js';
+import { shouldPreserveExplicitSourceRevision } from '../src/upstreams.js';
 import {
   GIT_TEST_ENV,
   git,
@@ -3829,6 +3831,284 @@ spec:
         { baseRevision: prBaseSha, sourceRevision: prHeadSha },
       );
     } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveRepositoryAndRevisions fails closed on nonexistent 40-hex SHAs in real .git repos while allowing non-git fixtures', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-resolve-sha-git-')));
+    let server: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    try {
+      server = await startHttpServer((req, res) => {
+        if (req.url === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 901 }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const gitRepo = join(work, 'git-repo');
+      await mkdir(gitRepo, { recursive: true });
+      await git(gitRepo, ['init', '-b', 'main']);
+      await writeFile(join(gitRepo, 'README.md'), 'hello\n');
+      await git(gitRepo, ['add', 'README.md']);
+      await git(gitRepo, ['commit', '-m', 'init']);
+      const headSha = await git(gitRepo, ['rev-parse', 'HEAD']);
+
+      await assert.rejects(
+        () => resolveRepositoryAndRevisions({
+          repositoryRoot: gitRepo,
+          repositoryFullName: 'acme/repo',
+          baseRevision: headSha,
+          sourceRevision: 'f'.repeat(40),
+          eventName: 'workflow_dispatch',
+          apiBaseUrl: server!.url,
+        }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'ACTION_INPUT_INVALID',
+      );
+
+      const nonGitDir = join(work, 'non-git-dir');
+      await mkdir(nonGitDir, { recursive: true });
+      const resolvedNonGit = await resolveRepositoryAndRevisions({
+        repositoryRoot: nonGitDir,
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'a'.repeat(40),
+        sourceRevision: 'b'.repeat(40),
+        eventName: 'workflow_dispatch',
+        apiBaseUrl: server.url,
+      });
+      assert.equal(resolvedNonGit.baseRevision, 'a'.repeat(40));
+      assert.equal(resolvedNonGit.sourceRevision, 'b'.repeat(40));
+
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: headSha,
+          commentCommand: 'retry',
+        }),
+        true,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: headSha,
+          commentCommand: 'revise',
+        }),
+        false,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'issue_comment',
+          explicitSourceRevision: '   ',
+          commentCommand: 'retry',
+        }),
+        false,
+      );
+      assert.equal(
+        shouldPreserveExplicitSourceRevision({
+          eventName: 'pull_request_review',
+          explicitSourceRevision: headSha,
+          commentCommand: 'retry',
+        }),
+        false,
+      );
+    } finally {
+      await server?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('emits scrubbed stderr warning when carried proposal exceeds MAX_PROPOSAL_JSON_BYTES in startNativePullRequestPublisherServer', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-carried-proposal-warn-')));
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    const origStderrWrite = process.stderr.write.bind(process.stderr);
+    const stderrChunks: string[] = [];
+
+    try {
+      const repo = join(work, 'repo');
+      const bareRemote = join(work, 'remote.git');
+      const runRoot = join(work, 'runs');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack', 'items'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update vendor note only.\n');
+      await writeFile(join(repo, '.auto-sync', 'checks', 'pass.sh'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'pass.sh'), 0o755);
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'note.txt'), 'base\n');
+      for (let i = 0; i < 135; i += 1) {
+        await writeFile(join(repo, 'pack', 'items', `item-${String(i).padStart(3, '0')}.txt`), `item-${i}\n`);
+      }
+
+      openAiServer = await startHttpServer(async (req, res) => {
+        const body = await readJsonBody(req);
+        if (body['max_tokens'] === 1 && body['stream'] !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null })));
+      });
+
+      let prPostCount = 0;
+      githubServer = await startHttpServer((req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 710 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          prPostCount += 1;
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 55,
+            html_url: 'https://github.invalid/acme/repo/pull/55',
+            head: { ref: 'loopwright/main', sha: '0'.repeat(40) },
+            base: { ref: 'main', sha: '0'.repeat(40) },
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: carried-proposal-warn
+spec:
+  goal:
+    candidate: Carried oversize proposal warning
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: pass-cmd
+        implementation: command.v1
+        parameters:
+          script: .auto-sync/checks/pass.sh
+          timeoutSeconds: 15
+  publication:
+    mode: pull_request
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: carried proposal warn"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  models:
+    - provider: openai
+      id: gpt-4.1-mini
+      api: openai-completions
+      apiKeyEnv: LLM_TOKEN
+      baseUrl: ${openAiServer.url}/v1
+      cost:
+        input: 1
+        output: 2
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'base commit']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      await mkdir(bareRemote, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+
+      // Create detached sourceRevision where carried pack/proposal.json exceeds MAX_PROPOSAL_JSON_BYTES (2 MiB).
+      await git(repo, ['checkout', '--detach', baseSha]);
+      const oversizeProposal = JSON.stringify({
+        schema_version: 1,
+        version: '2.0.0',
+        summary: 'x'.repeat(2_200_000),
+      });
+      await writeFile(join(repo, 'pack', 'proposal.json'), oversizeProposal);
+      await git(repo, ['add', 'pack/proposal.json']);
+      await git(repo, ['commit', '-m', 'oversize carried proposal']);
+      const sourceRev = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['checkout', 'main']);
+
+      process.stderr.write = ((chunk: Uint8Array | string) => {
+        stderrChunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        return true;
+      }) as typeof process.stderr.write;
+
+      const carriedWarnResult = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 710,
+        baseRevision: baseSha,
+        sourceRevision: sourceRev,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-carried-proposal-warn',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_carried_proposal_secret_1234',
+        gitRemoteUrl: bareRemote,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-carried-proposal-token-1234',
+        },
+      });
+      assert.equal(carriedWarnResult.kind, 'compiled', `unexpected result: ${JSON.stringify(carriedWarnResult)}`);
+      assert.equal(carriedWarnResult.delegateOutcome?.ok, true, `unexpected delegateOutcome: ${carriedWarnResult.delegateOutcome?.detail}`);
+      assert.ok(prPostCount >= 1, `expected PR POST, delegateOutcome=${carriedWarnResult.delegateOutcome?.detail}`);
+      const stderrText = stderrChunks.join('');
+      assert.match(stderrText, /carried proposal .*pack\/proposal\.json.*exceeds/i);
+      assert.equal(stderrText.includes('ghp_carried_proposal_secret_1234'), false);
+    } finally {
+      process.stderr.write = origStderrWrite;
       await openAiServer?.close();
       await githubServer?.close();
       await rm(work, { recursive: true, force: true });

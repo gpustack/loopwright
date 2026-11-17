@@ -31,7 +31,8 @@ import { finalizeAndPublishTurnkeyMemory } from './turnkey-memory.js';
 import {
   checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
   discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
-  resolveGitCommitSha, resolveGitHubAuth, resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
+  resolveGitCommitSha, resolveGitHubAuth, resolveRepositoryAndRevisions, shouldPreserveExplicitSourceRevision,
+  validateGitAuthorEmail, validateGitAuthorName,
   type ManagedPullRequestInfo,
 } from './upstreams.js';
 import { serializePrettyYaml } from './yaml.js';
@@ -691,12 +692,16 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           operatorAllowlist: input.operatorAllowlist,
         });
       }
-      const preserveExplicitSourceRevision = input.eventName === 'issue_comment'
-        && explicitSourceRevision !== undefined
-        && preEvaluatedComment !== undefined
+      const commentCommand = preEvaluatedComment !== undefined
         && !('ignoredReason' in preEvaluatedComment)
         && !('blockedReason' in preEvaluatedComment)
-        && preEvaluatedComment.command === 'retry';
+        ? preEvaluatedComment.command
+        : undefined;
+      const preserveExplicitSourceRevision = shouldPreserveExplicitSourceRevision({
+        eventName: input.eventName,
+        explicitSourceRevision,
+        commentCommand,
+      });
       const resolvedRepo = await resolveRepositoryAndRevisions({
         repositoryRoot: input.repositoryRoot,
         repositoryFullName: input.repositoryFullName,

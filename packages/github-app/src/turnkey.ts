@@ -1566,10 +1566,31 @@ export async function startLocalCommandGateServer(
               effectiveBaseline.delete(removedPath);
             }
             for (const update of carryUpdates) {
-              const updatedEntry = sourceRegularByPath.get(update.path);
-              if (updatedEntry !== undefined) {
-                effectiveBaseline.set(update.path, updatedEntry);
+              const cleanCarryPath = validateBaselineGitPath(update.path);
+              const existing = sourceRegularByPath.get(cleanCarryPath);
+              const byteLength = existing !== undefined
+                ? existing.byteLength
+                : Number(
+                    (
+                      await execGit(
+                        options.repositoryRoot,
+                        ['cat-file', '-s', update.oid],
+                        { env: gitEnv, timeoutMs: 15_000 },
+                      )
+                    ).toString('utf8').trim(),
+                  );
+              if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+                throw new GitHubAppError(
+                  'ACTION_INPUT_INVALID',
+                  `invalid carried baseline blob byteLength for "${cleanCarryPath}"`,
+                );
               }
+              effectiveBaseline.set(cleanCarryPath, {
+                path: cleanCarryPath,
+                mode: update.mode,
+                oid: update.oid,
+                byteLength,
+              });
             }
 
             const baselineModes = new Map<string, '100644' | '100755'>();
@@ -1598,6 +1619,14 @@ export async function startLocalCommandGateServer(
                 }
               }
             } else {
+              // ArtifactManifest under loopwright.dev/v1alpha1 with baseTree === undefined and deleted === undefined
+              // is classic full-snapshot mode where snapshot.files holds the complete candidate file set.
+              if (snapshot.manifest.spec.deleted !== undefined || snapshot.manifest.apiVersion !== 'loopwright.dev/v1alpha1') {
+                throw new GitHubAppError(
+                  'ACTION_INPUT_INVALID',
+                  'candidate manifest missing baseTree in non-classic snapshot mode',
+                );
+              }
               const candidateNames = new Set(snapshot.files.map(file => file.name));
               for (const [sourceName, sourceEntry] of sourceTreeMap.entries()) {
                 if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
@@ -1616,8 +1645,7 @@ export async function startLocalCommandGateServer(
             const toMaterialize = Array.from(effectiveBaseline.values()).filter(
               entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
             );
-            const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat
-              ?? (snapshot.baseRevision.length === 64 ? 'sha256' : 'sha1');
+            const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
             await materializeBaselineBatchForGate(
               options.repositoryRoot,
               objectFormat,
@@ -2480,9 +2508,21 @@ export async function startNativePullRequestPublisherServer(
                   );
                   stagedPathSet.add(cleanProposalPath);
                   prBodyFiles = [...snapshot.files, { name: cleanProposalPath, bytes: proposalBytes }];
+                } else if (Number.isSafeInteger(byteSize) && byteSize > MAX_PROPOSAL_JSON_BYTES) {
+                  process.stderr.write(
+                    `${scrubber.scrub(
+                      `[loopwright] warning: carried proposal "${cleanProposalPath}" (${byteSize} bytes) exceeds ${MAX_PROPOSAL_JSON_BYTES} byte limit; falling back to provenance footer`,
+                    )}\n`,
+                  );
                 }
-              } catch {
+              } catch (error) {
                 // Best-effort carried proposal read; fall back to provenance footer if blob read fails.
+                const detail = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
+                process.stderr.write(
+                  `${scrubber.scrub(
+                    `[loopwright] warning: failed to read carried proposal "${cleanProposalPath}" from ${carriedProposal.oid}: ${detail}`,
+                  )}\n`,
+                );
               }
             }
           }
