@@ -250,7 +250,10 @@ function isProtectedCandidatePath(name: string, protectedPaths: readonly string[
   return false;
 }
 
-function isAllowedCandidateWrite(name: string, snapshot: InspectedCandidateSnapshot): boolean {
+function isAllowedCandidateWrite(
+  name: string,
+  snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
+): boolean {
   if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
     return false;
   }
@@ -1562,36 +1565,14 @@ export async function startLocalCommandGateServer(
             const effectiveBaseline = new Map<string, BaselineRegularEntry>(
               baseRegularEntries.map(entry => [entry.path, entry] as const),
             );
-            for (const removedPath of carryRemovals) {
-              effectiveBaseline.delete(removedPath);
-            }
-            for (const update of carryUpdates) {
-              const cleanCarryPath = validateBaselineGitPath(update.path);
-              const existing = sourceRegularByPath.get(cleanCarryPath);
-              const byteLength = existing !== undefined
-                ? existing.byteLength
-                : Number(
-                    (
-                      await execGit(
-                        options.repositoryRoot,
-                        ['cat-file', '-s', update.oid],
-                        { env: gitEnv, timeoutMs: 15_000 },
-                      )
-                    ).toString('utf8').trim(),
-                  );
-              if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
-                throw new GitHubAppError(
-                  'ACTION_INPUT_INVALID',
-                  `invalid carried baseline blob byteLength for "${cleanCarryPath}"`,
-                );
-              }
-              effectiveBaseline.set(cleanCarryPath, {
-                path: cleanCarryPath,
-                mode: update.mode,
-                oid: update.oid,
-                byteLength,
-              });
-            }
+            await applyCarryDeltaToEffectiveBaseline(
+              options.repositoryRoot,
+              effectiveBaseline,
+              sourceRegularByPath,
+              carryRemovals,
+              carryUpdates,
+              gitEnv,
+            );
 
             const baselineModes = new Map<string, '100644' | '100755'>();
             for (const entry of effectiveBaseline.values()) {
@@ -1645,6 +1626,7 @@ export async function startLocalCommandGateServer(
             const toMaterialize = Array.from(effectiveBaseline.values()).filter(
               entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
             );
+            // Classic mode requires 40-hex SHA-1 commit OIDs via COMMIT_SHA_PATTERN above.
             const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
             await materializeBaselineBatchForGate(
               options.repositoryRoot,
@@ -1898,14 +1880,18 @@ export function hasSymlinkAtOrAbove(
   return false;
 }
 
-interface CarryDeltaEntry {
+export interface CarryDeltaEntry {
   readonly path: string;
   readonly mode: '100644' | '100755';
   readonly oid: string;
 }
 
-function computeAllowedSourceRevisionCarryDelta(
-  snapshot: InspectedCandidateSnapshot,
+/**
+ * Compute writable, symlink-free carry removals and updates between `baseEntries`
+ * and `sourceEntries` for a candidate snapshot.
+ */
+export function computeAllowedSourceRevisionCarryDelta(
+  snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
   baseEntries: ReadonlyMap<string, GitTreeEntry>,
   sourceEntries: ReadonlyMap<string, GitTreeEntry>,
 ): {
@@ -1937,6 +1923,60 @@ function computeAllowedSourceRevisionCarryDelta(
   }
 
   return { carryRemovals, carryUpdates };
+}
+
+/**
+ * Apply `carryRemovals` and `carryUpdates` onto `effectiveBaseline`, looking up
+ * missing blob sizes via `git cat-file -s` and failing closed on missing objects.
+ */
+export async function applyCarryDeltaToEffectiveBaseline(
+  repositoryRoot: string,
+  effectiveBaseline: Map<string, BaselineRegularEntry>,
+  sourceRegularByPath: ReadonlyMap<string, BaselineRegularEntry>,
+  carryRemovals: readonly string[],
+  carryUpdates: readonly CarryDeltaEntry[],
+  gitEnv: Record<string, string>,
+): Promise<void> {
+  for (const removedPath of carryRemovals) {
+    effectiveBaseline.delete(removedPath);
+  }
+  for (const update of carryUpdates) {
+    const cleanCarryPath = validateBaselineGitPath(update.path);
+    const existing = sourceRegularByPath.get(cleanCarryPath);
+    let byteLength: number;
+    if (existing !== undefined) {
+      byteLength = existing.byteLength;
+    } else {
+      let sizeRaw: string;
+      try {
+        sizeRaw = (
+          await execGit(
+            repositoryRoot,
+            ['cat-file', '-s', update.oid],
+            { env: gitEnv, timeoutMs: 15_000 },
+          )
+        ).toString('utf8').trim();
+      } catch {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `failed to read carried baseline blob size for "${cleanCarryPath}" (${update.oid})`,
+        );
+      }
+      byteLength = Number(sizeRaw);
+    }
+    if (!Number.isSafeInteger(byteLength) || byteLength < 0) {
+      throw new GitHubAppError(
+        'ACTION_INPUT_INVALID',
+        `invalid carried baseline blob byteLength for "${cleanCarryPath}"`,
+      );
+    }
+    effectiveBaseline.set(cleanCarryPath, {
+      path: cleanCarryPath,
+      mode: update.mode,
+      oid: update.oid,
+      byteLength,
+    });
+  }
 }
 
 export async function stageEntriesInIndex(

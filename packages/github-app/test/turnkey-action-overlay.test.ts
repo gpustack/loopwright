@@ -19,7 +19,13 @@ import {
   startLocalCommandGateServer,
   startNativePullRequestPublisherServer,
 } from '../src/index.js';
-import { listBaselineRegularEntries, verifyBaseTreeAnchor } from '../src/turnkey.js';
+import {
+  applyCarryDeltaToEffectiveBaseline,
+  computeAllowedSourceRevisionCarryDelta,
+  listBaselineRegularEntries,
+  verifyBaseTreeAnchor,
+} from '../src/turnkey.js';
+import { compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS } from '../src/taskpack.js';
 import { shouldPreserveExplicitSourceRevision } from '../src/upstreams.js';
 import {
   GIT_TEST_ENV,
@@ -4111,6 +4117,143 @@ spec:
       process.stderr.write = origStderrWrite;
       await openAiServer?.close();
       await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects missing carried blob OIDs with GitHubAppError ACTION_INPUT_INVALID during gate carry baseline resolution', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-carry-missing-oid-')));
+    try {
+      const repo = join(work, 'repo');
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await mkdir(join(repo, 'vendor'), { recursive: true });
+      await git(repo, ['init', '-b', 'main']);
+
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Verify carry delta.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), JSON.stringify({ schema_version: 1, version: '1.0.0' }) + '\n');
+      await writeFile(join(repo, 'vendor', 'keep.txt'), 'base-keep\n');
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: carry-missing-oid
+spec:
+  goal:
+    candidate: Verify carry delta error handling
+    noChange: No change
+  scope:
+    writable:
+      - pack
+      - vendor
+  instructions:
+    - .auto-sync/prompts/instructions.md
+  upstreams:
+    - id: engine
+      kind: github-release
+      source: acme/engine
+      watchedPaths: [pack]
+  proposal:
+    path: pack/proposal.json
+    requiredFields: [schema_version, version]
+    schemaVersion: 1
+  verification:
+    externalGates: []
+    localChecks:
+      - id: json
+        implementation: json-artifact.v1
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: loopwright/
+    titleTemplate: "chore: carry missing oid"
+  memory:
+    directory: .auto-sync/memory
+    apply: separate-pull-request
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+  output:
+    formats: [json]
+`);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'init']);
+      const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: join(repo, '.auto-sync', 'taskpack.yaml'),
+        repositoryRoot: repo,
+      });
+      const compiled = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        repository: 'acme/repo',
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+      const snapshotContext = {
+        contract: compiled.config.spec.task,
+        protectedPaths: compiled.config.spec.task.spec.scope.protected,
+      };
+
+      const presentBlobOid = await gitWithInput(repo, ['hash-object', '-w', '--stdin'], 'carried-present\n');
+      const missingBlobOid = 'd'.repeat(40);
+      const baseEntries = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+      ]);
+      const sourceEntriesPresent = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+        ['vendor/present.txt', { mode: '100644', type: 'blob', oid: presentBlobOid }],
+      ]);
+
+      const presentDelta = computeAllowedSourceRevisionCarryDelta(snapshotContext, baseEntries, sourceEntriesPresent);
+      assert.deepEqual(presentDelta.carryUpdates, [
+        { path: 'vendor/present.txt', mode: '100644', oid: presentBlobOid },
+      ]);
+      const presentBaseline = new Map<string, { path: string; mode: '100644' | '100755'; oid: string; byteLength: number }>();
+      await applyCarryDeltaToEffectiveBaseline(
+        repo,
+        presentBaseline,
+        new Map(),
+        presentDelta.carryRemovals,
+        presentDelta.carryUpdates,
+        GIT_TEST_ENV,
+      );
+      assert.deepEqual(presentBaseline.get('vendor/present.txt'), {
+        path: 'vendor/present.txt',
+        mode: '100644',
+        oid: presentBlobOid,
+        byteLength: Buffer.byteLength('carried-present\n'),
+      });
+
+      const sourceEntriesMissing = new Map([
+        ['vendor/keep.txt', { mode: '100644', type: 'blob', oid: 'a'.repeat(40) }],
+        ['vendor/missing.txt', { mode: '100644', type: 'blob', oid: missingBlobOid }],
+      ]);
+      const missingDelta = computeAllowedSourceRevisionCarryDelta(snapshotContext, baseEntries, sourceEntriesMissing);
+      assert.deepEqual(missingDelta.carryUpdates, [
+        { path: 'vendor/missing.txt', mode: '100644', oid: missingBlobOid },
+      ]);
+
+      await assert.rejects(
+        () => applyCarryDeltaToEffectiveBaseline(
+          repo,
+          new Map(),
+          new Map(),
+          missingDelta.carryRemovals,
+          missingDelta.carryUpdates,
+          GIT_TEST_ENV,
+        ),
+        (err: unknown) => err instanceof GitHubAppError
+          && err.code === 'ACTION_INPUT_INVALID'
+          && err.message === `failed to read carried baseline blob size for "vendor/missing.txt" (${missingBlobOid})`,
+      );
+    } finally {
       await rm(work, { recursive: true, force: true });
     }
   });

@@ -1197,8 +1197,12 @@ export async function resolveGitCommitSha(
 }
 
 /**
- * Accept pre-validated 40-hex commit SHAs directly (such as unfetched PR head SHAs)
- * and resolve symbolic Git refs locally via `resolveGitCommitSha`.
+ * Fast-path pre-validated 40-hex commit SHAs for PR metadata and non-explicit
+ * `baseRevision` values (such as unfetched fork PR head SHAs or shallow base
+ * clones), while resolving symbolic Git refs locally via `resolveGitCommitSha`.
+ * Caller-supplied `options.sourceRevision` in a local Git checkout intentionally
+ * bypasses this fast path and calls `resolveGitCommitSha` directly so missing
+ * preflight commits fail closed at intake.
  */
 async function resolveGitRevisionSha(repositoryRoot: string, ref: string, timeoutMs: number): Promise<string> {
   if (COMMIT_SHA_PATTERN.test(ref)) {
@@ -1317,15 +1321,22 @@ export async function resolveRepositoryAndRevisions(
   }
 
   const resolvedBase = await resolveGitRevisionSha(options.repositoryRoot, baseRev, timeoutMs);
+  // Explicit sourceRevision values in a local Git checkout (including /loopwright retry
+  // with preserveExplicitOnComment) are verified via resolveGitCommitSha even when already
+  // 40-hex, because carried-tree gate materialization and native PR publishing read from
+  // the local object store and must fail closed on missing commits.
   const verifyExplicitSourceLocally = !resolvedFromPr
     && options.sourceRevision !== undefined
     && options.sourceRevision.trim().length > 0
     && existsSync(join(options.repositoryRoot, '.git'));
-  const resolvedSource = verifyExplicitSourceLocally
-    ? await resolveGitCommitSha(options.repositoryRoot, sourceRev, timeoutMs)
-    : sourceRev === baseRev
-      ? resolvedBase
-      : await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
+  let resolvedSource: string;
+  if (verifyExplicitSourceLocally) {
+    resolvedSource = await resolveGitCommitSha(options.repositoryRoot, sourceRev, timeoutMs);
+  } else if (sourceRev === baseRev) {
+    resolvedSource = resolvedBase;
+  } else {
+    resolvedSource = await resolveGitRevisionSha(options.repositoryRoot, sourceRev, timeoutMs);
+  }
 
   let repositoryId: number | undefined;
   const envRepoIdRaw = options.env?.['GITHUB_REPOSITORY_ID']?.trim();
