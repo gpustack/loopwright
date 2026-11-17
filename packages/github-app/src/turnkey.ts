@@ -1340,6 +1340,7 @@ export async function startLocalCommandGateServer(
     gateMap.set(`${gate.gateId}\0${gate.checkId}`, gate);
     if (gate.timeoutSeconds > maxTimeoutSeconds) maxTimeoutSeconds = gate.timeoutSeconds;
   }
+  const verdictTtlMs = Math.min(86_400_000, Math.max(300_000, maxTimeoutSeconds * 1000 + 60_000));
 
   const jobs = new Map<string, LocalCommandGateJob>();
   const settledOrder: string[] = [];
@@ -1429,7 +1430,7 @@ export async function startLocalCommandGateServer(
       candidateDigest,
       status,
       reason: status === 'pending' ? null : reason,
-      expiresAtMs: String(Date.now() + 300_000),
+      expiresAtMs: String(Date.now() + verdictTtlMs),
     });
 
     const sanitizeFailureReason = (raw: string): string => {

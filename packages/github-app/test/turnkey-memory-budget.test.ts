@@ -32,6 +32,9 @@ import {
   SecretScrubber,
   stageTaskpackForStep,
 } from '../src/index.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 const execFileAsync = promisify(execFile);
 
@@ -453,6 +456,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_p3b_token_123456',
         gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
@@ -860,6 +864,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_mcp_token_123456',
         gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
@@ -869,7 +874,11 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
       });
       assert.equal(mcpWindowRes.kind, 'compiled');
       if (mcpWindowRes.kind === 'compiled') {
-        assert.equal(mcpWindowRes.delegateOutcome?.ok, true, 'must not fail admission with CONTEXT_UNSAFE');
+        assert.equal(
+          mcpWindowRes.delegateOutcome?.ok,
+          true,
+          `must not fail admission with CONTEXT_UNSAFE (detail=${mcpWindowRes.delegateOutcome?.detail ?? ''})`,
+        );
         assert.equal(mcpWindowRes.memory?.status, 'published');
       }
 

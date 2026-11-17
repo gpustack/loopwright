@@ -24,6 +24,9 @@ import {
   runGitHubActionEntrypoint,
   writeActionOutputSinks,
 } from '../src/index.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 const execFileAsync = promisify(execFile);
 
@@ -557,6 +560,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         githubApiBaseUrl: githubServer.url,
         githubToken: '',
         gitRemoteUrl: '',
+        openHostSessionAdapter: fastAdapter,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
@@ -885,6 +889,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_p6_token_123456',
         gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
@@ -917,6 +922,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         githubApiBaseUrl: githubServer.url,
         githubToken: '',
         gitRemoteUrl: '',
+        openHostSessionAdapter: fastAdapter,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',

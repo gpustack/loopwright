@@ -21,18 +21,21 @@ export function runCli(argv: readonly string[], env: Record<string, string> = CL
 
 export async function runCliInProcess(
   argv: readonly string[],
-  env?: Readonly<Record<string, string | undefined>>,
+  env: Readonly<Record<string, string | undefined>> = CLEAN_ENV,
 ): Promise<{ readonly status: number; readonly stdout: string; readonly stderr: string }> {
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
   const origStdoutWrite = process.stdout.write.bind(process.stdout);
   const origStderrWrite = process.stderr.write.bind(process.stderr);
-  const savedEnv = new Map<string, string | undefined>();
-  if (env !== undefined) {
-    for (const [key, val] of Object.entries(env)) {
-      savedEnv.set(key, process.env[key]);
-      if (val === undefined) delete process.env[key];
-      else process.env[key] = val;
+  const savedEnv = { ...process.env };
+  for (const key of Object.keys(process.env)) {
+    if (!(key in env) || env[key] === undefined) {
+      delete process.env[key];
+    }
+  }
+  for (const [key, val] of Object.entries(env)) {
+    if (val !== undefined) {
+      process.env[key] = val;
     }
   }
   process.stdout.write = ((
@@ -61,7 +64,12 @@ export async function runCliInProcess(
   } finally {
     process.stdout.write = origStdoutWrite;
     process.stderr.write = origStderrWrite;
-    for (const [key, prior] of savedEnv.entries()) {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) {
+        delete process.env[key];
+      }
+    }
+    for (const [key, prior] of Object.entries(savedEnv)) {
       if (prior === undefined) delete process.env[key];
       else process.env[key] = prior;
     }

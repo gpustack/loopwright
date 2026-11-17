@@ -12,12 +12,16 @@ import { loadConfiguration } from '../src/config.js';
 import type { TrustedRegistry, ControllerConfiguration } from '../src/types.js';
 export const TOKEN = 'S04_CONTROLLER_PRIVATE_CANARY_Aa91Bb82Cc73';
 
-const REAL_TMPDIR_PROMISE = realpath(tmpdir());
-const DESCRIBED_PI_FILES_PROMISE = describePiAdapterFiles();
-const INSTALLED_HANDLERS_PROMISE = installedHandlerDigests();
-const GRAPH_DIGEST_PROMISE = readFile(
+let realTmpdirPromise: Promise<string> | undefined;
+let describedPiFilesPromise: ReturnType<typeof describePiAdapterFiles> | undefined;
+let installedHandlersPromise: ReturnType<typeof installedHandlerDigests> | undefined;
+let graphDigestPromise: Promise<ReturnType<typeof hash>> | undefined;
+const getRealTmpdir = () => (realTmpdirPromise ??= realpath(tmpdir()));
+const getDescribedPiFiles = () => (describedPiFilesPromise ??= describePiAdapterFiles());
+const getInstalledHandlers = () => (installedHandlersPromise ??= installedHandlerDigests());
+const getGraphDigest = () => (graphDigestPromise ??= readFile(
   new URL('../../../package-lock.json', import.meta.resolve('@loopwright/agent-pi')),
-).then(bytes => hash(bytes));
+).then(bytes => hash(bytes)));
 
 const BASE_TASK_TEMPLATE = (() => {
   const task = contract();
@@ -34,12 +38,12 @@ const BASE_TASK_TEMPLATE = (() => {
 })();
 
 export async function configurationFixture() {
-  const root = await mkdtemp(join(await REAL_TMPDIR_PROMISE, 'loopwright-controller-'));
+  const root = await mkdtemp(join(await getRealTmpdir(), 'loopwright-controller-'));
   const operator = join(root, 'operator'), taskDirectory = join(root, 'task'); await mkdir(operator, { mode: 0o700 }); await mkdir(taskDirectory, { mode: 0o700 });
-  const described = await DESCRIBED_PI_FILES_PROMISE; assert.equal(described.ok, true); if (!described.ok) throw new Error('fixture');
+  const described = await getDescribedPiFiles(); assert.equal(described.ok, true); if (!described.ok) throw new Error('fixture');
   const files = structuredClone(described.value);
-  const installed = structuredClone(await INSTALLED_HANDLERS_PROMISE);
-  const graphDigest = structuredClone(await GRAPH_DIGEST_PROMISE);
+  const installed = structuredClone(await getInstalledHandlers());
+  const graphDigest = structuredClone(await getGraphDigest());
   const registry: TrustedRegistry = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'TrustedRegistry', metadata: { name: 'operator' }, spec: {
     version: 1, resourceVersion: 'context-1', handlers: [
       { id: 'package.patch', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Produce one structured submission for the frozen candidate.', purpose: 'task' }, capabilities: ['pi'] },

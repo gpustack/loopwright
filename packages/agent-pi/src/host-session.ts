@@ -1032,6 +1032,9 @@ class HostToolProcess implements ToolProcessPort {
                   await registerAttach(this.host, this.nonce, child.pid, true);
                 }
                 exitCode = await closePromise;
+              } catch (err) {
+                killProcessGroup(child.pid, child.exitCode === null && child.signalCode === null);
+                throw err;
               } finally {
                 combined.removeEventListener('abort', onAbort);
               }

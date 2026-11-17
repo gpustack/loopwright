@@ -25,6 +25,9 @@ import {
   readJsonBody,
   startHttpServer,
 } from './turnkey-action-fixtures.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+
+const fastAdapter = createFastTurnkeyAdapter();
 
 describe('tree_overlay command.v1 materialization and private GIT_INDEX_FILE publication (T4)', () => {
   async function postGateSigned(
@@ -267,6 +270,7 @@ spec:
         runId: 'run-overlay-cmdgate',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
@@ -956,6 +960,7 @@ spec:
         runId: 'run-sym-pub-check',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_sym_pub_secret_token_1234',
         gitRemoteUrl: bareRemote,
@@ -1253,6 +1258,7 @@ spec:
         runId: 'run-basetree-bind',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
@@ -1658,6 +1664,7 @@ spec:
         runId: 'run-revise-prot-mode',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_revise_prot_secret_1234',
         gitRemoteUrl: bareRemote,
@@ -1921,6 +1928,7 @@ spec:
         runId: 'run-classic-delete',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_classic_del_secret_1234',
         gitRemoteUrl: bareRemote,
@@ -2482,6 +2490,7 @@ spec:
         runId: 'run-empty-pr-refuse',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_empty_pr_refuse_secret_1234',
         gitRemoteUrl: bareRemote,
@@ -2841,6 +2850,7 @@ spec:
         runId: 'run-candidate-no-change',
         turnkey: true,
         allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
         githubApiBaseUrl: githubServer.url,
         githubToken: 'ghp_candidate_no_change_secret_1234',
         gitRemoteUrl: bareRemote,

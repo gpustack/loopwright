@@ -12,8 +12,10 @@ import { ControllerOwner, bootIdentity, processBirth } from '../src/ownership.js
 import { ProgressStore } from '../src/progress.js';
 import { hash } from '../src/schema.js';
 import type { ControllerProgress } from '../src/types.js';
-const SELF_BIRTH_PROMISE = processBirth(process.pid);
-const BOOT_ID_PROMISE = bootIdentity();
+let selfBirthPromise: ReturnType<typeof processBirth> | undefined;
+let bootIdPromise: ReturnType<typeof bootIdentity> | undefined;
+const getSelfBirth = () => (selfBirthPromise ??= processBirth(process.pid));
+const getBootId = () => (bootIdPromise ??= bootIdentity());
 
 export function setFixture(value: unknown, path: readonly (string | number)[], replacement: unknown): void {
   let object = value as Record<string | number, unknown>;
@@ -35,7 +37,7 @@ export async function retainedFixture(checks = 1, A = 3, I = 2, leaseMs = 60000,
   const plan = compiled.value, directory = join(f.root, 'retained'); await privateDirectory(directory, [f.taskDirectory, process.cwd()]);
   const registryDirectory = resolve('.claude/s04-qualification'); mkdirSync(registryDirectory, { recursive: true, mode: 0o700 });
   const registry = join(registryDirectory, 'progress-fixtures.ndjson');
-  const [selfBirth, bootId] = await Promise.all([SELF_BIRTH_PROMISE, BOOT_ID_PROMISE]);
+  const [selfBirth, bootId] = await Promise.all([getSelfBirth(), getBootId()]);
   appendFileSync(registry, JSON.stringify({ version: 1, root: f.root, directory, pid: process.pid, birth: selfBirth, boot: bootId, kind: 's02-unit-fixture' }) + '\n', { mode: 0o600 });
   const registryFile = openSync(registry, 'r'); try { fsyncSync(registryFile); } finally { closeSync(registryFile); }
   const owner = await ControllerOwner.acquire(directory, 'run-1', plan.planDigest), artifactDirectory = join(directory, 'artifacts');

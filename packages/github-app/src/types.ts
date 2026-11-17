@@ -3,6 +3,7 @@ import type { ClockBasis, ClockSample } from '@loopwright/state';
 import type {
   PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
 } from '@loopwright/agent-pi';
+import type { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
 import type { ControllerConfiguration, TrustedRegistry } from '@loopwright/controller';
 
 export type { ClockBasis, ClockSample, PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi };
@@ -930,6 +931,7 @@ export interface ActionEntrypointInput {
   readonly probeTimeoutMs?: number | undefined;
   readonly dryRun?: boolean | undefined;
   readonly delegate?: (compiled: WrittenCompiledTaskpack) => Promise<ActionDelegateOutcome>;
+  readonly openHostSessionAdapter?: typeof openPiHostSessionAdapterV2 | undefined;
 }
 
 export interface WrittenCompiledTaskpack extends CompiledTaskpack {
