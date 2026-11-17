@@ -10,6 +10,11 @@ import { INTEGRATED_FAILURE_SCENARIO_IDS, runIntegratedFailureMatrix } from '../
 import { closureExitCode } from '../src/main.js';
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const MAIN = fileURLToPath(new URL('../src/main.js', import.meta.url));
+let cachedFullClosureReport: Promise<ClosureMatrixReport> | null = null;
+function getFullClosureReport(): Promise<ClosureMatrixReport> {
+  cachedFullClosureReport ??= evaluateClosureMatrix({ repoRoot: REPO_ROOT, verifyFailures: true });
+  return cachedFullClosureReport;
+}
 test('closure: freezes the 23-row ledger with honest summary counts', () => {
   assert.equal(Object.isFrozen(CLOSURE_CAPABILITY_LEDGER), true);
   assert.equal(CLOSURE_CAPABILITY_LEDGER.length, 23);
@@ -44,7 +49,7 @@ test('closure: evaluates the committed repository evidence with clean integrity'
   assert.equal(closureExitCode(report, true), 4);
 });
 test('closure: auto-runs the failure matrix when verifyFailures is set', { timeout: 60000 }, async () => {
-  const report = await evaluateClosureMatrix({ repoRoot: REPO_ROOT, verifyFailures: true });
+  const report = await getFullClosureReport();
   assert.equal(report.integrity.ok, true, JSON.stringify(report.integrity.failures));
   assert.equal(report.falsificationDetected, false);
   assert.notEqual(report.failureMatrix, null);
@@ -111,7 +116,9 @@ test('closure: the full 14-scenario matrix passes against real public APIs', { t
   const expected = [...INTEGRATED_FAILURE_SCENARIO_IDS];
   assert.equal(expected.length, 14);
   assert.equal(new Set(expected).size, 14);
-  const report = await runIntegratedFailureMatrix();
+  const fullReport = await getFullClosureReport();
+  assert.notEqual(fullReport.failureMatrix, null);
+  const report = fullReport.failureMatrix!;
   assert.equal(report.version, 1);
   assert.equal(report.total, 14);
   assert.equal(report.passed, 14);
@@ -136,7 +143,13 @@ test('closure: the full 14-scenario matrix passes against real public APIs', { t
   assert.equal(closureExitCode({ version: 1, integrity: { ok: true, checkedFiles: 23, failures: [] }, falsificationDetected: false, diagnostics: [], summary: { total: 23, closedLocal: 18, deferredOwned: 2, blockedExternal: 3, unprovisionedExternal: 5, passed: 18 }, failureMatrix: report } as ClosureMatrixReport, true), 0);
 });
 test('closure: one injected scenario failure flips the report and maps to exit 4', { timeout: 60000 }, async () => {
-  const report = await runIntegratedFailureMatrix({ scenarioOverrides: { stale_memory_source_exclusion: () => ({ scenarioId: 'stale_memory_source_exclusion', passed: false, diagnosticCode: 'INJECTED_FAULT', assertions: ['injected'], elapsedMs: 0 }) } });
+  const scenarioOverrides: NonNullable<Parameters<typeof runIntegratedFailureMatrix>[0]>['scenarioOverrides'] = {};
+  for (const id of INTEGRATED_FAILURE_SCENARIO_IDS) {
+    scenarioOverrides[id] = id === 'stale_memory_source_exclusion'
+      ? () => ({ scenarioId: id, passed: false, diagnosticCode: 'INJECTED_FAULT', assertions: ['injected'], elapsedMs: 0 })
+      : () => ({ scenarioId: id, passed: true, diagnosticCode: null, assertions: ['stubbed pass'], elapsedMs: 0 });
+  }
+  const report = await runIntegratedFailureMatrix({ scenarioOverrides });
   assert.equal(report.allPassed, false);
   assert.equal(report.failed, 1);
   assert.equal(report.passed, 13);

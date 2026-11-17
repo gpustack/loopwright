@@ -807,6 +807,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
           runId: 'run-neg-symlink',
           turnkey: true,
           allowManifestCustomBaseUrl: true,
+          openHostSessionAdapter: fastAdapter,
           githubApiBaseUrl: githubServer.url,
           githubToken: 'ghp_neg_token_123456',
           gitRemoteUrl: bareRemote,

@@ -31,37 +31,42 @@ const EXTRA_TESTS = [
   { pkg: 'controller', path: 'packages/controller/qualification/schedule.test.mjs' },
 ];
 
-// Calibrated LPT weights (approximate relative cost) so both multi-core worker queues
+// Calibrated LPT weights (approximate relative cost in seconds) so both multi-core worker queues
 // and CI shards schedule heavy integration suites first without tail stragglers.
 const PRIORITY_WEIGHTS = new Map([
-  ['turnkey-action.test.js', 95],
-  ['self-upgrade-taskpack.test.js', 80],
-  ['parity.test.js', 68],
-  ['step-cli-fencing.test.js', 60],
-  ['self-upgrade-verifier.test.js', 55],
-  ['tree-overlay.test.js', 50],
-  ['turnkey-action-overlay.test.js', 48],
-  ['turnkey-memory.test.js', 46],
-  ['mcp-limits-and-logs.test.js', 45],
-  ['step-engine.test.js', 45],
-  ['gate.test.js', 42],
-  ['npm-pack.test.js', 38],
-  ['service-compile.test.js', 36],
-  ['step-cli.test.js', 34],
-  ['mcp-repair-budgets.test.js', 32],
-  ['taskpack-intake.test.js', 30],
-  ['host-session.test.js', 26],
-  ['delegated-taskpack.test.js', 24],
-  ['report-and-t3.test.js', 22],
-  ['python-bridge.test.js', 20],
-  ['turnkey-memory-budget.test.js', 18],
-  ['turnkey-memory-cas-guards.test.js', 18],
-  ['turnkey-action-app-auth.test.js', 16],
-  ['progress-checkpoint.test.js', 16],
-  ['closure-and-failure-matrix.test.js', 12],
-  ['reconcile.test.js', 11],
-  ['publication.test.js', 9],
-  ['cli.test.js', 8],
+  ['turnkey-action-overlay.test.js', 90],
+  ['turnkey-memory.test.js', 73],
+  ['turnkey-action.test.js', 63],
+  ['self-upgrade-taskpack.test.js', 59],
+  ['parity.test.js', 54],
+  ['mcp-repair-budgets.test.js', 51],
+  ['tree-overlay.test.js', 46],
+  ['step-engine.test.js', 46],
+  ['report-and-t3.test.js', 45],
+  ['step-cli-fencing.test.js', 45],
+  ['turnkey-memory-budget.test.js', 44],
+  ['step-cli.test.js', 44],
+  ['self-upgrade-verifier.test.js', 40],
+  ['turnkey-memory-cas-guards.test.js', 38],
+  ['mcp-limits-and-logs.test.js', 36],
+  ['reconcile.test.js', 35],
+  ['progress-capacity.test.js', 35],
+  ['turnkey-action-app-auth.test.js', 34],
+  ['gate.test.js', 34],
+  ['docs-and-site.test.js', 24],
+  ['npm-pack.test.js', 21],
+  ['delegated-taskpack.test.js', 20],
+  ['service-compile.test.js', 16],
+  ['arguments.test.js', 15],
+  ['taskpack-intake.test.js', 15],
+  ['host-session.test.js', 14],
+  ['publication.test.js', 12],
+  ['external-mcp.test.js', 10],
+  ['scheduling-cycle.test.js', 9],
+  ['closure-and-failure-matrix.test.js', 8],
+  ['control-plane-action.test.js', 8],
+  ['sandbox.test.js', 8],
+  ['python-bridge.test.js', 4],
 ]);
 
 function usageError(message) {
@@ -89,11 +94,25 @@ function parseArgs(argv) {
   let shard = null;
   const pkgs = new Set();
   let listOnly = false;
+  let concurrency = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--list') {
       listOnly = true;
+      continue;
+    }
+    if (arg === '--concurrency' || arg.startsWith('--concurrency=')) {
+      if (concurrency !== null) usageError('duplicate --concurrency flag');
+      const val = arg === '--concurrency' ? argv[++i] : arg.slice('--concurrency='.length);
+      if (typeof val !== 'string' || !/^[1-9]\d*$/.test(val)) {
+        usageError(`invalid --concurrency "${String(val ?? '')}"; expected positive integer`);
+      }
+      const parsedCount = Number.parseInt(val, 10);
+      if (!Number.isSafeInteger(parsedCount) || parsedCount < 1 || parsedCount > MAX_SHARDS) {
+        usageError(`out-of-range --concurrency "${val}"; expected 1..${String(MAX_SHARDS)}`);
+      }
+      concurrency = parsedCount;
       continue;
     }
     if (arg === '--shard' || arg.startsWith('--shard=')) {
@@ -114,7 +133,7 @@ function parseArgs(argv) {
     usageError(`unknown argument "${arg}"`);
   }
 
-  return { shard, pkgs, listOnly };
+  return { shard, pkgs, listOnly, concurrency };
 }
 
 function suiteWeight(filePath) {
@@ -182,7 +201,7 @@ if (targetFiles.length === 0) {
   process.exit(0);
 }
 
-const requested = Number.parseInt(process.env.LW_TEST_CONCURRENCY ?? '', 10);
+const requested = parsed.concurrency ?? Number.parseInt(process.env.LW_TEST_CONCURRENCY ?? '', 10);
 const isCi = Boolean(process.env.CI && process.env.CI !== '0' && process.env.CI !== 'false');
 const concurrency = Number.isInteger(requested) && requested >= 1
   ? requested

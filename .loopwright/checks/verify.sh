@@ -793,10 +793,18 @@ cat >"$COMPILE_RUNNER" <<'EOF'
 set -euo pipefail
 
 "$VERIFY_NODE_BIN" scripts/build.mjs
-"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit
-"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache .
-"$VERIFY_NODE_BIN" scripts/check-docs.mjs
-"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json
+
+"$VERIFY_NODE_BIN" ./node_modules/typescript/bin/tsc -p tsconfig.test.json &
+PID_TSC=$!
+"$VERIFY_NODE_BIN" ./node_modules/eslint/bin/eslint.js --config eslint.config.mjs --no-config-lookup --no-cache . &
+PID_ESLINT=$!
+"$VERIFY_NODE_BIN" scripts/check-docs.mjs &
+PID_DOCS=$!
+
+wait "$PID_TSC"
+wait "$PID_ESLINT"
+wait "$PID_DOCS"
+
 if [[ -n "${HUGO_BIN:-}" ]]; then
   "$VERIFY_NODE_BIN" scripts/site.mjs build
 fi
@@ -1514,9 +1522,12 @@ run_contained(
     network_mode="none",
 )
 
-# Promote compiled tree into brand-new RUNTIME_WORK (fresh regular-file inodes) and destroy BUILD_WORK
-# so any compile-stage process that escaped its process group has zero Seatbelt/inode write authority.
-promote_build_to_runtime(build_dir, runtime_dir)
+# Promote compiled tree into brand-new RUNTIME_WORK (fresh regular-file inodes) via staging dir
+# and atomic rename so any compile-stage survivor cannot race file creation in RUNTIME_WORK.
+runtime_stage = os.path.join(work_root, "run.staging")
+force_remove_dir(runtime_stage)
+promote_build_to_runtime(build_dir, runtime_stage)
+os.replace(runtime_stage, runtime_dir)
 force_remove_dir(build_dir)
 force_remove_dir(build_home)
 force_remove_dir(build_tmp)
