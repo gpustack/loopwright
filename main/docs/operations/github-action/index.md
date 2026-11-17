@@ -64,6 +64,8 @@ A live Action resolves repository identity and revisions, discovers upstreams, a
 
 Use `upstream-records` to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as `no_change`. Unavailable upstreams can block execution.
 
+Pass `source-revision` when preflight stages writable files onto a commit separate from `GITHUB_SHA`. Local checks and publication keep protected and non-writable files at `GITHUB_SHA`, and squash writable changes onto a commit parented on `GITHUB_SHA`.
+
 Native publication uses a detached `git worktree`, a signed-off diff-only commit, and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
 
 Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.
@@ -117,6 +119,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `git-author-name` | Dynamic or `github-actions[bot]` | Optional commit author, committer, and DCO `Signed-off-by` name override. |
 | `git-author-email` | Dynamic noreply email | Optional commit author, committer, and DCO `Signed-off-by` email override. |
 | `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
+| `source-revision` | `GITHUB_SHA` | Git commit SHA or ref materialized as the candidate source tree while keeping `GITHUB_SHA` as the base revision. |
 | `mcp-servers` | Taskpack `spec.mcp.servers` | JSON or YAML MCP server declarations merged by `id` (`LOOPWRIGHT_MCP_SERVERS` fallback). |
 | `wall-time-seconds` | `3600` | Run wall-time limit override in seconds (`60..21600`; `LOOPWRIGHT_WALL_TIME_SECONDS`). |
 | `total-tokens` | `20000000` | Total token ceiling across model calls (`1000..1000000000`; `LOOPWRIGHT_TOTAL_TOKENS`). |

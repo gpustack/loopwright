@@ -432,6 +432,7 @@
   </tbody>
 </table>
 <p>Use <code>upstream-records</code> to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as <code>no_change</code>. Unavailable upstreams can block execution.</p>
+<p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Local checks and publication keep protected and non-writable files at <code>GITHUB_SHA</code>, and squash writable changes onto a commit parented on <code>GITHUB_SHA</code>.</p>
 <p>Native publication uses a detached <code>git worktree</code>, a signed-off diff-only commit, and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
 <p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.</p>
 <p>On GitHub Actions, an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. This uses host process isolation, not a container security boundary. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
@@ -597,6 +598,11 @@
           <td><code>upstream-records</code></td>
           <td>Unset</td>
           <td>JSON array of precomputed upstream acquisition records.</td>
+      </tr>
+      <tr>
+          <td><code>source-revision</code></td>
+          <td><code>GITHUB_SHA</code></td>
+          <td>Git commit SHA or ref materialized as the candidate source tree while keeping <code>GITHUB_SHA</code> as the base revision.</td>
       </tr>
       <tr>
           <td><code>mcp-servers</code></td>
