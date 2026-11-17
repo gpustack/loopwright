@@ -50,7 +50,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     });
     assert.equal(manifest.metadata.name, 'self-upgrade');
     assert.equal(manifest.spec.sandbox, undefined);
-    assert.equal(manifest.spec.limits?.commandTimeoutSeconds, 900);
+    assert.equal(manifest.spec.limits?.commandTimeoutSeconds, 1800);
     assert.deepEqual(manifest.spec.triggers.commentCommands, ['retry', 'revise']);
     assert.equal(manifest.spec.upstreams.length, 7);
 
@@ -98,7 +98,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     });
 
     assert.equal(candidateCompiled.localCommandGates?.length, 1);
-    assert.equal(candidateCompiled.localCommandGates?.[0]?.timeoutSeconds, 900);
+    assert.equal(candidateCompiled.localCommandGates?.[0]?.timeoutSeconds, 1800);
     assert.equal(candidateCompiled.localCommandGates?.[0]?.script, '.loopwright/checks/verify.sh');
     assert.deepEqual(noChangeCompiled.config.spec.task.spec.acceptance.required, ['taskpack-no-change']);
 

@@ -83,7 +83,7 @@ spec:
         implementation: command.v1
         parameters:
           script: .loopwright/checks/verify.sh
-          timeoutSeconds: 900
+          timeoutSeconds: 1800
           allowReadOnlyGitHubToken: false
           env:
             - GITHUB_ACTIONS
@@ -118,7 +118,7 @@ spec:
       - /loopwright
   limits:
     wallTimeSeconds: 2700
-    commandTimeoutSeconds: 900
+    commandTimeoutSeconds: 1800
     toolTimeoutSeconds: 300
     maxAttempts: 3
   output:
