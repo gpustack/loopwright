@@ -297,4 +297,45 @@ describe('memory PR title and Markdown body formatting', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it('neutralizes trailing backslashes in inline code spans and bounds baseRevision to 64 code points', async () => {
+    const fixture = await buildRun('completed');
+    const entry = makeEntry(fixture, {
+      evidenceRefs: [{
+        evidenceId: 'ev.backslash',
+        checkId: 'check.backslash',
+        level: 'local_execution',
+        observedStatus: 'passed',
+        artifact: {
+          ...fixture.artifactRefs[1]!,
+          name: 'artifacts\\nested\\file`name\\',
+        },
+      }],
+    });
+    const longBaseRevision = `${'a'.repeat(80)}\\`;
+    const proposal: MemoryProposal = {
+      ...makeProposal(fixture, [{ kind: 'upsert', entry }]),
+      proposalId: 'prop\\id\\',
+      runId: 'run\\id\\',
+      baseRevision: longBaseRevision,
+    };
+
+    const body = buildMemoryPullRequestBody({
+      taskpack: 'pack\\name\\',
+      proposal,
+      storeDigestBefore: hex('before'),
+      storeDigestAfter: hex('after'),
+    });
+
+    assert.ok(
+      body.includes('Updates reviewed memory for taskpack `pack/name/` from verified run `run/id/`'),
+      body,
+    );
+    assert.ok(body.includes('- **Proposal ID**: `prop/id/`'), body);
+    assert.ok(body.includes('- **Run ID**: `run/id/`'), body);
+    assert.ok(body.includes(`- **Base Revision**: \`${'a'.repeat(12)}\` (\`${'a'.repeat(64)}\`)`), body);
+    assert.equal(body.includes('a'.repeat(65)), false, 'baseRevision full span must be bounded to 64 code points');
+    assert.ok(body.includes("- `artifacts/nested/file'name/`"), body);
+    assert.equal(/\\`/.test(body), false, 'inline code spans must not end with an unescaped backslash');
+  });
 });

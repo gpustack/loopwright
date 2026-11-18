@@ -45,7 +45,7 @@ function sanitizeSingleLine(text: string): string {
 }
 
 function escapeInlineCodeText(text: string): string {
-  return sanitizeSingleLine(text).replace(/`/g, '\'');
+  return sanitizeSingleLine(text).replace(/`/g, '\'').replace(/\\/g, '/');
 }
 
 function escapeTableSpecials(text: string, escapeAngles: boolean): string {
@@ -158,7 +158,7 @@ export function buildMemoryPullRequestBody(options: {
     '',
     `- **Proposal ID**: \`${safeProposalId}\``,
     `- **Run ID**: \`${safeRunId}\``,
-    `- **Base Revision**: \`${safeBaseRevision.slice(0, 12)}\` (\`${safeBaseRevision}\`)`,
+    `- **Base Revision**: \`${safeBaseRevision.slice(0, 12)}\` (\`${truncateCodePoints(safeBaseRevision, 64)}\`)`,
     `- **Store Digest**: \`${options.storeDigestBefore.hex.slice(0, 12)}\` -> \`${options.storeDigestAfter.hex.slice(0, 12)}\``,
   ];
   if (options.rebased === true) {

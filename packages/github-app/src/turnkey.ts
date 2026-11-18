@@ -2095,7 +2095,20 @@ function escapeMarkdownTableCell(value: unknown, scrubber: SecretScrubber): stri
 }
 
 function escapeInlineCode(raw: string): string {
-  return stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim().replace(/`/g, '\'');
+  return stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim().replace(/`/g, '\'').replace(/\\/g, '/');
+}
+
+function escapeMarkdownInlineProse(raw: string, maxCodePoints: number): string {
+  const collapsed = stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim();
+  if (collapsed.length === 0) return '';
+  const bounded = truncateCodePoints(collapsed, maxCodePoints).trim();
+  if (bounded.length === 0) return '';
+  return bounded
+    .replace(/\\/g, '\\\\')
+    .replace(/([`*_[\]|])/g, '\\$1')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/^(#+|[-+])/, '\\$1');
 }
 
 function formatInlineCodeTableCell(raw: string): string {
@@ -2282,6 +2295,10 @@ function extractVersionsMap(
   return map;
 }
 
+function extractSubscriptionEntryName(item: Record<string, unknown>): string | null {
+  return firstNonEmptyString(item['subscription'], item['id'], item['name']);
+}
+
 function extractSubscriptionSources(
   record: Record<string, unknown> | null,
   out: Map<string, string>,
@@ -2292,7 +2309,7 @@ function extractSubscriptionSources(
     for (const item of raw) {
       if (out.size >= MAX_VERSION_TABLE_ENTRIES) break;
       if (!isPlainRecord(item)) continue;
-      const id = firstNonEmptyString(item['id'], item['subscription'], item['name']);
+      const id = extractSubscriptionEntryName(item);
       const source = firstNonEmptyString(item['source']);
       if (id !== null && source !== null && !out.has(id)) {
         out.set(id, source);
@@ -2412,10 +2429,10 @@ export function buildNativePullRequestBody(options: {
     }
   }
   if (typeof parsed['notes'] === 'string') {
-    const cleanNotes = truncateCodePoints(
-      sanitizeProposalLeadText(options.scrubber.scrub(parsed['notes'])),
+    const cleanNotes = escapeMarkdownInlineProse(
+      options.scrubber.scrub(parsed['notes']),
       MAX_PR_NOTES_CODEPOINTS,
-    ).trim();
+    );
     if (cleanNotes.length > 0) {
       metaBullets.push(`- **Notes**: ${cleanNotes}`);
     }
@@ -2424,10 +2441,10 @@ export function buildNativePullRequestBody(options: {
     for (const item of parsed['notes']) {
       if (noteItems.length >= 10) break;
       if (typeof item !== 'string') continue;
-      const cleanNote = truncateCodePoints(
-        stripDisallowedControls(options.scrubber.scrub(item), false).replace(/\s+/g, ' ').trim(),
+      const cleanNote = escapeMarkdownInlineProse(
+        options.scrubber.scrub(item),
         MAX_PR_TABLE_CELL_CODEPOINTS,
-      ).trim();
+      );
       if (cleanNote.length > 0) {
         noteItems.push(cleanNote);
       }
@@ -2530,7 +2547,7 @@ export function buildNativePullRequestBody(options: {
     for (const item of rawSubscriptions) {
       if (subRows.length >= MAX_VERSION_TABLE_ENTRIES) break;
       if (!isPlainRecord(item)) continue;
-      const rawName = firstNonEmptyString(item['subscription'], item['id'], item['name']);
+      const rawName = extractSubscriptionEntryName(item);
       if (rawName !== null) {
         subRows.push({ name: rawName, entry: item });
       }
@@ -2564,6 +2581,7 @@ export function buildNativePullRequestBody(options: {
   if (options.modifiedPaths !== undefined && options.modifiedPaths.length > 0) {
     const cleanPaths: string[] = [];
     const seenPaths = new Set<string>();
+    const omittedInputCount = Math.max(0, options.modifiedPaths.length - MAX_MODIFIED_PATHS_INPUT);
     for (const rawPath of options.modifiedPaths.slice(0, MAX_MODIFIED_PATHS_INPUT)) {
       const scrubbedPath = options.scrubber.scrub(rawPath);
       const cleaned = stripDisallowedControls(scrubbedPath, false).replace(/\s+/g, ' ').trim();
@@ -2574,7 +2592,8 @@ export function buildNativePullRequestBody(options: {
     }
     if (cleanPaths.length > 0) {
       const count = cleanPaths.length;
-      const fileLines: string[] = [`## Modified Files (${count})`, ''];
+      const countLabel = omittedInputCount > 0 ? `${count}+` : String(count);
+      const fileLines: string[] = [`## Modified Files (${countLabel})`, ''];
       if (count <= 15) {
         for (const p of cleanPaths) {
           fileLines.push(`- \`${escapeInlineCode(p)}\``);
@@ -2593,7 +2612,7 @@ export function buildNativePullRequestBody(options: {
         }
         fileLines.push('');
         fileLines.push('<details>');
-        fileLines.push(`<summary>View modified files (${count})</summary>`);
+        fileLines.push(`<summary>View modified files (${countLabel})</summary>`);
         fileLines.push('');
         for (const p of cleanPaths.slice(0, 100)) {
           fileLines.push(`- \`${escapeInlineCode(p)}\``);
@@ -2602,6 +2621,11 @@ export function buildNativePullRequestBody(options: {
           fileLines.push(`- ...and ${cleanPaths.length - 100} more`);
         }
         fileLines.push('</details>');
+      }
+      if (omittedInputCount > 0) {
+        const pathWord = omittedInputCount === 1 ? 'path' : 'paths';
+        fileLines.push('');
+        fileLines.push(`_...and ${omittedInputCount} additional ${pathWord} omitted._`);
       }
       sections.push(fileLines.join('\n'));
     }

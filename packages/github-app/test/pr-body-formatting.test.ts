@@ -678,4 +678,110 @@ spec:
     });
     assert.ok(singleOmitBody.includes('_...and 1 additional version entry omitted._'), singleOmitBody);
   });
+
+  it('escapes Markdown/HTML injection in proposal notes, neutralizes trailing backslashes in inline code, aligns subscription ID precedence, and tracks >10,000 modifiedPaths', () => {
+    const scrubber = new SecretScrubber();
+    const digest = '0011223344556677'.repeat(4);
+
+    // 1) Untrusted string and array notes cannot inject headings, links, horizontal rules, or raw HTML
+    const injectionStrProposal = {
+      schema_version: 1,
+      summary: 'Safe summary.',
+      stage: 'aligned\\stage`test\\',
+      notes: '# Fake Heading\n[evil](https://evil.example) <script>alert(1)</script>\n---',
+    };
+    const strNotesBody = buildNativePullRequestBody({
+      runId: 'run-notes-str',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(injectionStrProposal), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      modifiedPaths: ['dir\\sub\\file.ts\\'],
+      scrubber,
+    });
+    assert.ok(strNotesBody.includes('- **Stage**: `aligned/stage\'test/`'), strNotesBody);
+    assert.ok(strNotesBody.includes('- `dir/sub/file.ts/`'), strNotesBody);
+    assert.ok(
+      strNotesBody.includes('- **Notes**: \\# Fake Heading \\[evil\\](https://evil.example) &lt;script&gt;alert(1)&lt;/script&gt; ---'),
+      strNotesBody,
+    );
+    assert.equal(strNotesBody.includes('<script>'), false);
+    assert.equal(/^# Fake Heading/m.test(strNotesBody), false);
+    assert.equal(/\[evil\]\(https:\/\/evil\.example\)/.test(strNotesBody), false);
+
+    const injectionArrProposal = {
+      schema_version: 1,
+      summary: 'Safe summary.',
+      notes: [
+        '# Fake Heading\n[evil](https://evil.example) <script>',
+        '---\n*bold* _italic_ `code` |pipe|\\slash',
+      ],
+    };
+    const arrNotesBody = buildNativePullRequestBody({
+      runId: 'run-notes-arr',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(injectionArrProposal), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      scrubber,
+    });
+    assert.ok(
+      arrNotesBody.includes('  - \\# Fake Heading \\[evil\\](https://evil.example) &lt;script&gt;'),
+      arrNotesBody,
+    );
+    assert.ok(
+      arrNotesBody.includes('  - \\--- \\*bold\\* \\_italic\\_ \\`code\\` \\|pipe\\|\\\\slash'),
+      arrNotesBody,
+    );
+    assert.equal(arrNotesBody.includes('<script>'), false);
+    assert.equal(/^---$/m.test(arrNotesBody.split('\n\n---\n\n')[0]!), false);
+
+    // 2) Subscription identifier precedence: `subscription` takes precedence over `id` and `name` in both Version Changes Source lookup and Subscriptions table
+    const precedenceProposal = {
+      schema_version: 1,
+      versions: {
+        'rocm/sglang': '0.5.9',
+      },
+      subscriptions: [
+        { subscription: 'rocm/sglang', id: 'legacy-id', name: 'legacy-name', source: 'sglang-project/sglang', status: 'ready' },
+      ],
+    };
+    const precedenceBody = buildNativePullRequestBody({
+      runId: 'run-sub-prec',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(precedenceProposal), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      scrubber,
+    });
+    assert.ok(precedenceBody.includes('| `rocm/sglang` | `sglang-project/sglang` | `0.5.9` |'), precedenceBody);
+    assert.ok(precedenceBody.includes('| rocm/sglang | ready | - | - | - |'), precedenceBody);
+
+    // 3) >10,000 modifiedPaths reports bounded count+ and explicit omitted count
+    const overCapPaths = Array.from({ length: 10_005 }, (_, i) => `packages/pkg-${i % 10}/file-${i}.ts`);
+    const overCapBody = buildNativePullRequestBody({
+      runId: 'run-paths-cap',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify({ summary: 'Many files.' }), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      modifiedPaths: overCapPaths,
+      scrubber,
+    });
+    assert.ok(overCapBody.includes('## Modified Files (10000+)'), overCapBody);
+    assert.ok(overCapBody.includes('<summary>View modified files (10000+)</summary>'), overCapBody);
+    assert.ok(overCapBody.includes('_...and 5 additional paths omitted._'), overCapBody);
+
+    const singleOmitPaths = Array.from({ length: 10_001 }, (_, i) => `packages/file-${i}.ts`);
+    const singleOmitPathsBody = buildNativePullRequestBody({
+      runId: 'run-paths-cap-1',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify({ summary: 'Many files.' }), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      modifiedPaths: singleOmitPaths,
+      scrubber,
+    });
+    assert.ok(singleOmitPathsBody.includes('_...and 1 additional path omitted._'), singleOmitPathsBody);
+  });
 });
