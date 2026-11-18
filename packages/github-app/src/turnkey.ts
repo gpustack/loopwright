@@ -2101,14 +2101,18 @@ function escapeInlineCode(raw: string): string {
 function escapeMarkdownInlineProse(raw: string, maxCodePoints: number): string {
   const collapsed = stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim();
   if (collapsed.length === 0) return '';
-  const bounded = truncateCodePoints(collapsed, maxCodePoints).trim();
-  if (bounded.length === 0) return '';
-  return bounded
+  const escaped = collapsed
     .replace(/\\/g, '\\\\')
     .replace(/([`*_[\]|])/g, '\\$1')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/^(#+|[-+])/, '\\$1');
+  const bounded = truncateCodePoints(escaped, maxCodePoints);
+  if (bounded === escaped) return bounded;
+  return bounded
+    .replace(/&[a-z]*$/, '')
+    .replace(/\\+$/, match => (match.length % 2 === 1 ? match.slice(0, -1) : match))
+    .trim();
 }
 
 function formatInlineCodeTableCell(raw: string): string {

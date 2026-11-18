@@ -1705,7 +1705,10 @@ export async function finalizeAndPublishTurnkeyMemory(
         cleanInline(`- Run: ${options.runId}`),
       ].join('\n');
       const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
-      const commitMessage = `${cleanTitle}\n\n${commitBody}\n\n${signoffLine}\n`;
+      const hasExactSignoff = cleanTitle === signoffLine;
+      const commitMessage = hasExactSignoff
+        ? `${cleanTitle}\n\n${commitBody}\n`
+        : `${cleanTitle}\n\n${commitBody}\n\n${signoffLine}\n`;
 
       const headOid = (
         await gitClone(
