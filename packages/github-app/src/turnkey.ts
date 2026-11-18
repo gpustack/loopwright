@@ -2024,6 +2024,20 @@ export function buildGitAuthEnv(gitWriteToken: string | undefined): Record<strin
 const MAX_PROPOSAL_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_PR_BODY_CODEPOINTS = 32_000;
 const MAX_PR_TABLE_CELL_CODEPOINTS = 500;
+const MAX_PR_NOTES_CODEPOINTS = 2_000;
+const MAX_VERSION_TABLE_ENTRIES = 500;
+const MAX_MODIFIED_PATHS_INPUT = 10_000;
+const HEX_DIGEST_VERSION_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+const RUNNER_SUBSCRIPTION_KEYS = [
+  'status',
+  'engine_version',
+  'engineVersion',
+  'engine',
+  'plugin_version',
+  'pluginVersion',
+  'plugin',
+  'reason',
+] as const;
 
 function stripDisallowedControls(text: string, allowNewline: boolean): string {
   let out = '';
@@ -2042,10 +2056,10 @@ function stripDisallowedControls(text: string, allowNewline: boolean): string {
   return out;
 }
 
-function escapeMarkdownTableCell(value: unknown): string {
+function escapeMarkdownTableCell(value: unknown, scrubber: SecretScrubber): string {
   if (value === null || value === undefined) return '-';
   const raw = typeof value === 'string'
-    ? value
+    ? scrubber.scrub(value)
     : typeof value === 'number' || typeof value === 'boolean'
       ? String(value)
       : '';
@@ -2057,8 +2071,236 @@ function escapeMarkdownTableCell(value: unknown): string {
   return bounded.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
 }
 
+function escapeInlineCode(raw: string): string {
+  return stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim().replace(/`/g, '\'');
+}
+
+function formatInlineCodeTableCell(raw: string): string {
+  const cleaned = escapeInlineCode(raw);
+  if (cleaned.length === 0) return '-';
+  const bounded = truncateCodePoints(cleaned, MAX_PR_TABLE_CELL_CODEPOINTS);
+  return `\`${bounded.replace(/\\/g, '\\\\').replace(/\|/g, '\\|')}\``;
+}
+
+function formatVersionTableCell(raw: string | null): string {
+  if (raw === null) return '-';
+  const cleaned = stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim();
+  if (cleaned.length === 0) return '-';
+  if (HEX_DIGEST_VERSION_PATTERN.test(cleaned)) {
+    return `\`${cleaned.slice(0, 12)}\``;
+  }
+  return formatInlineCodeTableCell(cleaned);
+}
+
 function sanitizeProposalLeadText(raw: string): string {
   return stripDisallowedControls(raw.replace(/\r\n?/g, '\n'), true).trim();
+}
+
+function findLastStructuralDetailsOpen(text: string): number {
+  const blockIdx = text.lastIndexOf('\n<details>\n');
+  if (blockIdx !== -1) return blockIdx + 1;
+  return text.startsWith('<details>\n') ? 0 : -1;
+}
+
+type VersionDiffStatus = 'Added' | 'Removed' | 'Updated' | 'Unchanged' | 'Tracked';
+
+interface VersionDiffRow {
+  readonly id: string;
+  readonly secondary: string | null;
+  readonly previous: string | null;
+  readonly target: string | null;
+  readonly status: VersionDiffStatus;
+}
+
+function computeVersionDiffStatus(
+  hasBase: boolean,
+  previous: string | null,
+  target: string | null,
+): VersionDiffStatus {
+  if (!hasBase) return 'Tracked';
+  if (previous === null) return 'Added';
+  if (target === null) return 'Removed';
+  return previous !== target ? 'Updated' : 'Unchanged';
+}
+
+function renderVersionDiffTable(
+  rows: readonly VersionDiffRow[],
+  options: {
+    readonly primaryHeader: string;
+    readonly secondaryHeader: string;
+    readonly hasSecondary: boolean;
+    readonly hasBase: boolean;
+  },
+): string {
+  const headers: string[] = [options.primaryHeader];
+  if (options.hasSecondary) headers.push(options.secondaryHeader);
+  if (options.hasBase) headers.push('Previous');
+  headers.push('Target');
+  if (options.hasBase) headers.push('Status');
+
+  const lines: string[] = [
+    `| ${headers.join(' | ')} |`,
+    `| ${headers.map(() => '---').join(' | ')} |`,
+  ];
+
+  for (const row of rows) {
+    const cells: string[] = [formatInlineCodeTableCell(row.id)];
+    if (options.hasSecondary) {
+      cells.push(row.secondary !== null ? formatInlineCodeTableCell(row.secondary) : '-');
+    }
+    if (options.hasBase) {
+      cells.push(formatVersionTableCell(row.previous));
+    }
+    cells.push(formatVersionTableCell(row.target));
+    if (options.hasBase) {
+      cells.push(row.status);
+    }
+    lines.push(`| ${cells.join(' | ')} |`);
+  }
+  return lines.join('\n');
+}
+
+function renderVersionChangesSection(
+  rows: readonly VersionDiffRow[],
+  options: {
+    readonly primaryHeader: string;
+    readonly secondaryHeader: string;
+    readonly hasBase: boolean;
+    readonly unchangedLabel: string;
+  },
+): string | null {
+  if (rows.length === 0) return null;
+  const hasSecondary = rows.some(row => row.secondary !== null);
+  const tableOpts = {
+    primaryHeader: options.primaryHeader,
+    secondaryHeader: options.secondaryHeader,
+    hasSecondary,
+    hasBase: options.hasBase,
+  };
+
+  if (!options.hasBase) {
+    return `## Version Changes\n\n${renderVersionDiffTable(rows, tableOpts)}`;
+  }
+
+  const changed = rows.filter(row => row.status !== 'Unchanged');
+  const unchanged = rows.filter(row => row.status === 'Unchanged');
+
+  if (changed.length > 0 && unchanged.length > 0) {
+    return [
+      '## Version Changes',
+      '',
+      renderVersionDiffTable(changed, tableOpts),
+      '',
+      '<details>',
+      `<summary>Unchanged ${options.unchangedLabel} (${unchanged.length})</summary>`,
+      '',
+      renderVersionDiffTable(unchanged, tableOpts),
+      '</details>',
+    ].join('\n');
+  }
+  if (changed.length === 0 && unchanged.length > 0) {
+    return [
+      '## Version Changes',
+      '',
+      `_All ${unchanged.length} ${options.unchangedLabel} match base._`,
+      '',
+      renderVersionDiffTable(unchanged, tableOpts),
+    ].join('\n');
+  }
+  return `## Version Changes\n\n${renderVersionDiffTable(changed, tableOpts)}`;
+}
+
+function extractUpstreamsMap(
+  record: Record<string, unknown>,
+  scrubber: SecretScrubber,
+): Map<string, { readonly pkg: string | null; readonly version: string }> {
+  const map = new Map<string, { readonly pkg: string | null; readonly version: string }>();
+  const raw = record['upstreams'];
+  if (!isPlainRecord(raw)) return map;
+  for (const [key, entry] of Object.entries(raw)) {
+    if (map.size >= MAX_VERSION_TABLE_ENTRIES) break;
+    const id = scrubber.scrub(key).trim();
+    if (id.length === 0) continue;
+    if (typeof entry === 'string') {
+      map.set(id, { pkg: null, version: scrubber.scrub(entry) });
+    } else if (isPlainRecord(entry)) {
+      const version = typeof entry['version'] === 'string'
+        ? scrubber.scrub(entry['version'])
+        : typeof entry['version'] === 'number' && Number.isFinite(entry['version'])
+          ? String(entry['version'])
+          : null;
+      if (version === null) continue;
+      const rawPkg = typeof entry['package'] === 'string' ? scrubber.scrub(entry['package']).trim() : '';
+      const pkg = rawPkg.length > 0 ? rawPkg : null;
+      map.set(id, { pkg, version });
+    }
+  }
+  return map;
+}
+
+function extractVersionsMap(
+  record: Record<string, unknown>,
+  scrubber: SecretScrubber,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  const raw = record['versions'];
+  if (!isPlainRecord(raw)) return map;
+  for (const [key, val] of Object.entries(raw)) {
+    if (map.size >= MAX_VERSION_TABLE_ENTRIES) break;
+    const id = scrubber.scrub(key).trim();
+    if (id.length === 0) continue;
+    if (typeof val === 'string') {
+      map.set(id, scrubber.scrub(val));
+    } else if (typeof val === 'number' && Number.isFinite(val)) {
+      map.set(id, String(val));
+    }
+  }
+  return map;
+}
+
+function extractSubscriptionSources(
+  record: Record<string, unknown> | null,
+  out: Map<string, string>,
+  scrubber: SecretScrubber,
+): void {
+  if (record === null) return;
+  const raw = record['subscriptions'];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (out.size >= MAX_VERSION_TABLE_ENTRIES) break;
+      if (!isPlainRecord(item)) continue;
+      const rawId = typeof item['id'] === 'string' && item['id'].trim().length > 0
+        ? item['id'].trim()
+        : typeof item['subscription'] === 'string' && item['subscription'].trim().length > 0
+          ? item['subscription'].trim()
+          : typeof item['name'] === 'string' && item['name'].trim().length > 0
+            ? item['name'].trim()
+            : null;
+      const id = rawId !== null ? scrubber.scrub(rawId).trim() : null;
+      const source = typeof item['source'] === 'string' && item['source'].trim().length > 0
+        ? scrubber.scrub(item['source']).trim()
+        : null;
+      if (id !== null && id.length > 0 && source !== null && source.length > 0 && !out.has(id)) {
+        out.set(id, source);
+      }
+    }
+  } else if (isPlainRecord(raw)) {
+    for (const [key, entry] of Object.entries(raw)) {
+      if (out.size >= MAX_VERSION_TABLE_ENTRIES) break;
+      const id = scrubber.scrub(key).trim();
+      if (id.length === 0 || !isPlainRecord(entry)) continue;
+      if (typeof entry['source'] === 'string' && entry['source'].trim().length > 0 && !out.has(id)) {
+        const source = scrubber.scrub(entry['source']).trim();
+        if (source.length > 0) {
+          out.set(id, source);
+        }
+      }
+    }
+  }
+}
+
+function hasRunnerSubscriptionFields(entry: Record<string, unknown>): boolean {
+  return RUNNER_SUBSCRIPTION_KEYS.some(key => Object.hasOwn(entry, key) && entry[key] !== undefined);
 }
 
 export function buildNativePullRequestBody(options: {
@@ -2067,6 +2309,8 @@ export function buildNativePullRequestBody(options: {
   readonly proposalPath?: string | undefined;
   readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[];
   readonly stagedPaths?: ReadonlySet<string> | undefined;
+  readonly baseProposalBytes?: Uint8Array | undefined;
+  readonly modifiedPaths?: readonly string[] | undefined;
   readonly scrubber: SecretScrubber;
 }): string {
   const provenanceFooter = options.scrubber.scrub(
@@ -2106,11 +2350,147 @@ export function buildNativePullRequestBody(options: {
     return provenanceFooter;
   }
 
+  let baseParsed: Record<string, unknown> | null = null;
+  if (
+    options.baseProposalBytes !== undefined
+    && options.baseProposalBytes.byteLength > 0
+    && options.baseProposalBytes.byteLength <= MAX_PROPOSAL_JSON_BYTES
+  ) {
+    try {
+      const decodedBase = new TextDecoder('utf-8', { fatal: true }).decode(options.baseProposalBytes);
+      const candidateBase: unknown = JSON.parse(decodedBase);
+      if (isPlainRecord(candidateBase)) {
+        baseParsed = candidateBase;
+      }
+    } catch {
+      baseParsed = null;
+    }
+  }
+  const hasBase = baseParsed !== null;
+
   const sections: string[] = [];
+
+  const summaryParts: string[] = [];
   if (typeof parsed['summary'] === 'string') {
-    const cleanSummary = sanitizeProposalLeadText(parsed['summary']);
+    const cleanSummary = sanitizeProposalLeadText(options.scrubber.scrub(parsed['summary']));
     if (cleanSummary.length > 0) {
-      sections.push(cleanSummary);
+      summaryParts.push(cleanSummary);
+    }
+  }
+  const metaBullets: string[] = [];
+  if (typeof parsed['stage'] === 'string') {
+    const cleanStage = escapeInlineCode(options.scrubber.scrub(parsed['stage']));
+    if (cleanStage.length > 0) {
+      metaBullets.push(`- **Stage**: \`${cleanStage}\``);
+    }
+  }
+  if (typeof parsed['notes'] === 'string') {
+    const cleanNotes = truncateCodePoints(
+      sanitizeProposalLeadText(options.scrubber.scrub(parsed['notes'])),
+      MAX_PR_NOTES_CODEPOINTS,
+    ).trim();
+    if (cleanNotes.length > 0) {
+      metaBullets.push(`- **Notes**: ${cleanNotes}`);
+    }
+  } else if (Array.isArray(parsed['notes'])) {
+    const noteItems: string[] = [];
+    for (const item of parsed['notes']) {
+      if (noteItems.length >= 10) break;
+      if (typeof item !== 'string') continue;
+      const cleanNote = truncateCodePoints(
+        stripDisallowedControls(options.scrubber.scrub(item), false).replace(/\s+/g, ' ').trim(),
+        MAX_PR_TABLE_CELL_CODEPOINTS,
+      ).trim();
+      if (cleanNote.length > 0) {
+        noteItems.push(cleanNote);
+      }
+    }
+    if (noteItems.length > 0) {
+      metaBullets.push('- **Notes**:');
+      for (const note of noteItems) {
+        metaBullets.push(`  - ${note}`);
+      }
+    }
+  }
+  if (metaBullets.length > 0) {
+    summaryParts.push(metaBullets.join('\n'));
+  }
+  if (summaryParts.length > 0) {
+    sections.push(`## Summary\n\n${summaryParts.join('\n\n')}`);
+  }
+
+  let renderedVersionChanges = false;
+  const candidateUpstreams = extractUpstreamsMap(parsed, options.scrubber);
+  const baseUpstreams = baseParsed !== null
+    ? extractUpstreamsMap(baseParsed, options.scrubber)
+    : new Map<string, { readonly pkg: string | null; readonly version: string }>();
+  if (candidateUpstreams.size > 0 || (hasBase && baseUpstreams.size > 0)) {
+    const orderedKeys: string[] = [...candidateUpstreams.keys()];
+    for (const baseKey of baseUpstreams.keys()) {
+      if (!candidateUpstreams.has(baseKey)) {
+        orderedKeys.push(baseKey);
+      }
+    }
+    const rows: VersionDiffRow[] = orderedKeys.map(id => {
+      const cand = candidateUpstreams.get(id);
+      const base = baseUpstreams.get(id);
+      const previous = base?.version ?? null;
+      const target = cand?.version ?? null;
+      return {
+        id,
+        secondary: cand?.pkg ?? base?.pkg ?? null,
+        previous,
+        target,
+        status: computeVersionDiffStatus(hasBase, previous, target),
+      };
+    });
+    const versionSection = renderVersionChangesSection(rows, {
+      primaryHeader: 'Upstream',
+      secondaryHeader: 'Package',
+      hasBase,
+      unchangedLabel: 'tracked upstream pins',
+    });
+    if (versionSection !== null) {
+      sections.push(versionSection);
+      renderedVersionChanges = true;
+    }
+  }
+
+  if (!renderedVersionChanges) {
+    const candidateVersions = extractVersionsMap(parsed, options.scrubber);
+    const baseVersions = baseParsed !== null
+      ? extractVersionsMap(baseParsed, options.scrubber)
+      : new Map<string, string>();
+    if (candidateVersions.size > 0 || (hasBase && baseVersions.size > 0)) {
+      const sourceMap = new Map<string, string>();
+      extractSubscriptionSources(parsed, sourceMap, options.scrubber);
+      extractSubscriptionSources(baseParsed, sourceMap, options.scrubber);
+      const orderedKeys: string[] = [...candidateVersions.keys()];
+      for (const baseKey of baseVersions.keys()) {
+        if (!candidateVersions.has(baseKey)) {
+          orderedKeys.push(baseKey);
+        }
+      }
+      const rows: VersionDiffRow[] = orderedKeys.map(id => {
+        const previous = baseVersions.get(id) ?? null;
+        const target = candidateVersions.get(id) ?? null;
+        return {
+          id,
+          secondary: sourceMap.get(id) ?? null,
+          previous,
+          target,
+          status: computeVersionDiffStatus(hasBase, previous, target),
+        };
+      });
+      const versionSection = renderVersionChangesSection(rows, {
+        primaryHeader: 'Component',
+        secondaryHeader: 'Source',
+        hasBase,
+        unchangedLabel: 'tracked versions',
+      });
+      if (versionSection !== null) {
+        sections.push(versionSection);
+      }
     }
   }
 
@@ -2118,12 +2498,15 @@ export function buildNativePullRequestBody(options: {
   const subRows: Array<{ readonly name: string; readonly entry: Record<string, unknown> }> = [];
   if (isPlainRecord(rawSubscriptions)) {
     for (const [key, entry] of Object.entries(rawSubscriptions)) {
-      if (key.trim().length > 0 && isPlainRecord(entry)) {
-        subRows.push({ name: key.trim(), entry });
+      if (subRows.length >= MAX_VERSION_TABLE_ENTRIES) break;
+      const cleanName = options.scrubber.scrub(key).trim();
+      if (cleanName.length > 0 && isPlainRecord(entry)) {
+        subRows.push({ name: cleanName, entry });
       }
     }
   } else if (Array.isArray(rawSubscriptions)) {
     for (const item of rawSubscriptions) {
+      if (subRows.length >= MAX_VERSION_TABLE_ENTRIES) break;
       if (!isPlainRecord(item)) continue;
       const rawName = typeof item['subscription'] === 'string' && item['subscription'].trim().length > 0
         ? item['subscription'].trim()
@@ -2133,29 +2516,82 @@ export function buildNativePullRequestBody(options: {
             ? item['name'].trim()
             : null;
       if (rawName !== null) {
-        subRows.push({ name: rawName, entry: item });
+        const cleanName = options.scrubber.scrub(rawName).trim();
+        if (cleanName.length > 0) {
+          subRows.push({ name: cleanName, entry: item });
+        }
       }
     }
   }
 
-  if (subRows.length > 0) {
+  if (subRows.length > 0 && subRows.some(row => hasRunnerSubscriptionFields(row.entry))) {
     const tableLines: string[] = [
+      '## Subscriptions',
+      '',
       '| Subscription | Status | Engine | Plugin | Reason |',
       '| --- | --- | --- | --- | --- |',
     ];
     for (const { name, entry } of subRows) {
-      const subCell = escapeMarkdownTableCell(name);
-      const statusCell = escapeMarkdownTableCell(entry['status']);
+      const subCell = escapeMarkdownTableCell(name, options.scrubber);
+      const statusCell = escapeMarkdownTableCell(entry['status'], options.scrubber);
       const engineCell = escapeMarkdownTableCell(
         entry['engine_version'] ?? entry['engineVersion'] ?? entry['engine'],
+        options.scrubber,
       );
       const pluginCell = escapeMarkdownTableCell(
         entry['plugin_version'] ?? entry['pluginVersion'] ?? entry['plugin'],
+        options.scrubber,
       );
-      const reasonCell = escapeMarkdownTableCell(entry['reason']);
+      const reasonCell = escapeMarkdownTableCell(entry['reason'], options.scrubber);
       tableLines.push(`| ${subCell} | ${statusCell} | ${engineCell} | ${pluginCell} | ${reasonCell} |`);
     }
     sections.push(tableLines.join('\n'));
+  }
+
+  if (options.modifiedPaths !== undefined && options.modifiedPaths.length > 0) {
+    const cleanPaths: string[] = [];
+    const seenPaths = new Set<string>();
+    for (const rawPath of options.modifiedPaths.slice(0, MAX_MODIFIED_PATHS_INPUT)) {
+      const scrubbedPath = options.scrubber.scrub(rawPath);
+      const cleaned = stripDisallowedControls(scrubbedPath, false).replace(/\s+/g, ' ').trim();
+      if (cleaned.length > 0 && !seenPaths.has(cleaned)) {
+        seenPaths.add(cleaned);
+        cleanPaths.push(cleaned);
+      }
+    }
+    if (cleanPaths.length > 0) {
+      const count = cleanPaths.length;
+      const fileLines: string[] = [`## Modified Files (${count})`, ''];
+      if (count <= 15) {
+        for (const p of cleanPaths) {
+          fileLines.push(`- \`${escapeInlineCode(p)}\``);
+        }
+      } else {
+        const dirCounts = new Map<string, number>();
+        for (const p of cleanPaths) {
+          const slashIdx = p.indexOf('/');
+          const topDir = slashIdx > 0 ? `${p.slice(0, slashIdx)}/` : '(root)';
+          dirCounts.set(topDir, (dirCounts.get(topDir) ?? 0) + 1);
+        }
+        const sortedDirs = [...dirCounts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        for (const [dir, dirCount] of sortedDirs) {
+          const label = dir === '(root)' ? '`(root)`' : `\`${escapeInlineCode(dir)}\``;
+          fileLines.push(`- ${label}: ${dirCount} ${dirCount === 1 ? 'file' : 'files'}`);
+        }
+        fileLines.push('');
+        fileLines.push('<details>');
+        fileLines.push(`<summary>View modified files (${count})</summary>`);
+        fileLines.push('');
+        for (const p of cleanPaths.slice(0, 100)) {
+          fileLines.push(`- \`${escapeInlineCode(p)}\``);
+        }
+        if (cleanPaths.length > 100) {
+          fileLines.push(`- ...and ${cleanPaths.length - 100} more`);
+        }
+        fileLines.push('</details>');
+      }
+      sections.push(fileLines.join('\n'));
+    }
   }
 
   if (sections.length === 0) {
@@ -2166,10 +2602,23 @@ export function buildNativePullRequestBody(options: {
   if (scrubbedLead.length === 0) {
     return provenanceFooter;
   }
-  const footerCodePoints = Array.from(provenanceFooter).length;
-  const maxLeadCodePoints = Math.max(1, MAX_PR_BODY_CODEPOINTS - footerCodePoints - 2);
-  const boundedLead = truncateCodePoints(scrubbedLead, maxLeadCodePoints);
-  return `${boundedLead}\n\n${provenanceFooter}`;
+  const footerWithSeparator = `\n\n---\n\n${provenanceFooter}`;
+  const footerCodePoints = Array.from(footerWithSeparator).length;
+  const maxLeadCodePoints = Math.max(1, MAX_PR_BODY_CODEPOINTS - footerCodePoints);
+  if (Array.from(scrubbedLead).length <= maxLeadCodePoints) {
+    return `${scrubbedLead}${footerWithSeparator}`;
+  }
+
+  let boundedLead = truncateCodePoints(scrubbedLead, maxLeadCodePoints);
+  boundedLead = boundedLead.replace(/<[a-z/!][^>]*$/i, '').trimEnd();
+  const openDetails = findLastStructuralDetailsOpen(boundedLead);
+  if (openDetails !== -1 && boundedLead.indexOf('\n</details>', openDetails) === -1) {
+    boundedLead = boundedLead.slice(0, openDetails).trimEnd();
+  }
+  if (boundedLead.length === 0) {
+    return provenanceFooter;
+  }
+  return `${boundedLead}${footerWithSeparator}`;
 }
 
 /**
@@ -2265,18 +2714,29 @@ export async function startNativePullRequestPublisherServer(
     const dispatchGeneration = request['dispatchGeneration'] ?? null;
     const idempotencyKey = String(request['idempotencyKey'] ?? '');
     const candidateDigest = String(request['candidateDigest'] ?? '');
-    const rawTitle = typeof request['title'] === 'string' ? request['title'].trim() : '';
-    const expandedTemplate = options.titleTemplate?.trim()
-      ? options.titleTemplate.trim()
-          .replace(/\$\{repository\}/g, options.repositoryFullName)
-          .replace(/\$\{runId\}/g, runId)
-          .replace(/\$\{candidateDigest\}/g, candidateDigest.slice(0, 12))
+    const cleanRunId = stripDisallowedControls(scrubber.scrub(runId), false).replace(/\s+/g, ' ').trim();
+    const rawTitle = typeof request['title'] === 'string'
+      ? stripDisallowedControls(scrubber.scrub(request['title']), true).trim()
       : '';
-    const title = rawTitle.length > 0
-      ? rawTitle
-      : expandedTemplate.length > 0
-        ? expandedTemplate
-        : `Loopwright update (${runId})`;
+    const expandedTemplate = options.titleTemplate?.trim()
+      ? stripDisallowedControls(
+          scrubber.scrub(
+            options.titleTemplate.trim()
+              .replace(/\$\{repository\}/g, options.repositoryFullName)
+              .replace(/\$\{runId\}/g, cleanRunId)
+              .replace(/\$\{candidateDigest\}/g, candidateDigest.slice(0, 12)),
+          ),
+          false,
+        ).replace(/\s+/g, ' ').trim()
+      : '';
+    const title = scrubber.scrub(
+      rawTitle.length > 0
+        ? rawTitle
+        : expandedTemplate.length > 0
+          ? expandedTemplate
+          : `chore(loopwright): automated update (${truncateCodePoints(cleanRunId || 'run', 34)})`,
+    );
+    const prTitle = stripDisallowedControls(title, false).replace(/\s+/g, ' ').trim();
     const targetBranch = String(request['targetBranch'] ?? options.targetBranch);
 
     if (idempotencyKey.length > 0) {
@@ -2365,12 +2825,14 @@ export async function startNativePullRequestPublisherServer(
         : await listTreeEntriesAtRevision(options.repositoryRoot, sourceRevision, gitEnv);
 
       const carriedUpdatesByPath = new Map<string, CarryDeltaEntry>();
+      let carryRemovalsList: readonly string[] = [];
       if (sourceRevision !== baseRevision) {
         const { carryRemovals, carryUpdates } = computeAllowedSourceRevisionCarryDelta(
           snapshot,
           baseEntries,
           sourceEntries,
         );
+        carryRemovalsList = carryRemovals;
         if (carryRemovals.length > 0) {
           await removePathsFromIndex(options.repositoryRoot, indexFile, carryRemovals, gitEnv);
         }
@@ -2520,7 +2982,70 @@ export async function startNativePullRequestPublisherServer(
           apiHeaders['authorization'] = `Bearer ${options.gitWriteToken}`;
         }
         const stagedPathSet = new Set(stagedFiles.map(entry => entry.path));
+        const finalEntryByPath = new Map<string, { readonly mode: '100644' | '100755'; readonly oid: string }>();
+        for (const [path, entry] of carriedUpdatesByPath) {
+          finalEntryByPath.set(path, { mode: entry.mode, oid: entry.oid });
+        }
+        for (const entry of stagedFiles) {
+          finalEntryByPath.set(entry.path, { mode: entry.mode, oid: entry.oid });
+        }
+        const modifiedPathSet = new Set<string>();
+        for (const removedPath of carryRemovalsList) {
+          if (!finalEntryByPath.has(removedPath) && baseEntries.has(removedPath)) {
+            modifiedPathSet.add(removedPath);
+          }
+        }
+        for (const removedPath of filesToRemove) {
+          finalEntryByPath.delete(removedPath);
+          if (baseEntries.has(removedPath)) {
+            modifiedPathSet.add(removedPath);
+          }
+        }
+        for (const [path, finalEntry] of finalEntryByPath) {
+          const baseEntry = baseEntries.get(path);
+          if (baseEntry === undefined || baseEntry.oid !== finalEntry.oid || baseEntry.mode !== finalEntry.mode) {
+            modifiedPathSet.add(path);
+          }
+        }
+        const modifiedPaths = [...modifiedPathSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+        const readBoundedProposalBlob = async (
+          oid: string,
+          warnLabel?: string,
+        ): Promise<Buffer | undefined> => {
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) return undefined;
+          try {
+            const sizeText = (await gitRepo(['cat-file', '-s', oid])).toString('utf8').trim();
+            const byteSize = Number(sizeText);
+            if (Number.isSafeInteger(byteSize) && byteSize > 0 && byteSize <= MAX_PROPOSAL_JSON_BYTES) {
+              return await execGit(
+                options.repositoryRoot,
+                ['cat-file', 'blob', oid],
+                { env: gitEnv, maxStdoutBytes: MAX_PROPOSAL_JSON_BYTES },
+              );
+            }
+            if (warnLabel !== undefined && Number.isSafeInteger(byteSize) && byteSize > MAX_PROPOSAL_JSON_BYTES) {
+              process.stderr.write(
+                `${scrubber.scrub(
+                  `[loopwright] warning: ${warnLabel} (${byteSize} bytes) exceeds ${MAX_PROPOSAL_JSON_BYTES} byte limit; falling back to provenance footer`,
+                )}\n`,
+              );
+            }
+          } catch (error) {
+            if (warnLabel !== undefined) {
+              const detail = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
+              process.stderr.write(
+                `${scrubber.scrub(
+                  `[loopwright] warning: failed to read ${warnLabel} from ${oid}: ${detail}`,
+                )}\n`,
+              );
+            }
+          }
+          return undefined;
+        };
+
         let prBodyFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[] = snapshot.files;
+        let baseProposalBytes: Uint8Array | undefined;
         if (options.proposalPath !== undefined && options.proposalPath.trim().length > 0) {
           let cleanProposalPath: string | undefined;
           try {
@@ -2528,41 +3053,29 @@ export async function startNativePullRequestPublisherServer(
           } catch {
             cleanProposalPath = undefined;
           }
+          if (cleanProposalPath !== undefined) {
+            const baseProposalEntry = baseEntries.get(cleanProposalPath);
+            if (
+              baseProposalEntry !== undefined
+              && (baseProposalEntry.mode === '100644' || baseProposalEntry.mode === '100755')
+            ) {
+              baseProposalBytes = await readBoundedProposalBlob(baseProposalEntry.oid);
+            }
+          }
           if (
             cleanProposalPath !== undefined
             && !stagedPathSet.has(cleanProposalPath)
             && !filesToRemove.includes(cleanProposalPath)
           ) {
             const carriedProposal = carriedUpdatesByPath.get(cleanProposalPath);
-            if (carriedProposal !== undefined && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(carriedProposal.oid)) {
-              try {
-                const sizeText = (
-                  await gitRepo(['cat-file', '-s', carriedProposal.oid])
-                ).toString('utf8').trim();
-                const byteSize = Number(sizeText);
-                if (Number.isSafeInteger(byteSize) && byteSize > 0 && byteSize <= MAX_PROPOSAL_JSON_BYTES) {
-                  const proposalBytes = await execGit(
-                    options.repositoryRoot,
-                    ['cat-file', 'blob', carriedProposal.oid],
-                    { env: gitEnv, maxStdoutBytes: MAX_PROPOSAL_JSON_BYTES },
-                  );
-                  stagedPathSet.add(cleanProposalPath);
-                  prBodyFiles = [...snapshot.files, { name: cleanProposalPath, bytes: proposalBytes }];
-                } else if (Number.isSafeInteger(byteSize) && byteSize > MAX_PROPOSAL_JSON_BYTES) {
-                  process.stderr.write(
-                    `${scrubber.scrub(
-                      `[loopwright] warning: carried proposal "${cleanProposalPath}" (${byteSize} bytes) exceeds ${MAX_PROPOSAL_JSON_BYTES} byte limit; falling back to provenance footer`,
-                    )}\n`,
-                  );
-                }
-              } catch (error) {
-                // Best-effort carried proposal read; fall back to provenance footer if blob read fails.
-                const detail = (error instanceof Error ? error.message : String(error)).replace(/[\r\n]+/g, ' ');
-                process.stderr.write(
-                  `${scrubber.scrub(
-                    `[loopwright] warning: failed to read carried proposal "${cleanProposalPath}" from ${carriedProposal.oid}: ${detail}`,
-                  )}\n`,
-                );
+            if (carriedProposal !== undefined) {
+              const proposalBytes = await readBoundedProposalBlob(
+                carriedProposal.oid,
+                `carried proposal "${cleanProposalPath}"`,
+              );
+              if (proposalBytes !== undefined) {
+                stagedPathSet.add(cleanProposalPath);
+                prBodyFiles = [...snapshot.files, { name: cleanProposalPath, bytes: proposalBytes }];
               }
             }
           }
@@ -2573,6 +3086,8 @@ export async function startNativePullRequestPublisherServer(
           proposalPath: options.proposalPath,
           files: prBodyFiles,
           stagedPaths: stagedPathSet,
+          baseProposalBytes,
+          modifiedPaths,
           scrubber,
         });
         const isUpdate = options.openManagedPr !== undefined && options.openManagedPr !== null;
@@ -2589,8 +3104,8 @@ export async function startNativePullRequestPublisherServer(
             method: isUpdate ? 'PATCH' : 'POST',
             body: JSON.stringify(
               isUpdate
-                ? { title, body: prBody }
-                : { title, head: branchName, base: targetBranch, body: prBody },
+                ? { title: prTitle, body: prBody }
+                : { title: prTitle, head: branchName, base: targetBranch, body: prBody },
             ),
           },
         );

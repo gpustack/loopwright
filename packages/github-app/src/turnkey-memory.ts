@@ -1695,11 +1695,19 @@ export async function finalizeAndPublishTurnkeyMemory(
 
       const cleanTitle = scrubber.scrub(casResult.pullRequest.title).replace(/[\r\n]+/g, ' ').trim();
       const cleanBody = scrubber.scrub(casResult.pullRequest.body).replace(/\r\n?/g, '\n').trim();
+      const upsertsCount = finalized.proposal.operations.filter(op => op.kind === 'upsert').length;
+      const retireCount = finalized.proposal.operations.length - upsertsCount;
+      const commitBodyLines = [
+        truncateCodePoints(`- Taskpack: ${scrubber.scrub(taskpack).replace(/[\r\n]+/g, ' ').trim()}`, 72),
+        `- Operations: ${finalized.proposal.operations.length} (${upsertsCount} upsert, ${retireCount} retire)`,
+        truncateCodePoints(`- Run: ${scrubber.scrub(options.runId).replace(/[\r\n]+/g, ' ').trim()}`, 72),
+      ];
+      const commitBody = commitBodyLines.join('\n');
       const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
-      const hasExactSignoff = cleanBody.split('\n').some(line => line.trim() === signoffLine);
+      const hasExactSignoff = [cleanTitle, ...commitBodyLines].some(line => line.trim() === signoffLine);
       const commitMessage = hasExactSignoff
-        ? `${cleanTitle}\n\n${cleanBody}\n`
-        : `${cleanTitle}\n\n${cleanBody}\n\n${signoffLine}\n`;
+        ? `${cleanTitle}\n\n${commitBody}\n`
+        : `${cleanTitle}\n\n${commitBody}\n\n${signoffLine}\n`;
 
       const headOid = (
         await gitClone(

@@ -2,12 +2,240 @@ import { constants, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { open, readFile, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import type { Digest } from '@loopwright/core';
 import { canonical, digestEqual, unifiedFileDiff } from './schema.js';
 import { ensureSafeDirectoryChain, entryFileBytes, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import { verifyMemoryProposal } from './verifier.js';
-import type { MemoryCASInput, MemoryCASRefusal, MemoryCASResult, MemoryDiagnostic, MemoryModifiedFile, MemoryProposal, SeparateMemoryPullRequestSpec } from './types.js';
+import type { MemoryCASInput, MemoryCASRefusal, MemoryCASResult, MemoryDiagnostic, MemoryEntry, MemoryModifiedFile, MemoryOperation, MemoryProposal, SeparateMemoryPullRequestSpec } from './types.js';
 
 const LOCK_NAME = '.cas.lock';
+const MAX_MEMORY_PR_TITLE_CODEPOINTS = 72;
+const MAX_MEMORY_PR_TASKPACK_CODEPOINTS = 28;
+const MAX_MEMORY_PR_TABLE_ROWS = 50;
+const MAX_MEMORY_PR_ENTRY_LABEL_CODEPOINTS = 60;
+const MAX_MEMORY_PR_CLAIM_CODEPOINTS = 200;
+const MAX_MEMORY_PR_BODY_CODEPOINTS = 30_000;
+const MAX_MEMORY_PR_CITED_ARTIFACTS = 50;
+const MAX_MEMORY_PR_ARTIFACT_NAME_CODEPOINTS = 120;
+const MAX_MEMORY_PR_PROVENANCE_CODEPOINTS = 6_000;
+
+function truncateCodePoints(text: string, maxCodePoints: number): string {
+  if (maxCodePoints <= 0) return '';
+  const chars = Array.from(text);
+  return chars.length <= maxCodePoints ? text : chars.slice(0, maxCodePoints).join('');
+}
+
+function stripMemoryControlChars(text: string): string {
+  let out = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code === 9 || code === 10 || code === 13) {
+      out += ' ';
+    } else if (code <= 31 || (code >= 127 && code <= 159)) {
+      continue;
+    } else {
+      out += text[index]!;
+    }
+  }
+  return out;
+}
+
+function sanitizeSingleLine(text: string): string {
+  return stripMemoryControlChars(text).replace(/\s+/g, ' ').trim();
+}
+
+function escapeInlineCodeText(text: string): string {
+  return sanitizeSingleLine(text).replace(/`/g, '\'');
+}
+
+function escapeTableSpecials(text: string, escapeAngles: boolean): string {
+  const escaped = text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+  return escapeAngles ? escaped.replace(/</g, '&lt;').replace(/>/g, '&gt;') : escaped;
+}
+
+function escapeMarkdownTableText(text: string, maxCodePoints: number): string {
+  const cleaned = sanitizeSingleLine(text);
+  if (cleaned.length === 0) return '-';
+  return escapeTableSpecials(truncateCodePoints(cleaned, maxCodePoints), true);
+}
+
+function formatInlineTableCode(text: string, maxCodePoints: number): string {
+  const cleaned = escapeInlineCodeText(text);
+  if (cleaned.length === 0) return '-';
+  return `\`${escapeTableSpecials(truncateCodePoints(cleaned, maxCodePoints), false)}\``;
+}
+
+function shortEntryLabel(entry: MemoryEntry): string {
+  const raw = entry.claimKey.trim().length > 0 ? entry.claimKey : entry.id;
+  return truncateCodePoints(sanitizeSingleLine(raw) || entry.id, MAX_MEMORY_PR_ENTRY_LABEL_CODEPOINTS);
+}
+
+/** Build a Conventional-Commit title (`<= 72` chars) for a separate memory pull request. */
+export function buildMemoryPullRequestTitle(options: {
+  readonly taskpack: string;
+  readonly operations: readonly MemoryOperation[];
+}): string {
+  const rawTaskpack = sanitizeSingleLine(options.taskpack);
+  const baseTaskpack = rawTaskpack.length > 0 ? rawTaskpack : 'store';
+  let upserts = 0;
+  let retirements = 0;
+  for (const operation of options.operations) {
+    if (operation.kind === 'upsert') upserts += 1;
+    else retirements += 1;
+  }
+
+  const formatTitle = (taskpackLabel: string): string => {
+    if (upserts > 0 && retirements === 0) {
+      return `chore(memory): record ${upserts} verified ${taskpackLabel} ${upserts === 1 ? 'entry' : 'entries'}`;
+    }
+    if (retirements > 0 && upserts === 0) {
+      return `chore(memory): retire ${retirements} stale ${taskpackLabel} ${retirements === 1 ? 'entry' : 'entries'}`;
+    }
+    return `chore(memory): update ${taskpackLabel} memory (+${upserts} / -${retirements})`;
+  };
+
+  let safeTaskpack = truncateCodePoints(baseTaskpack, MAX_MEMORY_PR_TASKPACK_CODEPOINTS);
+  let title = formatTitle(safeTaskpack);
+  const titleLen = Array.from(title).length;
+  if (titleLen > MAX_MEMORY_PR_TITLE_CODEPOINTS) {
+    const excess = titleLen - MAX_MEMORY_PR_TITLE_CODEPOINTS;
+    const reducedLimit = Math.max(1, Array.from(safeTaskpack).length - excess);
+    safeTaskpack = truncateCodePoints(baseTaskpack, reducedLimit);
+    title = formatTitle(safeTaskpack);
+  }
+  return truncateCodePoints(title, MAX_MEMORY_PR_TITLE_CODEPOINTS);
+}
+
+/** Build structured GitHub-Flavored Markdown PR body for a verified memory proposal. */
+export function buildMemoryPullRequestBody(options: {
+  readonly taskpack: string;
+  readonly proposal: MemoryProposal;
+  readonly storeDigestBefore: Digest;
+  readonly storeDigestAfter: Digest;
+  readonly rebased?: boolean;
+}): string {
+  const safeTaskpack = escapeInlineCodeText(options.taskpack) || 'store';
+  const safeRunId = escapeInlineCodeText(options.proposal.runId) || 'run';
+  const safeProposalId = escapeInlineCodeText(options.proposal.proposalId) || 'proposal';
+  const safeBaseRevision = escapeInlineCodeText(options.proposal.baseRevision) || 'unknown';
+  const upserts = options.proposal.operations.filter(
+    (operation): operation is Extract<MemoryOperation, { readonly kind: 'upsert' }> => operation.kind === 'upsert',
+  );
+  const retireCount = options.proposal.operations.length - upserts.length;
+
+  const summarySection = [
+    '## Summary',
+    '',
+    `Updates reviewed memory for taskpack \`${safeTaskpack}\` from verified run \`${safeRunId}\` (${upserts.length} recorded, ${retireCount} retired).`,
+  ].join('\n');
+
+  const citedArtifactMap = new Map<string, { readonly name: string; readonly hex: string }>();
+  for (const operation of upserts) {
+    for (const ref of operation.entry.evidenceRefs) {
+      const name = truncateCodePoints(escapeInlineCodeText(ref.artifact.name), MAX_MEMORY_PR_ARTIFACT_NAME_CODEPOINTS);
+      const hex = sanitizeSingleLine(ref.artifact.digest.hex);
+      const key = `${name}\0${hex}`;
+      if (!citedArtifactMap.has(key)) {
+        citedArtifactMap.set(key, { name, hex });
+      }
+    }
+  }
+  const citedArtifacts = [...citedArtifactMap.values()].sort((a, b) =>
+    a.name < b.name ? -1 : a.name > b.name ? 1 : a.hex < b.hex ? -1 : a.hex > b.hex ? 1 : 0,
+  );
+
+  const provenanceLines: string[] = [
+    '<details>',
+    `<summary>Provenance & Evidence Receipts (${citedArtifacts.length})</summary>`,
+    '',
+    `- **Proposal ID**: \`${safeProposalId}\``,
+    `- **Run ID**: \`${safeRunId}\``,
+    `- **Base Revision**: \`${safeBaseRevision.slice(0, 12)}\` (\`${safeBaseRevision}\`)`,
+    `- **Store Digest**: \`${options.storeDigestBefore.hex.slice(0, 12)}\` -> \`${options.storeDigestAfter.hex.slice(0, 12)}\``,
+  ];
+  if (options.rebased === true) {
+    provenanceLines.push('- **Rebased**: yes');
+  }
+  if (citedArtifacts.length === 0) {
+    provenanceLines.push('- **Cited Artifacts**: none');
+  } else {
+    provenanceLines.push('- **Cited Artifacts**:');
+    const maxArtifactsToConsider = Math.min(citedArtifacts.length, MAX_MEMORY_PR_CITED_ARTIFACTS);
+    let provenanceChars = Array.from(provenanceLines.join('\n')).length;
+    const closingBudget = Array.from(`\n  - ...and ${citedArtifacts.length} additional artifact(s).\n</details>`).length;
+    let shownArtifacts = 0;
+    for (let index = 0; index < maxArtifactsToConsider; index += 1) {
+      const artifact = citedArtifacts[index]!;
+      const line = `  - \`${artifact.name}\` (\`sha256:${artifact.hex.slice(0, 16)}…\`)`;
+      const lineChars = 1 + Array.from(line).length;
+      if (provenanceChars + lineChars + closingBudget > MAX_MEMORY_PR_PROVENANCE_CODEPOINTS) {
+        break;
+      }
+      provenanceLines.push(line);
+      provenanceChars += lineChars;
+      shownArtifacts += 1;
+    }
+    if (citedArtifacts.length > shownArtifacts) {
+      provenanceLines.push(`  - ...and ${citedArtifacts.length - shownArtifacts} additional artifact(s).`);
+    }
+  }
+  provenanceLines.push('</details>');
+  const provenanceBlock = provenanceLines.join('\n');
+
+  const changeLines: string[] = ['## Memory Changes', ''];
+  if (options.proposal.operations.length === 0) {
+    changeLines.push('_No memory operations._');
+    return `${summarySection}\n\n${changeLines.join('\n')}\n\n${provenanceBlock}`;
+  }
+
+  changeLines.push('| Action | Kind | Entry | Claim / Reason | Evidence |');
+  changeLines.push('| --- | --- | --- | --- | --- |');
+  const reservedCodePoints = Array.from(
+    `${summarySection}\n\n${changeLines.join('\n')}\n\n_...and ${options.proposal.operations.length} additional operation(s)._\n\n${provenanceBlock}`,
+  ).length;
+  const rowBudget = Math.max(0, MAX_MEMORY_PR_BODY_CODEPOINTS - reservedCodePoints);
+  const maxOpsToShow = Math.min(options.proposal.operations.length, MAX_MEMORY_PR_TABLE_ROWS);
+  let usedRowCodePoints = 0;
+  let shownOpsCount = 0;
+
+  for (let index = 0; index < maxOpsToShow; index += 1) {
+    const operation = options.proposal.operations[index]!;
+    let rowLine: string;
+    if (operation.kind === 'upsert') {
+      const action = operation.entry.supersedes.length > 0 ? 'Supersede' : 'Record';
+      const kindCell = formatInlineTableCode(operation.entry.kind, 40);
+      const entryCell = formatInlineTableCode(shortEntryLabel(operation.entry), MAX_MEMORY_PR_ENTRY_LABEL_CODEPOINTS);
+      const claimCell = escapeMarkdownTableText(operation.entry.claim, MAX_MEMORY_PR_CLAIM_CODEPOINTS);
+      const uniqueCheckIds = [...new Set(
+        operation.entry.evidenceRefs
+          .map(ref => sanitizeSingleLine(ref.checkId))
+          .filter(id => id.length > 0),
+      )].slice(0, 10);
+      const evidenceCell = uniqueCheckIds.length > 0
+        ? uniqueCheckIds.map(id => formatInlineTableCode(id, 60)).join(', ')
+        : '-';
+      rowLine = `| ${action} | ${kindCell} | ${entryCell} | ${claimCell} | ${evidenceCell} |`;
+    } else {
+      const entryCell = formatInlineTableCode(operation.entryId, MAX_MEMORY_PR_ENTRY_LABEL_CODEPOINTS);
+      const reasonCell = escapeMarkdownTableText(operation.reason, MAX_MEMORY_PR_CLAIM_CODEPOINTS);
+      rowLine = `| Retire | - | ${entryCell} | ${reasonCell} | - |`;
+    }
+    const rowCost = 1 + Array.from(rowLine).length;
+    if (usedRowCodePoints + rowCost > rowBudget) {
+      break;
+    }
+    changeLines.push(rowLine);
+    usedRowCodePoints += rowCost;
+    shownOpsCount += 1;
+  }
+
+  if (options.proposal.operations.length > shownOpsCount) {
+    changeLines.push('');
+    changeLines.push(`_...and ${options.proposal.operations.length - shownOpsCount} additional operation(s)._`);
+  }
+
+  return `${summarySection}\n\n${changeLines.join('\n')}\n\n${provenanceBlock}`;
+}
 
 function refusal(code: MemoryCASRefusal['code'], diagnostics: readonly MemoryDiagnostic[], storeDigestBefore: { algorithm: 'sha256'; hex: string }): MemoryCASResult {
   return { applied: false, rebased: false, refusal: { code, diagnostics }, storeDigestBefore, storeDigestAfter: null, pullRequest: null };
@@ -193,17 +421,21 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
       }
       throw error;
     }
-    const upserts = effective.operations.filter(operation => operation.kind === 'upsert');
-    const retirements = effective.operations.length - upserts.length;
-    const citedEvidence = [...new Set(upserts.flatMap(operation => operation.entry.evidenceRefs
-      .map(reference => `${reference.artifact.name}:${reference.artifact.digest.hex}`)))].sort();
+    const title = buildMemoryPullRequestTitle({ taskpack: input.taskpack, operations: effective.operations });
+    const body = buildMemoryPullRequestBody({
+      taskpack: input.taskpack,
+      proposal: effective,
+      storeDigestBefore,
+      storeDigestAfter: projection.index.storeDigest,
+      rebased,
+    });
     const pullRequest: SeparateMemoryPullRequestSpec = {
       mode: 'separate_pull_request',
       branchName: `loopwright/memory/${input.taskpack}/${effective.proposalId}`,
       targetBranch: input.targetBranch,
       baseRevision: effective.baseRevision,
-      title: `memory(${input.taskpack}): ${effective.proposalId}`,
-      body: `Applies verified memory proposal ${effective.proposalId} from run ${effective.runId}: ${upserts.length} addition(s)/replacement(s), ${retirements} retirement(s). Cited evidence: ${citedEvidence.length > 0 ? citedEvidence.join(', ') : 'none'}.`,
+      title,
+      body,
       modifiedFiles: patch.files,
       patch: patch.patch,
       excludesCodeCandidatePaths: true,

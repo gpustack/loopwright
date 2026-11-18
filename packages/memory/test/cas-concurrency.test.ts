@@ -191,8 +191,10 @@ describe('compare-and-swap store update', () => {
       assert.ok(result.pullRequest!.patch.startsWith(expectedEntryDiff));
       assert.ok(result.pullRequest!.patch.includes(`--- /dev/null\n+++ b/${memoryDirectoryFor(TASKPACK)}/index.json`));
       assert.ok(result.pullRequest!.patch.endsWith('\n'));
-      assert.ok(result.pullRequest!.body.includes('1 addition(s)/replacement(s), 0 retirement(s)'));
-      assert.ok(result.pullRequest!.body.includes(`evidence-one.bin:${fixture.artifactRefs[1]!.digest.hex}`));
+      assert.equal(result.pullRequest!.title, `chore(memory): record 1 verified ${TASKPACK} entry`);
+      assert.ok(result.pullRequest!.body.includes('## Summary'));
+      assert.ok(result.pullRequest!.body.includes('(1 recorded, 0 retired).'));
+      assert.ok(result.pullRequest!.body.includes(`\`evidence-one.bin\` (\`sha256:${fixture.artifactRefs[1]!.digest.hex.slice(0, 16)}…\`)`));
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.equal(reloaded.index.repository, 'org/repo');
       assert.equal(result.storeDigestAfter!.hex, reloaded.index.storeDigest.hex);
