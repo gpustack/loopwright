@@ -2102,6 +2102,7 @@ function escapeMarkdownInlineProse(raw: string, maxCodePoints: number): string {
   const collapsed = stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim();
   if (collapsed.length === 0) return '';
   const escaped = collapsed
+    .replace(/&/g, '&amp;')
     .replace(/\\/g, '\\\\')
     .replace(/([`*_[\]|])/g, '\\$1')
     .replace(/</g, '&lt;')
@@ -2110,7 +2111,7 @@ function escapeMarkdownInlineProse(raw: string, maxCodePoints: number): string {
   const bounded = truncateCodePoints(escaped, maxCodePoints);
   if (bounded === escaped) return bounded;
   return bounded
-    .replace(/&[a-z]*$/, '')
+    .replace(/&(?:amp|lt|gt|[a-z]{0,3})$/, '')
     .replace(/\\+$/, match => (match.length % 2 === 1 ? match.slice(0, -1) : match))
     .trim();
 }

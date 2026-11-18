@@ -736,6 +736,38 @@ spec:
     assert.equal(arrNotesBody.includes('<script>'), false);
     assert.equal(/^---$/m.test(arrNotesBody.split('\n\n---\n\n')[0]!), false);
 
+    // 1b) Ampersands in notes are escaped to &amp; before truncation, and mid-&amp; truncation strips only the incomplete entity
+    const ampProposal = {
+      schema_version: 1,
+      summary: 'Safe summary.',
+      notes: 'R&D &',
+    };
+    const ampBody = buildNativePullRequestBody({
+      runId: 'run-notes-amp',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(ampProposal), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      scrubber,
+    });
+    assert.ok(ampBody.includes('- **Notes**: R&amp;D &amp;'), ampBody);
+
+    const ampTruncatedProposal = {
+      schema_version: 1,
+      summary: 'Safe summary.',
+      notes: `R&D ${'x'.repeat(1990)}&`,
+    };
+    const ampTruncatedBody = buildNativePullRequestBody({
+      runId: 'run-notes-amp-trunc',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(ampTruncatedProposal), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      scrubber,
+    });
+    assert.ok(ampTruncatedBody.includes(`- **Notes**: R&amp;D ${'x'.repeat(1990)}\n`), ampTruncatedBody);
+    assert.equal(ampTruncatedBody.includes('&a\n'), false);
+
     // 2) Subscription identifier precedence: `subscription` takes precedence over `id` and `name` in both Version Changes Source lookup and Subscriptions table
     const precedenceProposal = {
       schema_version: 1,
