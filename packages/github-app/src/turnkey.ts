@@ -2028,16 +2028,38 @@ const MAX_PR_NOTES_CODEPOINTS = 2_000;
 const MAX_VERSION_TABLE_ENTRIES = 500;
 const MAX_MODIFIED_PATHS_INPUT = 10_000;
 const HEX_DIGEST_VERSION_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
-const RUNNER_SUBSCRIPTION_KEYS = [
-  'status',
-  'engine_version',
-  'engineVersion',
-  'engine',
-  'plugin_version',
-  'pluginVersion',
-  'plugin',
-  'reason',
-] as const;
+const RUNNER_ENGINE_KEYS = ['engine_version', 'engineVersion', 'engine'] as const;
+const RUNNER_PLUGIN_KEYS = ['plugin_version', 'pluginVersion', 'plugin'] as const;
+const RUNNER_SUBSCRIPTION_KEYS = ['status', ...RUNNER_ENGINE_KEYS, ...RUNNER_PLUGIN_KEYS, 'reason'] as const;
+
+function compareLexical(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+function firstNonEmptyString(...values: readonly unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
+  }
+  return null;
+}
+
+function toScalarVersionString(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function firstDefinedEntryField(entry: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    const value = entry[key];
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
 
 function stripDisallowedControls(text: string, allowNewline: boolean): string {
   let out = '';
@@ -2058,11 +2080,12 @@ function stripDisallowedControls(text: string, allowNewline: boolean): string {
 
 function escapeMarkdownTableCell(value: unknown, scrubber: SecretScrubber): string {
   if (value === null || value === undefined) return '-';
-  const raw = typeof value === 'string'
-    ? scrubber.scrub(value)
-    : typeof value === 'number' || typeof value === 'boolean'
-      ? String(value)
-      : '';
+  let raw = '';
+  if (typeof value === 'string') {
+    raw = scrubber.scrub(value);
+  } else if (typeof value === 'number' || typeof value === 'boolean') {
+    raw = String(value);
+  }
   const cleaned = stripDisallowedControls(raw, false)
     .replace(/\s+/g, ' ')
     .trim();
@@ -2082,9 +2105,9 @@ function formatInlineCodeTableCell(raw: string): string {
   return `\`${bounded.replace(/\\/g, '\\\\').replace(/\|/g, '\\|')}\``;
 }
 
-function formatVersionTableCell(raw: string | null): string {
+function formatVersionTableCell(raw: string | null, scrubber: SecretScrubber): string {
   if (raw === null) return '-';
-  const cleaned = stripDisallowedControls(raw, false).replace(/\s+/g, ' ').trim();
+  const cleaned = stripDisallowedControls(scrubber.scrub(raw), false).replace(/\s+/g, ' ').trim();
   if (cleaned.length === 0) return '-';
   if (HEX_DIGEST_VERSION_PATTERN.test(cleaned)) {
     return `\`${cleaned.slice(0, 12)}\``;
@@ -2130,6 +2153,7 @@ function renderVersionDiffTable(
     readonly secondaryHeader: string;
     readonly hasSecondary: boolean;
     readonly hasBase: boolean;
+    readonly scrubber: SecretScrubber;
   },
 ): string {
   const headers: string[] = [options.primaryHeader];
@@ -2144,14 +2168,14 @@ function renderVersionDiffTable(
   ];
 
   for (const row of rows) {
-    const cells: string[] = [formatInlineCodeTableCell(row.id)];
+    const cells: string[] = [formatInlineCodeTableCell(options.scrubber.scrub(row.id))];
     if (options.hasSecondary) {
-      cells.push(row.secondary !== null ? formatInlineCodeTableCell(row.secondary) : '-');
+      cells.push(row.secondary !== null ? formatInlineCodeTableCell(options.scrubber.scrub(row.secondary)) : '-');
     }
     if (options.hasBase) {
-      cells.push(formatVersionTableCell(row.previous));
+      cells.push(formatVersionTableCell(row.previous, options.scrubber));
     }
-    cells.push(formatVersionTableCell(row.target));
+    cells.push(formatVersionTableCell(row.target, options.scrubber));
     if (options.hasBase) {
       cells.push(row.status);
     }
@@ -2167,6 +2191,8 @@ function renderVersionChangesSection(
     readonly secondaryHeader: string;
     readonly hasBase: boolean;
     readonly unchangedLabel: string;
+    readonly omittedKeyCount: number;
+    readonly scrubber: SecretScrubber;
   },
 ): string | null {
   if (rows.length === 0) return null;
@@ -2176,10 +2202,16 @@ function renderVersionChangesSection(
     secondaryHeader: options.secondaryHeader,
     hasSecondary,
     hasBase: options.hasBase,
+    scrubber: options.scrubber,
   };
+  let omittedSuffix = '';
+  if (options.omittedKeyCount > 0) {
+    const entryWord = options.omittedKeyCount === 1 ? 'entry' : 'entries';
+    omittedSuffix = `\n\n_...and ${options.omittedKeyCount} additional version ${entryWord} omitted._`;
+  }
 
   if (!options.hasBase) {
-    return `## Version Changes\n\n${renderVersionDiffTable(rows, tableOpts)}`;
+    return `## Version Changes\n\n${renderVersionDiffTable(rows, tableOpts)}${omittedSuffix}`;
   }
 
   const changed = rows.filter(row => row.status !== 'Unchanged');
@@ -2196,7 +2228,7 @@ function renderVersionChangesSection(
       '',
       renderVersionDiffTable(unchanged, tableOpts),
       '</details>',
-    ].join('\n');
+    ].join('\n') + omittedSuffix;
   }
   if (changed.length === 0 && unchanged.length > 0) {
     return [
@@ -2205,33 +2237,27 @@ function renderVersionChangesSection(
       `_All ${unchanged.length} ${options.unchangedLabel} match base._`,
       '',
       renderVersionDiffTable(unchanged, tableOpts),
-    ].join('\n');
+    ].join('\n') + omittedSuffix;
   }
-  return `## Version Changes\n\n${renderVersionDiffTable(changed, tableOpts)}`;
+  return `## Version Changes\n\n${renderVersionDiffTable(changed, tableOpts)}${omittedSuffix}`;
 }
 
 function extractUpstreamsMap(
   record: Record<string, unknown>,
-  scrubber: SecretScrubber,
 ): Map<string, { readonly pkg: string | null; readonly version: string }> {
   const map = new Map<string, { readonly pkg: string | null; readonly version: string }>();
   const raw = record['upstreams'];
   if (!isPlainRecord(raw)) return map;
   for (const [key, entry] of Object.entries(raw)) {
     if (map.size >= MAX_VERSION_TABLE_ENTRIES) break;
-    const id = scrubber.scrub(key).trim();
+    const id = key.trim();
     if (id.length === 0) continue;
     if (typeof entry === 'string') {
-      map.set(id, { pkg: null, version: scrubber.scrub(entry) });
+      map.set(id, { pkg: null, version: entry });
     } else if (isPlainRecord(entry)) {
-      const version = typeof entry['version'] === 'string'
-        ? scrubber.scrub(entry['version'])
-        : typeof entry['version'] === 'number' && Number.isFinite(entry['version'])
-          ? String(entry['version'])
-          : null;
+      const version = toScalarVersionString(entry['version']);
       if (version === null) continue;
-      const rawPkg = typeof entry['package'] === 'string' ? scrubber.scrub(entry['package']).trim() : '';
-      const pkg = rawPkg.length > 0 ? rawPkg : null;
+      const pkg = firstNonEmptyString(entry['package']);
       map.set(id, { pkg, version });
     }
   }
@@ -2240,19 +2266,17 @@ function extractUpstreamsMap(
 
 function extractVersionsMap(
   record: Record<string, unknown>,
-  scrubber: SecretScrubber,
 ): Map<string, string> {
   const map = new Map<string, string>();
   const raw = record['versions'];
   if (!isPlainRecord(raw)) return map;
   for (const [key, val] of Object.entries(raw)) {
     if (map.size >= MAX_VERSION_TABLE_ENTRIES) break;
-    const id = scrubber.scrub(key).trim();
+    const id = key.trim();
     if (id.length === 0) continue;
-    if (typeof val === 'string') {
-      map.set(id, scrubber.scrub(val));
-    } else if (typeof val === 'number' && Number.isFinite(val)) {
-      map.set(id, String(val));
+    const version = toScalarVersionString(val);
+    if (version !== null) {
+      map.set(id, version);
     }
   }
   return map;
@@ -2261,7 +2285,6 @@ function extractVersionsMap(
 function extractSubscriptionSources(
   record: Record<string, unknown> | null,
   out: Map<string, string>,
-  scrubber: SecretScrubber,
 ): void {
   if (record === null) return;
   const raw = record['subscriptions'];
@@ -2269,34 +2292,38 @@ function extractSubscriptionSources(
     for (const item of raw) {
       if (out.size >= MAX_VERSION_TABLE_ENTRIES) break;
       if (!isPlainRecord(item)) continue;
-      const rawId = typeof item['id'] === 'string' && item['id'].trim().length > 0
-        ? item['id'].trim()
-        : typeof item['subscription'] === 'string' && item['subscription'].trim().length > 0
-          ? item['subscription'].trim()
-          : typeof item['name'] === 'string' && item['name'].trim().length > 0
-            ? item['name'].trim()
-            : null;
-      const id = rawId !== null ? scrubber.scrub(rawId).trim() : null;
-      const source = typeof item['source'] === 'string' && item['source'].trim().length > 0
-        ? scrubber.scrub(item['source']).trim()
-        : null;
-      if (id !== null && id.length > 0 && source !== null && source.length > 0 && !out.has(id)) {
+      const id = firstNonEmptyString(item['id'], item['subscription'], item['name']);
+      const source = firstNonEmptyString(item['source']);
+      if (id !== null && source !== null && !out.has(id)) {
         out.set(id, source);
       }
     }
   } else if (isPlainRecord(raw)) {
     for (const [key, entry] of Object.entries(raw)) {
       if (out.size >= MAX_VERSION_TABLE_ENTRIES) break;
-      const id = scrubber.scrub(key).trim();
+      const id = key.trim();
       if (id.length === 0 || !isPlainRecord(entry)) continue;
-      if (typeof entry['source'] === 'string' && entry['source'].trim().length > 0 && !out.has(id)) {
-        const source = scrubber.scrub(entry['source']).trim();
-        if (source.length > 0) {
-          out.set(id, source);
-        }
+      const source = firstNonEmptyString(entry['source']);
+      if (source !== null && !out.has(id)) {
+        out.set(id, source);
       }
     }
   }
+}
+
+function collectBoundedOrderedKeys(
+  candidateMap: ReadonlyMap<string, unknown>,
+  baseMap: ReadonlyMap<string, unknown>,
+): { readonly orderedKeys: readonly string[]; readonly omittedKeyCount: number } {
+  const allOrderedKeys: string[] = [...candidateMap.keys()];
+  for (const baseKey of baseMap.keys()) {
+    if (!candidateMap.has(baseKey)) {
+      allOrderedKeys.push(baseKey);
+    }
+  }
+  const orderedKeys = allOrderedKeys.slice(0, MAX_VERSION_TABLE_ENTRIES);
+  const omittedKeyCount = Math.max(0, allOrderedKeys.length - MAX_VERSION_TABLE_ENTRIES);
+  return { orderedKeys, omittedKeyCount };
 }
 
 function hasRunnerSubscriptionFields(entry: Record<string, unknown>): boolean {
@@ -2419,18 +2446,13 @@ export function buildNativePullRequestBody(options: {
     sections.push(`## Summary\n\n${summaryParts.join('\n\n')}`);
   }
 
-  let renderedVersionChanges = false;
-  const candidateUpstreams = extractUpstreamsMap(parsed, options.scrubber);
+  let hasVersionTable = false;
+  const candidateUpstreams = extractUpstreamsMap(parsed);
   const baseUpstreams = baseParsed !== null
-    ? extractUpstreamsMap(baseParsed, options.scrubber)
+    ? extractUpstreamsMap(baseParsed)
     : new Map<string, { readonly pkg: string | null; readonly version: string }>();
   if (candidateUpstreams.size > 0 || (hasBase && baseUpstreams.size > 0)) {
-    const orderedKeys: string[] = [...candidateUpstreams.keys()];
-    for (const baseKey of baseUpstreams.keys()) {
-      if (!candidateUpstreams.has(baseKey)) {
-        orderedKeys.push(baseKey);
-      }
-    }
+    const { orderedKeys, omittedKeyCount } = collectBoundedOrderedKeys(candidateUpstreams, baseUpstreams);
     const rows: VersionDiffRow[] = orderedKeys.map(id => {
       const cand = candidateUpstreams.get(id);
       const base = baseUpstreams.get(id);
@@ -2449,28 +2471,25 @@ export function buildNativePullRequestBody(options: {
       secondaryHeader: 'Package',
       hasBase,
       unchangedLabel: 'tracked upstream pins',
+      omittedKeyCount,
+      scrubber: options.scrubber,
     });
     if (versionSection !== null) {
       sections.push(versionSection);
-      renderedVersionChanges = true;
+      hasVersionTable = true;
     }
   }
 
-  if (!renderedVersionChanges) {
-    const candidateVersions = extractVersionsMap(parsed, options.scrubber);
+  if (!hasVersionTable) {
+    const candidateVersions = extractVersionsMap(parsed);
     const baseVersions = baseParsed !== null
-      ? extractVersionsMap(baseParsed, options.scrubber)
+      ? extractVersionsMap(baseParsed)
       : new Map<string, string>();
     if (candidateVersions.size > 0 || (hasBase && baseVersions.size > 0)) {
       const sourceMap = new Map<string, string>();
-      extractSubscriptionSources(parsed, sourceMap, options.scrubber);
-      extractSubscriptionSources(baseParsed, sourceMap, options.scrubber);
-      const orderedKeys: string[] = [...candidateVersions.keys()];
-      for (const baseKey of baseVersions.keys()) {
-        if (!candidateVersions.has(baseKey)) {
-          orderedKeys.push(baseKey);
-        }
-      }
+      extractSubscriptionSources(parsed, sourceMap);
+      extractSubscriptionSources(baseParsed, sourceMap);
+      const { orderedKeys, omittedKeyCount } = collectBoundedOrderedKeys(candidateVersions, baseVersions);
       const rows: VersionDiffRow[] = orderedKeys.map(id => {
         const previous = baseVersions.get(id) ?? null;
         const target = candidateVersions.get(id) ?? null;
@@ -2487,9 +2506,12 @@ export function buildNativePullRequestBody(options: {
         secondaryHeader: 'Source',
         hasBase,
         unchangedLabel: 'tracked versions',
+        omittedKeyCount,
+        scrubber: options.scrubber,
       });
       if (versionSection !== null) {
         sections.push(versionSection);
+        hasVersionTable = true;
       }
     }
   }
@@ -2499,32 +2521,23 @@ export function buildNativePullRequestBody(options: {
   if (isPlainRecord(rawSubscriptions)) {
     for (const [key, entry] of Object.entries(rawSubscriptions)) {
       if (subRows.length >= MAX_VERSION_TABLE_ENTRIES) break;
-      const cleanName = options.scrubber.scrub(key).trim();
-      if (cleanName.length > 0 && isPlainRecord(entry)) {
-        subRows.push({ name: cleanName, entry });
+      const rawName = key.trim();
+      if (rawName.length > 0 && isPlainRecord(entry)) {
+        subRows.push({ name: rawName, entry });
       }
     }
   } else if (Array.isArray(rawSubscriptions)) {
     for (const item of rawSubscriptions) {
       if (subRows.length >= MAX_VERSION_TABLE_ENTRIES) break;
       if (!isPlainRecord(item)) continue;
-      const rawName = typeof item['subscription'] === 'string' && item['subscription'].trim().length > 0
-        ? item['subscription'].trim()
-        : typeof item['id'] === 'string' && item['id'].trim().length > 0
-          ? item['id'].trim()
-          : typeof item['name'] === 'string' && item['name'].trim().length > 0
-            ? item['name'].trim()
-            : null;
+      const rawName = firstNonEmptyString(item['subscription'], item['id'], item['name']);
       if (rawName !== null) {
-        const cleanName = options.scrubber.scrub(rawName).trim();
-        if (cleanName.length > 0) {
-          subRows.push({ name: cleanName, entry: item });
-        }
+        subRows.push({ name: rawName, entry: item });
       }
     }
   }
 
-  if (subRows.length > 0 && subRows.some(row => hasRunnerSubscriptionFields(row.entry))) {
+  if (subRows.length > 0 && (!hasVersionTable || subRows.some(row => hasRunnerSubscriptionFields(row.entry)))) {
     const tableLines: string[] = [
       '## Subscriptions',
       '',
@@ -2535,11 +2548,11 @@ export function buildNativePullRequestBody(options: {
       const subCell = escapeMarkdownTableCell(name, options.scrubber);
       const statusCell = escapeMarkdownTableCell(entry['status'], options.scrubber);
       const engineCell = escapeMarkdownTableCell(
-        entry['engine_version'] ?? entry['engineVersion'] ?? entry['engine'],
+        firstDefinedEntryField(entry, RUNNER_ENGINE_KEYS),
         options.scrubber,
       );
       const pluginCell = escapeMarkdownTableCell(
-        entry['plugin_version'] ?? entry['pluginVersion'] ?? entry['plugin'],
+        firstDefinedEntryField(entry, RUNNER_PLUGIN_KEYS),
         options.scrubber,
       );
       const reasonCell = escapeMarkdownTableCell(entry['reason'], options.scrubber);
@@ -2573,7 +2586,7 @@ export function buildNativePullRequestBody(options: {
           const topDir = slashIdx > 0 ? `${p.slice(0, slashIdx)}/` : '(root)';
           dirCounts.set(topDir, (dirCounts.get(topDir) ?? 0) + 1);
         }
-        const sortedDirs = [...dirCounts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+        const sortedDirs = [...dirCounts.entries()].sort((a, b) => compareLexical(a[0], b[0]));
         for (const [dir, dirCount] of sortedDirs) {
           const label = dir === '(root)' ? '`(root)`' : `\`${escapeInlineCode(dir)}\``;
           fileLines.push(`- ${label}: ${dirCount} ${dirCount === 1 ? 'file' : 'files'}`);
@@ -2729,13 +2742,8 @@ export async function startNativePullRequestPublisherServer(
           false,
         ).replace(/\s+/g, ' ').trim()
       : '';
-    const title = scrubber.scrub(
-      rawTitle.length > 0
-        ? rawTitle
-        : expandedTemplate.length > 0
-          ? expandedTemplate
-          : `chore(loopwright): automated update (${truncateCodePoints(cleanRunId || 'run', 34)})`,
-    );
+    const fallbackTitle = `chore(loopwright): automated update (${truncateCodePoints(cleanRunId || 'run', 34)})`;
+    const title = scrubber.scrub(firstNonEmptyString(rawTitle, expandedTemplate) ?? fallbackTitle);
     const prTitle = stripDisallowedControls(title, false).replace(/\s+/g, ' ').trim();
     const targetBranch = String(request['targetBranch'] ?? options.targetBranch);
 
@@ -3007,7 +3015,7 @@ export async function startNativePullRequestPublisherServer(
             modifiedPathSet.add(path);
           }
         }
-        const modifiedPaths = [...modifiedPathSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        const modifiedPaths = [...modifiedPathSet].sort(compareLexical);
 
         const readBoundedProposalBlob = async (
           oid: string,

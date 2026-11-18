@@ -586,4 +586,96 @@ spec:
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('keeps standalone metadata-only subscriptions tables, preserves distinct secret-keyed rows, and caps orderedKeys union at 500', () => {
+    const scrubber = new SecretScrubber();
+    const secretA = 'secret-alpha-token-value-1111';
+    const secretB = 'secret-bravo-token-value-2222';
+    scrubber.register(secretA);
+    scrubber.register(secretB);
+    const digest = 'deadbeefcafebabe'.repeat(4);
+
+    // 1) Standalone subscriptions-only proposal without RUNNER_SUBSCRIPTION_KEYS still renders Subscriptions table
+    const standaloneSubs = {
+      schema_version: 1,
+      summary: 'Metadata-only subscriptions proposal.',
+      subscriptions: [
+        { id: 'vllm', source: 'vllm-project/vllm', version: '0.19.1' },
+      ],
+    };
+    const standaloneBody = buildNativePullRequestBody({
+      runId: 'run-sub-only',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify(standaloneSubs), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      scrubber,
+    });
+    assert.ok(standaloneBody.includes('## Subscriptions'), standaloneBody);
+    assert.ok(standaloneBody.includes('| vllm | - | - | - | - |'), standaloneBody);
+
+    // 2) Two upstream IDs containing two distinct secrets stay separate [scrubbed] rows and diff raw values accurately
+    const baseSecretUpstreams = {
+      schema_version: 1,
+      upstreams: {
+        [`upstream-${secretA}`]: { package: 'pkg-a', version: secretA },
+        [`upstream-${secretB}`]: { package: 'pkg-b', version: secretA },
+      },
+    };
+    const candSecretUpstreams = {
+      schema_version: 1,
+      upstreams: {
+        [`upstream-${secretA}`]: { package: 'pkg-a', version: secretA },
+        [`upstream-${secretB}`]: { package: 'pkg-b', version: secretB },
+      },
+    };
+    const secretRowsBody = buildNativePullRequestBody({
+      runId: 'run-secret-keys',
+      candidateDigest: digest,
+      proposalPath: '.loopwright/proposal.json',
+      files: [{ name: '.loopwright/proposal.json', bytes: Buffer.from(JSON.stringify(candSecretUpstreams), 'utf8') }],
+      stagedPaths: new Set(['.loopwright/proposal.json']),
+      baseProposalBytes: Buffer.from(JSON.stringify(baseSecretUpstreams), 'utf8'),
+      scrubber,
+    });
+    assert.equal(secretRowsBody.includes(secretA), false);
+    assert.equal(secretRowsBody.includes(secretB), false);
+    assert.ok(secretRowsBody.includes('| `upstream-[scrubbed]` | `pkg-b` | `[scrubbed]` | `[scrubbed]` | Updated |'), secretRowsBody);
+    assert.ok(secretRowsBody.includes('| `upstream-[scrubbed]` | `pkg-a` | `[scrubbed]` | `[scrubbed]` | Unchanged |'), secretRowsBody);
+
+    // 3) Union of candidate + base-only keys is capped at 500 with singular/plural omitted entry notices
+    const baseUnion: Record<string, string> = {};
+    const candUnion: Record<string, string> = {};
+    for (let i = 0; i < 300; i += 1) {
+      candUnion[`cand-${String(i).padStart(3, '0')}`] = '1.0.0';
+      baseUnion[`base-${String(i).padStart(3, '0')}`] = '1.0.0';
+    }
+    const unionBody = buildNativePullRequestBody({
+      runId: 'run-union-cap',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify({ versions: candUnion }), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      baseProposalBytes: Buffer.from(JSON.stringify({ versions: baseUnion }), 'utf8'),
+      scrubber,
+    });
+    assert.ok(unionBody.includes('_...and 100 additional version entries omitted._'), unionBody);
+    const renderedTableRows = unionBody.split('\n').filter(line => line.startsWith('| `cand-') || line.startsWith('| `base-'));
+    assert.equal(renderedTableRows.length, 500);
+
+    const cand500: Record<string, string> = {};
+    for (let i = 0; i < 500; i += 1) {
+      cand500[`cand-${String(i).padStart(3, '0')}`] = '1.0.0';
+    }
+    const singleOmitBody = buildNativePullRequestBody({
+      runId: 'run-union-cap-1',
+      candidateDigest: digest,
+      proposalPath: '.autosync/proposal.json',
+      files: [{ name: '.autosync/proposal.json', bytes: Buffer.from(JSON.stringify({ versions: cand500 }), 'utf8') }],
+      stagedPaths: new Set(['.autosync/proposal.json']),
+      baseProposalBytes: Buffer.from(JSON.stringify({ versions: { 'removed-only': '0.9.0' } }), 'utf8'),
+      scrubber,
+    });
+    assert.ok(singleOmitBody.includes('_...and 1 additional version entry omitted._'), singleOmitBody);
+  });
 });

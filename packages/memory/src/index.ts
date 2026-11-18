@@ -8,7 +8,7 @@ export { MEMORY_ROOT, normalizeMemoryRoot, memoryDirectoryFor, forbiddenMemoryAr
 export { selectActiveMemory, bindMemorySnapshotToResource, memorySnapshotBindingMatches, memorySnapshotResourceId } from './selector.js';
 export { finalizeRunMemory, resolveSettledCycleContext, type ResolvedSettledCycleContext } from './finalizer.js';
 export { verifyMemoryProposal, verifyRebasedProposal } from './verifier.js';
-export { applyMemoryProposalCAS, buildMemoryPullRequestTitle, buildMemoryPullRequestBody } from './cas.js';
+export { applyMemoryProposalCAS } from './cas.js';
 export { evaluateCompactionPolicy, buildCompactionSummary, restoreFromCompactionLedger } from './compaction.js';
 export type { MemoryEntryKind, MemoryEvidenceRef, MemoryEntryScope, MemoryEntrySourceRef, MemoryEntryValidity, MemoryEntry,
   RetiredMemoryEntry, MemoryStoreIndex, MemoryOperation, MemoryProposal, MemoryGateName, MemoryGateStatus, MemoryErrorCode,

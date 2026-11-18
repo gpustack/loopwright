@@ -94,16 +94,18 @@ export function buildMemoryPullRequestTitle(options: {
     return `chore(memory): update ${taskpackLabel} memory (+${upserts} / -${retirements})`;
   };
 
-  let safeTaskpack = truncateCodePoints(baseTaskpack, MAX_MEMORY_PR_TASKPACK_CODEPOINTS);
+  const safeTaskpack = truncateCodePoints(baseTaskpack, MAX_MEMORY_PR_TASKPACK_CODEPOINTS);
   let title = formatTitle(safeTaskpack);
   const titleLen = Array.from(title).length;
   if (titleLen > MAX_MEMORY_PR_TITLE_CODEPOINTS) {
     const excess = titleLen - MAX_MEMORY_PR_TITLE_CODEPOINTS;
     const reducedLimit = Math.max(1, Array.from(safeTaskpack).length - excess);
-    safeTaskpack = truncateCodePoints(baseTaskpack, reducedLimit);
-    title = formatTitle(safeTaskpack);
+    title = formatTitle(truncateCodePoints(baseTaskpack, reducedLimit));
   }
-  return truncateCodePoints(title, MAX_MEMORY_PR_TITLE_CODEPOINTS);
+  if (Array.from(title).length > MAX_MEMORY_PR_TITLE_CODEPOINTS) {
+    return `chore(memory): update ${truncateCodePoints(safeTaskpack, MAX_MEMORY_PR_TASKPACK_CODEPOINTS)} memory`;
+  }
+  return title;
 }
 
 /** Build structured GitHub-Flavored Markdown PR body for a verified memory proposal. */
@@ -140,9 +142,15 @@ export function buildMemoryPullRequestBody(options: {
       }
     }
   }
-  const citedArtifacts = [...citedArtifactMap.values()].sort((a, b) =>
-    a.name < b.name ? -1 : a.name > b.name ? 1 : a.hex < b.hex ? -1 : a.hex > b.hex ? 1 : 0,
-  );
+  const citedArtifacts = [...citedArtifactMap.values()].sort((a, b) => {
+    if (a.name !== b.name) {
+      return a.name < b.name ? -1 : 1;
+    }
+    if (a.hex !== b.hex) {
+      return a.hex < b.hex ? -1 : 1;
+    }
+    return 0;
+  });
 
   const provenanceLines: string[] = [
     '<details>',

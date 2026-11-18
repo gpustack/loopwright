@@ -5,8 +5,6 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   applyMemoryProposalCAS,
-  buildMemoryPullRequestBody,
-  buildMemoryPullRequestTitle,
   loadMemoryStore,
   memoryDirectoryFor,
   memoryProposalSchema,
@@ -15,6 +13,7 @@ import {
   type MemoryOperation,
   type MemoryProposal,
 } from '../src/index.js';
+import { buildMemoryPullRequestBody, buildMemoryPullRequestTitle } from '../src/cas.js';
 import { BASE_REVISION, buildRun, hex, inventoryMap, type RunFixture } from './run-fixtures.js';
 
 const CONVENTIONAL_COMMIT_REGEX = /^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([\w\-./]+\))?(!)?: .+/;
