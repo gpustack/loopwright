@@ -23,7 +23,7 @@ import { evaluateControllerAcceptance, type AcceptanceObservation } from './acce
 import { nextNode, descendants, compactionTarget } from './scheduler.js';
 import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt } from './repair.js';
 import { WorkDeadline } from './deadlines.js';
-import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isBudgetRefusal, isNoEffectBudgetRefusal } from './budget-observations.js';
+import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isBudgetRefusal, isNoEffectBudgetRefusal, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { ControllerEvents, type ControllerEvent } from './events.js';
 import { Finalizer, incident, type ControllerIncident, type CycleExecution } from './finalize.js';
 import { canonical, freeze, hash, id, isRecord, record, same, text } from './schema.js';
@@ -365,13 +365,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         this.#candidateKnown = false;
         await closeLocal();
         const facts = store.inspect();
-        const certain = facts.ok
-          && facts.value.clockStatus === 'trusted'
-          && !facts.value.counts.dispatchedRequests
-          && !facts.value.counts.unresolvedRequests
-          && !facts.value.counts.unresolvedOperations
-          && !facts.value.ledger.violations.length;
-        if (cleanupKnown && this.deadline.reason === null && certain) {
+        if (cleanupKnown && this.deadline.reason === null && facts.ok && storeFactsCertain(facts.value)) {
           failure = new ControllerFailure({
             ...safeDiagnostic(failure, 'execution'),
             code: 'BUDGET_EXHAUSTED',
@@ -408,7 +402,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     const view = this.deadline.assert(), { plan } = this.context, delegated = countDelegatedBudgets(plan, this.draft.attempts);
     const latest = this.draft.failures.at(-1), refusal = repairDisposition(kind, { attempts: this.draft.attempts.length, maxAttempts: plan.capacity.A,
       formatRepairs: view.ledger.formatRepairs + delegated.formatRepairs, implementationRepairs: view.ledger.implementationRepairs + delegated.implementationRepairs, maxFormatRepairs: plan.budgets.maxFormatRepairs, maxImplementationRepairs: plan.budgets.maxImplementationRepairs,
-      repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: view.clockStatus !== 'trusted' || Boolean(view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) });
+      repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: !storeFactsCertain(view) });
     if (refusal) refuse(refusal, '', 'execution');
   }
   async repairFormat(nodeId: string): Promise<void> {
@@ -519,16 +513,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       for (const row of retained) await this.runVerifier(row.slot);
       const attempt = this.draft.attempts.at(-1);
       if (attempt?.finished?.nativeCheckpointId === null) {
-        const refusal = record(parsePrivateJson(await this.context.artifacts.read(attempt.finished.outcome, 65536), 65536), ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup']);
-        if (refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
-        const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
-        if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED' && diagnostic.effect === 'confirmed') {
-          this.#candidateKnown = false;
-          refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: diagnostic.stateCode, piCode: diagnostic.piCode, effect: 'confirmed' });
-        }
-        if (!same(refusal.currentCandidate, this.draft.candidate.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-        if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') refuse(diagnostic.code, '', 'execution');
-        refuse('RECOVERY_REQUIRED', '', 'recovery');
+        await refuseFromRoleOutcome(this.context.artifacts, attempt.finished.outcome, this.draft.candidate.manifest, () => { this.#candidateKnown = false; });
       }
       if (attempt?.finished?.nativeCheckpointId && this.submission === null && attempt.purpose !== 'compaction' && this.draft.nodes.find(node => node.id === attempt.nodeId)?.state === 'failed') await this.repairFormat(attempt.nodeId);
     }
@@ -557,7 +542,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (![plan.task.spec.target.baseRevision, plan.task.spec.target.sourceRevision].includes(head)) refuse('TARGET_MISMATCH', '', 'execution');
     if (this.draft.publication.status !== 'pending') {
       const eligible = this.draft.nodes.every(node => node.state === 'completed') && scope?.status === 'passed'
-        && view.clockStatus === 'trusted' && !view.counts.dispatchedRequests && !view.counts.unresolvedRequests && !view.counts.unresolvedOperations && !view.ledger.violations.length
+        && storeFactsCertain(view)
         && this.submission !== null && this.submission.value.status === 'completed'
         && same(this.draft.candidate.digest, subject.candidateDigest);
       if (!eligible) { this.#publicationObservation = { status: 'not_run', reason: 'ineligible', receipt: null }; return acceptance; }

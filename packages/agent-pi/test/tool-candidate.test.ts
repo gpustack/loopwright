@@ -874,7 +874,10 @@ test('tree_overlay heals harmless Landlock-style utimes and chmod metadata drift
       assert.equal((await lstat(candidateDir)).mode & 0o777, 0o555);
       assert.equal((await lstat(join(candidateDir, 'packages'))).mode & 0o777, 0o555);
 
-      // Even chmod 0o000 on an untouched file/dir heals after identity checks!
+      // Even chmod 0o000 on an untouched file/dir heals after identity checks (including 100755 via 0o400 -> fchmod 0o555)!
+      await chmod(join(candidateDir, 'packages/run.sh'), 0o000);
+      assert.equal((await candidate.checkRead('packages/run.sh')).path, 'packages/run.sh');
+      assert.equal((await stat(join(candidateDir, 'packages/run.sh'))).mode & 0o777, 0o555);
       await chmod(join(candidateDir, 'packages/README.md'), 0o000);
       await chmod(join(candidateDir, 'packages'), 0o000);
       const editPrep = await candidate.tryPrepareEdit('packages/README.md', [{ oldText: '# Readme', newText: '# Edited' }]);

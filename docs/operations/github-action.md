@@ -111,7 +111,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `models-json` | Unset | Trusted Pi model configuration path; shell credential resolvers are refused. |
 | `allow-custom-base-url` | `false` | Set `true` to permit model base URLs declared in the taskpack. |
 | `dry-run` | `false` | Set `true` to compile without executing the controller. |
-| `force` | `false` | Set `true` to bypass `no_change` intake short-circuit and open-PR deduplication in candidate mode. |
+| `force` | `false` | Set `true` on non-comment trigger events in candidate mode to bypass `no_change` and open-PR deduplication. |
 | `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
 | `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
 | `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |
@@ -134,6 +134,8 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `command-timeout-seconds` | `30` | Fallback `command.v1` check timeout in seconds (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
 
 Explicit configuration takes precedence over environment variables (`Action with:` inputs > `taskpack.yaml` `spec.limits` > `LOOPWRIGHT_*` environment variables > compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical `spec.limits` keys and `LOOPWRIGHT_*` fallbacks; see [Execution limits](../configuration/taskpack.md#execution-limits). Interactive OAuth and CLI providers or MCP servers are unsupported.
+
+The `force` input applies only to candidate discovery on non-comment trigger events (`workflow_dispatch`, `schedule`, `repository_dispatch`, `release`), while PR comment commands (`/auto-sync retry`, `revise`, `status`) follow comment-command dispatch semantics.
 
 ## Outputs
 

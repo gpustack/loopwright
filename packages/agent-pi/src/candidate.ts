@@ -589,30 +589,94 @@ export class Candidate {
     };
   }
 
-  async #isCanonicalDir(path: string, resolved: string): Promise<boolean> {
+  async #isCanonicalDir(path: string, resolved: string, childInfo?: import('node:fs').BigIntStats): Promise<boolean> {
     try {
       return await realpath(path) === resolved;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EACCES' && resolved !== '/') {
         const parent = resolve(resolved, '..');
-        return await realpath(parent) === parent;
+        if (await realpath(parent) !== parent) return false;
+        const [parentStat, childStat] = await Promise.all([
+          lstat(parent, { bigint: true }),
+          childInfo ?? lstat(path, { bigint: true }),
+        ]);
+        if (!childStat.isDirectory() || childStat.isSymbolicLink() || childStat.dev !== parentStat.dev) {
+          return false;
+        }
+        // Safe under unprivileged containment where bind mounts cannot be introduced:
+        // parent is canonical, child is a non-symlink on the same device (no mount point),
+        // exact entry presence blocks case-alias tricks, and callers immediately heal search
+        // bits and re-verify realpath(path) === resolved.
+        try {
+          return (await readdir(parent)).includes(basename(resolved));
+        } catch (readdirError) {
+          if ((readdirError as NodeJS.ErrnoException).code === 'EACCES') return false;
+          throw readdirError;
+        }
       }
       throw error;
     }
   }
 
+  async #chmodDirectoryNoFollow(
+    path: string,
+    expectedInfo: import('node:fs').BigIntStats,
+    targetMode: number,
+  ): Promise<void> {
+    const uid = process.getuid?.();
+    if ((Number(expectedInfo.mode) & 0o400) === 0) {
+      const recheck = await lstat(path, { bigint: true });
+      if (
+        !recheck.isDirectory()
+        || recheck.isSymbolicLink()
+        || (uid !== undefined && Number(recheck.uid) !== uid)
+        || recheck.dev !== expectedInfo.dev
+        || recheck.ino !== expectedInfo.ino
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      }
+      // Grant read-only first so open(O_RDONLY | O_DIRECTORY | O_NOFOLLOW) can verify dev/ino before applying targetMode.
+      await chmod(path, 0o400);
+    }
+    const descriptor = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      const current = await descriptor.stat({ bigint: true });
+      if (
+        !current.isDirectory()
+        || (uid !== undefined && Number(current.uid) !== uid)
+        || current.dev !== expectedInfo.dev
+        || current.ino !== expectedInfo.ino
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      }
+      await descriptor.chmod(targetMode);
+      const healed = await descriptor.stat({ bigint: true });
+      if (
+        !healed.isDirectory()
+        || (uid !== undefined && Number(healed.uid) !== uid)
+        || healed.dev !== expectedInfo.dev
+        || healed.ino !== expectedInfo.ino
+        || (Number(healed.mode) & 0o777) !== targetMode
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      }
+    } finally {
+      await descriptor.close();
+    }
+  }
+
   async #directory(path: string): Promise<void> {
     const resolved = resolve(path);
-    const value = await lstat(path);
-    if (!value.isDirectory() || value.isSymbolicLink() || value.uid !== process.getuid?.()) {
+    const value = await lstat(path, { bigint: true });
+    if (!value.isDirectory() || value.isSymbolicLink() || Number(value.uid) !== process.getuid?.()) {
       refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     }
-    const modeBits = value.mode & 0o777;
+    const modeBits = Number(value.mode) & 0o777;
     if (modeBits === 0o555) {
       this.#lockedDirs.add(resolved);
       if (resolved === resolve(this.root)) this.#enforceLockedDirs = true;
     }
-    if (!await this.#isCanonicalDir(path, resolved)) {
+    if (!await this.#isCanonicalDir(path, resolved, value)) {
       refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     }
     if (this.#unlockDepth === 0) {
@@ -620,9 +684,8 @@ export class Candidate {
         || (modeBits & 0o500) !== 0o500
         || ((this.#enforceLockedDirs || this.#lockedDirs.has(resolved)) && modeBits !== 0o555);
       if (needsHeal) {
-        await chmod(path, 0o555);
-        const healed = await lstat(path);
-        if (!healed.isDirectory() || healed.isSymbolicLink() || healed.uid !== process.getuid?.() || (healed.mode & 0o777) !== 0o555 || await realpath(path) !== resolved) {
+        await this.#chmodDirectoryNoFollow(path, value, 0o555);
+        if (await realpath(path) !== resolved) {
           refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
         }
         this.#lockedDirs.add(resolved);
@@ -657,6 +720,31 @@ export class Candidate {
       parent = path;
     }
     return parent;
+  }
+
+  async #openRegularReadOnlyNoFollow(
+    path: string,
+    info: import('node:fs').BigIntStats,
+    phase: 'admission' | 'tool',
+    allowReadUnlock = true,
+  ): Promise<import('node:fs/promises').FileHandle> {
+    if (allowReadUnlock && (Number(info.mode) & 0o400) === 0) {
+      const uid = process.getuid?.();
+      const recheck = await lstat(path, { bigint: true });
+      if (
+        !recheck.isFile()
+        || recheck.isSymbolicLink()
+        || Number(recheck.nlink) !== 1
+        || (uid !== undefined && Number(recheck.uid) !== uid)
+        || recheck.dev !== info.dev
+        || recheck.ino !== info.ino
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
+      // Restore minimum read bit only; final expected mode (0o444/0o555) is applied via fchmod after O_NOFOLLOW + content verification.
+      await chmod(path, 0o400);
+    }
+    return await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   }
 
   async #verifyAndHealBaselineFile(
@@ -698,13 +786,7 @@ export class Candidate {
       return null;
     }
 
-    // If mode drifted to unreadable (e.g. chmod 000 under Landlock), restore read mode only after
-    // non-symlink, nlink===1, uid, size, and dev/ino checks passed above.
-    if ((Number(info.mode) & 0o400) === 0) {
-      await chmod(path, expectedMode);
-    }
-
-    const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const descriptor = await this.#openRegularReadOnlyNoFollow(path, info, phase);
     try {
       const current = await descriptor.stat({ bigint: true });
       if (
@@ -779,10 +861,7 @@ export class Candidate {
 
     if (knownOverlay !== undefined) {
       const expectedOverlayMode = this.#baseline.get(name)?.mode === '100755' ? 0o555 : 0o444;
-      if ((this.#isOverlay || this.#enforceLockedDirs) && (Number(info.mode) & 0o400) === 0) {
-        await chmod(path, expectedOverlayMode);
-      }
-      const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const descriptor = await this.#openRegularReadOnlyNoFollow(path, info, 'tool', this.#isOverlay || this.#enforceLockedDirs);
       try {
         const current = await descriptor.stat({ bigint: true });
         if (!current.isFile() || Number(current.nlink) !== 1 || current.dev !== info.dev || current.ino !== info.ino || Number(current.size) > this.input.policy.limits.fileBytes) {
@@ -1242,23 +1321,23 @@ export class Candidate {
         if (i > 0) currentDir = join(currentDir, segments[i - 1]!);
         let info;
         try {
-          info = await lstat(currentDir);
+          info = await lstat(currentDir, { bigint: true });
         } catch (error) {
           if (absent(error)) break;
           throw error;
         }
         const resolved = resolve(currentDir);
-        if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || !await this.#isCanonicalDir(currentDir, resolved)) {
+        if (!info.isDirectory() || info.isSymbolicLink() || Number(info.uid) !== process.getuid?.() || !await this.#isCanonicalDir(currentDir, resolved, info)) {
           // Stop unlocking at non-canonical or unexpected ancestor; inner checks refuse while the leaf-to-root relock loop restores any unlocked ancestors.
           break;
         }
-        const modeBits = info.mode & 0o777;
+        const modeBits = Number(info.mode) & 0o777;
         if (modeBits === 0o555) {
           this.#lockedDirs.add(resolved);
           if (resolved === resolve(this.root)) this.#enforceLockedDirs = true;
         }
         if ((modeBits & 0o022) !== 0 || (modeBits & 0o500) !== 0o500 || (modeBits & 0o200) === 0) {
-          await chmod(currentDir, 0o755);
+          await this.#chmodDirectoryNoFollow(currentDir, info, 0o755);
           if (await realpath(currentDir) !== resolved) break;
           unlocked.push(currentDir);
         } else if ((this.#enforceLockedDirs || this.#lockedDirs.has(resolved)) && modeBits !== 0o555) {
@@ -1281,11 +1360,12 @@ export class Candidate {
     for (let i = toRelock.length - 1; i >= 0; i--) {
       const dir = toRelock[i]!;
       try {
-        await chmod(dir, 0o555);
-        const verified = await lstat(dir);
-        if (!verified.isDirectory() || verified.isSymbolicLink() || (verified.mode & 0o777) !== 0o555) {
+        const preRelock = await lstat(dir, { bigint: true });
+        if (!preRelock.isDirectory() || preRelock.isSymbolicLink()) {
           relockError ??= new PiFailure({ code: 'RECOVERY_REQUIRED', path: '/candidate', phase: 'tool', retryable: false, effect: 'possible', requestId: null, operationId: null, stateErrorCode: null });
+          continue;
         }
+        await this.#chmodDirectoryNoFollow(dir, preRelock, 0o555);
       } catch (error) {
         if (isDelete && dir !== this.root && prunedDirs.has(resolve(dir)) && absent(error)) continue;
         relockError ??= error;

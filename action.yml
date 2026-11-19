@@ -66,7 +66,7 @@ inputs:
     required: false
     default: 'false'
   force:
-    description: "Bypass no_change intake short-circuit and open-PR deduplication in candidate mode when 'true'."
+    description: "Bypass no_change intake short-circuit and open-PR deduplication for candidate discovery on non-comment trigger events (workflow_dispatch, schedule, repository_dispatch, release) when 'true'; PR comment commands (/auto-sync retry|revise|status) follow comment-command dispatch semantics."
     required: false
     default: 'false'
   gate-endpoint-url:

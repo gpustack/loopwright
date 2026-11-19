@@ -840,22 +840,30 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let intake: TaskpackIntakeOutcome;
   let reviseGuidance: string | undefined;
   const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true && input.mode === 'candidate';
-  if (eventNameIsTrigger(input.eventName)) {
+  const runDiscoverIntake = (allowForce: boolean) => {
     const outcome = prepareTaskpackIntake({
       mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
       records: effectiveUpstreamRecords ?? [],
-      ...(forceDiscovery ? { force: true } : {}),
+      ...(allowForce ? { force: true } : {}),
       ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
       targetMatrix: input.targetMatrix ?? null,
     });
     if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
       emitProgress?.(`intake: no_change (${outcome.reason})`);
-      return { kind: 'no_change', reason: outcome.reason };
+      return { ok: false as const, exit: { kind: 'no_change' as const, reason: outcome.reason } };
     }
     if (outcome.kind === 'discover' && outcome.disposition === 'blocked') {
-      return blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; '));
+      return {
+        ok: false as const,
+        exit: blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; ')),
+      };
     }
-    intake = outcome;
+    return { ok: true as const, intake: outcome };
+  };
+  if (eventNameIsTrigger(input.eventName)) {
+    const discovered = runDiscoverIntake(forceDiscovery);
+    if (!discovered.ok) return discovered.exit;
+    intake = discovered.intake;
   } else if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
     const evaluation = preEvaluatedComment ?? evaluateCommentPayload(input.eventPayload, {
       eventName: input.eventName,
@@ -884,18 +892,10 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       reviseGuidance = evaluation.guidance;
       intake = outcome;
     } else {
-      const discoverOutcome = prepareTaskpackIntake({
-        mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
-        records: effectiveUpstreamRecords ?? [],
-        ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
-        targetMatrix: input.targetMatrix ?? null,
-      });
-      if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'no_change') {
-        emitProgress?.(`intake: no_change (${discoverOutcome.reason})`);
-        return { kind: 'no_change', reason: discoverOutcome.reason };
-      }
-      if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'blocked') return blocked('upstream sources are unavailable');
-      intake = discoverOutcome;
+      // PR comment commands follow comment-command dispatch semantics; force applies only to non-comment trigger events.
+      const discovered = runDiscoverIntake(false);
+      if (!discovered.ok) return discovered.exit;
+      intake = discovered.intake;
     }
   } else {
     return blocked(`unsupported event ${input.eventName}`);

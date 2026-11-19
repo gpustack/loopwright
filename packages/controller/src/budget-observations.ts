@@ -1,10 +1,11 @@
-import { bindSubject, type TaskLock } from '@loopwright/core';
+import { bindSubject, type ArtifactRef, type TaskLock } from '@loopwright/core';
 import type { Authority, LocalRunStore, RunView } from '@loopwright/state';
 import type { PiErrorV2 } from '@loopwright/agent-pi';
 import { descriptor, fileHash, ownedBytes } from './verifier-protocol.js';
-import { canonical, same } from './schema.js';
+import { canonical, record, same } from './schema.js';
 import { journal } from './progress.js';
-import { refuse } from './errors.js';
+import { refuse, type ControllerDiagnostic } from './errors.js';
+import { parsePrivateJson } from './parser.js';
 import type { ArtifactStore } from './storage.js';
 import type { ByteInventory } from './verification.js';
 import type { CompiledPlan, ControllerProgress } from './types.js';
@@ -29,10 +30,40 @@ export function countDelegatedBudgets(plan: CompiledPlan, attempts: ControllerPr
   return { modelCalls, formatRepairs, implementationRepairs };
 }
 
+/** Returns true when store state has a trusted clock and zero unresolved work or violations. */
+export function storeFactsCertain(view: RunView): boolean {
+  return view.clockStatus === 'trusted'
+    && !view.counts.dispatchedRequests
+    && !view.counts.unresolvedRequests
+    && !view.counts.unresolvedOperations
+    && !view.ledger.violations.length;
+}
+/** Replay-safe refusal classification for a persisted role-refusal outcome artifact. */
+export async function refuseFromRoleOutcome(
+  artifacts: ArtifactStore,
+  outcomeRef: ArtifactRef,
+  expectedManifest: ArtifactRef,
+  markCandidateUnknown: () => void,
+): Promise<never> {
+  const refusal = record(
+    parsePrivateJson(await artifacts.read(outcomeRef, 65_536), 65_536),
+    ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup'],
+  );
+  if (refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
+  if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED' && diagnostic.effect === 'confirmed') {
+    markCandidateUnknown();
+    refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: diagnostic.stateCode, piCode: diagnostic.piCode, effect: 'confirmed' });
+  }
+  if (!same(refusal.currentCandidate, expectedManifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') {
+    refuse(diagnostic.code, '', 'execution');
+  }
+  refuse('RECOVERY_REQUIRED', '', 'recovery');
+}
 /** Observation only: this may revoke scheduling, but never grants admission or a dispatch permit. */
 export function observeParentExhaustion(view: RunView, lock: TaskLock, delegatedModelCalls = 0): void {
-  if (view.runId !== lock.spec.runId || !same(view.lockHash, lock.spec.lockHash) || view.clockStatus !== 'trusted'
-    || view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', 'execution');
+  if (view.runId !== lock.spec.runId || !same(view.lockHash, lock.spec.lockHash) || !storeFactsCertain(view)) refuse('RECOVERY_REQUIRED', '', 'execution');
   const limits = lock.spec.contract.spec.budgets;
   if (view.ledger.admittedCalls + delegatedModelCalls >= limits.maxModelCalls || BigInt(view.ledger.chargedTokens.decimal) >= BigInt(limits.totalTokens)) refuse('BUDGET_EXHAUSTED', '', 'execution');
 }
@@ -53,10 +84,9 @@ export async function schedulingSnapshot(store: LocalRunStore, authority: Author
   candidate: ByteInventory, retained: ControllerProgress['candidate']): Promise<SchedulingSnapshot> {
   const facts = () => {
     const records = journal(store), view = records.view;
-    if (view.storeId !== authority.storeId || view.runId !== lock.spec.runId || !same(view.lockHash, lock.spec.lockHash) || view.clockStatus !== 'trusted'
+    if (view.storeId !== authority.storeId || view.runId !== lock.spec.runId || !same(view.lockHash, lock.spec.lockHash) || !storeFactsCertain(view)
       || view.owner.ownerId !== authority.ownerId || view.owner.generation !== authority.generation || view.owner.mode !== 'active'
-      || view.owner.leaseUntilMonotonicMs === null || BigInt(view.clock.sampledNow.monotonicMs) >= BigInt(view.owner.leaseUntilMonotonicMs)
-      || view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', 'execution');
+      || view.owner.leaseUntilMonotonicMs === null || BigInt(view.clock.sampledNow.monotonicMs) >= BigInt(view.owner.leaseUntilMonotonicMs)) refuse('RECOVERY_REQUIRED', '', 'execution');
     return canonical({ storeId: view.storeId, runId: view.runId, lockHash: view.lockHash, basis: view.clock.basis,
       owner: { id: view.owner.ownerId, generation: view.owner.generation, mode: view.owner.mode }, ledger: view.ledger, requests: records.requests, operations: records.operations,
       nativeCheckpoints: records.checkpoints.filter(cp => cp.additionalArtifacts.length === 0) });

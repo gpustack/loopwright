@@ -36,7 +36,7 @@ import { normalizeSubmission, type RetainedSubmission, type Submission } from '.
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
 import { descendants, nextNode } from './scheduler.js';
 import { formatPolicy, formatPrompt } from './repair.js';
-import { countDelegatedBudgets, observeParentExhaustion } from './budget-observations.js';
+import { countDelegatedBudgets, observeParentExhaustion, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { validateGateUrlOverrides } from './gate.js';
 import { createCycle, Cycle, type ControllerPorts, type CycleContext } from './controller.js';
 import { incident, type ControllerIncident, type CycleExecution } from './finalize.js';
@@ -466,21 +466,7 @@ async function advanceStepCycle(
     for (const row of retained) await cycle.runVerifier(row.slot);
     const lastAttempt = cycle.draft.attempts.at(-1);
     if (lastAttempt?.finished?.nativeCheckpointId === null) {
-      const refusal = record(
-        parsePrivateJson(await cycle.context.artifacts.read(lastAttempt.finished.outcome, 65_536), 65_536),
-        ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup'],
-      );
-      if (refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
-      const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
-      if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED' && diagnostic.effect === 'confirmed') {
-        cycle.markCandidateUnknown();
-        refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: diagnostic.stateCode, piCode: diagnostic.piCode, effect: 'confirmed' });
-      }
-      if (!same(refusal.currentCandidate, cycle.draft.candidate.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-      if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') {
-        refuse(diagnostic.code, '', 'execution');
-      }
-      refuse('RECOVERY_REQUIRED', '', 'recovery');
+      await refuseFromRoleOutcome(cycle.context.artifacts, lastAttempt.finished.outcome, cycle.draft.candidate.manifest, () => cycle.markCandidateUnknown());
     }
     if (
       lastAttempt?.finished?.nativeCheckpointId &&
@@ -594,13 +580,7 @@ async function runStepTickWithCycle(
   } catch (error) {
     const diagnostic = safeDiagnostic(error, 'execution');
     const facts = context.store.inspect();
-    const certain =
-      facts.ok &&
-      facts.value.clockStatus === 'trusted' &&
-      !facts.value.counts.dispatchedRequests &&
-      !facts.value.counts.unresolvedRequests &&
-      !facts.value.counts.unresolvedOperations &&
-      !facts.value.ledger.violations.length;
+    const certain = facts.ok && storeFactsCertain(facts.value);
     if (
       cycle.candidateKnown &&
       facts.ok &&
@@ -646,7 +626,7 @@ async function runStepTickWithCycle(
           context.lock.spec.runId,
           context.lock.spec.lockHash,
           [context.descriptor.plan, context.source.inventory],
-          cycle.candidateKnown ? ['authoritative_result'] : ['current_candidate', 'submission', 'authoritative_result'],
+          ['authoritative_result'],
           'complete',
         );
       }

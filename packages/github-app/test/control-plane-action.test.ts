@@ -827,6 +827,27 @@ describe('reusable Action entrypoint (AC-6)', () => {
       const parsed = JSON.parse(jsonLine) as { kind: string; intake?: { disposition?: string } };
       assert.equal(parsed.kind, 'compiled');
       assert.equal(parsed.intake?.disposition, 'ready');
+
+      // 4) PR comment commands follow comment-command dispatch semantics even when force=true
+      const commentDiscover = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 7, pull_request: {} },
+          comment: { id: 902, body: '/loopwright retry', author_association: 'COLLABORATOR', user: { login: 'octocat', type: 'User' } },
+        },
+        runRoot,
+        runId: 'run-force-comment-1',
+        force: true,
+        managedPrMatchesDiscoveredState: true,
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'up_to_date', version: 'v1.2.3', recentVersions: ['v1.2.3', 'v1.2.2'] }],
+      });
+      assert.equal(commentDiscover.kind, 'no_change');
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(runRoot, { recursive: true, force: true });
