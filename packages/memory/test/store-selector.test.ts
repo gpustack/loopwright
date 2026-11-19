@@ -307,6 +307,17 @@ describe('memory store layout', () => {
       assert.equal(projected.index.updatedAtMs, 2500);
       assert.deepEqual([...projected.entryFiles.keys()], ['entry.active']);
 
+      // Drifted or corrupt leftover retired .md file within byte bounds is rejected by parseEntryMarkdown / row validation
+      await writeFile(
+        join(root, MEMORY_ROOT, 'demo', 'entries', 'entry.retired.present.md'),
+        entryFileBytes(makeEntry({ id: 'entry.retired.present', claimKey: 'claim.retired.present', claim: 'Tampered legacy retired claim.' })),
+        { mode: 0o600 },
+      );
+      await assert.rejects(
+        () => loadMemoryStore(root, 'demo', 'org/repo'),
+        /MEMORY_SCHEMA_INVALID.*entry file does not match index row/,
+      );
+
       // Oversized leftover retired .md file is still rejected by readRegularFile
       await writeFile(
         join(root, MEMORY_ROOT, 'demo', 'entries', 'entry.retired.present.md'),

@@ -241,8 +241,9 @@ function applyLifecycleSweepAndEviction(options: {
   readonly config: MemoryFinalizerConfig;
   readonly settledStatus: RunResult['spec']['status'] | null;
   readonly passedCheckClaimKeys: ReadonlySet<string>;
-}): readonly MemoryOperation[] {
+}): { readonly operations: readonly MemoryOperation[]; readonly truncated: boolean } {
   const { baseOperations, baseEntries, config, settledStatus, passedCheckClaimKeys } = options;
+  let truncated = baseOperations.length > MAX_PROPOSAL_OPERATIONS;
   const cappedBase = baseOperations.slice(0, MAX_PROPOSAL_OPERATIONS);
   const targetedOrSuperseded = new Set<string>();
   for (const operation of cappedBase) {
@@ -259,23 +260,28 @@ function applyLifecycleSweepAndEviction(options: {
   const runSucceeded = settledStatus === 'completed' || settledStatus === 'no_change';
   const currentTargetMatrix = config.targetMatrix ?? null;
   for (const entry of sortedBaseEntries) {
-    if (cappedBase.length + eagerRetires.length >= MAX_PROPOSAL_OPERATIONS) break;
     if (targetedOrSuperseded.has(entry.id)) continue;
+    let retireReason: string | null = null;
     if (entry.expiresAtMs <= config.nowMs) {
-      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Entry expired past TTL.' });
-      targetedOrSuperseded.add(entry.id);
+      retireReason = 'Entry expired past TTL.';
     } else if (
       config.checkUpstreamVersions === true
       && hasDriftedPinnedUpstream(entry.validFor.upstreamVersions, config.upstreamVersions)
     ) {
-      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Pinned upstream version changed.' });
-      targetedOrSuperseded.add(entry.id);
+      retireReason = 'Pinned upstream version changed.';
     } else if (
       entry.kind === 'failure_observation'
       && targetMatrixOverlaps(entry.scope.targetMatrix, currentTargetMatrix)
       && (runSucceeded || passedCheckClaimKeys.has(entry.claimKey))
     ) {
-      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Prior failure observation healed.' });
+      retireReason = 'Prior failure observation healed.';
+    }
+    if (retireReason !== null) {
+      if (cappedBase.length + eagerRetires.length >= MAX_PROPOSAL_OPERATIONS) {
+        truncated = true;
+        break;
+      }
+      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: retireReason });
       targetedOrSuperseded.add(entry.id);
     }
   }
@@ -293,7 +299,7 @@ function applyLifecycleSweepAndEviction(options: {
   }
 
   if (surviving.size <= effectiveMaxEntries) {
-    return [...cappedBase, ...eagerRetires];
+    return { operations: [...cappedBase, ...eagerRetires], truncated };
   }
 
   const evictionOrder = [...surviving.values()].sort(compareEntriesForEviction);
@@ -329,12 +335,15 @@ function applyLifecycleSweepAndEviction(options: {
   const capacityRetireIds = new Set<string>([...evictedIds, ...droppedSupersededIds]);
   const capacityRetires: MemoryOperation[] = [];
   for (const id of [...capacityRetireIds].sort()) {
-    if (keptBaseOperations.length + eagerRetires.length + capacityRetires.length >= MAX_PROPOSAL_OPERATIONS) break;
     if (baseEntryIds.has(id) && !alreadyRetiring.has(id)) {
+      if (keptBaseOperations.length + eagerRetires.length + capacityRetires.length >= MAX_PROPOSAL_OPERATIONS) {
+        truncated = true;
+        break;
+      }
       capacityRetires.push({ kind: 'retire', entryId: id, reason: 'Evicted to stay within maxEntries capacity.' });
     }
   }
-  return [...keptBaseOperations, ...eagerRetires, ...capacityRetires];
+  return { operations: [...keptBaseOperations, ...eagerRetires, ...capacityRetires], truncated };
 }
 function sanitizeClaimControlChars(text: string): string {
   let out = '';
@@ -449,6 +458,7 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
     let operations: readonly MemoryOperation[] = deterministicEntries
       .slice(0, MAX_PROPOSAL_OPERATIONS)
       .map(entry => ({ kind: 'upsert' as const, entry }));
+    let deterministicTruncated = deterministicEntries.length > MAX_PROPOSAL_OPERATIONS;
     let outcomeStatus: MemoryFinalizerOutcome['status'] = 'proposed';
     let reason: string | null = null;
     const proposalRunSegment = runId.length <= 90 ? runId : runToken;
@@ -472,6 +482,7 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
           new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeoutMs); }),
         ]);
         operations = assemble(curated, proposalIdBase).operations;
+        deterministicTruncated = false;
       } catch (error) {
         return { status: 'unavailable', reason: `curator_fault: ${error instanceof Error ? error.message.slice(0, 256) : 'unknown fault'}`,
           deterministicEntries, proposal: null, proposalDigest: null, patch: null };
@@ -479,13 +490,19 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
         if (timer !== undefined) clearTimeout(timer);
       }
     }
-    operations = applyLifecycleSweepAndEviction({
+    const swept = applyLifecycleSweepAndEviction({
       baseOperations: operations,
       baseEntries: loaded.index.entries,
       config,
       settledStatus: settled.result?.spec.status ?? null,
       passedCheckClaimKeys,
     });
+    operations = swept.operations;
+    if (deterministicTruncated || swept.truncated) {
+      reason = reason === null
+        ? 'proposal_operations_truncated_at_limit'
+        : `${reason}; proposal_operations_truncated_at_limit`;
+    }
     const proposal = assemble(operations, proposalIdBase);
     const projected = projectMemoryStore(loaded.index, operations, config.nowMs, proposal.proposalId, {
       maxEntries: config.maxEntries,

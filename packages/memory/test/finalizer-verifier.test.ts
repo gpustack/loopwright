@@ -481,6 +481,7 @@ describe('settled-outcome finalizer', () => {
         maxEntries: 2,
       }));
       assert.equal(strictSweep.status, 'proposed');
+      assert.equal(strictSweep.reason, null);
       const retireReasons = new Map(
         strictSweep.proposal!.operations
           .filter((op): op is Extract<MemoryOperation, { readonly kind: 'retire' }> => op.kind === 'retire')
@@ -519,6 +520,7 @@ describe('settled-outcome finalizer', () => {
       const capped = await finalize(noChangeFixture, root, finalizerConfig({ nowMs: 2000 }));
       assert.equal(capped.status, 'proposed');
       assert.equal(capped.proposal!.operations.length, 256);
+      assert.equal(capped.reason, 'proposal_operations_truncated_at_limit');
     });
 
     // Failed run where optional check.two passed heals prior claim.check.check.two failure_observation

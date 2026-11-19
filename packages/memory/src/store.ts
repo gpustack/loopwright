@@ -256,11 +256,16 @@ export async function loadMemoryStore(
   if (entriesStats.isSymbolicLink() || !entriesStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'expected a directory');
   const files = await readdir(entriesDirectory);
   const activeById = new Map<string, MemoryEntry>(index.entries.map(entry => [entry.id, entry]));
-  const retiredIds = new Set<string>(index.retired.map(row => row.entry.id));
-  const indexedIds = new Set<string>([...activeById.keys(), ...retiredIds]);
+  const retiredById = new Map<string, MemoryEntry>();
+  for (const row of [...index.retired].reverse()) {
+    if (!activeById.has(row.entry.id) && !retiredById.has(row.entry.id)) {
+      retiredById.set(row.entry.id, row.entry);
+    }
+  }
+  const indexedIds = new Set<string>([...activeById.keys(), ...retiredById.keys()]);
   const committedBytes = (row: MemoryEntry): Uint8Array => entryFileBytes(row);
   const entryFiles = new Map<string, Uint8Array>();
-  const markActiveIndexed = (id: string, row: MemoryEntry, path: string): Promise<void> => (async () => {
+  const markIndexedEntry = (id: string, row: MemoryEntry, path: string, allowMissing: boolean): Promise<void> => (async () => {
     let bytes: Uint8Array;
     try {
       bytes = await readRegularFile(join(entriesDirectory, `${id}.md`), path, MAX_MEMORY_ENTRY_FILE_BYTES);
@@ -271,6 +276,7 @@ export async function loadMemoryStore(
           entryFiles.set(id, committedBytes(row));
           return;
         }
+        if (allowMissing) return;
         fail('MEMORY_SCHEMA_INVALID', path, 'index row has no entry file');
       }
       throw error;
@@ -284,15 +290,6 @@ export async function loadMemoryStore(
       return;
     }
     entryFiles.set(id, bytes);
-  })();
-  const markLegacyRetired = (id: string, path: string): Promise<void> => (async () => {
-    try {
-      const bytes = await readRegularFile(join(entriesDirectory, `${id}.md`), path, MAX_MEMORY_ENTRY_FILE_BYTES);
-      entryFiles.set(id, bytes);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
   })();
   for (const fileName of files) {
     const stagingMatch = ENTRY_STAGING_PATTERN.exec(fileName);
@@ -314,10 +311,9 @@ export async function loadMemoryStore(
       continue;
     }
   }
-  const legacyRetiredOnlyIds = [...retiredIds].filter(id => !activeById.has(id));
   await Promise.all([
-    ...[...activeById].map(([id, row]) => markActiveIndexed(id, row, `${dirLabel}/entries/${id}.md`)),
-    ...legacyRetiredOnlyIds.map(id => markLegacyRetired(id, `${dirLabel}/entries/${id}.md`)),
+    ...[...activeById].map(([id, row]) => markIndexedEntry(id, row, `${dirLabel}/entries/${id}.md`, false)),
+    ...[...retiredById].map(([id, row]) => markIndexedEntry(id, row, `${dirLabel}/entries/${id}.md`, true)),
   ]);
   return Object.freeze({ index, entryFiles });
 }
