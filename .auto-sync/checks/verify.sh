@@ -185,9 +185,9 @@ PROTECTED_EXACT_FILES = [
     "eslint.config.mjs",
     "action.yml",
     "AGENTS.md",
-    ".loopwright/taskpack.yaml",
-    ".loopwright/instructions.md",
-    ".loopwright/checks/verify.sh",
+    ".auto-sync/taskpack.yaml",
+    ".auto-sync/instructions.md",
+    ".auto-sync/checks/verify.sh",
 ]
 PROTECTED_TREE_PREFIXES = [
     "scripts",
@@ -579,9 +579,10 @@ yaml_target = next(iter(yaml_versions))
 if yaml_target != expected_yaml_target:
     fail(f"workspace yaml version {yaml_target!r} != staged target {expected_yaml_target!r}")
 
-# Candidate mode MUST strictly advance at least one dependency group beyond HEAD
-if parse_semver(pi_target) == parse_semver(head_pi_ver) and parse_semver(yaml_target) == parse_semver(head_yaml_ver):
-    fail("candidate manifests do not advance @earendil-works/pi-* or yaml beyond baseline HEAD")
+# Candidate mode MUST strictly advance at least one dependency group beyond HEAD unless SELF_UPGRADE_FORCE=1
+if os.environ.get("SELF_UPGRADE_FORCE") != "1":
+    if parse_semver(pi_target) == parse_semver(head_pi_ver) and parse_semver(yaml_target) == parse_semver(head_yaml_ver):
+        fail("candidate manifests do not advance @earendil-works/pi-* or yaml beyond baseline HEAD")
 
 # 7) Audit package-lock.json structurally AND bind byte-for-byte to staged package-lock.candidate.json
 head_lock_doc = strict_json_loads(git_show_head_required("package-lock.json"), "HEAD:package-lock.json")
@@ -681,31 +682,31 @@ if cand_lock_sha256 != staged_lock_sha256:
         f"candidate package-lock.json sha256 ({cand_lock_sha256}) does not match trusted staged package-lock.candidate.json ({staged_lock_sha256})"
     )
 
-# 8) Audit .loopwright/proposal.json parity against staged target-versions.json
+# 8) Audit .auto-sync/proposal.json parity against staged target-versions.json
 proposal_doc = strict_json_loads(
-    read_candidate_regular_bytes(".loopwright/proposal.json", MAX_JSON_BYTES),
-    ".loopwright/proposal.json",
+    read_candidate_regular_bytes(".auto-sync/proposal.json", MAX_JSON_BYTES),
+    ".auto-sync/proposal.json",
 )
 if not json_strict_equal(proposal_doc.get("schema_version"), 1):
-    fail(".loopwright/proposal.json schema_version must be 1")
+    fail(".auto-sync/proposal.json schema_version must be 1")
 summary = proposal_doc.get("summary")
 if not isinstance(summary, str) or not summary.strip():
-    fail(".loopwright/proposal.json summary must be non-empty")
+    fail(".auto-sync/proposal.json summary must be non-empty")
 prop_upstreams = proposal_doc.get("upstreams")
 prop_packages = proposal_doc.get("packages")
 if not isinstance(prop_upstreams, dict) or not isinstance(prop_packages, dict):
-    fail(".loopwright/proposal.json upstreams and packages must be objects")
+    fail(".auto-sync/proposal.json upstreams and packages must be objects")
 
 if set(prop_upstreams.keys()) != expected_upstream_ids:
-    fail(".loopwright/proposal.json upstreams keys mismatch")
+    fail(".auto-sync/proposal.json upstreams keys mismatch")
 for up_id, exp_pkg in {**PI_UPSTREAMS, "yaml": "yaml"}.items():
     entry = prop_upstreams.get(up_id)
     exp_ver = yaml_target if up_id == "yaml" else pi_target
     if not isinstance(entry, dict) or not json_strict_equal(entry.get("package"), exp_pkg) or not json_strict_equal(entry.get("version"), exp_ver):
-        fail(f".loopwright/proposal.json upstreams[{up_id!r}] does not match staged target {exp_ver!r}")
+        fail(f".auto-sync/proposal.json upstreams[{up_id!r}] does not match staged target {exp_ver!r}")
 
 if not json_strict_equal(prop_packages, expected_ws_deps):
-    fail(".loopwright/proposal.json packages does not match staged target-versions.json")
+    fail(".auto-sync/proposal.json packages does not match staged target-versions.json")
 PY
 
 # ---------------------------------------------------------------------------

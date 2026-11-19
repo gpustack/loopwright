@@ -64,7 +64,7 @@ loopwright step next \
 
 ### Host preflight
 
-`step next --taskpack` defaults to `--mode candidate` and compiles `no-change.v1` only when `--mode no-change` is set. When a repository pairs `.loopwright/taskpack.yaml` with host preflight staging, run preflight first, stop on `blocked`, and export the repository, stage, cache, and tool paths needed by `step submit`:
+`step next --taskpack` defaults to `--mode candidate` and compiles `no-change.v1` only when `--mode no-change` is set. When a repository pairs `.auto-sync/taskpack.yaml` with host preflight staging, run preflight first, stop on `blocked`, and export the repository, stage, cache, and tool paths needed by `step submit`:
 
 ```sh
 STAGE_DIR="$RUN_ROOT/preflight-stage"
@@ -80,7 +80,7 @@ export PYTHON_BIN="$(command -v python3)"
 export HUGO_BIN="$(command -v hugo || true)"
 
 loopwright step next \
-  --taskpack .loopwright/taskpack.yaml \
+  --taskpack .auto-sync/taskpack.yaml \
   --mode "$MODE" \
   --repo . \
   --run-root "$RUN_ROOT" \

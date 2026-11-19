@@ -46,7 +46,7 @@ npm run site
 
 The report provides an audit summary; the strict lint command enforces the documentation contract. The site exports twelve public pages and excludes repository-only contributor pages. Configuration authoring uses `yaml@2.9.1` and the core schema.
 
-Repository issue and pull request templates live under `.github/`. The `.github/workflows/` directory contains `ci.yml`, `test.yml`, `docs.yml`, `code-review.yml`, `self-upgrade.yml`, and `site.yml` for repository CI/CD. Use the five `.agents/skills/loopwright-*` guides for overview, docs, code review, issue and PR preparation, and release work.
+Repository issue and pull request templates live under `.github/`. The `.github/workflows/` directory contains `ci.yml`, `test.yml`, `docs.yml`, `code-review.yml`, `auto-sync.yml`, and `site.yml` for repository CI/CD. Use the five `.agents/skills/loopwright-*` guides for overview, docs, code review, issue and PR preparation, and release work.
 
 The state runtime profile is deliberately narrower than the core toolchain: darwin/arm64 Node v26.13.0 with
 bundled SQLite 3.54.1, one trusted host/boot and retained local disk. There is no separate SQLite installation or
@@ -99,14 +99,14 @@ SDK or live-provider acceptance. See the qualification README and retained progr
 
 ## Self-upgrade validation
 
-Loopwright dogfoods `.loopwright/taskpack.yaml` to upgrade `@earendil-works/pi-*` in lockstep and `yaml` across workspace packages. Run the offline preflight check and contained verification suite locally:
+Loopwright dogfoods `.auto-sync/taskpack.yaml` to upgrade `@earendil-works/pi-*` in lockstep and `yaml` across workspace packages. Run the offline preflight check and contained verification suite locally:
 
 ```sh
 node scripts/prepare-self-upgrade.mjs --offline-check
 npx tsc -p tsconfig.test.json && node --test --test-concurrency=2 .test-build/packages/github-app/test/self-upgrade-taskpack.test.js .test-build/packages/github-app/test/self-upgrade-verifier.test.js
 ```
 
-`scripts/prepare-self-upgrade.mjs` checks `.loopwright/proposal.json` against workspace manifests and `package-lock.json` before staging offline lockfile and cache bundles. `.loopwright/checks/verify.sh` audits candidate manifests before executing pinned offline verification gates (`direct-dedicated` on ephemeral GitHub Actions runners; `bwrap` or `sandbox-exec` locally).
+`scripts/prepare-self-upgrade.mjs` checks `.auto-sync/proposal.json` against workspace manifests and `package-lock.json` before staging offline lockfile and cache bundles. `.auto-sync/checks/verify.sh` audits candidate manifests before executing pinned offline verification gates (`direct-dedicated` on ephemeral GitHub Actions runners; `bwrap` or `sandbox-exec` locally).
 
 ---
 

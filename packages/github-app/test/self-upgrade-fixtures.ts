@@ -13,7 +13,7 @@ import {
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
 // Works identically from packages/github-app/test/*.ts and .test-build/packages/github-app/test/*.js
-export const REPO_ROOT = existsSync(resolve(THIS_DIR, '../../../.loopwright/taskpack.yaml'))
+export const REPO_ROOT = existsSync(resolve(THIS_DIR, '../../../.auto-sync/taskpack.yaml'))
   ? resolve(THIS_DIR, '../../..')
   : resolve(THIS_DIR, '../../../..');
 
@@ -107,6 +107,7 @@ export interface PrepareSelfUpgradeModule {
     readonly baselineByUpstream: Readonly<Record<string, string>>;
     readonly discoveredRecords: readonly TaskpackUpstreamRecord[];
     readonly stageDir?: string | undefined;
+    readonly force?: boolean | undefined;
   }) => EligibilityResult;
   readonly discoverNpmUpstreams: (input: {
     readonly manifest: Awaited<ReturnType<typeof loadDeclarativeTaskpack>>;
@@ -134,6 +135,7 @@ export interface PrepareSelfUpgradeModule {
     readonly repoRoot?: string | undefined;
     readonly stageDir?: string | undefined;
     readonly requestedMode?: 'auto' | 'candidate' | 'no-change' | undefined;
+    readonly force?: boolean | undefined;
     readonly skipStage?: boolean | undefined;
     readonly offlineCheck?: boolean | undefined;
     readonly discoveredRecords?: readonly TaskpackUpstreamRecord[] | undefined;
@@ -144,20 +146,6 @@ export interface PrepareSelfUpgradeModule {
       readonly npmCacheDir: string;
     }) => Promise<Buffer>;
   }) => Promise<PrepareSelfUpgradeRunResult>;
-  readonly resolveSelfUpgradeModelConfig: (options?: {
-    readonly env?: Readonly<Record<string, string | undefined>> | undefined;
-    readonly modelsOutPath?: string | undefined;
-  }) => Promise<{
-    readonly configured: boolean;
-    readonly modelProvider: string;
-    readonly modelId: string;
-    readonly modelThinking: string;
-    readonly modelApi: string;
-    readonly modelBaseUrl: string;
-    readonly modelsJsonPath: string;
-    readonly allowCustomBaseUrl: string;
-    readonly providerTokenEnv: string;
-  }>;
 }
 
 export async function loadPreflightModule(): Promise<PrepareSelfUpgradeModule> {
@@ -372,15 +360,15 @@ export async function createMiniSelfUpgradeRepo(
   },
 ): Promise<{ readonly repoRoot: string; readonly headSha: string }> {
   const repoRoot = join(parentDir, 'fixture-repo');
-  await mkdir(join(repoRoot, '.loopwright/checks'), { recursive: true, mode: 0o700 });
+  await mkdir(join(repoRoot, '.auto-sync/checks'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, '.agents/skills/loopwright-step'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, 'scripts'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, 'docs'), { recursive: true, mode: 0o700 });
 
   for (const rel of [
-    '.loopwright/taskpack.yaml',
-    '.loopwright/instructions.md',
-    '.loopwright/checks/verify.sh',
+    '.auto-sync/taskpack.yaml',
+    '.auto-sync/instructions.md',
+    '.auto-sync/checks/verify.sh',
   ]) {
     const raw = await readFile(join(REPO_ROOT, rel));
     await writeFile(join(repoRoot, rel), raw, {
@@ -390,7 +378,7 @@ export async function createMiniSelfUpgradeRepo(
 
   const preflight = await loadPreflightModule();
   await writeFile(
-    join(repoRoot, '.loopwright/proposal.json'),
+    join(repoRoot, '.auto-sync/proposal.json'),
     `${JSON.stringify(preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'), null, 2)}\n`,
     { mode: 0o600 },
   );
@@ -596,7 +584,7 @@ export async function stageAndApplyCandidateUpgrade(options: {
   });
 
   await writeFile(
-    join(options.candidateDir, '.loopwright/proposal.json'),
+    join(options.candidateDir, '.auto-sync/proposal.json'),
     `${JSON.stringify(targetVersions, null, 2)}\n`,
     { mode: 0o600 },
   );
@@ -616,7 +604,7 @@ export function runVerifyScript(
   candidateDir: string,
   extraEnv: Readonly<Record<string, string | undefined>>,
 ): { readonly status: number | null; readonly stdout: string; readonly stderr: string } {
-  const verifyPath = join(REPO_ROOT, '.loopwright/checks/verify.sh');
+  const verifyPath = join(REPO_ROOT, '.auto-sync/checks/verify.sh');
   const cleanEnv: Record<string, string> = {
     PATH: '/usr/local/bin:/usr/bin:/bin',
     NODE_BIN_DIR: dirname(process.execPath),
