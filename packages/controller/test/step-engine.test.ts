@@ -2807,3 +2807,148 @@ test('resumeCycleWithPorts refuses CAPABILITY_UNSUPPORTED when delegated format 
     await f.cleanup();
   }
 });
+
+test('stepNext classifies confirmed mid-session BUDGET_EXHAUSTED role refusal as BUDGET_EXHAUSTED incident both initially and on resume', async () => {
+  const f = await delegatedRepoFixture({ mixedPiFirst: true, maxModelCalls: 1, maxImplementationRepairs: 0, maxFormatRepairs: 0 });
+  try {
+    const runId = 'run-step-mid-session-budget';
+    const openAdapter = async (host: PiHostV2, input: PiOpenInputV2) => {
+      const adapter: PiAdapterV2 = {
+        capabilities: () => { throw new Error('unused'); },
+        events: () => ({ async *[Symbol.asyncIterator]() { yield* []; } }),
+        cancel: async () => ({
+          ok: true,
+          value: {
+            status: 'cancelled',
+            requestIds: [],
+            operationIds: [],
+            providerTermination: 'none',
+            usage: 'none',
+            localCleanup: 'complete',
+            error: null,
+            cleanupError: null,
+          },
+        }),
+        compact: async () => { throw new Error('unused'); },
+        close: async () => ({ ok: true, value: { closed: true } }),
+        capture: async () => { throw new Error('should not capture after confirmed mid-session budget exhaustion'); },
+        execute: async cmd => {
+          const reqId = 'pi-req-1';
+          const opId = 'pi-op-1';
+          stateValue(
+            host.store.reserveRequest(host.authority, {
+              requestId: reqId,
+              roleId: input.roleId,
+              nodeId: input.stepId,
+              attemptId: cmd.commandId,
+              purpose: cmd.purpose,
+              repair: cmd.repair,
+              transportRetryOf: null,
+              requestDigest: hash(reqId),
+              inputUpperBound: 40,
+              outputUpperBound: 10,
+              totalUpperBound: 50,
+              capability: {
+                adapterId: 'pi',
+                adapterVersion: '0.0.0',
+                provider: input.policy.selection.provider,
+                model: input.policy.selection.model,
+                kind: 'soft_only',
+                coversAllBillableTokens: false,
+                enforcesOutputBound: false,
+              },
+              operationId: opId,
+              targetIdentity: 'fixture:pi-step-1',
+            }),
+          );
+          stateValue(host.store.authorizeRequestDispatch(host.authority, reqId));
+          const op = stateValue(host.store.getOperation(opId));
+          const view = stateValue(host.store.inspect());
+          const usageRef = { name: 'pi-usage-1.json', byteLength: 2, digest: hash(Buffer.from('{}')) };
+          await writeFile(join(host.artifactsDirectory, usageRef.name), '{}', { mode: 0o600 });
+          stateValue(
+            host.store.observeRequest(host.authority, reqId, {
+              receiptId: 'pi-rec-1',
+              termination: 'confirmed',
+              outcome: 'succeeded',
+              evidence: {
+                evidenceId: 'pi-ev-1',
+                producerId: 'unit-pi',
+                method: 'synthetic',
+                artifact: usageRef,
+                subject: {
+                  storeId: view.storeId,
+                  runId: view.runId,
+                  lockHash: view.lockHash,
+                  operationId: opId,
+                  requestId: reqId,
+                  intentDigest: op.intentDigest,
+                  dispatchGeneration: op.dispatch!.generation,
+                  dispatchId: op.dispatch!.dispatchId,
+                },
+              },
+              usage: {
+                requestId: reqId,
+                inputTokens: { provenance: 'reported', value: 10 },
+                outputTokens: { provenance: 'reported', value: 5 },
+                costMicrousd: { provenance: 'unknown' },
+              },
+            }),
+          );
+          return {
+            ok: true,
+            value: {
+              status: 'failed',
+              requestIds: [reqId],
+              operationIds: [opId],
+              providerTermination: 'confirmed',
+              usage: 'complete',
+              localCleanup: 'complete',
+              error: {
+                code: 'REQUEST_REFUSED',
+                phase: 'admission',
+                path: '/budgets/maxModelCalls',
+                retryable: false,
+                effect: 'confirmed',
+                requestId: reqId,
+                operationId: opId,
+                stateErrorCode: 'BUDGET_EXHAUSTED',
+              },
+              cleanupError: null,
+            },
+          };
+        },
+      };
+      return { ok: true as const, value: adapter };
+    };
+
+    const first = assertOk(
+      await stepNext(
+        { configuration: f.loaded, repository: f.repository, runRoot: f.runRoot, runId },
+        { openAdapter },
+      ),
+      'initial stepNext mid-session BUDGET_EXHAUSTED',
+    );
+    assert.equal(first.kind, 'incident');
+    if (first.kind !== 'incident') return;
+    assert.equal(first.incident.code, 'BUDGET_EXHAUSTED');
+    assert.equal(first.incident.cleanup, 'complete');
+    assert.deepEqual(first.incident.unavailable, ['current_candidate', 'submission', 'authoritative_result']);
+
+    // Resuming after persisted role refusal with currentCandidate: null and effect: 'confirmed' stays BUDGET_EXHAUSTED
+    const resumed = assertOk(
+      await stepNext(
+        { runRoot: f.runRoot, runId, environment: name => f.environment[name] },
+        { openAdapter },
+      ),
+      'resumed stepNext after mid-session BUDGET_EXHAUSTED',
+    );
+    assert.equal(resumed.kind, 'incident');
+    if (resumed.kind !== 'incident') return;
+    assert.equal(resumed.incident.code, 'BUDGET_EXHAUSTED');
+    assert.equal(resumed.incident.cleanup, 'complete');
+    assert.deepEqual(resumed.incident.unavailable, ['current_candidate', 'submission', 'authoritative_result']);
+  } finally {
+    await f.cleanup();
+  }
+});

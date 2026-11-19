@@ -839,21 +839,31 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   };
   let intake: TaskpackIntakeOutcome;
   let reviseGuidance: string | undefined;
-  if (eventNameIsTrigger(input.eventName)) {
+  const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true && input.mode === 'candidate';
+  const runDiscoverIntake = (allowForce: boolean) => {
     const outcome = prepareTaskpackIntake({
       mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
       records: effectiveUpstreamRecords ?? [],
+      ...(allowForce ? { force: true } : {}),
       ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
       targetMatrix: input.targetMatrix ?? null,
     });
     if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
       emitProgress?.(`intake: no_change (${outcome.reason})`);
-      return { kind: 'no_change', reason: outcome.reason };
+      return { ok: false as const, exit: { kind: 'no_change' as const, reason: outcome.reason } };
     }
     if (outcome.kind === 'discover' && outcome.disposition === 'blocked') {
-      return blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; '));
+      return {
+        ok: false as const,
+        exit: blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; ')),
+      };
     }
-    intake = outcome;
+    return { ok: true as const, intake: outcome };
+  };
+  if (eventNameIsTrigger(input.eventName)) {
+    const discovered = runDiscoverIntake(forceDiscovery);
+    if (!discovered.ok) return discovered.exit;
+    intake = discovered.intake;
   } else if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
     const evaluation = preEvaluatedComment ?? evaluateCommentPayload(input.eventPayload, {
       eventName: input.eventName,
@@ -882,18 +892,10 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       reviseGuidance = evaluation.guidance;
       intake = outcome;
     } else {
-      const discoverOutcome = prepareTaskpackIntake({
-        mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
-        records: effectiveUpstreamRecords ?? [],
-        ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
-        targetMatrix: input.targetMatrix ?? null,
-      });
-      if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'no_change') {
-        emitProgress?.(`intake: no_change (${discoverOutcome.reason})`);
-        return { kind: 'no_change', reason: discoverOutcome.reason };
-      }
-      if (discoverOutcome.kind === 'discover' && discoverOutcome.disposition === 'blocked') return blocked('upstream sources are unavailable');
-      intake = discoverOutcome;
+      // PR comment commands follow comment-command dispatch semantics; force applies only to non-comment trigger events.
+      const discovered = runDiscoverIntake(false);
+      if (!discovered.ok) return discovered.exit;
+      intake = discovered.intake;
     }
   } else {
     return blocked(`unsupported event ${input.eventName}`);
@@ -1517,6 +1519,7 @@ export async function runActionCli(
   const gateEndpointUrl = env['INPUT_GATE-ENDPOINT-URL']?.trim();
   const publicationEndpointUrl = env['INPUT_PUBLICATION-ENDPOINT-URL']?.trim();
   const dryRun = env['INPUT_DRY-RUN'] === 'true';
+  const force = env['INPUT_FORCE'] === 'true';
   const inputRunId = env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local';
   const inputOutput = env['INPUT_OUTPUT']?.trim() || undefined;
   const sourceRevision = env['INPUT_SOURCE-REVISION']?.trim() || undefined;
@@ -1551,6 +1554,7 @@ export async function runActionCli(
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
     env,
     dryRun,
+    force,
     turnkey: !dryRun,
     githubApiBaseUrl: env['GITHUB_API_URL']?.trim() || undefined,
     githubToken: env['INPUT_GITHUB-TOKEN']?.trim() || undefined,

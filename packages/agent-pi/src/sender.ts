@@ -299,7 +299,7 @@ export class Sender implements RuntimeBroker {
   }
   finish(): PiOutcome {
     const turn = this.#turn; if (!turn) refuse('SESSION_BUSY'); this.#turn = null;
-    for (const slot of this.#slots.values()) if (slot.turn === turn) { if (!slot.parsedDone) { turn.failure ??= 'PROVIDER_RESPONSE_INVALID'; if (turn.requests.length) turn.uncertain = true; } slot.complete(); }
+    for (const slot of this.#slots.values()) if (slot.turn === turn) { if (!slot.parsedDone) { turn.failure ??= 'PROVIDER_RESPONSE_INVALID'; if (slot.final) turn.uncertain = true; } slot.complete(); }
     if (turn.requests.some(attempt => !attempt.committed)) turn.uncertain = true;
     if (this.#native.size) { turn.failure ??= 'MCP_FAILED'; for (const parent of this.#native.values()) clearTimeout(parent.timer); this.#native.clear(); }
     if (turn.pendingTools || turn.operations.some(id => { const record = this.host.store.getOperation(id); return !record.ok || record.value.state !== 'confirmed'; })) turn.uncertain = true;

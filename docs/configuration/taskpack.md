@@ -251,7 +251,7 @@ Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrid
 | `limits.maxModelCalls` | `LOOPWRIGHT_MAX_MODEL_CALLS` | `256` (`1..1024`) | Maximum model calls per run within store capacity (Action input `max-model-calls`) |
 | `limits.maxAttempts` | `LOOPWRIGHT_MAX_ATTEMPTS` | `5` (`1..16`) | Maximum controller attempts within 64-checkpoint cap (Action input `max-attempts`) |
 | `limits.maxFormatRepairs` | `LOOPWRIGHT_MAX_FORMAT_REPAIRS` | `6` (`0..1024`) | Maximum model calls spent repairing malformed submission JSON |
-| `limits.maxImplementationRepairs` | `LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS` | `32` (`0..1024`) | Maximum model calls spent repairing failed verification checks |
+| `limits.maxImplementationRepairs` | `LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS` | `128` (`0..1024`) | Maximum model calls spent repairing failed verification checks |
 | `limits.maxTransportRetries` | `LOOPWRIGHT_MAX_TRANSPORT_RETRIES` | `3` (`0..8`) | Maximum in-session retries on transient network or rate-limit errors |
 | `limits.toolTimeoutSeconds` | `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS` | `300` (`1..1800`) | Per-tool wall-clock timeout in seconds (Action input `tool-timeout-seconds`) |
 | `limits.commandTimeoutSeconds` | `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS` | `30` (`1..3600`) | Fallback `command.v1` script timeout in seconds (Action input `command-timeout-seconds`) |

@@ -812,7 +812,16 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
           if (!reserved.ok) {
             return {
               ok: false,
-              error: makePiError('REQUEST_REFUSED', `${reserved.error.code}:${reserved.error.path}`, 'dispatch', false, 'none', null, null, reserved.error.code),
+              error: makePiError(
+                'REQUEST_REFUSED',
+                reserved.error.path,
+                'admission',
+                false,
+                commandRequestIds.length === 0 ? 'none' : 'confirmed',
+                null,
+                null,
+                reserved.error.code,
+              ),
             };
           }
           const authz = host.store.authorizeRequestDispatch(host.authority, reqId);

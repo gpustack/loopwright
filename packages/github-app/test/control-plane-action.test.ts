@@ -555,6 +555,9 @@ describe('reusable Action entrypoint (AC-6)', () => {
     assert.match(actionYml, /INPUT_GIT-AUTHOR-NAME: \$\{\{ inputs\.git-author-name \}\}/);
     assert.match(actionYml, /INPUT_GIT-AUTHOR-EMAIL: \$\{\{ inputs\.git-author-email \}\}/);
     assert.match(actionYml, /INPUT_UPSTREAM-RECORDS: \$\{\{ inputs\.upstream-records \}\}/);
+    assert.match(actionYml, /INPUT_FORCE: \$\{\{ inputs\.force \}\}/);
+    const actionInputs = parsedAction['inputs'] as Record<string, { default?: unknown }>;
+    assert.equal(actionInputs['force']?.default, 'false');
 
     withEnv('LOOPWRIGHT_PROVIDER_TOKEN', 'provider-token-value');
     withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
@@ -689,6 +692,162 @@ describe('reusable Action entrypoint (AC-6)', () => {
           assert.equal(registryText.includes(secret), false, 'raw tokens must never be written to disk');
         }
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('supports force=true (INPUT_FORCE) in candidate discovery to preserve real discovered upstream records while bypassing no_change and open-PR dedup', async () => {
+    withEnv('ZAI_API_KEY', 'zai_force_test_token_0001');
+    withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+    const { root, runRoot } = await makeTargetRepository();
+    try {
+      const manifestWithReleaseUpstream = `${MANIFEST}  models:
+    - provider: zai
+      id: glm-5.3
+      thinking: high
+      apiKeyEnv: ZAI_API_KEY
+`;
+      await writeFile(join(root, '.loopwright', 'taskpack.yaml'), manifestWithReleaseUpstream);
+      await mkdir(join(root, 'docs'), { recursive: true });
+      await writeFile(join(root, 'docs', 'proposal.json'), JSON.stringify({
+        schema_version: 1,
+        candidates: { engine: { version: 'v1.2.3' } },
+      }));
+
+      let fetchCalls = 0;
+      const probeFetch: typeof globalThis.fetch = async url => {
+        fetchCalls += 1;
+        const target = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+        if (target.endsWith('/repos/octocat/engine/releases/latest')) {
+          return new Response(JSON.stringify({ tag_name: 'v1.2.3', prerelease: false, draft: false }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (target.endsWith('/repos/octocat/engine/releases?per_page=30')) {
+          return new Response(JSON.stringify([
+            { tag_name: 'v1.2.3', prerelease: false, draft: false },
+            { tag_name: 'v1.2.2', prerelease: false, draft: false },
+          ]), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ message: `unexpected ${target}` }), { status: 404, headers: { 'content-type': 'application/json' } });
+      };
+
+      // 1) Without force, all-up-to-date upstreams settle as no_change
+      const nonForced = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-force-off-1',
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'up_to_date', version: 'v1.2.3', recentVersions: ['v1.2.3', 'v1.2.2'] }],
+      });
+      assert.equal(nonForced.kind, 'no_change');
+
+      // 2) With force=true and dryRun=false (real discoverTaskpackUpstreams via probeFetch + managedPrMatchesDiscoveredState=true),
+      //    no_change and open-PR dedup are bypassed while real discovered version + recentVersions reach the author prompt!
+      let seenPrompt = '';
+      const forcedDiscover = await runGitHubActionEntrypoint({
+        turnkey: true,
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        repositoryId: 42,
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-force-on-1',
+        force: true,
+        managedPrMatchesDiscoveredState: true,
+        githubApiBaseUrl: 'https://api.github.invalid',
+        githubToken: 'ghp_force_test_token_1234',
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        probeFetch: async (url, init) => {
+          const target = typeof url === 'string' ? url : url instanceof URL ? url.toString() : url.url;
+          if (target.includes('/repos/octocat/target')) {
+            if (target.endsWith('/repos/octocat/target')) {
+              return new Response(JSON.stringify({ id: 42, full_name: 'octocat/target', default_branch: 'main' }), { status: 200, headers: { 'content-type': 'application/json' } });
+            }
+            if (target.includes('/pulls')) {
+              return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+            }
+          }
+          if (target.endsWith('/chat/completions')) {
+            return new Response(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'OK' } }] }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return probeFetch(url, init);
+        },
+        delegate: async taskpack => {
+          const agentHandler = taskpack.registry.spec.handlers.find(h => h.kind === 'agent');
+          seenPrompt = String(agentHandler?.parameters['prompt'] ?? '');
+          return { ok: true, detail: 'forced run completed' };
+        },
+      });
+      assert.ok(fetchCalls >= 1, 'expected discoverTaskpackUpstreams to fetch real upstream releases');
+      assert.equal(forcedDiscover.kind, 'compiled');
+      if (forcedDiscover.kind === 'compiled') {
+        assert.equal(forcedDiscover.intake.kind, 'discover');
+        if (forcedDiscover.intake.kind === 'discover') {
+          assert.equal(forcedDiscover.intake.disposition, 'ready');
+        }
+        assert.deepEqual(forcedDiscover.delegateOutcome, { ok: true, detail: 'forced run completed' });
+      }
+      assert.match(seenPrompt, /v1\.2\.3/);
+      assert.match(seenPrompt, /v1\.2\.2/);
+
+      // 3) runActionCli maps INPUT_FORCE='true' and bypasses no_change even when all upstream records are up_to_date
+      const outputFile = join(runRoot, 'force-cli-output.txt');
+      const cliCode = await runActionCli({
+        GITHUB_WORKSPACE: root,
+        LOOPWRIGHT_REPOSITORY: 'octocat/target',
+        GITHUB_SHA: BASE_REVISION,
+        'INPUT_MODE': 'candidate',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'run-force-cli-1',
+        'INPUT_DRY-RUN': 'true',
+        'INPUT_FORCE': 'true',
+        'INPUT_PUBLICATION-ENDPOINT-URL': 'https://publisher.example.test/publish',
+        'INPUT_UPSTREAM-RECORDS': JSON.stringify([
+          { upstreamId: 'engine', status: 'up_to_date', version: 'v1.2.3', recentVersions: ['v1.2.3', 'v1.2.2'] },
+        ]),
+        GITHUB_OUTPUT: outputFile,
+      });
+      assert.equal(cliCode, 0);
+      const outputText = await readFile(outputFile, 'utf8');
+      const jsonLine = outputText.split('\n')[1]!;
+      const parsed = JSON.parse(jsonLine) as { kind: string; intake?: { disposition?: string } };
+      assert.equal(parsed.kind, 'compiled');
+      assert.equal(parsed.intake?.disposition, 'ready');
+
+      // 4) PR comment commands follow comment-command dispatch semantics even when force=true
+      const commentDiscover = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 7, pull_request: {} },
+          comment: { id: 902, body: '/loopwright retry', author_association: 'COLLABORATOR', user: { login: 'octocat', type: 'User' } },
+        },
+        runRoot,
+        runId: 'run-force-comment-1',
+        force: true,
+        managedPrMatchesDiscoveredState: true,
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'up_to_date', version: 'v1.2.3', recentVersions: ['v1.2.3', 'v1.2.2'] }],
+      });
+      assert.equal(commentDiscover.kind, 'no_change');
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(runRoot, { recursive: true, force: true });

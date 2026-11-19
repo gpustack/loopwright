@@ -23,7 +23,7 @@ import { evaluateControllerAcceptance, type AcceptanceObservation } from './acce
 import { nextNode, descendants, compactionTarget } from './scheduler.js';
 import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt } from './repair.js';
 import { WorkDeadline } from './deadlines.js';
-import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isNoEffectBudgetRefusal } from './budget-observations.js';
+import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isBudgetRefusal, isNoEffectBudgetRefusal, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { ControllerEvents, type ControllerEvent } from './events.js';
 import { Finalizer, incident, type ControllerIncident, type CycleExecution } from './finalize.js';
 import { canonical, freeze, hash, id, isRecord, record, same, text } from './schema.js';
@@ -108,6 +108,8 @@ export class Cycle {
     }
   }
   get generation(): number { return this.head?.progress.candidate.generation ?? 0; }
+  get candidateKnown(): boolean { return this.#candidateKnown; }
+  markCandidateUnknown(): void { this.#candidateKnown = false; }
   get draft(): Draft {
     if (!this.head) refuse('RECOVERY_REQUIRED', '', 'execution'); return { ...this.head.progress, eventSequence: this.events.sequence };
   }
@@ -309,6 +311,7 @@ export class Cycle {
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;
+    let midSessionBudget: { readonly piCode: string; readonly stateCode: string | null } | null = null;
     const closeLocal = async (): Promise<void> => {
       this.deadline.onStop(null);
       if (this.#activeAdapter) { const active = this.#activeAdapter; this.#activeAdapter = null; const closed = await active.close(); cleanupKnown = closed.ok; if (!closed.ok) this.#cleanup = 'failed'; }
@@ -325,6 +328,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       const executed = purpose === 'compaction' ? await adapter.compact({ commandId }) : await adapter.execute({ commandId, text: commandText, purpose, repair });
       if (!executed.ok) { noEffectBudget = isNoEffectBudgetRefusal(executed.error);
         if (executed.error.code === 'MCP_AUTHENTICATION_REQUIRED' && executed.error.effect === 'none') noEffectMcpAuth = true;
+        if (!noEffectBudget && isBudgetRefusal(executed.error) && executed.error.effect === 'confirmed') {
+          midSessionBudget = { piCode: executed.error.code, stateCode: executed.error.stateErrorCode };
+        }
         refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: executed.error.code, stateCode: executed.error.stateErrorCode, effect: executed.error.effect }); }
       const outcome: PiOutcomeV2 = executed.value; nativeOutcome = await artifacts.json('native-outcome', { version: 1, attemptId: commandId, outcome }, 524288);
       noEffectBudget = outcome.error !== null && isNoEffectBudgetRefusal(outcome.error) && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
@@ -333,6 +339,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       if (outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
         this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
+      if (!noEffectBudget && outcome.status === 'failed' && outcome.error !== null && isBudgetRefusal(outcome.error) && outcome.error.effect === 'confirmed' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
+        midSessionBudget = { piCode: outcome.error.code, stateCode: outcome.error.stateErrorCode };
+      }
       if (outcome.status !== 'execution_settled' || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: outcome.error?.code ?? null, effect: outcome.error?.effect ?? 'possible' });
       this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source);
       if ((repair === 'format' || purpose === 'compaction') && !same(captured.digest, oldDigest)) refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'confirmed' });
@@ -352,6 +361,19 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
           if (same(originalState, afterState)) { this.#candidateKnown = true; failure = new ControllerFailure({ ...safeDiagnostic(failure, 'execution'), code: noEffectMcpAuth ? 'MCP_AUTHENTICATION_REQUIRED' : 'BUDGET_EXHAUSTED', stateCode: noEffectMcpAuth ? null : 'BUDGET_EXHAUSTED', piCode: noEffectMcpAuth ? 'MCP_AUTHENTICATION_REQUIRED' : null, effect: 'none' }); }
           else this.#candidateKnown = false;
         } else this.#candidateKnown = false;
+      } else if (midSessionBudget) {
+        this.#candidateKnown = false;
+        await closeLocal();
+        const facts = store.inspect();
+        if (cleanupKnown && this.deadline.reason === null && facts.ok && storeFactsCertain(facts.value)) {
+          failure = new ControllerFailure({
+            ...safeDiagnostic(failure, 'execution'),
+            code: 'BUDGET_EXHAUSTED',
+            stateCode: midSessionBudget.stateCode,
+            piCode: midSessionBudget.piCode,
+            effect: 'confirmed',
+          });
+        }
       }
       if (this.head?.progress.attempts.at(-1)?.id === commandId && this.head.progress.attempts.at(-1)!.finished === null) {
         const diagnostic = safeDiagnostic(failure, 'execution'), after = stateValue(store.inspect()).counts;
@@ -380,7 +402,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     const view = this.deadline.assert(), { plan } = this.context, delegated = countDelegatedBudgets(plan, this.draft.attempts);
     const latest = this.draft.failures.at(-1), refusal = repairDisposition(kind, { attempts: this.draft.attempts.length, maxAttempts: plan.capacity.A,
       formatRepairs: view.ledger.formatRepairs + delegated.formatRepairs, implementationRepairs: view.ledger.implementationRepairs + delegated.implementationRepairs, maxFormatRepairs: plan.budgets.maxFormatRepairs, maxImplementationRepairs: plan.budgets.maxImplementationRepairs,
-      repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: view.clockStatus !== 'trusted' || Boolean(view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) });
+      repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: !storeFactsCertain(view) });
     if (refusal) refuse(refusal, '', 'execution');
   }
   async repairFormat(nodeId: string): Promise<void> {
@@ -491,11 +513,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       for (const row of retained) await this.runVerifier(row.slot);
       const attempt = this.draft.attempts.at(-1);
       if (attempt?.finished?.nativeCheckpointId === null) {
-        const refusal = record(parsePrivateJson(await this.context.artifacts.read(attempt.finished.outcome, 65536), 65536), ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup']);
-        if (!same(refusal.currentCandidate, this.draft.candidate.manifest) || refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
-        const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
-        if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') refuse(diagnostic.code, '', 'execution');
-        refuse('RECOVERY_REQUIRED', '', 'recovery');
+        await refuseFromRoleOutcome(this.context.artifacts, attempt.finished.outcome, this.draft.candidate.manifest, () => { this.#candidateKnown = false; });
       }
       if (attempt?.finished?.nativeCheckpointId && this.submission === null && attempt.purpose !== 'compaction' && this.draft.nodes.find(node => node.id === attempt.nodeId)?.state === 'failed') await this.repairFormat(attempt.nodeId);
     }
@@ -524,7 +542,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (![plan.task.spec.target.baseRevision, plan.task.spec.target.sourceRevision].includes(head)) refuse('TARGET_MISMATCH', '', 'execution');
     if (this.draft.publication.status !== 'pending') {
       const eligible = this.draft.nodes.every(node => node.state === 'completed') && scope?.status === 'passed'
-        && view.clockStatus === 'trusted' && !view.counts.dispatchedRequests && !view.counts.unresolvedRequests && !view.counts.unresolvedOperations && !view.ledger.violations.length
+        && storeFactsCertain(view)
         && this.submission !== null && this.submission.value.status === 'completed'
         && same(this.draft.candidate.digest, subject.candidateDigest);
       if (!eligible) { this.#publicationObservation = { status: 'not_run', reason: 'ineligible', receipt: null }; return acceptance; }

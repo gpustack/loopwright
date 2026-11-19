@@ -583,6 +583,7 @@ export type TaskpackIntakeInput =
     readonly tenant: TenantIdentity;
     readonly baseRevision: string;
     readonly records: readonly TaskpackUpstreamRecord[];
+    readonly force?: boolean | undefined;
     readonly managedPrMatchesDiscoveredState?: boolean | undefined;
     readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   }
@@ -946,6 +947,7 @@ export interface ActionEntrypointInput {
   readonly probeFetch?: typeof globalThis.fetch | undefined;
   readonly probeTimeoutMs?: number | undefined;
   readonly dryRun?: boolean | undefined;
+  readonly force?: boolean | undefined;
   readonly delegate?: (compiled: WrittenCompiledTaskpack) => Promise<ActionDelegateOutcome>;
   readonly openHostSessionAdapter?: typeof openPiHostSessionAdapterV2 | undefined;
 }

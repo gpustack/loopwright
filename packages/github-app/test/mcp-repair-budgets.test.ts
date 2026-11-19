@@ -436,9 +436,9 @@ spec:
     }
   });
 
-  it('allocates model-call repair sub-budgets (maxImplementationRepairs=32, maxFormatRepairs=6), clamps to maxModelCalls, and completes >3-call implementation repairs across 2 repair dispatches', async () => {
+  it('allocates model-call repair sub-budgets (maxImplementationRepairs=128, maxFormatRepairs=6), clamps to maxModelCalls, and completes >3-call implementation repairs across 2 repair dispatches', async () => {
     assert.equal(DEFAULT_HOST_BUDGETS.maxFormatRepairs, 6);
-    assert.equal(DEFAULT_HOST_BUDGETS.maxImplementationRepairs, 32);
+    assert.equal(DEFAULT_HOST_BUDGETS.maxImplementationRepairs, 128);
     assert.equal(DEFAULT_HOST_BUDGETS.maxTransportRetries, 3);
 
     const validatedHigh = validateTaskpackLimitsDeclaration(
@@ -628,7 +628,7 @@ spec:
         },
       });
       assert.equal(defaultCompiled.config.spec.task.spec.budgets.maxFormatRepairs, 6);
-      assert.equal(defaultCompiled.config.spec.task.spec.budgets.maxImplementationRepairs, 32);
+      assert.equal(defaultCompiled.config.spec.task.spec.budgets.maxImplementationRepairs, 128);
 
       // Verify clamping when maxModelCalls < 32 (e.g. maxModelCalls: 5) passes loadTrustedConfiguration + compilePlan!
       const smallModelCallsCompiled = await compileDeclarativeTaskpack(manifest, {
@@ -709,6 +709,50 @@ spec:
       assert.equal(callCount, 8);
       assert.ok(logs.some(l => l.includes('role dispatch #2: implementation repair')));
       assert.ok(logs.some(l => l.includes('role dispatch #3: implementation repair')));
+
+      // Verify mid-session admission /budgets/maxImplementationRepairs refusal classifies as BUDGET_EXHAUSTED (not RECOVERY_REQUIRED)!
+      callCount = 0;
+      const exhaustedRunRoot = join(realWork, 'runs-budget-exhausted');
+      await mkdir(exhaustedRunRoot, { recursive: true, mode: 0o700 });
+      const exhaustedLogs: string[] = [];
+      const exhaustedBudgetRes = await runGitHubActionEntrypoint({
+        turnkey: true,
+        repositoryRoot: repo,
+        repositoryFullName: 'gpustack/runner',
+        repositoryId: 777,
+        baseRevision: headSha,
+        sourceRevision: headSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot: exhaustedRunRoot,
+        runId: 'run-mid-repair-budget-exhausted',
+        allowManifestCustomBaseUrl: true,
+        openHostSessionAdapter: fastAdapter,
+        upstreamRecords: [{ upstreamId: 'vllm', status: 'available', version: 'v0.19.1' }],
+        progressSink: line => exhaustedLogs.push(line),
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          CUSTOM_GLM_TOKEN: 'sk_test_subbudget_token_1234',
+          LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS: '2',
+        },
+      });
+      assert.equal(exhaustedBudgetRes.kind, 'compiled');
+      if (exhaustedBudgetRes.kind === 'compiled') {
+        assert.equal(exhaustedBudgetRes.delegateOutcome?.ok, false);
+        assert.match(
+          exhaustedBudgetRes.delegateOutcome?.detail ?? '',
+          /BUDGET_EXHAUSTED: REQUEST_REFUSED \(admission \/budgets\/maxImplementationRepairs\)/,
+        );
+      }
+      assert.ok(
+        exhaustedLogs.some(l => l.includes('BUDGET_EXHAUSTED') && l.includes('/budgets/maxImplementationRepairs')),
+        `expected BUDGET_EXHAUSTED log:\n${exhaustedLogs.join('\n')}`,
+      );
+      assert.equal(
+        exhaustedLogs.some(l => l.includes('attempt run-mid-repair-budget-exhausted: RECOVERY_REQUIRED')),
+        false,
+        `must not report RECOVERY_REQUIRED:\n${exhaustedLogs.join('\n')}`,
+      );
     } finally {
       if (prevToken === undefined) delete process.env['LOOPWRIGHT_PROVIDER_TOKEN'];
       else process.env['LOOPWRIGHT_PROVIDER_TOKEN'] = prevToken;

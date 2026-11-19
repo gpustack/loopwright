@@ -31,7 +31,7 @@ import {
 /** Default controller budgets for host bindings that do not pin their own. */
 export const DEFAULT_HOST_BUDGETS: TaskContract['spec']['budgets'] = Object.freeze({
   wallTimeMs: 3_600_000, totalTokens: 20_000_000, perCallOutputTokens: 32_768, maxModelCalls: 256, maxConcurrency: 1,
-  maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries: 3,
+  maxFormatRepairs: 6, maxImplementationRepairs: 128, maxTransportRetries: 3,
   enforcement: Object.freeze({
     wallTime: 'hard_admission', tokens: 'soft_accounting', modelCalls: 'hard_admission', concurrency: 'hard_admission',
     formatRepairs: 'hard_admission', implementationRepairs: 'hard_admission', transportRetries: 'hard_admission',
@@ -2088,7 +2088,7 @@ export function prepareTaskpackIntake(input: TaskpackIntakeInput): TaskpackIntak
   if (updates.length === 0 && failures.length > 0) {
     return { kind: 'discover', disposition: 'blocked', reason: 'upstream_unavailable', failures };
   }
-  if (updates.length === 0 || input.managedPrMatchesDiscoveredState === true) {
+  if (input.force !== true && (updates.length === 0 || input.managedPrMatchesDiscoveredState === true)) {
     return {
       kind: 'discover', disposition: 'no_change',
       reason: updates.length === 0 ? 'no subscription reports an available update' : 'an open managed pull request already matches the discovered state',
