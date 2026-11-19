@@ -132,8 +132,14 @@ function scopeGate(input: MemoryVerificationInput, proposal: MemoryProposal): Me
   }
   const targets = new Set<string>([`${taskpackDirectory}/index.json`]);
   for (const operation of proposal.operations) {
-    if (operation.kind === 'upsert') targets.add(`${taskpackDirectory}/entries/${operation.entry.id}.md`);
-    else targets.add(`${taskpackDirectory}/index.json`);
+    if (operation.kind === 'upsert') {
+      targets.add(`${taskpackDirectory}/entries/${operation.entry.id}.md`);
+      for (const supersededId of operation.entry.supersedes) {
+        targets.add(`${taskpackDirectory}/entries/${supersededId}.md`);
+      }
+    } else {
+      targets.add(`${taskpackDirectory}/entries/${operation.entryId}.md`);
+    }
   }
   for (const path of parsePatchPaths(input.patch)) targets.add(path);
   const memoryPrefixes = validWritableRoots

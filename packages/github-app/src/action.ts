@@ -18,7 +18,7 @@ import { collectMcpReferencedEnvNames, parseTaskpackDocument, validateMcpServerD
 import {
   authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS,
   loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits, parseActionsRunUrl, parseCommentCommand,
-  parseLoopwrightEnvLimits, prepareTaskpackIntake, stageCompiledInstructionResources,
+  parseLoopwrightEnvLimits, prepareTaskpackIntake, resolveTaskpackMemoryLocation, stageCompiledInstructionResources,
   validateCommentGuidance,
 } from './taskpack.js';
 import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
@@ -1394,6 +1394,11 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     const settledRunId = lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId);
     let memorySummary: TurnkeyMemorySummary | undefined;
     if (lastTurnkeySummary !== undefined || existsSync(join(realRunRoot, settledRunId, 'run.json'))) {
+      const memoryTargetCell = input.targetMatrix !== undefined
+        && input.targetMatrix !== null
+        && input.targetMatrix.length === 1
+        ? input.targetMatrix[0]!
+        : null;
       try {
         memorySummary = await finalizeAndPublishTurnkeyMemory({
           runRoot: realRunRoot,
@@ -1404,6 +1409,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           taskpackPath: input.taskpackPath,
           baseRevision: effectiveBaseRevision,
           upstreamRecords: effectiveUpstreamRecords,
+          targetMatrix: memoryTargetCell,
           remoteUrl: input.gitRemoteUrl,
           apiBaseUrl: effectiveApiBaseUrl,
           githubToken,
@@ -1414,9 +1420,15 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        let fallbackDirectory = manifest.spec.memory.directory;
+        try {
+          fallbackDirectory = resolveTaskpackMemoryLocation(manifest, input.taskpackPath).memoryDirectory;
+        } catch {
+          // keep declared directory when location resolution itself failed
+        }
         memorySummary = Object.freeze({
           status: 'failed',
-          directory: `${manifest.spec.memory.directory}/${manifest.metadata.name}`,
+          directory: fallbackDirectory,
           proposalId: null,
           entryCount: 0,
           rebased: false,

@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
-import type { ControllerIncident } from '@loopwright/controller';
+import { loadTrustedConfiguration, stepNext, stepSubmit, type ControllerIncident } from '@loopwright/controller';
 import { admitTask, digestArtifact } from '@loopwright/core';
-import { loadMemoryStore } from '@loopwright/memory';
+import { canonical, loadMemoryStore, storeDigestOf, type RetiredMemoryEntry } from '@loopwright/memory';
 import {
   DEFAULT_HOST_BUDGETS,
   SecretScrubber,
@@ -17,6 +18,7 @@ import {
   findOpenManagedPullRequest,
   findOpenMemoryPullRequest,
   loadDeclarativeTaskpack,
+  openStagedTaskpackStepGate,
   runActionCli,
   runGitHubActionEntrypoint,
   stageTaskpackForStep,
@@ -141,7 +143,14 @@ function parseGithubOutputs(raw: string): Readonly<Record<string, string>> {
 function makeTaskpackYaml(
   openAiBaseUrl: string,
   onNoModelBudget: 'deterministic-observations-only' | 'skip' = 'deterministic-observations-only',
+  memoryOptions?: { readonly publishOnFailure?: boolean; readonly skipCi?: boolean },
 ): string {
+  const publishOnFailureLine = memoryOptions?.publishOnFailure !== undefined
+    ? `\n    publishOnFailure: ${memoryOptions.publishOnFailure}`
+    : '';
+  const skipCiLine = memoryOptions?.skipCi !== undefined
+    ? `\n    skipCi: ${memoryOptions.skipCi}`
+    : '';
   return `apiVersion: loopwright.dev/v1alpha1
 kind: Taskpack
 metadata:
@@ -188,7 +197,7 @@ spec:
   memory:
     directory: .auto-sync/memory
     apply: separate-pull-request
-    onNoModelBudget: ${onNoModelBudget}
+    onNoModelBudget: ${onNoModelBudget}${publishOnFailureLine}${skipCiLine}
   triggers:
     schedule: true
     workflowDispatch: true
@@ -287,7 +296,11 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         })));
       });
 
-      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml(openAiServer.url), 'utf8');
+      await writeFile(
+        join(repo, '.auto-sync', 'taskpack.yaml'),
+        makeTaskpackYaml(openAiServer.url, 'deterministic-observations-only', { publishOnFailure: true }),
+        'utf8',
+      );
       await git(repo, ['add', '.']);
       await git(repo, ['commit', '-m', 'chore: bootstrap repo']);
       let mainSha = await git(repo, ['rev-parse', 'HEAD']);
@@ -295,6 +308,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
 
       let openCandidatePr: { number: number; headRef: string; headSha: string; title: string; body: string } | null = null;
       let openMemoryPr: { number: number; headRef: string; headSha: string; title: string; body: string } | null = null;
+      let lastMemoryPrTitle = '';
       let candidatePostCount = 0;
       let memoryPostCount = 0;
       let memoryPatchCount = 0;
@@ -347,6 +361,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
           const remoteSha = lsOut.split(/\s+/)[0] ?? '';
           if (headRef.startsWith('loopwright/memory/')) {
             memoryPostCount += 1;
+            lastMemoryPrTitle = String(payload['title'] ?? '');
             openMemoryPr = {
               number: 11,
               headRef,
@@ -463,7 +478,14 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       assert.equal(memDiffPaths1.length >= 3, true);
       assert.equal(memDiffPaths1.every(p => p.startsWith('.auto-sync/memory/auto-sync/')), true);
       const memCommitMsg1 = await git(memoryClone1, ['log', '-1', '--format=%B']);
-      assert.match(memCommitMsg1, /Signed-off-by: Memory Sync Bot <777\+memory-bot\[bot\]@users\.noreply\.github\.com>/);
+      const memCommitLines1 = memCommitMsg1.split('\n');
+      assert.match(memCommitLines1[0] ?? '', /^chore\(memory\):/);
+      assert.equal((memCommitLines1[0] ?? '').includes('[skip ci]'), false, 'commit subject must not contain [skip ci]');
+      assert.match(lastMemoryPrTitle, /^chore\(memory\):/);
+      assert.equal(lastMemoryPrTitle.includes('[skip ci]'), false, 'PR title must not contain [skip ci]');
+      assert.equal(memCommitMsg1.includes('\n\n[skip ci]\n\n'), true, 'commit body must contain [skip ci] before DCO trailer');
+      const memCommitNonEmpty1 = memCommitLines1.filter(line => line.trim().length > 0);
+      assert.equal(memCommitNonEmpty1.at(-1), 'Signed-off-by: Memory Sync Bot <777+memory-bot[bot]@users.noreply.github.com>');
 
       openCandidatePr = null;
       await git(bareRemote, ['update-ref', '-d', 'refs/heads/loopwright/main']);
@@ -536,7 +558,17 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         true,
         `phase2Res detail=${phase2Res.kind === 'compiled' ? (phase2Res.delegateOutcome?.detail ?? '') : ''}`,
       );
-      assert.equal(loadedOnBranch.index.retired.some(r => r.entry.kind === 'fact' && r.entry.claimKey === 'claim.check.verify-status'), true);
+      assert.equal(loadedOnBranch.index.retired.length, 0, 'direct deletion-on-retire keeps index.retired empty');
+      assert.equal(
+        loadedOnBranch.index.entries.some(e => e.kind === 'fact' && e.claimKey === 'claim.check.verify-status'),
+        false,
+        'superseded fact must be removed from index.entries',
+      );
+      assert.equal(
+        loadedOnBranch.entryFiles.size,
+        loadedOnBranch.index.entries.length,
+        'retired .md files must be unlinked from the memory branch',
+      );
 
       // --- Phase 3: Squash-merge memory PR #11 into `main` (leaving remote memory branch intact!), then verify Run 2b ---
       await git(repo, ['fetch', 'origin', 'refs/heads/loopwright/memory/auto-sync/main']);
@@ -785,7 +817,11 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       assert.equal(memoryPrPayloads.length, 0);
 
       await git(bareRemote, ['update-ref', '-d', 'refs/heads/loopwright/main']);
-      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml(openAiServer.url, 'deterministic-observations-only'), 'utf8');
+      await writeFile(
+        join(repo, '.auto-sync', 'taskpack.yaml'),
+        makeTaskpackYaml(openAiServer.url, 'deterministic-observations-only', { publishOnFailure: true }),
+        'utf8',
+      );
       await git(repo, ['add', '.auto-sync/taskpack.yaml']);
       await git(repo, ['commit', '-m', 'enable deterministic memory']);
       headSha = await git(repo, ['rev-parse', 'HEAD']);
@@ -1190,14 +1226,17 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
     const runRoot = join(work, 'runs');
 
     const memoryPrPayloads: Record<string, unknown>[] = [];
+    let incidentPullsRequests = 0;
     const githubServer = await startHttpServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
       if (req.method === 'GET' && url.pathname === '/repos/acme/repo/pulls') {
+        incidentPullsRequests += 1;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify([]));
         return;
       }
       if (req.method === 'POST' && url.pathname === '/repos/acme/repo/pulls') {
+        incidentPullsRequests += 1;
         const body = await readJsonBody(req);
         memoryPrPayloads.push(body);
         const headRef = String(body['head'] ?? '');
@@ -1285,10 +1324,47 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       const scrubber = new SecretScrubber();
       scrubber.register('ghp_incident_token_123456');
 
-      const published = await finalizeAndPublishTurnkeyMemory({
+      // Default publishOnFailure: false suppresses separate memory PR publication on incident runs with zero remote/API calls
+      assert.equal(manifest.spec.memory.publishOnFailure, false);
+      const skippedIncident = await finalizeAndPublishTurnkeyMemory({
         repositoryRoot: repo,
         taskpackPath: '.auto-sync/taskpack.yaml',
         manifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: headSha,
+        runRoot,
+        runId,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_incident_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+      });
+      assert.equal(skippedIncident.status, 'skipped');
+      assert.equal(skippedIncident.reason, 'failure_publication_disabled');
+      assert.equal(skippedIncident.branchName, null);
+      assert.equal(skippedIncident.pullRequestUrl, null);
+      assert.equal(skippedIncident.pullRequestNumber, null);
+      assert.equal(skippedIncident.entryCount, 0);
+      assert.equal(incidentPullsRequests, 0, 'suppressed incident run must make zero GitHub PR API calls');
+      assert.equal(
+        await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/memory/auto-sync/main']),
+        '',
+        'suppressed incident run must push zero remote memory branches',
+      );
+
+      // Explicit publishOnFailure: true publishes the separate incident failure_observation memory PR
+      const manifestWithPublishOnFailure = {
+        ...manifest,
+        spec: {
+          ...manifest.spec,
+          memory: { ...manifest.spec.memory, publishOnFailure: true },
+        },
+      };
+      const published = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: manifestWithPublishOnFailure,
         repositoryFullName: 'acme/repo',
         baseRevision: headSha,
         runRoot,
@@ -1346,6 +1422,623 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       assert.match(refused.reason ?? '', /MEMORY_SCHEMA_INVALID/);
     } finally {
       await githubServer.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('supports apply: disabled, apply: local-only (with local .md deletion), retire-only cleanup PRs on no_change + empty squash-merge detection, and non-blocking oversized memory files', async () => {
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-turnkey-mem-gc-'));
+    const work = await realpath(rawWork);
+    const bareRemote = join(work, 'remote.git');
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    let openAiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let githubServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+
+    const settleViaStep = async (params: {
+      readonly runId: string;
+      readonly mode: 'candidate' | 'no-change';
+      readonly baseSha: string;
+      readonly writeGoodCandidate?: boolean;
+      readonly writeBrokenCandidate?: boolean;
+    }): Promise<void> => {
+      const staged = await stageTaskpackForStep({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        runRoot,
+        runId: params.runId,
+        mode: params.mode,
+        discoverUpstreams: false,
+        upstreamRecordsJson: JSON.stringify([{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }]),
+        runtimeEnv: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          LOOPWRIGHT_REPOSITORY: 'acme/repo',
+          GITHUB_SHA: params.baseSha,
+        },
+      });
+      const gate = params.mode === 'candidate'
+        ? await openStagedTaskpackStepGate({ runRoot, runId: params.runId })
+        : null;
+      try {
+        const prevGateSecret = process.env[staged.signingEnvName];
+        process.env[staged.signingEnvName] = staged.signingSecret;
+        let loaded: Awaited<ReturnType<typeof loadTrustedConfiguration>>;
+        try {
+          loaded = await loadTrustedConfiguration({
+            configPath: staged.configPath,
+            registryPath: staged.registryPath,
+            registrySha256: staged.registrySha256,
+            untrustedRoots: [repo],
+          });
+        } finally {
+          if (prevGateSecret === undefined) delete process.env[staged.signingEnvName];
+          else process.env[staged.signingEnvName] = prevGateSecret;
+        }
+        assert.equal(loaded.ok, true, loaded.ok ? '' : JSON.stringify(loaded.error));
+        if (!loaded.ok) return;
+        const next = await stepNext(
+          {
+            configuration: loaded.value,
+            repository: repo,
+            runRoot,
+            runId: params.runId,
+            mode: params.mode,
+            ...(gate ? { environment: gate.environment } : {}),
+          },
+          gate ? { gateUrlOverrides: gate.gateUrlOverrides } : {},
+        );
+        assert.equal(next.ok, true);
+        if (!next.ok || next.value.kind !== 'step') return;
+        if (params.writeGoodCandidate) {
+          await writeFile(join(next.value.candidateDir, 'docs', 'status.md'), 'verified-v2\n', { mode: 0o600 });
+          await writeFile(join(next.value.candidateDir, 'pack', 'proposal.json'), '{"schema_version":1,"version":"2.0.0"}\n', { mode: 0o600 });
+        } else if (params.writeBrokenCandidate) {
+          await writeFile(join(next.value.candidateDir, 'docs', 'status.md'), 'broken-draft\n', { mode: 0o600 });
+          await writeFile(join(next.value.candidateDir, 'pack', 'proposal.json'), '{"schema_version":1,"version":"2.0.0"}\n', { mode: 0o600 });
+        }
+        const submitted = await stepSubmit(
+          {
+            runRoot,
+            runId: params.runId,
+            leaseToken: next.value.leaseToken,
+            status: params.mode === 'no-change' ? 'no_change' : 'completed',
+            ...(gate ? { environment: gate.environment } : {}),
+          },
+          gate ? { gateUrlOverrides: gate.gateUrlOverrides } : {},
+        );
+        assert.equal(submitted.ok, true, submitted.ok ? '' : JSON.stringify(submitted.error));
+      } finally {
+        await gate?.close();
+      }
+    };
+
+    try {
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(repo, { recursive: true });
+      await mkdir(runRoot, { recursive: true });
+      await git(bareRemote, ['init', '--bare', '--initial-branch=main']);
+      await git(repo, ['init', '--initial-branch=main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'docs'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), '# GC Test\n', 'utf8');
+      await writeFile(
+        join(repo, '.auto-sync', 'checks', 'verify.sh'),
+        '#!/bin/sh\nset -eu\ngrep -q "verified-v2" "$LOOPWRIGHT_CANDIDATE_DIR/docs/status.md"\n',
+        { mode: 0o755 },
+      );
+      await chmod(join(repo, '.auto-sync', 'checks', 'verify.sh'), 0o755);
+      await writeFile(join(repo, 'docs', 'status.md'), 'v1\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'proposal.json'), '{"schema_version":1,"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'frozen.json'), '{"locked":true}\n', 'utf8');
+
+      let turn = 0;
+      openAiServer = await startHttpServer(async (_req, res) => {
+        const cur = turn++;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (cur === 0) {
+          res.end(sseToolCall('gpt-4.1-mini', 'c1', 'write', { path: 'docs/status.md', content: 'verified-v2\n' }));
+          return;
+        }
+        if (cur === 1) {
+          res.end(sseToolCall('gpt-4.1-mini', 'c2', 'write', { path: 'pack/proposal.json', content: '{"schema_version":1,"version":"2.0.0"}\n' }));
+          return;
+        }
+        res.end(sseStop('gpt-4.1-mini', JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null })));
+      });
+
+      const memoryPrsCreated: Array<{ readonly number: number; readonly title: string; readonly body: string; readonly head: string }> = [];
+      let nextPrNum = 300;
+      let totalPullsCalls = 0;
+
+      githubServer = await startHttpServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (url.pathname === '/repos/acme/engine/releases/latest' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v2.0.0' }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo' && req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 707 }));
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'GET') {
+          totalPullsCalls += 1;
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('[]');
+          return;
+        }
+        if (url.pathname === '/repos/acme/repo/pulls' && req.method === 'POST') {
+          totalPullsCalls += 1;
+          const payload = await readJsonBody(req);
+          const headRef = String(payload['head'] ?? '');
+          const prNum = nextPrNum++;
+          const lsOut = await git(repo, ['ls-remote', bareRemote, `refs/heads/${headRef}`]);
+          const remoteSha = lsOut.split(/\s+/)[0] ?? '';
+          const baseShaNow = await git(repo, ['rev-parse', 'HEAD']);
+          if (headRef.startsWith('loopwright/memory/')) {
+            memoryPrsCreated.push({
+              number: prNum,
+              title: String(payload['title'] ?? ''),
+              body: String(payload['body'] ?? ''),
+              head: headRef,
+            });
+          }
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: prNum,
+            html_url: `https://github.invalid/acme/repo/pull/${prNum}`,
+            state: 'open',
+            head: { ref: headRef, sha: remoteSha, repo: { full_name: 'acme/repo', fork: false } },
+            base: { ref: String(payload['base'] ?? 'main'), sha: baseShaNow, repo: { full_name: 'acme/repo', fork: false } },
+          }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const scrubber = new SecretScrubber();
+      scrubber.register('ghp_gc_token_123456');
+
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml(openAiServer.url), 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'chore: bootstrap gc test repo']);
+      let mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      // --- 1. Retire-only cleanup PR on no_change + squash-merge leaving empty store + silent subsequent no_change ---
+      const sepManifest = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: repo });
+      assert.equal(sepManifest.spec.memory.publishOnFailure, false);
+      assert.equal(sepManifest.spec.memory.skipCi, true);
+      const sepFailManifest = {
+        ...sepManifest,
+        spec: {
+          ...sepManifest.spec,
+          memory: { ...sepManifest.spec.memory, publishOnFailure: true },
+        },
+      };
+      const baseNowMs = 1_750_000_000_000;
+
+      // Run 1: failed candidate check -> default publishOnFailure: false skips with zero remote pushes or PR API calls
+      await settleViaStep({ runId: 'run-gc-fail-1', mode: 'candidate', baseSha: mainSha, writeBrokenCandidate: true });
+      const gcSkippedFail = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-fail-1',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs,
+      });
+      assert.equal(gcSkippedFail.status, 'skipped');
+      assert.equal(gcSkippedFail.reason, 'failure_publication_disabled');
+      assert.equal(gcSkippedFail.branchName, null);
+      assert.equal(gcSkippedFail.pullRequestUrl, null);
+      assert.equal(gcSkippedFail.pullRequestNumber, null);
+      assert.equal(totalPullsCalls, 0, 'suppressed failed run must make zero GitHub PR API calls');
+      assert.equal(
+        await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/memory/auto-sync/main']),
+        '',
+        'suppressed failed run must push zero remote branches',
+      );
+
+      // Run 1 with publishOnFailure: true -> publishes failure_observation memory PR
+      const gcPub1 = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepFailManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-fail-1',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs,
+      });
+      assert.equal(gcPub1.status, 'published', gcPub1.reason ?? '');
+      assert.equal(gcPub1.entryCount, 1);
+      assert.equal(memoryPrsCreated.length, 1);
+
+      // Squash-merge PR #1 into main
+      await git(repo, ['fetch', 'origin', 'refs/heads/loopwright/memory/auto-sync/main']);
+      await git(repo, ['merge', '--squash', 'FETCH_HEAD']);
+      await git(repo, ['commit', '-m', 'chore(memory): squash merge failure observation']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      const seededAfterMerge = await loadMemoryStore(repo, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      assert.equal(seededAfterMerge.index.entries.length, 1);
+      const failureEntryId = seededAfterMerge.index.entries[0]!.id;
+      assert.equal(seededAfterMerge.index.entries[0]!.kind, 'failure_observation');
+      assert.equal(existsSync(join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries', `${failureEntryId}.md`)), true);
+
+      // Run 2: no_change run heals failure_observation -> opens retire-only cleanup PR deleting entries/<id>.md!
+      await settleViaStep({ runId: 'run-gc-nochange-heal', mode: 'no-change', baseSha: mainSha });
+      const gcCleanupPr = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-nochange-heal',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 60_000,
+      });
+      assert.equal(gcCleanupPr.status, 'published', gcCleanupPr.reason ?? '');
+      assert.equal(gcCleanupPr.entryCount, 1);
+      assert.equal(memoryPrsCreated.length, 2);
+      assert.match(memoryPrsCreated[1]!.title, /^chore\(memory\): retire 1 stale auto-sync entry$/);
+
+      const cleanupClone = join(work, 'cleanup-clone');
+      await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, cleanupClone]);
+      const cleanupStore = await loadMemoryStore(cleanupClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      assert.equal(cleanupStore.index.entries.length, 0);
+      assert.equal(cleanupStore.index.retired.length, 0);
+      assert.equal(existsSync(join(cleanupClone, '.auto-sync', 'memory', 'auto-sync', 'entries', `${failureEntryId}.md`)), false);
+      const deletedDiff = await git(cleanupClone, ['diff', '--diff-filter=D', '--name-only', mainSha, 'HEAD']);
+      assert.equal(deletedDiff, `.auto-sync/memory/auto-sync/entries/${failureEntryId}.md`);
+
+      // Squash-merge cleanup PR into main (remote branch stays at empty-store commit!)
+      await git(repo, ['fetch', 'origin', 'refs/heads/loopwright/memory/auto-sync/main']);
+      await git(repo, ['merge', '--squash', 'FETCH_HEAD']);
+      await git(repo, ['commit', '-m', 'chore(memory): squash merge retire-only cleanup PR']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      // Run 3: no_change run on clean store -> silent no_entries, zero new PRs!
+      await settleViaStep({ runId: 'run-gc-nochange-silent', mode: 'no-change', baseSha: mainSha });
+      const silentRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-nochange-silent',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 120_000,
+      });
+      assert.equal(silentRes.status, 'no_entries', silentRes.reason ?? '');
+      assert.equal(memoryPrsCreated.length, 2);
+
+      // Add a commit on main after empty squash-merge so storeDigest differs if checked, then Run 4 publishes cleanly (not blocked by reconcile_required!)
+      await writeFile(join(repo, 'README.md'), '# Post-cleanup commit\n', 'utf8');
+      await git(repo, ['add', 'README.md']);
+      await git(repo, ['commit', '-m', 'docs: post-cleanup main commit']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      await settleViaStep({ runId: 'run-gc-post-empty-merge', mode: 'candidate', baseSha: mainSha, writeGoodCandidate: true });
+      const sepNoSkipCiManifest = {
+        ...sepManifest,
+        spec: {
+          ...sepManifest.spec,
+          memory: { ...sepManifest.spec.memory, skipCi: false },
+        },
+      };
+      const postEmptyRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepNoSkipCiManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-post-empty-merge',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 180_000,
+      });
+      assert.equal(postEmptyRes.status, 'published', `empty cleanup squash-merge must be detected as landed (got ${postEmptyRes.status}: ${postEmptyRes.reason ?? ''})`);
+      assert.equal(memoryPrsCreated.length, 3);
+      const noSkipCiClone = join(work, 'no-skip-ci-clone');
+      await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, noSkipCiClone]);
+      const noSkipCiMsg = await git(noSkipCiClone, ['log', '-1', '--format=%B']);
+      assert.equal(noSkipCiMsg.includes('[skip ci]'), false, 'skipCi: false must omit [skip ci] from commit message');
+      const noSkipCiLines = noSkipCiMsg.split('\n').filter(line => line.trim().length > 0);
+      assert.match(noSkipCiLines.at(-1) ?? '', /^Signed-off-by: .+ <.+>$/);
+
+      // Unmerged partial legacy index.retired removal (1 of 2 retired rows removed on remote branch, both still on main) -> reconcile_required
+      const postEmptyLoaded = await loadMemoryStore(noSkipCiClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      const templateEntry = postEmptyLoaded.index.entries[0]!;
+      const legacyRet1: RetiredMemoryEntry = {
+        entry: { ...templateEntry, id: 'entry.legacy.ret.1', claimKey: 'claim.legacy.ret.1' },
+        retiredAtMs: baseNowMs + 181_000,
+        retiredByProposalId: 'proposal.legacy.1',
+        supersededByEntryId: null,
+      };
+      const legacyRet2: RetiredMemoryEntry = {
+        entry: { ...templateEntry, id: 'entry.legacy.ret.2', claimKey: 'claim.legacy.ret.2' },
+        retiredAtMs: baseNowMs + 181_000,
+        retiredByProposalId: 'proposal.legacy.2',
+        supersededByEntryId: null,
+      };
+      const legacyMainBase = {
+        version: 1 as const,
+        taskpack: 'auto-sync',
+        repository: 'acme/repo',
+        updatedAtMs: baseNowMs + 182_000,
+        entries: [],
+        retired: [legacyRet1, legacyRet2],
+      };
+      await mkdir(join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries'), { recursive: true });
+      await writeFile(
+        join(repo, '.auto-sync', 'memory', 'auto-sync', 'index.json'),
+        canonical({ ...legacyMainBase, storeDigest: storeDigestOf(legacyMainBase) }),
+        'utf8',
+      );
+      await git(repo, ['add', '.auto-sync/memory']);
+      await git(repo, ['commit', '-m', 'chore(memory): seed two legacy retired rows on main']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      const partialLegacyClone = join(work, 'partial-legacy-clone');
+      await git(work, ['clone', '--branch', 'main', bareRemote, partialLegacyClone]);
+      const partialRemoteBase = {
+        ...legacyMainBase,
+        updatedAtMs: baseNowMs + 183_000,
+        retired: [legacyRet1],
+      };
+      await writeFile(
+        join(partialLegacyClone, '.auto-sync', 'memory', 'auto-sync', 'index.json'),
+        canonical({ ...partialRemoteBase, storeDigest: storeDigestOf(partialRemoteBase) }),
+        'utf8',
+      );
+      await git(partialLegacyClone, ['add', '.auto-sync/memory']);
+      await git(partialLegacyClone, ['commit', '-m', 'chore(memory): partial legacy retired removal']);
+      await git(partialLegacyClone, ['push', '--force', 'origin', 'HEAD:refs/heads/loopwright/memory/auto-sync/main']);
+
+      await settleViaStep({ runId: 'run-gc-partial-legacy', mode: 'candidate', baseSha: mainSha, writeGoodCandidate: true });
+      const partialLegacyRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-partial-legacy',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 185_000,
+      });
+      assert.equal(
+        partialLegacyRes.status,
+        'reconcile_required',
+        `partial unmerged legacy retired removal must not be misdetected as squash-merged (got ${partialLegacyRes.status})`,
+      );
+      // Clean legacy retired rows from main before step 2 & 3
+      await rm(join(repo, '.auto-sync', 'memory'), { recursive: true, force: true });
+      await git(repo, ['add', '-A', '.auto-sync/memory']);
+      await git(repo, ['commit', '-m', 'chore(memory): reset clean memory before disabled/local-only checks']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      // --- 2. apply: 'disabled' returns skipped immediately with zero remote calls ---
+      const disabledYaml = makeTaskpackYaml(openAiServer.url).replace(
+        '    apply: separate-pull-request\n    onNoModelBudget: deterministic-observations-only\n',
+        '    apply: disabled\n',
+      );
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), disabledYaml, 'utf8');
+      const disabledManifest = await loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repo,
+      });
+      const pullsBeforeDisabled = totalPullsCalls;
+      const disabledRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: disabledManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-post-empty-merge',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 240_000,
+      });
+      assert.equal(disabledRes.status, 'skipped');
+      assert.equal(disabledRes.reason, 'memory_apply_disabled');
+      assert.equal(disabledRes.pullRequestUrl, null);
+      assert.equal(totalPullsCalls, pullsBeforeDisabled);
+
+      // --- 3. apply: 'local-only' writes directly on repositoryRoot and unlinks retired .md files with zero remote calls ---
+      const localOnlyYaml = makeTaskpackYaml(openAiServer.url).replace(
+        '    apply: separate-pull-request\n',
+        '    apply: local-only\n',
+      );
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), localOnlyYaml, 'utf8');
+      await git(repo, ['add', '.auto-sync/taskpack.yaml']);
+      await git(repo, ['commit', '-m', 'chore: switch memory apply to local-only']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+      const localManifest = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/taskpack.yaml', repositoryRoot: repo });
+      assert.equal(localManifest.spec.memory.publishOnFailure, false);
+
+      const pullsBeforeLocal = totalPullsCalls;
+      await settleViaStep({ runId: 'run-local-fail', mode: 'candidate', baseSha: mainSha, writeBrokenCandidate: true });
+      const localBadShaRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: localManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'refs/heads/main',
+        runRoot,
+        runId: 'run-local-fail',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 290_000,
+      });
+      assert.equal(localBadShaRes.status, 'failed');
+      assert.equal(localBadShaRes.reason, 'baseRevision is not a 40-hex commit SHA');
+
+      const localFailRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: localManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-local-fail',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 300_000,
+      });
+      assert.equal(localFailRes.status, 'local_only', localFailRes.reason ?? '');
+      assert.equal(localFailRes.entryCount, 1);
+      assert.equal(localFailRes.branchName, null);
+      assert.equal(localFailRes.pullRequestUrl, null);
+      assert.equal(totalPullsCalls, pullsBeforeLocal);
+
+      const localAfterFail = await loadMemoryStore(repo, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      assert.equal(localAfterFail.index.entries.length, 1);
+      const localFailEntryId = localAfterFail.index.entries[0]!.id;
+      const localFailEntryPath = join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries', `${localFailEntryId}.md`);
+      assert.equal(existsSync(localFailEntryPath), true);
+
+      // Heal via no_change in local-only -> unlinks retired .md file directly on repositoryRoot!
+      await settleViaStep({ runId: 'run-local-heal', mode: 'no-change', baseSha: mainSha });
+      const localHealRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: localManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-local-heal',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 360_000,
+      });
+      assert.equal(localHealRes.status, 'local_only', localHealRes.reason ?? '');
+      assert.equal(localHealRes.entryCount, 1);
+      assert.equal(existsSync(localFailEntryPath), false, 'local-only retire must unlink retired .md on disk');
+      const localAfterHeal = await loadMemoryStore(repo, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      assert.equal(localAfterHeal.index.entries.length, 0);
+      assert.equal(localAfterHeal.index.retired.length, 0);
+      assert.equal(totalPullsCalls, pullsBeforeLocal);
+
+      // Subsequent silent no_change in local-only -> returns no_entries
+      await settleViaStep({ runId: 'run-local-silent', mode: 'no-change', baseSha: mainSha });
+      const localSilentRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: localManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-local-silent',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 420_000,
+      });
+      assert.equal(localSilentRes.status, 'no_entries');
+
+      // --- 4. Non-blocking invariant: oversized (> 64 KiB) or corrupt memory file never flips delegateOutcome.ok to false ---
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml(openAiServer.url), 'utf8');
+      await git(repo, ['add', '.auto-sync/taskpack.yaml']);
+      await git(repo, ['commit', '-m', 'chore: restore separate-pull-request mode']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      await mkdir(join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'memory', 'auto-sync', 'index.json'), '{"corrupt":', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries', 'oversized.md'), 'x'.repeat(70_000), 'utf8');
+
+      turn = 0;
+      const corruptRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 707,
+        baseRevision: mainSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-gc-nonblocking-corrupt',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_gc_token_123456',
+        gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          LLM_TOKEN: 'sk-gc-llm-token-123456',
+        },
+      });
+      assert.equal(corruptRes.kind, 'compiled');
+      if (corruptRes.kind === 'compiled') {
+        assert.equal(corruptRes.delegateOutcome?.ok, true, 'corrupt/oversized memory files must never fail primary run');
+        assert.equal(corruptRes.memory?.status, 'refused');
+        assert.match(corruptRes.memory?.reason ?? '', /MEMORY_SCHEMA_INVALID|MEMORY_SCOPE_VIOLATION/);
+      }
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
       await rm(work, { recursive: true, force: true });
     }
   });

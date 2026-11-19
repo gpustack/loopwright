@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { constants } from 'node:fs';
-import { mkdir, mkdtemp, open, readdir, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
+import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -85,15 +85,22 @@ describe('compare-and-swap store update', () => {
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.equal(result.storeDigestAfter!.hex, reloaded.index.storeDigest.hex);
       assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.proposed']);
-      assert.equal(reloaded.index.retired.length, 1);
-      assert.equal(reloaded.index.retired[0]!.retiredByProposalId, proposal.proposalId);
-      assert.equal(reloaded.index.retired[0]!.supersededByEntryId, 'entry.proposed');
+      assert.deepEqual(reloaded.index.retired, []);
+      assert.equal(existsSync(join(root, MEMORY_ROOT, TASKPACK, 'entries', 'entry.base.md')), false);
+      const onDiskEntries = await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries'));
+      assert.deepEqual(onDiskEntries, ['entry.proposed.md']);
       const pullRequest = result.pullRequest!;
       assert.equal(pullRequest.mode, 'separate_pull_request');
       assert.equal(pullRequest.branchName, `loopwright/memory/${TASKPACK}/${proposal.proposalId}`);
       assert.equal(pullRequest.targetBranch, 'main');
       assert.equal(pullRequest.baseRevision, BASE_REVISION);
       assert.equal(pullRequest.excludesCodeCandidatePaths, true);
+      assert.ok(pullRequest.patch.includes(`--- a/${MEMORY_ROOT}/${TASKPACK}/entries/entry.base.md\n+++ /dev/null\n`));
+      const deletedFile = pullRequest.modifiedFiles.find(file => file.path === `${MEMORY_ROOT}/${TASKPACK}/entries/entry.base.md`);
+      assert.ok(deletedFile !== undefined);
+      assert.equal(deletedFile.deleted, true);
+      assert.equal(deletedFile.content, '');
+      assert.equal(deletedFile.sha256.length, 64);
       for (const file of pullRequest.modifiedFiles) assert.ok(file.path.startsWith(`${MEMORY_ROOT}/${TASKPACK}/`));
       const lockFiles = (await readdir(join(root, MEMORY_ROOT, TASKPACK))).filter(name => name === '.cas.lock');
       assert.deepEqual(lockFiles, []);
@@ -147,7 +154,8 @@ describe('compare-and-swap store update', () => {
       assert.equal(result.rebased, true);
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.concurrent', 'entry.proposed']);
-      assert.equal(reloaded.index.retired.length, 1);
+      assert.deepEqual(reloaded.index.retired, []);
+      assert.equal(existsSync(join(root, MEMORY_ROOT, TASKPACK, 'entries', 'entry.base.md')), false);
     });
   });
 
@@ -201,14 +209,18 @@ describe('compare-and-swap store update', () => {
     });
   });
 
-  it('rolls back every write and cleans up when the apply fails mid-way', async () => {
+  it('rolls back every write and restores unlinked .md files with 0o600 when the apply fails mid-way', async () => {
     const fixture = await buildRun('completed');
     await withSandbox(async root => {
-      const baseIndex = await seedStore(root, [seededEntry()]);
+      const baseEntry = seededEntry();
+      const baseIndex = await seedStore(root, [baseEntry]);
+      const expectedBaseBytes = Buffer.from(entryFileBytes(baseEntry));
+      const baseEntryPath = join(root, MEMORY_ROOT, TASKPACK, 'entries', 'entry.base.md');
       const proposal = buildProposal(fixture, baseIndex.storeDigest, supersedeOperations(fixture));
       const concurrentProposal = buildProposal(fixture, baseIndex.storeDigest, [{ kind: 'upsert', entry: proposedEntry(fixture, { id: 'entry.second', claimKey: 'claim.second', claim: 'Concurrent second claim.' }) }]);
       await assert.rejects(() => applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex, {
         faultInjectionHook: async () => {
+          assert.equal(existsSync(baseEntryPath), false, 'entry.base.md must already be unlinked before faultInjectionHook');
           const concurrent = await applyMemoryProposalCAS(casInput(root, fixture, concurrentProposal, baseIndex));
           assert.equal(concurrent.applied, false);
           assert.equal(concurrent.refusal!.code, 'MEMORY_CAS_CONFLICT');
@@ -226,11 +238,15 @@ describe('compare-and-swap store update', () => {
       assert.deepEqual(taskpackFiles.filter(name => name === '.cas.lock'), []);
       const entryFiles = await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries'));
       assert.deepEqual(entryFiles.filter(name => name.includes('.tmp-')), []);
-      assert.deepEqual(entryFiles.filter(name => name !== 'entry.base.md'), []);
+      assert.deepEqual(entryFiles, ['entry.base.md']);
+      const restoredStats = await stat(baseEntryPath);
+      assert.equal(restoredStats.mode & 0o777, 0o600);
+      const restoredBytes = await readFile(baseEntryPath);
+      assert.ok(restoredBytes.equals(expectedBaseBytes));
     });
   });
 
-  it('keeps a committed retire-then-upsert replacement active in the snapshot', async () => {
+  it('keeps a committed retire-then-upsert replacement active in the snapshot and deletes .md on final retire', async () => {
     const fixture = await buildRun('completed');
     await withSandbox(async root => {
       const baseIndex = await seedStore(root, [seededEntry()]);
@@ -247,7 +263,7 @@ describe('compare-and-swap store update', () => {
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.base']);
       assert.equal(reloaded.index.entries[0]!.claim, 'Replacement claim text with new evidence.');
-      assert.equal(reloaded.index.retired.length, 1);
+      assert.deepEqual(reloaded.index.retired, []);
       const contract = { spec: { taskpack: TASKPACK, target: { repository: 'org/repo' }, trustedContext: { resources: [] } } } as unknown as TaskContract;
       const snapshot = selectActiveMemory({ store: reloaded.index, contract, nowMs: 1500,
         currentCodeFingerprint: hex('fingerprint'), currentUpstreamVersions: { npm: '1.0.0' }, targetCell: null });
@@ -260,18 +276,18 @@ describe('compare-and-swap store update', () => {
       ]);
       const retireResult = await applyMemoryProposalCAS(casInput(root, fixture, retireProposal, afterReplacement.index));
       assert.equal(retireResult.applied, true);
+      assert.ok(retireResult.pullRequest!.patch.includes(`--- a/${MEMORY_ROOT}/${TASKPACK}/entries/entry.base.md\n+++ /dev/null\n`));
       const afterRetire = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(afterRetire.index.entries.map(entry => entry.id), []);
-      assert.equal(afterRetire.index.retired.length, 1);
-      assert.equal(afterRetire.index.retired[0]!.entry.claim, 'Replacement claim text with new evidence.');
-      assert.deepEqual(afterRetire.index.retired.map(row => row.entry.id), ['entry.base']);
+      assert.deepEqual(afterRetire.index.retired, []);
+      assert.deepEqual(await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries')), []);
       const retiredSnapshot = selectActiveMemory({ store: afterRetire.index, contract, nowMs: 1500,
         currentCodeFingerprint: hex('fingerprint'), currentUpstreamVersions: { npm: '1.0.0' }, targetCell: null });
       assert.deepEqual(retiredSnapshot.activeEntries.map(entry => entry.id), []);
     });
   });
 
-  it('supersedes a replaced entry and keeps index.retired unique', async () => {
+  it('supersedes a replaced entry, unlinks its .md file, and keeps index.retired empty', async () => {
     const fixture = await buildRun('completed');
     await withSandbox(async root => {
       const baseIndex = await seedStore(root, [seededEntry()]);
@@ -293,18 +309,17 @@ describe('compare-and-swap store update', () => {
       assert.equal(successorResult.applied, true);
       const afterSuccessor = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(afterSuccessor.index.entries.map(entry => entry.id), ['entry.successor']);
-      assert.deepEqual(afterSuccessor.index.retired.map(row => row.entry.id), ['entry.base']);
-      assert.equal(afterSuccessor.index.retired[0]!.entry.claim, 'Replacement claim text with new evidence.');
-      assert.equal(afterSuccessor.index.retired[0]!.supersededByEntryId, 'entry.successor');
+      assert.deepEqual(afterSuccessor.index.retired, []);
+      assert.deepEqual(await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries')), ['entry.successor.md']);
       const contract = { spec: { taskpack: TASKPACK, target: { repository: 'org/repo' }, trustedContext: { resources: [] } } } as unknown as TaskContract;
       const snapshot = selectActiveMemory({ store: afterSuccessor.index, contract, nowMs: 1500,
         currentCodeFingerprint: hex('fingerprint'), currentUpstreamVersions: { npm: '1.0.0' }, targetCell: null });
       assert.deepEqual(snapshot.activeEntries.map(entry => entry.id), ['entry.successor']);
-      assert.deepEqual(snapshot.excludedEntries.map(row => [row.entryId, row.reason]), [['entry.base', 'superseded']]);
+      assert.deepEqual(snapshot.excludedEntries, []);
     });
   });
 
-  it('rebases a proposal that reuses a historically retired claim key', async () => {
+  it('rebases onto a legacy retired store, reuses a historically retired claim key, and purges legacy retired rows and .md files', async () => {
     const fixture = await buildRun('completed');
     await withSandbox(async root => {
       const historic = seededEntry({ id: 'entry.historic', claimKey: 'claim.proposed' });
@@ -312,13 +327,34 @@ describe('compare-and-swap store update', () => {
       const baseIndex = await seedStore(root, [], [retiredRow]);
       const concurrent = seededEntry({ id: 'entry.concurrent', claimKey: 'claim.concurrent', claim: 'Concurrent disjoint claim.' });
       await seedStore(root, [concurrent], [retiredRow]);
+      assert.equal(existsSync(join(root, MEMORY_ROOT, TASKPACK, 'entries', 'entry.historic.md')), true);
       const proposal = buildProposal(fixture, baseIndex.storeDigest, [{ kind: 'upsert', entry: proposedEntry(fixture) }]);
       const result = await applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex));
       assert.equal(result.applied, true);
       assert.equal(result.rebased, true);
+      assert.ok(result.pullRequest!.patch.includes(`--- a/${MEMORY_ROOT}/${TASKPACK}/entries/entry.historic.md\n+++ /dev/null\n`));
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.concurrent', 'entry.proposed']);
-      assert.equal(reloaded.index.retired.length, 1);
+      assert.deepEqual(reloaded.index.retired, []);
+      assert.equal(existsSync(join(root, MEMORY_ROOT, TASKPACK, 'entries', 'entry.historic.md')), false);
+    });
+  });
+
+  it('enforces maxEntries in applyMemoryProposalCAS, unlinking evicted .md files and emitting deletion diffs', async () => {
+    const fixture = await buildRun('completed');
+    await withSandbox(async root => {
+      const oldFact = seededEntry({ id: 'entry.old', claimKey: 'claim.old', verifiedAtMs: 500 });
+      const keepInv = seededEntry({ id: 'entry.inv', claimKey: 'claim.inv', kind: 'invariant', verifiedAtMs: 600 });
+      const baseIndex = await seedStore(root, [keepInv, oldFact]);
+      const proposal = buildProposal(fixture, baseIndex.storeDigest, [
+        { kind: 'upsert', entry: proposedEntry(fixture, { verifiedAtMs: 1500 }) },
+      ]);
+      const result = await applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex, { maxEntries: 2 }));
+      assert.equal(result.applied, true);
+      assert.ok(result.pullRequest!.patch.includes(`--- a/${MEMORY_ROOT}/${TASKPACK}/entries/entry.old.md\n+++ /dev/null\n`));
+      const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
+      assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.inv', 'entry.proposed']);
+      assert.deepEqual(await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries')), ['entry.inv.md', 'entry.proposed.md']);
     });
   });
 });

@@ -173,6 +173,7 @@ spec:
     directory: .auto-sync/memory
     apply: separate-pull-request
     onNoModelBudget: deterministic-observations-only
+    publishOnFailure: true
   triggers:
     schedule: true
     workflowDispatch: true
@@ -669,6 +670,38 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
       await git(work, ['clone', '--branch', memBranch, staleNamedRemote, verifyRetireClone]);
       const verifyRetireStore = await loadMemoryStore(verifyRetireClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
       assert.equal(verifyRetireStore.index.entries.some(e => e.id === 'entry.mcp-001'), false);
+
+      // Unmerged full cleanup (all remaining entries retired -> remote store empty while entries still active on `main`) -> `reconcile_required`!
+      await git(unmergedClone, ['reset', '--hard', mainSha]);
+      const projUnmergedEmpty = projectMemoryStore(
+        seedProj.index,
+        [
+          { kind: 'retire', entryId: 'entry.mcp-000', reason: 'cleanup all entries' },
+          { kind: 'retire', entryId: 'entry.mcp-001', reason: 'cleanup all entries' },
+        ],
+        nowMs + 700,
+        'prop.unmerged-empty',
+      );
+      await writeProjectedStore(unmergedClone, projUnmergedEmpty);
+      await git(unmergedClone, ['add', '-A', '.auto-sync/memory']);
+      await git(unmergedClone, ['commit', '-m', 'memory(auto-sync): unmerged full cleanup']);
+      await git(unmergedClone, ['push', '--force', 'origin', `HEAD:refs/heads/${memBranch}`]);
+
+      const preserveEmptyRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: loadedManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-cas-1',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_cas_token_123',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: staleNamedRemote,
+      });
+      assert.equal(preserveEmptyRes.status, 'reconcile_required');
     } finally {
       await openAiServer?.close();
       await githubServer?.close();

@@ -1,6 +1,14 @@
 import type { ArtifactRef, CheckStatus, Digest, Evidence, EvidenceLevel, RunResult, TaskContract, TaskLock, VerificationResult } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
 
+export const DEFAULT_MEMORY_TTL_DAYS = 15;
+export const DEFAULT_MEMORY_TTL_MS = DEFAULT_MEMORY_TTL_DAYS * 24 * 60 * 60 * 1000;
+export const DEFAULT_MEMORY_MAX_ENTRIES = 128;
+export const DEFAULT_MEMORY_MAX_PROMPT_ENTRIES = 32;
+export const DEFAULT_MEMORY_MAX_PROMPT_BYTES = 16_384;
+export const MAX_MEMORY_ENTRY_FILE_BYTES = 65_536;
+export const MAX_MEMORY_INDEX_FILE_BYTES = 2_097_152;
+
 export type MemoryEntryKind = 'fact' | 'failure_observation' | 'invariant';
 
 export interface MemoryEvidenceRef {
@@ -162,9 +170,11 @@ export interface MemorySelectorInput {
   readonly store: MemoryStoreIndex;
   readonly contract: TaskContract;
   readonly nowMs: number;
-  readonly currentCodeFingerprint: Digest;
-  readonly currentUpstreamVersions: Readonly<Record<string, string>>;
+  readonly currentCodeFingerprint?: Digest | null | undefined;
+  readonly currentUpstreamVersions?: Readonly<Record<string, string>> | null | undefined;
   readonly targetCell: null | { readonly id: string; readonly platform: string; readonly variant: string };
+  readonly maxEntries?: number | undefined;
+  readonly maxBytes?: number | undefined;
 }
 
 export interface MemoryBudgetLedger {
@@ -207,12 +217,16 @@ export interface MemoryFinalizerConfig {
   readonly memoryWritable: readonly string[];
   readonly memoryRoot?: string | undefined;
   readonly onNoModelBudget: 'deterministic-observations-only' | 'skip';
-  readonly curator?: MemoryCuratorPort | null;
-  readonly curatorTimeoutMs?: number;
-  readonly requireCuratorReview?: boolean;
+  readonly curator?: MemoryCuratorPort | null | undefined;
+  readonly curatorTimeoutMs?: number | undefined;
+  readonly requireCuratorReview?: boolean | undefined;
   readonly nowMs: number;
   readonly ttlMs: number;
   readonly upstreamVersions: Readonly<Record<string, string>>;
+  readonly checkCodeFingerprint?: boolean | undefined;
+  readonly checkUpstreamVersions?: boolean | undefined;
+  readonly maxEntries?: number | undefined;
+  readonly targetMatrix?: MemoryEntry['scope']['targetMatrix'] | undefined;
 }
 
 export type SettledCycleContext =
@@ -238,6 +252,7 @@ export interface MemoryModifiedFile {
   readonly path: string;
   readonly content: string;
   readonly sha256: string;
+  readonly deleted?: boolean | undefined;
 }
 
 export interface SeparateMemoryPullRequestSpec {
@@ -274,8 +289,9 @@ export interface MemoryCASInput {
   readonly baseStore: MemoryStoreIndex | null;
   readonly allowRebase: boolean;
   /** Test seam: invoked between entry-file renames and the index rename; a throw triggers rollback. */
-  readonly faultInjectionHook?: () => Promise<void> | void;
+  readonly faultInjectionHook?: (() => Promise<void> | void) | undefined;
   readonly nowMs: number;
+  readonly maxEntries?: number | undefined;
 }
 
 export type MemoryCASRefusal = {
@@ -339,8 +355,8 @@ export interface CompactionSummaryInput {
     readonly store: MemoryStoreIndex;
     readonly contract: TaskContract;
     readonly nowMs: number;
-    readonly currentCodeFingerprint: Digest;
-    readonly currentUpstreamVersions: Readonly<Record<string, string>>;
+    readonly currentCodeFingerprint?: Digest | null | undefined;
+    readonly currentUpstreamVersions?: Readonly<Record<string, string>> | null | undefined;
     readonly targetCell: null | { readonly id: string; readonly platform: string; readonly variant: string };
   };
 }

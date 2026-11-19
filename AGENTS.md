@@ -20,7 +20,11 @@ Start with the [module map](docs/README.md#module-map). `docs/` owns usage contr
 
 ## Development
 
-Run `npm run build`, `npm run typecheck`, `npm run lint`, `npm run lint:docs`, and `npm run site`. Focus a package suite with `npx tsc -p tsconfig.test.json && node --test --test-concurrency=1 .test-build/packages/<pkg>/test/*.test.js`. See [development](docs/development.md).
+Run `npm run build`, `npm run typecheck`, `npm run lint`, `npm run lint:docs`, and `npm run site`. Compile tests with `npx tsc -p tsconfig.test.json` and select the test strategy by package workload (see [development](docs/development.md)):
+
+- `core`, `decisions`, `memory`, `controller`, `cli`: `node scripts/run-tests.mjs --pkg <pkg>`
+- `github-app`, `taskpack-runner`: target `.test-build/packages/<pkg>/test/<file>.test.js` with `--test-name-pattern` during iteration, then `node scripts/run-tests.mjs --pkg <pkg>`
+- `state`, `agent-pi`: `node scripts/run-tests.mjs --pkg <pkg>` (use `--concurrency 1` for sandbox, child-kill, or SQLite lock contention)
 
 Use `loopwright-overview` for architecture routing, `loopwright-docs` for documentation changes, `loopwright-code-review` for reviews, `loopwright-issue-pr` for issue or PR preparation, and `loopwright-release` for releases.
 

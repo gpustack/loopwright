@@ -1,6 +1,6 @@
 import { constants, existsSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { open, readFile, rename, unlink } from 'node:fs/promises';
+import { open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Digest } from '@loopwright/core';
 import { canonical, digestEqual, unifiedFileDiff } from './schema.js';
@@ -251,18 +251,29 @@ function refusal(code: MemoryCASRefusal['code'], diagnostics: readonly MemoryDia
 function casConflict(path: string, detail: string): readonly MemoryDiagnostic[] {
   return [{ code: 'MEMORY_CAS_CONFLICT', path, detail }];
 }
+const EMPTY_UTF8_SHA256 = createHash('sha256').update('', 'utf8').digest('hex');
+
 function buildPatch(directory: string, before: ReadonlyMap<string, Uint8Array>, after: ReadonlyMap<string, Uint8Array>,
   indexBefore: string | null, indexAfter: string): { patch: string; files: readonly MemoryModifiedFile[] } {
-  const changed: { path: string; before: string | null; after: string }[] = [];
+  const changed: { path: string; before: string | null; after: string | null }[] = [];
   for (const [id, bytes] of after) {
     const afterText = Buffer.from(bytes).toString('utf8');
     const previous = before.get(id);
     const beforeText = previous === undefined ? null : Buffer.from(previous).toString('utf8');
     if (beforeText !== afterText) changed.push({ path: `${directory}/entries/${id}.md`, before: beforeText, after: afterText });
   }
+  for (const [id, previous] of before) {
+    if (after.has(id)) continue;
+    const beforeText = Buffer.from(previous).toString('utf8');
+    changed.push({ path: `${directory}/entries/${id}.md`, before: beforeText, after: null });
+  }
   changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   if (indexBefore !== indexAfter) changed.push({ path: `${directory}/index.json`, before: indexBefore, after: indexAfter });
-  const files = changed.map(file => ({ path: file.path, content: file.after, sha256: createHash('sha256').update(file.after, 'utf8').digest('hex') }));
+  const files: MemoryModifiedFile[] = changed.map(file => (
+    file.after === null
+      ? { path: file.path, content: '', sha256: EMPTY_UTF8_SHA256, deleted: true }
+      : { path: file.path, content: file.after, sha256: createHash('sha256').update(file.after, 'utf8').digest('hex') }
+  ));
   return { patch: changed.map(file => unifiedFileDiff(file.path, file.before, file.after)).join(''), files };
 }
 async function stageFile(target: string, bytes: Uint8Array, nonce: string): Promise<string> {
@@ -274,6 +285,18 @@ async function stageFile(target: string, bytes: Uint8Array, nonce: string): Prom
 async function syncDirectory(directoryPath: string): Promise<void> {
   const handle = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await handle.sync(); } finally { await handle.close(); }
+}
+async function readOptionalRegularFileNoFollow(filePath: string): Promise<Buffer | null> {
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return await handle.readFile();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  } finally {
+    if (handle !== null) await handle.close();
+  }
 }
 function touchedBy(proposal: MemoryProposal): { readonly ids: ReadonlySet<string>; readonly claimKeys: ReadonlySet<string> } {
   const ids = new Set<string>(), claimKeys = new Set<string>();
@@ -351,8 +374,9 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     }
     verifyBase = input.baseStore;
   }
+  const projectionOptions = { maxEntries: input.maxEntries };
   const baseEntryFiles = fastPath ? loaded.entryFiles : new Map([...input.baseStore!.entries].map(entry => [entry.id, entryFileBytes(entry)]));
-  const baseProjection = projectMemoryStore(verifyBase, proposal.operations, input.nowMs, proposal.proposalId);
+  const baseProjection = projectMemoryStore(verifyBase, proposal.operations, input.nowMs, proposal.proposalId, projectionOptions);
   const verificationPatch = buildPatch(directory, baseEntryFiles, baseProjection.entryFiles, canonical(verifyBase), canonical(baseProjection.index)).patch;
   const verification = await verifyAgainst(input, proposal, verificationPatch, verifyBase, memoryRoot);
   if (!verification.satisfied) {
@@ -366,7 +390,7 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
       return refusal('MEMORY_CAS_CONFLICT', casConflict('/proposal/operations', 'concurrent changes touch the same entry id or claim key'), storeDigestBefore);
     }
     effective = { ...proposal, baseStoreDigest: loaded.index.storeDigest, baseRevision: input.currentRevision };
-    const rebasedProjection = projectMemoryStore(loaded.index, effective.operations, input.nowMs, effective.proposalId);
+    const rebasedProjection = projectMemoryStore(loaded.index, effective.operations, input.nowMs, effective.proposalId, projectionOptions);
     const rebasedPatch = buildPatch(directory, loaded.entryFiles, rebasedProjection.entryFiles,
       existsSync(join(repository, directory, 'index.json')) ? canonical(loaded.index) : null, canonical(rebasedProjection.index));
     const rebasedVerification = await verifyAgainst(input, effective, rebasedPatch.patch, loaded.index, memoryRoot);
@@ -374,6 +398,11 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
       return refusal('MEMORY_VERIFICATION_FAILED', rebasedVerification.gates.flatMap(gate => gate.diagnostics), storeDigestBefore);
     }
     rebased = true;
+  }
+  const lockProjection = projectMemoryStore(loaded.index, effective.operations, input.nowMs, effective.proposalId, projectionOptions);
+  const lockTouchedIds = new Set<string>(touchedBy(effective).ids);
+  for (const id of loaded.entryFiles.keys()) {
+    if (!lockProjection.entryFiles.has(id)) lockTouchedIds.add(id);
   }
   const nonce = randomBytes(6).toString('hex');
   const staged: { readonly temp: string; readonly target: string }[] = [];
@@ -390,7 +419,7 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     lockCreated = true;
     try {
       await lockHandle.writeFile(canonical({ version: 1, pid: process.pid, nonce, proposalId: effective.proposalId,
-        acquiredAtMs: input.nowMs, touchedEntryIds: [...touchedBy(effective).ids].sort() }));
+        acquiredAtMs: input.nowMs, touchedEntryIds: [...lockTouchedIds].sort() }));
       await lockHandle.sync();
     } finally { await lockHandle.close(); }
     const current = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository, memoryRoot);
@@ -398,21 +427,36 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
       return refusal('MEMORY_CAS_CONFLICT', casConflict(`${directory}/index.json`, 'store changed while preparing the apply'), storeDigestBefore);
     }
     await ensureSafeDirectoryChain(repository, [...taskpackSegments, 'entries']);
-    const projection = projectMemoryStore(current.index, effective.operations, input.nowMs, effective.proposalId);
+    const projection = projectMemoryStore(current.index, effective.operations, input.nowMs, effective.proposalId, projectionOptions);
     const indexPath = join(taskpackDirectory, 'index.json');
     const indexExistedBefore = existsSync(indexPath);
     const patch = buildPatch(directory, current.entryFiles, projection.entryFiles,
       indexExistedBefore ? canonical(current.index) : null, canonical(projection.index));
-    for (const file of patch.files) {
+    const writtenFiles = patch.files.filter(file => file.deleted !== true);
+    const deletedTargets = patch.files.filter(file => file.deleted === true).map(file => join(repository, file.path));
+    const priorEntryBytesByTarget = new Map<string, Buffer>();
+    for (const [id, bytes] of current.entryFiles) {
+      priorEntryBytesByTarget.set(join(repository, `${directory}/entries/${id}.md`), Buffer.from(bytes));
+    }
+    const priorIndexBytes = indexExistedBefore ? await readOptionalRegularFileNoFollow(indexPath) : null;
+    for (const file of writtenFiles) {
       const target = join(repository, file.path);
       staged.push({ temp: await stageFile(target, Buffer.from(file.content, 'utf8'), nonce), target });
     }
     const rollback = new Map<string, Buffer | null>();
-    for (const stage of staged) rollback.set(stage.target, existsSync(stage.target) ? await readFile(stage.target) : null);
+    for (const stage of staged) {
+      rollback.set(stage.target, stage.target === indexPath ? priorIndexBytes : (priorEntryBytesByTarget.get(stage.target) ?? null));
+    }
+    for (const target of deletedTargets) rollback.set(target, priorEntryBytesByTarget.get(target) ?? null);
     try {
       const entryStages = staged.filter(candidate => !candidate.target.endsWith('index.json'));
       for (const stage of entryStages) await rename(stage.temp, stage.target);
-      if (entryStages.length > 0) await syncDirectory(join(taskpackDirectory, 'entries'));
+      for (const target of deletedTargets) {
+        await unlink(target).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== 'ENOENT') throw err;
+        });
+      }
+      if (entryStages.length > 0 || deletedTargets.length > 0) await syncDirectory(join(taskpackDirectory, 'entries'));
       await input.faultInjectionHook?.();
       const indexStages = staged.filter(candidate => candidate.target.endsWith('index.json'));
       for (const stage of indexStages) await rename(stage.temp, stage.target);
@@ -422,11 +466,13 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
         try {
           if (bytes === null) await unlink(target);
           else {
-            const handle = await open(target, constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+            const handle = await open(target, constants.O_CREAT | constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
             try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
           }
         } catch { /* best-effort rollback of an already failing apply */ }
       }
+      await syncDirectory(join(taskpackDirectory, 'entries')).catch(() => undefined);
+      await syncDirectory(taskpackDirectory).catch(() => undefined);
       throw error;
     }
     const title = buildMemoryPullRequestTitle({ taskpack: input.taskpack, operations: effective.operations });

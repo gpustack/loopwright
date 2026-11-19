@@ -72,7 +72,7 @@
 - Use for: review memory proposals and compact retained context
 - Aliases: memory
 - Guides: [contribute/memory.md](contribute/memory.md)
-- Specs: [Specification](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md)
+- Specs: [Specification](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md), [Lightweight Lifecycle and GC](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md)
 - Code: [memory](../packages/memory/)
 - Related: [controller](#bounded-controller-and-cli), [decisions](#system-one-decision-routing)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -131,6 +131,7 @@
 | [2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md) | Turnkey execution, scope, and output modes |
 | [2026-11-14-delegated-role-stepping-and-multi-model-routing.md](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md) | Delegated role stepping and multi-model routing |
 | [2026-11-15-self-upgrade-dogfooding.md](../specs/2026-11-15-self-upgrade-dogfooding.md) | Self-upgrade Taskpack dogfooding and OS-contained verification |
+| [2026-11-19-lightweight-memory-lifecycle-and-gc.md](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md) | Lightweight memory lifecycle, eager cleanup, and configurable GC |
 
 ## All pages
 
