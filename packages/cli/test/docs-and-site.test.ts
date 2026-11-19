@@ -185,6 +185,24 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.equal(validated.metadata.name, 'multi-role-sync');
   assert.equal(validated.spec.roles?.length, 2);
 
+  // Verify complete Taskpack Macro YAML example in docs/configuration/taskpack.md validates against schema
+  const taskpackDoc = readFileSync(join(REPO_ROOT, 'docs', 'configuration', 'taskpack.md'), 'utf8');
+  const taskpackYamlMatch = taskpackDoc.match(/## Taskpack\n\n```yaml\n([\s\S]*?)\n```/);
+  assert.ok(taskpackYamlMatch?.[1], 'docs/configuration/taskpack.md must include a ## Taskpack YAML example');
+  const parsedTaskpackRef = parseDocument(taskpackYamlMatch[1], { version: '1.2', schema: 'core', uniqueKeys: true });
+  assert.equal(parsedTaskpackRef.errors.length, 0, 'taskpack.md Macro YAML must parse cleanly');
+  const validatedTaskpackRef = validateTaskpackManifest(parsedTaskpackRef.toJS());
+  assert.equal(validatedTaskpackRef.metadata.name, 'catalog-sync');
+  assert.equal(validatedTaskpackRef.spec.memory.apply, 'separate-pull-request');
+  assert.equal(validatedTaskpackRef.spec.memory.onNoModelBudget, 'deterministic-observations-only');
+  assert.equal(validatedTaskpackRef.spec.memory.ttlDays, 15);
+  assert.equal(validatedTaskpackRef.spec.memory.maxEntries, 128);
+  assert.equal(validatedTaskpackRef.spec.memory.maxPromptEntries, 32);
+  assert.equal(validatedTaskpackRef.spec.memory.checkCodeFingerprint, false);
+  assert.equal(validatedTaskpackRef.spec.memory.checkUpstreamVersions, false);
+  assert.equal(validatedTaskpackRef.spec.memory.publishOnFailure, false);
+  assert.equal(validatedTaskpackRef.spec.memory.skipCi, true);
+
   // 4. .claude/skills symlink
   const claudeSkillsPath = join(REPO_ROOT, '.claude', 'skills');
   assert.ok(existsSync(claudeSkillsPath), '.claude/skills must exist');
