@@ -409,11 +409,10 @@ function truncateActiveMemoryResourceToBudget(options: {
     let cap = Math.min(maxRawBytes, maxSystemPromptBytes, maxWireBytes);
     while (cap >= 64) {
       const candidate = selectMarkdownForBytes(cap);
-      if (candidate.length === 0) return '';
+      if (candidate.length === 0) break;
       if (fits(candidate)) return candidate;
       cap = Math.floor(cap * 0.8);
     }
-    return '';
   }
   const suffix = '\n...[active memory snapshot truncated to fit model request budget]';
   const lines = markdown.split('\n');
@@ -468,7 +467,7 @@ function injectActiveMemoryIntoAuthorPrompt(
     } else if (selectInlineMarkdown !== undefined) {
       const selected = selectInlineMarkdown(cap).trim();
       boundedBody = selected.length === 0
-        ? ''
+        ? truncateUtf8LinesWithSuffix(scrubbedBody, cap)
         : (Buffer.byteLength(selected, 'utf8') <= cap ? selected : truncateUtf8LinesWithSuffix(selected, cap));
     } else {
       boundedBody = truncateUtf8LinesWithSuffix(scrubbedBody, cap);
@@ -1247,22 +1246,32 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         maxEntries: maxPromptEntries,
         maxBytes: DEFAULT_MEMORY_MAX_PROMPT_BYTES,
       });
+      const prefilteredStore = Object.freeze({
+        ...loadedMemory.index,
+        entries: snapshot.activeEntries,
+        retired: Object.freeze([]),
+      });
+      const boundedMarkdownCache = new Map<number, string>();
       const selectBoundedMarkdown = (maxBytes: number): string => {
-        if (maxBytes < 64) return '';
+        if (maxBytes < 64 || snapshot.activeEntries.length === 0) return '';
+        const clampedBytes = Math.min(Math.trunc(maxBytes), DEFAULT_MEMORY_MAX_PROMPT_BYTES);
+        const cached = boundedMarkdownCache.get(clampedBytes);
+        if (cached !== undefined) return cached;
         const bounded = selectActiveMemory({
-          store: loadedMemory.index,
+          store: prefilteredStore,
           contract: selectorContractStub,
           nowMs: evalNowMs,
-          currentCodeFingerprint,
-          currentUpstreamVersions,
+          currentCodeFingerprint: null,
+          currentUpstreamVersions: null,
           targetCell,
           maxEntries: maxPromptEntries,
-          maxBytes,
+          maxBytes: clampedBytes,
         });
-        if (bounded.activeEntries.length === 0) return '';
-        return bindings.scrubber !== undefined
-          ? bindings.scrubber.scrub(bounded.renderedMarkdown)
-          : bounded.renderedMarkdown;
+        const result = bounded.activeEntries.length === 0
+          ? ''
+          : (bindings.scrubber !== undefined ? bindings.scrubber.scrub(bounded.renderedMarkdown) : bounded.renderedMarkdown);
+        boundedMarkdownCache.set(clampedBytes, result);
+        return result;
       };
       const existingResourcePaths = new Set<string>(instructionResources.map(r => r.path));
       const existingResourceIds = new Set<string>(instructionResources.map(r => r.id));
@@ -1356,16 +1365,14 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
             const effectiveRolePromptLimit = role.adapter === 'delegated'
               ? Math.min(16_384, promptByteLimit)
               : promptByteLimit;
-            const nextPrompt = inlineMarkdown.length > 0
-              ? injectActiveMemoryIntoAuthorPrompt(
-                role.prompt,
-                inlineMarkdown,
-                effectiveRolePromptLimit,
-                bindings.scrubber,
-                promptShareWireCap,
-                selectBoundedMarkdown,
-              )
-              : role.prompt;
+            const nextPrompt = injectActiveMemoryIntoAuthorPrompt(
+              role.prompt,
+              inlineMarkdown.length > 0 ? inlineMarkdown : scrubbedMarkdown,
+              effectiveRolePromptLimit,
+              bindings.scrubber,
+              promptShareWireCap,
+              inlineMarkdown.length > 0 ? selectBoundedMarkdown : undefined,
+            );
             if (nextPrompt !== role.prompt) {
               const addedWire = Buffer.byteLength(JSON.stringify(nextPrompt), 'utf8')
                 - Buffer.byteLength(JSON.stringify(role.prompt), 'utf8');

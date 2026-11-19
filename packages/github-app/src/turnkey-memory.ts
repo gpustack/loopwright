@@ -575,6 +575,11 @@ async function isSquashOrRebaseMergedMemoryBranch(options: {
       }
     }
 
+    const remoteRetiredById = new Map<string, (typeof remoteMemStore.retired)[number]>();
+    for (const row of remoteMemStore.retired) {
+      remoteRetiredById.set(row.entry.id, row);
+    }
+
     // Preserve legacy index.retired verification for pre-compaction memory branches.
     for (const row of remoteMemStore.retired) {
       const priorRetired = branchBaseRetiredById.get(row.entry.id);
@@ -599,11 +604,18 @@ async function isSquashOrRebaseMergedMemoryBranch(options: {
       }
     }
 
-    // Check legacy index.retired compaction (purging retired rows to []).
-    if (branchBaseStore.retired.length > 0 && remoteMemStore.retired.length === 0) {
+    // Check legacy index.retired rows removed on remoteMemStore relative to branchBaseStore (full or partial compaction).
+    for (const baseRetired of branchBaseStore.retired) {
+      if (remoteRetiredById.has(baseRetired.entry.id)) continue;
       hasRemoteChanges = true;
-      if (targetTipStore.retired.length > 0) {
-        return false;
+      const targetRetired = targetRetiredById.get(baseRetired.entry.id);
+      if (targetRetired !== undefined) {
+        const remoteReplacement = remoteCurrentById.get(baseRetired.entry.id);
+        const replacementLaterRetiredOnTarget =
+          remoteReplacement !== undefined && entriesEqual(targetRetired.entry, remoteReplacement);
+        if (!replacementLaterRetiredOnTarget) {
+          return false;
+        }
       }
     }
 
@@ -1064,10 +1076,15 @@ async function applyAndValidateTurnkeyMemoryCAS(options: {
 }
 
 /**
- * Fault-isolated post-settlement memory finalization, 5-gate CAS verification in an
- * isolated clone of `targetBranch`, and separate dedicated memory PR publication
- * (`loopwright/memory/<taskpack>/<targetBranch>`). Never mutates `repositoryRoot`,
- * `.git/worktrees`, primary `RunResult`, or the candidate PR branch.
+ * Fault-isolated post-settlement memory finalization and 5-gate CAS application.
+ *
+ * - `apply: 'separate-pull-request'` clones into an isolated scratch directory and
+ *   publishes `loopwright/memory/<taskpack>/<targetBranch>` without mutating
+ *   `repositoryRoot`, `.git/worktrees`, primary `RunResult`, or the candidate PR branch.
+ * - `apply: 'local-only'` intentionally updates `<repositoryRoot>/<memoryDirectory>` in
+ *   place after candidate execution and publication have already settled, leaving `.git`
+ *   refs and remote branches untouched.
+ * - `apply: 'disabled'` returns `'skipped'` (`'memory_apply_disabled'`) without side effects.
  */
 export async function finalizeAndPublishTurnkeyMemory(
   options: FinalizeAndPublishTurnkeyMemoryOptions,
@@ -1107,6 +1124,10 @@ export async function finalizeAndPublishTurnkeyMemory(
       return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'repositoryFullName is not an org/repo slug');
     }
 
+    if (!COMMIT_SHA_PATTERN.test(options.baseRevision)) {
+      return buildEmptyMemorySummary(memoryDirectory, 'failed', 'baseRevision is not a 40-hex commit SHA');
+    }
+
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,
       repositoryFullName: options.repositoryFullName,
@@ -1130,6 +1151,9 @@ export async function finalizeAndPublishTurnkeyMemory(
     };
 
     if (memoryApply === 'local-only') {
+      // Intentional contract: post-settlement local-only mode persists index.json and
+      // entries/*.md (including unlinking retired entries) directly under
+      // <repositoryRoot>/<memoryDirectory> without creating commits or remote branches.
       const localBaseStore = (await loadMemoryStore(options.repositoryRoot, taskpack, options.repositoryFullName, memoryRoot)).index;
       const preSkip = await verifyDescriptorAndBudgetSkip({
         runRoot: options.runRoot,
@@ -1269,10 +1293,6 @@ export async function finalizeAndPublishTurnkeyMemory(
       scrubber,
     });
     if (preCloneSkip !== null) return preCloneSkip;
-
-    if (!COMMIT_SHA_PATTERN.test(options.baseRevision)) {
-      return buildEmptyMemorySummary(memoryDirectory, 'failed', 'baseRevision is not a 40-hex commit SHA');
-    }
 
     const rawScratch = await mkdtemp(join(tmpdir(), 'loopwright-mem-'));
     await chmod(rawScratch, 0o700);

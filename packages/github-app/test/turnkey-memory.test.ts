@@ -9,7 +9,7 @@ import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { loadTrustedConfiguration, stepNext, stepSubmit, type ControllerIncident } from '@loopwright/controller';
 import { admitTask, digestArtifact } from '@loopwright/core';
-import { loadMemoryStore } from '@loopwright/memory';
+import { canonical, loadMemoryStore, storeDigestOf, type RetiredMemoryEntry } from '@loopwright/memory';
 import {
   DEFAULT_HOST_BUDGETS,
   SecretScrubber,
@@ -1783,6 +1783,84 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       const noSkipCiLines = noSkipCiMsg.split('\n').filter(line => line.trim().length > 0);
       assert.match(noSkipCiLines.at(-1) ?? '', /^Signed-off-by: .+ <.+>$/);
 
+      // Unmerged partial legacy index.retired removal (1 of 2 retired rows removed on remote branch, both still on main) -> reconcile_required
+      const postEmptyLoaded = await loadMemoryStore(noSkipCiClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
+      const templateEntry = postEmptyLoaded.index.entries[0]!;
+      const legacyRet1: RetiredMemoryEntry = {
+        entry: { ...templateEntry, id: 'entry.legacy.ret.1', claimKey: 'claim.legacy.ret.1' },
+        retiredAtMs: baseNowMs + 181_000,
+        retiredByProposalId: 'proposal.legacy.1',
+        supersededByEntryId: null,
+      };
+      const legacyRet2: RetiredMemoryEntry = {
+        entry: { ...templateEntry, id: 'entry.legacy.ret.2', claimKey: 'claim.legacy.ret.2' },
+        retiredAtMs: baseNowMs + 181_000,
+        retiredByProposalId: 'proposal.legacy.2',
+        supersededByEntryId: null,
+      };
+      const legacyMainBase = {
+        version: 1 as const,
+        taskpack: 'auto-sync',
+        repository: 'acme/repo',
+        updatedAtMs: baseNowMs + 182_000,
+        entries: [],
+        retired: [legacyRet1, legacyRet2],
+      };
+      await mkdir(join(repo, '.auto-sync', 'memory', 'auto-sync', 'entries'), { recursive: true });
+      await writeFile(
+        join(repo, '.auto-sync', 'memory', 'auto-sync', 'index.json'),
+        canonical({ ...legacyMainBase, storeDigest: storeDigestOf(legacyMainBase) }),
+        'utf8',
+      );
+      await git(repo, ['add', '.auto-sync/memory']);
+      await git(repo, ['commit', '-m', 'chore(memory): seed two legacy retired rows on main']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      const partialLegacyClone = join(work, 'partial-legacy-clone');
+      await git(work, ['clone', '--branch', 'main', bareRemote, partialLegacyClone]);
+      const partialRemoteBase = {
+        ...legacyMainBase,
+        updatedAtMs: baseNowMs + 183_000,
+        retired: [legacyRet1],
+      };
+      await writeFile(
+        join(partialLegacyClone, '.auto-sync', 'memory', 'auto-sync', 'index.json'),
+        canonical({ ...partialRemoteBase, storeDigest: storeDigestOf(partialRemoteBase) }),
+        'utf8',
+      );
+      await git(partialLegacyClone, ['add', '.auto-sync/memory']);
+      await git(partialLegacyClone, ['commit', '-m', 'chore(memory): partial legacy retired removal']);
+      await git(partialLegacyClone, ['push', '--force', 'origin', 'HEAD:refs/heads/loopwright/memory/auto-sync/main']);
+
+      await settleViaStep({ runId: 'run-gc-partial-legacy', mode: 'candidate', baseSha: mainSha, writeGoodCandidate: true });
+      const partialLegacyRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: sepManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: mainSha,
+        runRoot,
+        runId: 'run-gc-partial-legacy',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 185_000,
+      });
+      assert.equal(
+        partialLegacyRes.status,
+        'reconcile_required',
+        `partial unmerged legacy retired removal must not be misdetected as squash-merged (got ${partialLegacyRes.status})`,
+      );
+      // Clean legacy retired rows from main before step 2 & 3
+      await rm(join(repo, '.auto-sync', 'memory'), { recursive: true, force: true });
+      await git(repo, ['add', '-A', '.auto-sync/memory']);
+      await git(repo, ['commit', '-m', 'chore(memory): reset clean memory before disabled/local-only checks']);
+      mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
       // --- 2. apply: 'disabled' returns skipped immediately with zero remote calls ---
       const disabledYaml = makeTaskpackYaml(openAiServer.url).replace(
         '    apply: separate-pull-request\n    onNoModelBudget: deterministic-observations-only\n',
@@ -1829,6 +1907,24 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
 
       const pullsBeforeLocal = totalPullsCalls;
       await settleViaStep({ runId: 'run-local-fail', mode: 'candidate', baseSha: mainSha, writeBrokenCandidate: true });
+      const localBadShaRes = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest: localManifest,
+        repositoryFullName: 'acme/repo',
+        baseRevision: 'refs/heads/main',
+        runRoot,
+        runId: 'run-local-fail',
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        scrubber,
+        githubToken: 'ghp_gc_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+        nowMs: baseNowMs + 290_000,
+      });
+      assert.equal(localBadShaRes.status, 'failed');
+      assert.equal(localBadShaRes.reason, 'baseRevision is not a 40-hex commit SHA');
+
       const localFailRes = await finalizeAndPublishTurnkeyMemory({
         repositoryRoot: repo,
         taskpackPath: '.auto-sync/taskpack.yaml',

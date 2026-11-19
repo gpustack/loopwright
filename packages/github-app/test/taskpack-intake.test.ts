@@ -2438,6 +2438,63 @@ describe('spec.memory lifecycle schema and compile-time active memory controls',
       assert.equal(compiledStrict.activeMemory?.activeEntryCount, 0);
       assert.equal(compiledStrict.activeMemory?.excludedEntryCount, 7);
 
+      // 2b. Tight promptBytes ceiling smaller than a single rendered entry falls back to line truncation instead of dropping <active_memory>
+      const longClaimProj = projectMemoryStore(
+        emptyMemoryStoreIndex('docs-sync', 'octocat/target', nowMs - 2_000),
+        [{
+          kind: 'upsert',
+          entry: buildEntry(
+            'entry.long-failure',
+            'failure_observation',
+            'claim.check.docs-proposal-json',
+            `LONG_ENTRY_PREFIX ${'x'.repeat(1_600)}`,
+            'failed',
+          ),
+        }],
+        nowMs,
+        'prop.long',
+      );
+      await rm(join(memDir, 'entries'), { recursive: true, force: true });
+      await mkdir(join(memDir, 'entries'), { recursive: true });
+      for (const [id, bytes] of longClaimProj.entryFiles.entries()) {
+        await writeFile(join(memDir, 'entries', `${id}.md`), bytes);
+      }
+      await writeFile(join(memDir, 'index.json'), canonicalMemory(longClaimProj.index), 'utf8');
+      const baselineWithoutMem = await compileDeclarativeTaskpack(
+        validateTaskpackManifest(editedManifest(withRoles, draft => {
+          (draft['spec'] as Record<string, unknown>)['memory'] = {
+            directory: '.loopwright/memory/docs-sync',
+            apply: 'disabled',
+          };
+        })),
+        bindingsFor(withRoles, { repositoryRoot: root, nowMs }),
+      );
+      const baseAuthorPrompt = String(
+        (baselineWithoutMem.registry.spec.handlers.find(h => h.id === 'agent.author')?.parameters as Record<string, unknown>)?.['prompt'] ?? '',
+      );
+      const tightPromptCeiling = Buffer.byteLength(baseAuthorPrompt, 'utf8') + 700;
+      const compiledTightInline = await compileDeclarativeTaskpack(withRoles, bindingsFor(withRoles, {
+        repositoryRoot: root,
+        nowMs,
+        limits: { promptBytes: tightPromptCeiling },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+      }));
+      const tightAuthorPrompt = String(
+        (compiledTightInline.registry.spec.handlers.find(h => h.id === 'agent.author')?.parameters as Record<string, unknown>)?.['prompt'] ?? '',
+      );
+      assert.match(tightAuthorPrompt, /<active_memory>/);
+      assert.match(tightAuthorPrompt, /## Failure Observations/);
+      assert.match(tightAuthorPrompt, /\[active memory truncated; bounded snapshot staged in trusted resources\]/);
+      assert.ok(Buffer.byteLength(tightAuthorPrompt, 'utf8') <= tightPromptCeiling);
+
+      // Restore 7-entry fixture before step 3
+      await rm(join(memDir, 'entries'), { recursive: true, force: true });
+      await mkdir(join(memDir, 'entries'), { recursive: true });
+      for (const [id, bytes] of proj.entryFiles.entries()) {
+        await writeFile(join(memDir, 'entries', `${id}.md`), bytes);
+      }
+      await writeFile(join(memDir, 'index.json'), canonicalMemory(proj.index), 'utf8');
+
       // 3. Corrupt/oversized (> 64 KiB) entry file emits onMemoryWarning without failing compilation
       await writeFile(join(memDir, 'entries', 'entry.fact-0.md'), 'x'.repeat(70_000), 'utf8');
       const warnings: string[] = [];
