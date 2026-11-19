@@ -78,6 +78,7 @@ export interface BaselineParityResult {
 export interface StageResult {
   readonly stageDir: string;
   readonly targetVersionsPath: string;
+  readonly preflightMetadataPath: string;
   readonly candidateLockPath: string;
   readonly npmCacheDir: string;
   readonly candidateLockBytes: number;
@@ -125,6 +126,7 @@ export interface PrepareSelfUpgradeModule {
     readonly repoRoot: string;
     readonly stageDir: string;
     readonly targetVersions: TargetVersionsPayload;
+    readonly force?: boolean | undefined;
     readonly lockfileBuilder?: (ctx: {
       readonly repoRoot: string;
       readonly targetVersions: TargetVersionsPayload;

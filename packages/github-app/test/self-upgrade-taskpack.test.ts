@@ -1414,11 +1414,12 @@ process.exit(45);
     });
   });
 
-  it('stages baseline bundle and emits candidate mode under --force when upstreams are up_to_date, and allows zero-delta verify.sh under SELF_UPGRADE_FORCE=1', async () => {
+  it('stages baseline bundle with read-only preflight-metadata.json force=true under --force and rejects ambient env bypass without staged attestation', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
       const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
       const stageDir = join(dir, 'stage-force');
+      const unforcedStageDir = join(dir, 'stage-unforced');
       const baselineLockRaw = await readFile(join(repoRoot, 'package-lock.json'));
       const registryFixtures = Object.fromEntries(
         preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
@@ -1436,6 +1437,13 @@ process.exit(45);
       assert.equal(forced.actionMode, 'candidate');
       assert.equal(forced.staged !== null, true);
       assert.equal(forced.upstreamRecords.every(rec => rec.status === 'up_to_date'), true);
+      const metaStat = await stat(forced.staged!.preflightMetadataPath);
+      assert.equal(metaStat.mode & 0o222, 0, 'preflight-metadata.json must be read-only');
+      const metaDoc = JSON.parse(await readFile(forced.staged!.preflightMetadataPath, 'utf8')) as {
+        schema_version: number;
+        force: boolean;
+      };
+      assert.deepEqual(metaDoc, { schema_version: 1, force: true });
 
       const cliRes = spawnSync(
         process.execPath,
@@ -1460,14 +1468,32 @@ process.exit(45);
       assert.equal(cliSummary.recommendedMode, 'candidate');
       assert.equal(cliSummary.actionMode, 'candidate');
 
+      // Zero-delta succeeds when staged preflight-metadata.json attests force=true (no env override needed)
       const verifyRes = runVerifyScript(repoRoot, {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         SELF_UPGRADE_STAGE_DIR: stageDir,
-        SELF_UPGRADE_FORCE: '1',
       });
       assert.equal(verifyRes.status, 0, verifyRes.stderr);
+
+      // Ambient SELF_UPGRADE_FORCE=1 alone must NOT bypass zero-delta when staged metadata attests force=false
+      await preflight.stageCandidateBundle({
+        repoRoot,
+        stageDir: unforcedStageDir,
+        targetVersions: preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'),
+        force: false,
+        lockfileBuilder: async () => baselineLockRaw,
+      });
+      const spoofedRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        SELF_UPGRADE_STAGE_DIR: unforcedStageDir,
+        SELF_UPGRADE_FORCE: '1',
+      });
+      assert.notEqual(spoofedRes.status, 0);
+      assert.equal(spoofedRes.stderr.includes('do not advance'), true);
     });
   });
 });

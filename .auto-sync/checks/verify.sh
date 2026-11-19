@@ -482,6 +482,14 @@ expected_yaml_target = str(yaml_entry["version"])
 staged_lock_bytes = read_staged_regular_bytes("package-lock.candidate.json", MAX_LOCKFILE_BYTES)
 staged_lock_sha256 = hashlib.sha256(staged_lock_bytes).hexdigest()
 
+staged_meta_bytes = read_staged_regular_bytes("preflight-metadata.json", MAX_JSON_BYTES)
+staged_meta_doc = strict_json_loads(staged_meta_bytes, "staged:preflight-metadata.json")
+if not json_strict_equal(staged_meta_doc.get("schema_version"), 1):
+    fail("staged preflight-metadata.json schema_version must be 1")
+staged_force = staged_meta_doc.get("force")
+if not isinstance(staged_force, bool):
+    fail("staged preflight-metadata.json force must be a boolean")
+
 # 4) Audit unmanaged workspace package.json files (must equal HEAD with strict JSON types)
 for ws in UNMANAGED_WORKSPACES:
     rel = f"{ws}/package.json"
@@ -579,8 +587,8 @@ yaml_target = next(iter(yaml_versions))
 if yaml_target != expected_yaml_target:
     fail(f"workspace yaml version {yaml_target!r} != staged target {expected_yaml_target!r}")
 
-# Candidate mode MUST strictly advance at least one dependency group beyond HEAD unless SELF_UPGRADE_FORCE=1
-if os.environ.get("SELF_UPGRADE_FORCE") != "1":
+# Candidate mode MUST strictly advance at least one dependency group beyond HEAD unless preflight attested force=true
+if staged_force is not True:
     if parse_semver(pi_target) == parse_semver(head_pi_ver) and parse_semver(yaml_target) == parse_semver(head_yaml_ver):
         fail("candidate manifests do not advance @earendil-works/pi-* or yaml beyond baseline HEAD")
 

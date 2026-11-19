@@ -1023,8 +1023,12 @@ export async function stageCandidateBundle({
   repoRoot,
   stageDir,
   targetVersions,
+  force = false,
   lockfileBuilder = defaultLockfileBuilder,
 }) {
+  if (typeof force !== 'boolean') {
+    throw new Error('stageCandidateBundle force option must be a boolean');
+  }
   const resolvedRepo = await realpath(resolve(repoRoot));
   const absStageDir = resolve(stageDir);
   const stageParent = dirname(absStageDir);
@@ -1064,8 +1068,14 @@ export async function stageCandidateBundle({
   validateLockfileExpectedVersions(parsedCandidateLock, targetVersions.packages);
 
   const targetVersionsPath = join(canonicalStageDir, 'target-versions.json');
+  const preflightMetadataPath = join(canonicalStageDir, 'preflight-metadata.json');
   const candidateLockPath = join(canonicalStageDir, 'package-lock.candidate.json');
   await writeFile(targetVersionsPath, `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o644 });
+  await writeFile(
+    preflightMetadataPath,
+    `${JSON.stringify({ schema_version: 1, force }, null, 2)}\n`,
+    { mode: 0o644 },
+  );
   await writeFile(candidateLockPath, candidateLockBytes, { mode: 0o644 });
 
   await freezeTreeReadOnly(canonicalStageDir);
@@ -1073,6 +1083,7 @@ export async function stageCandidateBundle({
   return Object.freeze({
     stageDir: canonicalStageDir,
     targetVersionsPath,
+    preflightMetadataPath,
     candidateLockPath,
     npmCacheDir,
     candidateLockBytes: candidateLockBytes.byteLength,
@@ -1260,6 +1271,7 @@ export async function runPrepareSelfUpgrade(options = {}) {
       repoRoot,
       stageDir,
       targetVersions: evaluation.targetVersions,
+      force,
       lockfileBuilder: options.lockfileBuilder,
     });
   }

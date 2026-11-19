@@ -265,7 +265,6 @@ jobs:
           SELF_UPGRADE_STAGE_DIR: ${{ steps.preflight.outputs.stage_dir }}
           SELF_UPGRADE_NPM_CACHE: ${{ steps.preflight.outputs.npm_cache_dir }}
           SELF_UPGRADE_REPO_ROOT: ${{ github.workspace }}
-          SELF_UPGRADE_FORCE: ${{ inputs.force && '1' || '0' }}
           SELF_UPGRADE_REQUIRE_HUGO: '1'
         run: |
           node "${RUNNER_TEMP}/loopwright-bootstrap/packages/github-app/dist/action.js"
