@@ -36,9 +36,16 @@ export function observeParentExhaustion(view: RunView, lock: TaskLock, delegated
   const limits = lock.spec.contract.spec.budgets;
   if (view.ledger.admittedCalls + delegatedModelCalls >= limits.maxModelCalls || BigInt(view.ledger.chargedTokens.decimal) >= BigInt(limits.totalTokens)) refuse('BUDGET_EXHAUSTED', '', 'execution');
 }
+export function isBudgetRefusal(error: PiErrorV2): boolean {
+  return ['REQUEST_REFUSED', 'STATE_REFUSED'].includes(error.code)
+    && error.phase === 'admission'
+    && error.stateErrorCode === 'BUDGET_EXHAUSTED';
+}
 export function isNoEffectBudgetRefusal(error: PiErrorV2): boolean {
-  return ['REQUEST_REFUSED', 'STATE_REFUSED'].includes(error.code) && error.phase === 'admission' && error.stateErrorCode === 'BUDGET_EXHAUSTED'
-    && error.effect === 'none' && error.requestId === null && error.operationId === null;
+  return isBudgetRefusal(error)
+    && error.effect === 'none'
+    && error.requestId === null
+    && error.operationId === null;
 }
 export interface SchedulingSnapshot { readonly records: string; readonly candidate: string }
 /** Exact original facts, not record counts. Renewals/controller checkpoints grant no allowance and are excluded. */

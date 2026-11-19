@@ -147,3 +147,50 @@ test('scheduling: zero-request MCP_AUTHENTICATION_REQUIRED and CAPABILITY_UNSUPP
     assert.equal(returned.kind, 'incident');
   } finally { await fUncertain.close(); }
 });
+
+test('scheduling: mid-session admission BUDGET_EXHAUSTED refusal after confirmed requests classifies as BUDGET_EXHAUSTED incident instead of RECOVERY_REQUIRED', async () => {
+  const midSessionBudgetError: PiErrorV2 = {
+    code: 'REQUEST_REFUSED',
+    phase: 'admission',
+    path: '/budgets/maxImplementationRepairs',
+    retryable: false,
+    effect: 'confirmed',
+    requestId: 'unit-request',
+    operationId: 'unit-model-op',
+    stateErrorCode: 'BUDGET_EXHAUSTED',
+  };
+  const fake = adapter(async () => {
+    await account(context);
+    return {
+      ok: true,
+      value: {
+        status: 'failed',
+        requestIds: ['unit-request'],
+        operationIds: ['unit-model-op'],
+        providerTermination: 'confirmed',
+        usage: 'complete',
+        localCleanup: 'complete',
+        error: midSessionBudgetError,
+        cleanupError: null,
+      },
+    };
+  });
+  const f = await fixture({ openAdapter: async () => ({ ok: true, value: fake.value }) });
+  const context = f.context;
+  try {
+    const before = journal(context.store);
+    const returned = await f.cycle.finish();
+    const after = await f.retain('unit-mid-session-budget.json', returned, before, { closes: fake.closes() });
+    assert.equal(returned.kind, 'incident');
+    if (returned.kind !== 'incident') return;
+    assert.equal(returned.incident.code, 'BUDGET_EXHAUSTED');
+    assert.equal(returned.incident.cleanup, 'complete');
+    assert.ok(returned.incident.unavailable.includes('current_candidate'));
+    assert.equal(after.requests.length, 1);
+    assert.equal(after.view.ledger.admittedCalls, 1);
+    assert.equal(fake.closes(), 1);
+    assert.equal(fake.captures(), 0);
+  } finally {
+    await f.close();
+  }
+});

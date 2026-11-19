@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, link, chmod, realpath, stat, lstat, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, link, chmod, utimes, realpath, stat, lstat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { digestArtifact } from '@loopwright/core';
@@ -257,7 +257,9 @@ test('tree_overlay detects corrupted baseline OID on first touch and out-of-band
     const f = await overlayFixture();
     try {
       await chmod(join(f.root, 'packages/run.sh'), 0o444);
-      await assert.rejects(f.candidate.manifest(), err => err instanceof PiFailure && err.detail.code === 'RECOVERY_REQUIRED');
+      const manifest = await f.candidate.manifest();
+      assert.equal(manifest.spec.entries.length, 0);
+      assert.equal((await stat(join(f.root, 'packages/run.sh'))).mode & 0o777, 0o555);
     } finally {
       await f.cleanup();
     }
@@ -802,5 +804,138 @@ test('classifySoftToolPath returns soft_outside_candidate for clean non-candidat
     }
   } finally {
     await f.cleanup();
+  }
+});
+
+test('tree_overlay heals harmless Landlock-style utimes and chmod metadata drift on untouched files and directories while rejecting content/link/inode tampering', async () => {
+  // 1. Positive: utimes + chmod on untouched 100644/100755 baseline files and 0o555 directories heal cleanly across edit/read/manifest
+  {
+    const input = sessionInput();
+    const dir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-landlock-ok-'));
+    const staging = join(dir, 'staging');
+    const candidateDir = join(dir, 'candidate');
+    const readmeBytes = Buffer.from('# Readme\n');
+    const scriptBytes = Buffer.from('#!/bin/sh\necho ok\n');
+    const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 512, 0x42);
+    const overlayInput = {
+      ...input,
+      candidate: {
+        manifest: {
+          apiVersion: 'loopwright.dev/v1alpha1' as const,
+          kind: 'ArtifactManifest' as const,
+          metadata: { id: 'candidate' },
+          spec: {
+            baseTree: { objectFormat: 'sha256' as const, commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+            entries: [],
+            deleted: [],
+          },
+        },
+        baseRevision: input.candidate.baseRevision,
+        sourceRevision: input.candidate.sourceRevision,
+        artifacts: [],
+        baseline: {
+          directory: staging,
+          entries: [
+            { name: 'packages/README.md', mode: '100644' as const, oid: gitBlobOid('sha256', readmeBytes), byteLength: readmeBytes.length },
+            { name: 'packages/large.bin', mode: '100644' as const, oid: gitBlobOid('sha256', oversizeBytes), byteLength: oversizeBytes.length },
+            { name: 'packages/run.sh', mode: '100755' as const, oid: gitBlobOid('sha256', scriptBytes), byteLength: scriptBytes.length },
+          ],
+        },
+      },
+    } as unknown as typeof input;
+
+    try {
+      await mkdir(join(staging, 'packages'), { recursive: true, mode: 0o755 });
+      await writeFile(join(staging, 'packages/README.md'), readmeBytes, { mode: 0o444 });
+      await writeFile(join(staging, 'packages/large.bin'), oversizeBytes, { mode: 0o444 });
+      await writeFile(join(staging, 'packages/run.sh'), scriptBytes, { mode: 0o555 });
+      await materializeCandidateDirectory(candidateDir, overlayInput);
+
+      const candidate = new Candidate(candidateDir, overlayInput);
+      await candidate.captureBaselineStats();
+
+      // Simulate bash under Landlock touching mtime and changing modes on files and directories
+      const touchedAt = new Date(Date.now() + 60_000);
+      await utimes(join(candidateDir, 'packages/README.md'), touchedAt, touchedAt);
+      await chmod(join(candidateDir, 'packages/README.md'), 0o644);
+      await utimes(join(candidateDir, 'packages/run.sh'), touchedAt, touchedAt);
+      await chmod(join(candidateDir, 'packages/run.sh'), 0o777);
+      await utimes(join(candidateDir, 'packages/large.bin'), touchedAt, touchedAt);
+      await chmod(join(candidateDir, 'packages/large.bin'), 0o600);
+      await utimes(join(candidateDir, 'packages'), touchedAt, touchedAt);
+      await chmod(join(candidateDir, 'packages'), 0o777);
+      await utimes(candidateDir, touchedAt, touchedAt);
+      await chmod(candidateDir, 0o755);
+
+      // edit preflight + read + manifest must all succeed and restore locked modes!
+      const readRes = await candidate.checkRead('packages/run.sh');
+      assert.equal(readRes.path, 'packages/run.sh');
+      assert.equal((await stat(join(candidateDir, 'packages/run.sh'))).mode & 0o777, 0o555);
+      assert.equal((await lstat(candidateDir)).mode & 0o777, 0o555);
+      assert.equal((await lstat(join(candidateDir, 'packages'))).mode & 0o777, 0o555);
+
+      // Even chmod 0o000 on an untouched file/dir heals after identity checks!
+      await chmod(join(candidateDir, 'packages/README.md'), 0o000);
+      await chmod(join(candidateDir, 'packages'), 0o000);
+      const editPrep = await candidate.tryPrepareEdit('packages/README.md', [{ oldText: '# Readme', newText: '# Edited' }]);
+      assert.equal(editPrep.kind, 'change');
+      assert.equal((await lstat(join(candidateDir, 'packages'))).mode & 0o777, 0o555);
+      if (editPrep.kind === 'change') {
+        await candidate.commit(editPrep.change, () => {});
+      }
+      assert.equal((await stat(join(candidateDir, 'packages/README.md'))).mode & 0o777, 0o444);
+
+      // Subsequent manifest() heals remaining untouched files (including oversize baseline) and keeps dirs locked at 0o555
+      const manifest = await candidate.manifest();
+      assert.deepEqual(manifest.spec.entries.map(e => e.name), ['packages/README.md']);
+      assert.equal((await stat(join(candidateDir, 'packages/large.bin'))).mode & 0o777, 0o444);
+      assert.equal((await lstat(candidateDir)).mode & 0o777, 0o555);
+      assert.equal((await lstat(join(candidateDir, 'packages'))).mode & 0o777, 0o555);
+
+      // Subsequent manifest() after healing uses updated cached stats cleanly
+      const manifest2 = await candidate.manifest();
+      assert.deepEqual(manifest2.spec.entries.map(e => e.name), ['packages/README.md']);
+    } finally {
+      await setDirectoryTreeMode(candidateDir, 0o755).catch(() => {});
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  // 2. Negative: byte-modified (same length), inode swap (unlink+recreate same bytes), hardlink, and symlink MUST fail closed with RECOVERY_REQUIRED
+  for (const tamper of ['bytes', 'inode-swap', 'hardlink', 'symlink-file'] as const) {
+    const f = await overlayFixture({ objectFormat: 'sha256' });
+    try {
+      await mkdir(join(f.directory, 'outside'), { recursive: true });
+      const target = join(f.root, 'packages/README.md');
+      const touchedAt = new Date(Date.now() + 60_000);
+      if (tamper === 'bytes') {
+        await chmod(target, 0o644);
+        await writeFile(target, '# Tamper\n'); // same byte length as '# Readme\n'
+        await utimes(target, touchedAt, touchedAt);
+      } else if (tamper === 'inode-swap') {
+        await unlink(target);
+        await writeFile(target, '# Readme\n', { mode: 0o444 }); // identical bytes, different inode!
+        await utimes(target, touchedAt, touchedAt);
+      } else if (tamper === 'hardlink') {
+        await chmod(target, 0o644);
+        await link(target, join(f.directory, 'outside/hardlinked.md'));
+        await chmod(target, 0o444);
+      } else if (tamper === 'symlink-file') {
+        await unlink(target);
+        await symlink(join(f.directory, 'outside'), target);
+      }
+      await assert.rejects(
+        f.candidate.manifest(),
+        err => err instanceof PiFailure && err.detail.code === 'RECOVERY_REQUIRED',
+        `expected RECOVERY_REQUIRED for tamper=${tamper} at manifest()`,
+      );
+      await assert.rejects(
+        f.candidate.prepareEdit('packages/README.md', [{ oldText: '# Readme', newText: '# X' }]),
+        err => err instanceof PiFailure && (err.detail.code === 'RECOVERY_REQUIRED' || err.detail.code === 'TOOL_DENIED'),
+        `expected refusal for tamper=${tamper} at prepareEdit()`,
+      );
+    } finally {
+      await f.cleanup();
+    }
   }
 });

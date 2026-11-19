@@ -31,7 +31,7 @@ import {
 /** Default controller budgets for host bindings that do not pin their own. */
 export const DEFAULT_HOST_BUDGETS: TaskContract['spec']['budgets'] = Object.freeze({
   wallTimeMs: 3_600_000, totalTokens: 20_000_000, perCallOutputTokens: 32_768, maxModelCalls: 256, maxConcurrency: 1,
-  maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries: 3,
+  maxFormatRepairs: 6, maxImplementationRepairs: 128, maxTransportRetries: 3,
   enforcement: Object.freeze({
     wallTime: 'hard_admission', tokens: 'soft_accounting', modelCalls: 'hard_admission', concurrency: 'hard_admission',
     formatRepairs: 'hard_admission', implementationRepairs: 'hard_admission', transportRetries: 'hard_admission',

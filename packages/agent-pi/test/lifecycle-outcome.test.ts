@@ -8,6 +8,8 @@ import { canonical, digest } from '../src/boundary.js';
 import { systemPrompt } from '../src/resources.js';
 import { PROVIDER_DESTINATION } from '../src/provider.js';
 import type { PiAdapter, PiCapabilities } from '../src/types.js';
+import { admitTask } from '@loopwright/core';
+import { sessionInput } from './session-fixtures.js';
 import { requestFixture, stateGood } from './request-fixtures.js';
 // Failed-cleanup fixtures deliberately retain their live owner handles until this test process exits.
 const retainedCleanupFaults: PiAdapter[] = [];
@@ -97,4 +99,77 @@ test('completion and cancellation in the same bounded microtask interval preserv
     assert.equal(cancelled.value.status, 'cancelled'); assert.deepEqual(cancelled.value.requestIds, outcome.value.requestIds); assert.equal(cancelled.value.requestIds.length, 1); assert.equal(cancelled.value.providerTermination, 'confirmed'); assert.equal(cancelled.value.usage, 'complete'); assert.equal(cancelled.value.error?.code, 'CANCELLED');
     const repeat = await f.adapter.cancel({ reason: 'operator' }); assert.equal(repeat.ok, true); if (repeat.ok) assert.deepEqual(repeat.value, cancelled.value);
   } finally { await f.adapter.close(); await f.cleanup(); }
+});
+
+test('mid-session /budgets/maxImplementationRepairs refusal emits confirmed failed outcome with admission BUDGET_EXHAUSTED detail and zero extra sends', async () => {
+  const f = await requestFixture(
+    () => ({ status: 200, body: stream('end_turn') }),
+    () => {
+      const base = sessionInput();
+      const task = structuredClone(base.lock.spec.contract) as { spec: { budgets: { maxImplementationRepairs: number } } };
+      task.spec.budgets.maxImplementationRepairs = 1;
+      const admitted = admitTask(task, { admissionId: 'admission-repair-1', runId: base.lock.spec.runId });
+      assert.equal(admitted.ok, true);
+      if (!admitted.ok) throw new Error('admitTask');
+      return { ...base, lock: admitted.value };
+    },
+    10000,
+  );
+  let invocationSequence = 0;
+  const opened = await constructAdapter(f.host, f.input, {
+    environment: async () => {},
+    sender: (host, input) => new Sender(host, input, { fetch: (_url, init) => globalThis.fetch(f.destination, init) }),
+    session: (_host, input, broker) => ({
+      start: async (): Promise<PiCapabilities> => ({
+        version: 1, policyDigest: digest(Buffer.from(canonical(input.policy))), runtime: input.policy.runtime, requested: input.policy.selection,
+        catalogSupported: input.policy.selection, sessionEffective: input.policy.selection, outboundObserved: null, resources: input.policy.resources,
+        accounting: 'soft_only', contextFit: 'unproven', defaultMode: 'proven_bound', liveProvenBoundAvailable: false, optInMode: 'estimated_guard',
+        contextEstimator: { id: 'lw-pi-final-json-bytes-v1', version: 1, provenance: 'estimated' },
+        toolExecution: { candidate: 'read_only', candidateWrites: 'mediated', scratch: 'per_call' },
+      }),
+      command: async () => {
+        for (let count = 0; count < 2; count++) {
+          const invocation = ++invocationSequence;
+          const grant = await broker.invoke({ invocation, ...input.policy.selection });
+          const body = Buffer.from(JSON.stringify({
+            model: input.policy.selection.model,
+            system: [{ type: 'text', text: systemPrompt(input) + '\n\n<cwd>\n/workspace/candidate\n</cwd>' }],
+            messages: [{ role: 'user', content: 'literal fixture' }],
+            max_tokens: 1024,
+            thinking: { type: 'adaptive' },
+            output_config: { effort: 'xhigh' },
+            stream: true,
+          }));
+          await broker.send({
+            invocation, slot: grant.slot, method: 'POST', url: PROVIDER_DESTINATION,
+            headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-initiator': 'user', 'openai-intent': 'conversation-edits' },
+          }, body);
+          await broker.parsed({ invocation, slot: grant.slot, stopReason: 'stop', rawStopReason: 'end_turn', usage: { input: 4, output: 2, cacheRead: 0, cacheWrite: 0 }, toolCalls: [] });
+        }
+      },
+      close: async () => {},
+    }),
+  });
+  assert.equal(opened.ok, true);
+  if (!opened.ok) throw new Error('fixture open');
+  try {
+    const result = await opened.value.execute({ commandId: 'repair-mid-budget', text: 'repair', purpose: 'task', repair: 'implementation' });
+    assert.equal(result.ok, true);
+    if (!result.ok) throw new Error('missing outcome');
+    assert.equal(result.value.status, 'failed');
+    assert.equal(result.value.requestIds.length, 1);
+    assert.equal(result.value.providerTermination, 'confirmed');
+    assert.equal(result.value.usage, 'complete');
+    assert.equal(result.value.localCleanup, 'complete');
+    assert.equal(result.value.cleanupError, null);
+    assert.equal(result.value.error?.code, 'REQUEST_REFUSED');
+    assert.equal(result.value.error?.phase, 'admission');
+    assert.equal(result.value.error?.path, '/budgets/maxImplementationRepairs');
+    assert.equal(result.value.error?.stateErrorCode, 'BUDGET_EXHAUSTED');
+    assert.equal(f.physical(), 1);
+    assert.equal(stateGood(f.host.store.inspect()).ledger.implementationRepairs, 1);
+  } finally {
+    await opened.value.close();
+    await f.cleanup();
+  }
 });

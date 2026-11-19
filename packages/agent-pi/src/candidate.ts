@@ -81,16 +81,26 @@ type ExpectedOverlayFile =
 
 const preBootBaselineStats = new WeakMap<PiCandidateBaseline, { readonly root: string; readonly stats: ReadonlyMap<string, BaselineStatFingerprint> }>();
 
-function verifyUntouchedBaselineStat(info: import('node:fs').BigIntStats, entry: PiBaselineEntry): BaselineStatFingerprint {
-  const expectedMode = entry.mode === '100755' ? 0o555 : 0o444;
+function verifyUntouchedBaselineIdentity(
+  info: import('node:fs').BigIntStats,
+  entry: PiBaselineEntry,
+  phase: 'admission' | 'tool' = 'admission',
+): void {
   if (
     !info.isFile()
     || info.isSymbolicLink()
     || Number(info.nlink) !== 1
     || Number(info.uid) !== (process.getuid?.() ?? Number(info.uid))
     || Number(info.size) !== entry.byteLength
-    || (Number(info.mode) & 0o777) !== expectedMode
   ) {
+    refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+  }
+}
+
+function verifyUntouchedBaselineStat(info: import('node:fs').BigIntStats, entry: PiBaselineEntry): BaselineStatFingerprint {
+  const expectedMode = entry.mode === '100755' ? 0o555 : 0o444;
+  verifyUntouchedBaselineIdentity(info, entry, 'admission');
+  if ((Number(info.mode) & 0o777) !== expectedMode) {
     refuse('RECOVERY_REQUIRED', '/candidate');
   }
   return fingerprintFromStat(info);
@@ -262,6 +272,9 @@ export class Candidate {
   readonly #baselineStats = new Map<string, BaselineStatFingerprint>();
   readonly #verifiedBaseline = new Set<string>();
   #baselineStatsCaptured = false;
+  #enforceLockedDirs = false;
+  readonly #lockedDirs = new Set<string>();
+  #unlockDepth = 0;
   readonly #lastPrunedDirectories = new Set<string>();
   readonly #changes = new WeakMap<CandidateChange, Buffer>();
   readonly #deleteChanges = new WeakSet<CandidateChange>();
@@ -426,6 +439,7 @@ export class Candidate {
     const baseline = this.input.candidate.baseline;
     const preBoot = baseline ? preBootBaselineStats.get(baseline) : undefined;
     if (preBoot && preBoot.root === resolve(this.root)) {
+      this.#enforceLockedDirs = true;
       for (const [name, fingerprint] of preBoot.stats) {
         this.#baselineStats.set(name, fingerprint);
       }
@@ -575,10 +589,44 @@ export class Candidate {
     };
   }
 
+  async #isCanonicalDir(path: string, resolved: string): Promise<boolean> {
+    try {
+      return await realpath(path) === resolved;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EACCES' && resolved !== '/') {
+        const parent = resolve(resolved, '..');
+        return await realpath(parent) === parent;
+      }
+      throw error;
+    }
+  }
+
   async #directory(path: string): Promise<void> {
+    const resolved = resolve(path);
     const value = await lstat(path);
-    if (!value.isDirectory() || value.isSymbolicLink() || value.uid !== process.getuid?.() || value.mode & 0o022 || await realpath(path) !== resolve(path)) {
+    if (!value.isDirectory() || value.isSymbolicLink() || value.uid !== process.getuid?.()) {
       refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    const modeBits = value.mode & 0o777;
+    if (modeBits === 0o555) {
+      this.#lockedDirs.add(resolved);
+      if (resolved === resolve(this.root)) this.#enforceLockedDirs = true;
+    }
+    if (!await this.#isCanonicalDir(path, resolved)) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    if (this.#unlockDepth === 0) {
+      const needsHeal = (modeBits & 0o022) !== 0
+        || (modeBits & 0o500) !== 0o500
+        || ((this.#enforceLockedDirs || this.#lockedDirs.has(resolved)) && modeBits !== 0o555);
+      if (needsHeal) {
+        await chmod(path, 0o555);
+        const healed = await lstat(path);
+        if (!healed.isDirectory() || healed.isSymbolicLink() || healed.uid !== process.getuid?.() || (healed.mode & 0o777) !== 0o555 || await realpath(path) !== resolved) {
+          refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+        }
+        this.#lockedDirs.add(resolved);
+      }
     }
   }
 
@@ -611,6 +659,100 @@ export class Candidate {
     return parent;
   }
 
+  async #verifyAndHealBaselineFile(
+    name: string,
+    path: string,
+    expected: PiBaselineEntry,
+    info: import('node:fs').BigIntStats,
+    phase: 'admission' | 'tool',
+    readBytes: boolean,
+    allowOversize: boolean,
+  ): Promise<Buffer | null> {
+    verifyUntouchedBaselineIdentity(info, expected, phase);
+    if (!allowOversize && expected.byteLength > this.input.policy.limits.fileBytes) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    const expectedMode = expected.mode === '100755' ? 0o555 : 0o444;
+    const expectedStat = this.#baselineStats.get(name);
+    const infoFingerprint = fingerprintFromStat(info);
+    if (expectedStat) {
+      if (
+        infoFingerprint.dev !== expectedStat.dev
+        || infoFingerprint.ino !== expectedStat.ino
+        || infoFingerprint.size !== expectedStat.size
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
+    } else if (this.#baselineStatsCaptured) {
+      refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+    }
+
+    const modeMatches = (Number(info.mode) & 0o777) === expectedMode;
+    const fastStatMatches = Boolean(
+      expectedStat
+      && this.#verifiedBaseline.has(name)
+      && modeMatches
+      && sameFingerprint(expectedStat, infoFingerprint),
+    );
+    if (fastStatMatches && !readBytes) {
+      return null;
+    }
+
+    // If mode drifted to unreadable (e.g. chmod 000 under Landlock), restore read mode only after
+    // non-symlink, nlink===1, uid, size, and dev/ino checks passed above.
+    if ((Number(info.mode) & 0o400) === 0) {
+      await chmod(path, expectedMode);
+    }
+
+    const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const current = await descriptor.stat({ bigint: true });
+      if (
+        !current.isFile()
+        || current.isSymbolicLink()
+        || Number(current.nlink) !== 1
+        || Number(current.uid) !== (process.getuid?.() ?? Number(current.uid))
+        || current.dev !== info.dev
+        || current.ino !== info.ino
+        || Number(current.size) !== expected.byteLength
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
+      if (!allowOversize && Number(current.size) > this.input.policy.limits.fileBytes) {
+        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      }
+      const fdFingerprint = fingerprintFromStat(current);
+      if (fastStatMatches && sameFingerprint(infoFingerprint, fdFingerprint)) {
+        return await descriptor.readFile();
+      }
+      const bytes = await descriptor.readFile();
+      if (bytes.length !== expected.byteLength || gitBlobOid(this.#objectFormat!, bytes) !== expected.oid) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
+      let finalFingerprint = fdFingerprint;
+      if ((Number(current.mode) & 0o777) !== expectedMode) {
+        await descriptor.chmod(expectedMode);
+        const healed = await descriptor.stat({ bigint: true });
+        if (
+          !healed.isFile()
+          || Number(healed.nlink) !== 1
+          || healed.dev !== info.dev
+          || healed.ino !== info.ino
+          || Number(healed.size) !== expected.byteLength
+          || (Number(healed.mode) & 0o777) !== expectedMode
+        ) {
+          refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+        }
+        finalFingerprint = fingerprintFromStat(healed);
+      }
+      this.#baselineStats.set(name, finalFingerprint);
+      this.#verifiedBaseline.add(name);
+      return readBytes ? bytes : null;
+    } finally {
+      await descriptor.close();
+    }
+  }
+
   async #current(name: string): Promise<Buffer | null> {
     const parent = await this.#parent(name, false);
     const knownOverlay = this.#files.get(name);
@@ -635,40 +777,29 @@ export class Candidate {
     }
     if (!isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
 
-    const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const current = await descriptor.stat({ bigint: true });
-      if (!current.isFile() || Number(current.nlink) !== 1 || current.dev !== info.dev || current.ino !== info.ino || Number(current.size) > this.input.policy.limits.fileBytes) {
-        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    if (knownOverlay !== undefined) {
+      const expectedOverlayMode = this.#baseline.get(name)?.mode === '100755' ? 0o555 : 0o444;
+      if (this.#isOverlay && (Number(info.mode) & 0o400) === 0) {
+        await chmod(path, expectedOverlayMode);
       }
-      const bytes = await descriptor.readFile();
-      if (knownOverlay !== undefined) {
+      const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const current = await descriptor.stat({ bigint: true });
+        if (!current.isFile() || Number(current.nlink) !== 1 || current.dev !== info.dev || current.ino !== info.ino || Number(current.size) > this.input.policy.limits.fileBytes) {
+          refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+        }
+        const bytes = await descriptor.readFile();
         if (canonical(artifact(name, bytes)) !== canonical(knownOverlay)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+        if (this.#isOverlay && (Number(current.mode) & 0o777) !== expectedOverlayMode) {
+          await descriptor.chmod(expectedOverlayMode);
+        }
         return bytes;
+      } finally {
+        await descriptor.close();
       }
-      const expected = baseEntry!;
-      const expectedStat = this.#baselineStats.get(name);
-      const currentFingerprint = verifyUntouchedBaselineStat(info, expected);
-      if (!sameFingerprint(currentFingerprint, fingerprintFromStat(current))) {
-        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
-      }
-      if (expectedStat && !sameFingerprint(expectedStat, currentFingerprint)) {
-        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
-      }
-      if (!expectedStat || !this.#verifiedBaseline.has(name)) {
-        if (bytes.length !== expected.byteLength || gitBlobOid(this.#objectFormat!, bytes) !== expected.oid) {
-          refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
-        }
-        if (!expectedStat) {
-          if (this.#baselineStatsCaptured) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
-          this.#baselineStats.set(name, currentFingerprint);
-        }
-        this.#verifiedBaseline.add(name);
-      }
-      return bytes;
-    } finally {
-      await descriptor.close();
     }
+
+    return await this.#verifyAndHealBaselineFile(name, path, baseEntry!, info, 'tool', true, false);
   }
 
   async #listDirectoryEntries(dirPath: string): Promise<string> {
@@ -1103,6 +1234,7 @@ export class Candidate {
     let result!: T;
     let opFailed = false;
     let opError: unknown;
+    this.#unlockDepth++;
     try {
       const segments = relPath.split('/').slice(0, -1);
       let currentDir = this.root;
@@ -1115,12 +1247,21 @@ export class Candidate {
           if (absent(error)) break;
           throw error;
         }
-        if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o022) !== 0 || await realpath(currentDir) !== resolve(currentDir)) {
+        const resolved = resolve(currentDir);
+        if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || !await this.#isCanonicalDir(currentDir, resolved)) {
           // Stop unlocking at non-canonical or unexpected ancestor; inner checks refuse while the leaf-to-root relock loop restores any unlocked ancestors.
           break;
         }
-        if ((info.mode & 0o200) === 0) {
+        const modeBits = info.mode & 0o777;
+        if (modeBits === 0o555) {
+          this.#lockedDirs.add(resolved);
+          if (resolved === resolve(this.root)) this.#enforceLockedDirs = true;
+        }
+        if ((modeBits & 0o022) !== 0 || (modeBits & 0o500) !== 0o500 || (modeBits & 0o200) === 0) {
           await chmod(currentDir, 0o755);
+          if (await realpath(currentDir) !== resolved) break;
+          unlocked.push(currentDir);
+        } else if ((this.#enforceLockedDirs || this.#lockedDirs.has(resolved)) && modeBits !== 0o555) {
           unlocked.push(currentDir);
         }
       }
@@ -1131,6 +1272,8 @@ export class Candidate {
     } catch (error) {
       opFailed = true;
       opError = error;
+    } finally {
+      this.#unlockDepth--;
     }
 
     let relockError: unknown = null;
@@ -1285,14 +1428,7 @@ export class Candidate {
         if (this.#isOverlay && !this.#deleted.has(name)) {
           const baseEntry = this.#baseline.get(name);
           if (baseEntry) {
-            const currentFingerprint = verifyUntouchedBaselineStat(info, baseEntry);
-            const recorded = this.#baselineStats.get(name);
-            if (recorded) {
-              if (!sameFingerprint(recorded, currentFingerprint)) refuse('RECOVERY_REQUIRED', '/candidate');
-            } else {
-              if (this.#baselineStatsCaptured) refuse('RECOVERY_REQUIRED', '/candidate');
-              await this.#current(name);
-            }
+            await this.#verifyAndHealBaselineFile(name, fullPath, baseEntry, info, 'admission', false, true);
             seenBaseline++;
             continue;
           }
