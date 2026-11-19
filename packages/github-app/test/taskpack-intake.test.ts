@@ -382,6 +382,40 @@ describe('generic intake helpers (AC-1)', () => {
     assert.equal(noChange.disposition, 'no_change');
     const blocked = prepareTaskpackIntake({ mode: 'discover', tenant: TENANT, baseRevision: 'b'.repeat(40), records: [{ upstreamId: 'engine', status: 'failed', reason: 'rate limited' }] });
     assert.deepEqual(blocked, { kind: 'discover', disposition: 'blocked', reason: 'upstream_unavailable', failures: [{ upstreamId: 'engine', error: 'rate limited' }] });
+
+    const forcedCurrent = prepareTaskpackIntake({
+      mode: 'discover', tenant: TENANT, baseRevision: 'b'.repeat(40),
+      records: [{ upstreamId: 'engine', status: 'up_to_date', version: '1.0.0', recentVersions: ['1.0.0', '0.9.0'] }],
+      force: true,
+    });
+    assert.deepEqual(forcedCurrent, {
+      kind: 'discover', disposition: 'ready', baseRevision: 'b'.repeat(40), updates: [], targetMatrix: null,
+    });
+
+    const dedupedPr = prepareTaskpackIntake({
+      mode: 'discover', tenant: TENANT, baseRevision: 'b'.repeat(40),
+      records: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      managedPrMatchesDiscoveredState: true,
+    });
+    assert.equal(dedupedPr.disposition, 'no_change');
+
+    const forcedOverPr = prepareTaskpackIntake({
+      mode: 'discover', tenant: TENANT, baseRevision: 'b'.repeat(40),
+      records: [{ upstreamId: 'engine', status: 'available', version: '2.0.0' }],
+      managedPrMatchesDiscoveredState: true,
+      force: true,
+    });
+    assert.equal(forcedOverPr.disposition, 'ready');
+    if (forcedOverPr.kind === 'discover' && forcedOverPr.disposition === 'ready') {
+      assert.equal(forcedOverPr.updates.length, 1);
+    }
+
+    const forcedStillBlocked = prepareTaskpackIntake({
+      mode: 'discover', tenant: TENANT, baseRevision: 'b'.repeat(40),
+      records: [{ upstreamId: 'engine', status: 'failed', reason: 'rate limited' }],
+      force: true,
+    });
+    assert.equal(forcedStillBlocked.disposition, 'blocked');
   });
 
   it('authorizes only OWNER, MEMBER, COLLABORATOR, or allowlisted operators for revise commands', () => {

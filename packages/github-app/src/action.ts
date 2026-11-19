@@ -839,10 +839,12 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   };
   let intake: TaskpackIntakeOutcome;
   let reviseGuidance: string | undefined;
+  const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true && input.mode === 'candidate';
   if (eventNameIsTrigger(input.eventName)) {
     const outcome = prepareTaskpackIntake({
       mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
       records: effectiveUpstreamRecords ?? [],
+      ...(forceDiscovery ? { force: true } : {}),
       ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
       targetMatrix: input.targetMatrix ?? null,
     });
@@ -1517,6 +1519,7 @@ export async function runActionCli(
   const gateEndpointUrl = env['INPUT_GATE-ENDPOINT-URL']?.trim();
   const publicationEndpointUrl = env['INPUT_PUBLICATION-ENDPOINT-URL']?.trim();
   const dryRun = env['INPUT_DRY-RUN'] === 'true';
+  const force = env['INPUT_FORCE'] === 'true';
   const inputRunId = env['INPUT_RUN-ID']?.trim() || env['GITHUB_RUN_ID'] || 'local';
   const inputOutput = env['INPUT_OUTPUT']?.trim() || undefined;
   const sourceRevision = env['INPUT_SOURCE-REVISION']?.trim() || undefined;
@@ -1551,6 +1554,7 @@ export async function runActionCli(
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
     env,
     dryRun,
+    force,
     turnkey: !dryRun,
     githubApiBaseUrl: env['GITHUB_API_URL']?.trim() || undefined,
     githubToken: env['INPUT_GITHUB-TOKEN']?.trim() || undefined,

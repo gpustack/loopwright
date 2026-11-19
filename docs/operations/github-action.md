@@ -111,6 +111,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `models-json` | Unset | Trusted Pi model configuration path; shell credential resolvers are refused. |
 | `allow-custom-base-url` | `false` | Set `true` to permit model base URLs declared in the taskpack. |
 | `dry-run` | `false` | Set `true` to compile without executing the controller. |
+| `force` | `false` | Set `true` to bypass `no_change` intake short-circuit and open-PR deduplication in candidate mode. |
 | `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
 | `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
 | `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |

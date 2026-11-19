@@ -65,6 +65,10 @@ inputs:
     description: "Compile without invoking the controller delegate when 'true'."
     required: false
     default: 'false'
+  force:
+    description: "Bypass no_change intake short-circuit and open-PR deduplication in candidate mode when 'true'."
+    required: false
+    default: 'false'
   gate-endpoint-url:
     description: 'External verification gate endpoint URL.'
     required: false
@@ -170,6 +174,7 @@ runs:
         INPUT_MODELS-JSON: ${{ inputs.models-json }}
         INPUT_ALLOW-CUSTOM-BASE-URL: ${{ inputs.allow-custom-base-url }}
         INPUT_DRY-RUN: ${{ inputs.dry-run }}
+        INPUT_FORCE: ${{ inputs.force }}
         INPUT_GATE-ENDPOINT-URL: ${{ inputs.gate-endpoint-url }}
         INPUT_PUBLICATION-ENDPOINT-URL: ${{ inputs.publication-endpoint-url }}
         INPUT_OUTPUT: ${{ inputs.output }}

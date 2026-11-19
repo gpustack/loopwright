@@ -2088,7 +2088,7 @@ export function prepareTaskpackIntake(input: TaskpackIntakeInput): TaskpackIntak
   if (updates.length === 0 && failures.length > 0) {
     return { kind: 'discover', disposition: 'blocked', reason: 'upstream_unavailable', failures };
   }
-  if (updates.length === 0 || input.managedPrMatchesDiscoveredState === true) {
+  if (input.force !== true && (updates.length === 0 || input.managedPrMatchesDiscoveredState === true)) {
     return {
       kind: 'discover', disposition: 'no_change',
       reason: updates.length === 0 ? 'no subscription reports an available update' : 'an open managed pull request already matches the discovered state',
