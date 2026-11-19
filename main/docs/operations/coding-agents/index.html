@@ -426,7 +426,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
 </div>
 <h3 id="host-preflight">Host preflight</h3>
-<p><code>step next --taskpack</code> defaults to <code>--mode candidate</code> and compiles <code>no-change.v1</code> only when <code>--mode no-change</code> is set. When a repository pairs <code>.loopwright/taskpack.yaml</code> with host preflight staging, run preflight first, stop on <code>blocked</code>, and export the repository, stage, cache, and tool paths needed by <code>step submit</code>:</p>
+<p><code>step next --taskpack</code> defaults to <code>--mode candidate</code> and compiles <code>no-change.v1</code> only when <code>--mode no-change</code> is set. When a repository pairs <code>.auto-sync/taskpack.yaml</code> with host preflight staging, run preflight first, stop on <code>blocked</code>, and export the repository, stage, cache, and tool paths needed by <code>step submit</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">STAGE_DIR</span><span class="o">=</span><span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">/preflight-stage&#34;</span>
@@ -442,7 +442,7 @@
 </span></span><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">HUGO_BIN</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">command</span> -v hugo <span class="o">||</span> <span class="nb">true</span><span class="k">)</span><span class="s2">&#34;</span>
 </span></span><span class="line"><span class="cl">
 </span></span><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .loopwright/taskpack.yaml <span class="se">\
+</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .auto-sync/taskpack.yaml <span class="se">\
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --mode <span class="s2">&#34;</span><span class="nv">$MODE</span><span class="s2">&#34;</span> <span class="se">\
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo . <span class="se">\
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
