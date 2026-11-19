@@ -2,7 +2,7 @@
 import { Buffer } from 'node:buffer';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import {
   appendFile,
   chmod,
@@ -252,21 +252,21 @@ export async function auditBaselineParity(repoRoot) {
   const resolvedRepoRoot = resolve(repoRoot);
   const { parsed: proposal } = await readJsonRegularFile(
     resolvedRepoRoot,
-    '.loopwright/proposal.json',
+    '.auto-sync/proposal.json',
     MAX_PROPOSAL_BYTES,
   );
 
   if (proposal.schema_version !== 1) {
-    throw new Error(`.loopwright/proposal.json schema_version must be 1 (received ${String(proposal.schema_version)})`);
+    throw new Error(`.auto-sync/proposal.json schema_version must be 1 (received ${String(proposal.schema_version)})`);
   }
   if (typeof proposal.summary !== 'string' || proposal.summary.trim().length === 0) {
-    throw new Error('.loopwright/proposal.json summary must be a non-empty string');
+    throw new Error('.auto-sync/proposal.json summary must be a non-empty string');
   }
   if (!isPlainRecord(proposal.upstreams)) {
-    throw new Error('.loopwright/proposal.json upstreams must be a plain object');
+    throw new Error('.auto-sync/proposal.json upstreams must be a plain object');
   }
   if (!isPlainRecord(proposal.packages)) {
-    throw new Error('.loopwright/proposal.json packages must be a plain object');
+    throw new Error('.auto-sync/proposal.json packages must be a plain object');
   }
 
   const upstreamKeys = Object.keys(proposal.upstreams);
@@ -275,7 +275,7 @@ export async function auditBaselineParity(repoRoot) {
     || ALL_UPSTREAM_IDS.some(id => !Object.hasOwn(proposal.upstreams, id))
   ) {
     throw new Error(
-      `.loopwright/proposal.json upstreams must contain exact keys [${ALL_UPSTREAM_IDS.join(', ')}]`,
+      `.auto-sync/proposal.json upstreams must contain exact keys [${ALL_UPSTREAM_IDS.join(', ')}]`,
     );
   }
 
@@ -284,16 +284,16 @@ export async function auditBaselineParity(repoRoot) {
     const entry = proposal.upstreams[upstreamId];
     const expectedPkg = ALL_UPSTREAM_PACKAGES[upstreamId];
     if (!isPlainRecord(entry)) {
-      throw new Error(`.loopwright/proposal.json upstreams["${upstreamId}"] must be an object`);
+      throw new Error(`.auto-sync/proposal.json upstreams["${upstreamId}"] must be an object`);
     }
     if (entry.package !== expectedPkg) {
       throw new Error(
-        `.loopwright/proposal.json upstreams["${upstreamId}"].package must be "${expectedPkg}" (received "${String(entry.package)}")`,
+        `.auto-sync/proposal.json upstreams["${upstreamId}"].package must be "${expectedPkg}" (received "${String(entry.package)}")`,
       );
     }
     if (parseCanonicalSemver(entry.version) === null) {
       throw new Error(
-        `.loopwright/proposal.json upstreams["${upstreamId}"].version must be canonical X.Y.Z SemVer (received "${String(entry.version)}")`,
+        `.auto-sync/proposal.json upstreams["${upstreamId}"].version must be canonical X.Y.Z SemVer (received "${String(entry.version)}")`,
       );
     }
     baselineByUpstream[upstreamId] = entry.version;
@@ -302,7 +302,7 @@ export async function auditBaselineParity(repoRoot) {
   const piVersions = new Set(PI_UPSTREAM_IDS.map(id => baselineByUpstream[id]));
   if (piVersions.size !== 1) {
     throw new Error(
-      `.loopwright/proposal.json @earendil-works/pi-* baseline versions are skewed: ${[...piVersions].join(', ')}`,
+      `.auto-sync/proposal.json @earendil-works/pi-* baseline versions are skewed: ${[...piVersions].join(', ')}`,
     );
   }
   const piBaseline = baselineByUpstream['pi-coding-agent'];
@@ -316,7 +316,7 @@ export async function auditBaselineParity(repoRoot) {
     || MANAGED_WORKSPACES.some(ws => !Object.hasOwn(proposal.packages, ws))
   ) {
     throw new Error(
-      `.loopwright/proposal.json packages must contain exact keys [${MANAGED_WORKSPACES.join(', ')}]`,
+      `.auto-sync/proposal.json packages must contain exact keys [${MANAGED_WORKSPACES.join(', ')}]`,
     );
   }
 
@@ -324,7 +324,7 @@ export async function auditBaselineParity(repoRoot) {
     const recordedDeps = proposal.packages[ws];
     const expectedDeps = expectedPackagesMap[ws];
     if (!isPlainRecord(recordedDeps)) {
-      throw new Error(`.loopwright/proposal.json packages["${ws}"] must be an object`);
+      throw new Error(`.auto-sync/proposal.json packages["${ws}"] must be an object`);
     }
     const expectedDepNames = Object.keys(expectedDeps);
     const recordedDepNames = Object.keys(recordedDeps);
@@ -332,7 +332,7 @@ export async function auditBaselineParity(repoRoot) {
       recordedDepNames.length !== expectedDepNames.length
       || expectedDepNames.some(dep => recordedDeps[dep] !== expectedDeps[dep])
     ) {
-      throw new Error(`.loopwright/proposal.json packages["${ws}"] drifts from proposal.upstreams`);
+      throw new Error(`.auto-sync/proposal.json packages["${ws}"] drifts from proposal.upstreams`);
     }
 
     const { parsed: pkgManifest } = await readJsonRegularFile(
@@ -347,7 +347,7 @@ export async function auditBaselineParity(repoRoot) {
     for (const [depName, expectedVer] of Object.entries(expectedDeps)) {
       if (manifestDeps[depName] !== expectedVer) {
         throw new Error(
-          `Baseline drift in ${ws}/package.json: dependencies["${depName}"] is "${String(manifestDeps[depName])}", expected "${expectedVer}" from .loopwright/proposal.json`,
+          `Baseline drift in ${ws}/package.json: dependencies["${depName}"] is "${String(manifestDeps[depName])}", expected "${expectedVer}" from .auto-sync/proposal.json`,
         );
       }
     }
@@ -392,7 +392,7 @@ export async function auditBaselineParity(repoRoot) {
   }
 
   const auditedBaselinePaths = [
-    '.loopwright/proposal.json',
+    '.auto-sync/proposal.json',
     'package.json',
     'package-lock.json',
     ...MANAGED_WORKSPACES.map(ws => `${ws}/package.json`),
@@ -455,7 +455,7 @@ export function buildExpectedPackagesMap(piVersion, yamlVersion) {
   });
 }
 
-export function evaluateUpstreamEligibility({ baselineByUpstream, discoveredRecords, stageDir }) {
+export function evaluateUpstreamEligibility({ baselineByUpstream, discoveredRecords, stageDir, force = false }) {
   if (!isPlainRecord(baselineByUpstream)) {
     throw new Error('baselineByUpstream must be a plain record');
   }
@@ -611,13 +611,30 @@ export function evaluateUpstreamEligibility({ baselineByUpstream, discoveredReco
       });
     }
 
+    const stageNote = typeof stageDir === 'string' && stageDir.length > 0 ? `; stageDir=${stageDir}` : '';
     const unchangedRecords = ALL_UPSTREAM_IDS.map(id =>
       Object.freeze({
         upstreamId: id,
         status: 'up_to_date',
         version: baselineByUpstream[id],
+        ...(force === true
+          ? { reason: `forced candidate sync at baseline ${baselineByUpstream[id]}${stageNote}` }
+          : {}),
       }),
     );
+    if (force === true) {
+      return Object.freeze({
+        recommendedMode: 'candidate',
+        actionMode: 'candidate',
+        piOutcome,
+        yamlOutcome,
+        targetPiVersion,
+        targetYamlVersion,
+        targetVersions: buildTargetVersionsPayload(targetPiVersion, targetYamlVersion),
+        upstreamRecords: Object.freeze(unchangedRecords),
+        reasons: Object.freeze(['forced candidate run at baseline (upstreams up_to_date)']),
+      });
+    }
     return Object.freeze({
       recommendedMode: 'no-change',
       actionMode: 'no-change',
@@ -1006,8 +1023,12 @@ export async function stageCandidateBundle({
   repoRoot,
   stageDir,
   targetVersions,
+  force = false,
   lockfileBuilder = defaultLockfileBuilder,
 }) {
+  if (typeof force !== 'boolean') {
+    throw new Error('stageCandidateBundle force option must be a boolean');
+  }
   const resolvedRepo = await realpath(resolve(repoRoot));
   const absStageDir = resolve(stageDir);
   const stageParent = dirname(absStageDir);
@@ -1047,8 +1068,14 @@ export async function stageCandidateBundle({
   validateLockfileExpectedVersions(parsedCandidateLock, targetVersions.packages);
 
   const targetVersionsPath = join(canonicalStageDir, 'target-versions.json');
+  const preflightMetadataPath = join(canonicalStageDir, 'preflight-metadata.json');
   const candidateLockPath = join(canonicalStageDir, 'package-lock.candidate.json');
   await writeFile(targetVersionsPath, `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o644 });
+  await writeFile(
+    preflightMetadataPath,
+    `${JSON.stringify({ schema_version: 1, force }, null, 2)}\n`,
+    { mode: 0o644 },
+  );
   await writeFile(candidateLockPath, candidateLockBytes, { mode: 0o644 });
 
   await freezeTreeReadOnly(canonicalStageDir);
@@ -1056,6 +1083,7 @@ export async function stageCandidateBundle({
   return Object.freeze({
     stageDir: canonicalStageDir,
     targetVersionsPath,
+    preflightMetadataPath,
     candidateLockPath,
     npmCacheDir,
     candidateLockBytes: candidateLockBytes.byteLength,
@@ -1076,13 +1104,13 @@ async function loadTaskpackCompilerModule(repoRoot) {
 export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingVerifyScript = false } = {}) {
   const resolvedRepo = resolve(repoRoot);
   const { loadDeclarativeTaskpack, compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS } = await loadTaskpackCompilerModule(resolvedRepo);
-  const manifestPath = join(resolvedRepo, '.loopwright/taskpack.yaml');
+  const manifestPath = join(resolvedRepo, '.auto-sync/taskpack.yaml');
   const manifest = await loadDeclarativeTaskpack({
     manifestPath,
     repositoryRoot: resolvedRepo,
   });
 
-  const verifyRelPath = '.loopwright/checks/verify.sh';
+  const verifyRelPath = '.auto-sync/checks/verify.sh';
   const verifyExists = existsSync(join(resolvedRepo, verifyRelPath));
   if (!verifyExists && !allowMissingVerifyScript) {
     throw new Error(`Missing required command.v1 verification script "${verifyRelPath}"`);
@@ -1092,8 +1120,8 @@ export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingV
   let tempOverlayRoot = null;
   if (!verifyExists) {
     tempOverlayRoot = await mkdtemp(join(tmpdir(), 'loopwright-self-upgrade-compile-'));
-    await mkdir(join(tempOverlayRoot, '.loopwright/checks'), { recursive: true, mode: 0o700 });
-    for (const rel of ['.loopwright/taskpack.yaml', '.loopwright/instructions.md', '.loopwright/proposal.json']) {
+    await mkdir(join(tempOverlayRoot, '.auto-sync/checks'), { recursive: true, mode: 0o700 });
+    for (const rel of ['.auto-sync/taskpack.yaml', '.auto-sync/instructions.md', '.auto-sync/proposal.json']) {
       const content = await readBoundedRegularFile(resolvedRepo, rel, MAX_PROPOSAL_BYTES);
       await writeFile(join(tempOverlayRoot, rel), content, { mode: 0o600 });
     }
@@ -1113,7 +1141,7 @@ export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingV
       baseRevision: '0'.repeat(40),
       sourceRevision: '0'.repeat(40),
       repositoryRoot: compileRepoRoot,
-      taskpackPath: '.loopwright/taskpack.yaml',
+      taskpackPath: '.auto-sync/taskpack.yaml',
       executionMode: 'delegated',
       budgets: DEFAULT_HOST_BUDGETS,
     };
@@ -1145,6 +1173,10 @@ export async function runPrepareSelfUpgrade(options = {}) {
   const requestedMode = options.requestedMode ?? 'auto';
   if (!['auto', 'candidate', 'no-change'].includes(requestedMode)) {
     throw new Error(`Invalid --requested-mode "${String(requestedMode)}" (expected auto, candidate, or no-change)`);
+  }
+  const force = options.force === true;
+  if (force && requestedMode === 'no-change') {
+    throw new Error('Refusing --force with --requested-mode no-change');
   }
 
   const baseline = await auditBaselineParity(repoRoot);
@@ -1191,6 +1223,7 @@ export async function runPrepareSelfUpgrade(options = {}) {
     baselineByUpstream: baseline.baselineByUpstream,
     discoveredRecords,
     stageDir,
+    force,
   });
 
   if (requestedMode === 'no-change') {
@@ -1238,6 +1271,7 @@ export async function runPrepareSelfUpgrade(options = {}) {
       repoRoot,
       stageDir,
       targetVersions: evaluation.targetVersions,
+      force,
       lockfileBuilder: options.lockfileBuilder,
     });
   }
@@ -1280,331 +1314,12 @@ async function readJsonArgOrFile(rawArg, repoRoot) {
   return JSON.parse(rawArg);
 }
 
-const SELF_UPGRADE_PROVIDER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const SELF_UPGRADE_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-const SELF_UPGRADE_DISALLOWED_OAUTH_PROVIDERS = new Set([
-  'github-copilot',
-  'openai-codex',
-  'claude-code',
-  'gemini',
-  'google',
-  'gemini-cli',
-  'google-gemini-cli',
-  'google-antigravity',
-]);
-function snapThinkingToCatalogMap(desiredLevel, providerId, modelId, api) {
-  try {
-    const dataUrl = new URL(`./providers/data/${providerId}.json`, import.meta.resolve('@earendil-works/pi-ai'));
-    const dataPath = fileURLToPath(dataUrl);
-    if (!existsSync(dataPath)) return desiredLevel;
-    const raw = JSON.parse(String(readFileSync(dataPath, 'utf8')));
-    const entry = raw?.[api]?.[`chat:${modelId}`];
-    const levelMap = entry?.thinkingLevelMap;
-    if (!isPlainRecord(levelMap)) return desiredLevel;
-    if (typeof levelMap[desiredLevel] === 'string' && levelMap[desiredLevel].length > 0) {
-      return desiredLevel;
-    }
-    const fallbacksByDesired = {
-      off: ['low', 'minimal', 'medium', 'high', 'max'],
-      minimal: ['low', 'medium', 'high', 'off', 'max'],
-      low: ['medium', 'high', 'minimal', 'max', 'off'],
-      medium: ['high', 'low', 'max', 'minimal', 'off'],
-      high: ['max', 'medium', 'low', 'xhigh'],
-      xhigh: ['high', 'max', 'medium', 'low'],
-      max: ['high', 'xhigh', 'medium', 'low'],
-    };
-    for (const candidate of fallbacksByDesired[desiredLevel] ?? ['low', 'high', 'max', 'off']) {
-      if (typeof levelMap[candidate] === 'string' && levelMap[candidate].length > 0) {
-        return candidate;
-      }
-    }
-  } catch {
-    // ignore missing or non-standard catalog files
-  }
-  return desiredLevel;
-}
-
-function normalizeGatewayBaseUrl(rawUrl) {
-  let cleaned = rawUrl.trim();
-  while (cleaned.endsWith('/')) {
-    cleaned = cleaned.slice(0, -1);
-  }
-  if (cleaned.toLowerCase().endsWith('/chat/completions')) {
-    cleaned = cleaned.slice(0, -'/chat/completions'.length);
-    while (cleaned.endsWith('/')) {
-      cleaned = cleaned.slice(0, -1);
-    }
-  }
-  if (cleaned.length < 8 || cleaned.length > 2048 || /[\s\0\r\n?#]/.test(cleaned)) {
-    throw new Error('LLM gateway URL must be a single-line URL without whitespace, query, or fragment');
-  }
-  let parsed;
-  try {
-    parsed = new URL(cleaned);
-  } catch {
-    throw new Error('LLM gateway URL is invalid');
-  }
-  if (parsed.username || parsed.password) {
-    throw new Error('LLM gateway URL must not embed credentials');
-  }
-  const isLoopback = parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1' && parsed.port.length > 0;
-  if (!(parsed.protocol === 'https:' || isLoopback)) {
-    throw new Error('LLM gateway URL must use https:// or http://127.0.0.1:<port>');
-  }
-  return cleaned;
-}
-
-function inferGatewayProviderId(explicitProvider, baseUrl) {
-  const trimmed = explicitProvider.trim().toLowerCase();
-  if (trimmed.length > 0) {
-    if (
-      !SELF_UPGRADE_PROVIDER_ID_RE.test(trimmed)
-      || trimmed.includes('..')
-      || SELF_UPGRADE_DISALLOWED_OAUTH_PROVIDERS.has(trimmed)
-    ) {
-      throw new Error(`Unsupported LLM provider identifier "${explicitProvider}"`);
-    }
-    return trimmed;
-  }
-  const parsed = new URL(baseUrl);
-  const host = parsed.hostname.toLowerCase();
-  const path = parsed.pathname.toLowerCase();
-  if (host === 'open.bigmodel.cn' || host.endsWith('.bigmodel.cn')) {
-    return path.includes('/api/coding') ? 'zai-coding-cn' : 'zai-cn';
-  }
-  if (host === 'api.z.ai' || host.endsWith('.z.ai')) {
-    return 'zai';
-  }
-  const hostMap = {
-    'api.anthropic.com': 'anthropic',
-    'api.openai.com': 'openai',
-    'api.deepseek.com': 'deepseek',
-    'openrouter.ai': 'openrouter',
-    'api.moonshot.cn': 'moonshotai-cn',
-    'api.moonshot.ai': 'moonshotai',
-    'api.kimi.com': 'kimi-coding',
-    'api.minimaxi.com': 'minimax-cn',
-    'api.minimax.io': 'minimax',
-    'token-plan.cn-beijing.maas.aliyuncs.com': 'qwen-token-plan-cn',
-    'dashscope.aliyuncs.com': 'qwen-token-plan-cn',
-    'token-plan.ap-southeast-1.maas.aliyuncs.com': 'qwen-token-plan',
-    'dashscope-intl.aliyuncs.com': 'qwen-token-plan',
-  };
-  return hostMap[host] ?? 'custom-gateway';
-}
-
-function resolveGatewayWireApi(protocol, useAnthropic) {
-  const proto = protocol.trim().toLowerCase();
-  if (proto.length > 0) {
-    const map = {
-      openai: 'openai-completions',
-      'openai-completions': 'openai-completions',
-      'openai-responses': 'openai-responses',
-      anthropic: 'anthropic-messages',
-      'anthropic-messages': 'anthropic-messages',
-    };
-    if (!Object.hasOwn(map, proto)) {
-      throw new Error(`Unsupported LLM wire protocol "${protocol}"`);
-    }
-    return map[proto];
-  }
-  const flag = useAnthropic.trim().toLowerCase();
-  if (flag === 'true' || flag === '1' || flag === 'yes') return 'anthropic-messages';
-  if (flag === '' || flag === 'false' || flag === '0' || flag === 'no') return 'openai-completions';
-  throw new Error(`Invalid LLM use-anthropic flag "${useAnthropic}"`);
-}
-
-function firstNonEmptyEnv(env, ...keys) {
-  for (const key of keys) {
-    const val = env[key];
-    if (typeof val === 'string' && val.trim().length > 0) {
-      return val.trim();
-    }
-  }
-  return '';
-}
-
-const ZAI_PROVIDER_IDS = new Set(['zai', 'zai-cn', 'zai-coding-cn']);
-
-function isZaiOrGlmTarget(modelId, baseUrl, providerId = '') {
-  const lowerProvider = String(providerId ?? '').trim().toLowerCase();
-  if (ZAI_PROVIDER_IDS.has(lowerProvider)) {
-    return true;
-  }
-  const lowerModel = modelId.trim().toLowerCase();
-  if (lowerModel.startsWith('glm-') || lowerModel.includes('/glm-')) {
-    return true;
-  }
-  try {
-    const host = new URL(baseUrl).hostname.toLowerCase();
-    return host === 'api.z.ai' || host.endsWith('.z.ai') || host === 'open.bigmodel.cn' || host.endsWith('.bigmodel.cn');
-  } catch {
-    return false;
-  }
-}
-
-function resolveGatewayThinking(thinkingRaw, effortRaw, modelId, baseUrl, providerId = '') {
-  const think = thinkingRaw.trim().toLowerCase();
-  const effort = effortRaw.trim().toLowerCase();
-  if (think === 'disabled' || think === 'off') {
-    return { level: 'off', reasoning: false };
-  }
-  if (effort.length > 0) {
-    if (!SELF_UPGRADE_THINKING_LEVELS.has(effort) || effort === 'off') {
-      throw new Error(`Unsupported reasoning effort "${effortRaw}"`);
-    }
-    return { level: effort, reasoning: true };
-  }
-  if (think.length > 0) {
-    if (think === 'enabled') return { level: 'low', reasoning: true };
-    if (SELF_UPGRADE_THINKING_LEVELS.has(think)) return { level: think, reasoning: think !== 'off' };
-    throw new Error(`Unsupported thinking mode "${thinkingRaw}"`);
-  }
-  if (isZaiOrGlmTarget(modelId, baseUrl, providerId)) {
-    return { level: 'low', reasoning: true };
-  }
-  return { level: 'off', reasoning: false };
-}
-
-export async function resolveSelfUpgradeModelConfig({ env = process.env, modelsOutPath } = {}) {
-  const rawUrl = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_URL', 'CI_GPUSTACK_CODEREVIEW_LLM_URL');
-  const rawModel = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL', 'CI_GPUSTACK_CODEREVIEW_LLM_MODEL');
-  const rawProvider = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER');
-
-  if (rawUrl.length === 0 && rawModel.length === 0) {
-    return Object.freeze({
-      configured: false,
-      modelProvider: '',
-      modelId: '',
-      modelThinking: '',
-      modelApi: '',
-      modelBaseUrl: '',
-      modelsJsonPath: '',
-      allowCustomBaseUrl: 'false',
-      providerTokenEnv: '',
-    });
-  }
-  if (rawUrl.length === 0 || rawModel.length === 0) {
-    throw new Error('Both LLM gateway URL and model must be configured together');
-  }
-  if (rawModel.length > 128 || /[\s\0\r\n]/.test(rawModel)) {
-    throw new Error('LLM model identifier must be 1..128 non-whitespace characters');
-  }
-
-  const baseUrl = normalizeGatewayBaseUrl(rawUrl);
-  const providerId = inferGatewayProviderId(rawProvider, baseUrl);
-  const api = resolveGatewayWireApi(
-    firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL'),
-    firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC', 'CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC'),
-  );
-  const resolvedThinking = resolveGatewayThinking(
-    firstNonEmptyEnv(env, 'SELF_UPGRADE_INPUT_THINKING', 'CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING', 'CI_GPUSTACK_CODEREVIEW_LLM_THINKING'),
-    firstNonEmptyEnv(env, 'SELF_UPGRADE_INPUT_REASONING_EFFORT', 'CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT', 'CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT'),
-    rawModel,
-    baseUrl,
-    providerId,
-  );
-  // Bypass snapThinkingToCatalogMap when resolvedThinking.level === 'off':
-  // models.json sets `reasoning: thinkingLevel !== 'off'`, which @loopwright/agent-pi validates
-  // directly without consulting @earendil-works/pi-ai's built-in thinkingLevelMap (whose fallback
-  // table would otherwise snap 'off' to 'low' for ZAI/GLM catalog entries).
-  const thinkingLevel = resolvedThinking.level === 'off'
-    ? 'off'
-    : snapThinkingToCatalogMap(resolvedThinking.level, providerId, rawModel, api);
-  const reasoning = thinkingLevel !== 'off';
-
-  const isGlm5 = rawModel.toLowerCase().startsWith('glm-5') || rawModel.toLowerCase().includes('/glm-5');
-  const rawCtx = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE');
-  const contextWindow = rawCtx.length > 0 ? Number.parseInt(rawCtx, 10) : (isGlm5 ? 1_000_000 : 128_000);
-  if (!Number.isSafeInteger(contextWindow) || contextWindow < 4096 || contextWindow > 2_000_000) {
-    throw new Error('LLM context window must be an integer in [4096, 2000000]');
-  }
-  const rawMaxTok = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS');
-  const desiredMaxTok = rawMaxTok.length > 0 ? Number.parseInt(rawMaxTok, 10) : (isGlm5 ? 65_536 : 32_768);
-  if (!Number.isSafeInteger(desiredMaxTok) || desiredMaxTok < 256 || desiredMaxTok > 262_144) {
-    throw new Error('LLM max tokens must be an integer in [256, 262144]');
-  }
-  const maxTokens = Math.min(desiredMaxTok, contextWindow);
-
-  const samplingParams = {};
-  const rawTemp = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE', 'CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE');
-  if (rawTemp.length > 0) {
-    const temp = Number.parseFloat(rawTemp);
-    if (!Number.isFinite(temp) || temp < 0 || temp > 2) {
-      throw new Error('LLM temperature must be a finite number in [0, 2]');
-    }
-    samplingParams.temperature = temp;
-  }
-  const rawTopP = firstNonEmptyEnv(env, 'CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P', 'CI_GPUSTACK_CODEREVIEW_LLM_TOP_P');
-  if (rawTopP.length > 0) {
-    const topP = Number.parseFloat(rawTopP);
-    if (!Number.isFinite(topP) || topP <= 0 || topP > 1) {
-      throw new Error('LLM top_p must be a finite number in (0, 1]');
-    }
-    samplingParams.top_p = topP;
-  }
-
-  const lowerModel = rawModel.toLowerCase();
-  const zaiCompat = api === 'openai-completions' && isZaiOrGlmTarget(rawModel, baseUrl, providerId)
-    ? {
-      thinkingFormat: 'zai',
-      ...(!(lowerModel.startsWith('glm-4') || lowerModel.includes('/glm-4')) ? { supportsReasoningEffort: true } : {}),
-    }
-    : undefined;
-
-  const tokenEnvName = 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN';
-  const modelEntry = {
-    id: rawModel,
-    contextWindow,
-    maxTokens,
-    reasoning,
-    ...(Object.keys(samplingParams).length > 0 ? { samplingParams } : {}),
-    ...(zaiCompat !== undefined ? { compat: zaiCompat } : {}),
-  };
-  const modelsDoc = {
-    providers: {
-      [providerId]: {
-        baseUrl,
-        api,
-        apiKey: `$${tokenEnvName}`,
-        models: [modelEntry],
-      },
-    },
-  };
-
-  let writtenModelsPath = '';
-  if (typeof modelsOutPath === 'string' && modelsOutPath.trim().length > 0) {
-    const resolvedModelsOut = resolve(modelsOutPath);
-    await mkdir(dirname(resolvedModelsOut), { recursive: true, mode: 0o700 });
-    const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | (fsConstants.O_NOFOLLOW ?? 0);
-    const handle = await open(resolvedModelsOut, flags, 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(modelsDoc, null, 2)}\n`, 'utf8');
-    } finally {
-      await handle.close();
-    }
-    writtenModelsPath = resolvedModelsOut;
-  }
-
-  return Object.freeze({
-    configured: true,
-    modelProvider: providerId,
-    modelId: rawModel,
-    modelThinking: thinkingLevel,
-    modelApi: api,
-    modelBaseUrl: baseUrl,
-    modelsJsonPath: writtenModelsPath,
-    allowCustomBaseUrl: 'true',
-    providerTokenEnv: tokenEnvName,
-  });
-}
-
 function formatGithubOutputBlock(key, value) {
   const delimiter = `LOOPWRIGHT_EOF_${createHash('sha256').update(`${key}:${value}`, 'utf8').digest('hex').slice(0, 16)}`;
   return `${key}<<${delimiter}\n${value}\n${delimiter}\n`;
 }
 
-async function writeGithubOutputs(outputPath, summary, modelConfig) {
+async function writeGithubOutputs(outputPath, summary) {
   const blocks = [
     formatGithubOutputBlock('recommended_mode', summary.recommendedMode),
     formatGithubOutputBlock('action_mode', summary.actionMode),
@@ -1612,18 +1327,6 @@ async function writeGithubOutputs(outputPath, summary, modelConfig) {
     formatGithubOutputBlock('npm_cache_dir', summary.npmCacheDir),
     formatGithubOutputBlock('upstream_records', JSON.stringify(summary.upstreamRecords)),
   ];
-  if (modelConfig !== undefined) {
-    blocks.push(
-      formatGithubOutputBlock('model_provider', modelConfig.modelProvider),
-      formatGithubOutputBlock('model_id', modelConfig.modelId),
-      formatGithubOutputBlock('model_thinking', modelConfig.modelThinking),
-      formatGithubOutputBlock('model_api', modelConfig.modelApi),
-      formatGithubOutputBlock('model_base_url', modelConfig.modelBaseUrl),
-      formatGithubOutputBlock('models_json', modelConfig.modelsJsonPath),
-      formatGithubOutputBlock('allow_custom_base_url', modelConfig.allowCustomBaseUrl),
-      formatGithubOutputBlock('provider_token_env', modelConfig.providerTokenEnv),
-    );
-  }
   await appendFile(outputPath, blocks.join(''), 'utf8');
 }
 
@@ -1634,10 +1337,10 @@ function parseCliArgs(argv) {
     upstreamRecordsRaw: undefined,
     registryJsonRaw: undefined,
     requestedMode: 'auto',
+    force: false,
     skipStage: false,
     offlineCheck: false,
     githubOutput: undefined,
-    modelsOut: undefined,
     json: false,
   };
 
@@ -1645,6 +1348,8 @@ function parseCliArgs(argv) {
     const arg = argv[i];
     if (arg === '--offline-check') {
       parsed.offlineCheck = true;
+    } else if (arg === '--force') {
+      parsed.force = true;
     } else if (arg === '--skip-stage') {
       parsed.skipStage = true;
     } else if (arg === '--json') {
@@ -1667,9 +1372,6 @@ function parseCliArgs(argv) {
     } else if (arg === '--github-output' && i + 1 < argv.length) {
       i += 1;
       parsed.githubOutput = argv[i];
-    } else if (arg === '--models-out' && i + 1 < argv.length) {
-      i += 1;
-      parsed.modelsOut = argv[i];
     } else {
       throw new Error(`Unknown or incomplete CLI argument: "${arg}"`);
     }
@@ -1690,14 +1392,11 @@ async function main() {
     ? await readJsonArgOrFile(cli.registryJsonRaw, resolvedRepo)
     : undefined;
 
-  const modelConfig = cli.modelsOut !== undefined
-    ? await resolveSelfUpgradeModelConfig({ env: process.env, modelsOutPath: cli.modelsOut })
-    : undefined;
-
   const result = await runPrepareSelfUpgrade({
     repoRoot: resolvedRepo,
     stageDir: cli.stageDir,
     requestedMode: cli.requestedMode,
+    force: cli.force,
     skipStage: cli.skipStage,
     offlineCheck: cli.offlineCheck,
     discoveredRecords,
@@ -1705,7 +1404,7 @@ async function main() {
   });
 
   if (cli.githubOutput !== undefined && cli.githubOutput.length > 0) {
-    await writeGithubOutputs(resolve(cli.githubOutput), result, modelConfig);
+    await writeGithubOutputs(resolve(cli.githubOutput), result);
   }
 
   const outputSummary = {

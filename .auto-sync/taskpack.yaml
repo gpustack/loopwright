@@ -7,13 +7,13 @@ spec:
     candidate: >-
       Upgrade Loopwright runtime dependencies (@earendil-works/pi-* in lockstep and direct yaml packages uniformly)
       using the host-staged target versions and lockfile, adapt TypeScript call sites and documentation within
-      writable scope, update .loopwright/proposal.json, and pass all verification gates.
+      writable scope, update .auto-sync/proposal.json, and pass all verification gates.
     noChange: >-
-      Verify that .loopwright/proposal.json, workspace package manifests, and package-lock.json already match
+      Verify that .auto-sync/proposal.json, workspace package manifests, and package-lock.json already match
       eligible upstream releases with zero repository modifications.
   scope:
     writable:
-      - .loopwright/proposal.json
+      - .auto-sync/proposal.json
       - package-lock.json
       - packages/agent-pi
       - packages/cli
@@ -28,7 +28,7 @@ spec:
       - packages/cli/src/failure-matrix.ts
       - docs/contribute
   instructions:
-    - .loopwright/instructions.md
+    - .auto-sync/instructions.md
   upstreams:
     - id: pi-coding-agent
       kind: http-json
@@ -66,7 +66,7 @@ spec:
       watchedPaths: []
       allowPrerelease: false
   proposal:
-    path: .loopwright/proposal.json
+    path: .auto-sync/proposal.json
     requiredFields:
       - schema_version
       - summary
@@ -82,7 +82,7 @@ spec:
       - id: self-upgrade-verify
         implementation: command.v1
         parameters:
-          script: .loopwright/checks/verify.sh
+          script: .auto-sync/checks/verify.sh
           timeoutSeconds: 900
           allowReadOnlyGitHubToken: false
           env:
@@ -101,10 +101,10 @@ spec:
   publication:
     mode: pull_request
     targetBranch: main
-    headBranchPrefix: loopwright-self-upgrade-
+    headBranchPrefix: auto-sync/
     titleTemplate: "chore(deps): self-upgrade runtime dependencies"
   memory:
-    directory: .loopwright/memory/self-upgrade
+    directory: .auto-sync/memory/self-upgrade
     apply: separate-pull-request
     onNoModelBudget: deterministic-observations-only
   triggers:
@@ -115,9 +115,21 @@ spec:
       - retry
       - revise
     commentPrefixes:
-      - /loopwright
+      - /auto-sync
+  models:
+    - provider: zai-coding-cn
+      id: glm-5.3
+      thinking: low
+      apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN
+      contextWindow: 1000000
+      maxTokens: 65536
+      samplingParams:
+        temperature: 0.4
+        top_p: 0.9
   limits:
     wallTimeSeconds: 2700
+    contextWindow: 1000000
+    maxOutputTokens: 65536
     commandTimeoutSeconds: 900
     toolTimeoutSeconds: 300
     maxAttempts: 3

@@ -14,7 +14,6 @@ import {
   DEFAULT_HOST_BUDGETS,
   DEFAULT_LOCAL_COMMAND_GATE_ENV,
   loadDeclarativeTaskpack,
-  loadPiModelsJson,
   openStagedTaskpackStepGate,
   resolveEffectiveTaskpackSandboxPolicy,
   runActionCli,
@@ -34,7 +33,7 @@ import {
 } from './self-upgrade-fixtures.js';
 
 describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained command.v1 gate', () => {
-  it('compiles committed .loopwright/taskpack.yaml in candidate and no-change modes with strict scope boundaries', async () => {
+  it('compiles committed .auto-sync/taskpack.yaml in candidate and no-change modes with strict scope boundaries', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
       const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
@@ -45,19 +44,25 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     });
 
     const manifest = await loadDeclarativeTaskpack({
-      manifestPath: '.loopwright/taskpack.yaml',
+      manifestPath: '.auto-sync/taskpack.yaml',
       repositoryRoot: REPO_ROOT,
     });
     assert.equal(manifest.metadata.name, 'self-upgrade');
     assert.equal(manifest.spec.sandbox, undefined);
     assert.equal(manifest.spec.limits?.commandTimeoutSeconds, 900);
+    assert.equal(manifest.spec.limits?.contextWindow, 1_000_000);
+    assert.equal(manifest.spec.limits?.maxOutputTokens, 65_536);
     assert.deepEqual(manifest.spec.triggers.commentCommands, ['retry', 'revise']);
+    assert.deepEqual(manifest.spec.triggers.commentPrefixes, ['/auto-sync']);
+    assert.equal(manifest.spec.publication.headBranchPrefix, 'auto-sync/');
+    assert.ok((manifest.spec.models?.length ?? 0) >= 1);
+    assert.equal(manifest.spec.models?.[0]?.apiKeyEnv, 'LOOPWRIGHT_PROVIDER_TOKEN');
     assert.equal(manifest.spec.upstreams.length, 7);
 
     // Omitted spec.sandbox resolves to direct-dedicated on GitHub Actions and host OS sandbox locally
     const ghaPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
       workspaceRoot: REPO_ROOT,
-      relativeTaskpackPath: '.loopwright/taskpack.yaml',
+      relativeTaskpackPath: '.auto-sync/taskpack.yaml',
       env: { GITHUB_ACTIONS: 'true' },
     });
     assert.deepEqual(ghaPolicy.preferredBackends, ['direct-dedicated']);
@@ -65,7 +70,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
 
     const localPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
       workspaceRoot: REPO_ROOT,
-      relativeTaskpackPath: '.loopwright/taskpack.yaml',
+      relativeTaskpackPath: '.auto-sync/taskpack.yaml',
       env: {},
     });
     assert.equal(localPolicy.preferredBackends, undefined);
@@ -83,7 +88,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       baseRevision: 'a'.repeat(40),
       sourceRevision: 'a'.repeat(40),
       repositoryRoot: REPO_ROOT,
-      taskpackPath: '.loopwright/taskpack.yaml',
+      taskpackPath: '.auto-sync/taskpack.yaml',
       budgets: DEFAULT_HOST_BUDGETS,
     });
     const noChangeCompiled = await compileDeclarativeTaskpack(manifest, {
@@ -93,18 +98,18 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       baseRevision: 'a'.repeat(40),
       sourceRevision: 'a'.repeat(40),
       repositoryRoot: REPO_ROOT,
-      taskpackPath: '.loopwright/taskpack.yaml',
+      taskpackPath: '.auto-sync/taskpack.yaml',
       budgets: DEFAULT_HOST_BUDGETS,
     });
 
     assert.equal(candidateCompiled.localCommandGates?.length, 1);
     assert.equal(candidateCompiled.localCommandGates?.[0]?.timeoutSeconds, 900);
-    assert.equal(candidateCompiled.localCommandGates?.[0]?.script, '.loopwright/checks/verify.sh');
+    assert.equal(candidateCompiled.localCommandGates?.[0]?.script, '.auto-sync/checks/verify.sh');
     assert.deepEqual(noChangeCompiled.config.spec.task.spec.acceptance.required, ['taskpack-no-change']);
 
     const contract = candidateCompiled.config.spec.task;
     const writablePaths = [
-      '.loopwright/proposal.json',
+      '.auto-sync/proposal.json',
       'package-lock.json',
       'packages/agent-pi/package.json',
       'packages/agent-pi/src/host-session.ts',
@@ -120,9 +125,10 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     }
 
     const protectedPaths = [
-      '.loopwright/taskpack.yaml',
-      '.loopwright/instructions.md',
-      '.loopwright/checks/verify.sh',
+      '.auto-sync/taskpack.yaml',
+      '.auto-sync/instructions.md',
+      '.auto-sync/checks/verify.sh',
+      '.auto-sync/memory/self-upgrade/index.json',
       'package.json',
       'scripts/prepare-self-upgrade.mjs',
       'action.yml',
@@ -250,7 +256,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
 
     // 7) Missing-version 16-hex SHA hash from http-json -> rejected (blocked)
     const manifest = await loadDeclarativeTaskpack({
-      manifestPath: '.loopwright/taskpack.yaml',
+      manifestPath: '.auto-sync/taskpack.yaml',
       repositoryRoot: REPO_ROOT,
     });
     const fixturesWithMissingVersion: Record<string, unknown> = Object.fromEntries(
@@ -314,15 +320,15 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     assert.equal(chunksPulled <= 5, true, `expected <=5 64KiB chunks read before cancel, got ${chunksPulled}`);
   });
 
-  it('fails nonzero on malformed JSON, invalid schema, or drifted .loopwright/proposal.json and stages read-only candidate bundles', async () => {
+  it('fails nonzero on malformed JSON, invalid schema, or drifted .auto-sync/proposal.json and stages read-only candidate bundles', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
       const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir);
-      const proposalPath = join(repoRoot, '.loopwright/proposal.json');
+      const proposalPath = join(repoRoot, '.auto-sync/proposal.json');
       const originalProposalRaw = await readFile(proposalPath, 'utf8');
       const originalProposal = JSON.parse(originalProposalRaw) as Record<string, unknown>;
 
-      // 1) Malformed truncated JSON in .loopwright/proposal.json -> nonzero failure
+      // 1) Malformed truncated JSON in .auto-sync/proposal.json -> nonzero failure
       await writeFile(proposalPath, '{"schema_version": 1, "summary": "broken"\n', { mode: 0o600 });
       const malformedRun = spawnSync(
         process.execPath,
@@ -330,9 +336,9 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         { encoding: 'utf8' },
       );
       assert.notEqual(malformedRun.status, 0);
-      assert.equal(malformedRun.stderr.includes('Invalid JSON in ".loopwright/proposal.json"'), true);
+      assert.equal(malformedRun.stderr.includes('Invalid JSON in ".auto-sync/proposal.json"'), true);
 
-      // 2) Invalid schema (schema_version !== 1) in .loopwright/proposal.json -> nonzero failure
+      // 2) Invalid schema (schema_version !== 1) in .auto-sync/proposal.json -> nonzero failure
       await writeFile(
         proposalPath,
         `${JSON.stringify({ ...originalProposal, schema_version: 2 }, null, 2)}\n`,
@@ -346,7 +352,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       assert.notEqual(schemaInvalidRun.status, 0);
       assert.equal(schemaInvalidRun.stderr.includes('schema_version must be 1'), true);
 
-      // 3) Drift .loopwright/proposal.json yaml version without updating packages/cli/package.json -> nonzero failure
+      // 3) Drift .auto-sync/proposal.json yaml version without updating packages/cli/package.json -> nonzero failure
       const driftedProposal = {
         ...originalProposal,
         upstreams: {
@@ -396,13 +402,13 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       // Verify checkManagedPrMatchesDiscoveredState matches a committed proposal carrying those versions
       const prHeadProposal = JSON.stringify(prepared.evaluation!.targetVersions, null, 2);
       await writeFile(proposalPath, `${prHeadProposal}\n`, { mode: 0o600 });
-      spawnSync('git', ['add', '.loopwright/proposal.json'], { cwd: repoRoot, stdio: 'ignore' });
+      spawnSync('git', ['add', '.auto-sync/proposal.json'], { cwd: repoRoot, stdio: 'ignore' });
       spawnSync('git', ['commit', '-m', 'chore: simulated managed PR head'], { cwd: repoRoot, stdio: 'ignore' });
       const prHeadSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout.trim();
       spawnSync('git', ['reset', '--hard', headSha], { cwd: repoRoot, stdio: 'ignore' });
 
       const manifest = await loadDeclarativeTaskpack({
-        manifestPath: '.loopwright/taskpack.yaml',
+        manifestPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: repoRoot,
       });
       const prMatches = await checkManagedPrMatchesDiscoveredState({
@@ -412,7 +418,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         openManagedPr: {
           number: 42,
           htmlUrl: 'https://github.com/gpustack/loopwright/pull/42',
-          headRef: 'loopwright-self-upgrade-1',
+          headRef: 'auto-sync/main',
           headSha: prHeadSha,
           baseRef: 'main',
           baseSha: headSha,
@@ -435,7 +441,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       const stageDir = join(dir, 'stage-guards');
 
       // Stage a valid 1.6.0 / 2.10.0 bundle first
-      const baselineProposalRaw = await readFile(join(repoRoot, '.loopwright/proposal.json'), 'utf8');
+      const baselineProposalRaw = await readFile(join(repoRoot, '.auto-sync/proposal.json'), 'utf8');
       const baselineLockRaw = await readFile(join(repoRoot, 'package-lock.json'), 'utf8');
       const baselineCliPkgRaw = await readFile(join(repoRoot, 'packages/cli/package.json'), 'utf8');
       const baselineAgentPiPkgRaw = await readFile(join(repoRoot, 'packages/agent-pi/package.json'), 'utf8');
@@ -651,7 +657,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       }
 
       // Restore baseline files cleanly
-      await writeFile(join(repoRoot, '.loopwright/proposal.json'), baselineProposalRaw, { mode: 0o600 });
+      await writeFile(join(repoRoot, '.auto-sync/proposal.json'), baselineProposalRaw, { mode: 0o600 });
       await writeFile(lockPath, baselineLockRaw, { mode: 0o600 });
       await writeFile(join(repoRoot, 'packages/cli/package.json'), baselineCliPkgRaw, { mode: 0o600 });
       await writeFile(join(repoRoot, 'packages/agent-pi/package.json'), baselineAgentPiPkgRaw, { mode: 0o600 });
@@ -906,7 +912,7 @@ await new Promise((resolveConn, rejectConn) => {
           stageDir,
         });
 
-        const verifyPath = join(REPO_ROOT, '.loopwright/checks/verify.sh');
+        const verifyPath = join(REPO_ROOT, '.auto-sync/checks/verify.sh');
         const netEscapeRes = await spawnAsync(
           '/bin/bash',
           [verifyPath],
@@ -1078,7 +1084,7 @@ process.exit(45);
       assert.equal(noChangePrep.recommendedMode, 'no-change');
 
       const stagedNoChange = await stageTaskpackForStep({
-        taskpackPath: '.loopwright/taskpack.yaml',
+        taskpackPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: repoRoot,
         runRoot,
         runId: 'self-upgrade-no-change-01',
@@ -1168,7 +1174,7 @@ process.exit(45);
       assert.notEqual(candidatePrep.staged, null);
 
       const stagedCandidate = await stageTaskpackForStep({
-        taskpackPath: '.loopwright/taskpack.yaml',
+        taskpackPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: repoRoot,
         runRoot,
         runId: 'self-upgrade-candidate-01',
@@ -1232,7 +1238,7 @@ process.exit(45);
       const stagedTarget = JSON.parse(stagedTargetRaw) as TargetVersionsPayload;
       const stagedLockRaw = await readFile(candidatePrep.staged!.candidateLockPath);
 
-      await writeFile(join(yieldedCandidateDir, '.loopwright/proposal.json'), stagedTargetRaw, { mode: 0o600 });
+      await writeFile(join(yieldedCandidateDir, '.auto-sync/proposal.json'), stagedTargetRaw, { mode: 0o600 });
       await writeFile(join(yieldedCandidateDir, 'package-lock.json'), stagedLockRaw, { mode: 0o600 });
       for (const [ws, depUpdates] of Object.entries(stagedTarget.packages)) {
         const wsManifestPath = join(yieldedCandidateDir, ws, 'package.json');
@@ -1311,7 +1317,7 @@ process.exit(45);
         { cwd: repoRoot, encoding: 'utf8' },
       );
       assert.equal(baseGitStatus.stdout, '');
-      const baseProposal = JSON.parse(await readFile(join(repoRoot, '.loopwright/proposal.json'), 'utf8')) as TargetVersionsPayload;
+      const baseProposal = JSON.parse(await readFile(join(repoRoot, '.auto-sync/proposal.json'), 'utf8')) as TargetVersionsPayload;
       assert.equal(baseProposal.upstreams['pi-coding-agent']?.version, '1.5.0');
       assert.equal(baseProposal.upstreams['yaml']?.version, '2.9.0');
 
@@ -1344,7 +1350,7 @@ process.exit(45);
         return JSON.parse(Buffer.from(entry!.body, 'base64').toString('utf8')) as Record<string, unknown>;
       };
 
-      const exportedProposal = decodeExportedJson('.loopwright/proposal.json') as unknown as TargetVersionsPayload;
+      const exportedProposal = decodeExportedJson('.auto-sync/proposal.json') as unknown as TargetVersionsPayload;
       assert.equal(exportedProposal.upstreams['pi-coding-agent']?.version, '1.6.0');
       assert.equal(exportedProposal.upstreams['yaml']?.version, '2.10.0');
 
@@ -1367,128 +1373,9 @@ process.exit(45);
     });
   });
 
-  it('resolves org LLM gateway config into 0o600 models.json and succeeds on dry-run candidate compilation without publicationEndpoint', async () => {
+  it('compiles dry-run candidate action from .auto-sync/taskpack.yaml with token scrubbing and zero PublicationEndpoint', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
-      const modelsOut = join(dir, 'models.json');
-
-      // 1) Empty env falls back cleanly without writing models.json
-      const emptyCfg = await preflight.resolveSelfUpgradeModelConfig({ env: {}, modelsOutPath: modelsOut });
-      assert.equal(emptyCfg.configured, false);
-      assert.equal(emptyCfg.allowCustomBaseUrl, 'false');
-
-      // 2) Empty-string workflow inputs/vars fall through to org CI_GPUSTACK_CODEREVIEW_LLM_*, strip /chat/completions, and write 0o600 models.json
-      const orgCfg = await preflight.resolveSelfUpgradeModelConfig({
-        env: {
-          SELF_UPGRADE_INPUT_THINKING: '',
-          SELF_UPGRADE_INPUT_REASONING_EFFORT: '',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: '',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: '',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING: '',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT: '',
-          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/',
-          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
-          CI_GPUSTACK_CODEREVIEW_LLM_THINKING: 'enabled',
-          CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT: 'medium',
-          CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE: '0.4',
-          CI_GPUSTACK_CODEREVIEW_LLM_TOP_P: '0.9',
-        },
-        modelsOutPath: modelsOut,
-      });
-      assert.equal(orgCfg.configured, true);
-      assert.equal(orgCfg.modelProvider, 'zai-coding-cn');
-      assert.equal(orgCfg.modelId, 'glm-5.3');
-      assert.equal(orgCfg.modelThinking, 'high');
-      assert.equal(orgCfg.modelApi, 'openai-completions');
-      assert.equal(orgCfg.modelBaseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
-      assert.equal(orgCfg.allowCustomBaseUrl, 'true');
-      assert.equal(orgCfg.providerTokenEnv, 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN');
-
-      // Explicit disabled/off thinking stays 'off' with reasoning=false instead of snapping back on
-      const disabledThinkingOut = join(dir, 'models-disabled.json');
-      const disabledCfg = await preflight.resolveSelfUpgradeModelConfig({
-        env: {
-          SELF_UPGRADE_INPUT_THINKING: 'disabled',
-          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4',
-          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
-          CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT: 'medium',
-        },
-        modelsOutPath: disabledThinkingOut,
-      });
-      assert.equal(disabledCfg.modelThinking, 'off');
-      const parsedDisabledModels = await loadPiModelsJson(disabledThinkingOut);
-      assert.equal(parsedDisabledModels.providers.get('zai-coding-cn')?.models.get('glm-5.3')?.reasoning, false);
-
-      const st = await stat(modelsOut);
-      assert.equal(st.mode & 0o777, 0o600);
-      const parsedModels = await loadPiModelsJson(modelsOut);
-      const providerEntry = parsedModels.providers.get('zai-coding-cn');
-      assert.equal(providerEntry?.apiKeyEnv, 'LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN');
-      assert.equal(providerEntry?.models.get('glm-5.3')?.contextWindow, 1_000_000);
-      assert.equal(providerEntry?.models.get('glm-5.3')?.maxTokens, 65_536);
-
-      // 3) Dedicated CI_GPUSTACK_LOOPWRIGHT_LLM_* takes precedence over CI_GPUSTACK_CODEREVIEW_LLM_*
-      const overrideCfg = await preflight.resolveSelfUpgradeModelConfig({
-        env: {
-          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: 'https://api.openai.com/v1',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: 'gpt-4.1',
-          CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://open.bigmodel.cn/api/coding/paas/v4',
-          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
-        },
-      });
-      assert.equal(overrideCfg.modelProvider, 'openai');
-      assert.equal(overrideCfg.modelId, 'gpt-4.1');
-
-      // 3b) Custom internal gateway host + explicit CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER=zai-coding-cn
-      // receives ZAI default thinking ('low', reasoning=true) and zaiCompat in models.json
-      const customZaiModelsOut = join(dir, 'models-custom-zai.json');
-      const customZaiCfg = await preflight.resolveSelfUpgradeModelConfig({
-        env: {
-          CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER: 'zai-coding-cn',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: 'https://llm-gateway.internal.example/v1',
-          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: 'coding-model-v1',
-        },
-        modelsOutPath: customZaiModelsOut,
-      });
-      assert.equal(customZaiCfg.configured, true);
-      assert.equal(customZaiCfg.modelProvider, 'zai-coding-cn');
-      assert.equal(customZaiCfg.modelThinking, 'low');
-      const customZaiModelsRaw = JSON.parse(await readFile(customZaiModelsOut, 'utf8')) as {
-        providers: Record<string, { models: readonly { id: string; reasoning: boolean; compat?: Record<string, unknown> }[] }>;
-      };
-      const customZaiModelEntry = customZaiModelsRaw.providers['zai-coding-cn']?.models[0];
-      assert.equal(customZaiModelEntry?.reasoning, true);
-      assert.deepEqual(customZaiModelEntry?.compat, {
-        thinkingFormat: 'zai',
-        supportsReasoningEffort: true,
-      });
-
-      // 4) Negative cases fail closed
-      await assert.rejects(
-        () => preflight.resolveSelfUpgradeModelConfig({ env: { CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://api.openai.com/v1' } }),
-        /must be configured together/,
-      );
-      await assert.rejects(
-        () => preflight.resolveSelfUpgradeModelConfig({
-          env: {
-            CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER: 'openai-codex',
-            CI_GPUSTACK_CODEREVIEW_LLM_URL: 'https://api.openai.com/v1',
-            CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'gpt-5',
-          },
-        }),
-        /Unsupported LLM provider/,
-      );
-      await assert.rejects(
-        () => preflight.resolveSelfUpgradeModelConfig({
-          env: {
-            CI_GPUSTACK_CODEREVIEW_LLM_URL: 'http://example.com/v1',
-            CI_GPUSTACK_CODEREVIEW_LLM_MODEL: 'glm-5.3',
-          },
-        }),
-        /must use https/,
-      );
-
-      // 5) runActionCli with INPUT_DRY-RUN='true' and candidate mode succeeds without INPUT_PUBLICATION-ENDPOINT-URL
       const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir);
       const runRoot = join(dir, 'dry-runs');
       await mkdir(runRoot, { recursive: true, mode: 0o700 });
@@ -1499,20 +1386,12 @@ process.exit(45);
         GITHUB_WORKSPACE: repoRoot,
         GITHUB_REPOSITORY: 'gpustack/loopwright',
         GITHUB_SHA: headSha,
-        'INPUT_TASKPACK-PATH': '.loopwright/taskpack.yaml',
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
         'INPUT_MODE': 'candidate',
         'INPUT_EVENT-NAME': 'workflow_dispatch',
         'INPUT_RUN-ROOT': runRoot,
         'INPUT_RUN-ID': 'dry-run-self-upgrade-1',
         'INPUT_DRY-RUN': 'true',
-        'INPUT_PROVIDER': orgCfg.modelProvider,
-        'INPUT_MODEL': orgCfg.modelId,
-        'INPUT_THINKING': orgCfg.modelThinking,
-        'INPUT_API': orgCfg.modelApi,
-        'INPUT_BASE-URL': orgCfg.modelBaseUrl,
-        'INPUT_MODELS-JSON': orgCfg.modelsJsonPath,
-        'INPUT_ALLOW-CUSTOM-BASE-URL': orgCfg.allowCustomBaseUrl,
-        'INPUT_PROVIDER-TOKEN-ENV': orgCfg.providerTokenEnv,
         'INPUT_UPSTREAM-RECORDS': JSON.stringify(
           preflight.ALL_UPSTREAM_IDS.map(id => ({
             upstreamId: id,
@@ -1520,13 +1399,107 @@ process.exit(45);
             version: id === 'yaml' ? '2.10.0' : '1.6.0',
           })),
         ),
-        LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN: 'sk-org-gateway-token-123456',
+        LOOPWRIGHT_PROVIDER_TOKEN: 'sk-test-token-123456',
         GITHUB_OUTPUT: ghOut,
       });
       assert.equal(exitCode, 0);
       const outRaw = await readFile(ghOut, 'utf8');
-      assert.equal(outRaw.includes('sk-org-gateway-token-123456'), false);
+      assert.equal(outRaw.includes('sk-test-token-123456'), false);
       assert.equal(outRaw.includes('"kind":"compiled"'), true);
+      const resultMatch = /result<<[^\n]+\n([^\n]+)\n/.exec(outRaw)
+        ?? /result=([^\n]+)/.exec(outRaw);
+      const compiledResult = JSON.parse(resultMatch?.[1] ?? '') as { taskpack?: { configPath?: string } };
+      const compiledConfigRaw = await readFile(compiledResult.taskpack!.configPath!, 'utf8');
+      assert.equal(compiledConfigRaw.includes('LOOPWRIGHT_PROVIDER_TOKEN'), true);
+    });
+  });
+
+  it('stages baseline bundle with read-only preflight-metadata.json force=true under --force and rejects ambient env bypass without staged attestation', async () => {
+    const preflight = await loadPreflightModule();
+    await withTempDir(async dir => {
+      const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
+      const stageDir = join(dir, 'stage-force');
+      const unforcedStageDir = join(dir, 'stage-unforced');
+      const baselineLockRaw = await readFile(join(repoRoot, 'package-lock.json'));
+      const registryFixtures = Object.fromEntries(
+        preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
+      );
+
+      const forced = await preflight.runPrepareSelfUpgrade({
+        repoRoot,
+        stageDir,
+        requestedMode: 'auto',
+        force: true,
+        registryFixtures,
+        lockfileBuilder: async () => baselineLockRaw,
+      });
+      assert.equal(forced.recommendedMode, 'candidate');
+      assert.equal(forced.actionMode, 'candidate');
+      assert.equal(forced.staged !== null, true);
+      assert.equal(forced.upstreamRecords.every(rec => rec.status === 'up_to_date'), true);
+      const metaStat = await stat(forced.staged!.preflightMetadataPath);
+      assert.equal(metaStat.mode & 0o222, 0, 'preflight-metadata.json must be read-only');
+      const metaDoc = JSON.parse(await readFile(forced.staged!.preflightMetadataPath, 'utf8')) as {
+        schema_version: number;
+        force: boolean;
+      };
+      assert.deepEqual(metaDoc, { schema_version: 1, force: true });
+
+      const cliRes = spawnSync(
+        process.execPath,
+        [
+          join(REPO_ROOT, 'scripts/prepare-self-upgrade.mjs'),
+          '--repo',
+          repoRoot,
+          '--stage-dir',
+          join(dir, 'stage-force-cli'),
+          '--requested-mode',
+          'auto',
+          '--force',
+          '--skip-stage',
+          '--registry-json',
+          JSON.stringify(registryFixtures),
+          '--json',
+        ],
+        { cwd: repoRoot, encoding: 'utf8' },
+      );
+      assert.equal(cliRes.status, 0, cliRes.stderr);
+      const cliSummary = JSON.parse(cliRes.stdout) as { recommendedMode: string; actionMode: string };
+      assert.equal(cliSummary.recommendedMode, 'candidate');
+      assert.equal(cliSummary.actionMode, 'candidate');
+
+      // Zero-delta succeeds when staged preflight-metadata.json attests force=true (no env override needed)
+      const verifyRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        SELF_UPGRADE_STAGE_DIR: stageDir,
+      });
+      if (CAN_RUN_KERNEL_CONTAINMENT) {
+        assert.equal(verifyRes.status, 0, verifyRes.stderr);
+      } else {
+        assert.notEqual(verifyRes.status, 0);
+        assert.equal(verifyRes.stderr.includes('do not advance'), false);
+        assert.equal(verifyRes.stderr.includes('failing closed'), true);
+      }
+
+      // Ambient SELF_UPGRADE_FORCE=1 alone must NOT bypass zero-delta when staged metadata attests force=false
+      await preflight.stageCandidateBundle({
+        repoRoot,
+        stageDir: unforcedStageDir,
+        targetVersions: preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'),
+        force: false,
+        lockfileBuilder: async () => baselineLockRaw,
+      });
+      const spoofedRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        SELF_UPGRADE_STAGE_DIR: unforcedStageDir,
+        SELF_UPGRADE_FORCE: '1',
+      });
+      assert.notEqual(spoofedRes.status, 0);
+      assert.equal(spoofedRes.stderr.includes('do not advance'), true);
     });
   });
 });

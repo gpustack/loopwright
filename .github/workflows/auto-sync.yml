@@ -1,4 +1,4 @@
-name: Self-Upgrade
+name: Auto Sync
 
 permissions:
   contents: read
@@ -25,39 +25,23 @@ on:
           - normal
           - 4x
           - 8x
-      mode:
-        description: "Preflight mode selection ('auto', 'candidate', or 'no-change')"
-        default: auto
-        required: false
-        type: choice
-        options:
-          - auto
-          - candidate
-          - no-change
       dry-run:
         description: "Compile without invoking model execution or PR publication"
-        default: 'false'
+        default: false
         required: false
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      llm-thinking:
-        description: "Optional LLM thinking override ('', 'disabled', or 'enabled')"
-        default: ''
+        type: boolean
+      force:
+        description: "Force candidate mode even when preflight detects no upstream changes"
+        default: false
         required: false
-        type: string
-      llm-reasoning-effort:
-        description: "Optional LLM reasoning effort ('', 'minimal', 'low', 'medium', 'high', 'xhigh', or 'max')"
-        default: ''
-        required: false
-        type: string
+        type: boolean
   issue_comment:
     types:
       - created
 
 jobs:
-  self-upgrade:
+  auto-sync:
+    name: Auto Sync
     if: >-
       github.event_name == 'workflow_dispatch'
       || (github.event_name == 'schedule' && github.repository == 'gpustack/loopwright')
@@ -66,49 +50,49 @@ jobs:
         && github.event.issue.pull_request != null
         && github.event.issue.state == 'open'
         && github.event.comment.user.type != 'Bot'
-        && startsWith(github.event.comment.body, '/loopwright')
+        && startsWith(github.event.comment.body, '/auto-sync')
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
-    runs-on: ${{ inputs.runner_profile && inputs.runner_profile != 'normal' && format('ubuntu-24.04-{0}', inputs.runner_profile) || vars.SELF_UPGRADE_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.runner_profile && inputs.runner_profile != 'normal' && format('ubuntu-24.04-{0}', inputs.runner_profile) || vars.AUTOSYNC_RUNNER || vars.SELF_UPGRADE_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       npm_config_ignore_scripts: 'true'
     steps:
-      - name: Checkout SHA-pinned bootstrap Loopwright control plane
+      - name: Checkout bootstrap
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: gpustack/loopwright
-          ref: caeb27ecabb3d21359fb220fdba23a60b2d062d6
+          ref: 92d90440b9e48cac42dd7ef058da1e8c48ec858c
           path: bootstrap-loopwright
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Relocate bootstrap control plane outside workspace
+      - name: Relocate bootstrap
         run: |
           rm -rf "${RUNNER_TEMP}/loopwright-bootstrap"
           mv "${GITHUB_WORKSPACE}/bootstrap-loopwright" "${RUNNER_TEMP}/loopwright-bootstrap"
 
-      - name: Checkout trusted main repository state
+      - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: refs/heads/main
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Verify main checkout and dispatch ref alignment
+      - name: Verify main ref
         id: main_ref
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_REF: ${{ github.ref }}
         run: |
           if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_REF}" != "refs/heads/main" ]]; then
-            echo "Refusing workflow_dispatch from '${DISPATCH_REF}'; dispatch Self-Upgrade from refs/heads/main." >&2
+            echo "Refusing workflow_dispatch from '${DISPATCH_REF}'; dispatch Auto Sync from refs/heads/main." >&2
             exit 1
           fi
           MAIN_SHA="$(git rev-parse --verify 'HEAD^{commit}')"
           echo "sha=${MAIN_SHA}" >> "${GITHUB_OUTPUT}"
 
-      - name: Fetch pull request commit object without checkout
+      - name: Fetch PR head
         if: github.event_name == 'issue_comment'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -153,7 +137,7 @@ jobs:
           hugo-version: '0.152.2'
           extended: true
 
-      - name: Install Python bridge dependencies
+      - name: Install Python dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -163,65 +147,48 @@ jobs:
             python3-pytest \
             python3-pytest-xdist
 
-      - name: Build pinned bootstrap control plane and workspace preflight
+      - name: Build workspace
         run: |
           npm --prefix "${RUNNER_TEMP}/loopwright-bootstrap" ci --ignore-scripts --no-audit --no-fund
           npm --prefix "${RUNNER_TEMP}/loopwright-bootstrap" run build
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
 
-      - name: Run self-upgrade preflight, model gateway resolution, and lockfile staging
+      - name: Run preflight
         id: preflight
         env:
-          REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
-          SELF_UPGRADE_INPUT_THINKING: ${{ inputs.llm-thinking }}
-          SELF_UPGRADE_INPUT_REASONING_EFFORT: ${{ inputs.llm-reasoning-effort }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_PROVIDER }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_URL: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_URL }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_MODEL }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_PROTOCOL }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_USE_ANTHROPIC }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_THINKING }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_REASONING_EFFORT }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_TEMPERATURE }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_TOP_P }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_MAX_TOKENS }}
-          CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE: ${{ vars.CI_GPUSTACK_LOOPWRIGHT_LLM_CONTEXT_WINDOW_SIZE }}
-          CI_GPUSTACK_CODEREVIEW_LLM_URL: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_URL }}
-          CI_GPUSTACK_CODEREVIEW_LLM_MODEL: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_MODEL }}
-          CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_USE_ANTHROPIC }}
-          CI_GPUSTACK_CODEREVIEW_LLM_THINKING: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_THINKING }}
-          CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_REASONING_EFFORT }}
-          CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_TEMPERATURE }}
-          CI_GPUSTACK_CODEREVIEW_LLM_TOP_P: ${{ vars.CI_GPUSTACK_CODEREVIEW_LLM_TOP_P }}
+          FORCE_SYNC: ${{ inputs.force && 'true' || 'false' }}
         run: |
-          STAGE_DIR="${RUNNER_TEMP}/loopwright-self-upgrade-stage"
-          MODELS_OUT="${RUNNER_TEMP}/loopwright-self-upgrade-models.json"
+          STAGE_DIR="${RUNNER_TEMP}/loopwright-auto-sync-stage"
+          EXTRA_ARGS=()
+          if [[ "${FORCE_SYNC}" == "true" ]]; then
+            EXTRA_ARGS+=(--force)
+          fi
           node scripts/prepare-self-upgrade.mjs \
             --stage-dir "${STAGE_DIR}" \
-            --requested-mode "${REQUESTED_MODE}" \
-            --models-out "${MODELS_OUT}" \
+            --requested-mode auto \
+            "${EXTRA_ARGS[@]}" \
             --github-output "${GITHUB_OUTPUT}"
 
-      - name: Validate preflight disposition and resolve effective mode
+      - name: Resolve mode
         id: mode_gate
         env:
           EVENT_NAME: ${{ github.event_name }}
-          REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
+          FORCE_SYNC: ${{ inputs.force && 'true' || 'false' }}
           RECOMMENDED_MODE: ${{ steps.preflight.outputs.recommended_mode }}
           ACTION_MODE: ${{ steps.preflight.outputs.action_mode }}
         run: |
           if [[ "${RECOMMENDED_MODE}" == "blocked" ]]; then
-            echo "Self-upgrade preflight reported recommended_mode=blocked; refusing execution." >&2
+            echo "Preflight reported recommended_mode=blocked; refusing execution." >&2
             exit 3
           fi
-          if [[ ( "${EVENT_NAME}" == "issue_comment" || "${REQUESTED_MODE}" == "candidate" ) && "${RECOMMENDED_MODE}" != "candidate" ]]; then
-            echo "Candidate execution requested (${EVENT_NAME}, mode=${REQUESTED_MODE}), but preflight recommended_mode=${RECOMMENDED_MODE} staged no upgrade bundle." >&2
+          if [[ ( "${EVENT_NAME}" == "issue_comment" || "${FORCE_SYNC}" == "true" ) && "${RECOMMENDED_MODE}" != "candidate" ]]; then
+            echo "Candidate execution requested (${EVENT_NAME}, force=${FORCE_SYNC}), but preflight recommended_mode=${RECOMMENDED_MODE} staged no upgrade bundle." >&2
             exit 3
           fi
           echo "effective_mode=${ACTION_MODE}" >> "${GITHUB_OUTPUT}"
 
-      - name: Resolve host tool paths
+      - name: Resolve host tools
         id: tools
         run: |
           {
@@ -230,18 +197,18 @@ jobs:
             echo "python_bin=$(command -v python3)"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Verify no-change.v1 controller invariance
+      - name: Verify no-change
         if: steps.mode_gate.outputs.effective_mode == 'no-change'
         env:
           GITHUB_SHA: ${{ steps.main_ref.outputs.sha }}
         run: |
           BOOTSTRAP_CLI="${RUNNER_TEMP}/loopwright-bootstrap/packages/cli/dist/main.js"
-          NO_CHANGE_ROOT="${RUNNER_TEMP}/loopwright-self-upgrade-no-change"
+          NO_CHANGE_ROOT="${RUNNER_TEMP}/loopwright-auto-sync-no-change"
           NO_CHANGE_RUN_ID="no-change-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "${NO_CHANGE_ROOT}"
           chmod 0700 "${NO_CHANGE_ROOT}"
           STEP_JSON="$(node "${BOOTSTRAP_CLI}" step next \
-            --taskpack .loopwright/taskpack.yaml \
+            --taskpack .auto-sync/taskpack.yaml \
             --mode no-change \
             --repo "${GITHUB_WORKSPACE}" \
             --run-root "${NO_CHANGE_ROOT}" \
@@ -271,40 +238,30 @@ jobs:
             }
           '
 
-      - name: Run pinned Loopwright Taskpack Entrypoint
+      - name: Run Loopwright
         id: loopwright
         env:
           GITHUB_SHA: ${{ steps.main_ref.outputs.sha }}
           GITHUB_REF: refs/heads/main
-          INPUT_TASKPACK-PATH: .loopwright/taskpack.yaml
+          INPUT_TASKPACK-PATH: .auto-sync/taskpack.yaml
           INPUT_MODE: ${{ steps.mode_gate.outputs.effective_mode }}
           INPUT_UPSTREAM-RECORDS: ${{ steps.preflight.outputs.upstream_records }}
           INPUT_EVENT-NAME: ${{ github.event_name }}
           INPUT_EVENT-PATH: ${{ github.event_path }}
-          INPUT_RUN-ROOT: ${{ runner.temp }}/loopwright-self-upgrade
-          INPUT_RUN-ID: self-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+          INPUT_RUN-ROOT: ${{ runner.temp }}/loopwright-auto-sync
+          INPUT_RUN-ID: auto-sync-${{ github.run_id }}-${{ github.run_attempt }}
           INPUT_STORAGE-PROFILE: actions-basic
-          INPUT_DRY-RUN: ${{ inputs.dry-run || 'false' }}
-          INPUT_PROVIDER: ${{ steps.preflight.outputs.model_provider }}
-          INPUT_MODEL: ${{ steps.preflight.outputs.model_id }}
-          INPUT_THINKING: ${{ steps.preflight.outputs.model_thinking }}
-          INPUT_API: ${{ steps.preflight.outputs.model_api }}
-          INPUT_BASE-URL: ${{ steps.preflight.outputs.model_base_url }}
-          INPUT_MODELS-JSON: ${{ steps.preflight.outputs.models_json }}
-          INPUT_ALLOW-CUSTOM-BASE-URL: ${{ steps.preflight.outputs.allow_custom_base_url || 'false' }}
-          INPUT_PROVIDER-TOKEN-ENV: ${{ steps.preflight.outputs.provider_token_env }}
+          INPUT_DRY-RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+          INPUT_FORCE: ${{ inputs.force && 'true' || 'false' }}
           INPUT_GITHUB-APP-ID: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_ID || vars.CI_GPUSTACK_LOOPWRIGHT_APP_ID || secrets.LOOPWRIGHT_APP_ID }}
           INPUT_GITHUB-APP-PRIVATE-KEY: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_PRIVATE_KEY || secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
           INPUT_OUTPUT: json,github-step-summary
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LOOPWRIGHT_SELF_UPGRADE_LLM_TOKEN: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_LLM_AUTH_TOKEN || secrets.CI_GPUSTACK_CODEREVIEW_LLM_AUTH_TOKEN }}
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          ZAI_CODING_CN_API_KEY: ${{ secrets.ZAI_CODING_CN_API_KEY }}
-          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          LOOPWRIGHT_PROVIDER_TOKEN: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_LLM_AUTH_TOKEN || secrets.CI_GPUSTACK_CODEREVIEW_LLM_AUTH_TOKEN }}
           NODE_BIN_DIR: ${{ steps.tools.outputs.node_bin_dir }}
           HUGO_BIN: ${{ steps.tools.outputs.hugo_bin }}
           PYTHON_BIN: ${{ steps.tools.outputs.python_bin }}
-          SELF_UPGRADE_RUN_ROOT: ${{ runner.temp }}/loopwright-self-upgrade
+          SELF_UPGRADE_RUN_ROOT: ${{ runner.temp }}/loopwright-auto-sync
           SELF_UPGRADE_STAGE_DIR: ${{ steps.preflight.outputs.stage_dir }}
           SELF_UPGRADE_NPM_CACHE: ${{ steps.preflight.outputs.npm_cache_dir }}
           SELF_UPGRADE_REPO_ROOT: ${{ github.workspace }}
@@ -312,18 +269,18 @@ jobs:
         run: |
           node "${RUNNER_TEMP}/loopwright-bootstrap/packages/github-app/dist/action.js"
 
-      - name: Upload scrubbed self-upgrade diagnostics
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: self-upgrade-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          name: auto-sync-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/loopwright-self-upgrade/*/run.json
-            ${{ runner.temp }}/loopwright-self-upgrade/*/memory-publication.json
-            ${{ runner.temp }}/loopwright-self-upgrade/*/artifacts/**/*.json
-            ${{ runner.temp }}/loopwright-self-upgrade/lw-action-*/config/config.yaml
-            ${{ runner.temp }}/loopwright-self-upgrade/lw-action-*/registry/registry.yaml
-            !${{ runner.temp }}/loopwright-self-upgrade/**/secrets.json
-            !${{ runner.temp }}/loopwright-self-upgrade/**/*.sqlite*
+            ${{ runner.temp }}/loopwright-auto-sync/*/run.json
+            ${{ runner.temp }}/loopwright-auto-sync/*/memory-publication.json
+            ${{ runner.temp }}/loopwright-auto-sync/*/artifacts/**/*.json
+            ${{ runner.temp }}/loopwright-auto-sync/lw-action-*/config/config.yaml
+            ${{ runner.temp }}/loopwright-auto-sync/lw-action-*/registry/registry.yaml
+            !${{ runner.temp }}/loopwright-auto-sync/**/secrets.json
+            !${{ runner.temp }}/loopwright-auto-sync/**/*.sqlite*
           retention-days: 30
           if-no-files-found: ignore

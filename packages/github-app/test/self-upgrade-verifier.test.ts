@@ -8,6 +8,7 @@ import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { parseDocument } from 'yaml';
 import { loadTrustedConfiguration, stepNext } from '@loopwright/controller';
 import {
   CANONICAL_TASKPACK_STEP_GATE_URL,
@@ -60,8 +61,8 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
       const externalMode = (await stat(externalExecPath)).mode & 0o777;
       assert.equal(externalMode, 0o755, `expected external executable mode 0o755 to remain intact, got 0o${externalMode.toString(8)}`);
 
-      // 2) Named FIFO at .loopwright/proposal.json fails fast without blocking open()
-      const proposalPath = join(repoRoot, '.loopwright/proposal.json');
+      // 2) Named FIFO at .auto-sync/proposal.json fails fast without blocking open()
+      const proposalPath = join(repoRoot, '.auto-sync/proposal.json');
       const savedProposal = await readFile(proposalPath);
       await unlink(proposalPath);
       const mkfifoProbe = spawnSync('mkfifo', [proposalPath], { stdio: 'ignore' });
@@ -540,7 +541,7 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         },
       });
 
-      await writeFile(join(repoRoot, '.loopwright/proposal.json'), `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o600 });
+      await writeFile(join(repoRoot, '.auto-sync/proposal.json'), `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o600 });
       await writeFile(join(repoRoot, 'package-lock.json'), offlineLockBytes, { mode: 0o600 });
       for (const [ws, depUpdates] of Object.entries(targetVersions.packages)) {
         const wsManifestPath = join(repoRoot, ws, 'package.json');
@@ -647,18 +648,27 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
     };
 
     // 1) Workflow contract: issue_comment fetches +refs/pull/<n>/head without checking out PR head
-    const workflowRaw = await readFile(join(REPO_ROOT, '.github/workflows/self-upgrade.yml'), 'utf8');
-    assert.equal(workflowRaw.includes('Fetch pull request commit object without checkout'), true);
+    const workflowRaw = await readFile(join(REPO_ROOT, '.github/workflows/auto-sync.yml'), 'utf8');
+    const workflowDoc = parseDocument(workflowRaw, { version: '1.2', schema: 'core', uniqueKeys: true });
+    assert.equal(workflowDoc.errors.length, 0, 'auto-sync.yml must parse cleanly as YAML');
     assert.equal(
       workflowRaw.includes('+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}'),
       true,
     );
     assert.equal(
-      workflowRaw.includes('!${{ runner.temp }}/loopwright-self-upgrade/**/secrets.json'),
+      workflowRaw.includes('!${{ runner.temp }}/loopwright-auto-sync/**/secrets.json'),
       true,
     );
     assert.equal(
-      workflowRaw.includes('!${{ runner.temp }}/loopwright-self-upgrade/**/*.sqlite*'),
+      workflowRaw.includes('!${{ runner.temp }}/loopwright-auto-sync/**/*.sqlite*'),
+      true,
+    );
+    assert.equal(
+      workflowRaw.includes("startsWith(github.event.comment.body, '/auto-sync')"),
+      true,
+    );
+    assert.equal(
+      workflowRaw.includes('INPUT_TASKPACK-PATH: .auto-sync/taskpack.yaml'),
       true,
     );
 
@@ -709,7 +719,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
               number: 77,
               state: 'open',
               base: { ref: 'main', sha: mainSha },
-              head: { ref: 'loopwright-self-upgrade/main', sha: forkHeadSha },
+              head: { ref: 'auto-sync/main', sha: forkHeadSha },
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
@@ -720,7 +730,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       const commentPayload = {
         action: 'created',
         issue: { number: 77, pull_request: { url: 'https://api.github.com/repos/gpustack/loopwright/pulls/77' } },
-        comment: { body: '/loopwright retry', author_association: 'COLLABORATOR' },
+        comment: { body: '/auto-sync retry', author_association: 'COLLABORATOR' },
         repository: { id: 4242, full_name: 'gpustack/loopwright' },
       };
 
@@ -742,7 +752,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       await mkdir(forkCfgDir, { recursive: true, mode: 0o700 });
 
       const manifest = await loadDeclarativeTaskpack({
-        manifestPath: '.loopwright/taskpack.yaml',
+        manifestPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: runnerCheckout,
       });
       const compiledFork = await compileDeclarativeTaskpack(manifest, {
@@ -752,7 +762,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         baseRevision: resolved.baseRevision,
         sourceRevision: resolved.sourceRevision,
         repositoryRoot: runnerCheckout,
-        taskpackPath: '.loopwright/taskpack.yaml',
+        taskpackPath: '.auto-sync/taskpack.yaml',
         budgets: DEFAULT_HOST_BUDGETS,
         credentialEnvMap: {
           localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV,
@@ -900,7 +910,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       await writeFile(corePkgPath, goodCoreRaw, { mode: 0o600 });
 
       // Proposal "schema_version": true rejected
-      const proposalPath = join(repoRoot, '.loopwright/proposal.json');
+      const proposalPath = join(repoRoot, '.auto-sync/proposal.json');
       const goodProposalRaw = await readFile(proposalPath, 'utf8');
       const boolSchemaProposal = JSON.parse(goodProposalRaw) as Record<string, unknown>;
       boolSchemaProposal['schema_version'] = true;
@@ -1134,7 +1144,7 @@ if (!/^ERR:(EPERM|EACCES|ENOENT)$/.test(String(unixOutcome))) {
           (resolveProc, rejectProc) => {
             const child = spawn(
               '/bin/bash',
-              [join(REPO_ROOT, '.loopwright/checks/verify.sh')],
+              [join(REPO_ROOT, '.auto-sync/checks/verify.sh')],
               {
                 cwd: runtimeNetRepo,
                 env: {
