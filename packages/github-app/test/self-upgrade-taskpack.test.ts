@@ -1475,7 +1475,13 @@ process.exit(45);
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         SELF_UPGRADE_STAGE_DIR: stageDir,
       });
-      assert.equal(verifyRes.status, 0, verifyRes.stderr);
+      if (CAN_RUN_KERNEL_CONTAINMENT) {
+        assert.equal(verifyRes.status, 0, verifyRes.stderr);
+      } else {
+        assert.notEqual(verifyRes.status, 0);
+        assert.equal(verifyRes.stderr.includes('do not advance'), false);
+        assert.equal(verifyRes.stderr.includes('failing closed'), true);
+      }
 
       // Ambient SELF_UPGRADE_FORCE=1 alone must NOT bypass zero-delta when staged metadata attests force=false
       await preflight.stageCandidateBundle({
