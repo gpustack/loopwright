@@ -223,7 +223,7 @@ Reports include total tokens, with input and output breakdowns. Cost appears in 
 1. **Candidate pull request**: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching `headBranchPrefix`.
 2. **Verified no-change**: When no update is needed, the compiled `no-change.v1` check verifies an untouched tree and settles cleanly without opening an empty PR.
 3. **Slash-command iteration**: Collaborators with write access comment `/loopwright status`, `/loopwright retry`, or `/loopwright revise` on managed issues or pull requests.
-4. **Reviewed memory**: Active entries live under `.loopwright/memory/<name>`. Separate PRs skip failed runs (`publishOnFailure: false`) and add `[skip ci]` (`skipCi: true`). Use `local-only` or `disabled` without blocking task completion.
+4. **Reviewed memory**: Active entries live under `.loopwright/memory/<name>`. Separate PRs skip non-passing runs (`publishOnFailure: false`) and add `[skip ci]` (`skipCi: true`). Use `local-only` or `disabled` without blocking task completion.
 
 ---
 

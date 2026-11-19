@@ -329,7 +329,7 @@ The script runs with a minimal environment and `LOOPWRIGHT_CANDIDATE_DIR` pointi
 | --- | --- | --- | --- |
 | `publication.mode` | Yes | `'pull_request'` or `'disabled'` | Opens/updates a managed pull request or skips remote branch writes |
 | `publication.targetBranch` | Yes | Branch name (`1..128` chars) | Base branch targeted by generated pull requests (required even when `disabled`) |
-| `publication.headBranchPrefix` | Yes | Prefix (`1..64` chars, no `//`) | Branch prefix for head-pinned PRs (for example `loopwright-catalog-sync-`) |
+| `publication.headBranchPrefix` | Yes | Prefix (`1..64` chars, `[A-Za-z0-9._-]` plus optional trailing `/`) | Branch prefix for head-pinned PRs (for example `loopwright-catalog-sync-`) |
 | `publication.titleTemplate` | Yes | String (`1..256` chars) | Pull request title string |
 | `memory.directory` | Yes | `<controlRoot>/memory` or descendant | Storage directory for reviewed CAS memory, protected even inside a writable ancestor |
 | `memory.apply` | Yes | `'separate-pull-request'`, `'local-only'`, `'disabled'` | Proposes memory updates in a separate PR, applies locally, or disables memory |
@@ -339,12 +339,12 @@ The script runs with a minimal environment and `LOOPWRIGHT_CANDIDATE_DIR` pointi
 | `memory.maxPromptEntries` | No | Integer (`1..128`, default `32`) | Maximum prioritized active entries injected into role prompts |
 | `memory.checkCodeFingerprint` | No | Boolean (default `false`) | Enables `scope.writable` hash checks for memory validity |
 | `memory.checkUpstreamVersions` | No | Boolean (default `false`) | Enables upstream version checks for memory validity |
-| `memory.publishOnFailure` | No | Boolean (default `false`) | Publishes separate memory PRs on failed or incident runs when `true` |
+| `memory.publishOnFailure` | No | Boolean (default `false`) | Publishes separate memory PRs on non-passing or incident runs when `true` |
 | `memory.skipCi` | No | Boolean (default `true`) | Adds `[skip ci]` to memory commit bodies before DCO trailers |
 
 - **Direct deletion**: Retiring or evicting an entry deletes `entries/<id>.md` on disk and clears `index.retired`.
 - **Loose defaults**: Memory skips `codeFingerprint` and `upstreamVersions` invalidation unless you opt in with `true`.
-- **Quiet PR defaults**: Separate memory PRs skip failed runs and add `[skip ci]` before the DCO trailer.
+- **Quiet PR defaults**: Separate memory PRs skip non-passing runs and add `[skip ci]` before the DCO trailer.
 - **Stateless taskpacks**: Set `apply: disabled` for stateless workflows or taskpacks driven by `spec.decisions`.
 - **Non-blocking isolation**: Memory reads, warnings, CAS conflicts, and cleanup PRs never block task completion.
 
