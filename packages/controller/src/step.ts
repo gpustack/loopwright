@@ -626,7 +626,7 @@ async function runStepTickWithCycle(
           context.lock.spec.runId,
           context.lock.spec.lockHash,
           [context.descriptor.plan, context.source.inventory],
-          ['authoritative_result'],
+          cycle.candidateKnown ? ['authoritative_result'] : ['current_candidate', 'submission', 'authoritative_result'],
           'complete',
         );
       }

@@ -1,5 +1,5 @@
-import { constants, existsSync } from 'node:fs';
-import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
+import { constants, existsSync, type BigIntStats } from 'node:fs';
+import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { LIMITS, digestArtifact, isWritablePath, type ArtifactRef, type ArtifactManifest } from '@loopwright/core';
@@ -61,7 +61,7 @@ function isPrefixCollision(aNorm: string, bNorm: string): boolean {
   return aNorm.startsWith(bNorm + '/') || bNorm.startsWith(aNorm + '/');
 }
 
-function fingerprintFromStat(info: import('node:fs').BigIntStats): BaselineStatFingerprint {
+function fingerprintFromStat(info: BigIntStats): BaselineStatFingerprint {
   return {
     mode: Number(info.mode),
     size: Number(info.size),
@@ -82,7 +82,7 @@ type ExpectedOverlayFile =
 const preBootBaselineStats = new WeakMap<PiCandidateBaseline, { readonly root: string; readonly stats: ReadonlyMap<string, BaselineStatFingerprint> }>();
 
 function verifyUntouchedBaselineIdentity(
-  info: import('node:fs').BigIntStats,
+  info: BigIntStats,
   entry: PiBaselineEntry,
   phase: 'admission' | 'tool' = 'admission',
 ): void {
@@ -97,7 +97,7 @@ function verifyUntouchedBaselineIdentity(
   }
 }
 
-function verifyUntouchedBaselineStat(info: import('node:fs').BigIntStats, entry: PiBaselineEntry): BaselineStatFingerprint {
+function verifyUntouchedBaselineStat(info: BigIntStats, entry: PiBaselineEntry): BaselineStatFingerprint {
   const expectedMode = entry.mode === '100755' ? 0o555 : 0o444;
   verifyUntouchedBaselineIdentity(info, entry, 'admission');
   if ((Number(info.mode) & 0o777) !== expectedMode) {
@@ -589,7 +589,7 @@ export class Candidate {
     };
   }
 
-  async #isCanonicalDir(path: string, resolved: string, childInfo?: import('node:fs').BigIntStats): Promise<boolean> {
+  async #isCanonicalDir(path: string, resolved: string, childInfo?: BigIntStats): Promise<boolean> {
     try {
       return await realpath(path) === resolved;
     } catch (error) {
@@ -620,7 +620,7 @@ export class Candidate {
 
   async #chmodDirectoryNoFollow(
     path: string,
-    expectedInfo: import('node:fs').BigIntStats,
+    expectedInfo: BigIntStats,
     targetMode: number,
   ): Promise<void> {
     const uid = process.getuid?.();
@@ -635,8 +635,19 @@ export class Candidate {
       ) {
         refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
       }
-      // Grant read-only first so open(O_RDONLY | O_DIRECTORY | O_NOFOLLOW) can verify dev/ino before applying targetMode.
-      await chmod(path, 0o400);
+      // Grant read+search (0o500) so the directory stays traversable during the window before open(O_RDONLY | O_DIRECTORY | O_NOFOLLOW).
+      await chmod(path, 0o500);
+      const granted = await lstat(path, { bigint: true });
+      if (
+        !granted.isDirectory()
+        || granted.isSymbolicLink()
+        || (uid !== undefined && Number(granted.uid) !== uid)
+        || granted.dev !== expectedInfo.dev
+        || granted.ino !== expectedInfo.ino
+        || (Number(granted.mode) & 0o777) !== 0o500
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      }
     }
     const descriptor = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
     try {
@@ -724,10 +735,10 @@ export class Candidate {
 
   async #openRegularReadOnlyNoFollow(
     path: string,
-    info: import('node:fs').BigIntStats,
+    info: BigIntStats,
     phase: 'admission' | 'tool',
     allowReadUnlock = true,
-  ): Promise<import('node:fs/promises').FileHandle> {
+  ): Promise<FileHandle> {
     if (allowReadUnlock && (Number(info.mode) & 0o400) === 0) {
       const uid = process.getuid?.();
       const recheck = await lstat(path, { bigint: true });
@@ -743,6 +754,18 @@ export class Candidate {
       }
       // Restore minimum read bit only; final expected mode (0o444/0o555) is applied via fchmod after O_NOFOLLOW + content verification.
       await chmod(path, 0o400);
+      const granted = await lstat(path, { bigint: true });
+      if (
+        !granted.isFile()
+        || granted.isSymbolicLink()
+        || Number(granted.nlink) !== 1
+        || (uid !== undefined && Number(granted.uid) !== uid)
+        || granted.dev !== info.dev
+        || granted.ino !== info.ino
+        || (Number(granted.mode) & 0o777) !== 0o400
+      ) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
     }
     return await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   }
@@ -751,7 +774,7 @@ export class Candidate {
     name: string,
     path: string,
     expected: PiBaselineEntry,
-    info: import('node:fs').BigIntStats,
+    info: BigIntStats,
     phase: 'admission' | 'tool',
     readBytes: boolean,
     allowOversize: boolean,
