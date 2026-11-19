@@ -840,12 +840,12 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let intake: TaskpackIntakeOutcome;
   let reviseGuidance: string | undefined;
   const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true && input.mode === 'candidate';
-  const runDiscoverIntake = (allowForce: boolean) => {
+  const runDiscoverIntake = (allowForce: boolean, bypassManagedPrDedupe = false) => {
     const outcome = prepareTaskpackIntake({
       mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
       records: effectiveUpstreamRecords ?? [],
       ...(allowForce ? { force: true } : {}),
-      ...(managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
+      ...(!bypassManagedPrDedupe && managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
       targetMatrix: input.targetMatrix ?? null,
     });
     if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
@@ -893,8 +893,12 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       intake = outcome;
     } else {
       // PR comment commands follow comment-command dispatch semantics; force applies only to non-comment trigger events.
-      const discovered = runDiscoverIntake(false);
+      // Explicit operator `retry` comments bypass open-PR deduplication while still settling `no_change` if no updates are available.
+      const discovered = runDiscoverIntake(false, true);
       if (!discovered.ok) return discovered.exit;
+      if (evaluation.guidance.trim().length > 0) {
+        reviseGuidance = evaluation.guidance;
+      }
       intake = discovered.intake;
     }
   } else {

@@ -853,4 +853,119 @@ describe('reusable Action entrypoint (AC-6)', () => {
       await rm(runRoot, { recursive: true, force: true });
     }
   });
+
+  it('bypasses open-PR deduplication on authorized /loopwright retry comments while honoring up_to_date no_change and optional guidance', async () => {
+    withEnv('LOOPWRIGHT_PROVIDER_TOKEN', 'provider-token-value');
+    withEnv('LOOPWRIGHT_PUBLICATION_SIGNING_SECRET', 'publication-signing-value');
+    const { root, runRoot } = await makeTargetRepository();
+    try {
+      const availableRecord = [{ upstreamId: 'engine', status: 'available' as const, version: 'v1.2.4', recentVersions: ['v1.2.4', 'v1.2.3'] }];
+
+      // 1) /loopwright retry with multi-line operator guidance and managedPrMatchesDiscoveredState=true proceeds to compiled/ready
+      let seenPromptWithGuidance = '';
+      const retryWithGuidance = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 855, pull_request: { head: { sha: 'c'.repeat(40) } } },
+          comment: {
+            id: 910,
+            body: '/loopwright retry\nRebase onto main and preserve the existing release notes.',
+            author_association: 'COLLABORATOR',
+            user: { login: 'octocat', type: 'User' },
+          },
+        },
+        runRoot,
+        runId: 'run-comment-retry-guidance-1',
+        managedPrMatchesDiscoveredState: true,
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: availableRecord,
+        delegate: async taskpack => {
+          const agentHandler = taskpack.registry.spec.handlers.find(h => h.kind === 'agent');
+          seenPromptWithGuidance = String(agentHandler?.parameters['prompt'] ?? '');
+          return { ok: true, detail: 'retried with guidance' };
+        },
+      });
+      assert.equal(retryWithGuidance.kind, 'compiled');
+      if (retryWithGuidance.kind === 'compiled') {
+        assert.equal(retryWithGuidance.intake.kind, 'discover');
+        if (retryWithGuidance.intake.kind === 'discover') {
+          assert.equal(retryWithGuidance.intake.disposition, 'ready');
+        }
+        assert.deepEqual(retryWithGuidance.delegateOutcome, { ok: true, detail: 'retried with guidance' });
+      }
+      assert.match(seenPromptWithGuidance, /<operator_guidance>/);
+      assert.match(seenPromptWithGuidance, /Rebase onto main and preserve the existing release notes\./);
+
+      // 2) Bare /loopwright retry with managedPrMatchesDiscoveredState=true also bypasses open-PR dedup without injecting operator_guidance
+      let seenPromptBare = '';
+      const retryBare = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 855, pull_request: { head: { sha: 'c'.repeat(40) } } },
+          comment: {
+            id: 911,
+            body: '/loopwright retry',
+            author_association: 'MEMBER',
+            user: { login: 'maintainer', type: 'User' },
+          },
+        },
+        runRoot,
+        runId: 'run-comment-retry-bare-1',
+        managedPrMatchesDiscoveredState: true,
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: availableRecord,
+        delegate: async taskpack => {
+          const agentHandler = taskpack.registry.spec.handlers.find(h => h.kind === 'agent');
+          seenPromptBare = String(agentHandler?.parameters['prompt'] ?? '');
+          return { ok: true, detail: 'retried bare' };
+        },
+      });
+      assert.equal(retryBare.kind, 'compiled');
+      if (retryBare.kind === 'compiled') {
+        assert.equal(retryBare.intake.kind, 'discover');
+        if (retryBare.intake.kind === 'discover') {
+          assert.equal(retryBare.intake.disposition, 'ready');
+        }
+      }
+      assert.equal(seenPromptBare.includes('<operator_guidance>'), false);
+
+      // 3) /loopwright retry when upstreams are all up_to_date still settles as no_change
+      const retryUpToDate = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: BASE_REVISION,
+        mode: 'candidate',
+        eventName: 'issue_comment',
+        eventPayload: {
+          action: 'created',
+          issue: { number: 855, pull_request: { head: { sha: 'c'.repeat(40) } } },
+          comment: {
+            id: 912,
+            body: '/loopwright retry',
+            author_association: 'MEMBER',
+            user: { login: 'maintainer', type: 'User' },
+          },
+        },
+        runRoot,
+        runId: 'run-comment-retry-up-to-date-1',
+        managedPrMatchesDiscoveredState: true,
+        publicationEndpoint: { id: 'docs-publication', url: 'https://publisher.example.test/publish', signingCredentialRef: 'docs-publication-signing' },
+        upstreamRecords: [{ upstreamId: 'engine', status: 'up_to_date', version: 'v1.2.4', recentVersions: ['v1.2.4', 'v1.2.3'] }],
+      });
+      assert.equal(retryUpToDate.kind, 'no_change');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+  });
 });
