@@ -939,3 +939,38 @@ test('tree_overlay heals harmless Landlock-style utimes and chmod metadata drift
     }
   }
 });
+
+test('classic locked-dir candidate heals chmod drift on untouched files via #enforceLockedDirs while rejecting tampered bytes', async () => {
+  const f = await fixture();
+  try {
+    await setDirectoryTreeMode(f.root, 0o555);
+    const target = join(f.root, 'packages/example.ts');
+
+    // First access under locked root enables #enforceLockedDirs; drift to 0o644 and 0o000 must both heal back to 0o444
+    await chmod(target, 0o644);
+    const readRes = await f.candidate.checkRead('packages/example.ts');
+    assert.equal(readRes.path, 'packages/example.ts');
+    assert.equal((await stat(target)).mode & 0o777, 0o444);
+
+    await chmod(target, 0o000);
+    const prep = await f.candidate.tryPrepareEdit('packages/example.ts', [{ oldText: 'value = 1', newText: 'value = 2' }]);
+    assert.equal(prep.kind, 'change');
+    assert.equal((await stat(target)).mode & 0o777, 0o444);
+    if (prep.kind === 'change') {
+      await f.candidate.commit(prep.change, () => {});
+    }
+
+    // Tampered content still fails closed with RECOVERY_REQUIRED
+    await setDirectoryTreeMode(f.root, 0o755);
+    await chmod(target, 0o644);
+    await writeFile(target, 'export const value = 999;\n');
+    await setDirectoryTreeMode(f.root, 0o555);
+    await assert.rejects(
+      f.candidate.checkRead('packages/example.ts'),
+      err => err instanceof PiFailure && err.detail.code === 'RECOVERY_REQUIRED',
+    );
+  } finally {
+    await setDirectoryTreeMode(f.root, 0o755).catch(() => {});
+    await f.cleanup();
+  }
+});

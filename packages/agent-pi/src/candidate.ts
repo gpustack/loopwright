@@ -779,7 +779,7 @@ export class Candidate {
 
     if (knownOverlay !== undefined) {
       const expectedOverlayMode = this.#baseline.get(name)?.mode === '100755' ? 0o555 : 0o444;
-      if (this.#isOverlay && (Number(info.mode) & 0o400) === 0) {
+      if ((this.#isOverlay || this.#enforceLockedDirs) && (Number(info.mode) & 0o400) === 0) {
         await chmod(path, expectedOverlayMode);
       }
       const descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -790,7 +790,7 @@ export class Candidate {
         }
         const bytes = await descriptor.readFile();
         if (canonical(artifact(name, bytes)) !== canonical(knownOverlay)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
-        if (this.#isOverlay && (Number(current.mode) & 0o777) !== expectedOverlayMode) {
+        if ((this.#isOverlay || this.#enforceLockedDirs) && (Number(current.mode) & 0o777) !== expectedOverlayMode) {
           await descriptor.chmod(expectedOverlayMode);
         }
         return bytes;

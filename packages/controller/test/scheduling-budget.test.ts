@@ -194,3 +194,115 @@ test('scheduling: mid-session admission BUDGET_EXHAUSTED refusal after confirmed
     await f.close();
   }
 });
+
+test('scheduling: mid-session budget error preserves RECOVERY_REQUIRED when effect is possible, close fails, or unresolved store ops remain', async () => {
+  // 1. executed.ok === false with effect === 'possible' must remain RECOVERY_REQUIRED
+  {
+    const possibleError: PiErrorV2 = {
+      code: 'REQUEST_REFUSED',
+      phase: 'admission',
+      path: '/budgets/maxImplementationRepairs',
+      retryable: false,
+      effect: 'possible',
+      requestId: null,
+      operationId: null,
+      stateErrorCode: 'BUDGET_EXHAUSTED',
+    };
+    const fake = adapter(async () => ({ ok: false, error: possibleError }));
+    const f = await fixture({ openAdapter: async () => ({ ok: true, value: fake.value }) });
+    try {
+      const returned = await f.cycle.finish();
+      assert.equal(returned.kind, 'incident');
+      if (returned.kind !== 'incident') return;
+      assert.equal(returned.incident.code, 'RECOVERY_REQUIRED');
+    } finally {
+      await f.close();
+    }
+  }
+
+  // 2. outcome failed with confirmed BUDGET_EXHAUSTED but failing local close() must remain RECOVERY_REQUIRED
+  {
+    const confirmedError: PiErrorV2 = {
+      code: 'REQUEST_REFUSED',
+      phase: 'admission',
+      path: '/budgets/maxImplementationRepairs',
+      retryable: false,
+      effect: 'confirmed',
+      requestId: 'unit-request',
+      operationId: 'unit-model-op',
+      stateErrorCode: 'BUDGET_EXHAUSTED',
+    };
+    const fake = adapter(async () => {
+      await account(context);
+      return {
+        ok: true,
+        value: {
+          status: 'failed',
+          requestIds: ['unit-request'],
+          operationIds: ['unit-model-op'],
+          providerTermination: 'confirmed',
+          usage: 'complete',
+          localCleanup: 'complete',
+          error: confirmedError,
+          cleanupError: null,
+        },
+      };
+    });
+    const failingCloseAdapter: PiAdapterV2 = {
+      ...fake.value,
+      close: async () => ({ ok: false, error: { ...budgetError, code: 'RECOVERY_REQUIRED', stateErrorCode: null, effect: 'possible' } }),
+    };
+    const f = await fixture({ openAdapter: async () => ({ ok: true, value: failingCloseAdapter }) });
+    const context = f.context;
+    try {
+      const returned = await f.cycle.finish();
+      assert.equal(returned.kind, 'incident');
+      if (returned.kind !== 'incident') return;
+      assert.equal(returned.incident.code, 'RECOVERY_REQUIRED');
+    } finally {
+      await f.close().catch(err => {
+        if (!(err instanceof Error && err.message === 'CLEANUP_FAILED')) throw err;
+      });
+    }
+  }
+
+  // 3. outcome failed with confirmed BUDGET_EXHAUSTED but unresolved request in store must remain RECOVERY_REQUIRED
+  {
+    const confirmedError: PiErrorV2 = {
+      code: 'REQUEST_REFUSED',
+      phase: 'admission',
+      path: '/budgets/maxImplementationRepairs',
+      retryable: false,
+      effect: 'confirmed',
+      requestId: 'unit-request',
+      operationId: 'unit-model-op',
+      stateErrorCode: 'BUDGET_EXHAUSTED',
+    };
+    const fake = adapter(async () => {
+      await account(context, 100, false); // reserve + dispatch without observing!
+      return {
+        ok: true,
+        value: {
+          status: 'failed',
+          requestIds: ['unit-request'],
+          operationIds: ['unit-model-op'],
+          providerTermination: 'confirmed',
+          usage: 'complete',
+          localCleanup: 'complete',
+          error: confirmedError,
+          cleanupError: null,
+        },
+      };
+    });
+    const f = await fixture({ openAdapter: async () => ({ ok: true, value: fake.value }) });
+    const context = f.context;
+    try {
+      const returned = await f.cycle.finish();
+      assert.equal(returned.kind, 'incident');
+      if (returned.kind !== 'incident') return;
+      assert.equal(returned.incident.code, 'RECOVERY_REQUIRED');
+    } finally {
+      await f.close();
+    }
+  }
+});

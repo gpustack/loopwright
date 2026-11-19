@@ -108,6 +108,8 @@ export class Cycle {
     }
   }
   get generation(): number { return this.head?.progress.candidate.generation ?? 0; }
+  get candidateKnown(): boolean { return this.#candidateKnown; }
+  markCandidateUnknown(): void { this.#candidateKnown = false; }
   get draft(): Draft {
     if (!this.head) refuse('RECOVERY_REQUIRED', '', 'execution'); return { ...this.head.progress, eventSequence: this.events.sequence };
   }
@@ -309,6 +311,7 @@ export class Cycle {
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;
+    let midSessionBudget: { readonly piCode: string; readonly stateCode: string | null } | null = null;
     const closeLocal = async (): Promise<void> => {
       this.deadline.onStop(null);
       if (this.#activeAdapter) { const active = this.#activeAdapter; this.#activeAdapter = null; const closed = await active.close(); cleanupKnown = closed.ok; if (!closed.ok) this.#cleanup = 'failed'; }
@@ -325,9 +328,8 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       const executed = purpose === 'compaction' ? await adapter.compact({ commandId }) : await adapter.execute({ commandId, text: commandText, purpose, repair });
       if (!executed.ok) { noEffectBudget = isNoEffectBudgetRefusal(executed.error);
         if (executed.error.code === 'MCP_AUTHENTICATION_REQUIRED' && executed.error.effect === 'none') noEffectMcpAuth = true;
-        if (!noEffectBudget && isBudgetRefusal(executed.error) && executed.error.effect !== 'none') {
-          await closeLocal();
-          refuse('BUDGET_EXHAUSTED', '', 'execution', { piCode: executed.error.code, stateCode: executed.error.stateErrorCode, effect: executed.error.effect });
+        if (!noEffectBudget && isBudgetRefusal(executed.error) && executed.error.effect === 'confirmed') {
+          midSessionBudget = { piCode: executed.error.code, stateCode: executed.error.stateErrorCode };
         }
         refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: executed.error.code, stateCode: executed.error.stateErrorCode, effect: executed.error.effect }); }
       const outcome: PiOutcomeV2 = executed.value; nativeOutcome = await artifacts.json('native-outcome', { version: 1, attemptId: commandId, outcome }, 524288);
@@ -337,9 +339,8 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       if (outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
         this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
-      if (!noEffectBudget && outcome.status === 'failed' && outcome.error !== null && isBudgetRefusal(outcome.error) && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
-        await closeLocal();
-        refuse('BUDGET_EXHAUSTED', '', 'execution', { piCode: outcome.error.code, stateCode: outcome.error.stateErrorCode, effect: outcome.error.effect });
+      if (!noEffectBudget && outcome.status === 'failed' && outcome.error !== null && isBudgetRefusal(outcome.error) && outcome.error.effect === 'confirmed' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
+        midSessionBudget = { piCode: outcome.error.code, stateCode: outcome.error.stateErrorCode };
       }
       if (outcome.status !== 'execution_settled' || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: outcome.error?.code ?? null, effect: outcome.error?.effect ?? 'possible' });
       this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source);
@@ -360,6 +361,25 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
           if (same(originalState, afterState)) { this.#candidateKnown = true; failure = new ControllerFailure({ ...safeDiagnostic(failure, 'execution'), code: noEffectMcpAuth ? 'MCP_AUTHENTICATION_REQUIRED' : 'BUDGET_EXHAUSTED', stateCode: noEffectMcpAuth ? null : 'BUDGET_EXHAUSTED', piCode: noEffectMcpAuth ? 'MCP_AUTHENTICATION_REQUIRED' : null, effect: 'none' }); }
           else this.#candidateKnown = false;
         } else this.#candidateKnown = false;
+      } else if (midSessionBudget) {
+        this.#candidateKnown = false;
+        await closeLocal();
+        const facts = store.inspect();
+        const certain = facts.ok
+          && facts.value.clockStatus === 'trusted'
+          && !facts.value.counts.dispatchedRequests
+          && !facts.value.counts.unresolvedRequests
+          && !facts.value.counts.unresolvedOperations
+          && !facts.value.ledger.violations.length;
+        if (cleanupKnown && this.deadline.reason === null && certain) {
+          failure = new ControllerFailure({
+            ...safeDiagnostic(failure, 'execution'),
+            code: 'BUDGET_EXHAUSTED',
+            stateCode: midSessionBudget.stateCode,
+            piCode: midSessionBudget.piCode,
+            effect: 'confirmed',
+          });
+        }
       }
       if (this.head?.progress.attempts.at(-1)?.id === commandId && this.head.progress.attempts.at(-1)!.finished === null) {
         const diagnostic = safeDiagnostic(failure, 'execution'), after = stateValue(store.inspect()).counts;
@@ -502,9 +522,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         const refusal = record(parsePrivateJson(await this.context.artifacts.read(attempt.finished.outcome, 65536), 65536), ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup']);
         if (refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
         const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
-        if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED') {
+        if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED' && diagnostic.effect === 'confirmed') {
           this.#candidateKnown = false;
-          refuse('BUDGET_EXHAUSTED', '', 'execution');
+          refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: diagnostic.stateCode, piCode: diagnostic.piCode, effect: 'confirmed' });
         }
         if (!same(refusal.currentCandidate, this.draft.candidate.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
         if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') refuse(diagnostic.code, '', 'execution');

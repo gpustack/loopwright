@@ -470,8 +470,13 @@ async function advanceStepCycle(
         parsePrivateJson(await cycle.context.artifacts.read(lastAttempt.finished.outcome, 65_536), 65_536),
         ['version', 'attemptId', 'command', 'diagnostic', 'nativeOutcome', 'currentCandidate', 'unavailable', 'localCleanup'],
       );
-      if (!same(refusal.currentCandidate, cycle.draft.candidate.manifest) || refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
+      if (refusal.localCleanup !== 'complete') refuse('RECOVERY_REQUIRED', '', 'recovery');
       const diagnostic = refusal.diagnostic as unknown as ControllerDiagnostic;
+      if (refusal.currentCandidate === null && diagnostic.code === 'BUDGET_EXHAUSTED' && diagnostic.effect === 'confirmed') {
+        cycle.markCandidateUnknown();
+        refuse('BUDGET_EXHAUSTED', '', 'execution', { stateCode: diagnostic.stateCode, piCode: diagnostic.piCode, effect: 'confirmed' });
+      }
+      if (!same(refusal.currentCandidate, cycle.draft.candidate.manifest)) refuse('RECOVERY_REQUIRED', '', 'recovery');
       if (['BUDGET_EXHAUSTED', 'CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED'].includes(diagnostic.code) && diagnostic.effect === 'none') {
         refuse(diagnostic.code, '', 'execution');
       }
@@ -597,6 +602,7 @@ async function runStepTickWithCycle(
       !facts.value.counts.unresolvedOperations &&
       !facts.value.ledger.violations.length;
     if (
+      cycle.candidateKnown &&
       facts.ok &&
       (['DEADLINE', 'CANCELLED', 'BUDGET_EXHAUSTED', 'ATTEMPT_LIMIT', 'REPEAT_FAILURE'].includes(diagnostic.code) ||
         (certain &&
@@ -640,7 +646,7 @@ async function runStepTickWithCycle(
           context.lock.spec.runId,
           context.lock.spec.lockHash,
           [context.descriptor.plan, context.source.inventory],
-          ['authoritative_result'],
+          cycle.candidateKnown ? ['authoritative_result'] : ['current_candidate', 'submission', 'authoritative_result'],
           'complete',
         );
       }
@@ -650,7 +656,7 @@ async function runStepTickWithCycle(
         context.lock.spec.runId,
         context.lock.spec.lockHash,
         [context.descriptor.plan, context.source.inventory],
-        ['authoritative_result'],
+        cycle.candidateKnown ? ['authoritative_result'] : ['current_candidate', 'submission', 'authoritative_result'],
         'complete',
       );
     }
