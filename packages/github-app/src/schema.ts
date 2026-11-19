@@ -1,13 +1,18 @@
 import { CST, isAlias, isMap, isScalar, isSeq, Lexer, parseDocument } from 'yaml';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import {
+  DEFAULT_MEMORY_MAX_ENTRIES,
+  DEFAULT_MEMORY_MAX_PROMPT_ENTRIES,
+  DEFAULT_MEMORY_TTL_DAYS,
+} from '@loopwright/memory';
+import {
   GitHubAppError, DEFAULT_COMMENT_PREFIXES, LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_TASKPACK_ROLES, PROTECTED_AUTOMATION_PATHS, TASKPACK_COMMENT_COMMANDS,
   TASKPACK_MANIFEST_API_VERSION, TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS, TASKPACK_TOOL_NAMES,
   type SandboxBackendId, type SandboxCapability, type SandboxNetworkMode,
   type TaskpackCheckDeclaration, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy, type TaskpackDecisionProviderKind,
   type TaskpackDecisionsDeclaration, type TaskpackHttpMcpServerDeclaration, type TaskpackLimitsDeclaration, type TaskpackManifest,
-  type TaskpackMcpDeclaration, type TaskpackMcpServerDeclaration, type TaskpackModelDeclaration,
-  type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackRoleDeclaration,
+  type TaskpackMcpDeclaration, type TaskpackMcpServerDeclaration, type TaskpackMemoryApplyMode, type TaskpackMemoryNoBudgetMode,
+  type TaskpackModelDeclaration, type TaskpackOutputDeclaration, type TaskpackOutputFormat, type TaskpackRoleDeclaration,
   type TaskpackRolePurpose, type TaskpackSandboxDeclaration, type TaskpackStdioMcpServerDeclaration,
   type TaskpackToolName, type TaskpackUpstreamDescriptor,
 } from './types.js';
@@ -1117,7 +1122,10 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
   }
   const titleTemplate = requireString(publication['titleTemplate'], '/spec/publication/titleTemplate', 1, 256);
 
-  const memory = requireObject(spec['memory'], '/spec/memory', ['directory', 'apply', 'onNoModelBudget']);
+  const memory = requireObject(spec['memory'], '/spec/memory', [
+    'directory', 'apply', 'onNoModelBudget', 'ttlDays', 'maxEntries', 'maxPromptEntries',
+    'checkCodeFingerprint', 'checkUpstreamVersions', 'publishOnFailure', 'skipCi',
+  ]);
   const memoryDirectory = normalizeRelativePath(memory['directory'], '/spec/memory/directory');
   const memoryRoot = `${controlRoot}/memory`;
   if (!pathCoveredBy(memoryDirectory, memoryRoot)) {
@@ -1127,12 +1135,46 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
   if (memoryOverlap !== undefined) {
     throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `memory directory "${memoryDirectory}" overlaps writable path "${memoryOverlap}"`, '/spec/memory/directory');
   }
-  const apply = requireString(memory['apply'], '/spec/memory/apply', 1, 32);
-  if (apply !== 'separate-pull-request') manifestInvalid('memory apply must be separate-pull-request', '/spec/memory/apply');
-  const onNoModelBudget = requireString(memory['onNoModelBudget'], '/spec/memory/onNoModelBudget', 1, 48);
-  if (onNoModelBudget !== 'deterministic-observations-only' && onNoModelBudget !== 'skip') {
-    manifestInvalid('onNoModelBudget must be deterministic-observations-only or skip', '/spec/memory/onNoModelBudget');
+  const applyRaw = requireString(memory['apply'], '/spec/memory/apply', 1, 32);
+  if (applyRaw !== 'separate-pull-request' && applyRaw !== 'local-only' && applyRaw !== 'disabled') {
+    manifestInvalid('memory apply must be separate-pull-request, local-only, or disabled', '/spec/memory/apply');
   }
+  const apply: TaskpackMemoryApplyMode = applyRaw;
+  let onNoModelBudget: TaskpackMemoryNoBudgetMode;
+  if (memory['onNoModelBudget'] === undefined) {
+    if (apply === 'disabled') {
+      onNoModelBudget = 'skip';
+    } else {
+      manifestInvalid('onNoModelBudget must be deterministic-observations-only or skip', '/spec/memory/onNoModelBudget');
+    }
+  } else {
+    const rawNoBudget = requireString(memory['onNoModelBudget'], '/spec/memory/onNoModelBudget', 1, 48);
+    if (rawNoBudget !== 'deterministic-observations-only' && rawNoBudget !== 'skip') {
+      manifestInvalid('onNoModelBudget must be deterministic-observations-only or skip', '/spec/memory/onNoModelBudget');
+    }
+    onNoModelBudget = rawNoBudget;
+  }
+  const ttlDays = memory['ttlDays'] === undefined
+    ? DEFAULT_MEMORY_TTL_DAYS
+    : requireSafeIntInRange(memory['ttlDays'], '/spec/memory/ttlDays', 1, 365);
+  const maxEntries = memory['maxEntries'] === undefined
+    ? DEFAULT_MEMORY_MAX_ENTRIES
+    : requireSafeIntInRange(memory['maxEntries'], '/spec/memory/maxEntries', 1, 512);
+  const maxPromptEntries = memory['maxPromptEntries'] === undefined
+    ? DEFAULT_MEMORY_MAX_PROMPT_ENTRIES
+    : requireSafeIntInRange(memory['maxPromptEntries'], '/spec/memory/maxPromptEntries', 1, 128);
+  const checkCodeFingerprint = memory['checkCodeFingerprint'] === undefined
+    ? false
+    : requireBoolean(memory['checkCodeFingerprint'], '/spec/memory/checkCodeFingerprint');
+  const checkUpstreamVersions = memory['checkUpstreamVersions'] === undefined
+    ? false
+    : requireBoolean(memory['checkUpstreamVersions'], '/spec/memory/checkUpstreamVersions');
+  const publishOnFailure = memory['publishOnFailure'] === undefined
+    ? false
+    : requireBoolean(memory['publishOnFailure'], '/spec/memory/publishOnFailure');
+  const skipCi = memory['skipCi'] === undefined
+    ? true
+    : requireBoolean(memory['skipCi'], '/spec/memory/skipCi');
 
   const triggers = requireObject(spec['triggers'], '/spec/triggers', ['schedule', 'workflowDispatch', 'releasePublished', 'commentCommands', 'commentPrefixes']);
   const schedule = requireBoolean(triggers['schedule'], '/spec/triggers/schedule');
@@ -1501,7 +1543,18 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     proposal: Object.freeze({ path: proposalPath, requiredFields: Object.freeze(requiredFields), schemaVersion }),
     verification: Object.freeze({ localChecks: Object.freeze(localChecks), externalGates: Object.freeze(externalGates) }),
     publication: Object.freeze({ mode: publicationMode as 'pull_request' | 'disabled', targetBranch, headBranchPrefix, titleTemplate }),
-    memory: Object.freeze({ directory: memoryDirectory, apply: 'separate-pull-request' as const, onNoModelBudget }),
+    memory: Object.freeze({
+      directory: memoryDirectory,
+      apply,
+      onNoModelBudget,
+      ttlDays,
+      maxEntries,
+      maxPromptEntries,
+      checkCodeFingerprint,
+      checkUpstreamVersions,
+      publishOnFailure,
+      skipCi,
+    }),
     triggers: Object.freeze({ schedule, workflowDispatch, releasePublished, commentCommands: Object.freeze(commentCommands), commentPrefixes: Object.freeze(commentPrefixes) }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),

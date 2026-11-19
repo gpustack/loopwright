@@ -432,7 +432,13 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         codeFingerprint: docsFp,
         verifiedAtMs: nowMs - 1_000,
       });
-      const proj130 = projectMemoryStore(emptyMemoryStoreIndex('auto-sync', 'acme/repo', nowMs - 2_000), ops130, nowMs, 'prop.seed-130');
+      const proj130 = projectMemoryStore(
+        emptyMemoryStoreIndex('auto-sync', 'acme/repo', nowMs - 2_000),
+        ops130,
+        nowMs,
+        'prop.seed-130',
+        { maxEntries: 256 },
+      );
       await writeProjectedStoreToDisk(repo, proj130);
       await git(repo, ['add', '.auto-sync/memory']);
       await git(repo, ['commit', '-m', 'chore(memory): seed 130 active entries']);
@@ -465,7 +471,8 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
       });
       assert.equal(tight130Res.kind, 'compiled');
       if (tight130Res.kind === 'compiled') {
-        assert.equal(tight130Res.taskpack.activeMemory?.activeEntryCount, 130);
+        assert.equal((tight130Res.taskpack.activeMemory?.activeEntryCount ?? 0) > 0, true);
+        assert.equal((tight130Res.taskpack.activeMemory?.activeEntryCount ?? 0) <= 32, true);
         assert.equal(tight130Res.taskpack.activeMemory?.resourcePath, '.auto-sync/memory/auto-sync/active-snapshot.md');
         assert.equal(tight130Res.delegateOutcome?.ok, true);
       }
@@ -492,14 +499,19 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
         onMemoryWarning: msg => memoryWarnings.push(msg),
       });
-      assert.equal(compiledOmitted.activeMemory?.activeEntryCount, 130);
+      assert.equal((compiledOmitted.activeMemory?.activeEntryCount ?? 0) > 0, true);
+      assert.equal((compiledOmitted.activeMemory?.activeEntryCount ?? 0) <= 32, true);
       assert.equal(compiledOmitted.activeMemory?.resourcePath, null);
       assert.equal(memoryWarnings.some(w => w.includes('active memory omitted')), true);
 
       await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), '# Guide\n', 'utf8');
-      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), makeTaskpackYaml(openAiServer.url), 'utf8');
+      const yamlMax256 = makeTaskpackYaml(openAiServer.url).replace(
+        '    onNoModelBudget: deterministic-observations-only\n',
+        '    onNoModelBudget: deterministic-observations-only\n    maxEntries: 256\n',
+      );
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), yamlMax256, 'utf8');
       await git(repo, ['add', '.auto-sync/prompts/instructions.md', '.auto-sync/taskpack.yaml']);
-      await git(repo, ['commit', '-m', 'chore: restore default limits']);
+      await git(repo, ['commit', '-m', 'chore: restore default limits with maxEntries 256']);
       mainSha = await git(repo, ['rev-parse', 'HEAD']);
       await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
       await git(bareRemote, ['update-ref', '-d', 'refs/heads/loopwright/main']).catch(() => undefined);
@@ -521,6 +533,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         ops220,
         nowMs + 2_000,
         'prop.seed-220-v1',
+        { maxEntries: 256 },
       );
       const item000V2 = buildSyntheticMemoryEntry({
         id: 'entry.item-000',
@@ -538,6 +551,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         ],
         nowMs + 4_000,
         'prop.seed-220-v2',
+        { maxEntries: 256 },
       );
       const index220Bytes = Buffer.byteLength(canonical(proj220V2.index), 'utf8');
       assert.equal(index220Bytes > 450_000, true);
@@ -568,6 +582,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         }],
         nowMs + 6_000,
         'prop.main-221',
+        { maxEntries: 256 },
       );
       await writeProjectedStoreToDisk(repo, proj221OnMain);
       await git(repo, ['add', '.auto-sync/memory']);
@@ -833,6 +848,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         ops130,
         nowMs + 100,
         'prop.mcp-seed-130',
+        { maxEntries: 256 },
       );
       await writeProjectedStoreToDisk(repo, proj130);
       await git(repo, ['add', '.auto-sync/memory']);

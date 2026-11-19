@@ -7,6 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { after, describe, it } from 'node:test';
 import { isWritablePath, validateDocument } from '@loopwright/core';
 import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
+import {
+  canonical as canonicalMemory,
+  emptyMemoryStoreIndex,
+  hashDomain,
+  projectMemoryStore,
+  type MemoryEntry,
+} from '@loopwright/memory';
 import { compileDeclarativeTaskpack, compileScopePatterns, authorizeRepositoryActor, boundDiagnosticLog, DEFAULT_HOST_BUDGETS, loadDeclarativeTaskpack, parseActionsRunUrl, parseCommentCommand, prepareTaskpackIntake, resolveManifestControlRoot, stageCompiledInstructionResources, validateCommentGuidance } from '../src/taskpack.js';
 import { effectiveProtectedPaths, parseTaskpackDocument, validateTaskpackManifest, type Json } from '../src/schema.js';
 import { GITHUB_APP_CONFIG_API_VERSION, loadGitHubAppConfig, parseGitHubAppConfigDocument, startConfiguredGitHubApp } from '../src/config.js';
@@ -2203,6 +2210,260 @@ spec:
         })),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/proposal/path',
       );
+    });
+  });
+});
+
+describe('spec.memory lifecycle schema and compile-time active memory controls', () => {
+  it('applies defaults, supports separate-pull-request / local-only / disabled, and rejects out-of-range or unknown keys', async () => {
+    const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+    assert.equal(base.spec.memory.apply, 'separate-pull-request');
+    assert.equal(base.spec.memory.onNoModelBudget, 'deterministic-observations-only');
+    assert.equal(base.spec.memory.ttlDays, 15);
+    assert.equal(base.spec.memory.maxEntries, 128);
+    assert.equal(base.spec.memory.maxPromptEntries, 32);
+    assert.equal(base.spec.memory.checkCodeFingerprint, false);
+    assert.equal(base.spec.memory.checkUpstreamVersions, false);
+    assert.equal(base.spec.memory.publishOnFailure, false);
+    assert.equal(base.spec.memory.skipCi, true);
+
+    // Explicit valid bounds & local-only mode
+    const localOnly = validateTaskpackManifest(editedManifest(base, draft => {
+      (draft['spec'] as Record<string, unknown>)['memory'] = {
+        directory: '.loopwright/memory/docs-sync',
+        apply: 'local-only',
+        onNoModelBudget: 'deterministic-observations-only',
+        ttlDays: 365,
+        maxEntries: 512,
+        maxPromptEntries: 128,
+        checkCodeFingerprint: true,
+        checkUpstreamVersions: true,
+        publishOnFailure: true,
+        skipCi: false,
+      };
+    }));
+    assert.equal(localOnly.spec.memory.apply, 'local-only');
+    assert.equal(localOnly.spec.memory.ttlDays, 365);
+    assert.equal(localOnly.spec.memory.maxEntries, 512);
+    assert.equal(localOnly.spec.memory.maxPromptEntries, 128);
+    assert.equal(localOnly.spec.memory.checkCodeFingerprint, true);
+    assert.equal(localOnly.spec.memory.checkUpstreamVersions, true);
+    assert.equal(localOnly.spec.memory.publishOnFailure, true);
+    assert.equal(localOnly.spec.memory.skipCi, false);
+
+    // disabled mode makes onNoModelBudget optional and defaults it to 'skip'
+    const disabledDefault = validateTaskpackManifest(editedManifest(base, draft => {
+      (draft['spec'] as Record<string, unknown>)['memory'] = {
+        directory: '.loopwright/memory/docs-sync',
+        apply: 'disabled',
+      };
+    }));
+    assert.equal(disabledDefault.spec.memory.apply, 'disabled');
+    assert.equal(disabledDefault.spec.memory.onNoModelBudget, 'skip');
+    assert.equal(disabledDefault.spec.memory.ttlDays, 15);
+    assert.equal(disabledDefault.spec.memory.maxEntries, 128);
+    assert.equal(disabledDefault.spec.memory.maxPromptEntries, 32);
+    assert.equal(disabledDefault.spec.memory.publishOnFailure, false);
+    assert.equal(disabledDefault.spec.memory.skipCi, true);
+
+    // local-only requires onNoModelBudget
+    assert.throws(
+      () => validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['memory'] = {
+          directory: '.loopwright/memory/docs-sync',
+          apply: 'local-only',
+        };
+      })),
+      (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/memory/onNoModelBudget',
+    );
+
+    // Unknown key, invalid apply, out-of-range ints, non-integers, and non-booleans
+    const invalidCases: readonly { readonly patch: Record<string, unknown>; readonly expectedPath: string }[] = [
+      { patch: { extraKey: true }, expectedPath: '/spec/memory' },
+      { patch: { apply: 'inline' }, expectedPath: '/spec/memory/apply' },
+      { patch: { ttlDays: 0 }, expectedPath: '/spec/memory/ttlDays' },
+      { patch: { ttlDays: 366 }, expectedPath: '/spec/memory/ttlDays' },
+      { patch: { ttlDays: 7.5 }, expectedPath: '/spec/memory/ttlDays' },
+      { patch: { maxEntries: 0 }, expectedPath: '/spec/memory/maxEntries' },
+      { patch: { maxEntries: 513 }, expectedPath: '/spec/memory/maxEntries' },
+      { patch: { maxEntries: '128' }, expectedPath: '/spec/memory/maxEntries' },
+      { patch: { maxPromptEntries: 0 }, expectedPath: '/spec/memory/maxPromptEntries' },
+      { patch: { maxPromptEntries: 129 }, expectedPath: '/spec/memory/maxPromptEntries' },
+      { patch: { checkCodeFingerprint: 'true' }, expectedPath: '/spec/memory/checkCodeFingerprint' },
+      { patch: { checkUpstreamVersions: 1 }, expectedPath: '/spec/memory/checkUpstreamVersions' },
+      { patch: { publishOnFailure: 'true' }, expectedPath: '/spec/memory/publishOnFailure' },
+      { patch: { skipCi: 0 }, expectedPath: '/spec/memory/skipCi' },
+    ];
+    for (const testCase of invalidCases) {
+      assert.throws(
+        () => validateTaskpackManifest(editedManifest(base, draft => {
+          (draft['spec'] as Record<string, unknown>)['memory'] = {
+            directory: '.loopwright/memory/docs-sync',
+            apply: 'separate-pull-request',
+            onNoModelBudget: 'deterministic-observations-only',
+            ...testCase.patch,
+          };
+        })),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === testCase.expectedPath,
+        `expected TASKPACK_MANIFEST_INVALID at ${testCase.expectedPath}`,
+      );
+    }
+  });
+
+  it('skips memory when disabled, enforces loose vs strict fingerprint/upstream toggles, prioritizes failures into task+review prompts, and isolates oversized/corrupt files', async () => {
+    await withSandbox(async root => {
+      await mkdir(join(root, 'docs'), { recursive: true });
+      await writeFile(join(root, 'docs', 'guide.md'), '# Guide v2\n', 'utf8');
+      const nowMs = 1_750_000_000_000;
+      const staleFingerprint = { algorithm: 'sha256' as const, hex: '1'.repeat(64) };
+      const buildEntry = (
+        id: string,
+        kind: MemoryEntry['kind'],
+        claimKey: string,
+        claim: string,
+        observedStatus: 'passed' | 'failed',
+      ): MemoryEntry => ({
+        version: 1,
+        id,
+        claimKey,
+        claim,
+        kind,
+        scope: {
+          taskpack: 'docs-sync',
+          repository: 'octocat/target',
+          paths: ['docs/**'],
+          targetMatrix: null,
+        },
+        sourceRef: {
+          runId: 'run-seed',
+          lockHash: hashDomain('lock', id),
+          candidateDigest: hashDomain('cand', id),
+        },
+        sourceDigest: hashDomain('src', { id, claim }),
+        verifiedAtMs: nowMs - 1_000,
+        validFor: {
+          baseRevision: 'b'.repeat(40),
+          sourceRevision: 'a'.repeat(40),
+          codeFingerprint: staleFingerprint,
+          upstreamVersions: { engine: 'v1.0.0' },
+        },
+        expiresAtMs: nowMs + 86_400_000 * 10,
+        supersedes: [],
+        evidenceRefs: [{
+          evidenceId: `ev.${id}`,
+          checkId: 'docs-proposal-json',
+          level: 'local_execution',
+          observedStatus,
+          artifact: {
+            name: `checks/${id}.json`,
+            digest: hashDomain('ev', id),
+            byteLength: 64,
+          },
+        }],
+      });
+
+      // Seed 6 routine facts (~900B each > 5.4 KiB total) + 1 high-signal failure_observation
+      const ops = [
+        ...Array.from({ length: 6 }, (_, i) => ({
+          kind: 'upsert' as const,
+          entry: buildEntry(
+            `entry.fact-${i}`,
+            'fact',
+            `claim.fact.${i}`,
+            `Routine fact ${i}: ${'f'.repeat(850)}`,
+            'passed',
+          ),
+        })),
+        {
+          kind: 'upsert' as const,
+          entry: buildEntry(
+            'entry.fail-critical',
+            'failure_observation',
+            'claim.check.docs-proposal-json',
+            'CRITICAL_FAILURE_SIGNAL: docs/proposal.json missing candidates field',
+            'failed',
+          ),
+        },
+      ];
+      const proj = projectMemoryStore(emptyMemoryStoreIndex('docs-sync', 'octocat/target', nowMs - 2_000), ops, nowMs, 'prop.seed');
+      const memDir = join(root, '.loopwright', 'memory', 'docs-sync');
+      await mkdir(join(memDir, 'entries'), { recursive: true });
+      for (const [id, bytes] of proj.entryFiles.entries()) {
+        await writeFile(join(memDir, 'entries', `${id}.md`), bytes);
+      }
+      await writeFile(join(memDir, 'index.json'), canonicalMemory(proj.index), 'utf8');
+
+      const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+      const withRoles = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['roles'] = [
+          { id: 'author', purpose: 'task', provider: 'openai', model: 'gpt-5', thinking: 'medium' },
+          { id: 'reviewer', purpose: 'review', provider: 'openai', model: 'gpt-5', thinking: 'medium', dependsOn: ['author'] },
+        ];
+      }));
+
+      // 1. Default loose coupling (checkCodeFingerprint: false, checkUpstreamVersions: false) keeps entries active and injects failure into BOTH task and review prompts
+      const compiledLoose = await compileDeclarativeTaskpack(withRoles, bindingsFor(withRoles, {
+        repositoryRoot: root,
+        nowMs,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+        credentialEnvMap: { provider: 'OPENAI_API_KEY', publication: 'TASKPACK_TEST_PUBLICATION_SIGNING_SECRET' },
+      }));
+      assert.equal(compiledLoose.activeMemory?.activeEntryCount, 7);
+      assert.equal(compiledLoose.activeMemory?.excludedEntryCount, 0);
+      assert.equal(compiledLoose.activeMemory?.resourcePath, '.loopwright/memory/docs-sync/active-snapshot.md');
+      const authorHandler = compiledLoose.registry.spec.handlers.find(h => h.id === 'agent.author');
+      const reviewerHandler = compiledLoose.registry.spec.handlers.find(h => h.id === 'agent.reviewer');
+      const authorPromptText = String((authorHandler?.parameters as Record<string, unknown>)?.['prompt'] ?? '');
+      const reviewerPromptText = String((reviewerHandler?.parameters as Record<string, unknown>)?.['prompt'] ?? '');
+      assert.match(authorPromptText, /<active_memory>/);
+      assert.match(authorPromptText, /CRITICAL_FAILURE_SIGNAL/);
+      assert.match(reviewerPromptText, /<active_memory>/);
+      assert.match(reviewerPromptText, /CRITICAL_FAILURE_SIGNAL/);
+
+      // 2. Enabling checkCodeFingerprint or checkUpstreamVersions excludes drifted entries
+      const strictManifest = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['memory'] = {
+          directory: '.loopwright/memory/docs-sync',
+          apply: 'separate-pull-request',
+          onNoModelBudget: 'deterministic-observations-only',
+          checkCodeFingerprint: true,
+          checkUpstreamVersions: true,
+        };
+      }));
+      const compiledStrict = await compileDeclarativeTaskpack(strictManifest, bindingsFor(strictManifest, {
+        repositoryRoot: root,
+        nowMs,
+        upstreamRecords: [{ upstreamId: 'engine', status: 'available', version: 'v2.0.0' }],
+      }));
+      assert.equal(compiledStrict.activeMemory?.activeEntryCount, 0);
+      assert.equal(compiledStrict.activeMemory?.excludedEntryCount, 7);
+
+      // 3. Corrupt/oversized (> 64 KiB) entry file emits onMemoryWarning without failing compilation
+      await writeFile(join(memDir, 'entries', 'entry.fact-0.md'), 'x'.repeat(70_000), 'utf8');
+      const warnings: string[] = [];
+      const compiledOversized = await compileDeclarativeTaskpack(base, bindingsFor(base, {
+        repositoryRoot: root,
+        nowMs,
+        onMemoryWarning: msg => warnings.push(msg),
+      }));
+      assert.equal(compiledOversized.activeMemory, undefined);
+      assert.equal(warnings.some(w => w.includes('active memory skipped')), true);
+
+      // 4. apply: 'disabled' skips loadMemoryStore completely (zero warnings even with oversized/corrupt files)
+      const disabledManifest = validateTaskpackManifest(editedManifest(base, draft => {
+        (draft['spec'] as Record<string, unknown>)['memory'] = {
+          directory: '.loopwright/memory/docs-sync',
+          apply: 'disabled',
+        };
+      }));
+      const disabledWarnings: string[] = [];
+      const compiledDisabled = await compileDeclarativeTaskpack(disabledManifest, bindingsFor(disabledManifest, {
+        repositoryRoot: root,
+        nowMs,
+        onMemoryWarning: msg => disabledWarnings.push(msg),
+      }));
+      assert.equal(compiledDisabled.activeMemory, undefined);
+      assert.deepEqual(disabledWarnings, []);
     });
   });
 });

@@ -179,6 +179,22 @@ export interface TaskpackRoleDeclaration {
   readonly dependsOn?: readonly string[] | undefined;
 }
 
+export type TaskpackMemoryApplyMode = 'separate-pull-request' | 'local-only' | 'disabled';
+export type TaskpackMemoryNoBudgetMode = 'deterministic-observations-only' | 'skip';
+
+export interface TaskpackMemoryDeclaration {
+  readonly directory: string;
+  readonly apply: TaskpackMemoryApplyMode;
+  readonly onNoModelBudget: TaskpackMemoryNoBudgetMode;
+  readonly ttlDays?: number | undefined;
+  readonly maxEntries?: number | undefined;
+  readonly maxPromptEntries?: number | undefined;
+  readonly checkCodeFingerprint?: boolean | undefined;
+  readonly checkUpstreamVersions?: boolean | undefined;
+  readonly publishOnFailure?: boolean | undefined;
+  readonly skipCi?: boolean | undefined;
+}
+
 export interface TaskpackManifest {
   readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
   readonly kind: 'Taskpack';
@@ -193,7 +209,7 @@ export interface TaskpackManifest {
     readonly proposal: { readonly path: string; readonly requiredFields: readonly string[]; readonly schemaVersion: number };
     readonly verification: { readonly localChecks: readonly TaskpackCheckDeclaration[]; readonly externalGates: readonly TaskpackExternalGateDeclaration[] };
     readonly publication: { readonly mode: 'pull_request' | 'disabled'; readonly targetBranch: string; readonly headBranchPrefix: string; readonly titleTemplate: string };
-    readonly memory: { readonly directory: string; readonly apply: 'separate-pull-request'; readonly onNoModelBudget: 'deterministic-observations-only' | 'skip' };
+    readonly memory: TaskpackMemoryDeclaration;
     readonly triggers: {
       readonly schedule: boolean;
       readonly workflowDispatch: boolean;
