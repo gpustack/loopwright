@@ -11,7 +11,7 @@ npm test
 ```
 
 Dependencies are exactly locked. Core has no runtime dependencies; state consumes core, and the private Pi adapter
-uses pinned Pi 1.5.0 packages. The root minimatch override applies to the resolved graph, including SDK dependencies.
+uses pinned Pi 1.5.2 packages. The root minimatch override applies to the resolved graph, including SDK dependencies.
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
@@ -44,7 +44,7 @@ node scripts/check-docs.mjs --report
 npm run site
 ```
 
-The report provides an audit summary; the strict lint command enforces the documentation contract. The site exports twelve public pages and excludes repository-only contributor pages. Configuration authoring uses `yaml@2.9.0` and the core schema.
+The report provides an audit summary; the strict lint command enforces the documentation contract. The site exports twelve public pages and excludes repository-only contributor pages. Configuration authoring uses `yaml@2.9.1` and the core schema.
 
 Repository issue and pull request templates live under `.github/`. The `.github/workflows/` directory contains `ci.yml`, `test.yml`, `docs.yml`, `code-review.yml`, `self-upgrade.yml`, and `site.yml` for repository CI/CD. Use the five `.agents/skills/loopwright-*` guides for overview, docs, code review, issue and PR preparation, and release work.
 

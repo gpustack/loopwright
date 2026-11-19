@@ -15,6 +15,6 @@
     "@loopwright/memory": "0.0.0",
     "@loopwright/state": "0.0.0",
     "@loopwright/taskpack-runner": "0.0.0",
-    "yaml": "2.9.0"
+    "yaml": "2.9.1"
   }
 }
