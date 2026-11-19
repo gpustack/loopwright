@@ -404,7 +404,6 @@
       </tr>
   </tbody>
 </table>
-<p>Turnkey compilation grants author roles <code>['read', 'write', 'edit', 'bash', 'delete']</code> plus discovered <code>mcp__&lt;id&gt;__&lt;tool&gt;</code> tools.</p>
 <h2 id="taskpack-1">Taskpack</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -422,39 +421,53 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">author-model</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">medium</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read, write, edit]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">write</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">edit</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">review-model</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author]</span><span class="w"> </span><span class="c"># Optional prior role IDs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional prior role IDs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">author</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional whitelist and blacklist</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests, docs/versions.md]</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifests/frozen-policy.yaml]</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">.loopwright/instructions.md]</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to repository-wide writes)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/versions.md</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional blacklist</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifests/frozen-policy.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.loopwright/instructions.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">engine-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l">octocat/engine</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">docs]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">docs</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">allowPrerelease</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">proposal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">manifests/proposal.yaml</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">schema_version, candidates]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">schema_version</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">candidates</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">schemaVersion</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">verification</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">localChecks</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">proposal-schema</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">json-artifact.v1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">release_channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable }</span><span class="w"> </span><span class="c"># Optional scalar overrides</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional scalar overrides</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">release_channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">static-check</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">command.v1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/checks/verify.sh</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional (defaults to 30)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allowReadOnlyGitHubToken</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">CHECK_MODE]</span><span class="w"> </span><span class="c"># Optional safe environment variable names</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">env</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional safe environment variable names</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">CHECK_MODE</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">ci-smoke</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">gateId</span><span class="p">:</span><span class="w"> </span><span class="l">catalog-smoke</span><span class="w">
@@ -463,71 +476,82 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">pull_request</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">targetBranch</span><span class="p">:</span><span class="w"> </span><span class="l">main</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">headBranchPrefix</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright/catalog-sync-</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">headBranchPrefix</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright-catalog-sync-</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">titleTemplate</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;chore(catalog) - sync upstream release metadata&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">memory</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/memory/catalog-sync</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">apply</span><span class="p">:</span><span class="w"> </span><span class="l">separate-pull-request</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">onNoModelBudget</span><span class="p">:</span><span class="w"> </span><span class="l">deterministic-observations-only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">onNoModelBudget</span><span class="p">:</span><span class="w"> </span><span class="l">deterministic-observations-only</span><span class="w"> </span><span class="c"># Optional when apply is disabled</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">ttlDays</span><span class="p">:</span><span class="w"> </span><span class="m">15</span><span class="w"> </span><span class="c"># Optional (defaults to 15)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxEntries</span><span class="p">:</span><span class="w"> </span><span class="m">128</span><span class="w"> </span><span class="c"># Optional (defaults to 128)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxPromptEntries</span><span class="p">:</span><span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="c"># Optional (defaults to 32)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">checkCodeFingerprint</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">checkUpstreamVersions</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">publishOnFailure</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">skipCi</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional (defaults to true)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">triggers</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">schedule</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">workflowDispatch</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">releasePublished</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">retry, revise, status]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/loopwright]</span><span class="w"> </span><span class="c"># Optional (defaults to [&#39;/loopwright&#39;])</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">retry</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">revise</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">status</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to [&#39;/loopwright&#39;])</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">/loopwright</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional ordered model pool (defaults to zai / glm-5.3 / high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional (defaults to high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional (defaults to provider token env)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">cost</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">input: 1, output: 2, cacheRead: 0.1, cacheWrite</span><span class="p">:</span><span class="w"> </span><span class="m">1.25</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional USD per million tokens</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate on quota exhaustion</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">cost</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional USD per million tokens</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">input</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">mcp</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host MCP servers</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">servers</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">github</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">stdio</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">command</span><span class="p">:</span><span class="w"> </span><span class="l">github-mcp-server</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">stdio, --read-only, --toolsets, &#34;repos,pull_requests,issues&#34;]</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN }</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">args</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional command arguments</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">stdio</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- --<span class="l">read-only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">envFrom</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional secret env mapping</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">GITHUB_PERSONAL_ACCESS_TOKEN</span><span class="p">:</span><span class="w"> </span><span class="l">GITHUB_TOKEN</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">60</span><span class="w"> </span><span class="c"># Optional (defaults to 60)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">deepwiki</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">transport</span><span class="p">:</span><span class="w"> </span><span class="l">http</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">url</span><span class="p">:</span><span class="w"> </span><span class="l">https://mcp.deepwiki.com/mcp</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">wallTimeSeconds: 3600, totalTokens: 20000000, contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">200000</span><span class="p">,</span><span class="w"> </span><span class="c"># Optional; see Execution limits</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens: 32768, maxModelCalls: 256, maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="p">,</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="p">,</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">toolTimeoutSeconds: 300, commandTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span>}<span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">formats</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">json, github-step-summary] }</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">limits</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional execution ceilings (see Execution limits)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">20000000</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxOutputTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxModelCalls</span><span class="p">:</span><span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commandTimeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to json)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sandbox</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional host isolation policy</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">macos-seatbelt, linux-bwrap, linux-landlock, docker]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">preferredBackends</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">macos-seatbelt</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">linux-bwrap</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">networkMode</span><span class="p">:</span><span class="w"> </span><span class="l">none</span><span class="w"> </span><span class="c"># Optional (defaults to none)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">filesystemReadContainment, filesystemWriteContainment, protectedPathReadOnlyMask, networkIsolation, processTreeCleanup]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">~/.ssh]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredCapabilities</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">filesystemWriteContainment</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">processTreeCleanup</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">deniedReadPaths</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">~/.ssh</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional System-One triage policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional (defaults to typesafe-jev)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">disclosurePolicy</span><span class="p">:</span><span class="w"> </span><span class="l">public-metadata-only</span><span class="w"> </span><span class="c"># Optional (defaults to disabled)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional (defaults to 0.8)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">confirmThreshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w"> </span><span class="c"># Optional (defaults to 0.6)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">hardDeadlineMs</span><span class="p">:</span><span class="w"> </span><span class="m">5000</span><span class="w"> </span><span class="c"># Optional (defaults to 5000)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional (defaults to 1)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowImages</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional (defaults to 0.8)</span></span></span></code></pre></div>
 </div>
 <h3 id="role-dag">Role DAG</h3>
-<p><code>spec.roles</code> contains one to four roles. Each requires <code>id</code>, <code>provider</code>, and <code>model</code>. Optional <code>purpose</code> is <code>task</code> or <code>review</code>; optional <code>thinking</code> selects a reasoning label. Optional <code>tools</code> selects from <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, and <code>delete</code>. <code>dependsOn</code> can reference only earlier roles, so the graph is acyclic. The first check depends on every sink role. The compiler adjusts <code>controls.maxAttempts</code> to fit checkpoint capacity <code>D &lt;= 64</code>.</p>
-<p>Use <code>loopwright step next --taskpack</code> for local compilation without provider secrets. It selects <code>executionMode: 'delegated'</code> and stages configuration under <code>.taskpack-&lt;runId&gt;/</code> in the run root. See <a href="/loopwright/latest/docs/operations/cli/">CLI</a>
- for the pull and submit protocol.</p>
+<p><code>spec.roles</code> contains one to four acyclic roles (<code>id</code>, <code>provider</code>, <code>model</code>, optional <code>purpose: task | review</code>, <code>thinking</code>, <code>tools</code>, and earlier <code>dependsOn</code> IDs; Turnkey grants <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code> plus <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>). The first check depends on every sink role, <code>maxAttempts</code> fits <code>D &lt;= 64</code>, and <code>loopwright step next --taskpack</code> runs <code>executionMode: 'delegated'</code> without provider secrets (<a href="/loopwright/latest/docs/operations/cli/">CLI</a>
+).</p>
 <ul>
-<li><strong>Strict YAML 1.2</strong>: The parser rejects symlinks (<code>O_NOFOLLOW</code>), <code>..</code> traversal, duplicate keys, YAML anchors/aliases, and <code>${NAME}</code> interpolation (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>; see <a href="/loopwright/latest/docs/configuration/controller-and-registry/#environment-interpolation">Environment interpolation</a>
+<li><strong>Strict YAML 1.2</strong>: Rejects symlinks (<code>O_NOFOLLOW</code>), <code>..</code> traversal, duplicate keys, anchors/aliases, and <code>${NAME}</code> interpolation (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>; see <a href="/loopwright/latest/docs/configuration/controller-and-registry/#environment-interpolation">Environment interpolation</a>
 ).</li>
-<li><strong>Control root</strong>: Set Action <code>taskpack-path</code> to select a manifest. Its parent becomes the control root.</li>
-<li><strong>Root fallback</strong>: Root-level manifests and raw bytes use <code>.loopwright</code> as the control root.</li>
-<li><strong>Built-in masks</strong>: <code>PROTECTED_AUTOMATION_PATHS</code> protects <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code>.</li>
-<li><strong>Control root mask</strong>: The active control root stays protected except for an exact non-overlapping <code>spec.proposal.path</code> file.</li>
-<li><strong>Protected assets</strong>: The exact manifest path, instruction files, and command scripts also remain protected.</li>
+<li><strong>Control root and masks</strong>: Action <code>taskpack-path</code> parent becomes the control root (default <code>.loopwright</code>); protects <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, <code>CLAUDE.md</code>, the control root (except an exact <code>spec.proposal.path</code>), the manifest, instructions, and check scripts.</li>
 </ul>
 <h2 id="metadata-and-scope">Metadata and scope</h2>
 <table>
@@ -596,47 +620,18 @@
       </tr>
   </tbody>
 </table>
-<p>Scope paths normally include descendants, except an exact <code>spec.proposal.path</code> file inside the control root. Raw globs, traversal, and spaces are rejected. Protected paths win over writable ancestors, and writable paths covered by protected paths fail. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.</p>
-<p>A control-root <code>spec.proposal.path</code> requires an exact <code>spec.scope.writable</code> file entry; omitted or broad control-root scope fails. Instruction, manifest, and control-root proposal paths reject symlinks.</p>
+<p>Scope paths include descendants except for an exact <code>spec.proposal.path</code> file inside the control root (which requires an exact <code>writable</code> entry). Raw globs, traversal, spaces, symlinks, and empty writable lists are rejected; protected paths win over writable ancestors, and <code>proposal.path</code> must stay writable.</p>
 <h2 id="model-configuration">Model configuration</h2>
 <p>Loopwright inherits <code>provider</code>, <code>model</code>, <code>thinking</code>, wire <code>api</code>, and custom <code>models.json</code> semantics from the <a href="https://pi.dev/models">Pi model catalog</a>
  and Pi&rsquo;s <a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md">providers</a>
 , <a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md">models</a>
 , and <a href="https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md">models-configuration</a>
- guides. <code>spec.models</code> declares an ordered <code>1..8</code> candidate list for the <strong>coding and authoring LLM</strong> (separate from <code>spec.decisions</code> triage).</p>
-<p>Loopwright admits <strong>token-authenticated HTTP providers only</strong> and handles rate spikes and quota limits across two layers:</p>
+ guides. <code>spec.models</code> declares an ordered <code>1..8</code> candidate list for the <strong>coding and authoring LLM</strong> (separate from <code>spec.decisions</code> triage) and admits <strong>token-authenticated HTTP providers only</strong>:</p>
 <ul>
-<li><strong>Supported built-in token providers</strong>: <code>zai</code> (<code>ZAI_API_KEY</code>) and <code>zai-coding-cn</code> (<code>ZAI_CODING_CN_API_KEY</code>) ship <code>glm-5.3</code> (<code>thinking</code>: <code>off</code>, <code>low</code>, <code>high</code>, <code>max</code>), alongside <code>anthropic</code>, <code>openai</code>, <code>openrouter</code>, <code>deepseek</code>, <code>qwen-token-plan</code>, <code>qwen-token-plan-cn</code>, <code>fireworks</code>, <code>together</code>, <code>baseten</code>, <code>nvidia</code>, <code>groq</code>, <code>cerebras</code>, <code>mistral</code>, <code>xai</code>, <code>huggingface</code>, <code>minimax</code>, <code>minimax-cn</code>, <code>moonshotai</code>, <code>kimi-coding</code>, <code>opencode</code>, <code>vercel-ai-gateway</code>, <code>xiaomi</code>, and <code>ant-ling</code>.</li>
-<li><strong>Supported custom gateways</strong>: Declare <code>baseUrl</code> and <code>api</code> (<code>openai-completions</code>, <code>openai-responses</code>, or <code>anthropic-messages</code>) in any <code>spec.models[]</code> item (with Action <code>allow-custom-base-url: 'true'</code>) or supply a host Pi <code>models.json</code> file (<code>models-json</code>).</li>
-<li><strong>Quota probe and fallback</strong>: A single candidate runs with zero probe overhead; <code>&gt;= 2</code> candidates (or comma-separated tokens in <code>apiKeyEnv</code>) run a <code>max_tokens=1</code> preflight probe (<code>&lt;= 15s</code> each, <code>&lt;= 30s</code> total) to skip <code>402</code>, <code>400</code> quota codes (<code>1113</code>), <code>401</code>/<code>403</code>, <code>429</code>, or <code>5xx</code>, while <code>maxTransportRetries</code> absorbs transient <code>429</code> bursts in-session and rotates to the next candidate on mid-run quota exhaustion.</li>
-<li><strong>Refused OAuth and shell providers</strong>: Interactive OAuth/CLI providers (<code>github-copilot</code>, <code>gemini</code>, <code>google</code>, <code>gemini-cli</code>, <code>google-gemini-cli</code>, <code>google-antigravity</code>, <code>claude-code</code>, <code>openai-codex</code>), <code>oauth</code> blocks, literal <code>apiKey</code> secrets, and <code>!command</code> shell resolvers fail closed with <code>PROVIDER_OAUTH_UNSUPPORTED</code>.</li>
+<li><strong>Built-in token providers</strong>: <code>zai</code> (<code>ZAI_API_KEY</code>) and <code>zai-coding-cn</code> (<code>ZAI_CODING_CN_API_KEY</code>) ship <code>glm-5.3</code> (<code>thinking</code>: <code>off</code>, <code>low</code>, <code>high</code>, <code>max</code>), alongside <code>anthropic</code>, <code>openai</code>, <code>openrouter</code>, <code>deepseek</code>, <code>qwen-token-plan</code>, <code>qwen-token-plan-cn</code>, <code>fireworks</code>, <code>together</code>, <code>baseten</code>, <code>nvidia</code>, <code>groq</code>, <code>cerebras</code>, <code>mistral</code>, <code>xai</code>, <code>huggingface</code>, <code>minimax</code>, <code>minimax-cn</code>, <code>moonshotai</code>, <code>kimi-coding</code>, <code>opencode</code>, <code>vercel-ai-gateway</code>, <code>xiaomi</code>, and <code>ant-ling</code>.</li>
+<li><strong>Custom gateways and fallback</strong>: Declare <code>baseUrl</code> and <code>api</code> on any <code>spec.models[]</code> item (with Action <code>allow-custom-base-url: 'true'</code>) or pass <code>models-json</code>. One candidate skips probing; <code>&gt;= 2</code> candidates (or comma-separated <code>apiKeyEnv</code> tokens) run a <code>max_tokens=1</code> preflight probe (<code>&lt;= 15s</code> each, <code>&lt;= 30s</code> total) and rotate on quota exhaustion.</li>
+<li><strong>Refused OAuth and shell providers</strong>: Interactive OAuth/CLI providers (<code>github-copilot</code>, <code>gemini</code>, <code>google</code>, <code>gemini-cli</code>, <code>google-gemini-cli</code>, <code>google-antigravity</code>, <code>claude-code</code>, <code>openai-codex</code>), <code>oauth</code> blocks, literal <code>apiKey</code> secrets, and <code>!command</code> resolvers fail closed with <code>PROVIDER_OAUTH_UNSUPPORTED</code>.</li>
 </ul>
-<div class="code-block">
-  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">catalog-sync</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="c"># Other Taskpack sections omitted; see Taskpack above.</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional ordered model pool</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">custom-glm-gateway</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l">openai-completions</span><span class="w"> </span><span class="c"># Optional for built-in providers; needed with baseUrl</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">baseUrl</span><span class="p">:</span><span class="w"> </span><span class="l">https://llm-gateway.example.com/v1</span><span class="w"> </span><span class="c"># Optional custom endpoint URL</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">authHeader</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional Bearer header toggle</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="m">204800</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">maxTokens</span><span class="p">:</span><span class="w"> </span><span class="m">32768</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">reasoning</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">samplingParams</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">temperature: 0.6, top_p</span><span class="p">:</span><span class="w"> </span><span class="m">0.95</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">compat</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">thinkingFormat: zai, maxTokensField: max_tokens, zaiToolStream</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span>}<span class="w"> </span><span class="c"># Optional OpenAI-compatible wire dialect tuning</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
-</div>
 <h3 id="model-fields">Model fields</h3>
 <table>
   <thead>
@@ -746,7 +741,7 @@
       </tr>
   </tbody>
 </table>
-<p>Provider-reported cost retains <code>reported</code> provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains <code>unknown</code>.</p>
+<p>Provider-reported cost retains <code>reported</code> provenance; when absent and pricing is positive, Loopwright estimates cost from tokens (otherwise <code>unknown</code>).</p>
 <h2 id="mcp-and-limits">MCP and limits</h2>
 <p><code>spec.mcp.servers</code> connects <code>stdio</code> and Streamable <code>http</code> MCP servers on the host and exposes tools as <code>mcp__&lt;id&gt;__&lt;tool&gt;</code>. OAuth MCP declarations fail closed (<code>MCP_OAUTH_UNSUPPORTED</code>).</p>
 <h3 id="mcp-server-fields">MCP server fields</h3>
@@ -805,7 +800,7 @@
   </tbody>
 </table>
 <h3 id="execution-limits">Execution limits</h3>
-<p>Explicit Action <code>with:</code> inputs override <code>spec.limits</code>, and <code>spec.limits</code> overrides <code>LOOPWRIGHT_*</code> environment variables before compiler defaults apply. Every limit uses one canonical field and environment variable name; unknown alias keys fail closed with <code>TASKPACK_MANIFEST_INVALID</code>.</p>
+<p>Explicit Action <code>with:</code> inputs override <code>spec.limits</code>, and <code>spec.limits</code> overrides <code>LOOPWRIGHT_*</code> environment variables before compiler defaults apply; unknown alias keys fail closed with <code>TASKPACK_MANIFEST_INVALID</code>.</p>
 <table>
   <thead>
       <tr>
@@ -861,7 +856,7 @@
       <tr>
           <td><code>limits.maxImplementationRepairs</code></td>
           <td><code>LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS</code></td>
-          <td><code>32</code> (<code>0..1024</code>)</td>
+          <td><code>128</code> (<code>0..1024</code>)</td>
           <td>Maximum model calls spent repairing failed verification checks</td>
       </tr>
       <tr>
@@ -939,7 +934,6 @@
   </tbody>
 </table>
 <h2 id="upstreams-and-proposal">Upstreams and proposal</h2>
-<h3 id="upstream-and-proposal-fields">Upstream and proposal fields</h3>
 <table>
   <thead>
       <tr>
@@ -1044,7 +1038,6 @@
   </tbody>
 </table>
 <h2 id="verification-checks">Verification checks</h2>
-<h3 id="check-and-gate-fields">Check and gate fields</h3>
 <table>
   <thead>
       <tr>
@@ -1180,8 +1173,7 @@
       </tr>
   </tbody>
 </table>
-<p>The script runs with a minimal environment and <code>LOOPWRIGHT_CANDIDATE_DIR</code> pointing to a temporary candidate copy. Exit <code>0</code> approves the check; nonzero exit denies it. Diagnostics are scrubbed and bounded.</p>
-<p>The <code>env</code> list rejects <code>LOOPWRIGHT_*</code>, <code>INPUT_*</code>, <code>GITHUB_APP_*</code>, <code>ACTIONS_*</code>, <code>LD_*</code>, <code>DYLD_*</code>, and <code>GIT_*</code>. It also rejects <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>BASH_ENV</code>, <code>ENV</code>, and <code>NODE_OPTIONS</code>.</p>
+<p>The script runs with a minimal environment and <code>LOOPWRIGHT_CANDIDATE_DIR</code> pointing to a temporary candidate copy (<code>0</code> approves; nonzero denies with scrubbed diagnostics). <code>env</code> rejects <code>LOOPWRIGHT_*</code>, <code>INPUT_*</code>, <code>GITHUB_APP_*</code>, <code>ACTIONS_*</code>, <code>LD_*</code>, <code>DYLD_*</code>, <code>GIT_*</code>, <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>BASH_ENV</code>, <code>ENV</code>, and <code>NODE_OPTIONS</code>.</p>
 <h2 id="publication-and-memory">Publication and memory</h2>
 <table>
   <thead>
@@ -1208,8 +1200,8 @@
       <tr>
           <td><code>publication.headBranchPrefix</code></td>
           <td>Yes</td>
-          <td>Prefix (<code>1..64</code> chars, no <code>//</code>)</td>
-          <td>Branch prefix for head-pinned PRs (for example <code>loopwright/catalog-sync-</code>)</td>
+          <td>Prefix (<code>1..64</code> chars, <code>[A-Za-z0-9._-]</code> plus optional trailing <code>/</code>)</td>
+          <td>Branch prefix for head-pinned PRs (for example <code>loopwright-catalog-sync-</code>)</td>
       </tr>
       <tr>
           <td><code>publication.titleTemplate</code></td>
@@ -1226,19 +1218,94 @@
       <tr>
           <td><code>memory.apply</code></td>
           <td>Yes</td>
-          <td><code>'separate-pull-request'</code></td>
-          <td>Proposes memory updates in a separate PR outside candidate changes</td>
+          <td><code>'separate-pull-request'</code>, <code>'local-only'</code>, <code>'disabled'</code></td>
+          <td>Proposes memory updates in a separate PR, applies locally, or disables memory</td>
       </tr>
       <tr>
           <td><code>memory.onNoModelBudget</code></td>
-          <td>Yes</td>
+          <td>Conditional</td>
           <td><code>'deterministic-observations-only'</code> or <code>'skip'</code></td>
-          <td>Records deterministic facts without LLM calls or skips memory emission</td>
+          <td>Records deterministic entries or skips emission; optional when <code>apply</code> is <code>'disabled'</code></td>
+      </tr>
+      <tr>
+          <td><code>memory.ttlDays</code></td>
+          <td>No</td>
+          <td>Integer (<code>1..365</code>, default <code>15</code>)</td>
+          <td>Entry retention window in days before eager retirement</td>
+      </tr>
+      <tr>
+          <td><code>memory.maxEntries</code></td>
+          <td>No</td>
+          <td>Integer (<code>1..512</code>, default <code>128</code>)</td>
+          <td>Maximum active entries retained per taskpack store</td>
+      </tr>
+      <tr>
+          <td><code>memory.maxPromptEntries</code></td>
+          <td>No</td>
+          <td>Integer (<code>1..128</code>, default <code>32</code>)</td>
+          <td>Maximum prioritized active entries injected into role prompts</td>
+      </tr>
+      <tr>
+          <td><code>memory.checkCodeFingerprint</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>false</code>)</td>
+          <td>Enables <code>scope.writable</code> hash checks for memory validity</td>
+      </tr>
+      <tr>
+          <td><code>memory.checkUpstreamVersions</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>false</code>)</td>
+          <td>Enables upstream version checks for memory validity</td>
+      </tr>
+      <tr>
+          <td><code>memory.publishOnFailure</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>false</code>)</td>
+          <td>Publishes separate memory PRs on non-passing or incident runs when <code>true</code></td>
+      </tr>
+      <tr>
+          <td><code>memory.skipCi</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>true</code>)</td>
+          <td>Adds <code>[skip ci]</code> to memory commit bodies before DCO trailers</td>
+      </tr>
+  </tbody>
+</table>
+<ul>
+<li><strong>Direct deletion</strong>: Retiring or evicting an entry deletes <code>entries/&lt;id&gt;.md</code> on disk and clears <code>index.retired</code>.</li>
+<li><strong>Loose defaults</strong>: Memory skips <code>codeFingerprint</code> and <code>upstreamVersions</code> invalidation unless you opt in with <code>true</code>.</li>
+<li><strong>Quiet PR defaults</strong>: Separate memory PRs skip non-passing runs and add <code>[skip ci]</code> before the DCO trailer.</li>
+<li><strong>Stateless taskpacks</strong>: Set <code>apply: disabled</code> for stateless workflows or taskpacks driven by <code>spec.decisions</code>.</li>
+<li><strong>Non-blocking isolation</strong>: Memory reads, warnings, CAS conflicts, and cleanup PRs never block task completion.</li>
+</ul>
+<h3 id="memory-apply-modes">Memory apply modes</h3>
+<table>
+  <thead>
+      <tr>
+          <th>Mode</th>
+          <th>Behavior</th>
+          <th>Typical use</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>separate-pull-request</code></td>
+          <td>Opens or updates a separate memory branch and PR</td>
+          <td>Default for reviewed repository memory</td>
+      </tr>
+      <tr>
+          <td><code>local-only</code></td>
+          <td>Updates <code>&lt;memoryDirectory&gt;</code> locally without remote branch writes</td>
+          <td>Local loops or read-only remotes</td>
+      </tr>
+      <tr>
+          <td><code>disabled</code></td>
+          <td>Skips memory loading, prompt injection, and finalization</td>
+          <td>Stateless or <code>spec.decisions</code>-driven taskpacks</td>
       </tr>
   </tbody>
 </table>
 <h2 id="triggers-and-policies">Triggers and policies</h2>
-<h3 id="trigger-and-policy-fields">Trigger and policy fields</h3>
 <table>
   <thead>
       <tr>
@@ -1322,10 +1389,9 @@
       </tr>
   </tbody>
 </table>
-<p>A bare prefix on the first line followed by non-empty guidance on later lines also invokes <code>revise</code>. The <code>revise</code> command must be enabled.</p>
+<p>A bare prefix on the first line followed by non-empty guidance on later lines also invokes <code>revise</code> when <code>revise</code> is enabled.</p>
 <h3 id="output-formats">Output formats</h3>
-<p><code>spec.output</code> accepts a format string, a list, or an object with a <code>formats</code> list. Omission defaults to <code>json</code>.
-Action <code>output</code> overrides the taskpack default. The managed CLI selects formats separately with <code>--output-format</code>.</p>
+<p><code>spec.output</code> accepts a format string, a list, or an object with a <code>formats</code> list (<code>json</code> by default; Action <code>output</code> overrides it, and CLI uses <code>--output-format</code>).</p>
 <table>
   <thead>
       <tr>
@@ -1357,7 +1423,7 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
       </tr>
   </tbody>
 </table>
-<p>Summaries include status, connected MCP servers, checks, <code>K</code>/<code>M</code>/<code>B</code> token counts, <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code> elapsed durations, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. JSON outputs preserve exact integer counts alongside formatted strings.</p>
+<p>Summaries include status, connected MCP servers, checks, <code>K</code>/<code>M</code>/<code>B</code> token counts, <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code> durations, publication URL, and reported or estimated USD cost (<code>unknown</code> cost is omitted).</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -1398,21 +1464,22 @@ Action <code>output</code> overrides the taskpack default. The managed CLI selec
     </li>
     <li><a href="#upstreams-and-proposal">Upstreams and proposal</a>
       <ul>
-        <li><a href="#upstream-and-proposal-fields">Upstream and proposal fields</a></li>
         <li><a href="#upstream-kinds">Upstream kinds</a></li>
       </ul>
     </li>
     <li><a href="#verification-checks">Verification checks</a>
       <ul>
-        <li><a href="#check-and-gate-fields">Check and gate fields</a></li>
         <li><a href="#local-implementations">Local implementations</a></li>
         <li><a href="#command-parameters">Command parameters</a></li>
       </ul>
     </li>
-    <li><a href="#publication-and-memory">Publication and memory</a></li>
+    <li><a href="#publication-and-memory">Publication and memory</a>
+      <ul>
+        <li><a href="#memory-apply-modes">Memory apply modes</a></li>
+      </ul>
+    </li>
     <li><a href="#triggers-and-policies">Triggers and policies</a>
       <ul>
-        <li><a href="#trigger-and-policy-fields">Trigger and policy fields</a></li>
         <li><a href="#comment-commands">Comment commands</a></li>
         <li><a href="#output-formats">Output formats</a></li>
       </ul>

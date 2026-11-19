@@ -595,7 +595,7 @@
 <li><strong>Candidate pull request</strong>: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching <code>headBranchPrefix</code>.</li>
 <li><strong>Verified no-change</strong>: When no update is needed, the compiled <code>no-change.v1</code> check verifies an untouched tree and settles cleanly without opening an empty PR.</li>
 <li><strong>Slash-command iteration</strong>: Collaborators with write access comment <code>/loopwright status</code>, <code>/loopwright retry</code>, or <code>/loopwright revise</code> on managed issues or pull requests.</li>
-<li><strong>Reviewed memory</strong>: Memory proposals target <code>.loopwright/memory/&lt;name&gt;</code> via a separate pull request so candidate diffs never self-approve retained memory.</li>
+<li><strong>Reviewed memory</strong>: Active entries live under <code>.loopwright/memory/&lt;name&gt;</code>. Separate PRs skip non-passing runs (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> (<code>skipCi: true</code>). Use <code>local-only</code> or <code>disabled</code> without blocking task completion.</li>
 </ol>
 <nav class="reading-footer" aria-label="Further reading">
     <section>

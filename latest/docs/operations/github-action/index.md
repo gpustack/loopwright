@@ -68,6 +68,8 @@ Pass `source-revision` when preflight stages writable files onto a commit separa
 
 Native publication uses a detached `git worktree`, a signed-off diff-only commit, and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
 
+Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `local-only`, or `disabled`) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs (`failed`, `blocked`, `exhausted`, `expired`, `cancelled`, or incident) by default (`publishOnFailure: false`) and add `[skip ci]` before the DCO trailer (`skipCi: true`). Memory errors or skipped updates never block primary task completion.
+
 Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.
 
 On GitHub Actions, an omitted `spec.sandbox` selects `direct-dedicated`. This uses host process isolation, not a container security boundary. The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`. See [Sandbox Backends](/loopwright/latest/docs/configuration/sandbox-backends/index.md) for isolation tradeoffs.
@@ -109,6 +111,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `models-json` | Unset | Trusted Pi model configuration path; shell credential resolvers are refused. |
 | `allow-custom-base-url` | `false` | Set `true` to permit model base URLs declared in the taskpack. |
 | `dry-run` | `false` | Set `true` to compile without executing the controller. |
+| `force` | `false` | Set `true` on non-comment trigger events in candidate mode to bypass `no_change` and open-PR deduplication. |
 | `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
 | `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
 | `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |
@@ -131,6 +134,8 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `command-timeout-seconds` | `30` | Fallback `command.v1` check timeout in seconds (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
 
 Explicit configuration takes precedence over environment variables (`Action with:` inputs > `taskpack.yaml` `spec.limits` > `LOOPWRIGHT_*` environment variables > compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical `spec.limits` keys and `LOOPWRIGHT_*` fallbacks; see [Execution limits](/loopwright/latest/docs/configuration/taskpack/index.md#execution-limits). Interactive OAuth and CLI providers or MCP servers are unsupported.
+
+The `force` input applies only to candidate discovery on non-comment trigger events (`workflow_dispatch`, `schedule`, `repository_dispatch`, `release`), while PR comment commands (`/auto-sync retry`, `revise`, `status`) follow comment-command dispatch semantics.
 
 ## Outputs
 

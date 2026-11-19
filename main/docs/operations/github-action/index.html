@@ -434,6 +434,7 @@
 <p>Use <code>upstream-records</code> to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as <code>no_change</code>. Unavailable upstreams can block execution.</p>
 <p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Local checks and publication keep protected and non-writable files at <code>GITHUB_SHA</code>, and squash writable changes onto a commit parented on <code>GITHUB_SHA</code>.</p>
 <p>Native publication uses a detached <code>git worktree</code>, a signed-off diff-only commit, and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
+<p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>local-only</code>, or <code>disabled</code>) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs (<code>failed</code>, <code>blocked</code>, <code>exhausted</code>, <code>expired</code>, <code>cancelled</code>, or incident) by default (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> before the DCO trailer (<code>skipCi: true</code>). Memory errors or skipped updates never block primary task completion.</p>
 <p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.</p>
 <p>On GitHub Actions, an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. This uses host process isolation, not a container security boundary. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
  for isolation tradeoffs.</p>
@@ -550,6 +551,11 @@
           <td>Set <code>true</code> to compile without executing the controller.</td>
       </tr>
       <tr>
+          <td><code>force</code></td>
+          <td><code>false</code></td>
+          <td>Set <code>true</code> on non-comment trigger events in candidate mode to bypass <code>no_change</code> and open-PR deduplication.</td>
+      </tr>
+      <tr>
           <td><code>gate-endpoint-url</code></td>
           <td>Unset</td>
           <td>External gate endpoint, bound as <code>default</code>.</td>
@@ -653,6 +659,7 @@
 </table>
 <p>Explicit configuration takes precedence over environment variables (<code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> environment variables &gt; compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical <code>spec.limits</code> keys and <code>LOOPWRIGHT_*</code> fallbacks; see <a href="/loopwright/main/docs/configuration/taskpack/#execution-limits">Execution limits</a>
 . Interactive OAuth and CLI providers or MCP servers are unsupported.</p>
+<p>The <code>force</code> input applies only to candidate discovery on non-comment trigger events (<code>workflow_dispatch</code>, <code>schedule</code>, <code>repository_dispatch</code>, <code>release</code>), while PR comment commands (<code>/auto-sync retry</code>, <code>revise</code>, <code>status</code>) follow comment-command dispatch semantics.</p>
 <h2 id="outputs">Outputs</h2>
 <p>The Action writes a compact, scrubbed <code>result</code> JSON summary (with SHA-256 digests and byte lengths rather than raw binary buffers) to stdout and <code>GITHUB_OUTPUT</code>. Live runs stream <code>[loopwright]</code> progress lines (upstream discovery, connected MCP servers, per-turn token/duration metrics, tool calls, and check outcomes) plus a plain-text run summary to stderr. A <code>compiled</code> result alone does not establish successful publication; inspect <code>delegateOutcome</code> and the run report.</p>
 <table>

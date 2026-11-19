@@ -26,8 +26,6 @@ When a GitHub Action or App processes a taskpack, `compileDeclarativeTaskpack` g
 | `TrustedRegistry` | `spec.proposal`, `spec.verification`, `spec.publication`, `spec.mcp` | Computes SHA-256 digests for installed handlers (`pi.agent.v1`, `json-artifact.v1`, `scope.v1`, `no-change.v1`, `gate.v1`) and `package-lock.json` |
 | `ControllerConfig` | Binds compiled `TaskContract` and `TrustedRegistry` SHA-256 | Sets `drainReserveMs: 120000`, `maxAttempts: 5`, `repeatFailureLimit: 2`, and `${ENV}` credential templates (`0600`) |
 
-Turnkey compilation grants author roles `['read', 'write', 'edit', 'bash', 'delete']` plus discovered `mcp__<id>__<tool>` tools.
-
 ## Taskpack
 
 ```yaml
@@ -45,39 +43,53 @@ spec:
       provider: example
       model: author-model
       thinking: medium # Optional
-      tools: [read, write, edit] # Optional
+      tools: # Optional
+        - read
+        - write
+        - edit
     - id: review
       purpose: review # Optional
       provider: example
       model: review-model
-      tools: [read] # Optional
-      dependsOn: [author] # Optional prior role IDs
+      tools: # Optional
+        - read
+      dependsOn: # Optional prior role IDs
+        - author
   scope: # Optional whitelist and blacklist
-    writable: [manifests, docs/versions.md] # Optional (defaults to repository-wide writes)
-    protected: [manifests/frozen-policy.yaml] # Optional blacklist
-  instructions: [.loopwright/instructions.md] # Optional protected UTF-8 instruction files
+    writable: # Optional (defaults to repository-wide writes)
+      - manifests
+      - docs/versions.md
+    protected: # Optional blacklist
+      - manifests/frozen-policy.yaml
+  instructions: # Optional protected UTF-8 instruction files
+    - .loopwright/instructions.md
   upstreams:
     - id: engine-release
       kind: github-release
       source: octocat/engine
-      watchedPaths: [docs]
+      watchedPaths:
+        - docs
       allowPrerelease: false # Optional (defaults to false)
   proposal:
     path: manifests/proposal.yaml
-    requiredFields: [schema_version, candidates]
+    requiredFields:
+      - schema_version
+      - candidates
     schemaVersion: 1
   verification:
     localChecks:
       - id: proposal-schema
         implementation: json-artifact.v1
-        parameters: { release_channel: stable } # Optional scalar overrides
+        parameters: # Optional scalar overrides
+          release_channel: stable
       - id: static-check
         implementation: command.v1
         parameters:
           script: .loopwright/checks/verify.sh
           timeoutSeconds: 30 # Optional (defaults to 30)
           allowReadOnlyGitHubToken: false # Optional (defaults to false)
-          env: [CHECK_MODE] # Optional safe environment variable names
+          env: # Optional safe environment variable names
+            - CHECK_MODE
     externalGates:
       - id: ci-smoke
         gateId: catalog-smoke
@@ -86,72 +98,82 @@ spec:
   publication:
     mode: pull_request
     targetBranch: main
-    headBranchPrefix: loopwright/catalog-sync-
+    headBranchPrefix: loopwright-catalog-sync-
     titleTemplate: "chore(catalog) - sync upstream release metadata"
   memory:
     directory: .loopwright/memory/catalog-sync
     apply: separate-pull-request
-    onNoModelBudget: deterministic-observations-only
+    onNoModelBudget: deterministic-observations-only # Optional when apply is disabled
+    ttlDays: 15 # Optional (defaults to 15)
+    maxEntries: 128 # Optional (defaults to 128)
+    maxPromptEntries: 32 # Optional (defaults to 32)
+    checkCodeFingerprint: false # Optional (defaults to false)
+    checkUpstreamVersions: false # Optional (defaults to false)
+    publishOnFailure: false # Optional (defaults to false)
+    skipCi: true # Optional (defaults to true)
   triggers:
     schedule: true
     workflowDispatch: true
     releasePublished: false
-    commentCommands: [retry, revise, status]
-    commentPrefixes: [/loopwright] # Optional (defaults to ['/loopwright'])
+    commentCommands:
+      - retry
+      - revise
+      - status
+    commentPrefixes: # Optional (defaults to ['/loopwright'])
+      - /loopwright
   models: # Optional ordered model pool (defaults to zai / glm-5.3 / high)
     - provider: zai
       id: glm-5.3
       thinking: high # Optional (defaults to high)
       apiKeyEnv: ZAI_API_KEY # Optional (defaults to provider token env)
-      cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25 } # Optional USD per million tokens
-    - provider: zai-coding-cn # Optional fallback candidate on quota exhaustion
-      id: glm-5.3
-      thinking: high # Optional
-      apiKeyEnv: ZAI_CODING_CN_API_KEY # Optional
+      cost: # Optional USD per million tokens
+        input: 1
+        output: 2
   mcp: # Optional host MCP servers
     servers:
       - id: github
         transport: stdio
         command: github-mcp-server
-        args: [stdio, --read-only, --toolsets, "repos,pull_requests,issues"] # Optional command arguments
-        envFrom: { GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN } # Optional secret env mapping
+        args: # Optional command arguments
+          - stdio
+          - --read-only
+        envFrom: # Optional secret env mapping
+          GITHUB_PERSONAL_ACCESS_TOKEN: GITHUB_TOKEN
         timeoutSeconds: 60 # Optional (defaults to 60)
-      - id: deepwiki
-        transport: http
-        url: https://mcp.deepwiki.com/mcp
-  limits: { wallTimeSeconds: 3600, totalTokens: 20000000, contextWindow: 200000, # Optional; see Execution limits
-    maxOutputTokens: 32768, maxModelCalls: 256, maxAttempts: 5,
-    maxFormatRepairs: 6, maxImplementationRepairs: 32, maxTransportRetries: 3,
-    toolTimeoutSeconds: 300, commandTimeoutSeconds: 30 }
-  output: { formats: [json, github-step-summary] } # Optional (defaults to json)
+  limits: # Optional execution ceilings (see Execution limits)
+    wallTimeSeconds: 3600 # Optional
+    totalTokens: 20000000 # Optional
+    maxOutputTokens: 32768 # Optional
+    maxModelCalls: 256 # Optional
+    maxAttempts: 5 # Optional
+    commandTimeoutSeconds: 30 # Optional
+  output: # Optional (defaults to json)
+    formats:
+      - json
+      - github-step-summary
   sandbox: # Optional host isolation policy
-    preferredBackends: [macos-seatbelt, linux-bwrap, linux-landlock, docker] # Optional
+    preferredBackends: # Optional
+      - macos-seatbelt
+      - linux-bwrap
     networkMode: none # Optional (defaults to none)
-    requiredCapabilities: [filesystemReadContainment, filesystemWriteContainment, protectedPathReadOnlyMask, networkIsolation, processTreeCleanup] # Optional
-    deniedReadPaths: [~/.ssh] # Optional
+    requiredCapabilities: # Optional
+      - filesystemWriteContainment
+      - processTreeCleanup
+    deniedReadPaths: # Optional
+      - ~/.ssh
   decisions: # Optional System-One triage policy
     enabled: true
     provider: typesafe-jev # Optional (defaults to typesafe-jev)
     disclosurePolicy: public-metadata-only # Optional (defaults to disabled)
     minConfidence: 0.8 # Optional (defaults to 0.8)
-    confirmThreshold: 0.6 # Optional (defaults to 0.6)
-    hardDeadlineMs: 5000 # Optional (defaults to 5000)
-    maxAttempts: 1 # Optional (defaults to 1)
-    allowImages: false # Optional (defaults to false)
 ```
 
 ### Role DAG
 
-`spec.roles` contains one to four roles. Each requires `id`, `provider`, and `model`. Optional `purpose` is `task` or `review`; optional `thinking` selects a reasoning label. Optional `tools` selects from `read`, `write`, `edit`, `bash`, and `delete`. `dependsOn` can reference only earlier roles, so the graph is acyclic. The first check depends on every sink role. The compiler adjusts `controls.maxAttempts` to fit checkpoint capacity `D <= 64`.
+`spec.roles` contains one to four acyclic roles (`id`, `provider`, `model`, optional `purpose: task | review`, `thinking`, `tools`, and earlier `dependsOn` IDs; Turnkey grants `read`, `write`, `edit`, `bash`, `delete` plus `mcp__<id>__<tool>`). The first check depends on every sink role, `maxAttempts` fits `D <= 64`, and `loopwright step next --taskpack` runs `executionMode: 'delegated'` without provider secrets ([CLI](/loopwright/latest/docs/operations/cli/index.md)).
 
-Use `loopwright step next --taskpack` for local compilation without provider secrets. It selects `executionMode: 'delegated'` and stages configuration under `.taskpack-<runId>/` in the run root. See [CLI](/loopwright/latest/docs/operations/cli/index.md) for the pull and submit protocol.
-
-- **Strict YAML 1.2**: The parser rejects symlinks (`O_NOFOLLOW`), `..` traversal, duplicate keys, YAML anchors/aliases, and `${NAME}` interpolation (`TASKPACK_UNTRUSTED_INTERPOLATION`; see [Environment interpolation](/loopwright/latest/docs/configuration/controller-and-registry/index.md#environment-interpolation)).
-- **Control root**: Set Action `taskpack-path` to select a manifest. Its parent becomes the control root.
-- **Root fallback**: Root-level manifests and raw bytes use `.loopwright` as the control root.
-- **Built-in masks**: `PROTECTED_AUTOMATION_PATHS` protects `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
-- **Control root mask**: The active control root stays protected except for an exact non-overlapping `spec.proposal.path` file.
-- **Protected assets**: The exact manifest path, instruction files, and command scripts also remain protected.
+- **Strict YAML 1.2**: Rejects symlinks (`O_NOFOLLOW`), `..` traversal, duplicate keys, anchors/aliases, and `${NAME}` interpolation (`TASKPACK_UNTRUSTED_INTERPOLATION`; see [Environment interpolation](/loopwright/latest/docs/configuration/controller-and-registry/index.md#environment-interpolation)).
+- **Control root and masks**: Action `taskpack-path` parent becomes the control root (default `.loopwright`); protects `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, `CLAUDE.md`, the control root (except an exact `spec.proposal.path`), the manifest, instructions, and check scripts.
 
 ## Metadata and scope
 
@@ -167,46 +189,15 @@ Use `loopwright step next --taskpack` for local compilation without provider sec
 | `spec.scope.protected` | No | String list (`0..128` paths) | Relative paths excluded from writes in addition to built-in masks |
 | `spec.instructions` | No | Relative path or list (`1..16` paths) | UTF-8 files compiled as SHA-256-pinned `instruction` trusted resources; aggregate size `<= 262144` bytes |
 
-Scope paths normally include descendants, except an exact `spec.proposal.path` file inside the control root. Raw globs, traversal, and spaces are rejected. Protected paths win over writable ancestors, and writable paths covered by protected paths fail. An explicit empty writable list is invalid. The proposal path must remain writable after exclusions.
-
-A control-root `spec.proposal.path` requires an exact `spec.scope.writable` file entry; omitted or broad control-root scope fails. Instruction, manifest, and control-root proposal paths reject symlinks.
+Scope paths include descendants except for an exact `spec.proposal.path` file inside the control root (which requires an exact `writable` entry). Raw globs, traversal, spaces, symlinks, and empty writable lists are rejected; protected paths win over writable ancestors, and `proposal.path` must stay writable.
 
 ## Model configuration
 
-Loopwright inherits `provider`, `model`, `thinking`, wire `api`, and custom `models.json` semantics from the [Pi model catalog](https://pi.dev/models) and Pi's [providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md), [models](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md), and [models-configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md) guides. `spec.models` declares an ordered `1..8` candidate list for the **coding and authoring LLM** (separate from `spec.decisions` triage).
+Loopwright inherits `provider`, `model`, `thinking`, wire `api`, and custom `models.json` semantics from the [Pi model catalog](https://pi.dev/models) and Pi's [providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md), [models](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md), and [models-configuration](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models-configuration.md) guides. `spec.models` declares an ordered `1..8` candidate list for the **coding and authoring LLM** (separate from `spec.decisions` triage) and admits **token-authenticated HTTP providers only**:
 
-Loopwright admits **token-authenticated HTTP providers only** and handles rate spikes and quota limits across two layers:
-
-- **Supported built-in token providers**: `zai` (`ZAI_API_KEY`) and `zai-coding-cn` (`ZAI_CODING_CN_API_KEY`) ship `glm-5.3` (`thinking`: `off`, `low`, `high`, `max`), alongside `anthropic`, `openai`, `openrouter`, `deepseek`, `qwen-token-plan`, `qwen-token-plan-cn`, `fireworks`, `together`, `baseten`, `nvidia`, `groq`, `cerebras`, `mistral`, `xai`, `huggingface`, `minimax`, `minimax-cn`, `moonshotai`, `kimi-coding`, `opencode`, `vercel-ai-gateway`, `xiaomi`, and `ant-ling`.
-- **Supported custom gateways**: Declare `baseUrl` and `api` (`openai-completions`, `openai-responses`, or `anthropic-messages`) in any `spec.models[]` item (with Action `allow-custom-base-url: 'true'`) or supply a host Pi `models.json` file (`models-json`).
-- **Quota probe and fallback**: A single candidate runs with zero probe overhead; `>= 2` candidates (or comma-separated tokens in `apiKeyEnv`) run a `max_tokens=1` preflight probe (`<= 15s` each, `<= 30s` total) to skip `402`, `400` quota codes (`1113`), `401`/`403`, `429`, or `5xx`, while `maxTransportRetries` absorbs transient `429` bursts in-session and rotates to the next candidate on mid-run quota exhaustion.
-- **Refused OAuth and shell providers**: Interactive OAuth/CLI providers (`github-copilot`, `gemini`, `google`, `gemini-cli`, `google-gemini-cli`, `google-antigravity`, `claude-code`, `openai-codex`), `oauth` blocks, literal `apiKey` secrets, and `!command` shell resolvers fail closed with `PROVIDER_OAUTH_UNSUPPORTED`.
-
-```yaml
-apiVersion: loopwright.dev/v1alpha1
-kind: Taskpack
-metadata:
-  name: catalog-sync
-spec:
-  # Other Taskpack sections omitted; see Taskpack above.
-  models: # Optional ordered model pool
-    - provider: custom-glm-gateway
-      id: glm-5.3
-      thinking: high # Optional
-      api: openai-completions # Optional for built-in providers; needed with baseUrl
-      baseUrl: https://llm-gateway.example.com/v1 # Optional custom endpoint URL
-      apiKeyEnv: ZAI_API_KEY # Optional
-      authHeader: true # Optional Bearer header toggle
-      contextWindow: 204800 # Optional
-      maxTokens: 32768 # Optional
-      reasoning: true # Optional
-      samplingParams: { temperature: 0.6, top_p: 0.95 } # Optional
-      compat: { thinkingFormat: zai, maxTokensField: max_tokens, zaiToolStream: true } # Optional OpenAI-compatible wire dialect tuning
-    - provider: zai-coding-cn # Optional fallback candidate
-      id: glm-5.3
-      thinking: high # Optional
-      apiKeyEnv: ZAI_CODING_CN_API_KEY # Optional
-```
+- **Built-in token providers**: `zai` (`ZAI_API_KEY`) and `zai-coding-cn` (`ZAI_CODING_CN_API_KEY`) ship `glm-5.3` (`thinking`: `off`, `low`, `high`, `max`), alongside `anthropic`, `openai`, `openrouter`, `deepseek`, `qwen-token-plan`, `qwen-token-plan-cn`, `fireworks`, `together`, `baseten`, `nvidia`, `groq`, `cerebras`, `mistral`, `xai`, `huggingface`, `minimax`, `minimax-cn`, `moonshotai`, `kimi-coding`, `opencode`, `vercel-ai-gateway`, `xiaomi`, and `ant-ling`.
+- **Custom gateways and fallback**: Declare `baseUrl` and `api` on any `spec.models[]` item (with Action `allow-custom-base-url: 'true'`) or pass `models-json`. One candidate skips probing; `>= 2` candidates (or comma-separated `apiKeyEnv` tokens) run a `max_tokens=1` preflight probe (`<= 15s` each, `<= 30s` total) and rotate on quota exhaustion.
+- **Refused OAuth and shell providers**: Interactive OAuth/CLI providers (`github-copilot`, `gemini`, `google`, `gemini-cli`, `google-gemini-cli`, `google-antigravity`, `claude-code`, `openai-codex`), `oauth` blocks, literal `apiKey` secrets, and `!command` resolvers fail closed with `PROVIDER_OAUTH_UNSUPPORTED`.
 
 ### Model fields
 
@@ -229,7 +220,7 @@ spec:
 | `models[].samplingParamsByThinkingLevel` | No | Map of thinking level to `samplingParams` | Per-thinking-level sampling parameter overrides |
 | `models[].compat` | No | Object (`thinkingFormat`, `maxTokensField`, `zaiToolStream`, booleans) | OpenAI-compatible dialect flags matching Pi `models.json` `compat` |
 
-Provider-reported cost retains `reported` provenance. When billing is absent and pricing has a positive rate, Loopwright estimates cost from token usage. Estimated cost is not provider-attested billing; unpriced usage remains `unknown`.
+Provider-reported cost retains `reported` provenance; when absent and pricing is positive, Loopwright estimates cost from tokens (otherwise `unknown`).
 
 ## MCP and limits
 
@@ -249,7 +240,7 @@ Provider-reported cost retains `reported` provenance. When billing is absent and
 
 ### Execution limits
 
-Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrides `LOOPWRIGHT_*` environment variables before compiler defaults apply. Every limit uses one canonical field and environment variable name; unknown alias keys fail closed with `TASKPACK_MANIFEST_INVALID`.
+Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrides `LOOPWRIGHT_*` environment variables before compiler defaults apply; unknown alias keys fail closed with `TASKPACK_MANIFEST_INVALID`.
 
 | Field | Environment variable | Default and bounds | Meaning |
 | --- | --- | --- | --- |
@@ -260,7 +251,7 @@ Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrid
 | `limits.maxModelCalls` | `LOOPWRIGHT_MAX_MODEL_CALLS` | `256` (`1..1024`) | Maximum model calls per run within store capacity (Action input `max-model-calls`) |
 | `limits.maxAttempts` | `LOOPWRIGHT_MAX_ATTEMPTS` | `5` (`1..16`) | Maximum controller attempts within 64-checkpoint cap (Action input `max-attempts`) |
 | `limits.maxFormatRepairs` | `LOOPWRIGHT_MAX_FORMAT_REPAIRS` | `6` (`0..1024`) | Maximum model calls spent repairing malformed submission JSON |
-| `limits.maxImplementationRepairs` | `LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS` | `32` (`0..1024`) | Maximum model calls spent repairing failed verification checks |
+| `limits.maxImplementationRepairs` | `LOOPWRIGHT_MAX_IMPLEMENTATION_REPAIRS` | `128` (`0..1024`) | Maximum model calls spent repairing failed verification checks |
 | `limits.maxTransportRetries` | `LOOPWRIGHT_MAX_TRANSPORT_RETRIES` | `3` (`0..8`) | Maximum in-session retries on transient network or rate-limit errors |
 | `limits.toolTimeoutSeconds` | `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS` | `300` (`1..1800`) | Per-tool wall-clock timeout in seconds (Action input `tool-timeout-seconds`) |
 | `limits.commandTimeoutSeconds` | `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS` | `30` (`1..3600`) | Fallback `command.v1` script timeout in seconds (Action input `command-timeout-seconds`) |
@@ -275,8 +266,6 @@ Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrid
 | `limits.candidateEntries` | `LOOPWRIGHT_CANDIDATE_ENTRIES` | `4096` (`16..4096`) | Maximum tracked candidate workspace entries |
 
 ## Upstreams and proposal
-
-### Upstream and proposal fields
 
 | Field path | Required | Type and bounds | Meaning |
 | --- | --- | --- | --- |
@@ -301,8 +290,6 @@ Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrid
 | `custom-table` | Repository table ID | Reads a pinned structured version matrix in the repository |
 
 ## Verification checks
-
-### Check and gate fields
 
 | Field path | Required | Type and bounds | Meaning |
 | --- | --- | --- | --- |
@@ -334,9 +321,7 @@ Explicit Action `with:` inputs override `spec.limits`, and `spec.limits` overrid
 | `allowReadOnlyGitHubToken` | No | Boolean (default `false`) | Passes the resolved GitHub token when available; the flag does not reduce its permissions |
 | `env` | No | List (`0..16` names) | Safe uppercase host environment variable names to pass to the script |
 
-The script runs with a minimal environment and `LOOPWRIGHT_CANDIDATE_DIR` pointing to a temporary candidate copy. Exit `0` approves the check; nonzero exit denies it. Diagnostics are scrubbed and bounded.
-
-The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `LD_*`, `DYLD_*`, and `GIT_*`. It also rejects `GH_TOKEN`, `GITHUB_TOKEN`, `BASH_ENV`, `ENV`, and `NODE_OPTIONS`.
+The script runs with a minimal environment and `LOOPWRIGHT_CANDIDATE_DIR` pointing to a temporary candidate copy (`0` approves; nonzero denies with scrubbed diagnostics). `env` rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `LD_*`, `DYLD_*`, `GIT_*`, `GH_TOKEN`, `GITHUB_TOKEN`, `BASH_ENV`, `ENV`, and `NODE_OPTIONS`.
 
 ## Publication and memory
 
@@ -344,15 +329,34 @@ The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `
 | --- | --- | --- | --- |
 | `publication.mode` | Yes | `'pull_request'` or `'disabled'` | Opens/updates a managed pull request or skips remote branch writes |
 | `publication.targetBranch` | Yes | Branch name (`1..128` chars) | Base branch targeted by generated pull requests (required even when `disabled`) |
-| `publication.headBranchPrefix` | Yes | Prefix (`1..64` chars, no `//`) | Branch prefix for head-pinned PRs (for example `loopwright/catalog-sync-`) |
+| `publication.headBranchPrefix` | Yes | Prefix (`1..64` chars, `[A-Za-z0-9._-]` plus optional trailing `/`) | Branch prefix for head-pinned PRs (for example `loopwright-catalog-sync-`) |
 | `publication.titleTemplate` | Yes | String (`1..256` chars) | Pull request title string |
 | `memory.directory` | Yes | `<controlRoot>/memory` or descendant | Storage directory for reviewed CAS memory, protected even inside a writable ancestor |
-| `memory.apply` | Yes | `'separate-pull-request'` | Proposes memory updates in a separate PR outside candidate changes |
-| `memory.onNoModelBudget` | Yes | `'deterministic-observations-only'` or `'skip'` | Records deterministic facts without LLM calls or skips memory emission |
+| `memory.apply` | Yes | `'separate-pull-request'`, `'local-only'`, `'disabled'` | Proposes memory updates in a separate PR, applies locally, or disables memory |
+| `memory.onNoModelBudget` | Conditional | `'deterministic-observations-only'` or `'skip'` | Records deterministic entries or skips emission; optional when `apply` is `'disabled'` |
+| `memory.ttlDays` | No | Integer (`1..365`, default `15`) | Entry retention window in days before eager retirement |
+| `memory.maxEntries` | No | Integer (`1..512`, default `128`) | Maximum active entries retained per taskpack store |
+| `memory.maxPromptEntries` | No | Integer (`1..128`, default `32`) | Maximum prioritized active entries injected into role prompts |
+| `memory.checkCodeFingerprint` | No | Boolean (default `false`) | Enables `scope.writable` hash checks for memory validity |
+| `memory.checkUpstreamVersions` | No | Boolean (default `false`) | Enables upstream version checks for memory validity |
+| `memory.publishOnFailure` | No | Boolean (default `false`) | Publishes separate memory PRs on non-passing or incident runs when `true` |
+| `memory.skipCi` | No | Boolean (default `true`) | Adds `[skip ci]` to memory commit bodies before DCO trailers |
+
+- **Direct deletion**: Retiring or evicting an entry deletes `entries/<id>.md` on disk and clears `index.retired`.
+- **Loose defaults**: Memory skips `codeFingerprint` and `upstreamVersions` invalidation unless you opt in with `true`.
+- **Quiet PR defaults**: Separate memory PRs skip non-passing runs and add `[skip ci]` before the DCO trailer.
+- **Stateless taskpacks**: Set `apply: disabled` for stateless workflows or taskpacks driven by `spec.decisions`.
+- **Non-blocking isolation**: Memory reads, warnings, CAS conflicts, and cleanup PRs never block task completion.
+
+### Memory apply modes
+
+| Mode | Behavior | Typical use |
+| --- | --- | --- |
+| `separate-pull-request` | Opens or updates a separate memory branch and PR | Default for reviewed repository memory |
+| `local-only` | Updates `<memoryDirectory>` locally without remote branch writes | Local loops or read-only remotes |
+| `disabled` | Skips memory loading, prompt injection, and finalization | Stateless or `spec.decisions`-driven taskpacks |
 
 ## Triggers and policies
-
-### Trigger and policy fields
 
 | Field path | Required | Type and bounds | Meaning |
 | --- | --- | --- | --- |
@@ -372,12 +376,11 @@ The `env` list rejects `LOOPWRIGHT_*`, `INPUT_*`, `GITHUB_APP_*`, `ACTIONS_*`, `
 | `revise` | `/loopwright revise` | Passes bounded reviewer guidance (`<= 40` lines, `<= 2048` bytes) into next attempt |
 | `status` | `/loopwright status` | Reports active queue lease, run status, or last receipt summary |
 
-A bare prefix on the first line followed by non-empty guidance on later lines also invokes `revise`. The `revise` command must be enabled.
+A bare prefix on the first line followed by non-empty guidance on later lines also invokes `revise` when `revise` is enabled.
 
 ### Output formats
 
-`spec.output` accepts a format string, a list, or an object with a `formats` list. Omission defaults to `json`.
-Action `output` overrides the taskpack default. The managed CLI selects formats separately with `--output-format`.
+`spec.output` accepts a format string, a list, or an object with a `formats` list (`json` by default; Action `output` overrides it, and CLI uses `--output-format`).
 
 | Format | Destination | Content |
 | --- | --- | --- |
@@ -386,7 +389,7 @@ Action `output` overrides the taskpack default. The managed CLI selects formats 
 | `markdown` | Action stderr or CLI stdout | Markdown run summary |
 | `text` | Action stderr or CLI stdout | Plain-text run summary |
 
-Summaries include status, connected MCP servers, checks, `K`/`M`/`B` token counts, `ms`/`s`/`m`/`h` elapsed durations, and publication URL when available. Reported or estimated cost is shown in USD; unknown cost is omitted. JSON outputs preserve exact integer counts alongside formatted strings.
+Summaries include status, connected MCP servers, checks, `K`/`M`/`B` token counts, `ms`/`s`/`m`/`h` durations, publication URL, and reported or estimated USD cost (`unknown` cost is omitted).
 
 ---
 
