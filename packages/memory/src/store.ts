@@ -4,7 +4,30 @@ import { lstat, mkdir, open, readFile, readdir } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import type { Digest } from '@loopwright/core';
 import { canonical, fail, hashDomain, hasControlCharacter, memoryIdentifierPattern, memoryStoreIndexSchema, parseEntryMarkdown, renderEntryMarkdown, storeDigestOf } from './schema.js';
-import type { MemoryEntry, MemoryOperation, MemoryStoreIndex, RetiredMemoryEntry } from './types.js';
+import {
+  DEFAULT_MEMORY_MAX_ENTRIES,
+  DEFAULT_MEMORY_MAX_PROMPT_BYTES,
+  DEFAULT_MEMORY_MAX_PROMPT_ENTRIES,
+  DEFAULT_MEMORY_TTL_DAYS,
+  DEFAULT_MEMORY_TTL_MS,
+  MAX_MEMORY_ENTRY_FILE_BYTES,
+  MAX_MEMORY_INDEX_FILE_BYTES,
+  type MemoryEntry,
+  type MemoryEntryKind,
+  type MemoryOperation,
+  type MemoryStoreIndex,
+  type RetiredMemoryEntry,
+} from './types.js';
+
+export {
+  DEFAULT_MEMORY_MAX_ENTRIES,
+  DEFAULT_MEMORY_MAX_PROMPT_BYTES,
+  DEFAULT_MEMORY_MAX_PROMPT_ENTRIES,
+  DEFAULT_MEMORY_TTL_DAYS,
+  DEFAULT_MEMORY_TTL_MS,
+  MAX_MEMORY_ENTRY_FILE_BYTES,
+  MAX_MEMORY_INDEX_FILE_BYTES,
+};
 
 export const MEMORY_ROOT = '.loopwright/memory';
 const TASKPACK_DIRECTORY_ENTRIES = ['index.json', 'entries', '.cas.lock'];
@@ -97,12 +120,28 @@ export interface LoadedMemoryStore {
   readonly index: MemoryStoreIndex;
   readonly entryFiles: ReadonlyMap<string, Uint8Array>;
 }
-async function readRegularFile(path: string, label: string): Promise<Uint8Array> {
+async function readRegularFile(path: string, label: string, maxBytes: number): Promise<Uint8Array> {
   const stats = await lstat(path);
   if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', label, 'symbolic links are refused in the memory store');
   if (!stats.isFile()) fail('MEMORY_SCHEMA_INVALID', label, 'expected a regular file');
-  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  try { return await handle.readFile(); } finally { await handle.close(); }
+  if (stats.size > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const fdStats = await handle.stat();
+    if (!fdStats.isFile()) fail('MEMORY_SCHEMA_INVALID', label, 'expected a regular file');
+    if (fdStats.size > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
+    const bytes = await handle.readFile();
+    if (bytes.byteLength > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
+    return bytes;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      fail('MEMORY_SCHEMA_INVALID', label, 'symbolic links are refused in the memory store');
+    }
+    throw error;
+  } finally {
+    if (handle !== null) await handle.close();
+  }
 }
 async function refuseForbiddenNames(directory: string, label: string): Promise<void> {
   const names = await readdir(directory);
@@ -190,7 +229,7 @@ export async function loadMemoryStore(
     if (error.code === 'ENOENT') return null; throw error;
   });
   const indexBytes = await (async (): Promise<Uint8Array | null> => {
-    try { return await readRegularFile(join(directory, 'index.json'), `${dirLabel}/index.json`); }
+    try { return await readRegularFile(join(directory, 'index.json'), `${dirLabel}/index.json`, MAX_MEMORY_INDEX_FILE_BYTES); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
@@ -204,26 +243,36 @@ export async function loadMemoryStore(
     if (existing.length > 0) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'entry files exist without an index');
     return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
   }
-  if (entriesStats === null) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'entries directory missing');
   let parsedIndex: unknown;
   try { parsedIndex = JSON.parse(Buffer.from(indexBytes).toString('utf8')); } catch { fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'index is not JSON'); }
   const index = memoryStoreIndexSchema(parsedIndex, dirLabel);
   if (index.taskpack !== taskpack) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json/taskpack`, 'index taskpack does not match directory');
-  if (entriesStats!.isSymbolicLink() || !entriesStats!.isDirectory()) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'expected a directory');
+  if (entriesStats === null) {
+    if (index.entries.length === 0) {
+      return Object.freeze({ index, entryFiles: new Map() });
+    }
+    fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'entries directory missing');
+  }
+  if (entriesStats.isSymbolicLink() || !entriesStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'expected a directory');
   const files = await readdir(entriesDirectory);
-  const indexedIds = new Set([...index.entries.map(entry => entry.id), ...index.retired.map(row => row.entry.id)]);
+  const activeById = new Map<string, MemoryEntry>(index.entries.map(entry => [entry.id, entry]));
+  const retiredIds = new Set<string>(index.retired.map(row => row.entry.id));
+  const indexedIds = new Set<string>([...activeById.keys(), ...retiredIds]);
   const committedBytes = (row: MemoryEntry): Uint8Array => entryFileBytes(row);
   const entryFiles = new Map<string, Uint8Array>();
-  const markIndexed = (id: string, row: MemoryEntry, path: string): Promise<void> => (async () => {
+  const markActiveIndexed = (id: string, row: MemoryEntry, path: string): Promise<void> => (async () => {
     let bytes: Uint8Array;
     try {
-      bytes = await readRegularFile(join(entriesDirectory, `${id}.md`), path);
+      bytes = await readRegularFile(join(entriesDirectory, `${id}.md`), path, MAX_MEMORY_ENTRY_FILE_BYTES);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && activeLock !== null && activeLock.touchedEntryIds.has(id)) {
-        entryFiles.set(id, committedBytes(row));
-        return;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        activeLock = activeLock ?? await readActiveCasLock(directory);
+        if (activeLock !== null && activeLock.touchedEntryIds.has(id)) {
+          entryFiles.set(id, committedBytes(row));
+          return;
+        }
+        fail('MEMORY_SCHEMA_INVALID', path, 'index row has no entry file');
       }
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') fail('MEMORY_SCHEMA_INVALID', path, 'index row has no entry file');
       throw error;
     }
     const parsed = parseEntryMarkdown(bytes, path);
@@ -235,6 +284,15 @@ export async function loadMemoryStore(
       return;
     }
     entryFiles.set(id, bytes);
+  })();
+  const markLegacyRetired = (id: string, path: string): Promise<void> => (async () => {
+    try {
+      const bytes = await readRegularFile(join(entriesDirectory, `${id}.md`), path, MAX_MEMORY_ENTRY_FILE_BYTES);
+      entryFiles.set(id, bytes);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
   })();
   for (const fileName of files) {
     const stagingMatch = ENTRY_STAGING_PATTERN.exec(fileName);
@@ -256,10 +314,11 @@ export async function loadMemoryStore(
       continue;
     }
   }
-  const authoritative = new Map<string, MemoryEntry>();
-  for (const entry of index.entries) authoritative.set(entry.id, entry);
-  for (const row of [...index.retired].reverse()) if (!authoritative.has(row.entry.id)) authoritative.set(row.entry.id, row.entry);
-  await Promise.all([...authoritative].map(([id, row]) => markIndexed(id, row, `${dirLabel}/entries/${id}.md`)));
+  const legacyRetiredOnlyIds = [...retiredIds].filter(id => !activeById.has(id));
+  await Promise.all([
+    ...[...activeById].map(([id, row]) => markActiveIndexed(id, row, `${dirLabel}/entries/${id}.md`)),
+    ...legacyRetiredOnlyIds.map(id => markLegacyRetired(id, `${dirLabel}/entries/${id}.md`)),
+  ]);
   return Object.freeze({ index, entryFiles });
 }
 
@@ -323,32 +382,42 @@ export async function computeCodeFingerprint(
 export function entryFileBytes(entry: MemoryEntry): Uint8Array {
   return Buffer.from(renderEntryMarkdown(entry), 'utf8');
 }
+const EVICTION_KIND_PRIORITY: Readonly<Record<MemoryEntryKind, number>> = {
+  failure_observation: 0,
+  fact: 1,
+  invariant: 2,
+};
+export function clampMemoryMaxEntries(maxEntries: number | undefined): number {
+  if (maxEntries === undefined || !Number.isFinite(maxEntries)) return DEFAULT_MEMORY_MAX_ENTRIES;
+  return Math.min(1024, Math.max(1, Math.trunc(maxEntries)));
+}
+export function compareEntriesForEviction(a: MemoryEntry, b: MemoryEntry): number {
+  const kindDiff = EVICTION_KIND_PRIORITY[a.kind] - EVICTION_KIND_PRIORITY[b.kind];
+  if (kindDiff !== 0) return kindDiff;
+  if (a.verifiedAtMs !== b.verifiedAtMs) return a.verifiedAtMs - b.verifiedAtMs;
+  if (a.expiresAtMs !== b.expiresAtMs) return a.expiresAtMs - b.expiresAtMs;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
 export interface ProjectedMemoryStore {
   readonly index: MemoryStoreIndex;
   readonly entryFiles: ReadonlyMap<string, Uint8Array>;
   readonly retiredRows: readonly RetiredMemoryEntry[];
 }
 /** Purely projects operations onto a base index; used for patch previews and atomic CAS application. */
-export function projectMemoryStore(base: MemoryStoreIndex, operations: readonly MemoryOperation[], nowMs: number, proposalId: string): ProjectedMemoryStore {
+export function projectMemoryStore(
+  base: MemoryStoreIndex,
+  operations: readonly MemoryOperation[],
+  nowMs: number,
+  proposalId: string,
+  options?: { readonly maxEntries?: number | undefined },
+): ProjectedMemoryStore {
+  void proposalId;
   const entries = new Map<string, MemoryEntry>(base.entries.map(entry => [entry.id, entry]));
-  const retiredById = new Map<string, RetiredMemoryEntry>(base.retired.map(row => [row.entry.id, row]));
-  const supersededBy = new Map<string, string>();
   const handledBySupersession = new Set<string>();
-  for (const operation of operations) {
-    if (operation.kind !== 'upsert') continue;
-    for (const id of operation.entry.supersedes) if (!supersededBy.has(id)) supersededBy.set(id, operation.entry.id);
-  }
-  const retire = (entry: MemoryEntry, successor: string | null): void => {
-    retiredById.set(entry.id, { entry, retiredAtMs: nowMs, retiredByProposalId: proposalId, supersededByEntryId: successor });
-  };
   for (const [index, operation] of operations.entries()) {
     if (operation.kind === 'upsert') {
       for (const id of operation.entry.supersedes) {
-        const prior = entries.get(id);
-        if (prior === undefined) continue;
-        entries.delete(id);
-        handledBySupersession.add(id);
-        retire(prior, operation.entry.id);
+        if (entries.delete(id)) handledBySupersession.add(id);
       }
       entries.set(operation.entry.id, operation.entry);
       continue;
@@ -359,15 +428,31 @@ export function projectMemoryStore(base: MemoryStoreIndex, operations: readonly 
       fail('MEMORY_SCHEMA_INVALID', `/operations/${index}`, `retire target ${operation.entryId} is not a projected active entry`);
     }
     entries.delete(operation.entryId);
-    retire(existing, supersededBy.get(operation.entryId) ?? null);
+  }
+  const effectiveMaxEntries = clampMemoryMaxEntries(options?.maxEntries);
+  let evicted = false;
+  if (entries.size > effectiveMaxEntries) {
+    const evictionOrder = [...entries.values()].sort(compareEntriesForEviction);
+    const excessCount = entries.size - effectiveMaxEntries;
+    for (let i = 0; i < excessCount; i += 1) {
+      entries.delete(evictionOrder[i]!.id);
+    }
+    evicted = true;
   }
   const sorted = [...entries.values()].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  const retiredSorted = [...retiredById.values()].sort((a, b) => a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : 0);
-  const baseContent = { version: 1 as const, taskpack: base.taskpack, repository: base.repository,
-    updatedAtMs: operations.length === 0 ? base.updatedAtMs : nowMs, entries: sorted, retired: retiredSorted };
+  const mutated = operations.length > 0 || base.retired.length > 0 || evicted;
+  const retired: readonly RetiredMemoryEntry[] = Object.freeze([]);
+  const baseContent = {
+    version: 1 as const,
+    taskpack: base.taskpack,
+    repository: base.repository,
+    updatedAtMs: mutated ? nowMs : base.updatedAtMs,
+    entries: Object.freeze(sorted),
+    retired,
+  };
   const index: MemoryStoreIndex = Object.freeze({ ...baseContent, storeDigest: storeDigestOf(baseContent) });
   const entryFiles = new Map<string, Uint8Array>(sorted.map(entry => [entry.id, entryFileBytes(entry)]));
-  return { index, entryFiles, retiredRows: retiredSorted };
+  return { index, entryFiles, retiredRows: retired };
 }
 export async function ensureSafeDirectoryChain(repository: string, segments: readonly string[]): Promise<string> {
   if (!Array.isArray(segments) || segments.length === 0 || segments.length > 18) {

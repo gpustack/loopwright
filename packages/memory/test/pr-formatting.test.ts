@@ -8,6 +8,7 @@ import {
   loadMemoryStore,
   memoryDirectoryFor,
   memoryProposalSchema,
+  unifiedFileDiff,
   type MemoryCASInput,
   type MemoryEntry,
   type MemoryOperation,
@@ -337,5 +338,21 @@ describe('memory PR title and Markdown body formatting', () => {
     assert.equal(body.includes('a'.repeat(65)), false, 'baseRevision full span must be bounded to 64 code points');
     assert.ok(body.includes("- `artifacts/nested/file'name/`"), body);
     assert.equal(/\\`/.test(body), false, 'inline code spans must not end with an unescaped backslash');
+  });
+
+  it('formats standard Git deletion unified diffs (--- a/<path> to +++ /dev/null) when after is null', () => {
+    const diff = unifiedFileDiff('.loopwright/memory/demo/entries/entry.old.md', 'line one\nline two\n', null);
+    assert.equal(
+      diff,
+      [
+        '--- a/.loopwright/memory/demo/entries/entry.old.md',
+        '+++ /dev/null',
+        '@@ -1,2 +0,0 @@',
+        '-line one',
+        '-line two',
+        '',
+      ].join('\n'),
+    );
+    assert.equal(unifiedFileDiff('.loopwright/memory/demo/entries/entry.old.md', null, null), '');
   });
 });

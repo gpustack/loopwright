@@ -183,6 +183,7 @@ describe('custom memoryRoot support and backward compatibility', () => {
           nowMs: 10_000,
           ttlMs: 86_400_000,
           upstreamVersions: { engine: '2.0.0' },
+          checkCodeFingerprint: true,
         },
       });
 
@@ -512,6 +513,7 @@ describe('custom memoryRoot support and backward compatibility', () => {
           nowMs: 12_000,
           ttlMs: 86_400_000,
           upstreamVersions: {},
+          checkCodeFingerprint: true,
         },
       });
       assert.equal(finalized.status, 'proposed');
@@ -603,6 +605,7 @@ describe('custom memoryRoot support and backward compatibility', () => {
           nowMs: 10_000,
           ttlMs: 86_400_000,
           upstreamVersions: {},
+          checkCodeFingerprint: true,
         },
       });
       assert.ok(finalized.proposal !== null);

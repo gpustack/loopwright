@@ -5,6 +5,15 @@ export { MemoryDiagnosticError, diagnostic, fail, digestEqual, canonical, hashDo
 export { MEMORY_ROOT, normalizeMemoryRoot, memoryDirectoryFor, forbiddenMemoryArtifactName, isMemoryManagedPath, emptyMemoryStoreIndex,
   loadMemoryStore, computeCodeFingerprint, compileScopePattern, matchScopePattern, entryFileBytes, projectMemoryStore,
   ensureMemoryDirectories } from './store.js';
+export {
+  DEFAULT_MEMORY_TTL_DAYS,
+  DEFAULT_MEMORY_TTL_MS,
+  DEFAULT_MEMORY_MAX_ENTRIES,
+  DEFAULT_MEMORY_MAX_PROMPT_ENTRIES,
+  DEFAULT_MEMORY_MAX_PROMPT_BYTES,
+  MAX_MEMORY_ENTRY_FILE_BYTES,
+  MAX_MEMORY_INDEX_FILE_BYTES,
+} from './types.js';
 export { selectActiveMemory, bindMemorySnapshotToResource, memorySnapshotBindingMatches, memorySnapshotResourceId } from './selector.js';
 export { finalizeRunMemory, resolveSettledCycleContext, type ResolvedSettledCycleContext } from './finalizer.js';
 export { verifyMemoryProposal, verifyRebasedProposal } from './verifier.js';

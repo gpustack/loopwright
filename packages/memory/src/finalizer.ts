@@ -4,15 +4,17 @@ import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
 import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
-import { computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
-import type { MemoryBudgetLedger, MemoryCuratorRequest, MemoryEntry, MemoryEvidenceRef, MemoryFinalizerInput, MemoryFinalizerOutcome, MemoryOperation, MemoryProposal, SettledCycleContext } from './types.js';
+import { clampMemoryMaxEntries, compareEntriesForEviction, computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
+import type { MemoryBudgetLedger, MemoryCuratorRequest, MemoryEntry, MemoryEvidenceRef, MemoryFinalizerConfig, MemoryFinalizerInput, MemoryFinalizerOutcome, MemoryOperation, MemoryProposal, SettledCycleContext } from './types.js';
 
 const PROOF_FILE_LIMIT = 256;
+const MAX_PROPOSAL_OPERATIONS = 256;
 const ARTIFACT_BYTES_LIMIT = 8_388_608;
-const FACT_STATUSES = ['completed', 'no_change'] as const;
+const ZERO_SHA256_DIGEST: Digest = Object.freeze({ algorithm: 'sha256', hex: '0'.repeat(64) });
 const OBSERVATION_STATUSES = ['failed', 'blocked', 'exhausted', 'expired', 'cancelled', 'reconcile_required'] as const;
 const INCIDENT_EVIDENCE_ID = 'evidence.incident';
 const INCIDENT_CHECK_ID = 'incident';
+const EPHEMERAL_GATE_WORKDIR_PATTERN = /(?:\/[^\s/:]+)+\/loopwright-gate-[A-Za-z0-9._-]+(?:\/exec-[A-Za-z0-9._-]+)?/g;
 
 type Inventory = Map<string, { readonly byteLength: number; readonly digest: Digest }>;
 function addInventory(inventory: Inventory, reference: ArtifactRef): void {
@@ -205,6 +207,135 @@ function evidenceRefFor(row: { readonly checkId: string; readonly status: string
   if (!artifact) return null;
   return { evidenceId: document.metadata.id, checkId: row.checkId, level: document.spec.level, observedStatus: row.status as MemoryEvidenceRef['observedStatus'], artifact };
 }
+function normalizeGateWorkdirPaths(text: string): string {
+  return text.replace(EPHEMERAL_GATE_WORKDIR_PATTERN, '<gate-workdir>');
+}
+function targetMatrixOverlaps(
+  candidateMatrix: MemoryEntry['scope']['targetMatrix'],
+  currentTargetMatrix: MemoryEntry['scope']['targetMatrix'],
+): boolean {
+  return (
+    candidateMatrix === null
+    || currentTargetMatrix === null
+    || (
+      candidateMatrix.id === currentTargetMatrix.id
+      && candidateMatrix.platform === currentTargetMatrix.platform
+      && candidateMatrix.variant === currentTargetMatrix.variant
+    )
+  );
+}
+function hasDriftedPinnedUpstream(
+  entryUpstreams: Readonly<Record<string, string>>,
+  currentUpstreams: Readonly<Record<string, string>>,
+): boolean {
+  for (const key of Object.keys(entryUpstreams)) {
+    if (Object.hasOwn(currentUpstreams, key) && currentUpstreams[key] !== entryUpstreams[key]) {
+      return true;
+    }
+  }
+  return false;
+}
+function applyLifecycleSweepAndEviction(options: {
+  readonly baseOperations: readonly MemoryOperation[];
+  readonly baseEntries: readonly MemoryEntry[];
+  readonly config: MemoryFinalizerConfig;
+  readonly settledStatus: RunResult['spec']['status'] | null;
+  readonly passedCheckClaimKeys: ReadonlySet<string>;
+}): readonly MemoryOperation[] {
+  const { baseOperations, baseEntries, config, settledStatus, passedCheckClaimKeys } = options;
+  const cappedBase = baseOperations.slice(0, MAX_PROPOSAL_OPERATIONS);
+  const targetedOrSuperseded = new Set<string>();
+  for (const operation of cappedBase) {
+    if (operation.kind === 'upsert') {
+      targetedOrSuperseded.add(operation.entry.id);
+      for (const sid of operation.entry.supersedes) targetedOrSuperseded.add(sid);
+    } else {
+      targetedOrSuperseded.add(operation.entryId);
+    }
+  }
+
+  const eagerRetires: MemoryOperation[] = [];
+  const sortedBaseEntries = [...baseEntries].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const runSucceeded = settledStatus === 'completed' || settledStatus === 'no_change';
+  const currentTargetMatrix = config.targetMatrix ?? null;
+  for (const entry of sortedBaseEntries) {
+    if (cappedBase.length + eagerRetires.length >= MAX_PROPOSAL_OPERATIONS) break;
+    if (targetedOrSuperseded.has(entry.id)) continue;
+    if (entry.expiresAtMs <= config.nowMs) {
+      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Entry expired past TTL.' });
+      targetedOrSuperseded.add(entry.id);
+    } else if (
+      config.checkUpstreamVersions === true
+      && hasDriftedPinnedUpstream(entry.validFor.upstreamVersions, config.upstreamVersions)
+    ) {
+      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Pinned upstream version changed.' });
+      targetedOrSuperseded.add(entry.id);
+    } else if (
+      entry.kind === 'failure_observation'
+      && targetMatrixOverlaps(entry.scope.targetMatrix, currentTargetMatrix)
+      && (runSucceeded || passedCheckClaimKeys.has(entry.claimKey))
+    ) {
+      eagerRetires.push({ kind: 'retire', entryId: entry.id, reason: 'Prior failure observation healed.' });
+      targetedOrSuperseded.add(entry.id);
+    }
+  }
+
+  const effectiveMaxEntries = clampMemoryMaxEntries(config.maxEntries);
+  const surviving = new Map<string, MemoryEntry>(sortedBaseEntries.map(entry => [entry.id, entry]));
+  const baseEntryIds = new Set<string>(sortedBaseEntries.map(entry => entry.id));
+  for (const operation of [...cappedBase, ...eagerRetires]) {
+    if (operation.kind === 'upsert') {
+      for (const sid of operation.entry.supersedes) surviving.delete(sid);
+      surviving.set(operation.entry.id, operation.entry);
+    } else {
+      surviving.delete(operation.entryId);
+    }
+  }
+
+  if (surviving.size <= effectiveMaxEntries) {
+    return [...cappedBase, ...eagerRetires];
+  }
+
+  const evictionOrder = [...surviving.values()].sort(compareEntriesForEviction);
+  const excess = surviving.size - effectiveMaxEntries;
+  const evictedIds = new Set<string>();
+  for (let i = 0; i < excess; i += 1) {
+    evictedIds.add(evictionOrder[i]!.id);
+  }
+
+  const droppedSupersededIds = new Set<string>();
+  const keptBaseOperations: MemoryOperation[] = [];
+  for (const operation of cappedBase) {
+    if (operation.kind === 'upsert' && evictedIds.has(operation.entry.id)) {
+      for (const sid of operation.entry.supersedes) droppedSupersededIds.add(sid);
+      continue;
+    }
+    keptBaseOperations.push(operation);
+  }
+  const alreadyRetiring = new Set<string>(
+    keptBaseOperations
+      .filter((op): op is Extract<MemoryOperation, { readonly kind: 'retire' }> => op.kind === 'retire')
+      .map(op => op.entryId),
+  );
+  for (const op of eagerRetires) {
+    if (op.kind === 'retire') alreadyRetiring.add(op.entryId);
+  }
+  for (const op of keptBaseOperations) {
+    if (op.kind === 'upsert') {
+      for (const sid of op.entry.supersedes) alreadyRetiring.add(sid);
+    }
+  }
+
+  const capacityRetireIds = new Set<string>([...evictedIds, ...droppedSupersededIds]);
+  const capacityRetires: MemoryOperation[] = [];
+  for (const id of [...capacityRetireIds].sort()) {
+    if (keptBaseOperations.length + eagerRetires.length + capacityRetires.length >= MAX_PROPOSAL_OPERATIONS) break;
+    if (baseEntryIds.has(id) && !alreadyRetiring.has(id)) {
+      capacityRetires.push({ kind: 'retire', entryId: id, reason: 'Evicted to stay within maxEntries capacity.' });
+    }
+  }
+  return [...keptBaseOperations, ...eagerRetires, ...capacityRetires];
+}
 function sanitizeClaimControlChars(text: string): string {
   let out = '';
   for (let index = 0; index < text.length; index++) {
@@ -250,7 +381,9 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
         patch: null,
       };
     }
-    const fingerprint = await computeCodeFingerprint(settled.repository, contract.spec.scope.writable, memoryRoot);
+    const fingerprint = config.checkCodeFingerprint === true
+      ? await computeCodeFingerprint(settled.repository, contract.spec.scope.writable, memoryRoot)
+      : ZERO_SHA256_DIGEST;
     const loaded = await loadMemoryStore(settled.repository, config.taskpack, contract.spec.target.repository, memoryRoot);
     const baseRevision = contract.spec.target.baseRevision;
     const validity = { baseRevision, sourceRevision: contract.spec.target.sourceRevision, codeFingerprint: fingerprint, upstreamVersions: config.upstreamVersions };
@@ -268,15 +401,23 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
     if (normalizedWritablePaths.length === 0 || normalizedWritablePaths.length > 128) {
       fail('MEMORY_SCHEMA_INVALID', '/contract/spec/scope/writable', 'writable scope length outside 1..128');
     }
+    const targetMatrix = config.targetMatrix ?? null;
     const priorSameClaim = (claimKey: string): readonly string[] =>
-      [...new Set(loaded.index.entries.filter(candidate => candidate.claimKey === claimKey).map(candidate => candidate.id))].sort().slice(0, 32);
+      [...new Set(
+        loaded.index.entries
+          .filter(candidate => candidate.claimKey === claimKey && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix))
+          .map(candidate => candidate.id),
+      )].sort().slice(0, 32);
     const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry =>
       ({ version: 1, id, claimKey, claim: boundedClaim(claim), kind, scope: { taskpack: config.taskpack, repository: contract.spec.target.repository,
-        paths: normalizedWritablePaths, targetMatrix: null }, sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
+        paths: normalizedWritablePaths, targetMatrix }, sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
         validFor: validity, expiresAtMs: config.nowMs + config.ttlMs, supersedes: priorSameClaim(claimKey), evidenceRefs: refs });
     const deterministicEntries: MemoryEntry[] = [];
     const rows = settled.result === null ? [] : [...settled.result.spec.verification.spec.required, ...settled.result.spec.verification.spec.optional];
-    if (settled.result !== null && FACT_STATUSES.includes(settled.result.spec.status as (typeof FACT_STATUSES)[number])) {
+    const passedCheckClaimKeys = new Set<string>(
+      rows.filter(row => row.status === 'passed').map(row => `claim.check.${row.checkId}`),
+    );
+    if (settled.result !== null && settled.result.spec.status === 'completed') {
       for (const row of rows.filter(row => row.status === 'passed')) {
         const reference = evidenceRefFor(row, settled.evidence);
         if (reference === null) continue;
@@ -293,18 +434,21 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
         const detailText = baseDetail === 'gate_denied' && gateReason !== null
           ? `gate_denied: ${gateReason}`
           : baseDetail;
+        const rawClaim = `Check ${row.checkId} ended ${row.status} on run ${runId} (${row.reason}${detailText === null ? '' : `: ${detailText}`}).`;
         deterministicEntries.push(buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
-          `Check ${row.checkId} ended ${row.status} on run ${runId} (${row.reason}${detailText === null ? '' : `: ${detailText}`}).`,
+          normalizeGateWorkdirPaths(rawClaim),
           'failure_observation', [reference]));
       }
     }
     if (settled.result === null && settled.incident !== null) {
       const incident = settled.incident, artifact = incident.knownReferences[0] ?? syntheticIncidentArtifact(incident);
       deterministicEntries.push(buildEntry(`entry.${runToken}.incident`, `claim.incident.${runToken}`,
-        `Run ${runId} settled as incident ${incident.code} at stage ${incident.stage}; cleanup ${incident.cleanup}.`,
+        normalizeGateWorkdirPaths(`Run ${runId} settled as incident ${incident.code} at stage ${incident.stage}; cleanup ${incident.cleanup}.`),
         'failure_observation', [{ evidenceId: INCIDENT_EVIDENCE_ID, checkId: INCIDENT_CHECK_ID, level: 'local_execution', observedStatus: 'not_run', artifact }]));
     }
-    let operations: readonly MemoryOperation[] = deterministicEntries.map(entry => ({ kind: 'upsert' as const, entry }));
+    let operations: readonly MemoryOperation[] = deterministicEntries
+      .slice(0, MAX_PROPOSAL_OPERATIONS)
+      .map(entry => ({ kind: 'upsert' as const, entry }));
     let outcomeStatus: MemoryFinalizerOutcome['status'] = 'proposed';
     let reason: string | null = null;
     const proposalRunSegment = runId.length <= 90 ? runId : runToken;
@@ -335,9 +479,18 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
         if (timer !== undefined) clearTimeout(timer);
       }
     }
+    operations = applyLifecycleSweepAndEviction({
+      baseOperations: operations,
+      baseEntries: loaded.index.entries,
+      config,
+      settledStatus: settled.result?.spec.status ?? null,
+      passedCheckClaimKeys,
+    });
     const proposal = assemble(operations, proposalIdBase);
-    const projected = projectMemoryStore(loaded.index, operations, config.nowMs, proposal.proposalId);
-    const changed: { readonly path: string; readonly before: string | null; readonly after: string }[] = [];
+    const projected = projectMemoryStore(loaded.index, operations, config.nowMs, proposal.proposalId, {
+      maxEntries: config.maxEntries,
+    });
+    const changed: { readonly path: string; readonly before: string | null; readonly after: string | null }[] = [];
     const indexBefore = canonical(loaded.index), indexAfter = canonical(projected.index);
     if (indexBefore !== indexAfter) {
       const indexExisted = existsSync(join(resolve(settled.repository), directory, 'index.json'));
@@ -348,6 +501,11 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       const beforeBytes = loaded.entryFiles.get(id);
       const before = beforeBytes === undefined ? null : Buffer.from(beforeBytes).toString('utf8');
       if (before !== after) changed.push({ path: `${directory}/entries/${id}.md`, before, after });
+    }
+    for (const [id, beforeBytes] of loaded.entryFiles) {
+      if (projected.entryFiles.has(id)) continue;
+      const before = Buffer.from(beforeBytes).toString('utf8');
+      changed.push({ path: `${directory}/entries/${id}.md`, before, after: null });
     }
     changed.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
     const patch = changed.map(file => unifiedFileDiff(file.path, file.before, file.after)).join('');

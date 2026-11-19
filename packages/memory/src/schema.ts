@@ -302,7 +302,7 @@ function splitLines(content: string): readonly string[] {
   if (lines[lines.length - 1] === '') lines.pop();
   return lines;
 }
-/** Git-style unified diff over repo-relative text files; `before === null` means a new file. */
+/** Git-style unified diff over repo-relative text files; `before === null` means a new file and `after === null` means a deleted file. */
 type DiffOp = { readonly kind: ' ' | '-' | '+'; readonly text: string };
 function editScript(a: readonly string[], b: readonly string[]): readonly DiffOp[] {
   const m = a.length, n = b.length;
@@ -320,9 +320,10 @@ function editScript(a: readonly string[], b: readonly string[]): readonly DiffOp
   while (j < n) { ops.push({ kind: '+', text: b[j]! }); j++; }
   return ops;
 }
-export function unifiedFileDiff(path: string, before: string | null, after: string, context = 3): string {
-  const a = splitLines(before ?? ''), b = splitLines(after);
-  if (before !== null && a.length === b.length && a.every((line, index) => line === b[index])) return '';
+export function unifiedFileDiff(path: string, before: string | null, after: string | null, context = 3): string {
+  if (before === null && after === null) return '';
+  const a = splitLines(before ?? ''), b = splitLines(after ?? '');
+  if (before !== null && after !== null && a.length === b.length && a.every((line, index) => line === b[index])) return '';
   const ops = editScript(a, b);
   const changed = ops.map(op => op.kind !== ' ');
   const hunks: string[] = [];
@@ -342,8 +343,15 @@ export function unifiedFileDiff(path: string, before: string | null, after: stri
     hunks.push(lines.join('\n'));
     index = to;
   }
-  if (hunks.length === 0) return '';
-  const header = before === null ? `--- /dev/null\n+++ b/${path}\n` : `--- a/${path}\n+++ b/${path}\n`;
+  if (hunks.length === 0) {
+    if (before !== null && after === null) return `--- a/${path}\n+++ /dev/null\n`;
+    return '';
+  }
+  const header = before === null
+    ? `--- /dev/null\n+++ b/${path}\n`
+    : after === null
+      ? `--- a/${path}\n+++ /dev/null\n`
+      : `--- a/${path}\n+++ b/${path}\n`;
   return header + hunks.join('\n') + '\n';
 }
 export function parseEntryMarkdown(bytes: Uint8Array, path = ''): MemoryEntry {
