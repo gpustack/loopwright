@@ -2,17 +2,24 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { bindSubject, digestArtifact, identifyManifest, type ArtifactManifest, type ArtifactRef, type Digest } from '@loopwright/core';
+import { bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, type ArtifactManifest, type ArtifactRef, type Digest } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result, safeDiagnostic, type ControllerDiagnostic } from './errors.js';
-import { readBoundedFile } from './files.js';
+import { copyVerifiedFileReadOnly, readBoundedFile, STREAM_CHUNK_BYTES } from './files.js';
 import { parsePrivateJson } from './parser.js';
 import { canonical, freeze, hash, id, integer, isRecord, list, record, same, text } from './schema.js';
-import { ArtifactStore, privateDirectory, stateValue } from './storage.js';
+import { ArtifactStore, privateDirectory, resolveCanonicalCasBlobPath, stateValue } from './storage.js';
 import { ControllerOwner } from './ownership.js';
-import { admitRetainedRun } from './retained.js';
+import {
+  admitRetainedRun,
+  CONSERVATIVE_LEGACY_HOST_POLICY,
+  hostProtectionFromPolicy,
+  parsePersistedHostPolicy,
+  validatePortPolicyFields,
+  validatePortsAgainstHostPolicy,
+} from './retained.js';
 import { reconcileInterruptedOperations, restoredCandidate, retainedPrimary } from './recovery.js';
 import { ProgressStore, journal, stableId, type ProgressHead } from './progress.js';
 import {
@@ -20,19 +27,20 @@ import {
   captureDelegatedRole,
   decodeDelegatedWorkspace,
   nativeSessionId,
-  type DelegatedCapturePayload,
+  type DelegatedCaptureOverlayEntryV2,
+  type DelegatedCapturePayloadV2,
 } from './capture.js';
 import {
   assertCanonicalMinimalOverlay,
   canonicalizeCandidateManifest,
   compareUtf16,
-  gitObjectOid,
   isHostProtectedPath,
   matchesScopePattern,
   materializeBaseline,
   overlayManifestBounds,
   restoreSource,
   type FrozenSource,
+  type HostPathProtectionOptions,
 } from './source.js';
 import { isVerdictStep, normalizeSubmission, validateStepVerdictObject, type RetainedSubmission, type Submission } from './submission.js';
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
@@ -43,11 +51,14 @@ import { validateGateUrlOverrides } from './gate.js';
 import { createCycle, Cycle, roleResourcesFor, type ControllerPorts, type CycleContext } from './controller.js';
 import { incident, type ControllerIncident } from './finalize.js';
 import type {
+  CasCandidateFile,
   CompiledPlan,
   ControllerAttempt,
+  ControllerPolicyProfile,
   CycleExecution,
   DelegatedSelection,
   LoadedConfiguration,
+  PersistedHostPolicy,
   PlannedRole,
   StepMcpServerMetadata,
   StepVerdict,
@@ -64,7 +75,8 @@ export interface StepNextInput {
   readonly runId: string;
   readonly mode?: 'candidate' | 'no-change';
   readonly reissueLease?: boolean;
-  readonly allowWorkflowWrites?: boolean;
+  readonly policyProfile?: ControllerPolicyProfile | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
   readonly environment?: (name: string) => string | undefined;
@@ -93,6 +105,7 @@ interface StepMetaRecord {
   readonly version: 1;
   readonly mode: 'candidate' | 'no-change';
   readonly allowWorkflowWrites?: boolean;
+  readonly hostPolicy: PersistedHostPolicy;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
 }
@@ -107,8 +120,12 @@ interface StepLeaseRecord {
   readonly contextFiles: readonly string[];
 }
 
-function isWritableCandidateFile(name: string, scope: CompiledPlan['scope'], allowWorkflowWrites = false): boolean {
-  if (isHostProtectedPath(name, allowWorkflowWrites)) return false;
+function isWritableCandidateFile(
+  name: string,
+  scope: CompiledPlan['scope'],
+  hostProtection: HostPathProtectionOptions,
+): boolean {
+  if (isHostProtectedPath(name, hostProtection)) return false;
   if (scope.protected.some(pattern => matchesScopePattern(pattern, name))) return false;
   return scope.writable.some(pattern => matchesScopePattern(pattern, name));
 }
@@ -172,13 +189,22 @@ function normalizeMcpServersMetadata(
   return freeze(items);
 }
 
-async function readStepMeta(directory: string): Promise<StepMetaRecord> {
+async function readStepMeta(
+  directory: string,
+  explicitDescriptorPolicy?: PersistedHostPolicy,
+): Promise<StepMetaRecord> {
   const path = join(directory, 'step-meta.json');
   try {
     await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { version: 1, mode: 'candidate' };
+      const hostPolicy = explicitDescriptorPolicy ?? CONSERVATIVE_LEGACY_HOST_POLICY;
+      return freeze({
+        version: 1,
+        mode: 'candidate',
+        hostPolicy,
+        ...(hostPolicy.allowWorkflowWrites ? { allowWorkflowWrites: true } : {}),
+      });
     }
     refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
@@ -191,9 +217,13 @@ async function readStepMeta(directory: string): Promise<StepMetaRecord> {
     refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
   if (!isRecord(parsed)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const hasHostPolicy = Object.hasOwn(parsed, 'hostPolicy') && parsed.hostPolicy !== undefined;
+  const hasPolicyProfile = Object.hasOwn(parsed, 'policyProfile') && parsed.policyProfile !== undefined;
   const allowedKeys = [
     'version',
     'mode',
+    ...(hasHostPolicy ? ['hostPolicy' as const] : []),
+    ...(hasPolicyProfile ? ['policyProfile' as const] : []),
     ...(Object.hasOwn(parsed, 'allowWorkflowWrites') ? ['allowWorkflowWrites' as const] : []),
     ...(Object.hasOwn(parsed, 'roleMcpServers') ? ['roleMcpServers' as const] : []),
     ...(Object.hasOwn(parsed, 'mcpServers') ? ['mcpServers' as const] : []),
@@ -201,12 +231,40 @@ async function readStepMeta(directory: string): Promise<StepMetaRecord> {
   const raw = record(parsed, allowedKeys);
   if (raw.version !== 1 || (raw.mode !== 'candidate' && raw.mode !== 'no-change')) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (raw.allowWorkflowWrites !== undefined && typeof raw.allowWorkflowWrites !== 'boolean') refuse('RECOVERY_REQUIRED', '', 'recovery');
+  if (hasPolicyProfile && raw.policyProfile !== 'local' && raw.policyProfile !== 'github') {
+    refuse('RECOVERY_REQUIRED', '/policyProfile', 'recovery');
+  }
+  let hostPolicy: PersistedHostPolicy;
+  if (hasHostPolicy) {
+    hostPolicy = parsePersistedHostPolicy(raw.hostPolicy, '/hostPolicy', 'recovery');
+    if (hasPolicyProfile && raw.policyProfile !== hostPolicy.policyProfile) {
+      refuse('RECOVERY_REQUIRED', '/policyProfile', 'recovery');
+    }
+    if (raw.allowWorkflowWrites !== undefined && raw.allowWorkflowWrites !== hostPolicy.allowWorkflowWrites) {
+      refuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'recovery');
+    }
+  } else if (hasPolicyProfile) {
+    hostPolicy = freeze({
+      policyProfile: raw.policyProfile as ControllerPolicyProfile,
+      allowWorkflowWrites: raw.allowWorkflowWrites === true,
+    });
+  } else {
+    // Legacy step-meta.json omitting hostPolicy/policyProfile defaults conservatively to 'github'!
+    hostPolicy = freeze({
+      policyProfile: 'github',
+      allowWorkflowWrites: raw.allowWorkflowWrites === true,
+    });
+  }
+  if (explicitDescriptorPolicy !== undefined && !same(explicitDescriptorPolicy, hostPolicy)) {
+    refuse('RECOVERY_REQUIRED', '/hostPolicy', 'recovery');
+  }
   const roleMcpServers = normalizeRoleMcpServers(raw.roleMcpServers, 'recovery');
   const mcpServers = normalizeMcpServersMetadata(raw.mcpServers, 'recovery');
   return freeze({
     version: 1,
     mode: raw.mode,
-    ...(raw.allowWorkflowWrites === true ? { allowWorkflowWrites: true } : {}),
+    hostPolicy,
+    ...(hostPolicy.allowWorkflowWrites ? { allowWorkflowWrites: true } : {}),
     ...(roleMcpServers !== undefined ? { roleMcpServers } : {}),
     ...(mcpServers !== undefined ? { mcpServers } : {}),
   });
@@ -245,9 +303,17 @@ function verifyLeaseToken(lease: StepLeaseRecord | null, runId: string, attemptI
   }
 }
 
-async function cleanupRunWorkspaces(runRoot: string, runId: string, directory: string): Promise<void> {
+async function cleanupRunWorkspaces(
+  runRoot: string,
+  runId: string,
+  directory: string,
+  artifacts?: ArtifactStore,
+): Promise<void> {
   await unlink(join(directory, 'step-lease.json')).catch(() => {});
   await rm(join(resolve(runRoot), 'workspaces', runId), { recursive: true, force: true }).catch(() => {});
+  if (artifacts) {
+    await artifacts.cleanCasTempFiles().catch(() => {});
+  }
 }
 
 async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead | null): Promise<Map<string, '100644' | '100755'>> {
@@ -265,10 +331,11 @@ async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead
   if (head && !same(head.progress.candidate.workspace, context.source.workspace)) {
     try {
       const bounds = overlayManifestBounds(context.plan.budgets.overlay);
-      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, bounds.workspaceMaxBytes);
-      const parsed = parsePrivateJson(Buffer.from(wsBytes), bounds.workspaceMaxBytes, bounds.collectionLimit);
-      if (isRecord(parsed) && parsed.format === 'delegated-capture.v1') {
-        const decoded = decodeDelegatedWorkspace(wsBytes, head.manifest, context.lock, 'recovery');
+      const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
+      const parsed = parsePrivateJson(Buffer.from(wsBytes), maxWsBytes, bounds.collectionLimit);
+      if (isRecord(parsed) && (parsed.format === 'delegated-capture.v1' || parsed.format === 'delegated-capture.v2')) {
+        const decoded = await decodeDelegatedWorkspace(wsBytes, head.manifest, context.lock, 'recovery', context.artifacts.directory);
         for (const item of decoded.payload.overlay) modes.set(item.name, item.mode);
       }
     } catch {
@@ -284,10 +351,10 @@ async function materializeAttemptWorkspace(
   attemptId: string,
   role: PlannedRole,
   repair: ControllerAttempt['repair'],
-  allowWorkflowWrites: boolean,
+  hostProtection: HostPathProtectionOptions,
 ): Promise<{ readonly candidateDir: string; readonly contextFiles: readonly string[] }> {
   const { context } = cycle;
-  const { plan, loaded, source, owner } = context;
+  const { plan, loaded, source, owner, artifacts } = context;
   const state = approvedState(loaded);
   const excluded = [context.descriptor.repository, ...state.input.untrustedRoots];
   const workspacesRoot = join(resolve(runRoot), 'workspaces');
@@ -314,17 +381,30 @@ async function materializeAttemptWorkspace(
     for (const delPath of deletedSet) {
       await rm(join(candidateDir, delPath), { force: true });
     }
-    const overlayByPath = new Map(cycle.candidate.files.map(file => [file.name, file.bytes]));
-    for (const [name, bytes] of overlayByPath) {
-      const targetPath = join(candidateDir, name);
+    for (const item of cycle.candidate.files) {
+      const targetPath = join(candidateDir, item.name);
       await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
       await rm(targetPath, { recursive: true, force: true });
-      const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      try {
-        await file.writeFile(bytes);
-        await file.sync();
-      } finally {
-        await file.close();
+      if ('bytes' in item) {
+        const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        try {
+          await file.writeFile(item.bytes);
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+      } else {
+        const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
+        await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
+          expectedBytes: item.byteLength,
+          expectedSha256: item.digest.hex,
+          mode: 0o600,
+          ownedSource: true,
+          requireReadOnlySource: true,
+          verifyCanonicalSource: true,
+          path: item.name,
+          phase: 'execution',
+        });
       }
     }
     const allPaths = new Set<string>();
@@ -334,7 +414,7 @@ async function materializeAttemptWorkspace(
     for (const file of cycle.candidate.files) allPaths.add(file.name);
     for (const relPath of allPaths) {
       const gitMode = modes.get(relPath) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope, allowWorkflowWrites);
+      const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope, hostProtection);
       const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
       await chmod(join(candidateDir, relPath), perm);
     }
@@ -343,15 +423,29 @@ async function materializeAttemptWorkspace(
       const targetPath = join(candidateDir, item.name);
       await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
       const gitMode = modes.get(item.name) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope, allowWorkflowWrites);
+      const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope, hostProtection);
       const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
-      const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, perm);
-      try {
-        await file.writeFile(item.bytes);
-        await file.chmod(perm);
-        await file.sync();
-      } finally {
-        await file.close();
+      if ('bytes' in item) {
+        const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, perm);
+        try {
+          await file.writeFile(item.bytes);
+          await file.chmod(perm);
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+      } else {
+        const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
+        await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
+          expectedBytes: item.byteLength,
+          expectedSha256: item.digest.hex,
+          mode: perm,
+          ownedSource: true,
+          requireReadOnlySource: true,
+          verifyCanonicalSource: true,
+          path: item.name,
+          phase: 'execution',
+        });
       }
     }
   }
@@ -398,7 +492,7 @@ async function buildStepYield(
           ? [role.policy.mcp.serverId]
           : [];
   const mcpServers = attempt.repair === 'format' ? [] : declaredServers.filter(srv => allowedMcpServers.includes(srv.id));
-  const allowWorkflowWrites = meta.allowWorkflowWrites === true;
+  const allowWorkflowWrites = meta.hostPolicy.allowWorkflowWrites;
   const reworkEpoch = attempt.reworkEpoch ?? cycle.reworkEpoch;
   const rework = attempt.repair === 'none' ? await cycle.activeReworkForNode(attempt.nodeId) : null;
   const selection: DelegatedSelection = {
@@ -502,8 +596,8 @@ async function yieldDelegatedRole(
     },
     'role.' + ordinal + '.pre',
   );
-  const allowWorkflowWrites = meta.allowWorkflowWrites === true;
-  const { contextFiles } = await materializeAttemptWorkspace(cycle, runRoot, commandId, role, repair, allowWorkflowWrites);
+  const hostProtection = hostProtectionFromPolicy(meta.hostPolicy);
+  const { contextFiles } = await materializeAttemptWorkspace(cycle, runRoot, commandId, role, repair, hostProtection);
   const leaseToken = randomBytes(32).toString('hex');
   await writeAtomicPrivateJson(
     join(directory, 'step-lease.json'),
@@ -553,7 +647,7 @@ async function advanceStepCycle(
             effectiveRole,
             active,
             cycle.context.source,
-            meta.allowWorkflowWrites === true || cycle.context.ports.allowWorkflowWrites === true,
+            hostProtectionFromPolicy(meta.hostPolicy),
           );
           const failure = await cycle.completeCapture(active, captured, { ignoreArtifactPath: disallowMutations });
           if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
@@ -761,7 +855,7 @@ async function runStepTickWithCycle(
     return yielded;
   }
 
-  await cleanupRunWorkspaces(runRoot, context.lock.spec.runId, context.directory);
+  await cleanupRunWorkspaces(runRoot, context.lock.spec.runId, context.directory, context.artifacts);
   try {
     await cycle.deadline.dispose();
   } catch {
@@ -813,12 +907,14 @@ async function reopenStepContext(input: {
   readonly forceRecoveryMode?: boolean;
 }): Promise<{
   readonly context: CycleContext;
+  readonly meta: StepMetaRecord;
   readonly head: ProgressHead | null;
   readonly candidate: import('./verification.js').ByteInventory;
   readonly submission: RetainedSubmission | null;
   readonly decision: ReturnType<ProgressStore['decision']>;
   readonly expired: boolean;
 }> {
+  validatePortPolicyFields(input.ports, input.phase);
   const { directory, descriptor, lock, effectiveConfig, state, plan } = await admitRetainedRun({
     runRoot: input.runRoot,
     runId: input.runId,
@@ -827,7 +923,10 @@ async function reopenStepContext(input: {
     ...(input.environment ? { environment: input.environment } : {}),
     phase: input.phase,
   });
-  validateGateUrlOverrides(input.ports.gateUrlOverrides, input.phase, effectiveConfig.registry.spec.gateEndpoints);
+  const meta = await readStepMeta(directory, descriptor.hostPolicy);
+  const effectivePorts = validatePortsAgainstHostPolicy(input.ports, meta.hostPolicy, input.phase);
+  const effectiveDescriptor = descriptor.hostPolicy !== undefined ? descriptor : { ...descriptor, hostPolicy: meta.hostPolicy };
+  validateGateUrlOverrides(effectivePorts.gateUrlOverrides, input.phase, effectiveConfig.registry.spec.gateEndpoints);
 
   let owner: ControllerOwner | null = null;
   let store: LocalRunStore | null = null;
@@ -847,6 +946,7 @@ async function reopenStepContext(input: {
       }),
     ).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
+    await artifacts.cleanCasTempFiles();
     const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
     const source = await restoreSource(descriptor.repository, plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source);
@@ -862,10 +962,10 @@ async function reopenStepContext(input: {
       owner,
       artifacts,
       progress,
-      descriptor,
+      descriptor: effectiveDescriptor,
       signal: input.signal ?? new AbortController().signal,
       onEvent: undefined,
-      ports: input.ports,
+      ports: effectivePorts,
     };
     const candidate = await restoredCandidate(context, head);
     await reconcileInterruptedOperations(context, head, candidate, original.storeId);
@@ -908,7 +1008,7 @@ async function reopenStepContext(input: {
       }
     }
     handedOff = true;
-    return { context, head, candidate, submission, decision, expired };
+    return { context, meta, head, candidate, submission, decision, expired };
   } finally {
     if (!handedOff) {
       if (store) {
@@ -928,7 +1028,7 @@ async function settleForcedStepRun(
   runRoot: string,
   forcedStatus: 'expired' | 'cancelled' | 'reconcile_required',
 ): Promise<RunExecution> {
-  await cleanupRunWorkspaces(runRoot, context.lock.spec.runId, context.directory);
+  await cleanupRunWorkspaces(runRoot, context.lock.spec.runId, context.directory, context.artifacts);
   const cycle = new Cycle(context, head, candidate, false);
   cycle.submission = submission;
   let primary: AcceptanceObservation | ControllerIncident;
@@ -1031,11 +1131,12 @@ async function scanCandidateDirectory(
   previousDigest: Digest,
   disallowMutations: boolean,
   overlayConfig: CompiledPlan['budgets']['overlay'],
-  allowWorkflowWrites: boolean,
+  artifacts: ArtifactStore,
+  hostProtection: HostPathProtectionOptions,
 ): Promise<{
   readonly manifest: ArtifactManifest;
-  readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[];
-  readonly overlay: readonly { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[];
+  readonly files: readonly CasCandidateFile[];
+  readonly overlay: readonly DelegatedCaptureOverlayEntryV2[];
   readonly deleted: readonly string[];
 }> {
   const bounds = overlayManifestBounds(overlayConfig);
@@ -1052,9 +1153,19 @@ async function scanCandidateDirectory(
   }
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) refuse('ARTIFACT_INVALID', '', 'execution');
 
-  const scannedFiles: { readonly name: string; readonly mode: '100644' | '100755'; readonly bytes: Uint8Array }[] = [];
+  interface ScannedRegularEntry {
+    readonly absPath: string;
+    readonly name: string;
+    readonly mode: '100644' | '100755';
+    readonly byteLength: number;
+    readonly sha256: string;
+    readonly gitOid?: string | undefined;
+  }
+
+  const scannedFiles: ScannedRegularEntry[] = [];
   const seenPaths = new Set<string>();
-  const streamChunk = Buffer.allocUnsafe(65_536);
+  const streamChunk = Buffer.allocUnsafe(STREAM_CHUNK_BYTES);
+  const probeByte = Buffer.allocUnsafe(1);
   let entriesSeen = 0;
 
   const visit = async (absDir: string, relPrefix: string, depth: number): Promise<void> => {
@@ -1076,74 +1187,55 @@ async function scanCandidateDirectory(
       if (!st.isFile() || st.nlink !== 1) refuse('ARTIFACT_INVALID', '', 'execution');
       if (!digestArtifact(relPath, new Uint8Array()).ok) refuse('ARTIFACT_INVALID', '', 'execution');
 
-      const baseEntry = v2BaselineByPath?.get(relPath);
-      if (baseEntry !== undefined && st.size === baseEntry.byteLength && (st.size > bounds.perFileMaxBytes || st.size > 65_536)) {
-        const fh = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-        let buf: Buffer;
-        try {
-          const fst = await fh.stat();
-          if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size !== st.size) {
-            refuse('ARTIFACT_INVALID', '', 'execution');
-          }
-          const hasher = createHash(v2BaseTree!.objectFormat === 'sha256' ? 'sha256' : 'sha1');
-          hasher.update(`blob ${fst.size}\0`, 'utf8');
-          let offset = 0;
-          while (offset < fst.size) {
-            const toRead = Math.min(streamChunk.length, fst.size - offset);
-            const { bytesRead } = await fh.read(streamChunk, 0, toRead, offset);
-            if (bytesRead <= 0) break;
-            hasher.update(streamChunk.subarray(0, bytesRead));
-            offset += bytesRead;
-          }
-          if (offset !== fst.size) refuse('ARTIFACT_INVALID', '', 'execution');
-          if (hasher.digest('hex') === baseEntry.oid) {
-            seenPaths.add(relPath);
-            continue;
-          }
-          if (fst.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-          buf = Buffer.alloc(fst.size);
-          let readOffset = 0;
-          while (readOffset < fst.size) {
-            const { bytesRead } = await fh.read(buf, readOffset, fst.size - readOffset, readOffset);
-            if (bytesRead <= 0) break;
-            readOffset += bytesRead;
-          }
-          const after = await fh.stat();
-          if (readOffset !== fst.size || after.dev !== fst.dev || after.ino !== fst.ino || after.nlink !== 1 || !after.isFile() || after.size !== fst.size) {
-            refuse('ARTIFACT_INVALID', '', 'execution');
-          }
-        } finally {
-          await fh.close();
-        }
-        seenPaths.add(relPath);
-        const mode: '100644' | '100755' = (st.mode & 0o111) !== 0 ? '100755' : '100644';
-        scannedFiles.push({ name: relPath, mode, bytes: new Uint8Array(buf) });
-        continue;
-      }
-
-      if (st.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
       const fh = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-      let buf: Buffer;
+      let byteLength: number;
+      let mode: '100644' | '100755';
+      let sha256: string;
+      let gitOid: string | undefined;
       try {
         const fst = await fh.stat();
         if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size !== st.size) {
           refuse('ARTIFACT_INVALID', '', 'execution');
         }
-        if (fst.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-        buf = Buffer.alloc(fst.size);
+        const shaHasher = createHash('sha256');
+        const gitHasher =
+          v2BaseTree !== undefined
+            ? createHash(v2BaseTree.objectFormat === 'sha256' ? 'sha256' : 'sha1').update(`blob ${fst.size}\0`, 'utf8')
+            : null;
         let offset = 0;
         while (offset < fst.size) {
-          const { bytesRead } = await fh.read(buf, offset, fst.size - offset, offset);
+          const toRead = Math.min(streamChunk.length, fst.size - offset);
+          const { bytesRead } = await fh.read(streamChunk, 0, toRead, offset);
           if (bytesRead <= 0) break;
+          const slice = streamChunk.subarray(0, bytesRead);
+          shaHasher.update(slice);
+          gitHasher?.update(slice);
           offset += bytesRead;
         }
-        if (offset !== fst.size) refuse('ARTIFACT_INVALID', '', 'execution');
+        const { bytesRead: extraBytes } = await fh.read(probeByte, 0, 1, offset);
+        const after = await fh.stat();
+        if (
+          extraBytes !== 0 ||
+          offset !== fst.size ||
+          after.dev !== fst.dev ||
+          after.ino !== fst.ino ||
+          after.nlink !== 1 ||
+          !after.isFile() ||
+          after.size !== fst.size ||
+          after.mtimeMs !== fst.mtimeMs ||
+          after.ctimeMs !== fst.ctimeMs
+        ) {
+          refuse('ARTIFACT_INVALID', '', 'execution');
+        }
+        byteLength = fst.size;
+        mode = (fst.mode & 0o111) !== 0 ? '100755' : '100644';
+        sha256 = shaHasher.digest('hex');
+        gitOid = gitHasher?.digest('hex');
       } finally {
         await fh.close();
       }
       seenPaths.add(relPath);
-      const mode: '100644' | '100755' = (st.mode & 0o111) !== 0 ? '100755' : '100644';
-      scannedFiles.push({ name: relPath, mode, bytes: new Uint8Array(buf) });
+      scannedFiles.push({ absPath, name: relPath, mode, byteLength, sha256, gitOid });
     }
   };
 
@@ -1156,32 +1248,51 @@ async function scanCandidateDirectory(
     const deleted: string[] = [];
     for (const baseEntry of source.baselineEntries ?? []) {
       if (!seenPaths.has(baseEntry.name)) {
-        if (isHostProtectedPath(baseEntry.name, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+        if (isHostProtectedPath(baseEntry.name, hostProtection)) refuse('ARTIFACT_INVALID', '', 'execution');
         deleted.push(baseEntry.name);
       }
     }
     deleted.sort(compareUtf16);
-    const overlay: { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[] = [];
-    const files: { readonly name: string; readonly bytes: Uint8Array }[] = [];
+    const overlay: DelegatedCaptureOverlayEntryV2[] = [];
+    const files: CasCandidateFile[] = [];
     const manifestEntries: ArtifactRef[] = [];
     let totalOverlayBytes = 0;
     for (const file of scannedFiles) {
       const baseEntry = baselineByPath.get(file.name);
-      if (baseEntry && gitObjectOid(baseTree.objectFormat, 'blob', file.bytes) === baseEntry.oid) {
+      if (baseEntry && file.gitOid === baseEntry.oid) {
         continue;
       }
-      if (isHostProtectedPath(file.name, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+      if (isHostProtectedPath(file.name, hostProtection)) refuse('ARTIFACT_INVALID', '', 'execution');
       if (
-        file.bytes.byteLength > bounds.perFileMaxBytes ||
+        file.byteLength > bounds.perFileMaxBytes ||
         overlay.length >= bounds.maxFiles ||
-        (totalOverlayBytes += file.bytes.byteLength) > bounds.maxBytes
+        (totalOverlayBytes += file.byteLength) > bounds.maxBytes
       ) {
         refuse('OUTPUT_LIMIT', '', 'execution');
       }
-      const ref = digestArtifact(file.name, file.bytes);
+      const pointer = await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes);
+      if (pointer.sha256 !== file.sha256 || pointer.byteLength !== file.byteLength) {
+        refuse('ARTIFACT_INVALID', '', 'execution');
+      }
+      const ref = digestArtifactFromMetadata(file.name, {
+        digest: { algorithm: 'sha256', hex: pointer.sha256 },
+        byteLength: pointer.byteLength,
+      });
       if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');
-      overlay.push({ name: file.name, mode: file.mode, bodyBase64: Buffer.from(file.bytes).toString('base64') });
-      files.push({ name: file.name, bytes: file.bytes });
+      overlay.push({
+        name: file.name,
+        mode: file.mode,
+        sha256: pointer.sha256,
+        byteLength: pointer.byteLength,
+        blobRef: pointer.blobRef,
+      });
+      files.push({
+        name: file.name,
+        byteLength: pointer.byteLength,
+        digest: ref.value.digest,
+        blobPath: pointer.path,
+        mode: file.mode,
+      });
       manifestEntries.push(ref.value);
     }
     const identified = identifyManifest(
@@ -1203,30 +1314,53 @@ async function scanCandidateDirectory(
   // source.version === 1 (classic mode)
   if (scannedFiles.length > bounds.maxFiles) refuse('OUTPUT_LIMIT', '', 'execution');
   let totalBytes = 0;
-  const baselineByPath = new Map(source.artifacts.map(item => [item.name, item.bytes]));
+  const baselineByPath = new Map(
+    source.artifacts.map(item => [item.name, { byteLength: item.bytes.byteLength, sha256: hash(item.bytes).hex }]),
+  );
   const scannedNames = new Set(scannedFiles.map(item => item.name));
   const deleted: string[] = [];
   for (const baseName of baselineByPath.keys()) {
     if (!scannedNames.has(baseName)) {
-      if (isHostProtectedPath(baseName, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+      if (isHostProtectedPath(baseName, hostProtection)) refuse('ARTIFACT_INVALID', '', 'execution');
       deleted.push(baseName);
     }
   }
   deleted.sort(compareUtf16);
-  const overlay: { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[] = [];
-  const files: { readonly name: string; readonly bytes: Uint8Array }[] = [];
+  const overlay: DelegatedCaptureOverlayEntryV2[] = [];
+  const files: CasCandidateFile[] = [];
   const manifestEntries: ArtifactRef[] = [];
   for (const file of scannedFiles) {
-    const baseBytes = baselineByPath.get(file.name);
-    const modifiedOrAdded = baseBytes === undefined || !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
-    if (modifiedOrAdded && isHostProtectedPath(file.name, allowWorkflowWrites)) {
+    const baseInfo = baselineByPath.get(file.name);
+    const modifiedOrAdded = baseInfo === undefined || baseInfo.byteLength !== file.byteLength || baseInfo.sha256 !== file.sha256;
+    if (modifiedOrAdded && isHostProtectedPath(file.name, hostProtection)) {
       refuse('ARTIFACT_INVALID', '', 'execution');
     }
-    if ((totalBytes += file.bytes.byteLength) > bounds.maxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-    const ref = digestArtifact(file.name, file.bytes);
+    if (file.byteLength > bounds.perFileMaxBytes || (totalBytes += file.byteLength) > bounds.maxBytes) {
+      refuse('OUTPUT_LIMIT', '', 'execution');
+    }
+    const pointer = await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes);
+    if (pointer.sha256 !== file.sha256 || pointer.byteLength !== file.byteLength) {
+      refuse('ARTIFACT_INVALID', '', 'execution');
+    }
+    const ref = digestArtifactFromMetadata(file.name, {
+      digest: { algorithm: 'sha256', hex: pointer.sha256 },
+      byteLength: pointer.byteLength,
+    });
     if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');
-    overlay.push({ name: file.name, mode: file.mode, bodyBase64: Buffer.from(file.bytes).toString('base64') });
-    files.push({ name: file.name, bytes: file.bytes });
+    overlay.push({
+      name: file.name,
+      mode: file.mode,
+      sha256: pointer.sha256,
+      byteLength: pointer.byteLength,
+      blobRef: pointer.blobRef,
+    });
+    files.push({
+      name: file.name,
+      byteLength: pointer.byteLength,
+      digest: ref.value.digest,
+      blobPath: pointer.path,
+      mode: file.mode,
+    });
     manifestEntries.push(ref.value);
   }
   const identified = identifyManifest(
@@ -1274,20 +1408,31 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
     if (
       fields.some(
         key =>
-          !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'allowWorkflowWrites', 'roleMcpServers', 'mcpServers', 'environment', 'signal'].includes(key),
+          !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'policyProfile', 'allowWorkflowWrites', 'roleMcpServers', 'mcpServers', 'environment', 'signal'].includes(key),
       ) ||
       (input.mode !== undefined && input.mode !== 'candidate' && input.mode !== 'no-change') ||
       (input.reissueLease !== undefined && typeof input.reissueLease !== 'boolean') ||
+      (input.policyProfile !== undefined && input.policyProfile !== 'local' && input.policyProfile !== 'github') ||
       (input.allowWorkflowWrites !== undefined && typeof input.allowWorkflowWrites !== 'boolean') ||
       (input.environment !== undefined && typeof input.environment !== 'function') ||
       (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     ) {
       refuse('CONFIG_SCHEMA', '', 'admission');
     }
+    validatePortPolicyFields(ports, 'admission');
+    if (input.policyProfile !== undefined && ports.policyProfile !== undefined && input.policyProfile !== ports.policyProfile) {
+      refuse('CONFIG_SCHEMA', '/policyProfile', 'admission');
+    }
+    if (input.allowWorkflowWrites !== undefined && ports.allowWorkflowWrites !== undefined && input.allowWorkflowWrites !== ports.allowWorkflowWrites) {
+      refuse('CONFIG_SCHEMA', '/allowWorkflowWrites', 'admission');
+    }
     const normalizedRoleMcp = normalizeRoleMcpServers(input.roleMcpServers ?? ports.roleMcpServers, 'admission');
     const normalizedMcpServers = normalizeMcpServersMetadata(input.mcpServers ?? ports.mcpServers, 'admission');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'admission');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'admission');
+
+    const requestedPolicyProfile = input.policyProfile ?? ports.policyProfile;
+    const requestedAllowWorkflowWrites = input.allowWorkflowWrites ?? ports.allowWorkflowWrites;
 
     const root = resolve(text(input.runRoot));
     const runId = id(input.runId);
@@ -1302,6 +1447,10 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       if (input.mode === 'no-change' && !compiled.value.noChangeEligibility.available) {
         refuse('CAPABILITY_UNSUPPORTED', '/mode', 'admission');
       }
+      const initialHostPolicy: PersistedHostPolicy = freeze({
+        policyProfile: requestedPolicyProfile ?? 'local',
+        allowWorkflowWrites: requestedAllowWorkflowWrites === true,
+      });
       const context = await createCycle(
         {
           configuration: input.configuration,
@@ -1310,13 +1459,17 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
           runId: input.runId,
           ...(input.signal ? { signal: input.signal } : {}),
         },
-        ports,
+        {
+          ...ports,
+          policyProfile: initialHostPolicy.policyProfile,
+          allowWorkflowWrites: initialHostPolicy.allowWorkflowWrites,
+        },
       );
-      const allowWf = input.allowWorkflowWrites === true || ports.allowWorkflowWrites === true;
       const initialMeta: StepMetaRecord = {
         version: 1,
         mode: input.mode ?? 'candidate',
-        ...(allowWf ? { allowWorkflowWrites: true } : {}),
+        hostPolicy: initialHostPolicy,
+        ...(initialHostPolicy.allowWorkflowWrites ? { allowWorkflowWrites: true } : {}),
         ...(normalizedRoleMcp !== undefined ? { roleMcpServers: normalizedRoleMcp } : {}),
         ...(normalizedMcpServers !== undefined ? { mcpServers: normalizedMcpServers } : {}),
       };
@@ -1340,6 +1493,11 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       return await runStepTickWithCycle(context, input.runRoot, initialMeta);
     }
 
+    const mergedReopenPorts: ControllerPorts = {
+      ...ports,
+      ...(requestedPolicyProfile !== undefined ? { policyProfile: requestedPolicyProfile } : {}),
+      ...(requestedAllowWorkflowWrites !== undefined ? { allowWorkflowWrites: requestedAllowWorkflowWrites } : {}),
+    };
     const reopened = await reopenStepContext({
       runRoot: input.runRoot,
       runId: input.runId,
@@ -1347,29 +1505,16 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       ...(input.repository !== undefined ? { repository: input.repository } : {}),
       ...(input.environment ? { environment: input.environment } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
-      ports,
+      ports: mergedReopenPorts,
       phase: 'execution',
     });
-    const { context, head, candidate, submission, decision, expired } = reopened;
+    const { context, meta: existingMeta, head, candidate, submission, decision, expired } = reopened;
 
-    const existingMeta = await readStepMeta(context.directory).catch(async error => {
-      stateValue(context.store.release(context.authority));
-      stateValue(context.store.close());
-      await context.owner.release();
-      throw error;
-    });
     if (input.mode !== undefined && input.mode !== existingMeta.mode) {
       stateValue(context.store.release(context.authority));
       stateValue(context.store.close());
       await context.owner.release();
       refuse('RECOVERY_REQUIRED', '/mode', 'execution');
-    }
-    const requestedAllowWorkflowWrites = input.allowWorkflowWrites ?? ports.allowWorkflowWrites;
-    if (requestedAllowWorkflowWrites !== undefined && requestedAllowWorkflowWrites !== (existingMeta.allowWorkflowWrites === true)) {
-      stateValue(context.store.release(context.authority));
-      stateValue(context.store.close());
-      await context.owner.release();
-      refuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'execution');
     }
     const effectiveMeta: StepMetaRecord = {
       ...existingMeta,
@@ -1465,6 +1610,7 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       explicitVerdictBytes = new Uint8Array(Buffer.from(canonical(parsedVerdict), 'utf8'));
     }
     validateGateUrlOverrides(ports.gateUrlOverrides, 'execution');
+    validatePortPolicyFields(ports, 'execution');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'execution');
 
     const reopened = await reopenStepContext({
@@ -1475,7 +1621,7 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       ports,
       phase: 'execution',
     });
-    const { context, head, candidate, submission, decision, expired } = reopened;
+    const { context, meta, head, candidate, submission, decision, expired } = reopened;
 
     if (expired) {
       return await settleForcedStepRun(context, head, candidate, submission, input.runRoot, 'expired');
@@ -1506,16 +1652,7 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       return await releaseAndRefuse('AUTHORITY_REFUSED', '/leaseToken', 'execution');
     }
 
-    const meta = await readStepMeta(context.directory).catch(async error => {
-      stateValue(context.store.release(context.authority));
-      stateValue(context.store.close());
-      await context.owner.release();
-      throw error;
-    });
-    if (ports.allowWorkflowWrites !== undefined && ports.allowWorkflowWrites !== (meta.allowWorkflowWrites === true)) {
-      return await releaseAndRefuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'execution');
-    }
-    const allowWorkflowWrites = meta.allowWorkflowWrites === true;
+    const hostProtection = hostProtectionFromPolicy(meta.hostPolicy);
     const role: PlannedRole = active.repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
     const disallowMutations =
       active.repair === 'format' ||
@@ -1531,7 +1668,8 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
         head.progress.candidate.digest,
         disallowMutations,
         context.plan.budgets.overlay,
-        allowWorkflowWrites,
+        context.artifacts,
+        hostProtection,
       );
       if (input.submissionFile !== undefined) {
         explicitSubmissionBytes = await readExplicitSubmissionFile(input.submissionFile);
@@ -1591,9 +1729,9 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       }
     }
 
-    const payload: DelegatedCapturePayload = {
-      format: 'delegated-capture.v1',
-      version: 1,
+    const payload: DelegatedCapturePayloadV2 = {
+      format: 'delegated-capture.v2',
+      version: 2,
       baseRevision: context.plan.task.spec.target.baseRevision,
       sourceRevision: context.plan.task.spec.target.sourceRevision,
       overlay: scanned.overlay,
@@ -1616,14 +1754,11 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       const nextGeneration = head.progress.candidate.generation + (changed ? 1 : 0);
       if (nextGeneration >= context.plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
       const payloadBytes = Buffer.from(canonical(payload), 'utf8');
-      if (payloadBytes.byteLength > bounds.workspaceMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
+      if (payloadBytes.byteLength > bounds.v2WorkspaceJsonMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
       context.artifacts.vault.assertClean(payloadBytes);
       if (submissionBytes !== null) {
         if (submissionBytes.byteLength > 1_048_576) refuse('OUTPUT_LIMIT', '', 'execution');
         context.artifacts.vault.assertClean(submissionBytes);
-      }
-      for (const file of scanned.files) {
-        context.artifacts.vault.assertClean(file.bytes);
       }
     } catch (error) {
       stateValue(context.store.release(context.authority));
@@ -1654,6 +1789,7 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
 
     await unlink(join(context.directory, 'step-lease.json')).catch(() => {});
     await rm(join(resolve(input.runRoot), 'workspaces', context.lock.spec.runId, active.id), { recursive: true, force: true }).catch(() => {});
+    await context.artifacts.cleanCasTempFiles().catch(() => {});
 
     await cycle.deadline.dispose();
     await cycle.events.suspend();

@@ -73,7 +73,7 @@ test('v2 refuses orphan/copied/stale/substituted negative proof and invalid body
     const { row, refusal } = await f.anchor(prepared); assert.throws(() => authenticatedRefusal({ ...refusal } as PreflightRefusal));
     await assert.rejects(f.verifier.restoreRefusal(prepared, { ...row, producerNonce: 'd'.repeat(32) }));
     assert.throws(() => evaluateControllerAcceptance(f.plan, f.lock, f.candidate.manifest, f.candidate.files, 0, [], null, f.store, null, true, [refusal]));
-    const invalid = { ...f.candidate, files: f.candidate.files.map(file => ({ ...file, bytes: Buffer.from('substituted') })) };
+    const invalid = { ...f.candidate, files: f.candidate.files.map(file => ({ name: file.name, bytes: Buffer.from('substituted') })) };
     assert.throws(() => preflightVerification(f.plan, f.lock, 'check.tests', f.source, invalid, 1, 'b'.repeat(32)), /ARTIFACT_INVALID/);
     assert.equal(journal(f.store).operations.length, 0); assert.equal(f.workers(), 0);
     await writeFile(join(f.directory, 'refusal-negative-proof.json'), canonical({ version: 1, row, orphanDidNotBrand: true, copiedStaleSubstitutedRefused: true, invalidBodyNotSizing: true, operations: 0, workers: 0 }), { mode: 0o600 });

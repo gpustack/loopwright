@@ -4,11 +4,17 @@ import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/
 import { approvedState } from './config.js';
 import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner } from './ownership.js';
-import { admitRetainedRun } from './retained.js';
+import {
+  admitRetainedRun,
+  effectiveRunHostPolicy,
+  hostProtectionFromPolicy,
+  validatePortPolicyFields,
+  validatePortsAgainstHostPolicy,
+} from './retained.js';
 import { ArtifactStore, stateValue } from './storage.js';
 import { assertCanonicalMinimalOverlay, overlayManifestBounds, restoreSource } from './source.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
-import { decodeCandidateCapture } from './capture.js';
+import { assertNoHostProtectedMutations, decodeCandidateCapture } from './capture.js';
 import { ControllerEvents } from './events.js';
 import { Finalizer, type ControllerIncident } from './finalize.js';
 import { parsePrivateJson } from './parser.js';
@@ -33,6 +39,7 @@ export async function restoredCandidate(context: CycleContext, head: ProgressHea
   const interval = journal(context.store).requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests);
   const decoded = await decodeCandidateCapture({
     artifacts: context.artifacts,
+    artifactsDirectory: context.artifacts.directory,
     lock: context.lock,
     plan: context.plan,
     checkpoint,
@@ -42,6 +49,8 @@ export async function restoredCandidate(context: CycleContext, head: ProgressHea
     phase: 'recovery',
   });
   assertCanonicalMinimalOverlay(head.manifest, decoded.artifacts, context.source, 'recovery');
+  const effectivePolicy = effectiveRunHostPolicy(context.descriptor);
+  assertNoHostProtectedMutations(head.manifest, decoded.artifacts, context.source, hostProtectionFromPolicy(effectivePolicy), 'recovery');
   return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.artifacts, baselineProofs: context.source.baselineProofs };
 }
 export async function retainedPrimary(context: CycleContext, head: ProgressHead): Promise<CycleExecution> {
@@ -131,14 +140,16 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
     const fields = Object.keys(input); record(input, fields);
     if (fields.some(key => !['configuration', 'repository', 'runRoot', 'runId', 'signal', 'onEvent'].includes(key)) || input.signal !== undefined && !(input.signal instanceof AbortSignal) || input.onEvent !== undefined && typeof input.onEvent !== 'function') refuse('CONFIG_SCHEMA', '', 'recovery');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery');
-    const { directory, descriptor, lock, effectiveConfig, state, plan } = await admitRetainedRun({
+    validatePortPolicyFields(ports, 'recovery');
+    const { directory, descriptor, hostPolicy, lock, effectiveConfig, state, plan } = await admitRetainedRun({
       runRoot: input.runRoot,
       runId: input.runId,
       configuration: input.configuration,
       repository: input.repository,
       phase: 'recovery',
     });
-    validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery', effectiveConfig.registry.spec.gateEndpoints);
+    const effectivePorts = validatePortsAgainstHostPolicy(ports, hostPolicy, 'recovery');
+    validateGateUrlOverrides(effectivePorts.gateUrlOverrides, 'recovery', effectiveConfig.registry.spec.gateEndpoints);
     let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null, handedOff = false;
     try {
       owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
@@ -146,10 +157,11 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
       authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
       const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
+      await artifacts.cleanCasTempFiles();
       const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
       const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
-      let context: CycleContext = { loaded: effectiveConfig, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
+      let context: CycleContext = { loaded: effectiveConfig, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports: effectivePorts };
       const candidate = await restoredCandidate(context, head);
       await reconcileInterruptedOperations(context, head, candidate, original.storeId);
       const decision = progress.decision(head);

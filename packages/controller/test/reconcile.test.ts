@@ -966,8 +966,11 @@ test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions,
       return { ok: true, value: adapter };
     };
 
-    const parkRunMidGate = async (runId: string) => {
-      const context = await createCycle({ configuration: loaded, repository, runRoot, runId }, { openAdapter, allowWorkflowWrites: true });
+    const parkRunMidGate = async (runId: string, allowWorkflowWrites: boolean) => {
+      const context = await createCycle(
+        { configuration: loaded, repository, runRoot, runId },
+        { openAdapter, policyProfile: 'github', allowWorkflowWrites },
+      );
       const cycle = new Cycle(context);
       await cycle.bootstrap();
       await cycle.role('build');
@@ -1028,8 +1031,8 @@ test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions,
       return rPath;
     };
 
-    // 1. Without allowWorkflowWrites: true, repair touching .github/workflows/ci.yml fails closed (incident -> RECOVERY_REQUIRED)
-    const rPathBlocked = await parkRunMidGate('run-rec-wf-blocked');
+    // 1. Under policyProfile: 'github' with allowWorkflowWrites: false, repair touching .github/workflows/ci.yml fails closed (even when ports omit policyProfile!)
+    const rPathBlocked = await parkRunMidGate('run-rec-wf-blocked', false);
     const blockedRes = await reconcileCycle(
       { configuration: loaded, runRoot, runId: 'run-rec-wf-blocked', receipt: rPathBlocked },
       { openAdapter, gateUrlOverrides: { 'ci-gate': approvingGate.url } },
@@ -1037,7 +1040,7 @@ test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions,
     assert.equal(blockedRes.ok, false);
     await rm(rPathBlocked, { force: true });
 
-    // 2. With { allowWorkflowWrites: true, decisions, gateUrlOverrides }, repair touching .github/workflows/ci.yml succeeds and settles completed!
+    // 2. With { policyProfile: 'github', allowWorkflowWrites: true }, repair touching .github/workflows/ci.yml succeeds and settles completed!
     let routingCalls = 0;
     const decisions: import('../src/types.js').AdvisoryDecisionPort = {
       routeCapabilityTier: async () => {
@@ -1045,10 +1048,10 @@ test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions,
         return { tier: 'balanced', source: 'deterministic_heuristic' };
       },
     };
-    const rPathAllowed = await parkRunMidGate('run-rec-wf-allowed');
+    const rPathAllowed = await parkRunMidGate('run-rec-wf-allowed', true);
     const allowedRes = await reconcileCycle(
       { configuration: loaded, runRoot, runId: 'run-rec-wf-allowed', receipt: rPathAllowed },
-      { allowWorkflowWrites: true, openAdapter, gateUrlOverrides: { 'ci-gate': approvingGate.url }, decisions },
+      { policyProfile: 'github', allowWorkflowWrites: true, openAdapter, gateUrlOverrides: { 'ci-gate': approvingGate.url }, decisions },
     );
     assert.ok(allowedRes.ok && allowedRes.value.kind === 'settled', JSON.stringify(allowedRes.ok ? allowedRes.value : allowedRes.error));
     if (allowedRes.ok && allowedRes.value.kind === 'settled') {

@@ -46,3 +46,24 @@ export type {
 } from './report.js';
 export type { RetainedRunInput } from './retained.js';
 export type { ExportManifest, ExportEntry } from './bundle.js';
+export {
+  parseCasUri,
+  resolveCanonicalCasBlobPath,
+  streamVerifiedCasBlob,
+} from './storage.js';
+export type { CasBlobPointer, CasBlobVerificationTarget } from './storage.js';
+export { copyVerifiedFileReadOnly, streamRegularFile } from './files.js';
+export type {
+  CopyVerifiedFileOptions,
+  CopiedVerifiedFile,
+  StreamRegularFileOptions,
+  StreamedFileSummary,
+} from './files.js';
+export type { HostPathProtectionOptions } from './source.js';
+export type {
+  ControllerPolicyProfile,
+  PersistedHostPolicy,
+  RawCandidateFile,
+  CasCandidateFile,
+  CandidateFileEntry,
+} from './types.js';

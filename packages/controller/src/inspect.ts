@@ -1,20 +1,26 @@
+import { lstat } from 'node:fs/promises';
+import { join } from 'node:path';
 import { reopenLocalRun, type LocalRunStore, type RunView } from '@loopwright/state';
-import { aggregateUsage, digestArtifact, validateDocument, type RequestUsage, type UsageSummary } from '@loopwright/core';
+import { aggregateUsage, digestArtifact, validateDocument, type ArtifactManifest, type RequestUsage, type UsageSummary } from '@loopwright/core';
 import { result, refuse, type ControllerResult } from './errors.js';
 import { readRetained, type RetainedRunInput } from './retained.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
 import { decodeCandidateCapture } from './capture.js';
 import { countDelegatedBudgets } from './budget-observations.js';
-import { stateValue, checkedRef } from './storage.js';
+import { parseSourceTree } from './source.js';
+import { resolveCanonicalCasBlobPath, stateValue, checkedRef, streamVerifiedCasBlob } from './storage.js';
 import { parsePrivateJson } from './parser.js';
-import { freeze, id, isRecord, list, record, same } from './schema.js';
+import { freeze, id, isRecord, list, record, same, text } from './schema.js';
 import { PublicBundle, type ExportManifest } from './bundle.js';
+import type { RawCandidateFile } from './types.js';
+
 export type CurrentState = Pick<RunView, 'revision' | 'clockStatus' | 'counts' | 'ledger' | 'clock'>;
 export interface RunStatus {
   readonly runId: string; readonly source: 'current' | 'retained' | 'unavailable'; readonly stage: string | null; readonly status: string | null;
   readonly currentState: CurrentState | null; readonly checkpoint: string | null; readonly cleanup: 'complete' | 'pending' | 'failed' | null; readonly unavailable: readonly string[];
 }
 const unavailable = (runId: string): RunStatus => freeze({ runId, source: 'unavailable', stage: null, status: null, currentState: null, checkpoint: null, cleanup: null, unavailable: ['stage', 'status', 'currentState', 'checkpoint', 'cleanup'] });
+
 async function snapshot(input: RetainedRunInput) {
   const retained = await readRetained(input); let store: LocalRunStore | null = null;
   try {
@@ -40,6 +46,7 @@ async function snapshot(input: RetainedRunInput) {
     return { ...retained, head, records, status, observed, primary, effectiveLedger };
   } finally { if (store) stateValue(store.close()); }
 }
+
 /** Owner-free, credential-free current observation; unavailable facts are explicit data. */
 export function readStatus(input: RetainedRunInput) {
   return result(async () => {
@@ -47,29 +54,142 @@ export function readStatus(input: RetainedRunInput) {
     try { return (await snapshot(input)).status; } catch { return unavailable(runId); }
   }, 'inspection');
 }
+
 type Snapshot = Awaited<ReturnType<typeof snapshot>>;
-async function candidateFiles(saved: Snapshot, head: ProgressHead) {
+
+interface ExportedCandidateFileV2 {
+  readonly name: string;
+  readonly mode: '100644' | '100755';
+  readonly sha256: string;
+  readonly byteLength: number;
+  readonly uri: string;
+  readonly blobPath: string;
+}
+
+type CandidateFilesDocument =
+  | {
+      readonly version: 2;
+      readonly manifest: ArtifactManifest;
+      readonly files: readonly ExportedCandidateFileV2[];
+    }
+  | {
+      readonly version: 1;
+      readonly manifest: ArtifactManifest;
+      readonly files: readonly { readonly name: string; readonly encoding: 'base64'; readonly body: string }[];
+    };
+
+async function readBaselineModes(saved: Snapshot): Promise<Map<string, '100644' | '100755'>> {
+  const modes = new Map<string, '100644' | '100755'>();
+  const rawSource = parsePrivateJson(await saved.artifacts.read(saved.descriptor.source, 262_144), 262_144);
+  const sourceVersion = isRecord(rawSource) ? rawSource.version : undefined;
+  if (sourceVersion === 2) {
+    const src = record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'baseTree', 'manifest', 'sourceTree', 'entryCount']);
+    const baseTree = record(src.baseTree, ['objectFormat', 'commitOid', 'treeOid']);
+    const objectFormat = baseTree.objectFormat === 'sha256' ? 'sha256' : 'sha1';
+    const treeBytes = await saved.artifacts.read(checkedRef(src.sourceTree), 8_388_608);
+    for (const entry of parseSourceTree(treeBytes, objectFormat, 'recovery')) {
+      modes.set(entry.name, entry.mode);
+    }
+    return modes;
+  }
+  const src = record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'manifest', 'entries']);
+  for (const rawEntry of list(src.entries, '', 256)) {
+    const entry = record(rawEntry, ['name', 'mode', 'oid', 'ref', 'artifact']);
+    const mode = text(entry.mode);
+    if (mode === '100644' || mode === '100755') {
+      modes.set(text(entry.name), mode);
+    }
+  }
+  return modes;
+}
+
+async function verifyAndBuildV2Files(
+  artifactsDir: string,
+  manifest: ArtifactManifest,
+  baselineModes: ReadonlyMap<string, '100644' | '100755'>,
+  overlayModes: ReadonlyMap<string, '100644' | '100755'>,
+): Promise<readonly ExportedCandidateFileV2[]> {
+  const out: ExportedCandidateFileV2[] = [];
+  for (const entry of manifest.spec.entries) {
+    const sha256 = entry.digest.hex;
+    const uri = 'cas://sha256/' + sha256;
+    const blobPath = await resolveCanonicalCasBlobPath(artifactsDir, sha256, undefined, 'inspection');
+    await streamVerifiedCasBlob(
+      artifactsDir,
+      {
+        name: entry.name,
+        sha256,
+        byteLength: entry.byteLength,
+        uri,
+        path: blobPath,
+      },
+      undefined,
+      'inspection',
+    );
+    const mode = overlayModes.get(entry.name) ?? baselineModes.get(entry.name) ?? '100644';
+    out.push({
+      name: entry.name,
+      mode,
+      sha256,
+      byteLength: entry.byteLength,
+      uri,
+      blobPath,
+    });
+  }
+  return out;
+}
+
+async function hasCasSha256Dir(artifactsDir: string): Promise<boolean> {
+  try {
+    const st = await lstat(join(artifactsDir, 'blobs', 'sha256'));
+    if (st.isSymbolicLink() || !st.isDirectory()) refuse('ARTIFACT_INVALID', '', 'inspection');
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function candidateFilesDocument(saved: Snapshot, head: ProgressHead): Promise<CandidateFilesDocument> {
+  const artifactsDir = join(saved.directory, 'artifacts');
+  const baselineModes = await readBaselineModes(saved);
+
   if (same(head.progress.candidate.workspace, saved.descriptor.sourceWorkspace)) {
     const rawSource = parsePrivateJson(await saved.artifacts.read(saved.descriptor.source, 262144), 262144);
     const sourceVersion = isRecord(rawSource) ? rawSource.version : undefined;
     if (sourceVersion === 2) {
       record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'baseTree', 'manifest', 'sourceTree', 'entryCount']);
       if (head.manifest.spec.entries.length !== 0 || head.manifest.spec.baseTree === undefined) refuse('ARTIFACT_INVALID', '', 'inspection');
-      return [];
+      return { version: 2, manifest: head.manifest, files: [] };
     }
     const source = record(rawSource, ['version', 'repository', 'directory', 'baseObject', 'sourceObject', 'manifest', 'entries']);
-    const files = []; let total = 0;
+    const files: RawCandidateFile[] = [];
+    let total = 0;
     for (const raw of list(source.entries, '', 256)) {
       const entry = record(raw, ['name', 'mode', 'oid', 'ref', 'artifact']), ref = checkedRef(entry.ref), bytes = await saved.artifacts.read(checkedRef(entry.artifact), 4194304), actual = digestArtifact(ref.name, bytes);
-      if (!actual.ok || !same(actual.value, ref) || (total += bytes.length) > 4194304) refuse('ARTIFACT_INVALID', '', 'inspection'); files.push({ name: ref.name, bytes });
+      if (!actual.ok || !same(actual.value, ref) || (total += bytes.length) > 4194304) refuse('ARTIFACT_INVALID', '', 'inspection');
+      files.push({ name: ref.name, bytes });
     }
-    if (!same(head.manifest.spec.entries, list(source.entries, '', 256).map(raw => (raw as Record<string, unknown>).ref))) refuse('ARTIFACT_INVALID', '', 'inspection'); return files;
+    if (!same(head.manifest.spec.entries, list(source.entries, '', 256).map(raw => (raw as Record<string, unknown>).ref))) {
+      refuse('ARTIFACT_INVALID', '', 'inspection');
+    }
+    if (files.length === 0 || await hasCasSha256Dir(artifactsDir)) {
+      const v2Files = await verifyAndBuildV2Files(artifactsDir, head.manifest, baselineModes, new Map());
+      return { version: 2, manifest: head.manifest, files: v2Files };
+    }
+    return {
+      version: 1,
+      manifest: head.manifest,
+      files: files.map(file => ({ name: file.name, encoding: 'base64', body: Buffer.from(file.bytes).toString('base64') })),
+    };
   }
+
   const attempt = [...head.progress.attempts].reverse().find(item => item.finished?.nativeCheckpointId && same(saved.records.checkpoints.find(cp => cp.checkpointId === item.finished!.nativeCheckpointId)?.workspace, head.progress.candidate.workspace));
   if (!attempt) refuse('EVIDENCE_UNAVAILABLE', '', 'inspection');
   const checkpoint = saved.records.checkpoints.find(cp => cp.checkpointId === attempt.finished!.nativeCheckpointId)!;
   const decoded = await decodeCandidateCapture({
     artifacts: saved.artifacts,
+    artifactsDirectory: artifactsDir,
     lock: saved.lock,
     plan: saved.plan,
     checkpoint,
@@ -78,8 +198,53 @@ async function candidateFiles(saved: Snapshot, head: ProgressHead) {
     requestIds: saved.records.requests.filter(row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests).map(row => row.admission.requestId),
     phase: 'inspection',
   });
-  return decoded.artifacts;
+
+  const overlayModes = new Map<string, '100644' | '100755'>();
+  if (decoded.delegatedPayload) {
+    for (const item of decoded.delegatedPayload.overlay) {
+      overlayModes.set(item.name, item.mode);
+    }
+  }
+  for (const item of decoded.artifacts) {
+    if (!('bytes' in item) && item.mode !== undefined) {
+      overlayModes.set(item.name, item.mode);
+    }
+  }
+
+  const isExplicitV2 = decoded.delegatedPayload?.version === 2 || decoded.artifacts.some(item => 'blobPath' in item);
+  const isEmptyNonLegacyV1 = head.manifest.spec.entries.length === 0 && decoded.delegatedPayload?.version !== 1;
+  if (isExplicitV2 || isEmptyNonLegacyV1) {
+    const v2Files = await verifyAndBuildV2Files(artifactsDir, head.manifest, baselineModes, overlayModes);
+    return { version: 2, manifest: head.manifest, files: v2Files };
+  }
+
+  // Legacy v1 capture (`delegated-capture.v1` or synthetic Pi `chunk` snapshot):
+  // If CAS blobs exist for every entry on disk, verify and emit v2; if no CAS blob exists for the legacy capture, emit v1 fallback.
+  if (await hasCasSha256Dir(artifactsDir)) {
+    let anyCasBlobPresent = false;
+    for (const entry of head.manifest.spec.entries) {
+      const exists = await lstat(join(artifactsDir, 'blobs', 'sha256', entry.digest.hex)).then(() => true, () => false);
+      if (exists) {
+        anyCasBlobPresent = true;
+        break;
+      }
+    }
+    if (anyCasBlobPresent) {
+      const v2Files = await verifyAndBuildV2Files(artifactsDir, head.manifest, baselineModes, overlayModes);
+      return { version: 2, manifest: head.manifest, files: v2Files };
+    }
+  }
+
+  return {
+    version: 1,
+    manifest: head.manifest,
+    files: decoded.artifacts.map(file => {
+      if (!('bytes' in file)) refuse('ARTIFACT_INVALID', '', 'inspection');
+      return { name: file.name, encoding: 'base64' as const, body: Buffer.from(file.bytes).toString('base64') };
+    }),
+  };
 }
+
 export interface InspectRunInput extends RetainedRunInput { readonly output?: string }
 export interface InspectRunValue {
   readonly status: RunStatus;
@@ -95,7 +260,7 @@ export function inspectRun(input: InspectRunInput): Promise<ControllerResult<Ins
     const bundle = new PublicBundle(runId, saved.lock.spec.lockHash), { head, primary, observed } = saved;
     bundle.json('task.lock.json', saved.lock); bundle.json('plan.json', saved.plan);
     if (head) {
-      try { const files = await candidateFiles(saved, head); bundle.json('candidate.files.json', { version: 1, manifest: head.manifest, files: files.map(file => ({ name: file.name, encoding: 'base64', body: Buffer.from(file.bytes).toString('base64') })) }); }
+      try { bundle.json('candidate.files.json', await candidateFilesDocument(saved, head)); }
       catch { bundle.absent('candidate.files.json'); }
     } else bundle.absent('candidate.files.json');
     const validResult = validateDocument(primary, 'RunResult');

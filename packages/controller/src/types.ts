@@ -15,6 +15,23 @@ export type Implementation =
   | 'no-change.v1'
   | 'gate.v1';
 export type RoleAdapterKind = 'pi' | 'delegated';
+export type ControllerPolicyProfile = 'local' | 'github';
+export interface PersistedHostPolicy {
+  readonly policyProfile: ControllerPolicyProfile;
+  readonly allowWorkflowWrites: boolean;
+}
+export interface RawCandidateFile {
+  readonly name: string;
+  readonly bytes: Uint8Array;
+}
+export interface CasCandidateFile {
+  readonly name: string;
+  readonly byteLength: number;
+  readonly digest: Digest;
+  readonly blobPath: string;
+  readonly mode?: '100644' | '100755' | undefined;
+}
+export type CandidateFileEntry = RawCandidateFile | CasCandidateFile;
 export type StepVerdictDisposition = 'pass' | 'rework' | 'fail' | 'human';
 export interface StepVerdict {
   readonly verdict: StepVerdictDisposition;

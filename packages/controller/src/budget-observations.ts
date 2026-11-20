@@ -6,7 +6,7 @@ import { canonical, hash, record, same } from './schema.js';
 import { journal } from './progress.js';
 import { refuse, type ControllerDiagnostic } from './errors.js';
 import { parsePrivateJson } from './parser.js';
-import { checkedRef, type ArtifactStore } from './storage.js';
+import { checkedRef, streamVerifiedCasBlob, type ArtifactStore } from './storage.js';
 import { overlayManifestBounds } from './source.js';
 import type { ByteInventory } from './verification.js';
 import type { CompiledPlan, ControllerProgress } from './types.js';
@@ -113,11 +113,34 @@ export async function schedulingSnapshot(store: LocalRunStore, authority: Author
     || candidate.files.length !== candidate.manifest.spec.entries.length || new Set(candidate.files.map(file => file.name)).size !== candidate.files.length
     || !Buffer.from(await artifacts.read(candidate.ref, bounds.manifestMaxBytes)).equals(Buffer.from(canonical(candidate.manifest)))) refuse('ARTIFACT_INVALID', '', 'execution');
   let total = 0;
+  let rawTotal = 0;
+  const maxAllowedTotal = Math.max(268_435_456, bounds.maxBytes);
+  const filesByName = new Map(candidate.files.map(file => [file.name, file]));
   for (const entry of candidate.manifest.spec.entries) {
-    const file = candidate.files.find(file => file.name === entry.name); if (!file || (total += entry.byteLength) > 268435456) refuse('ARTIFACT_INVALID', '', 'execution');
-    const bytes = ownedBytes(file.bytes, 67108864); if (bytes.length !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
+    const file = filesByName.get(entry.name);
+    if (!file || (total += entry.byteLength) > maxAllowedTotal) refuse('ARTIFACT_INVALID', '', 'execution');
+    if ('bytes' in file) {
+      if ('blobPath' in file || (rawTotal += entry.byteLength) > 268_435_456) refuse('ARTIFACT_INVALID', '', 'execution');
+      const bytes = ownedBytes(file.bytes, 67_108_864);
+      if (bytes.length !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
+    } else {
+      if (file.byteLength !== entry.byteLength || !same(file.digest, entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
+      await streamVerifiedCasBlob(
+        artifacts.directory,
+        {
+          name: entry.name,
+          sha256: entry.digest.hex,
+          byteLength: entry.byteLength,
+          uri: 'cas://sha256/' + entry.digest.hex,
+          path: file.blobPath,
+        },
+        undefined,
+        'execution',
+      );
+    }
   }
-  await artifacts.read(retained.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes)); if (retained.privateSession) await artifacts.read(retained.privateSession, 67108864);
+  await artifacts.read(retained.workspace, Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes));
+  if (retained.privateSession) await artifacts.read(retained.privateSession, 67108864);
   await artifacts.owner.assertCurrent(); if (facts() !== records) refuse('RECOVERY_REQUIRED', '', 'execution');
   return Object.freeze({ records, candidate: canonical({ retained, manifest: candidate.manifest, subject: subject.value }) });
 }
