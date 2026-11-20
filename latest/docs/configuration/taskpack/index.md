@@ -303,6 +303,8 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 
 Action `with:` inputs override `spec.limits`, which override `LOOPWRIGHT_*` env vars. Key bounds: `wallTimeSeconds` (`60..21600`), `totalTokens` (`1000..1e9`), `maxModelCalls` (`1..1024`), `maxAttempts` (`1..16`, within 256 checkpoints), `commandTimeoutSeconds` (`1..3600`), and `limits.overlay: { maxFiles: 1..4096, maxBytes: 1024..67108864 }` (default `128` / `4 MiB`; e.g. `512` / `16 MiB`).
 
+Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session dispatch; when omitted, defaults derive from compiled `maxModelCalls` and `maxImplementationRepairs`. Unlike fallback `LOOPWRIGHT_*` env vars above, `LOOPWRIGHT_MAX_TURNS` and `LOOPWRIGHT_MAX_REPAIR_TURNS` take precedence over `spec.limits` at runtime.
+
 ## Verification checks
 
 `spec.verification.localChecks` (`0..32` items) and `externalGates` (`0..32` items) evaluate candidate artifacts and scripts inside isolated verifiers.

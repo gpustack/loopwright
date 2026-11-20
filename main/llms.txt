@@ -2,7 +2,7 @@
 
 > Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: 6d281028848473fc52b96a5a3b1cea49fc1a731f.
+Documentation version: main. Source revision: 5c67611fa5496254ef1a97ab7f51eac3a9e26c6e.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
@@ -43,4 +43,4 @@ Follow the [Bootstrap Interview Reference](/loopwright/main/references/bootstrap
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/6d281028848473fc52b96a5a3b1cea49fc1a731f/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/5c67611fa5496254ef1a97ab7f51eac3a9e26c6e/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
