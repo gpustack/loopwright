@@ -3,27 +3,35 @@ import { createHash } from 'node:crypto';
 import { refuse } from './errors.js';
 import type { Digest } from '@loopwright/core';
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export function snapshot(input: unknown): Json {
+export interface SnapshotBounds {
+  readonly maxBytes?: number;
+  readonly maxNodes?: number;
+  readonly maxArray?: number;
+}
+export function snapshot(input: unknown, bounds?: SnapshotBounds): Json {
+  const maxBytes = bounds?.maxBytes ?? 1048576;
+  const maxNodes = bounds?.maxNodes ?? 65536;
+  const maxArray = bounds?.maxArray ?? 1024;
   let nodes = 0, bytes = 0; const seen = new Set<object>();
   const copy = (value: unknown, depth: number): Json => {
-    if (++nodes > 65536 || depth > 64) refuse('INPUT_INVALID');
+    if (++nodes > maxNodes || depth > 64) refuse('INPUT_INVALID');
     if (value === null || typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number') {
       if (typeof value === 'number' && (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER || Object.is(value, -0))) refuse('INPUT_INVALID');
       if (typeof value === 'string' && (value.length > 16384 || /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value))) refuse('INPUT_INVALID');
-      bytes += Buffer.byteLength(JSON.stringify(value)); if (bytes > 1048576) refuse('INPUT_INVALID'); return value;
+      bytes += Buffer.byteLength(JSON.stringify(value)); if (bytes > maxBytes) refuse('INPUT_INVALID'); return value;
     }
     if (typeof value !== 'object' || types.isProxy(value) || seen.has(value)) refuse('INPUT_INVALID'); seen.add(value);
     const isArray = Array.isArray(value), prototype: unknown = Object.getPrototypeOf(value);
     if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) refuse('INPUT_INVALID');
     const keys = Reflect.ownKeys(value); if (keys.some(key => typeof key !== 'string')) refuse('INPUT_INVALID');
     const length = isArray ? Object.getOwnPropertyDescriptor(value, 'length')!.value as number : keys.length;
-    if (length > (isArray ? 1024 : 128) || isArray && keys.length !== length + 1) refuse('INPUT_INVALID');
+    if (length > (isArray ? maxArray : 128) || isArray && keys.length !== length + 1) refuse('INPUT_INVALID');
     const output: Json[] | Record<string, Json> = isArray ? [] : Object.create(null) as Record<string, Json>;
-    bytes += 2 + length; if (bytes > 1048576) refuse('INPUT_INVALID');
+    bytes += 2 + length; if (bytes > maxBytes) refuse('INPUT_INVALID');
     for (const key of isArray ? Array.from({ length }, (_, index) => String(index)) : keys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) refuse('INPUT_INVALID');
-      if (!isArray) { bytes += Buffer.byteLength(JSON.stringify(key)) + 1; if (bytes > 1048576) refuse('INPUT_INVALID'); }
+      if (!isArray) { bytes += Buffer.byteLength(JSON.stringify(key)) + 1; if (bytes > maxBytes) refuse('INPUT_INVALID'); }
       const child = copy(descriptor.value, depth + 1);
       if (Array.isArray(output)) output.push(child); else output[key] = child;
     }

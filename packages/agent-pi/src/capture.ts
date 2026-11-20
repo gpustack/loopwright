@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import type { ArtifactManifest } from '@loopwright/core';
 import { bindSubject } from '@loopwright/core';
 import { ArtifactWriter } from './artifacts.js';
-import { Candidate } from './candidate.js';
+import { Candidate, DEFAULT_OVERLAY_MANIFEST_MAX_BYTES, resolveCandidateOverlayLimits, type ResolvedCandidateOverlayLimits } from './candidate.js';
 import { NativeSnapshot, rowBytes } from './snapshot.js';
 import { canonical, digest } from './boundary.js';
 import { stateValue } from './admission.js';
@@ -14,8 +14,15 @@ import { sameIdentity } from './policy.js';
 import { refuse } from './errors.js';
 import type { PiCapture, PiHost, PiOpenInput } from './types.js';
 export interface NativeCaptureSource { capture(sink: (bytes: Uint8Array) => Promise<void>): Promise<void> }
-export function captureBinding(host: PiHost, input: PiOpenInput, manifest: ArtifactManifest, checkpointId: string, sequence: number) {
-  const view = stateValue(host.store.inspect(), 'restore'), subject = bindSubject(input.lock, manifest); if (!subject.ok) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
+export function captureBinding(
+  host: PiHost,
+  input: PiOpenInput,
+  manifest: ArtifactManifest,
+  checkpointId: string,
+  sequence: number,
+  overlayLimits: ResolvedCandidateOverlayLimits = resolveCandidateOverlayLimits(input.lock.spec.contract.spec.budgets.overlay),
+) {
+  const view = stateValue(host.store.inspect(), 'restore'), subject = bindSubject(input.lock, manifest, { overlay: { maxFiles: overlayLimits.maxFiles, maxBytes: overlayLimits.maxBytes } }); if (!subject.ok) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
   return { version: 1, checkpointId, storeId: view.storeId, runId: view.runId, lockHash: view.lockHash, sessionId: input.sessionId, roleId: input.roleId, stepId: input.stepId,
     runtime: input.policy.runtime, policyDigest: digest(Buffer.from(canonical(input.policy))), resourcesDigest: digest(Buffer.from(canonical(input.policy.resources))), candidateDigest: subject.value.candidateDigest,
     clockBasis: view.clock.basis, accountingDigest: digest(Buffer.from(canonical({ ledger: view.ledger, requests: view.counts.requests, operations: view.counts.operations }))), sequence };
@@ -39,10 +46,14 @@ export async function captureCheckpoint(host: PiHost, input: PiOpenInput, candid
   }
   if (existing.error.code !== 'RECORD_NOT_FOUND') stateValue(existing, 'restore');
   if (before.counts.checkpoints >= input.policy.limits.checkpoints) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-  const manifest = await candidate.manifest(), binding = captureBinding(host, input, manifest, checkpointId, sequence);
+  const manifest = await candidate.manifest();
+  if (manifest.spec.entries.length > input.policy.limits.candidateEntries) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+  const overlayLimits = resolveCandidateOverlayLimits(input.lock.spec.contract.spec.budgets.overlay);
+  const binding = captureBinding(host, input, manifest, checkpointId, sequence, overlayLimits);
+  const manifestMaxBytes = manifest.spec.baseTree !== undefined ? overlayLimits.manifestMaxBytes : DEFAULT_OVERLAY_MANIFEST_MAX_BYTES;
   // Conservatively include both logical candidate bytes and the encoded workspace artifact in headroom.
   const baseline = manifest.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) + input.resources.reduce((sum, resource) => sum + resource.bytes.byteLength, 0);
-  const remaining = input.policy.limits.artifactBytes - baseline; if (remaining <= 0 || Buffer.byteLength(canonical(manifest)) > 32768) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+  const remaining = input.policy.limits.artifactBytes - baseline; if (remaining <= 0 || Buffer.byteLength(canonical(manifest)) > manifestMaxBytes) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
   const session = new ArtifactWriter(host.artifactsDirectory, 'pi-checkpoints/' + checkpointId + '.session.ndjson', Math.min(input.policy.limits.sessionBytes, input.policy.limits.fileBytes, remaining), signal);
   let workspace: ArtifactWriter | null = null;
   try {

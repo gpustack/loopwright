@@ -32,15 +32,19 @@ import { canonicalDirectory } from './session-host.js';
 import { SnapshotTransfer } from './snapshot-transfer.js';
 import type { ToolProcessPort, ToolProcessReply } from './tool-process.js';
 import { clampToolResultBytes, type ToolResult } from './tools.js';
-import type {
-  CallExternalMcpToolOptions,
-  ConnectHostMcpOptions,
-  ConnectedMcpServerSummary,
-  ExternalMcpHttpServerConfig,
-  ExternalMcpServerConfig,
-  ExternalMcpStdioServerConfig,
-  ExternalMcpToolSchema,
-  HostMcpRegistry,
+import {
+  createRoleMcpAllowlist,
+  createRoleScopedMcpExecutor,
+  validateAllowedMcpServers,
+  type CallExternalMcpToolOptions,
+  type ConnectHostMcpOptions,
+  type ConnectedMcpServerSummary,
+  type ExternalMcpHttpServerConfig,
+  type ExternalMcpServerConfig,
+  type ExternalMcpStdioServerConfig,
+  type ExternalMcpToolSchema,
+  type HostMcpRegistry,
+  type RoleMcpAllowlist,
 } from './external-mcp.js';
 import type { PiAdapterV2, PiHostV2, PiOpenInputV2, PiResultV2 } from './types-v2.js';
 import type { PiAdapter, PiCapabilities, PiErrorCode, PiHost, PiOpenInput, PiResult } from './types.js';
@@ -80,7 +84,18 @@ export type HostSessionProgressEvent =
 
 export interface OpenPiHostSessionOptions {
   readonly mcpRegistry?: HostMcpRegistry | undefined;
+  readonly allowedMcpServers?: readonly string[] | undefined;
   readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined;
+}
+
+function resolveSessionMcpAllowlist(input: PiOpenInput, options?: OpenPiHostSessionOptions): RoleMcpAllowlist {
+  const role = input.lock.spec.contract.spec.roles.find(item => item.id === input.roleId);
+  if (!role) refuse('BINDING_MISMATCH', '/roleId');
+  return createRoleMcpAllowlist({
+    roleTools: role.tools,
+    policyTools: input.policy.tools,
+    allowedServers: options?.allowedMcpServers,
+  });
 }
 
 const exec = promisify(execFile);
@@ -1570,30 +1585,41 @@ class HostRuntimeSession {
     });
     await registerAttach(this.host, this.nonce, child.pid);
 
+    const roleMcpAllowlist = resolveSessionMcpAllowlist(this.input, this.options);
+    const permittedToolNames = roleMcpAllowlist.filterToolNames(this.input.policy.tools);
+
     const restored = recoverSnapshot(this.host, this.input);
     if (restored) {
       const accepted = this.#wait('restore-ready');
-      await this.#channel.send('restore-start', {
-        selection: this.input.policy.selection,
-        toolNames: this.input.policy.tools,
-        sessionBytes: this.input.policy.limits.sessionBytes,
-      });
-      await accepted;
+      await Promise.all([
+        this.#channel.send('restore-start', {
+          selection: this.input.policy.selection,
+          toolNames: permittedToolNames,
+          sessionBytes: this.input.policy.limits.sessionBytes,
+        }),
+        accepted,
+      ]);
       async function* chunks() {
         yield restored!.native;
       }
       const complete = this.#wait('restore-complete', 90000);
-      await this.#snapshots.send(1, chunks(), this.input.policy.limits.sessionBytes);
-      await complete;
+      await Promise.all([
+        this.#snapshots.send(1, chunks(), this.input.policy.limits.sessionBytes),
+        complete,
+      ]);
     }
 
     const ready = this.#wait('ready');
-    const externalMcpTools = this.options?.mcpRegistry?.toolSchemasFor(this.input.policy.tools) ?? [];
+    const externalMcpTools = this.options?.mcpRegistry
+      ? this.options.mcpRegistry
+        .toolSchemasFor(permittedToolNames, this.options.allowedMcpServers)
+        .filter(schema => roleMcpAllowlist.isToolAllowed(schema.name, schema.serverId))
+      : [];
     const [, response] = await Promise.all([
       this.#channel.send('init', {
         selection: this.input.policy.selection,
         systemPrompt: systemPrompt(this.input),
-        toolNames: this.input.policy.tools,
+        toolNames: permittedToolNames,
         mcp: this.input.policy.mcp,
         toolArgsBytes: this.input.policy.limits.toolArgsBytes,
         toolResultBytes: this.input.policy.limits.toolResultBytes,
@@ -1896,25 +1922,33 @@ async function environment(host: PiHost): Promise<void> {
 
 function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPorts {
   return Object.freeze<FactoryPorts>({
-    environment,
+    environment: async host => {
+      validateAllowedMcpServers(options?.allowedMcpServers);
+      await environment(host);
+    },
     lease: (host, input) => HostExecutionLease.acquire(host, input),
-    execution: (host, owned, candidateDir) => new HostExecution(
-      host,
-      owned,
-      candidateDir,
-      {
-        process: (operationId, signal) => new HostToolProcess(
-          host,
-          owned,
-          join(host.directory, 'tool-' + operationId),
-          candidateDir,
-          operationId,
-          signal,
-        ),
-        ...(options?.mcpRegistry !== undefined ? { mcpExecutor: options.mcpRegistry } : {}),
-      },
-      options?.onProgress,
-    ),
+    execution: (host, owned, candidateDir) => {
+      const roleMcpAllowlist = resolveSessionMcpAllowlist(owned, options);
+      return new HostExecution(
+        host,
+        owned,
+        candidateDir,
+        {
+          process: (operationId, signal) => new HostToolProcess(
+            host,
+            owned,
+            join(host.directory, 'tool-' + operationId),
+            candidateDir,
+            operationId,
+            signal,
+          ),
+          ...(options?.mcpRegistry !== undefined
+            ? { mcpExecutor: createRoleScopedMcpExecutor(options.mcpRegistry, roleMcpAllowlist) }
+            : {}),
+        },
+        options?.onProgress,
+      );
+    },
     mcp: (_host, owned) => ({
       process: () => new HostMcpProcess(owned, join(_host.directory, 'sdk-' + owned.sessionId, 'candidate')),
     }),
