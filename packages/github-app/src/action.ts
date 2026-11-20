@@ -533,7 +533,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   });
   let openManagedPr: ManagedPullRequestInfo | null = null;
   let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
-  const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim();
+  const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim() || undefined;
   let preflightResult: RunTaskpackPreflightResult | undefined;
 
   try {
@@ -1151,18 +1151,18 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         const registryPath = join(registryDirectory, 'registry.yaml');
         const configPath = join(configDirectory, 'config.yaml');
         const configBytes = Buffer.from(serializePrettyYaml(checkOnlyCompiled.config), 'utf8');
+        assertCleanArtifact(checkOnlyCompiled.registryBytes, scrubber, '/registry');
+        assertCleanArtifact(configBytes, scrubber, '/config');
+        for (const resource of checkOnlyCompiled.instructionResources ?? []) {
+          assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+        }
         await writeFile(registryPath, checkOnlyCompiled.registryBytes, { mode: 0o600 });
         await writeFile(configPath, configBytes, { mode: 0o600 });
         await chmod(registryPath, 0o600);
         await chmod(configPath, 0o600);
         if (checkOnlyCompiled.instructionResources !== undefined && checkOnlyCompiled.instructionResources.length > 0) {
           await stageCompiledInstructionResources(registryDirectory, checkOnlyCompiled.instructionResources);
-          for (const resource of checkOnlyCompiled.instructionResources) {
-            assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
-          }
         }
-        assertCleanArtifact(checkOnlyCompiled.registryBytes, scrubber, '/registry');
-        assertCleanArtifact(configBytes, scrubber, '/config');
         const writtenNoChange: WrittenCompiledTaskpack = {
           ...checkOnlyCompiled,
           configBytes,

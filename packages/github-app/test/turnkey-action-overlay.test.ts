@@ -2580,6 +2580,18 @@ spec:
       assert.match(receipt.reason ?? '', /candidate tree matches base tree/);
       assert.equal(postPullsCalled, 0);
       assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+
+      await assert.rejects(
+        startNativePullRequestPublisherServer({
+          runRoot,
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          targetBranch: 'main',
+          headBranchPrefix: 'auto-sync/',
+          host: '0.0.0.0',
+        }),
+        (err: unknown) => err instanceof Error && /loopback host/.test(err.message),
+      );
     } finally {
       await pubServer?.close();
       await openAiServer?.close();
@@ -2894,6 +2906,18 @@ spec:
       assert.equal(capturedReport?.report?.detail, null);
       assert.equal(postPullsCalled, 0);
       assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+
+      await assert.rejects(
+        startNativePullRequestPublisherServer({
+          runRoot,
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          targetBranch: 'main',
+          headBranchPrefix: 'auto-sync/',
+          host: '0.0.0.0',
+        }),
+        (err: unknown) => err instanceof Error && /loopback host/.test(err.message),
+      );
     } finally {
       await openAiServer?.close();
       await githubServer?.close();

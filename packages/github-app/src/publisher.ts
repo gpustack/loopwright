@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { chmod, lstat, mkdtemp, open, realpath, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -1045,13 +1045,19 @@ export async function startNativePullRequestPublisherServer(
   scrubber.register(authToken);
   if (options.gitWriteToken) scrubber.register(options.gitWriteToken);
 
+  const host = options.host ?? '127.0.0.1';
+  if (host !== '127.0.0.1' && host !== '::1' && host !== 'localhost') {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `native pull request publisher must bind a loopback host, got "${host}"`,
+    );
+  }
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+
   const ownedScratch = options.scratchRoot === undefined;
   const rawScratchBase = options.scratchRoot ?? await mkdtemp(join(tmpdir(), 'loopwright-pub-'));
   await chmod(rawScratchBase, 0o700);
   const scratchBase = await realpath(rawScratchBase);
-
-  const host = options.host ?? '127.0.0.1';
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 
   interface PublicationReceiptPayload {
     readonly version: 1;
@@ -1069,7 +1075,9 @@ export async function startNativePullRequestPublisherServer(
     readonly candidateDigest: string;
   }
 
+  const MAX_RECEIPT_CACHE_ENTRIES = 256;
   const receiptCache = new Map<string, PublicationReceiptPayload>();
+  const expectedBearerBuf = Buffer.from(`Bearer ${authToken}`, 'utf8');
 
   const server = createServer(async (req, res) => {
     const pathname = (req.url ?? '/').split('?')[0];
@@ -1094,7 +1102,11 @@ export async function startNativePullRequestPublisherServer(
     }
 
     const authHeader = req.headers['authorization'];
-    if (authHeader !== `Bearer ${authToken}`) {
+    const providedBearerBuf = Buffer.from(typeof authHeader === 'string' ? authHeader : '', 'utf8');
+    if (
+      providedBearerBuf.length !== expectedBearerBuf.length
+      || !timingSafeEqual(providedBearerBuf, expectedBearerBuf)
+    ) {
       writePlainJsonResponse(res, 401, { error: 'invalid_bearer_token' });
       return;
     }
@@ -1169,28 +1181,33 @@ export async function startNativePullRequestPublisherServer(
 
     const emitReceipt = (receipt: PublicationReceiptPayload): void => {
       if (idempotencyKey.length > 0) {
+        if (!receiptCache.has(idempotencyKey) && receiptCache.size >= MAX_RECEIPT_CACHE_ENTRIES) {
+          const oldestKey = receiptCache.keys().next().value;
+          if (oldestKey !== undefined) receiptCache.delete(oldestKey);
+        }
         receiptCache.set(idempotencyKey, receipt);
       }
       writeSignedJsonResponse(res, 200, signingSecret, receipt);
     };
 
-    const workRoot = await mkdtemp(join(scratchBase, 'idx-'));
-    await chmod(workRoot, 0o700);
-    const indexFile = join(workRoot, 'index');
-    const gitEnv = buildGitAuthEnv(options.gitWriteToken);
-    const gitRepo = (
-      args: readonly string[],
-      extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
-    ): Promise<Buffer> =>
-      execGit(options.repositoryRoot, args, { env: gitEnv, ...extraOpts });
-    const gitWithIndex = (
-      args: readonly string[],
-      extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
-    ): Promise<Buffer> =>
-      execGit(options.repositoryRoot, args, { env: { ...gitEnv, GIT_INDEX_FILE: indexFile }, ...extraOpts });
+    let workRoot: string | undefined;
     let mutationStarted = false;
 
     try {
+      workRoot = await mkdtemp(join(scratchBase, 'idx-'));
+      await chmod(workRoot, 0o700);
+      const indexFile = join(workRoot, 'index');
+      const gitEnv = buildGitAuthEnv(options.gitWriteToken);
+      const gitRepo = (
+        args: readonly string[],
+        extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
+      ): Promise<Buffer> =>
+        execGit(options.repositoryRoot, args, { env: gitEnv, ...extraOpts });
+      const gitWithIndex = (
+        args: readonly string[],
+        extraOpts?: { readonly input?: Buffer | string | undefined; readonly timeoutMs?: number | undefined },
+      ): Promise<Buffer> =>
+        execGit(options.repositoryRoot, args, { env: { ...gitEnv, GIT_INDEX_FILE: indexFile }, ...extraOpts });
       const realRunRoot = await realpath(options.runRoot);
       const snapshot = await inspectAndVerifyCandidate(realRunRoot, runId, candidateDigest, workRoot);
       const baseRevision = String(request['baseRevision'] ?? snapshot.baseRevision);
@@ -1571,7 +1588,9 @@ export async function startNativePullRequestPublisherServer(
         scrubbed.length > 0 ? scrubbed : 'publication aborted',
       ));
     } finally {
-      await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
+      if (workRoot !== undefined) {
+        await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   });
   server.requestTimeout = 0;

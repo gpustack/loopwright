@@ -5,6 +5,7 @@ import {
   assertMultiTenantManifestAuthority,
   isGitHubTriggerDeclared,
   MULTI_TENANT_HOST_POLICY,
+  resolveManifestControlRoot,
   validateTaskpackV2Manifest,
 } from '@loopwright/taskpack';
 import { InstallationTokenBroker, SecretScrubber } from './token-broker.js';
@@ -152,9 +153,10 @@ function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: str
 export async function startGitHubAppControlPlane(options: ControlPlaneOptions): Promise<ControlPlaneHandle> {
   if (options.manifest !== undefined) {
     assertMultiTenantManifestAuthority(options.manifest);
+    const resolvedControl = resolveManifestControlRoot(options.manifest, options.manifest.manifestPath);
     assertManifestScopeInvariants(options.manifest, {
-      controlRoot: options.manifest.controlRoot ?? '.loopwright',
-      manifestPath: options.manifest.manifestPath,
+      controlRoot: resolvedControl.controlRoot,
+      manifestPath: resolvedControl.manifestPath,
       policyProfile: 'github',
       hostPolicy: MULTI_TENANT_HOST_POLICY,
       enforceHostAuthority: true,
