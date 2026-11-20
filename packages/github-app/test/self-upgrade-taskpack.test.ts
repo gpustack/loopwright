@@ -1788,6 +1788,10 @@ process.exit(45);
         env: {
           ...process.env,
           PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          GITHUB_TOKEN: '',
+          GH_TOKEN: '',
+          GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(noChangeFixtures),
         },
       });
@@ -1909,7 +1913,10 @@ process.exit(45);
           env: {
             ...process.env,
             PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+            GITHUB_TOKEN: '',
+            GH_TOKEN: '',
             GITHUB_ACTIONS: '',
+            RUNNER_ENVIRONMENT: '',
             LOOPWRIGHT_PROVIDER_TOKEN: 'sk-self-upgrade-auto-test-token',
             SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
               Object.fromEntries(preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.10.0' : '1.5.0' }])),
