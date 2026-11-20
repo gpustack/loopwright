@@ -42,6 +42,9 @@ spec:
       - packages/controller/qualification/**
       - packages/cli/src/closure.ts
       - packages/cli/src/failure-matrix.ts
+      - packages/*/tsconfig.json
+      - packages/*/tsconfig.*.json
+      - packages/*/eslint.config.*
       - docs/contribute/**
       - scripts/**
   instructions:
@@ -130,6 +133,41 @@ spec:
         implementation: json-artifact.v1
       - id: writable-scope
         implementation: scope.v1
+      - id: agent-pi-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/agent-pi/package.json
+          allowedPointers:
+            - /dependencies/@earendil-works~1pi-agent-core
+            - /dependencies/@earendil-works~1pi-ai
+            - /dependencies/@earendil-works~1pi-codemode
+            - /dependencies/@earendil-works~1pi-coding-agent
+            - /dependencies/@earendil-works~1pi-mcp
+            - /dependencies/@earendil-works~1pi-tui
+      - id: cli-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/cli/package.json
+          allowedPointers:
+            - /dependencies/yaml
+      - id: controller-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/controller/package.json
+          allowedPointers:
+            - /dependencies/yaml
+      - id: decisions-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/decisions/package.json
+          allowedPointers:
+            - /dependencies/yaml
+      - id: github-app-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/github-app/package.json
+          allowedPointers:
+            - /dependencies/yaml
       - id: self-upgrade-verify
         implementation: command.v1
         parameters:
@@ -176,11 +214,16 @@ spec:
         top_p: 0.9
   limits:
     wallTimeSeconds: 2700
+    totalTokens: 20000000
     contextWindow: 1000000
     maxOutputTokens: 65536
+    maxModelCalls: 128
     commandTimeoutSeconds: 900
     toolTimeoutSeconds: 300
     maxAttempts: 3
+    overlay:
+      maxFiles: 64
+      maxBytes: 2097152
   output:
     formats:
       - json

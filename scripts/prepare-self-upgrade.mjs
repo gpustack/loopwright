@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, URL } from 'node:url';
 import { promisify } from 'node:util';
@@ -17,7 +17,10 @@ export const MAX_MANIFEST_BYTES = 64 * 1024;
 export const MAX_LOCKFILE_BYTES = 900 * 1024;
 export const MAX_HTTP_JSON_BYTES = 1024 * 1024;
 export const MAX_PROMPT_RESOURCE_BYTES = 64 * 1024;
+export const MAX_PROMPT_RESOURCES_TOTAL_BYTES = 256 * 1024;
+export const MAX_PROMPT_PATCH_TOTAL_BYTES = 192 * 1024;
 export const MAX_NPM_CACHE_ARCHIVE_BYTES = 128 * 1024 * 1024;
+export const MAX_WORKSPACE_RESOURCES_TOTAL_BYTES = 256 * 1024 * 1024;
 
 export const PI_UPSTREAM_MAP = Object.freeze({
   'pi-coding-agent': '@earendil-works/pi-coding-agent',
@@ -691,6 +694,71 @@ export async function computeUnifiedLockfilePatch(baselineLockPath, candidateLoc
   return `--- a/package-lock.json\n+++ b/package-lock.json\n${lines.slice(firstHunkIdx).join('\n')}`;
 }
 
+/**
+ * Split a unified diff into ordered UTF-8 slices (`<= maxChunkBytes` each, `<= maxTotalBytes` total),
+ * preferring `@@ ` hunk boundaries whenever individual hunks fit within `maxChunkBytes` and falling back
+ * to line boundaries for oversized contiguous hunks. Returned slices are ordered byte parts (not standalone
+ * patches) and MUST be concatenated in part order (`chunks.join('') === patchText`) before `git apply`,
+ * matching `.auto-sync/instructions.md`.
+ */
+export function splitPromptPatchChunks(
+  patchText,
+  maxChunkBytes = MAX_PROMPT_RESOURCE_BYTES,
+  maxTotalBytes = MAX_PROMPT_PATCH_TOTAL_BYTES,
+) {
+  if (typeof patchText !== 'string' || patchText.length === 0) return Object.freeze([]);
+  const totalBytes = Buffer.byteLength(patchText, 'utf8');
+  if (totalBytes > maxTotalBytes) return Object.freeze([]);
+  if (totalBytes <= maxChunkBytes) return Object.freeze([patchText]);
+
+  const lines = patchText.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const hunkSegments = [];
+  let currentHunkLines = [];
+  let seenFirstHunkHeader = false;
+  for (const line of lines) {
+    if (line.startsWith('@@ ')) {
+      if (seenFirstHunkHeader && currentHunkLines.length > 0) {
+        hunkSegments.push(currentHunkLines);
+        currentHunkLines = [];
+      }
+      seenFirstHunkHeader = true;
+    }
+    currentHunkLines.push(line);
+  }
+  if (currentHunkLines.length > 0) hunkSegments.push(currentHunkLines);
+
+  const chunks = [];
+  let currentParts = [];
+  let currentBytes = 0;
+  for (const segmentLines of hunkSegments) {
+    const segmentText = segmentLines.join('');
+    const segmentBytes = Buffer.byteLength(segmentText, 'utf8');
+    if (segmentBytes <= maxChunkBytes) {
+      if (currentBytes + segmentBytes > maxChunkBytes && currentParts.length > 0) {
+        chunks.push(currentParts.join(''));
+        currentParts = [];
+        currentBytes = 0;
+      }
+      currentParts.push(segmentText);
+      currentBytes += segmentBytes;
+    } else {
+      for (const line of segmentLines) {
+        const lineBytes = Buffer.byteLength(line, 'utf8');
+        if (lineBytes > maxChunkBytes) return Object.freeze([]);
+        if (currentBytes + lineBytes > maxChunkBytes && currentParts.length > 0) {
+          chunks.push(currentParts.join(''));
+          currentParts = [];
+          currentBytes = 0;
+        }
+        currentParts.push(line);
+        currentBytes += lineBytes;
+      }
+    }
+  }
+  if (currentParts.length > 0) chunks.push(currentParts.join(''));
+  return Object.freeze(chunks);
+}
+
 async function prepareCanonicalStageDir(repoRoot, stageDir, preserveStageDirRoot) {
   const resolvedRepo = await realpath(resolve(repoRoot));
   const absStageDir = resolve(stageDir);
@@ -722,8 +790,15 @@ export async function stageNoChangeBundle({ repoRoot, stageDir, targetVersions, 
   const { canonicalStageDir } = await prepareCanonicalStageDir(repoRoot, stageDir, preserveStageDirRoot);
   const targetVersionsPath = join(canonicalStageDir, 'target-versions.json');
   const preflightMetadataPath = join(canonicalStageDir, 'preflight-metadata.json');
-  await writeFile(targetVersionsPath, `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o644 });
-  await writeFile(preflightMetadataPath, `${JSON.stringify({ schema_version: 1, force: false, disposition: 'no_change' }, null, 2)}\n`, { mode: 0o644 });
+  const targetVersionsRaw = `${JSON.stringify(targetVersions, null, 2)}\n`;
+  const preflightMetadataRaw = `${JSON.stringify({ schema_version: 1, force: false, disposition: 'no_change' }, null, 2)}\n`;
+  const targetVersionsBytes = Buffer.byteLength(targetVersionsRaw, 'utf8');
+  const preflightMetadataBytes = Buffer.byteLength(preflightMetadataRaw, 'utf8');
+  if (targetVersionsBytes > MAX_PROMPT_RESOURCE_BYTES || preflightMetadataBytes > MAX_PROMPT_RESOURCE_BYTES) {
+    throw new Error(`Staged no-change metadata exceeds ${MAX_PROMPT_RESOURCE_BYTES} bytes per-resource ceiling`);
+  }
+  await writeFile(targetVersionsPath, targetVersionsRaw, { mode: 0o644 });
+  await writeFile(preflightMetadataPath, preflightMetadataRaw, { mode: 0o644 });
   await finalizeStagePermissions(canonicalStageDir, [targetVersionsPath, preflightMetadataPath], preserveStageDirRoot);
   return Object.freeze({
     kind: 'no-change',
@@ -732,6 +807,7 @@ export async function stageNoChangeBundle({ repoRoot, stageDir, targetVersions, 
     preflightMetadataPath,
     candidateLockPath: null,
     lockfilePatchPath: null,
+    lockfilePatchPaths: Object.freeze([]),
     npmCacheArchivePath: null,
     candidateLockBytes: 0,
     lockfilePatchBytes: 0,
@@ -775,24 +851,61 @@ export async function stageCandidateBundle({
   const targetVersionsPath = join(canonicalStageDir, 'target-versions.json');
   const preflightMetadataPath = join(canonicalStageDir, 'preflight-metadata.json');
   const candidateLockPath = join(canonicalStageDir, 'package-lock.candidate.json');
-  await writeFile(targetVersionsPath, `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o644 });
-  await writeFile(preflightMetadataPath, `${JSON.stringify({ schema_version: 1, force }, null, 2)}\n`, { mode: 0o644 });
+  const targetVersionsRaw = `${JSON.stringify(targetVersions, null, 2)}\n`;
+  const preflightMetadataRaw = `${JSON.stringify({ schema_version: 1, force }, null, 2)}\n`;
+  const targetVersionsBytes = Buffer.byteLength(targetVersionsRaw, 'utf8');
+  const preflightMetadataBytes = Buffer.byteLength(preflightMetadataRaw, 'utf8');
+  if (targetVersionsBytes > MAX_PROMPT_RESOURCE_BYTES) {
+    throw new Error(`Staged target-versions.json (${targetVersionsBytes} bytes) exceeds ${MAX_PROMPT_RESOURCE_BYTES} bytes`);
+  }
+  const workspaceTotalBytes = targetVersionsBytes + preflightMetadataBytes + candidateLockBytes.byteLength + npmCacheArchiveBytes;
+  if (workspaceTotalBytes > MAX_WORKSPACE_RESOURCES_TOTAL_BYTES) {
+    throw new Error(`Staged workspace resources (${workspaceTotalBytes} bytes) exceed ${MAX_WORKSPACE_RESOURCES_TOTAL_BYTES} bytes`);
+  }
+  await writeFile(targetVersionsPath, targetVersionsRaw, { mode: 0o644 });
+  await writeFile(preflightMetadataPath, preflightMetadataRaw, { mode: 0o644 });
   await writeFile(candidateLockPath, candidateLockBytes, { mode: 0o644 });
 
   const baselineLockPath = await assertNoSymlinkChain(resolvedRepo, 'package-lock.json');
   const patchText = await computeUnifiedLockfilePatch(baselineLockPath, candidateLockPath);
   const patchBytes = Buffer.byteLength(patchText, 'utf8');
-  let lockfilePatchPath = null;
+  const lockfilePatchPaths = [];
   let lockfilePatchBytes = 0;
-  if (patchBytes > 0 && patchBytes <= MAX_PROMPT_RESOURCE_BYTES) {
-    lockfilePatchPath = join(canonicalStageDir, 'package-lock.patch');
+  if (patchBytes > 0) {
+    if (patchBytes > MAX_PROMPT_PATCH_TOTAL_BYTES) {
+      throw new Error(
+        `Computed package-lock.json unified diff (${patchBytes} bytes) exceeds ${MAX_PROMPT_PATCH_TOTAL_BYTES} bytes prompt patch ceiling`,
+      );
+    }
+    if (targetVersionsBytes + patchBytes > MAX_PROMPT_RESOURCES_TOTAL_BYTES) {
+      throw new Error(
+        `Staged prompt resources (${targetVersionsBytes + patchBytes} bytes) exceed ${MAX_PROMPT_RESOURCES_TOTAL_BYTES} bytes`,
+      );
+    }
+    const patchChunks = splitPromptPatchChunks(patchText, MAX_PROMPT_RESOURCE_BYTES, MAX_PROMPT_PATCH_TOTAL_BYTES);
+    if (patchChunks.length === 0) {
+      throw new Error(
+        `Computed package-lock.json unified diff (${patchBytes} bytes) exceeds ${MAX_PROMPT_PATCH_TOTAL_BYTES} bytes or contains a line exceeding ${MAX_PROMPT_RESOURCE_BYTES} bytes`,
+      );
+    }
     lockfilePatchBytes = patchBytes;
-    await writeFile(lockfilePatchPath, patchText, { mode: 0o644 });
+    if (patchChunks.length === 1) {
+      const singlePatchPath = join(canonicalStageDir, 'package-lock.patch');
+      lockfilePatchPaths.push(singlePatchPath);
+      await writeFile(singlePatchPath, patchChunks[0], { mode: 0o644 });
+    } else {
+      for (let idx = 0; idx < patchChunks.length; idx += 1) {
+        const partPath = join(canonicalStageDir, `package-lock.patch.part${idx + 1}`);
+        lockfilePatchPaths.push(partPath);
+        await writeFile(partPath, patchChunks[idx], { mode: 0o644 });
+      }
+    }
   }
+  const lockfilePatchPath = lockfilePatchPaths.length === 1 ? lockfilePatchPaths[0] : null;
 
   await finalizeStagePermissions(
     canonicalStageDir,
-    [targetVersionsPath, preflightMetadataPath, candidateLockPath, npmCacheArchivePath, ...(lockfilePatchPath !== null ? [lockfilePatchPath] : [])],
+    [targetVersionsPath, preflightMetadataPath, candidateLockPath, npmCacheArchivePath, ...lockfilePatchPaths],
     preserveStageDirRoot,
   );
 
@@ -803,6 +916,7 @@ export async function stageCandidateBundle({
     preflightMetadataPath,
     candidateLockPath,
     lockfilePatchPath,
+    lockfilePatchPaths: Object.freeze(lockfilePatchPaths),
     npmCacheArchivePath,
     candidateLockBytes: candidateLockBytes.byteLength,
     lockfilePatchBytes,
@@ -843,16 +957,53 @@ export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingV
   });
 }
 
+function buildStagedResourceDescriptors(staged) {
+  if (staged === null) return [];
+  if (staged.kind === 'no-change') {
+    return [
+      { id: 'target-versions', kind: 'document', path: 'target-versions.json', mount: 'workspace', exposeToChecks: true },
+      { id: 'preflight-metadata', kind: 'document', path: 'preflight-metadata.json', mount: 'workspace', exposeToChecks: true },
+    ];
+  }
+  let patchPaths = [];
+  if (Array.isArray(staged.lockfilePatchPaths) && staged.lockfilePatchPaths.length > 0) {
+    patchPaths = staged.lockfilePatchPaths;
+  } else if (typeof staged.lockfilePatchPath === 'string' && staged.lockfilePatchPath.length > 0) {
+    patchPaths = [staged.lockfilePatchPath];
+  }
+  const promptPatchDescriptors = patchPaths.map((stagedFilePath, idx) => {
+    const fileName = basename(stagedFilePath);
+    const id = fileName === 'package-lock.patch' ? 'package-lock-patch' : `package-lock-patch-part-${idx + 1}`;
+    return { id, kind: 'document', path: fileName, mount: 'prompt', exposeToChecks: false };
+  });
+  return [
+    { id: 'target-versions-prompt', kind: 'document', path: 'target-versions.json', mount: 'prompt', exposeToChecks: false },
+    ...promptPatchDescriptors,
+    { id: 'target-versions', kind: 'document', path: 'target-versions.json', mount: 'workspace', exposeToChecks: true },
+    { id: 'preflight-metadata', kind: 'document', path: 'preflight-metadata.json', mount: 'workspace', exposeToChecks: true },
+    { id: 'package-lock-candidate', kind: 'document', path: 'package-lock.candidate.json', mount: 'workspace', exposeToChecks: true },
+    { id: 'npm-cache-archive', kind: 'document', path: 'npm-cache.tgz', mount: 'workspace', exposeToChecks: true },
+  ];
+}
+
 export function formatPreflightOutput(result) {
-  const disposition = result.recommendedMode === 'candidate' ? 'candidate' : result.recommendedMode === 'no-change' ? 'no_change' : 'blocked';
+  let disposition = 'blocked';
+  if (result.recommendedMode === 'candidate') {
+    disposition = 'candidate';
+  } else if (result.recommendedMode === 'no-change') {
+    disposition = 'no_change';
+  }
   const reasons = result.evaluation?.reasons ?? [];
-  const reason = reasons.length > 0
-    ? reasons.join('; ')
-    : disposition === 'no_change'
-      ? 'All tracked runtime dependencies match baseline.'
-      : disposition === 'candidate'
-        ? `Staged self-upgrade bundle for @earendil-works/pi-* ${result.evaluation?.targetPiVersion ?? result.baseline.piBaseline} and yaml ${result.evaluation?.targetYamlVersion ?? result.baseline.yamlBaseline}.`
-        : 'Self-upgrade preflight blocked.';
+  let reason = 'Self-upgrade preflight blocked.';
+  if (reasons.length > 0) {
+    reason = reasons.join('; ');
+  } else if (disposition === 'no_change') {
+    reason = 'All tracked runtime dependencies match baseline.';
+  } else if (disposition === 'candidate') {
+    const piVer = result.evaluation?.targetPiVersion ?? result.baseline.piBaseline;
+    const yamlVer = result.evaluation?.targetYamlVersion ?? result.baseline.yamlBaseline;
+    reason = `Staged self-upgrade bundle for @earendil-works/pi-* ${piVer} and yaml ${yamlVer}.`;
+  }
   const upstreams = result.upstreamRecords.map(rec => ({
     id: rec.upstreamId,
     status: rec.status,
@@ -860,24 +1011,7 @@ export function formatPreflightOutput(result) {
     ...(typeof rec.currentVersion === 'string' ? { currentVersion: rec.currentVersion } : {}),
     ...(typeof rec.reason === 'string' && rec.reason.length > 0 ? { reason: rec.reason } : {}),
   }));
-
-  const stagedResources = result.staged === null
-    ? []
-    : result.staged.kind === 'no-change'
-      ? [
-        { id: 'target-versions', kind: 'document', path: 'target-versions.json', mount: 'workspace', exposeToChecks: true },
-        { id: 'preflight-metadata', kind: 'document', path: 'preflight-metadata.json', mount: 'workspace', exposeToChecks: true },
-      ]
-      : [
-        { id: 'target-versions-prompt', kind: 'document', path: 'target-versions.json', mount: 'prompt', exposeToChecks: false },
-        ...(result.staged.lockfilePatchPath !== null
-          ? [{ id: 'package-lock-patch', kind: 'document', path: 'package-lock.patch', mount: 'prompt', exposeToChecks: false }]
-          : []),
-        { id: 'target-versions', kind: 'document', path: 'target-versions.json', mount: 'workspace', exposeToChecks: true },
-        { id: 'preflight-metadata', kind: 'document', path: 'preflight-metadata.json', mount: 'workspace', exposeToChecks: true },
-        { id: 'package-lock-candidate', kind: 'document', path: 'package-lock.candidate.json', mount: 'workspace', exposeToChecks: true },
-        { id: 'npm-cache-archive', kind: 'document', path: 'npm-cache.tgz', mount: 'workspace', exposeToChecks: true },
-      ];
+  const stagedResources = buildStagedResourceDescriptors(result.staged);
 
   return Object.freeze({ disposition, reason, upstreams: Object.freeze(upstreams), stagedResources: Object.freeze(stagedResources) });
 }

@@ -712,11 +712,16 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
     assert.equal(workflowRaw.includes('name: Run preflight'), false);
     assert.equal(workflowRaw.includes('name: Resolve mode'), false);
     assert.equal(workflowRaw.includes('name: Verify no-change'), false);
+    assert.equal(workflowRaw.includes('pull-requests: read'), true);
+    assert.equal(workflowRaw.includes("!endsWith(github.event.comment.user.login, '[bot]')"), true);
+    assert.equal(workflowRaw.includes('python3-pytest'), true);
 
     // 1b) Aligned workspace resource / npm-cache archive ceilings (>= 128 MiB single / 256 MiB total)
     assert.equal(PREFLIGHT_MAX_WORKSPACE_RESOURCE_BYTES, 128 * 1024 * 1024);
     assert.equal(PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES, 256 * 1024 * 1024);
     assert.equal(preflight.MAX_NPM_CACHE_ARCHIVE_BYTES, 128 * 1024 * 1024);
+    assert.equal(preflight.MAX_WORKSPACE_RESOURCES_TOTAL_BYTES, 256 * 1024 * 1024);
+    assert.equal(preflight.MAX_PROMPT_RESOURCES_TOTAL_BYTES, 256 * 1024);
 
     // 2) Fork-PR issue_comment intake: unfetched fork PR head fails closed; fetching +refs/pull/77/head without checkout succeeds
     await withTempDir(async rawDir => {
@@ -928,15 +933,27 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
       cliMutatedPrivate['private'] = 1;
       await writeFile(cliPkgPath, `${JSON.stringify(cliMutatedPrivate, null, 2)}\n`, { mode: 0o600 });
 
+      const checkOutDir = join(dir, 'check-out');
+      await mkdir(checkOutDir, { recursive: true, mode: 0o700 });
+      const failCheckOutPath = join(checkOutDir, 'fail-out.json');
       const privateIntRes = runVerifyScript(repoRoot, {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         LOOPWRIGHT_STAGED_DIR: stageDir,
+        LOOPWRIGHT_CHECK_OUT: failCheckOutPath,
       });
       assert.notEqual(privateIntRes.status, 0);
       assert.equal(privateIntRes.stderr.includes("field 'private' must not be modified"), true);
       assert.equal(privateIntRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+      const failCheckOut = JSON.parse(await readFile(failCheckOutPath, 'utf8')) as {
+        detail: string;
+        findings: readonly { title: string; severity: string; path?: string; evidence: string }[];
+      };
+      assert.equal(failCheckOut.findings.length, 1);
+      assert.equal(failCheckOut.findings[0]?.severity, 'high');
+      assert.equal(failCheckOut.findings[0]?.path, 'packages/cli/package.json');
+      assert.equal(failCheckOut.findings[0]?.evidence.includes("field 'private' must not be modified"), true);
       await writeFile(cliPkgPath, goodCliRaw, { mode: 0o600 });
 
       // Unmanaged manifest "private": true -> 1 rejected
@@ -1003,15 +1020,56 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
       await unlink(extraTsconfigPath);
 
       // Refuse fallback to SELF_UPGRADE_STAGE_DIR / /tmp when LOOPWRIGHT_CHECK_ID is set and LOOPWRIGHT_STAGED_DIR is unset
+      const shellFailCheckOutPath = join(checkOutDir, 'shell-fail-out.json');
       const missingStagedDirRes = runVerifyScript(repoRoot, {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_CHECK_OUT: shellFailCheckOutPath,
       });
       assert.notEqual(missingStagedDirRes.status, 0);
       assert.equal(missingStagedDirRes.stderr.includes('LOOPWRIGHT_STAGED_DIR must be set under command.v1'), true);
       assert.equal(missingStagedDirRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+      const shellFailOut = JSON.parse(await readFile(shellFailCheckOutPath, 'utf8')) as {
+        detail: string;
+        findings: readonly { title: string; severity: string; evidence: string }[];
+      };
+      assert.equal(shellFailOut.findings[0]?.title, 'Self-upgrade verifier precondition failed');
+      assert.equal(shellFailOut.findings[0]?.severity, 'high');
+
+      // Symlinked LOOPWRIGHT_CHECK_OUT is refused cleanly without mutating target or printing a Python traceback
+      const symlinkTargetPath = join(checkOutDir, 'protected-target.json');
+      await writeFile(symlinkTargetPath, '{"untouched":true}\n', { mode: 0o600 });
+      const symlinkCheckOutPath = join(checkOutDir, 'symlink-out.json');
+      spawnSync('ln', ['-s', symlinkTargetPath, symlinkCheckOutPath]);
+      const symlinkOutRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_CHECK_OUT: symlinkCheckOutPath,
+      });
+      assert.notEqual(symlinkOutRes.status, 0);
+      assert.equal(symlinkOutRes.stderr.includes('Traceback'), false);
+      assert.equal(await readFile(symlinkTargetPath, 'utf8'), '{"untouched":true}\n');
+
+      // Oversized failure diagnostic via stdin still prints stderr cleanly and exits 1 without E2BIG abort
+      const oversizedStagePath = join(dir, 'missing-stage', 'x'.repeat(200).concat('/', 'y'.repeat(200)));
+      const longFailCheckOutPath = join(checkOutDir, 'long-fail-out.json');
+      const longFailRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        LOOPWRIGHT_STAGED_DIR: oversizedStagePath,
+        LOOPWRIGHT_CHECK_OUT: longFailCheckOutPath,
+      });
+      assert.equal(longFailRes.status, 1);
+      assert.equal(longFailRes.stderr.includes('trusted stage directory'), true);
+      const longFailOut = JSON.parse(await readFile(longFailCheckOutPath, 'utf8')) as {
+        findings: readonly { title: string }[];
+      };
+      assert.equal(longFailOut.findings[0]?.title, 'Self-upgrade verifier precondition failed');
 
       // no_change staged bundle verifies baseline parity & exits 0 cleanly without running candidate build,
       // and rejects any candidate edit under disposition=no_change
@@ -1022,12 +1080,19 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
         stageDir: ncStageDir,
         targetVersions: preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'),
       });
+      const ncCheckOutPath = join(checkOutDir, 'nc-out.json');
       const ncPassRes = runVerifyScript(ncRepo, {
         SELF_UPGRADE_REPO_ROOT: ncRepo,
         LOOPWRIGHT_STAGED_DIR: ncStageDir,
+        LOOPWRIGHT_CHECK_OUT: ncCheckOutPath,
       });
       assert.equal(ncPassRes.status, 0, `expected no_change verify.sh to exit 0: ${ncPassRes.stderr}`);
       assert.equal(ncPassRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+      const ncCheckOut = JSON.parse(await readFile(ncCheckOutPath, 'utf8')) as {
+        detail: string;
+        metrics: Record<string, unknown>;
+      };
+      assert.deepEqual(ncCheckOut.metrics, { disposition: 'no_change', phase3_executed: false });
 
       await writeFile(join(ncRepo, 'docs/development.md'), '# Modified under no_change\n', { mode: 0o600 });
       const ncEditedRes = runVerifyScript(ncRepo, {

@@ -82,6 +82,7 @@ export interface StageResult {
   readonly preflightMetadataPath: string;
   readonly candidateLockPath: string | null;
   readonly lockfilePatchPath: string | null;
+  readonly lockfilePatchPaths: readonly string[];
   readonly npmCacheArchivePath: string | null;
   readonly candidateLockBytes: number;
   readonly lockfilePatchBytes: number;
@@ -125,8 +126,12 @@ export interface PrepareSelfUpgradeModule {
   readonly ALL_UPSTREAM_IDS: readonly string[];
   readonly MAX_HTTP_JSON_BYTES: number;
   readonly MAX_PROMPT_RESOURCE_BYTES: number;
+  readonly MAX_PROMPT_RESOURCES_TOTAL_BYTES: number;
+  readonly MAX_PROMPT_PATCH_TOTAL_BYTES: number;
   readonly MAX_NPM_CACHE_ARCHIVE_BYTES: number;
+  readonly MAX_WORKSPACE_RESOURCES_TOTAL_BYTES: number;
   readonly buildTargetVersionsPayload: (piVersion: string, yamlVersion: string) => TargetVersionsPayload;
+  readonly splitPromptPatchChunks: (patchText: string, maxChunkBytes?: number, maxTotalBytes?: number) => readonly string[];
   readonly parseCanonicalSemver: (value: unknown) => { major: number; minor: number; patch: number; raw: string } | null;
   readonly auditBaselineParity: (repoRoot: string) => Promise<BaselineParityResult>;
   readonly evaluateUpstreamEligibility: (input: {
