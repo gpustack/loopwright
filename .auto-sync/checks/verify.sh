@@ -93,13 +93,68 @@ PYTHON_EXEC="$(resolve_executable \
   exit 1
 }
 
+VERIFY_WRITE_CHECK_OUT_PY="$(cat <<'PY'
+from __future__ import annotations
+import json
+import os
+import stat
+import sys
+
+MAX_CHECK_OUT_BYTES = 60000
+out_path = os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip()
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+if out_path and mode in ("--shell-failure", "--json"):
+    parent = os.path.dirname(out_path)
+    if parent and os.path.isdir(parent) and not os.path.islink(out_path):
+        try:
+            raw_in = sys.stdin.buffer.read(MAX_CHECK_OUT_BYTES + 1)
+            if len(raw_in) <= MAX_CHECK_OUT_BYTES:
+                if mode == "--shell-failure":
+                    msg_text = raw_in.decode("utf-8", errors="replace")
+                    doc = {
+                        "detail": msg_text[:2048],
+                        "findings": [
+                            {
+                                "title": "Self-upgrade verifier precondition failed",
+                                "severity": "high",
+                                "evidence": msg_text[:1800] if msg_text else "verifier precondition failed",
+                            }
+                        ],
+                    }
+                else:
+                    doc = json.loads(raw_in.decode("utf-8"))
+                if isinstance(doc, dict):
+                    encoded = (json.dumps(doc) + "\n").encode("utf-8")
+                    if len(encoded) <= MAX_CHECK_OUT_BYTES:
+                        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+                        fd = os.open(out_path, flags, 0o600)
+                        try:
+                            st = os.fstat(fd)
+                            if stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+                                os.write(fd, encoded)
+                        finally:
+                            os.close(fd)
+        except (OSError, ValueError):
+            pass
+PY
+)"
+export VERIFY_WRITE_CHECK_OUT_PY
+
+emit_shell_check_failure() {
+  local msg="$1"
+  if [[ -n "${LOOPWRIGHT_CHECK_OUT:-}" ]]; then
+    printf '%s' "${msg:0:2048}" | "$PYTHON_EXEC" -c "$VERIFY_WRITE_CHECK_OUT_PY" --shell-failure || true
+  fi
+  echo "$msg" >&2
+  exit 1
+}
+
 GIT_BIN="$(resolve_executable \
   "$(command -v git 2>/dev/null || true)" \
   "/usr/bin/git" \
   "/usr/local/bin/git" \
   "/opt/homebrew/bin/git")" || {
-  echo "verify.sh: unable to locate git executable" >&2
-  exit 1
+  emit_shell_check_failure "verify.sh: unable to locate git executable"
 }
 
 HUGO_RESOLVED=""
@@ -112,14 +167,12 @@ if HUGO_FOUND="$(resolve_executable \
   HUGO_RESOLVED="$HUGO_FOUND"
 fi
 if [[ "${SELF_UPGRADE_REQUIRE_HUGO:-0}" == "1" && -z "$HUGO_RESOLVED" ]]; then
-  echo "verify.sh: SELF_UPGRADE_REQUIRE_HUGO=1 but hugo binary was not found" >&2
-  exit 1
+  emit_shell_check_failure "verify.sh: SELF_UPGRADE_REQUIRE_HUGO=1 but hugo binary was not found"
 fi
 
 CANDIDATE_DIR="${LOOPWRIGHT_CANDIDATE_DIR:-$PWD}"
 if [[ ! -d "$CANDIDATE_DIR" || -L "$CANDIDATE_DIR" ]]; then
-  echo "verify.sh: candidate directory '$CANDIDATE_DIR' must be a real directory" >&2
-  exit 1
+  emit_shell_check_failure "verify.sh: candidate directory '$CANDIDATE_DIR' must be a real directory"
 fi
 CANDIDATE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$CANDIDATE_DIR")"
 
@@ -128,8 +181,7 @@ BASE_DIR_REAL=""
 BASELINE_REAL=""
 if [[ -n "$BASE_DIR_RAW" ]]; then
   if [[ ! -d "$BASE_DIR_RAW" || -L "$BASE_DIR_RAW" ]]; then
-    echo "verify.sh: LOOPWRIGHT_BASE_DIR '$BASE_DIR_RAW' must be a real directory" >&2
-    exit 1
+    emit_shell_check_failure "verify.sh: LOOPWRIGHT_BASE_DIR '$BASE_DIR_RAW' must be a real directory"
   fi
   BASE_DIR_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$BASE_DIR_RAW")"
   BASELINE_REAL="$BASE_DIR_REAL"
@@ -139,8 +191,7 @@ else
     if "$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel >/dev/null 2>&1; then
       BASELINE_REPO="$("$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel)"
     else
-      echo "verify.sh: LOOPWRIGHT_BASE_DIR or SELF_UPGRADE_REPO_ROOT must be set when candidate directory has no .git metadata" >&2
-      exit 1
+      emit_shell_check_failure "verify.sh: LOOPWRIGHT_BASE_DIR or SELF_UPGRADE_REPO_ROOT must be set when candidate directory has no .git metadata"
     fi
   fi
   BASELINE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$BASELINE_REPO")"
@@ -148,16 +199,14 @@ fi
 
 if [[ -n "${LOOPWRIGHT_CHECK_ID:-}" || -n "${LOOPWRIGHT_BASE_DIR:-}" ]]; then
   if [[ -z "${LOOPWRIGHT_STAGED_DIR:-}" ]]; then
-    echo "verify.sh: LOOPWRIGHT_STAGED_DIR must be set under command.v1 (refusing fallback to /tmp/loopwright-self-upgrade-stage)" >&2
-    exit 1
+    emit_shell_check_failure "verify.sh: LOOPWRIGHT_STAGED_DIR must be set under command.v1 (refusing fallback to /tmp/loopwright-self-upgrade-stage)"
   fi
   STAGE_RAW="${LOOPWRIGHT_STAGED_DIR}"
 else
   STAGE_RAW="${LOOPWRIGHT_STAGED_DIR:-${SELF_UPGRADE_STAGE_DIR:-/tmp/loopwright-self-upgrade-stage}}"
 fi
 if [[ ! -d "$STAGE_RAW" || -L "$STAGE_RAW" ]]; then
-  echo "verify.sh: trusted stage directory '$STAGE_RAW' does not exist; run spec.preflight (scripts/prepare-self-upgrade.mjs) first" >&2
-  exit 1
+  emit_shell_check_failure "verify.sh: trusted stage directory '$STAGE_RAW' does not exist; run spec.preflight (scripts/prepare-self-upgrade.mjs) first"
 fi
 STAGE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$STAGE_RAW")"
 
@@ -262,7 +311,64 @@ PROTECTED_SOURCE_FILES = [
 ]
 
 
+REL_PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9._/-])((?:\.auto-sync/|\.github/|\.agents/|packages/|docs/|scripts/)[A-Za-z0-9._/-]+|package-lock\.json|package\.json|tsconfig(?:\.[A-Za-z0-9._-]+)?\.json|eslint\.config\.[A-Za-z0-9._-]+|action\.yml|AGENTS\.md)"
+)
+SAFE_REL_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+RESERVED_DEV_RE = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
+
+
+def write_phase1_check_out(payload: dict[str, object]) -> None:
+    helper_code = os.environ.get("VERIFY_WRITE_CHECK_OUT_PY", "")
+    if not helper_code or not os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip():
+        return
+    try:
+        encoded = (json.dumps(payload) + "\n").encode("utf-8")
+        if len(encoded) <= 60000:
+            subprocess.run(
+                [sys.executable, "-c", helper_code, "--json"],
+                input=encoded,
+                check=False,
+            )
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def infer_finding_rel_path(msg: str) -> str | None:
+    m = REL_PATH_TOKEN_RE.search(msg)
+    if not m:
+        return None
+    cand = m.group(1).strip("/")
+    if not cand or len(cand) > 512:
+        return None
+    segs = cand.split("/")
+    if len(segs) > 32:
+        return None
+    for seg in segs:
+        if (
+            not seg
+            or seg in (".", "..")
+            or seg.endswith(".")
+            or not SAFE_REL_SEG_RE.match(seg)
+            or RESERVED_DEV_RE.match(seg)
+        ):
+            return None
+    return cand
+
+
 def fail(msg: str) -> None:
+    finding: dict[str, object] = {
+        "title": "Self-upgrade pre-execution audit failed",
+        "severity": "high",
+        "evidence": msg[:1800] if msg else "pre-execution audit failed",
+    }
+    inferred_path = infer_finding_rel_path(msg)
+    if inferred_path is not None:
+        finding["path"] = inferred_path
+    write_phase1_check_out({
+        "detail": f"verify.sh audit failed: {msg}"[:2048],
+        "findings": [finding],
+    })
     sys.stderr.write(f"verify.sh audit failed: {msg}\n")
     sys.exit(1)
 
@@ -869,6 +975,13 @@ if not json_strict_equal(prop_packages, expected_ws_deps):
     fail(".auto-sync/proposal.json packages does not match staged target-versions.json")
 
 if staged_disposition == "no_change":
+    write_phase1_check_out({
+        "detail": "Verified baseline parity with zero repository modifications.",
+        "metrics": {
+            "disposition": "no_change",
+            "phase3_executed": False,
+        },
+    })
     sys.exit(10)
 PY
 if [[ "$PHASE1_RC" -eq 10 ]]; then
@@ -1118,16 +1231,14 @@ elif [[ -n "${SELF_UPGRADE_TEST_NODE_MODULES:-}" ]]; then
   mkdir -p "$WORK_NPM_CACHE"
   chmod 0700 "$WORK_NPM_CACHE"
 else
-  echo "verify.sh: offline npm cache ('${STAGED_CACHE_TGZ}' or '${STAGE_REAL}/npm-cache') not found; run spec.preflight first" >&2
-  exit 1
+  emit_shell_check_failure "verify.sh: offline npm cache ('${STAGED_CACHE_TGZ}' or '${STAGE_REAL}/npm-cache') not found; run spec.preflight first"
 fi
 
 TEST_NM_REAL=""
 if [[ -n "${SELF_UPGRADE_TEST_NODE_MODULES:-}" ]]; then
   TEST_NM_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$SELF_UPGRADE_TEST_NODE_MODULES")"
   if [[ ! -d "$TEST_NM_REAL" ]]; then
-    echo "verify.sh: SELF_UPGRADE_TEST_NODE_MODULES '$TEST_NM_REAL' does not exist" >&2
-    exit 1
+    emit_shell_check_failure "verify.sh: SELF_UPGRADE_TEST_NODE_MODULES '$TEST_NM_REAL' does not exist"
   fi
 fi
 
@@ -1193,6 +1304,7 @@ export NODE_BIN NPM_BIN NODE_RESOLVED_DIR HUGO_RESOLVED COMPILE_RUNNER TEST_RUNN
 from __future__ import annotations
 import errno
 import hashlib
+import json
 import os
 import pwd
 import shutil
@@ -1201,6 +1313,40 @@ import stat
 import subprocess
 import sys
 import time
+
+check_out_env = os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip()
+
+
+def write_phase3_check_out(
+    detail: str,
+    finding_title: str | None = None,
+    finding_evidence: str | None = None,
+    metrics: dict[str, object] | None = None,
+) -> None:
+    helper_code = os.environ.get("VERIFY_WRITE_CHECK_OUT_PY", "")
+    if not check_out_env or not helper_code:
+        return
+    doc: dict[str, object] = {"detail": detail[:2048]}
+    if finding_title and finding_evidence:
+        doc["findings"] = [
+            {
+                "title": finding_title[:256],
+                "severity": "high",
+                "evidence": finding_evidence[:1800],
+            }
+        ]
+    if metrics is not None:
+        doc["metrics"] = metrics
+    try:
+        encoded = (json.dumps(doc) + "\n").encode("utf-8")
+        if len(encoded) <= 60000:
+            subprocess.run(
+                [python_exec, "-c", helper_code, "--json"],
+                input=encoded,
+                check=False,
+            )
+    except (OSError, TypeError, ValueError):
+        pass
 
 build_dir = os.path.realpath(os.environ["BUILD_WORK"])
 runtime_dir = os.path.join(os.path.realpath(os.environ["WORK_ROOT"]), "run")
@@ -1235,7 +1381,9 @@ if is_dedicated_runner:
 elif platform_name == "darwin":
     seatbelt_bin = "/usr/bin/sandbox-exec"
     if not (os.path.isfile(seatbelt_bin) and os.access(seatbelt_bin, os.X_OK)):
-        sys.stderr.write("verify.sh: /usr/bin/sandbox-exec unavailable on macOS; failing closed\n")
+        msg = "verify.sh: /usr/bin/sandbox-exec unavailable on macOS; failing closed"
+        write_phase3_check_out(msg, "OS containment backend unavailable", msg)
+        sys.stderr.write(msg + "\n")
         sys.exit(1)
     seatbelt_probe = subprocess.run(
         [
@@ -1249,7 +1397,9 @@ elif platform_name == "darwin":
         check=False,
     )
     if seatbelt_probe.returncode != 0:
-        sys.stderr.write("verify.sh: /usr/bin/sandbox-exec containment unavailable on macOS; failing closed\n")
+        msg = "verify.sh: /usr/bin/sandbox-exec containment unavailable on macOS; failing closed"
+        write_phase3_check_out(msg, "OS containment backend unavailable", msg)
+        sys.stderr.write(msg + "\n")
         sys.exit(1)
 elif platform_name.startswith("linux"):
     for candidate in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"):
@@ -1264,10 +1414,14 @@ elif platform_name.startswith("linux"):
                 bwrap_bin = candidate
                 break
     if bwrap_bin is None:
-        sys.stderr.write("verify.sh: Linux bwrap --unshare-all unavailable; failing closed\n")
+        msg = "verify.sh: Linux bwrap --unshare-all unavailable; failing closed"
+        write_phase3_check_out(msg, "OS containment backend unavailable", msg)
+        sys.stderr.write(msg + "\n")
         sys.exit(1)
 else:
-    sys.stderr.write(f"verify.sh: unsupported host platform {platform_name!r}; failing closed\n")
+    msg = f"verify.sh: unsupported host platform {platform_name!r}; failing closed"
+    write_phase3_check_out(msg, "OS containment backend unavailable", msg)
+    sys.stderr.write(msg + "\n")
     sys.exit(1)
 
 try:
@@ -1589,9 +1743,17 @@ def run_contained(
             if kill_timed_out:
                 sys.stderr.write(f"verify.sh: timed out terminating process group for stage {stage_label!r}\n")
         if tamper_reason is not None or kill_timed_out:
+            detail_msg = (
+                f"verify.sh: {tamper_reason} in stage {stage_label!r}"
+                if tamper_reason is not None
+                else f"verify.sh: timed out terminating process group for stage {stage_label!r}"
+            )
+            write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' integrity violation", detail_msg)
             sys.exit(1)
         if returncode != 0:
-            sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
+            detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
+            write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
+            sys.stderr.write(detail_msg + "\n")
             sys.exit(returncode)
         return
 
@@ -1735,7 +1897,9 @@ def run_contained(
         except OSError:
             pass
     if returncode != 0:
-        sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
+        detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
+        write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
+        sys.stderr.write(detail_msg + "\n")
         sys.exit(returncode)
 
 
@@ -1946,5 +2110,12 @@ run_contained(
         os.path.join(runtime_dir, ".test-build"),
     ],
     network_mode="loopback-only",
+)
+write_phase3_check_out(
+    "Offline install, compile, lint, docs, closure, and runtime test gates passed.",
+    metrics={
+        "disposition": "candidate",
+        "phase3_executed": True,
+    },
 )
 PY

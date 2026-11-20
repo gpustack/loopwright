@@ -5,17 +5,17 @@
     {
       "path": ".auto-sync/checks",
       "kind": "directory",
-      "sha256": "26288029d77de83ed20feaf71c4606694ae128b5d4952686feb005298f7368ac"
+      "sha256": "1391ca7272e00ded4e14fcc6cfaa671094aed8c028d74934eef3b21dd4447c09"
     },
     {
       "path": ".auto-sync/instructions.md",
       "kind": "file",
-      "sha256": "923cbb55df421219c04a5f7dacfd406f41c59b4b14c6376614e216b2d782d73e"
+      "sha256": "a1fde4c06fcd205cf426b2b4487601824e1423a832bfeb5b1ccc540741ab4bc1"
     },
     {
       "path": "scripts/prepare-self-upgrade.mjs",
       "kind": "file",
-      "sha256": "3247ad2f9639c31507d8819c4d89b09a65fb567080d44cee00fed48a57977dd2"
+      "sha256": "e6fe6c6243cf0ee83b0eeff79597daaf20919a3cd1f352be3fc85785701e356a"
     }
   ]
 }

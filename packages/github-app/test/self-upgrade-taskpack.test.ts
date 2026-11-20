@@ -80,6 +80,17 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     const candidateCompiled = await compileDeclarativeTaskpack(manifest, { ...common, mode: 'candidate' });
     const noChangeCompiled = await compileDeclarativeTaskpack(manifest, { ...common, mode: 'no-change' });
     assert.equal(candidateCompiled.localCommandGates?.length, 1);
+    assert.deepEqual({ ...candidateCompiled.config.spec.task.spec.budgets.overlay }, { maxFiles: 64, maxBytes: 2_097_152 });
+    assert.deepEqual(
+      manifest.spec.verification.localChecks.filter(c => c.implementation === 'json-keys-guard.v1').map(c => c.id),
+      [
+        'agent-pi-manifest-keys',
+        'cli-manifest-keys',
+        'controller-manifest-keys',
+        'decisions-manifest-keys',
+        'github-app-manifest-keys',
+      ],
+    );
     assert.deepEqual(noChangeCompiled.config.spec.task.spec.acceptance.required, ['taskpack-no-change']);
 
     const contract = candidateCompiled.config.spec.task;
@@ -91,6 +102,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       '.auto-sync/taskpack.yaml', '.auto-sync/digests.lock.json', '.auto-sync/checks/verify.sh',
       '.claude/skills', 'package.json', 'scripts/prepare-self-upgrade.mjs', 'action.yml',
       '.github/workflows/ci.yml', 'packages/core/src/contracts.ts', 'packages/cli/src/closure.ts',
+      'packages/cli/tsconfig.json', 'packages/cli/tsconfig.extra.json', 'packages/cli/eslint.config.mjs',
     ]) {
       const check = isWritablePath(contract, rel);
       assert.equal(check.ok && check.value, false, `expected ${rel} to be non-writable`);
@@ -1515,6 +1527,88 @@ process.exit(45);
       } finally {
         await noChangeRes.cleanup();
       }
+
+      // 4) Large lockfile unified diff (64 KiB < patch <= 192 KiB) splits into line-aligned prompt parts that git apply cleanly
+      const multiPartLockFixturePath = join(dir, 'lock-160-2100-multipart.json');
+      const multiPartEntries: Record<string, Record<string, unknown>> = {};
+      for (let i = 0; i < 450; i += 1) {
+        multiPartEntries[`node_modules/__synthetic_dep_${String(i).padStart(4, '0')}`] = {
+          version: `1.0.${String(i)}`,
+          resolved: `https://registry.npmjs.org/__synthetic_dep_${String(i).padStart(4, '0')}/-/__synthetic_dep_${String(i).padStart(4, '0')}-1.0.${String(i)}.tgz`,
+          integrity: `sha512-${Buffer.from(`synthetic-dep-${String(i)}`.repeat(4), 'utf8').toString('base64')}`,
+        };
+      }
+      const baseSyntheticLock = JSON.parse(buildSyntheticLockfile({ piVersion: '1.6.0', yamlVersion: '2.10.0' })) as {
+        packages: Record<string, Record<string, unknown>>;
+      };
+      Object.assign(baseSyntheticLock.packages, multiPartEntries);
+      await writeFile(multiPartLockFixturePath, `${JSON.stringify(baseSyntheticLock, null, 2)}\n`, { mode: 0o600 });
+
+      const multiPartRes = await runTaskpackPreflight({
+        manifest,
+        repositoryRoot: repoRoot,
+        authorized: true,
+        hostPolicy,
+        scrubber: new SecretScrubber(),
+        env: {
+          PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+            Object.fromEntries(
+              preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.10.0' : '1.6.0' }]),
+            ),
+          ),
+          SELF_UPGRADE_LOCKFILE_FIXTURE: multiPartLockFixturePath,
+        },
+        tempRoot: dir,
+      });
+      try {
+        const partResources = multiPartRes.promptResources.filter(r => r.id.startsWith('package-lock-patch-part-'));
+        assert.equal(partResources.length >= 2, true, `expected >= 2 prompt patch parts, got ${partResources.length}`);
+        assert.equal(partResources.every(r => r.byteLength <= preflight.MAX_PROMPT_RESOURCE_BYTES && r.exposeToChecks === false), true);
+        const combinedPatch = partResources.map(r => r.content).join('');
+        const multiApplyDir = join(dir, 'agent-multipart-apply');
+        spawnSync('git', ['clone', '--quiet', '--no-hardlinks', repoRoot, multiApplyDir], { stdio: 'ignore' });
+        const multiApply = spawnSync('git', ['apply', '-'], {
+          cwd: multiApplyDir,
+          input: combinedPatch,
+          encoding: 'utf8',
+        });
+        assert.equal(multiApply.status, 0, `git apply concatenated parts failed: ${multiApply.stderr}`);
+        assert.equal(
+          createHash('sha256').update(await readFile(join(multiApplyDir, 'package-lock.json'))).digest('hex'),
+          createHash('sha256').update(await readFile(join(multiPartRes.checkStagedDir!, 'package-lock.candidate.json'))).digest('hex'),
+        );
+      } finally {
+        await multiPartRes.cleanup();
+      }
+
+      // 4b) splitPromptPatchChunks prefers hunk boundaries (@@) when hunks fit, and stageCandidateBundle fails closed when patch exceeds prompt ceiling
+      const hunkPatch = [
+        '--- a/package-lock.json',
+        '+++ b/package-lock.json',
+        '@@ -1,3 +1,3 @@',
+        ...Array.from({ length: 12 }, (_, i) => `+  "dep_${String(i)}": "1.0.0",`),
+        '@@ -50,3 +50,3 @@',
+        ...Array.from({ length: 12 }, (_, i) => `+  "other_${String(i)}": "2.0.0",`),
+        '',
+      ].join('\n');
+      const hunkAlignedChunks = preflight.splitPromptPatchChunks(hunkPatch, 420, 2048);
+      assert.equal(hunkAlignedChunks.length, 2);
+      assert.equal(hunkAlignedChunks[1]?.startsWith('@@ -50,3 +50,3 @@\n'), true);
+      assert.equal(hunkAlignedChunks.join(''), hunkPatch);
+
+      await assert.rejects(
+        () => preflight.stageCandidateBundle({
+          repoRoot,
+          stageDir: join(dir, 'stage-oversized-patch'),
+          targetVersions: preflight.buildTargetVersionsPayload('1.6.0', '2.10.0'),
+          lockfileBuilder: async () => Buffer.from(
+            buildSyntheticLockfile({ piVersion: '1.6.0', yamlVersion: '2.10.0', padBytes: 220 * 1024 }),
+            'utf8',
+          ),
+        }),
+        /exceeds .* bytes|contains a line exceeding/,
+      );
     });
   });
 
