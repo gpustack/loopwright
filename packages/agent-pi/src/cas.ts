@@ -453,7 +453,12 @@ export async function readBlobChunkAsync(
   }
   try {
     const before = await fh.stat();
-    if (!before.isFile() || before.nlink !== 1 || before.size !== expectedLength) {
+    if (
+      !before.isFile()
+      || before.nlink !== 1
+      || !checkOwnerAndMode(before.uid, before.mode, 0o222)
+      || before.size !== expectedLength
+    ) {
       refuse('RECOVERY_REQUIRED', '/restore/workspace');
     }
     const buf = Buffer.allocUnsafe(length);
@@ -468,6 +473,7 @@ export async function readBlobChunkAsync(
     if (
       !after.isFile()
       || after.nlink !== 1
+      || (after.mode & 0o222) !== 0
       || after.dev !== before.dev
       || after.ino !== before.ino
       || after.size !== before.size
@@ -778,7 +784,7 @@ export async function streamCopyVerifiedBlob(
       srcBefore.isSymbolicLink()
       || !srcBefore.isFile()
       || srcBefore.nlink !== 1
-      || !checkOwnerAndMode(srcBefore.uid, 0, 0)
+      || !checkOwnerAndMode(srcBefore.uid, srcBefore.mode, 0o222)
       || srcBefore.size !== expected.byteLength
     ) {
       refuse('RECOVERY_REQUIRED', '/candidate');
@@ -820,6 +826,7 @@ export async function streamCopyVerifiedBlob(
       !srcAfter.isFile()
       || srcAfter.isSymbolicLink()
       || srcAfter.nlink !== 1
+      || (srcAfter.mode & 0o222) !== 0
       || srcAfter.dev !== srcBefore.dev
       || srcAfter.ino !== srcBefore.ino
       || srcAfter.size !== srcBefore.size

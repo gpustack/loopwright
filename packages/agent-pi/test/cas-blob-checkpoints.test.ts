@@ -2006,6 +2006,14 @@ test('R5-10: streamCopyVerifiedBlob binds staging, verification, fchmod, and lin
       assert.equal(existingAfter.mode & 0o777, existingBefore.mode & 0o777);
       assert.equal(await readFile(existingPath, 'utf8'), 'keep-existing-pi-r5-10');
 
+      // Writable source blob is refused (sealed CAS blobs must be read-only).
+      const writableSrc = join(dir, 'writable-src.blob');
+      const writableCreated = await createStreamedFile(writableSrc, 512, 0x2a, 0o600);
+      await assert.rejects(
+        streamCopyVerifiedBlob(writableSrc, join(dir, 'from-writable.bin'), { byteLength: 512, sha256Hex: writableCreated.sha256Hex }, 0o444),
+        err => err instanceof PiFailure && err.detail.code === 'RECOVERY_REQUIRED',
+      );
+
       assert.equal(chmodSpy.mock.callCount(), 0);
       const remainingEntries = await readdir(dir);
       assert.equal(remainingEntries.some(name => name.startsWith('.lw-stage-')), false);
