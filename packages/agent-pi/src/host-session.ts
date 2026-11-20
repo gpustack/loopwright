@@ -38,7 +38,7 @@ import { clampToolResultBytes, type ToolResult } from './tools.js';
 import {
   createRoleMcpAllowlist,
   createRoleScopedMcpExecutor,
-  isExternalMcpToolName,
+  EXTERNAL_MCP_TOOL_NAME_PATTERN,
   validateAllowedMcpServers,
   type CallExternalMcpToolOptions,
   type ConnectHostMcpOptions,
@@ -112,7 +112,24 @@ const DEFAULT_MAX_DISPATCH_TURNS = 40;
 const DEFAULT_MAX_REPAIR_DISPATCH_TURNS = 20;
 const DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS = 8;
 const DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS = 10;
+const SUMMARY_MAX_ARGS_BYTES = 65536;
 const MUTATING_TOOLS = new Set(['write', 'edit', 'delete']);
+const MUTATING_MCP_VERBS = new Set([
+  'write', 'edit', 'delete', 'remove', 'create', 'update', 'patch',
+  'put', 'post', 'set', 'apply', 'replace', 'append', 'insert',
+  'upsert', 'modify', 'move', 'rename', 'mkdir', 'commit', 'push', 'merge',
+]);
+
+function isMutatingExternalMcpTool(toolName: string): boolean {
+  const match = EXTERNAL_MCP_TOOL_NAME_PATTERN.exec(toolName);
+  if (!match) return false;
+  const serverId = match[1];
+  const upstreamName = match[2];
+  if (!serverId || serverId === 'workspace' || !upstreamName) return false;
+  const stripped = upstreamName.replace(/^_+/, '');
+  const firstToken = stripped.split(/[_-]|(?<=[a-z0-9])(?=[A-Z])/)[0]?.toLowerCase() ?? '';
+  return MUTATING_MCP_VERBS.has(firstToken);
+}
 
 interface CircuitBreakerTrip {
   readonly reason: 'max_turns' | 'consecutive_tool_errors' | 'no_progress';
@@ -179,9 +196,6 @@ class HostSessionCircuitBreaker {
     if (!this.#active || this.#tripped !== null) return;
     this.#completedTurns += 1;
     this.#turnHadToolCalls = hasToolCalls;
-    this.#turnToolCount = 0;
-    this.#turnToolErrorCount = 0;
-    this.#turnSucceededMutation = false;
   }
 
   recordToolEnd(toolName: string, isError: boolean): void {
@@ -189,7 +203,7 @@ class HostSessionCircuitBreaker {
     this.#turnToolCount += 1;
     if (isError) {
       this.#turnToolErrorCount += 1;
-    } else if (MUTATING_TOOLS.has(toolName) || (isExternalMcpToolName(toolName) && toolName !== 'mcp__workspace__read_file')) {
+    } else if (MUTATING_TOOLS.has(toolName) || isMutatingExternalMcpTool(toolName)) {
       this.#turnSucceededMutation = true;
     }
   }
@@ -1374,7 +1388,7 @@ class HostExecution extends Execution {
     return summarizeToolProgressArgs(
       identity.name,
       bytes,
-      this.input.policy.limits.toolArgsBytes,
+      Math.min(this.input.policy.limits.toolArgsBytes, SUMMARY_MAX_ARGS_BYTES),
       raw => this.candidate.enforceHardPathInvariants(raw, { allowRootAlias: identity.name === 'read' }),
       this.onScrub,
     );

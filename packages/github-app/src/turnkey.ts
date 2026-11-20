@@ -4448,6 +4448,24 @@ export async function executeTurnkeyActionCycle(
   let implRepairDispatches = 0;
   const totalTokenBudget = options.taskpack.config.spec.task.spec.budgets.totalTokens;
   let cumulativeTokens = 0;
+  const envSource = options.runtimeEnv ?? process.env;
+  const maxTurnsRaw = envSource['LOOPWRIGHT_MAX_TURNS']?.trim();
+  const maxTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_TURNS');
+  if (maxTurnsRaw && maxTurnsOverride === undefined) {
+    options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_TURNS=${maxTurnsRaw}; expected positive integer`));
+  }
+  const maxRepairTurnsRaw = envSource['LOOPWRIGHT_MAX_REPAIR_TURNS']?.trim();
+  const maxRepairTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_REPAIR_TURNS');
+  if (maxRepairTurnsRaw && maxRepairTurnsOverride === undefined) {
+    options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_REPAIR_TURNS=${maxRepairTurnsRaw}; expected positive integer`));
+  }
+  const circuitBreakerOptions: HostSessionCircuitBreakerOptions | undefined =
+    maxTurnsOverride !== undefined || maxRepairTurnsOverride !== undefined
+      ? {
+        ...(maxTurnsOverride !== undefined ? { maxTurns: maxTurnsOverride } : {}),
+        ...(maxRepairTurnsOverride !== undefined ? { maxRepairTurns: maxRepairTurnsOverride } : {}),
+      }
+      : undefined;
 
   const effectiveAllowWorkflowWrites = options.allowWorkflowWrites ?? options.taskpack.allowWorkflowWrites;
   const ports: ControllerPorts = {
@@ -4514,25 +4532,6 @@ export async function executeTurnkeyActionCycle(
             options.onLog!(scrubber.scrub(line));
           }
         };
-
-      const envSource = options.runtimeEnv ?? process.env;
-      const maxTurnsRaw = envSource['LOOPWRIGHT_MAX_TURNS']?.trim();
-      const maxTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_TURNS');
-      if (maxTurnsRaw && maxTurnsOverride === undefined) {
-        options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_TURNS=${maxTurnsRaw}; expected positive integer`));
-      }
-      const maxRepairTurnsRaw = envSource['LOOPWRIGHT_MAX_REPAIR_TURNS']?.trim();
-      const maxRepairTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_REPAIR_TURNS');
-      if (maxRepairTurnsRaw && maxRepairTurnsOverride === undefined) {
-        options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_REPAIR_TURNS=${maxRepairTurnsRaw}; expected positive integer`));
-      }
-      const circuitBreakerOptions: HostSessionCircuitBreakerOptions | undefined =
-        maxTurnsOverride !== undefined || maxRepairTurnsOverride !== undefined
-          ? {
-            ...(maxTurnsOverride !== undefined ? { maxTurns: maxTurnsOverride } : {}),
-            ...(maxRepairTurnsOverride !== undefined ? { maxRepairTurns: maxRepairTurnsOverride } : {}),
-          }
-          : undefined;
 
       const adapterFactory = options.openHostSessionAdapter ?? openPiHostSessionAdapterV2;
       const opened = await adapterFactory(wrappedHost, adapterInput, {

@@ -10,6 +10,7 @@ import { createLocalRun, type StateResult } from '@loopwright/state';
 import { contract } from '../../core/test/fixtures.js';
 import { canonical, digest } from '../src/boundary.js';
 import { describePiAdapterFiles } from '../src/descriptor.js';
+import { HostMcpRegistry } from '../src/external-mcp.js';
 import {
   isSupportedHostSessionPlatform,
   openPiHostSessionAdapter,
@@ -86,6 +87,7 @@ async function createHostSessionFixture(options: {
   readonly tools?: readonly string[];
   readonly mcpNames?: readonly 'mcp__workspace__read_file'[];
   readonly candidate?: PiOpenInput['candidate'];
+  readonly maxImplementationRepairs?: number;
 }) {
   const filesRes = await describePiAdapterFiles();
   assert.equal(filesRes.ok, true);
@@ -106,6 +108,9 @@ async function createHostSessionFixture(options: {
   task.spec.budgets.totalTokens = 1000000;
   task.spec.budgets.perCallOutputTokens = 512;
   task.spec.budgets.maxModelCalls = 16;
+  if (options.maxImplementationRepairs !== undefined) {
+    task.spec.budgets.maxImplementationRepairs = options.maxImplementationRepairs;
+  }
 
   const lock = coreGood(admitTask(task, { admissionId: 'admission-host-1', runId: 'run-host-1' }));
   const exampleBytes = Buffer.from('export const value = 1;\n', 'utf8');
@@ -1871,7 +1876,88 @@ test('openPiHostSessionAdapterV2 circuit breaker stops runaway turns and no-prog
   assert.equal(noProgRes.outcome.error?.path, '/circuit-breaker/repairNoProgress');
   assert.equal(noProgRes.outcome.error?.stateErrorCode, 'BUDGET_EXHAUSTED');
 
-  // 4. Invalid circuitBreaker options return PiResult error cleanly instead of throwing synchronously
+  // 4. External MCP tools: mutating verb resets no_progress while read-only verb still trips
+  const mcpServer = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { id?: number | string; method?: string; params?: { name?: string } };
+    if (body.id === undefined) { res.writeHead(202).end(); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (body.method === 'initialize') {
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'ext', version: '1.0.0' } } }));
+    } else if (body.method === 'tools/list') {
+      res.end(JSON.stringify({
+        jsonrpc: '2.0',
+        id: body.id,
+        result: {
+          tools: [
+            { name: 'get_status', description: 'Read status', inputSchema: { type: 'object', properties: {} } },
+            { name: 'write_file', description: 'Write file', inputSchema: { type: 'object', properties: { path: { type: 'string' } } } },
+          ],
+        },
+      }));
+    } else {
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: `ok:${body.params?.name ?? ''}` }] } }));
+    }
+  });
+  await new Promise<void>(resolve => mcpServer.listen(0, '127.0.0.1', resolve));
+  const mcpAddr = mcpServer.address();
+  if (!mcpAddr || typeof mcpAddr === 'string') throw new Error('mcp listen failed');
+  const mcpRegistry = await HostMcpRegistry.connect([{ id: 'ext', transport: 'http', url: `http://127.0.0.1:${mcpAddr.port}/mcp`, allowInsecureHttp: true }]);
+  try {
+    const runMcpSeq = async (sequence: readonly string[]) => {
+      let turns = 0;
+      const llmServer = http.createServer((_req, res) => {
+        const nextTool = sequence[turns];
+        turns += 1;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.end(nextTool
+          ? sseToolCall('glm-5.3', `call-mcp-${turns}`, nextTool, nextTool.endsWith('write_file') ? { path: 'a.txt' } : {})
+          : sseStop('glm-5.3', 'done'));
+      });
+      await new Promise<void>(resolve => llmServer.listen(0, '127.0.0.1', resolve));
+      const llmAddr = llmServer.address();
+      if (!llmAddr || typeof llmAddr === 'string') throw new Error('llm listen failed');
+      const f = await createHostSessionFixture({
+        baseUrl: `http://127.0.0.1:${llmAddr.port}/v1`,
+        tools: ['read', 'write', ...mcpRegistry.toolNames],
+        maxImplementationRepairs: 16,
+      });
+      try {
+        const opened = await openPiHostSessionAdapterV2(f.hostV2, f.inputV2, {
+          mcpRegistry,
+          circuitBreaker: { maxRepairTurns: 10, maxRepairNoProgressTurns: 2 },
+        });
+        assert.equal(opened.ok, true, JSON.stringify(opened));
+        if (!opened.ok) throw new Error('open failed');
+        try {
+          const res = await opened.value.execute({ commandId: `cmd-mcp-${turns}`, text: 'Repair', purpose: 'task', repair: 'implementation' });
+          assert.equal(res.ok, true);
+          if (!res.ok) throw new Error('execute failed');
+          return { outcome: res.value, turns };
+        } finally {
+          await opened.value.close();
+        }
+      } finally {
+        f.cleanup();
+        llmServer.closeAllConnections();
+        await new Promise<void>(resolve => llmServer.close(() => resolve()));
+      }
+    };
+    const readOnlyTrip = await runMcpSeq(['mcp__ext__get_status', 'mcp__ext__get_status', 'mcp__ext__get_status']);
+    assert.equal(readOnlyTrip.turns, 2);
+    assert.equal(readOnlyTrip.outcome.error?.path, '/circuit-breaker/repairNoProgress');
+
+    const mutatingReset = await runMcpSeq(['mcp__ext__get_status', 'mcp__ext__write_file', 'mcp__ext__get_status']);
+    assert.equal(mutatingReset.turns, 4, JSON.stringify(mutatingReset.outcome));
+    assert.equal(mutatingReset.outcome.status, 'execution_settled', JSON.stringify(mutatingReset.outcome));
+  } finally {
+    await mcpRegistry.close();
+    mcpServer.closeAllConnections();
+    await new Promise<void>(resolve => mcpServer.close(() => resolve()));
+  }
+
+  // 5. Invalid circuitBreaker options return PiResult error cleanly instead of throwing synchronously
   const invalidFixture = await createHostSessionFixture({ baseUrl: 'http://127.0.0.1:1/v1' });
   try {
     const invalidRes = await openPiHostSessionAdapterV2(invalidFixture.hostV2, invalidFixture.inputV2, {
