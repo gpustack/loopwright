@@ -2,16 +2,19 @@
 
 > Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: 3a48b6a840897423faf5274d81fe6d65cd40fb63.
+Documentation version: main. Source revision: 5c9b49eac68cd595d6687d0db9d38245d00c8de8.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
 ## Interactive Bootstrap Protocol
 
-1. Choose an operating mode with the user: Declarative Taskpack Mode (simple single-file .loopwright/taskpack.yaml + GitHub Action/App for repository sync and PRs) or Managed Controller Mode (out-of-repo TrustedRegistry registry.yaml + SHA-256-pinned ControllerConfig controller.yaml + TaskContract for fine-grained CLI governance).
-2. Fetch the Markdown exports listed below for the chosen mode before generating YAML (Declarative Taskpack Walkthrough + Taskpack Manifest Reference + GitHub Action Configuration for Mode 1; Managed Controller Walkthrough + Task Contracts and Schemas + Controller and Trusted Registry for Mode 2).
-3. Inspect the target repository (including existing automatic synchronized workflows, release scripts, version manifests, and folder layout) and confirm upstream sources, writable/protected scope, verification checks, and PR publication settings interactively with the user.
-4. Emit two-space Pretty YAML with apiVersion: loopwright.dev/v1alpha1, keep .loopwright/memory/<id> outside writable scope, and never embed raw secrets or untrusted ${ENV} interpolation inside taskpack.yaml.
+Follow the [Bootstrap Interview Reference](/loopwright/main/references/bootstrap-interview.md) when initializing or migrating Loopwright automation.
+
+1. Inspect first, edit last: scan existing sync scripts, Dockerfiles, dependency manifests (go.mod, package.json, pyproject.toml), Helm charts, version tables, and workflows BEFORE asking questions or editing any files.
+2. Interview one question at a time: ask one focused question per turn with a repository-grounded `(Recommended)` default, covering operating mode (Declarative Taskpack vs Managed Controller), modular domain split and exclusions, schedule cadence, upstream source kinds (prefer github-release with allowPrerelease: false over git-tag when non-SemVer tags exist), lockstep/Stage-B/hold policies, bounded Host Preflight -> networkMode: none -> command.v1 Verifier boundaries, spec.memory.apply, and workflow panel inputs.
+3. Enforce zero model-specific code coupling: declare model pools and unified apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN exclusively in *taskpack.yaml (spec.models); never generate model-specific helper scripts or hardcode vendor names in workflows or scripts.
+4. Fetch schema guides before writing YAML: read the owning Markdown exports linked below right before emitting config (Taskpack + GitHub Action for Mode 1; Managed Controller + Task Contract + Controller and Registry for Mode 2) so command.v1 parameters, spec.models[] fields, Action inputs, and controller schemas match verbatim.
+5. Gate on Stage 5 approval: present the architecture summary table and wait for explicit user confirmation before generating two-space Pretty YAML (apiVersion: loopwright.dev/v1alpha1), deterministic offline fixture selftests, and tiered qualification steps.
 
 ## Getting Started
 
@@ -40,4 +43,4 @@ documentation and code for your release. This index routes questions; follow its
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/3a48b6a840897423faf5274d81fe6d65cd40fb63/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/5c9b49eac68cd595d6687d0db9d38245d00c8de8/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.

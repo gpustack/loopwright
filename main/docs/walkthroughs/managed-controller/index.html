@@ -436,10 +436,10 @@
   Init["01 Init drafts"] -> Registry["02 Pin TrustedRegistry"] -> Config["03 Bind ControllerConfig"] -> Run["04 Check & run"] -> Reconcile["05 Inspect & settle"]
 -->
 <h2 id="prompt-bootstrap">Prompt bootstrap</h2>
-<p><code>loopwright init</code> writes generic <code>REVIEW_REQUIRED</code> placeholders. To assemble tailored <code>registry.yaml</code> and <code>controller.yaml</code> files interactively without looking up digests by hand, paste this prompt into your local coding agent:</p>
+<p><code>loopwright init</code> writes generic <code>REVIEW_REQUIRED</code> placeholders. To assemble tailored <code>registry.yaml</code> and <code>controller.yaml</code> files through an interview-first workflow without looking up digests by hand, paste this prompt into your local coding agent:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Managed Controller, Task Contract, and Controller and Registry. Inspect this target repository, confirm my writable/protected scope, budgets, and required checks, compute the installed Loopwright handler and graph SHA-256 digests on this machine, write out-of-repo registry.yaml and controller.yaml, and validate them with loopwright check.</span></span></code></pre></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.</span></span></code></pre></div>
 </div>
 <h2 id="step-1-generate-drafts">Step 1: Generate drafts</h2>
 <p>Install <code>@gpustack/loopwright</code> (see <a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
