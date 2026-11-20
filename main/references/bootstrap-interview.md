@@ -62,14 +62,14 @@ Map each automated domain to explicit `spec.upstreams[]` entries, `spec.upstream
 | `http-json` | JSON catalogs, OCI registries, PyPI, npm | Use native `versionPath` selector and `monotonicSemver: true` (default) to block downgrades |
 | `custom-table` | Repository-local version matrix | Keep source table outside `scope.writable` |
 
-Prefer `github-release` with `allowPrerelease: false` over `git-tag` whenever an upstream repository carries non-SemVer branch or archive tags. For `http-json` feeds, configure `versionPath` and `monotonicSemver` natively instead of custom parser glue.
+Prefer `github-release` with `allowPrerelease: false` over `git-tag` whenever an upstream repository carries non-SemVer branch or archive tags. Sort non-prerelease `vX.Y.Z` releases by numeric SemVer tuple so older-branch patch releases never downgrade newer minor releases. For `http-json` feeds, configure `versionPath` and `monotonicSemver` natively instead of custom parser glue.
 
 ### Version policy and promotion
 
 Confirm three version guardrails one question at a time:
 
 1. **Lockstep constraints**: Declare `spec.upstreamGroups[]` (`{ id, policy: lockstep | independent, members }`) so mismatched or partial lockstep releases resolve atomically as `held_back` without blocking sibling upstreams.
-2. **Two-stage promotion**: Whether image consumers need Stage A (recipe or Dockerfile sync) separate from Stage B (promoting built image tags via `target_tag` after registry publish).
+2. **Two-stage promotion**: Whether image consumers need Stage A (recipe or Dockerfile sync) separate from Stage B (promoting built image tags via `target_tag` after registry publish). Drain pending Stage B promotions for un-held published images before starting a new Stage A sync cycle, so fast-moving upstreams cannot starve promotion.
 3. **Setting-image holds**: Whether to keep a protected hold list (for example `.auto-sync/setting-image-holds.json` outside `scope.writable`) or use native `held_back` status so newer base images publish ahead of runtime default bumps.
 
 ## Stage 3: Bounded execution
@@ -217,13 +217,13 @@ Once approved, generate:
 1. Two-space Pretty YAML taskpack manifests (`apiVersion: loopwright.dev/v1alpha1`, `kind: Taskpack`).
 2. Protected `spec.preflight` scripts, instruction files, and `command.v1` verification scripts (plus `digests.lock.json` via `loopwright digest sync` when `pinDigests: true`).
 3. Workflow YAML (`.github/workflows/loopwright.yml` or per-domain workflows) with `mode: auto` and least-privilege permissions.
-4. Deterministic offline fixture selftests exercising real contracts, schema validation, and fail-closed guards (never brittle workflow-text scraping assertions).
+4. Lean, decoupled repo-side checks (`bash -n`, `shellcheck`, YAML/JSON/path integrity, and fail-closed contract guards) — avoid multi-thousand-line mock-repo selftests, hardcoded current version literals, or ad-hoc counterexample tests.
 
 ## Stage 6: Tiered qualification
 
 Qualify the generated configuration in three ordered tiers and report exact observed outcomes at each tier:
 
-1. **Tier 1 (Local offline)**: Run offline fixture selftests, taskpack schema validation, `loopwright digest sync --taskpack ... --check`, and `dry-run: 'true'` compilation.
+1. **Tier 1 (Local offline)**: Run lean repository checks, taskpack schema validation, `loopwright digest sync --taskpack ... --check`, and `dry-run: 'true'` compilation.
 2. **Tier 2 (GitHub Actions dry run)**: Dispatch the live workflow with `dry-run=true` to verify preflight, App token minting, and compilation on the runner.
 3. **Tier 3 (Live per-domain qualification)**: Dispatch each domain with `dry-run=false` (add `force=true` to test candidate authoring). Verify the opened PR and test `/auto-sync status` or `/auto-sync retry`.
 
