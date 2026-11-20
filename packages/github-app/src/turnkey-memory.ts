@@ -27,7 +27,6 @@ import {
 } from '@loopwright/memory';
 import { sanitizeReportText } from './output-format.js';
 import {
-  buildUpstreamVersionsMap,
   compileScopePatterns,
   resolveManifestControlRoot,
   resolveTaskpackMemoryLocation,
@@ -58,12 +57,14 @@ import {
 } from './types.js';
 import {
   buildCleanGitEnv,
+  buildUpstreamMemoryVersions,
   COMMIT_SHA_PATTERN,
   DEFAULT_GIT_COMMIT_IDENTITY,
   fetchBoundedText,
   findOpenMemoryPullRequest,
   isPlainRecord,
   type ManagedPullRequestInfo,
+  type UpstreamAcquisitionRecord,
   validateGitCommitIdentity,
   validateGitRemoteSource,
 } from './upstreams.js';
@@ -1114,7 +1115,10 @@ export async function finalizeAndPublishTurnkeyMemory(
     const maxEntries = options.manifest.spec.memory.maxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES;
     const checkCodeFingerprint = options.manifest.spec.memory.checkCodeFingerprint === true;
     const checkUpstreamVersions = options.manifest.spec.memory.checkUpstreamVersions === true;
-    const targetMatrix = options.targetMatrix ?? null;
+    const manifestMatrix = options.manifest.spec.target?.matrix;
+    const targetMatrix = options.targetMatrix !== undefined
+      ? options.targetMatrix
+      : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
 
     if (memoryApply === 'disabled') {
       return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'memory_apply_disabled');
@@ -1147,7 +1151,7 @@ export async function finalizeAndPublishTurnkeyMemory(
       checkCodeFingerprint,
       checkUpstreamVersions,
       targetMatrix,
-      upstreamVersions: buildUpstreamVersionsMap(options.upstreamRecords),
+      upstreamVersions: buildUpstreamMemoryVersions(options.upstreamRecords as readonly UpstreamAcquisitionRecord[] | undefined),
     };
 
     if (memoryApply === 'local-only') {

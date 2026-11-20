@@ -17,6 +17,7 @@ import {
   GitHubAppError,
   loadDeclarativeTaskpack,
   negotiateSandboxBackend,
+  openStagedTaskpackStepGate,
   resolveActionOutputFormats,
   resolveEffectiveTaskpackSandboxPolicy,
   resolveRepositoryAndRevisions,
@@ -227,7 +228,7 @@ spec:
     noChange: Check upstreams
   scope:
     writable:
-      - pack
+      - 'pack/**'
     protected: []
   upstreams:
     - id: rel
@@ -496,7 +497,7 @@ describe('turnkey Action cycle end-to-end execution', () => {
         'INPUT_GITHUB-TOKEN': fixture.githubToken,
         'INPUT_REMOTE-URL': fixture.bareRemote,
         LLM_TOKEN: `${fixture.badToken},${fixture.goodToken}`,
-        CHECK_SECRET: fixture.verifySecret,
+        CHECK_MARKER: fixture.verifySecret,
       });
 
       assert.equal(exitCode, 0, 'turnkey e2e Action run must succeed cleanly');
@@ -689,7 +690,7 @@ describe('turnkey Action cycle end-to-end execution', () => {
         'INPUT_GITHUB-TOKEN': fixture.githubToken,
         'INPUT_REMOTE-URL': fixture.bareRemote,
         LLM_TOKEN: fixture.goodToken,
-        CHECK_SECRET: fixture.verifySecret,
+        CHECK_MARKER: fixture.verifySecret,
       }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 1, 'mutated remote PR head must settle as failed');
@@ -1073,7 +1074,7 @@ describe('negative and security regression tests', () => {
         GITHUB_API_URL: githubServer.url,
         GITHUB_TOKEN: fixture.githubToken,
         LLM_TOKEN: fixture.goodToken,
-        CHECK_SECRET: fixture.verifySecret,
+        CHECK_MARKER: fixture.verifySecret,
         INPUT_TASKPACK_PATH: '.auto-sync/taskpack.yaml',
         'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
         'INPUT_RUN-ROOT': fixture.runRoot,
@@ -1175,7 +1176,7 @@ describe('negative and security regression tests', () => {
         GITHUB_API_URL: githubServer.url,
         GITHUB_TOKEN: fixture.githubToken,
         LLM_TOKEN: fixture.goodToken,
-        CHECK_SECRET: fixture.verifySecret,
+        CHECK_MARKER: fixture.verifySecret,
         'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
         'INPUT_RUN-ROOT': fixture.runRoot,
         'INPUT_RUN-ID': 'run-post-push-rest-fail',
@@ -1305,7 +1306,7 @@ describe('negative and security regression tests', () => {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
           LLM_TOKEN: fixture.goodToken,
-          CHECK_SECRET: fixture.verifySecret,
+          CHECK_MARKER: fixture.verifySecret,
         },
       });
 
@@ -1353,7 +1354,7 @@ spec:
     noChange: Check
   scope:
     writable:
-      - docs
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1463,7 +1464,7 @@ spec:
     noChange: Check sandbox
   scope:
     writable:
-      - docs
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1641,7 +1642,7 @@ spec:
     noChange: Verify
   scope:
     writable:
-      - docs
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1751,7 +1752,7 @@ spec:
     noChange: Check custom pool env
   scope:
     writable:
-      - docs
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1846,7 +1847,7 @@ spec:
     noChange: Check N4 and N8 guards
   scope:
     writable:
-      - docs
+      - 'docs/**'
   upstreams:
     - id: http-u
       kind: custom-table
@@ -1902,7 +1903,7 @@ spec:
     noChange: Check N7
   scope:
     writable:
-      - docs
+      - 'docs/**'
   upstreams:
     - id: http-u
       kind: custom-table
@@ -2049,8 +2050,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -2151,8 +2152,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -2639,6 +2640,298 @@ exit 1
       assert.equal(overflowReason.includes('[output truncated]'), true, `expected truncation marker in reason, got: ${overflowReason}`);
     } finally {
       await gateServer?.close();
+    }
+  });
+
+  it('round-trips ~30 KiB LOOPWRIGHT_CHECK_OUT with structured findings+metrics through Controller Gate and bounds oversized ~64 KiB verdicts <= 65,536 bytes', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-gate-64k-')));
+    try {
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'runs');
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+
+      await git(repo, ['init', '-b', 'main']);
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update pack/proposal.json.\n');
+      await writeFile(join(repo, 'pack', 'proposal.json'), `${JSON.stringify({ schema_version: 1, version: '1.0.0' })}\n`);
+
+      // Check 1: emits ~30 KiB structured LOOPWRIGHT_CHECK_OUT with findings + metrics and exits 0 (approved)
+      const nodeBin = JSON.stringify(process.execPath);
+      const check30kScript = `#!/bin/sh
+set -eu
+exec ${nodeBin} -e '
+const fs = require("node:fs");
+const findings = Array.from({ length: 24 }, (_, i) => ({
+  title: "Finding #" + i,
+  severity: "low",
+  path: "pack/proposal.json",
+  line: i + 1,
+  evidence: "ev-" + i + "-" + "x".repeat(1150),
+}));
+const metrics = Object.fromEntries(Array.from({ length: 20 }, (_, i) => ["metric_" + i, i + 0.5]));
+const payload = JSON.stringify({
+  detail: "Structured 30KiB check report: " + "d".repeat(500),
+  findings,
+  metrics,
+});
+if (Buffer.byteLength(payload, "utf8") < 28000 || Buffer.byteLength(payload, "utf8") > 35000) {
+  throw new Error("unexpected test payload size: " + Buffer.byteLength(payload, "utf8"));
+}
+fs.writeFileSync(process.env.LOOPWRIGHT_CHECK_OUT, payload, "utf8");
+'
+`;
+      // Check 2: emits ~65,000-byte LOOPWRIGHT_CHECK_OUT with >512-char detail + 31 large findings so BOTH detail truncation and findings trimming trigger
+      const check64kScript = `#!/bin/sh
+set -eu
+exec ${nodeBin} -e '
+const fs = require("node:fs");
+const findings = Array.from({ length: 31 }, (_, i) => ({
+  title: "Oversized Finding #" + i,
+  severity: "medium",
+  path: "pack/proposal.json",
+  line: i + 1,
+  evidence: "big-" + i + "-" + "y".repeat(1920),
+}));
+const metrics = Object.fromEntries(Array.from({ length: 24 }, (_, i) => ["m_" + i, "v".repeat(60)]));
+const payload = JSON.stringify({
+  detail: "Long detail: " + "z".repeat(600),
+  findings,
+  metrics,
+});
+if (Buffer.byteLength(payload, "utf8") <= 64000 || Buffer.byteLength(payload, "utf8") > 65536) {
+  throw new Error("unexpected oversized payload size: " + Buffer.byteLength(payload, "utf8"));
+}
+fs.writeFileSync(process.env.LOOPWRIGHT_CHECK_OUT, payload, "utf8");
+'
+`;
+      await writeFile(join(repo, '.auto-sync', 'checks', 'check30k.sh'), check30kScript, { mode: 0o755 });
+      await writeFile(join(repo, '.auto-sync', 'checks', 'check64k.sh'), check64kScript, { mode: 0o755 });
+      await writeFile(
+        join(repo, '.auto-sync', 'taskpack.yaml'),
+        serializePrettyYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'Taskpack',
+          metadata: { name: 'gate-64k-test' },
+          spec: {
+            execution: { mode: 'strict', digests: { pinDigests: false } },
+            goal: { candidate: 'Update proposal.', noChange: 'Verify.' },
+            scope: { writable: ['pack/**'], protected: [] },
+            instructions: ['.auto-sync/prompts/instructions.md'],
+            upstreams: [],
+            proposal: { path: 'pack/proposal.json', requiredFields: ['schema_version', 'version'], schemaVersion: 1 },
+            verification: {
+              localChecks: [
+                { id: 'json', implementation: 'json-artifact.v1' },
+                { id: 'check-30k', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/check30k.sh', timeoutSeconds: 15 } },
+                { id: 'check-64k', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/check64k.sh', timeoutSeconds: 15 } },
+              ],
+              externalGates: [],
+            },
+            publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: test' },
+            memory: { directory: '.auto-sync/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
+            triggers: { schedule: false, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+          },
+        }),
+        'utf8',
+      );
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'init 64k gate test']);
+
+      const runId = 'gate-64k-run-1';
+      const staged = await stageTaskpackForStep({
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repo,
+        runRoot,
+        runId,
+        mode: 'candidate',
+      });
+      const gateHandle = await openStagedTaskpackStepGate({ runRoot, runId });
+      assert.ok(gateHandle !== null);
+      try {
+        const prevSecret = process.env[staged.signingEnvName];
+        process.env[staged.signingEnvName] = staged.signingSecret;
+        let loaded;
+        try {
+          loaded = await loadTrustedConfiguration({
+            configPath: staged.configPath,
+            registryPath: staged.registryPath,
+            registrySha256: staged.registrySha256,
+            untrustedRoots: [repo],
+          });
+        } finally {
+          if (prevSecret === undefined) delete process.env[staged.signingEnvName];
+          else process.env[staged.signingEnvName] = prevSecret;
+        }
+        assert.equal(loaded.ok, true);
+        if (!loaded.ok) return;
+
+        const next = await stepNext(
+          { configuration: loaded.value, repository: repo, runRoot, runId, mode: 'candidate', environment: gateHandle.environment },
+          gateHandle.ports,
+        );
+        assert.equal(next.ok, true);
+        if (!next.ok || next.value.kind !== 'step') assert.fail('expected step yield');
+
+        await writeFile(
+          join(next.value.candidateDir, 'pack', 'proposal.json'),
+          `${JSON.stringify({ schema_version: 1, version: '2.0.0' })}\n`,
+          { mode: 0o600 },
+        );
+
+        const submitted = await stepSubmit(
+          { runRoot, runId, leaseToken: next.value.leaseToken, status: 'completed', environment: gateHandle.environment },
+          gateHandle.ports,
+        );
+        assert.equal(submitted.ok, true, JSON.stringify(submitted));
+        if (!submitted.ok || submitted.value.kind !== 'result') assert.fail('expected settled result');
+        assert.equal(submitted.value.result.spec.status, 'completed', JSON.stringify(submitted.value.result.spec.verification));
+
+        const checks = submitted.value.result.spec.verification.spec.required;
+        const check30k = checks.find(c => c.checkId === 'check-30k');
+        const check64k = checks.find(c => c.checkId === 'check-64k');
+        assert.equal(check30k?.status, 'passed');
+        assert.equal(check30k?.findings?.length, 24);
+        assert.equal(check30k?.metrics?.['metric_19'], 19.5);
+        assert.equal(check64k?.status, 'passed');
+        assert.equal(check64k?.detail?.length, 512, 'oversized detail should be truncated to 512 code points');
+        assert.ok((check64k?.findings?.length ?? 0) > 0 && (check64k?.findings?.length ?? 0) < 31, 'oversized findings should be progressively trimmed to fit budget');
+
+        // Also directly assert wire response byteLength <= 65_536 from the live gate endpoint
+        const candidateDigest = submitted.value.result.spec.subject.candidateDigest.hex;
+        const reqBody = Buffer.from(JSON.stringify({
+          storeId: 'store-wire-64k',
+          runId,
+          lockHash: null,
+          operationId: 'op-wire-64k',
+          dispatchId: 'disp-wire-64k',
+          dispatchGeneration: 1,
+          gateId: 'check-64k',
+          checkId: 'check-64k',
+          candidateDigest,
+        }), 'utf8');
+        const wireRes = await fetch(gateHandle.serverUrl!, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-loopwright-signature': signPayload(staged.signingSecret, reqBody),
+          },
+          body: reqBody,
+        });
+        assert.equal(wireRes.status, 200);
+        const wireBytes = new Uint8Array(await wireRes.arrayBuffer());
+        assert.ok(wireBytes.byteLength <= 65_536, `wire verdict exceeded 65_536 bytes: ${wireBytes.byteLength}`);
+        assert.ok(wireBytes.byteLength <= 64_000, `wire verdict exceeded soft budget 64_000 bytes: ${wireBytes.byteLength}`);
+        assert.equal(verifySignedPayload(staged.signingSecret, wireBytes, wireRes.headers.get('x-loopwright-signature') ?? ''), true);
+      } finally {
+        await gateHandle.close();
+      }
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('stageTaskpackForStep persists workspaceStagedDir read-only and advertises live readOnlyPath with matching SHA-256 and 0o444/0o400 mode', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-step-ws-stage-')));
+    try {
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'runs');
+      await mkdir(join(repo, '.loopwright', 'scripts'), { recursive: true });
+      await mkdir(join(repo, 'docs'), { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+
+      const wsPayload = Buffer.from('{"staged":"workspace-artifact","version":"3.1.4"}\n', 'utf8');
+      const expectedSha = createHash('sha256').update(wsPayload).digest('hex');
+
+      await writeFile(join(repo, 'docs', 'proposal.json'), `${JSON.stringify({ schema_version: 1 })}\n`);
+      await writeFile(
+        join(repo, '.loopwright', 'scripts', 'preflight.mjs'),
+        `#!/usr/bin/env node
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const nestedDir = join(process.env.LOOPWRIGHT_STAGING_DIR, 'bundle');
+mkdirSync(nestedDir, { recursive: true });
+writeFileSync(join(nestedDir, 'artifact.json'), ${JSON.stringify(wsPayload.toString('utf8'))}, 'utf8');
+writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
+  disposition: 'candidate',
+  stagedResources: [
+    { id: 'ws-artifact', kind: 'document', path: 'bundle/artifact.json', mount: 'workspace', exposeToChecks: false },
+  ],
+}), 'utf8');
+`,
+        { mode: 0o755 },
+      );
+      await writeFile(
+        join(repo, '.loopwright', 'taskpack.yaml'),
+        serializePrettyYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'Taskpack',
+          metadata: { name: 'ws-stage-step' },
+          spec: {
+            execution: { mode: 'strict', digests: { pinDigests: false } },
+            goal: { candidate: 'Update docs.', noChange: 'Verify.' },
+            preflight: { script: '.loopwright/scripts/preflight.mjs', timeoutSeconds: 15 },
+            scope: { writable: ['docs/**'], protected: [] },
+            upstreams: [],
+            proposal: { path: 'docs/proposal.json', requiredFields: ['schema_version'], schemaVersion: 1 },
+            verification: { localChecks: [{ id: 'json', implementation: 'json-artifact.v1' }], externalGates: [] },
+            publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: ws' },
+            memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
+            triggers: { schedule: false, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+          },
+        }),
+        'utf8',
+      );
+      await git(repo, ['init', '-b', 'main']);
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'init ws stage step test']);
+
+      const staged = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repo,
+        runRoot,
+        runId: 'ws-stage-run-1',
+        mode: 'candidate',
+      });
+
+      assert.ok(typeof staged.workspaceStagedDir === 'string' && staged.workspaceStagedDir.length > 0);
+      assert.equal(staged.checkStagedDir, undefined, 'exposeToChecks: false should not stage checkStagedDir');
+
+      const registryText = await readFile(staged.registryPath, 'utf8');
+      const match = /readOnlyPath=([^\s"\\]+)/.exec(registryText);
+      assert.ok(match !== null, `expected readOnlyPath= in compiled author prompt:\n${registryText}`);
+      const advertisedPath = match[1]!;
+      assert.equal(advertisedPath, join(staged.workspaceStagedDir, 'bundle', 'artifact.json'));
+
+      const diskBytes = await readFile(advertisedPath);
+      assert.equal(createHash('sha256').update(diskBytes).digest('hex'), expectedSha);
+      const diskMode = (await lstat(advertisedPath)).mode & 0o777;
+      assert.ok(diskMode === 0o444 || diskMode === 0o400, `expected 0o444 or 0o400 mode, got 0o${diskMode.toString(8)}`);
+
+      // Re-staging the same runId reuses secrets.json including workspaceStagedDir
+      const stagedAgain = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repo,
+        runRoot,
+        runId: 'ws-stage-run-1',
+        mode: 'candidate',
+      });
+      assert.equal(stagedAgain.workspaceStagedDir, staged.workspaceStagedDir);
+    } finally {
+      // Restore write bits on read-only staged subtrees before cleanup
+      const restore = async (p: string): Promise<void> => {
+        const st = await lstat(p).catch(() => null);
+        if (st === null || st.isSymbolicLink() || !st.isDirectory()) return;
+        await chmod(p, 0o700).catch(() => undefined);
+        for (const e of await readdir(p, { withFileTypes: true }).catch(() => [])) {
+          if (e.isDirectory()) await restore(join(p, e.name));
+        }
+      };
+      await restore(work);
+      await rm(work, { recursive: true, force: true });
     }
   });
 });

@@ -3,15 +3,37 @@ import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PI_THINKING_LEVELS, PI_WIRE_APIS, isOAuthOnlyPiProvider, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
+import { PI_THINKING_LEVELS, PI_WIRE_APIS, STANDARD_PI_PROVIDER_ENV, isOAuthOnlyPiProvider, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry, type ExternalMcpServerConfig } from '@loopwright/agent-pi/mcp';
-import { formatDurationMs, formatTokenCount, type ReportMcpServerInfo } from '@loopwright/controller';
+import { formatDurationMs, formatTokenCount, type AdvisoryDecisionPort, type ReportMcpServerInfo } from '@loopwright/controller';
+import {
+  DECISION_PROVIDER_API_KEY_ENV,
+  DECISION_PROVIDER_DEFAULTS,
+  DEFAULT_DECISION_POLICY,
+  DecisionBudgetTracker,
+  DecisionError,
+  HttpDecisionTransport,
+  evaluateCycleAlignment,
+  evaluateSoftCompactionAdvisory,
+  heuristicCapabilityTier,
+  routeTaskCapability,
+  triageCandidateDiff,
+  type DecisionPolicyConfig,
+  type DecisionScrubber,
+  type DecisionTransport,
+} from '@loopwright/decisions';
 import {
   LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveDefaultProviderTokenEnv, resolveTaskpackModelCandidates,
   resolveTaskpackModelSelection, selectHealthyModelCandidate,
   type ParsedPiModelsJson,
 } from './models-config.js';
 import { resolveActionOutputFormats, writeActionOutputSinks, type RunReportInput } from './output-format.js';
+import {
+  collectManifestSecretEnvNames,
+  formatWorkspaceResourcesManifest,
+  runTaskpackPreflight,
+  type RunTaskpackPreflightResult,
+} from './preflight.js';
 import { validateMcpAuthConfiguration, qualifyDeploymentHostProfile } from './qualification.js';
 import { negotiateSandboxBackend, resolveEffectiveTaskpackSandboxPolicy } from './sandbox.js';
 import { collectMcpReferencedEnvNames, parseTaskpackDocument, validateMcpServerDeclarations } from './schema.js';
@@ -30,7 +52,7 @@ import {
 import { finalizeAndPublishTurnkeyMemory } from './turnkey-memory.js';
 import {
   checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
-  discoverTaskpackUpstreams, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
+  discoverTaskpackUpstreamsV2, findOpenManagedPullRequest, parseOptionalGitIdentityInput,
   resolveGitCommitSha, resolveGitHubAuth, resolveRepositoryAndRevisions, shouldPreserveExplicitSourceRevision,
   validateGitAuthorEmail, validateGitAuthorName,
   type ManagedPullRequestInfo,
@@ -39,8 +61,8 @@ import { serializePrettyYaml } from './yaml.js';
 import {
   DEFAULT_LOCAL_COMMAND_GATE_ENV, GitHubAppError, LOCAL_COMMAND_GATE_ENDPOINT_ID,
   type ActionDelegateOutcome, type ActionEntrypointInput, type ActionEntrypointResult, type ClockSample,
-  type GitCommitIdentity, type HostGateEndpointPlan, type HostPublicationEndpointPlan, type HostRoleSelection,
-  type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate,
+  type ExecutionHostPolicy, type GitCommitIdentity, type HostGateEndpointPlan, type HostPublicationEndpointPlan,
+  type HostRoleSelection, type HostTaskpackBindings, type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate,
   type TaskpackCommentCommand, type TaskpackIntakeOutcome, type TaskpackLimitsDeclaration,
   type TaskpackManifest, type TaskpackMcpServerDeclaration, type TaskpackUpstreamRecord,
   type TurnkeyMemorySummary, type WrittenCompiledTaskpack,
@@ -67,8 +89,259 @@ export interface TurnkeyActionEntrypointInput extends ActionEntrypointInput {
   readonly gitRemoteUrl?: string | undefined;
   readonly managedPrMatchesDiscoveredState?: boolean | undefined;
   readonly output?: string | undefined;
+  readonly decisionTransport?: DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
   readonly progressSink?: ((line: string) => void) | undefined;
   readonly onTurnkeyReport?: ((info: TurnkeyActionExecutionReport) => void) | undefined;
+}
+
+export interface CreateTaskpackDecisionPortOptions {
+  readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
+  readonly apiKey?: string | undefined;
+  readonly transport?: DecisionTransport | undefined;
+  readonly scrubber?: SecretScrubber | undefined;
+  readonly hasPinnedRoles?: boolean | undefined;
+}
+
+export function createTaskpackDecisionPort(
+  manifest: TaskpackManifest,
+  options?: CreateTaskpackDecisionPortOptions,
+): AdvisoryDecisionPort | undefined {
+  const decl = manifest.spec.decisions;
+  if (decl === undefined || decl.enabled !== true) {
+    return undefined;
+  }
+  const env = options?.runtimeEnv ?? process.env;
+  const provider = decl.provider ?? DEFAULT_DECISION_POLICY.provider;
+  const defaults = DECISION_PROVIDER_DEFAULTS[provider];
+  const policy: DecisionPolicyConfig = Object.freeze({
+    enabled: true,
+    disclosurePolicy: decl.disclosurePolicy ?? 'public-metadata-only',
+    minConfidence: decl.minConfidence ?? DEFAULT_DECISION_POLICY.minConfidence,
+    confirmThreshold: decl.confirmThreshold ?? DEFAULT_DECISION_POLICY.confirmThreshold,
+    hardDeadlineMs: decl.hardDeadlineMs ?? DEFAULT_DECISION_POLICY.hardDeadlineMs,
+    maxAttempts: decl.maxAttempts ?? DEFAULT_DECISION_POLICY.maxAttempts,
+    fallbackRole: DEFAULT_DECISION_POLICY.fallbackRole,
+    onFallbackUnavailable: DEFAULT_DECISION_POLICY.onFallbackUnavailable,
+    provider,
+    endpoint: defaults.endpoint,
+    model: defaults.model,
+    startluxOptions: null,
+    allowImages: decl.allowImages ?? false,
+  });
+
+  const resolvedApiKey = options?.apiKey ?? DECISION_PROVIDER_API_KEY_ENV[provider]
+    .map(envName => env[envName]?.trim())
+    .find((val): val is string => typeof val === 'string' && val.length > 0);
+  if (resolvedApiKey !== undefined && resolvedApiKey.length > 0) {
+    options?.scrubber?.register(resolvedApiKey);
+  }
+  const budget = new DecisionBudgetTracker();
+  const transport = options?.transport ?? new HttpDecisionTransport();
+  const decisionScrubber: DecisionScrubber | undefined = options?.scrubber !== undefined
+    ? { scrub: text => options.scrubber!.scrub(text) }
+    : undefined;
+  const triageRules = decl.triageRules;
+  const rethrowFatalDecisionError = (error: unknown): void => {
+    if (error instanceof DecisionError && (error.authorityViolation === true || error.code === 'DECISION_POLICY_INVALID')) {
+      throw error;
+    }
+  };
+
+  return Object.freeze<AdvisoryDecisionPort>({
+    routeCapabilityTier: async input => {
+      const task = {
+        taskId: input.stepId,
+        taskKind: input.taskKind,
+        estimatedFilesCount: input.estimatedFilesCount,
+        hasFailingTests: input.hasFailingTests,
+        requiresArchitectureChange: input.requiresArchitectureChange,
+        candidateSkills: input.candidateSkills,
+        ...(options?.hasPinnedRoles === true ? { pinnedRole: input.roleId } : {}),
+      };
+      try {
+        const res = await routeTaskCapability({
+          policy,
+          state: {
+            runId: input.runId,
+            stepId: input.stepId,
+            roleId: input.roleId,
+            taskKind: input.taskKind,
+            estimatedFilesCount: input.estimatedFilesCount,
+            hasFailingTests: input.hasFailingTests,
+            requiresArchitectureChange: input.requiresArchitectureChange,
+          },
+          budget,
+          ...(decisionScrubber !== undefined ? { scrubber: decisionScrubber } : {}),
+          transport,
+          ...(resolvedApiKey !== undefined ? { apiKey: resolvedApiKey } : {}),
+          task,
+        });
+        return {
+          tier: res.tier,
+          skills: res.skills,
+          source: res.source,
+          zone: res.zone,
+        };
+      } catch (error) {
+        rethrowFatalDecisionError(error);
+        return {
+          tier: heuristicCapabilityTier(task),
+          skills: [],
+          source: 'deterministic_fallback',
+          zone: null,
+        };
+      }
+    },
+    evaluateCycleAlignment: async input => {
+      try {
+        const res = await evaluateCycleAlignment({
+          policy,
+          state: {
+            runId: input.runId,
+            trigger: input.trigger,
+            targetStepId: input.targetStepId,
+            reworkEpoch: input.reworkEpoch,
+            remainingAttempts: input.remainingAttempts,
+            contextUtilization: input.contextUtilization,
+            failedVerificationLoops: input.failedVerificationLoops,
+          },
+          budget,
+          ...(decisionScrubber !== undefined ? { scrubber: decisionScrubber } : {}),
+          transport,
+          ...(resolvedApiKey !== undefined ? { apiKey: resolvedApiKey } : {}),
+          cycle: {
+            contractHash: input.contractHash,
+            expectedContractHash: input.contractHash,
+            baseRevision: input.baseRevision,
+            expectedBaseRevision: input.baseRevision,
+            leaseEpoch: '1',
+            expectedLeaseEpoch: '1',
+            leaseExpired: false,
+            writableScopeViolations: [],
+            remainingBudgetUsd: 1,
+            remainingCycles: input.remainingAttempts,
+            contextUtilization: input.contextUtilization,
+            failedVerificationLoops: input.failedVerificationLoops,
+          },
+        });
+        return {
+          route: res.route,
+          precheckPassed: res.precheckPassed,
+          source: res.source,
+          zone: res.zone,
+        };
+      } catch (error) {
+        rethrowFatalDecisionError(error);
+        return {
+          route: 'continue',
+          precheckPassed: true,
+          source: 'deterministic_fallback',
+          zone: null,
+        };
+      }
+    },
+    adviseSoftCompaction: async input => {
+      try {
+        const res = await evaluateSoftCompactionAdvisory({
+          policy,
+          state: {
+            runId: input.runId,
+            stepId: input.stepId,
+            roleId: input.roleId,
+            contextUtilization: input.contextUtilization,
+            failedVerificationLoops: input.failedVerificationLoops,
+          },
+          budget,
+          ...(decisionScrubber !== undefined ? { scrubber: decisionScrubber } : {}),
+          transport,
+          ...(resolvedApiKey !== undefined ? { apiKey: resolvedApiKey } : {}),
+          compaction: {
+            contextUtilization: input.contextUtilization,
+            failedVerificationLoops: input.failedVerificationLoops,
+          },
+        });
+        return {
+          advisoryDecision: res.advisoryDecision,
+          hardTriggerActive: res.hardTriggerActive,
+          hardTriggerVetoRefused: res.hardTriggerVetoRefused,
+          source: res.source,
+          zone: res.zone,
+        };
+      } catch (error) {
+        rethrowFatalDecisionError(error);
+        if (input.contextUtilization >= 0.8 || input.failedVerificationLoops >= 2) {
+          return {
+            advisoryDecision: 'compact',
+            hardTriggerActive: true,
+            hardTriggerVetoRefused: true,
+            source: 'deterministic_fallback',
+            zone: null,
+          };
+        }
+        if (input.contextUtilization < 0.6) {
+          return {
+            advisoryDecision: null,
+            hardTriggerActive: false,
+            hardTriggerVetoRefused: false,
+            source: 'deterministic_fallback',
+            zone: null,
+          };
+        }
+        return {
+          advisoryDecision: 'defer',
+          hardTriggerActive: false,
+          hardTriggerVetoRefused: false,
+          source: 'deterministic_fallback',
+          zone: null,
+        };
+      }
+    },
+    triageCandidateDiff: async input => {
+      if (triageRules === undefined || triageRules.length === 0) {
+        return null;
+      }
+      try {
+        const res = await triageCandidateDiff({
+          policy,
+          state: {
+            runId: input.runId,
+            stepId: input.stepId,
+            attemptId: input.attemptId,
+            summary: input.summary,
+          },
+          budget,
+          ...(decisionScrubber !== undefined ? { scrubber: decisionScrubber } : {}),
+          transport,
+          ...(resolvedApiKey !== undefined ? { apiKey: resolvedApiKey } : {}),
+          diff: {
+            summary: input.summary,
+            rules: triageRules.map(r => ({
+              id: r.id,
+              description: r.description,
+              severity: r.severity,
+              kind: r.kind,
+              ...(r.threshold !== undefined ? { threshold: r.threshold } : {}),
+            })),
+          },
+        });
+        return {
+          escalated: res.escalated,
+          verificationCertified: false,
+          source: res.source,
+          zone: res.zone,
+        };
+      } catch (error) {
+        rethrowFatalDecisionError(error);
+        return {
+          escalated: [],
+          verificationCertified: false,
+          source: 'deterministic_fallback',
+          zone: null,
+        };
+      }
+    },
+  });
 }
 
 function systemSample(): ClockSample {
@@ -241,6 +514,34 @@ function resolveExternalMcpConfigs(options: {
  * Serialize `ActionEntrypointResult` into a compact, human-readable JSON summary
  * guaranteed never to contain `Buffer` / `Uint8Array` byte-number dumps.
  */
+function summarizeWrittenTaskpack(
+  taskpack: WrittenCompiledTaskpack,
+  manifest?: TaskpackManifest,
+) {
+  return {
+    name: manifest?.metadata.name ?? taskpack.config.spec.task.spec.taskpack,
+    manifestPath: manifest?.manifestPath ?? '.loopwright/taskpack.yaml',
+    trustedDirectory: taskpack.trustedDirectory,
+    registryPath: taskpack.registryPath,
+    configPath: taskpack.configPath,
+    registrySha256: taskpack.registrySha256,
+    registryByteLength: taskpack.registryBytes.byteLength,
+    configByteLength: taskpack.configBytes.byteLength,
+    instructionResources: (taskpack.instructionResources ?? []).map(resource => ({
+      id: resource.id,
+      path: resource.path,
+      byteLength: resource.bytes.byteLength,
+      sha256: resource.digest.hex,
+    })),
+    localCommandChecks: (taskpack.localCommandGates ?? []).map(gate => ({
+      checkId: gate.checkId,
+      script: gate.script,
+      timeoutSeconds: gate.timeoutSeconds,
+    })),
+    ...(taskpack.activeMemory !== undefined ? { activeMemory: taskpack.activeMemory } : {}),
+  };
+}
+
 export function serializeActionResultSummary(
   result: ActionEntrypointResult,
   scrubber: SecretScrubber,
@@ -248,33 +549,19 @@ export function serializeActionResultSummary(
   const payload = result.kind === 'compiled'
     ? {
       kind: 'compiled' as const,
-      taskpack: {
-        name: result.manifest.metadata.name,
-        manifestPath: result.manifest.manifestPath ?? '.loopwright/taskpack.yaml',
-        trustedDirectory: result.taskpack.trustedDirectory,
-        registryPath: result.taskpack.registryPath,
-        configPath: result.taskpack.configPath,
-        registrySha256: result.taskpack.registrySha256,
-        registryByteLength: result.taskpack.registryBytes.byteLength,
-        configByteLength: result.taskpack.configBytes.byteLength,
-        instructionResources: (result.taskpack.instructionResources ?? []).map(resource => ({
-          id: resource.id,
-          path: resource.path,
-          byteLength: resource.bytes.byteLength,
-          sha256: resource.digest.hex,
-        })),
-        localCommandChecks: (result.taskpack.localCommandGates ?? []).map(gate => ({
-          checkId: gate.checkId,
-          script: gate.script,
-          timeoutSeconds: gate.timeoutSeconds,
-        })),
-        ...(result.taskpack.activeMemory !== undefined ? { activeMemory: result.taskpack.activeMemory } : {}),
-      },
+      taskpack: summarizeWrittenTaskpack(result.taskpack, result.manifest),
       intake: result.intake,
       delegateOutcome: result.delegateOutcome,
       ...(result.memory !== undefined ? { memory: result.memory } : {}),
     }
-    : result;
+    : result.kind === 'no_change'
+      ? {
+        kind: 'no_change' as const,
+        reason: result.reason,
+        ...(result.taskpack !== undefined ? { taskpack: summarizeWrittenTaskpack(result.taskpack) } : {}),
+        ...(result.delegateOutcome !== undefined ? { delegateOutcome: result.delegateOutcome } : {}),
+      }
+      : result;
 
   const safeJson = JSON.stringify(payload, (_key, value: unknown) => {
     if (Buffer.isBuffer(value) || value instanceof Uint8Array || ArrayBuffer.isView(value)) {
@@ -590,13 +877,31 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     };
   }
 
+  const hostPolicy: ExecutionHostPolicy = Object.freeze({
+    allowPrivileged: input.hostPolicy?.allowPrivileged
+      ?? input.allowPrivilegedExecution
+      ?? (runtimeEnv['INPUT_ALLOW-PRIVILEGED-EXECUTION'] === 'true'),
+    allowWorkflowWrites: input.hostPolicy?.allowWorkflowWrites
+      ?? input.allowWorkflowWrites
+      ?? (runtimeEnv['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true'),
+  });
+
   const manifestPath = join(input.repositoryRoot, input.taskpackPath ?? '.loopwright/taskpack.yaml');
   let manifest: TaskpackManifest;
   try {
-    manifest = await loadDeclarativeTaskpack({ manifestPath, repositoryRoot: input.repositoryRoot });
+    manifest = await loadDeclarativeTaskpack({
+      manifestPath,
+      repositoryRoot: input.repositoryRoot,
+      hostPolicy,
+    });
   } catch (error) {
     if (error instanceof GitHubAppError) {
-      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED' || error.code === 'MCP_OAUTH_UNSUPPORTED') {
+      if (
+        error.code === 'PROVIDER_OAUTH_UNSUPPORTED'
+        || error.code === 'MCP_OAUTH_UNSUPPORTED'
+        || error.code === 'TASKPACK_HOST_BINDING_INVALID'
+        || (error.code === 'TASKPACK_SCOPE_VIOLATION' && error.path?.startsWith('/spec/execution') === true)
+      ) {
         return { kind: 'refused', code: error.code, reason: error.message };
       }
       return blocked('target repository manifest failed validation', 'loadDeclarativeTaskpack refused the manifest');
@@ -623,6 +928,62 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
 
   resolveActionOutputFormats(input.output, manifest);
 
+  // Register known host secrets onto turnkeyScrubber BEFORE any preflight script or external call runs.
+  const manifestSecretEnvs = collectManifestSecretEnvNames(manifest);
+  const decisionApiKeyEnvs = Object.values(DECISION_PROVIDER_API_KEY_ENV).flat();
+  for (const secretEnvKey of [
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'INPUT_GITHUB-TOKEN',
+    'INPUT_GITHUB-APP-PRIVATE-KEY',
+    input.providerTokenEnv,
+    input.credentialEnvMap?.provider,
+    input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET',
+    input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+    input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+    input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
+    ...Object.values(STANDARD_PI_PROVIDER_ENV),
+    ...decisionApiKeyEnvs,
+    ...manifestSecretEnvs,
+    ...collectMcpReferencedEnvNames(effectiveMcpDecls),
+  ]) {
+    if (typeof secretEnvKey === 'string' && secretEnvKey.length > 0) {
+      const val = runtimeEnv[secretEnvKey];
+      if (typeof val === 'string' && val.trim().length > 0) {
+        turnkeyScrubber.register(val.trim());
+      }
+    }
+  }
+  if (typeof input.decisionApiKey === 'string' && input.decisionApiKey.trim().length > 0) {
+    turnkeyScrubber.register(input.decisionApiKey.trim());
+  }
+  if (typeof input.githubToken === 'string' && input.githubToken.trim().length > 0) {
+    turnkeyScrubber.register(input.githubToken.trim());
+  }
+  if (typeof input.githubAppPrivateKey === 'string' && input.githubAppPrivateKey.trim().length > 0) {
+    turnkeyScrubber.register(input.githubAppPrivateKey.trim());
+  }
+
+  // Enforce event and comment/review actor authorization BEFORE running spec.preflight!
+  let preEvaluatedComment: ReturnType<typeof evaluateCommentPayload> | undefined;
+  if (!eventNameIsTrigger(input.eventName) && input.eventName !== 'issue_comment' && input.eventName !== 'pull_request_review') {
+    return blocked(`unsupported event ${input.eventName}`);
+  }
+  if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
+    preEvaluatedComment = evaluateCommentPayload(input.eventPayload, {
+      eventName: input.eventName,
+      commentPrefixes: input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes,
+      commentCommands: manifest.spec.triggers.commentCommands,
+      operatorAllowlist: input.operatorAllowlist,
+    });
+    if ('ignoredReason' in preEvaluatedComment) {
+      return blocked(`comment ignored: ${preEvaluatedComment.ignoredReason}`);
+    }
+    if ('blockedReason' in preEvaluatedComment) {
+      return blocked(preEvaluatedComment.blockedReason, preEvaluatedComment.detail);
+    }
+  }
+
   const turnkeyEnabled = input.turnkey === true && input.dryRun !== true;
   let effectiveRepositoryId = input.repositoryId ?? 0;
   let effectiveInstallationId = input.installationId ?? 0;
@@ -638,164 +999,90 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   let openManagedPr: ManagedPullRequestInfo | null = null;
   let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
   const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim();
-  let preEvaluatedComment: ReturnType<typeof evaluateCommentPayload> | undefined;
+  let preflightResult: RunTaskpackPreflightResult | undefined;
 
-  if (turnkeyEnabled) {
-    try {
-      const effectivePolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
-        workspaceRoot: input.repositoryRoot,
-        relativeTaskpackPath: input.taskpackPath,
-        env: runtimeEnv,
-      });
-      const negotiated = negotiateSandboxBackend(effectivePolicy, {
-        platform: process.platform,
-        arch: process.arch,
-      });
-      if (input.delegate === undefined && negotiated.backendId === 'docker') {
-        return blocked(
-          'SANDBOX_POLICY_INVALID',
-          'turnkey host-session mode runs without Docker; docker sandbox backend cannot be used when delegate is unset',
-        );
-      }
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        return blocked(error.code, error.message);
-      }
-      throw error;
-    }
-
-    try {
-      const resolvedAuth = await resolveGitHubAuth({
-        apiBaseUrl: effectiveApiBaseUrl,
-        repositoryFullName: input.repositoryFullName,
-        repositoryId: effectiveRepositoryId > 0 ? effectiveRepositoryId : undefined,
-        githubToken: input.githubToken,
-        appId: input.githubAppId,
-        appPrivateKey: input.githubAppPrivateKey,
-        appInstallationId: input.githubAppInstallationId,
-        gitAuthorName: explicitGitAuthorName,
-        gitAuthorEmail: explicitGitAuthorEmail,
-        fetchImpl: input.probeFetch,
-        scrubber: turnkeyScrubber,
-        env: runtimeEnv,
-      });
-      githubToken = resolvedAuth.token;
-      gitCommitIdentity = resolvedAuth.gitCommitIdentity;
-      if (effectiveInstallationId <= 0 && resolvedAuth.installationId !== undefined) {
-        effectiveInstallationId = resolvedAuth.installationId;
-      }
-      if (input.eventName === 'issue_comment') {
-        preEvaluatedComment = evaluateCommentPayload(input.eventPayload, {
-          eventName: input.eventName,
-          commentPrefixes: input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes,
-          commentCommands: manifest.spec.triggers.commentCommands,
-          operatorAllowlist: input.operatorAllowlist,
-        });
-      }
-      const commentCommand = preEvaluatedComment !== undefined
-        && !('ignoredReason' in preEvaluatedComment)
-        && !('blockedReason' in preEvaluatedComment)
-        ? preEvaluatedComment.command
-        : undefined;
-      const preserveExplicitSourceRevision = shouldPreserveExplicitSourceRevision({
-        eventName: input.eventName,
-        explicitSourceRevision,
-        commentCommand,
-      });
-      const resolvedRepo = await resolveRepositoryAndRevisions({
-        repositoryRoot: input.repositoryRoot,
-        repositoryFullName: input.repositoryFullName,
-        baseRevision: effectiveBaseRevision,
-        sourceRevision: explicitSourceRevision,
-        preserveExplicitSourceRevision,
-        eventName: input.eventName,
-        eventPayload: input.eventPayload,
-        apiBaseUrl: effectiveApiBaseUrl,
-        githubToken,
-        fetchImpl: input.probeFetch,
-        scrubber: turnkeyScrubber,
-        env: runtimeEnv,
-      });
-      effectiveRepositoryId = input.repositoryId !== undefined && input.repositoryId > 0
-        ? input.repositoryId
-        : resolvedRepo.repositoryId;
-      effectiveBaseRevision = resolvedRepo.baseRevision;
-      effectiveSourceRevision = resolvedRepo.sourceRevision;
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        return blocked(error.code, turnkeyScrubber.scrub(error.message));
-      }
-      throw error;
-    }
-
-    if (
-      effectiveUpstreamRecords === undefined
-      && (input.upstreamRecordsJson !== undefined || manifest.spec.upstreams.length > 0)
-    ) {
+  try {
+    if (turnkeyEnabled) {
       try {
-        effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
-          repositoryRoot: input.repositoryRoot,
-          apiBaseUrl: effectiveApiBaseUrl,
-          githubToken,
-          upstreamRecordsJson: input.upstreamRecordsJson,
-          fetchImpl: input.probeFetch,
-          scrubber: turnkeyScrubber,
+        const effectivePolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+          workspaceRoot: input.repositoryRoot,
+          relativeTaskpackPath: input.taskpackPath,
           env: runtimeEnv,
+          hostPolicy,
         });
+        const negotiated = negotiateSandboxBackend(effectivePolicy, {
+          platform: process.platform,
+          arch: process.arch,
+        });
+        if (input.delegate === undefined && negotiated.backendId === 'docker') {
+          return blocked(
+            'SANDBOX_POLICY_INVALID',
+            'turnkey host-session mode runs without Docker; docker sandbox backend cannot be used when delegate is unset',
+          );
+        }
       } catch (error) {
         if (error instanceof GitHubAppError) {
-          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+          return blocked(error.code, error.message);
         }
         throw error;
       }
-    }
 
-    if (
-      manifest.spec.publication.mode === 'pull_request'
-      && input.publicationEndpoint === undefined
-      && input.mode === 'candidate'
-      && (effectiveApiBaseUrl !== undefined || githubToken !== undefined)
-    ) {
       try {
-        openManagedPr = await findOpenManagedPullRequest({
+        const resolvedAuth = await resolveGitHubAuth({
           apiBaseUrl: effectiveApiBaseUrl,
           repositoryFullName: input.repositoryFullName,
-          targetBranch: manifest.spec.publication.targetBranch,
-          headBranchPrefix: manifest.spec.publication.headBranchPrefix,
+          repositoryId: effectiveRepositoryId > 0 ? effectiveRepositoryId : undefined,
+          githubToken: input.githubToken,
+          appId: input.githubAppId,
+          appPrivateKey: input.githubAppPrivateKey,
+          appInstallationId: input.githubAppInstallationId,
+          gitAuthorName: explicitGitAuthorName,
+          gitAuthorEmail: explicitGitAuthorEmail,
+          fetchImpl: input.probeFetch,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+        });
+        githubToken = resolvedAuth.token;
+        gitCommitIdentity = resolvedAuth.gitCommitIdentity;
+        if (effectiveInstallationId <= 0 && resolvedAuth.installationId !== undefined) {
+          effectiveInstallationId = resolvedAuth.installationId;
+        }
+        const commentCommand = preEvaluatedComment !== undefined
+          && !('ignoredReason' in preEvaluatedComment)
+          && !('blockedReason' in preEvaluatedComment)
+          ? preEvaluatedComment.command
+          : undefined;
+        const preserveExplicitSourceRevision = shouldPreserveExplicitSourceRevision({
+          eventName: input.eventName,
+          explicitSourceRevision,
+          commentCommand,
+        });
+        const resolvedRepo = await resolveRepositoryAndRevisions({
+          repositoryRoot: input.repositoryRoot,
+          repositoryFullName: input.repositoryFullName,
+          baseRevision: effectiveBaseRevision,
+          sourceRevision: explicitSourceRevision,
+          preserveExplicitSourceRevision,
+          eventName: input.eventName,
+          eventPayload: input.eventPayload,
+          apiBaseUrl: effectiveApiBaseUrl,
           githubToken,
           fetchImpl: input.probeFetch,
           scrubber: turnkeyScrubber,
           env: runtimeEnv,
         });
+        effectiveRepositoryId = input.repositoryId !== undefined && input.repositoryId > 0
+          ? input.repositoryId
+          : resolvedRepo.repositoryId;
+        effectiveBaseRevision = resolvedRepo.baseRevision;
+        effectiveSourceRevision = resolvedRepo.sourceRevision;
       } catch (error) {
         if (error instanceof GitHubAppError) {
           return blocked(error.code, turnkeyScrubber.scrub(error.message));
         }
         throw error;
       }
-    }
-
-    if (
-      managedPrMatchesDiscoveredState === undefined
-      && openManagedPr !== null
-      && effectiveUpstreamRecords !== undefined
-      && effectiveUpstreamRecords.length > 0
-    ) {
-      managedPrMatchesDiscoveredState = await checkManagedPrMatchesDiscoveredState({
-        repositoryRoot: input.repositoryRoot,
-        repositoryFullName: input.repositoryFullName,
-        manifest,
-        openManagedPr,
-        records: effectiveUpstreamRecords,
-        apiBaseUrl: effectiveApiBaseUrl,
-        githubToken,
-        fetchImpl: input.probeFetch,
-        scrubber: turnkeyScrubber,
-        env: runtimeEnv,
-      });
-    }
-  } else {
-    if (explicitSourceRevision !== undefined && existsSync(join(input.repositoryRoot, '.git'))) {
+    } else if (explicitSourceRevision !== undefined && existsSync(join(input.repositoryRoot, '.git'))) {
       try {
         effectiveBaseRevision = await resolveGitCommitSha(input.repositoryRoot, effectiveBaseRevision);
         effectiveSourceRevision = explicitSourceRevision === input.baseRevision
@@ -808,14 +1095,120 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         throw error;
       }
     }
-    if (input.upstreamRecords === undefined && input.upstreamRecordsJson !== undefined) {
+
+    const isStatusComment = preEvaluatedComment !== undefined
+      && !('ignoredReason' in preEvaluatedComment)
+      && !('blockedReason' in preEvaluatedComment)
+      && preEvaluatedComment.command === 'status';
+
+    if (manifest.spec.preflight !== undefined && !isStatusComment) {
       try {
-        effectiveUpstreamRecords = await discoverTaskpackUpstreams(manifest, {
+        preflightResult = await runTaskpackPreflight({
+          manifest,
+          repositoryRoot: input.repositoryRoot,
+          authorized: true,
+          hostPolicy,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+          tempRoot: input.runRoot,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (
+            error.code === 'TASKPACK_HOST_BINDING_INVALID'
+            || (error.code === 'TASKPACK_SCOPE_VIOLATION' && error.path?.startsWith('/spec/execution') === true)
+          ) {
+            return { kind: 'refused', code: error.code, reason: turnkeyScrubber.scrub(error.message) };
+          }
+          return blocked(error.code, turnkeyScrubber.scrub(error.message));
+        }
+        throw error;
+      }
+      if (preflightResult.disposition === 'blocked') {
+        return blocked('preflight blocked execution', preflightResult.reason ?? 'preflight returned disposition=blocked');
+      }
+      if (effectiveUpstreamRecords === undefined && preflightResult.upstreams.length > 0) {
+        effectiveUpstreamRecords = preflightResult.upstreams;
+      }
+    }
+
+    if (turnkeyEnabled) {
+      if (
+        effectiveUpstreamRecords === undefined
+        && (input.upstreamRecordsJson !== undefined || (manifest.spec.preflight === undefined && manifest.spec.upstreams.length > 0))
+      ) {
+        try {
+          const discovered = await discoverTaskpackUpstreamsV2(manifest, {
+            repositoryRoot: input.repositoryRoot,
+            apiBaseUrl: effectiveApiBaseUrl,
+            githubToken,
+            upstreamRecordsJson: input.upstreamRecordsJson,
+            fetchImpl: input.probeFetch,
+            scrubber: turnkeyScrubber,
+            env: runtimeEnv,
+          });
+          effectiveUpstreamRecords = discovered.records;
+        } catch (error) {
+          if (error instanceof GitHubAppError) {
+            return blocked(error.code, turnkeyScrubber.scrub(error.message));
+          }
+          throw error;
+        }
+      }
+
+      if (
+        manifest.spec.publication.mode === 'pull_request'
+        && input.publicationEndpoint === undefined
+        && (input.mode === 'candidate' || input.mode === 'auto')
+        && (effectiveApiBaseUrl !== undefined || githubToken !== undefined)
+      ) {
+        try {
+          openManagedPr = await findOpenManagedPullRequest({
+            apiBaseUrl: effectiveApiBaseUrl,
+            repositoryFullName: input.repositoryFullName,
+            targetBranch: manifest.spec.publication.targetBranch,
+            headBranchPrefix: manifest.spec.publication.headBranchPrefix,
+            githubToken,
+            fetchImpl: input.probeFetch,
+            scrubber: turnkeyScrubber,
+            env: runtimeEnv,
+          });
+        } catch (error) {
+          if (error instanceof GitHubAppError) {
+            return blocked(error.code, turnkeyScrubber.scrub(error.message));
+          }
+          throw error;
+        }
+      }
+
+      if (
+        managedPrMatchesDiscoveredState === undefined
+        && openManagedPr !== null
+        && effectiveUpstreamRecords !== undefined
+        && effectiveUpstreamRecords.length > 0
+      ) {
+        managedPrMatchesDiscoveredState = await checkManagedPrMatchesDiscoveredState({
+          repositoryRoot: input.repositoryRoot,
+          repositoryFullName: input.repositoryFullName,
+          manifest,
+          openManagedPr,
+          records: effectiveUpstreamRecords,
+          apiBaseUrl: effectiveApiBaseUrl,
+          githubToken,
+          fetchImpl: input.probeFetch,
+          scrubber: turnkeyScrubber,
+          env: runtimeEnv,
+        });
+      }
+    } else if (input.upstreamRecords === undefined && input.upstreamRecordsJson !== undefined) {
+      try {
+        const discovered = await discoverTaskpackUpstreamsV2(manifest, {
           repositoryRoot: input.repositoryRoot,
           upstreamRecordsJson: input.upstreamRecordsJson,
           scrubber: turnkeyScrubber,
           env: runtimeEnv,
         });
+        effectiveUpstreamRecords = discovered.records;
       } catch (error) {
         if (error instanceof GitHubAppError) {
           return blocked(error.code, turnkeyScrubber.scrub(error.message));
@@ -823,674 +1216,914 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         throw error;
       }
     }
-  }
 
-  if (effectiveUpstreamRecords !== undefined && effectiveUpstreamRecords.length > 0) {
-    emitProgress?.(
-      `upstreams: ${effectiveUpstreamRecords.map(r => `${r.upstreamId}=${r.status}${r.version ? `(${r.version})` : ''}`).join(', ')}`,
-    );
-  }
-
-  const tenant = {
-    installationId: effectiveInstallationId,
-    repositoryId: effectiveRepositoryId,
-    repositoryFullName: input.repositoryFullName,
-    taskpackId: manifest.metadata.name,
-  };
-  let intake: TaskpackIntakeOutcome;
-  let reviseGuidance: string | undefined;
-  const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true && input.mode === 'candidate';
-  const runDiscoverIntake = (allowForce: boolean, bypassManagedPrDedupe = false) => {
-    const outcome = prepareTaskpackIntake({
-      mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
-      records: effectiveUpstreamRecords ?? [],
-      ...(allowForce ? { force: true } : {}),
-      ...(!bypassManagedPrDedupe && managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
-      targetMatrix: input.targetMatrix ?? null,
-    });
-    if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
-      emitProgress?.(`intake: no_change (${outcome.reason})`);
-      return { ok: false as const, exit: { kind: 'no_change' as const, reason: outcome.reason } };
+    if (effectiveUpstreamRecords !== undefined && effectiveUpstreamRecords.length > 0) {
+      emitProgress?.(
+        `upstreams: ${effectiveUpstreamRecords.map(r => `${r.upstreamId}=${r.status}${r.version ? `(${r.version})` : ''}`).join(', ')}`,
+      );
     }
-    if (outcome.kind === 'discover' && outcome.disposition === 'blocked') {
-      return {
-        ok: false as const,
-        exit: blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; ')),
-      };
-    }
-    return { ok: true as const, intake: outcome };
-  };
-  if (eventNameIsTrigger(input.eventName)) {
-    const discovered = runDiscoverIntake(forceDiscovery);
-    if (!discovered.ok) return discovered.exit;
-    intake = discovered.intake;
-  } else if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
-    const evaluation = preEvaluatedComment ?? evaluateCommentPayload(input.eventPayload, {
-      eventName: input.eventName,
-      commentPrefixes: input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes,
-      commentCommands: manifest.spec.triggers.commentCommands,
-      operatorAllowlist: input.operatorAllowlist,
-    });
-    if ('ignoredReason' in evaluation) return blocked(`comment ignored: ${evaluation.ignoredReason}`);
-    if ('blockedReason' in evaluation) return blocked(evaluation.blockedReason, evaluation.detail);
-    const commandDigest = createHash('sha256').update(evaluation.guidance, 'utf8').digest('hex');
-    if (evaluation.command === 'status') {
-      intake = { kind: 'status', disposition: 'ready', summary: `status query admitted for ${input.repositoryFullName}/${manifest.metadata.name}` };
-    } else if (evaluation.command === 'revise') {
-      const boundHeadSha = evaluation.headSha.startsWith('pr-') && COMMIT_SHA_PATTERN.test(effectiveSourceRevision)
-        ? effectiveSourceRevision
-        : evaluation.headSha;
-      const reviseInput = {
-        mode: 'revise' as const, tenant,
-        command: { commandId: evaluation.commandId, headSha: boundHeadSha, commandDigest },
-        actorLogin: evaluation.login, authorAssociation: evaluation.authorAssociation,
-        guidance: evaluation.guidance,
-        ...(input.operatorAllowlist !== undefined ? { operatorAllowlist: input.operatorAllowlist } : {}),
-      };
-      const outcome = prepareTaskpackIntake(reviseInput);
-      if (outcome.kind === 'revise' && outcome.disposition === 'blocked') return blocked(`revise command rejected: ${outcome.reason}`, outcome.detail);
-      reviseGuidance = evaluation.guidance;
-      intake = outcome;
-    } else {
-      // PR comment commands follow comment-command dispatch semantics; force applies only to non-comment trigger events.
-      // Explicit operator `retry` comments bypass open-PR deduplication while still settling `no_change` if no updates are available.
-      const discovered = runDiscoverIntake(false, true);
-      if (!discovered.ok) return discovered.exit;
-      if (evaluation.guidance.trim().length > 0) {
-        reviseGuidance = evaluation.guidance;
-      }
-      intake = discovered.intake;
-    }
-  } else {
-    return blocked(`unsupported event ${input.eventName}`);
-  }
 
-  emitProgress?.(
-    `intake: taskpack=${manifest.metadata.name} mode=${input.mode} repo=${input.repositoryFullName} base=${effectiveBaseRevision.slice(0, 12)} kind=${intake.kind}`,
-  );
-
-  let modelsConfig: ParsedPiModelsJson | undefined;
-  if (input.modelsJsonPath !== undefined) {
-    try {
-      modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
-          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
-        }
-        return blocked(error.code, error.message);
-      }
-      throw error;
-    }
-  }
-
-  const scrubber = turnkeyScrubber;
-  const gateEnvName = input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET';
-  const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
-  const publicationAuthEnvName = input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
-  const localCmdGateEnvName = input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
-  if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
-  if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
-  if (typeof runtimeEnv[publicationAuthEnvName] === 'string') scrubber.register(runtimeEnv[publicationAuthEnvName]!);
-  if (typeof runtimeEnv[localCmdGateEnvName] === 'string') scrubber.register(runtimeEnv[localCmdGateEnvName]!);
-
-  const hasHostRoleOverrides = input.provider !== undefined
-    || input.model !== undefined
-    || input.thinking !== undefined
-    || input.api !== undefined
-    || input.baseUrl !== undefined;
-  const roleSelection: HostRoleSelection | undefined = hasHostRoleOverrides
-    ? {
-      provider: input.provider,
-      model: input.model,
-      thinking: input.thinking,
-      api: input.api,
-      baseUrl: input.baseUrl,
-    }
-    : undefined;
-
-  const needsNativePublicationEndpoint = manifest.spec.publication.mode === 'pull_request'
-    && input.publicationEndpoint === undefined
-    && input.mode === 'candidate';
-  const DRY_RUN_PUBLICATION_SENTINEL_URL = 'http://127.0.0.1:65535/loopwright-dry-run-publication';
-
-  let activeGateEndpoints: readonly HostGateEndpointPlan[] = input.gateEndpoints ?? [];
-  let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? (
-    input.dryRun === true && needsNativePublicationEndpoint
-      ? {
-        id: 'dry-run-publication',
-        url: DRY_RUN_PUBLICATION_SENTINEL_URL,
-        signingCredentialRef: 'taskpack-publication-signing',
-      }
-      : null
-  );
-  let mcpRegistry: HostMcpRegistry | undefined;
-
-  let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined
-    ? [input.providerTokenEnv]
-    : [];
-  const loggedMemoryWarnings = new Set<string>();
-  const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => {
-    const externalMcpTools = mcpRegistry !== undefined && mcpRegistry.toolNames.length > 0
-      ? mcpRegistry.toolNames
-      : undefined;
-    const externalMcpToolSchemas = mcpRegistry !== undefined && externalMcpTools !== undefined
-      ? mcpRegistry.toolSchemasFor(externalMcpTools)
-      : undefined;
-    const acceptanceCheckIds = [
-      ...manifest.spec.verification.localChecks.map(c => c.id),
-      ...manifest.spec.verification.externalGates.map(g => g.id),
-    ];
-    const authorPrompt = input.authorPrompt ?? buildDefaultAuthorPrompt({
-      mode: input.mode,
+    const tenant = {
+      installationId: effectiveInstallationId,
+      repositoryId: effectiveRepositoryId,
       repositoryFullName: input.repositoryFullName,
-      upstreamRecords: effectiveUpstreamRecords,
-      openManagedPr,
-      reviseGuidance,
-      externalMcpTools,
-      acceptanceCheckIds,
-      runtimeEnv,
-      scrubber,
-    });
-    return {
-      mode: input.mode,
-      repository: input.repositoryFullName,
-      repositoryRoot: input.repositoryRoot,
-      taskpackPath: input.taskpackPath,
-      baseRevision: effectiveBaseRevision,
-      sourceRevision: effectiveSourceRevision,
-      upstreamRecords: effectiveUpstreamRecords,
-      targetMatrix: input.targetMatrix ?? null,
-      roleSelection,
-      ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
-      allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
-      modelsJsonPath: input.modelsJsonPath,
-      runtimeOptions: {},
-      budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
-      limits: explicitLimitsOverride,
-      envLimits: envLimitsFallback,
-      ...(externalMcpTools !== undefined ? { externalMcpTools } : {}),
-      ...(externalMcpToolSchemas !== undefined ? { externalMcpToolSchemas } : {}),
-      gateEndpoints: activeGateEndpoints,
-      publicationEndpoint: activePublicationEndpoint,
-      credentialEnvMap: {
-        provider: candidate !== undefined
-          ? (input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
-            ? input.credentialEnvMap.provider
-            : candidate.providerEnvName)
-          : (input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN'),
-        gate: gateEnvName,
-        publication: publicationEnvName,
-        publicationAuth: publicationAuthEnvName,
-        localCommandGate: localCmdGateEnvName,
-      },
-      ...(trackedSourceTokenEnvNames.length > 0 ? { sourceTokenEnvNames: trackedSourceTokenEnvNames } : {}),
-      resourceVersion: input.resourceVersion,
-      authorPrompt,
-      scrubber,
-      onMemoryWarning: message => {
-        if (!loggedMemoryWarnings.has(message)) {
-          loggedMemoryWarnings.add(message);
-          emitProgress?.(`memory: ${message}`);
-        }
-      },
+      taskpackId: manifest.metadata.name,
     };
-  };
-
-  const roleProviderEnvNames: string[] = [];
-  if (manifest.spec.roles !== undefined && manifest.spec.roles.length > 0) {
-    try {
-      for (const [roleIdx, role] of manifest.spec.roles.entries()) {
-        const normalizedProvider = role.provider.trim().toLowerCase();
-        if (isOAuthOnlyPiProvider(normalizedProvider) || normalizedProvider === 'antigravity' || normalizedProvider === 'pi-oauth') {
-          throw new GitHubAppError(
-            'PROVIDER_OAUTH_UNSUPPORTED',
-            `Pi provider "${role.provider}" uses OAuth or CLI login, which Loopwright refuses; configure a token-authenticated Pi provider`,
-            `/spec/roles/${roleIdx}/provider`,
-          );
+    let intake: TaskpackIntakeOutcome;
+    let reviseGuidance: string | undefined;
+    let autoCheckOnlyNoChangeReason: string | null = null;
+    const forceDiscovery = (input.force ?? (runtimeEnv['INPUT_FORCE'] === 'true')) === true
+      && (input.mode === 'candidate' || input.mode === 'auto');
+    const runDiscoverIntake = (allowForce: boolean, bypassManagedPrDedupe = false) => {
+      if (
+        !allowForce
+        && preflightResult !== undefined
+        && preflightResult.disposition === 'no_change'
+      ) {
+        const pfReason = preflightResult.reason ?? 'preflight reported no_change';
+        emitProgress?.(`intake: no_change (${pfReason})`);
+        if (input.mode === 'auto') {
+          autoCheckOnlyNoChangeReason = pfReason;
+          return {
+            ok: true as const,
+            intake: {
+              kind: 'discover' as const,
+              disposition: 'no_change' as const,
+              updates: [],
+              failures: [],
+              reason: pfReason,
+              summary: pfReason,
+              targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+            } as TaskpackIntakeOutcome,
+          };
         }
-        if (role.thinking !== undefined && !(PI_THINKING_LEVELS as readonly string[]).includes(role.thinking)) {
-          throw new GitHubAppError(
-            'TASKPACK_MANIFEST_INVALID',
-            `spec.roles[].thinking must be one of ${PI_THINKING_LEVELS.join(', ')}`,
-            `/spec/roles/${roleIdx}/thinking`,
-          );
-        }
-        const roleBindings: HostTaskpackBindings = {
-          ...buildBindings(),
-          candidateIndex: undefined,
-          roleSelection: {
-            provider: role.provider,
-            model: role.model,
-            ...(role.thinking !== undefined ? { thinking: role.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+        return { ok: false as const, exit: { kind: 'no_change' as const, reason: pfReason } };
+      }
+      if (
+        allowForce
+        && preflightResult !== undefined
+        && (effectiveUpstreamRecords === undefined || effectiveUpstreamRecords.length === 0)
+      ) {
+        return {
+          ok: true as const,
+          intake: {
+            kind: 'discover' as const,
+            disposition: 'ready' as const,
+            baseRevision: effectiveBaseRevision,
+            updates: [],
+            targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
           },
         };
-        const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
-        const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
-        roleProviderEnvNames.push(resolveDefaultProviderTokenEnv(selection.provider, {
-          modelsJsonApiKeyEnv,
-          manifestApiKeyEnv: apiKeyEnv,
-          env: runtimeEnv,
-        }));
       }
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
-          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+      if (
+        preflightResult !== undefined
+        && preflightResult.disposition === 'candidate'
+        && (effectiveUpstreamRecords === undefined || effectiveUpstreamRecords.length === 0)
+      ) {
+        return {
+          ok: true as const,
+          intake: {
+            kind: 'discover' as const,
+            disposition: 'ready' as const,
+            baseRevision: effectiveBaseRevision,
+            updates: [],
+            targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+          },
+        };
+      }
+      const outcome = prepareTaskpackIntake({
+        mode: 'discover', tenant, baseRevision: effectiveBaseRevision,
+        records: effectiveUpstreamRecords ?? [],
+        ...(allowForce ? { force: true } : {}),
+        ...(!bypassManagedPrDedupe && managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
+        targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+      });
+      if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
+        emitProgress?.(`intake: no_change (${outcome.reason})`);
+        if (input.mode === 'auto') {
+          autoCheckOnlyNoChangeReason = outcome.reason;
+          return { ok: true as const, intake: outcome };
         }
-        return blocked(error.code, error.message);
+        return { ok: false as const, exit: { kind: 'no_change' as const, reason: outcome.reason } };
       }
-      throw error;
+      if (outcome.kind === 'discover' && outcome.disposition === 'blocked') {
+        return {
+          ok: false as const,
+          exit: blocked('upstream sources are unavailable', outcome.failures.map(failure => `${failure.upstreamId}: ${failure.error}`).join('; ')),
+        };
+      }
+      return { ok: true as const, intake: outcome };
+    };
+    if (eventNameIsTrigger(input.eventName)) {
+      const discovered = runDiscoverIntake(forceDiscovery);
+      if (!discovered.ok) return discovered.exit;
+      intake = discovered.intake;
+    } else if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
+      const evaluation = preEvaluatedComment!;
+      if ('ignoredReason' in evaluation) return blocked(`comment ignored: ${evaluation.ignoredReason}`);
+      if ('blockedReason' in evaluation) return blocked(evaluation.blockedReason, evaluation.detail);
+      const commandDigest = createHash('sha256').update(evaluation.guidance, 'utf8').digest('hex');
+      if (evaluation.command === 'status') {
+        intake = { kind: 'status', disposition: 'ready', summary: `status query admitted for ${input.repositoryFullName}/${manifest.metadata.name}` };
+      } else if (evaluation.command === 'revise') {
+        const boundHeadSha = evaluation.headSha.startsWith('pr-') && COMMIT_SHA_PATTERN.test(effectiveSourceRevision)
+          ? effectiveSourceRevision
+          : evaluation.headSha;
+        const reviseInput = {
+          mode: 'revise' as const, tenant,
+          command: { commandId: evaluation.commandId, headSha: boundHeadSha, commandDigest },
+          actorLogin: evaluation.login, authorAssociation: evaluation.authorAssociation,
+          guidance: evaluation.guidance,
+          ...(input.operatorAllowlist !== undefined ? { operatorAllowlist: input.operatorAllowlist } : {}),
+        };
+        const outcome = prepareTaskpackIntake(reviseInput);
+        if (outcome.kind === 'revise' && outcome.disposition === 'blocked') return blocked(`revise command rejected: ${outcome.reason}`, outcome.detail);
+        reviseGuidance = evaluation.guidance;
+        intake = outcome;
+      } else {
+        // PR comment commands follow comment-command dispatch semantics; force applies only to non-comment trigger events.
+        // Explicit operator `retry` comments bypass open-PR deduplication while still settling `no_change` if no updates are available.
+        const discovered = runDiscoverIntake(false, true);
+        if (!discovered.ok) return discovered.exit;
+        if (evaluation.guidance.trim().length > 0) {
+          reviseGuidance = evaluation.guidance;
+        }
+        intake = discovered.intake;
+      }
+    } else {
+      return blocked(`unsupported event ${input.eventName}`);
     }
-  }
 
-  let candidates: readonly ResolvedModelCandidate[];
-  try {
-    const firstRole = manifest.spec.roles?.[0];
-    const candidateBaseBindings = (manifest.spec.models === undefined && firstRole !== undefined && roleSelection === undefined)
+    emitProgress?.(
+      `intake: taskpack=${manifest.metadata.name} mode=${input.mode} repo=${input.repositoryFullName} base=${effectiveBaseRevision.slice(0, 12)} kind=${intake.kind}`,
+    );
+
+    let modelsConfig: ParsedPiModelsJson | undefined;
+    if (input.modelsJsonPath !== undefined) {
+      try {
+        modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+            return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+          }
+          return blocked(error.code, error.message);
+        }
+        throw error;
+      }
+    }
+
+    const scrubber = turnkeyScrubber;
+    const gateEnvName = input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET';
+    const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
+    const publicationAuthEnvName = input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
+    const localCmdGateEnvName = input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
+    if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
+    if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
+    if (typeof runtimeEnv[publicationAuthEnvName] === 'string') scrubber.register(runtimeEnv[publicationAuthEnvName]!);
+    if (typeof runtimeEnv[localCmdGateEnvName] === 'string') scrubber.register(runtimeEnv[localCmdGateEnvName]!);
+
+    const hasHostRoleOverrides = input.provider !== undefined
+      || input.model !== undefined
+      || input.thinking !== undefined
+      || input.api !== undefined
+      || input.baseUrl !== undefined;
+    const roleSelection: HostRoleSelection | undefined = hasHostRoleOverrides
       ? {
-        ...buildBindings(),
-        roleSelection: {
-          provider: firstRole.provider,
-          model: firstRole.model,
-          ...(firstRole.thinking !== undefined ? { thinking: firstRole.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
-        },
+        provider: input.provider,
+        model: input.model,
+        thinking: input.thinking,
+        api: input.api,
+        baseUrl: input.baseUrl,
       }
-      : buildBindings();
-    candidates = resolveTaskpackModelCandidates(manifest, candidateBaseBindings, {
-      modelsConfig,
-      env: runtimeEnv,
-      explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
-      scrubber,
-    });
-  } catch (error) {
-    if (error instanceof GitHubAppError) {
-      if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
-        return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
-      }
-      return blocked(error.code, error.message);
-    }
-    throw error;
-  }
+      : undefined;
 
-  const forbiddenCommandEnvNames = new Set<string>([
-    ...candidates.flatMap(candidate => [
-      candidate.providerEnvName,
-      ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
-    ]),
-    ...roleProviderEnvNames,
-    ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
-    ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
-    ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
-    ...collectMcpReferencedEnvNames(effectiveMcpDecls),
-  ]);
-  trackedSourceTokenEnvNames = [...forbiddenCommandEnvNames];
+    const isAutoNoChange = input.mode === 'auto' && autoCheckOnlyNoChangeReason !== null;
+    const effectiveCompileMode: 'candidate' | 'no-change' = (input.mode === 'no-change' || isAutoNoChange)
+      ? 'no-change'
+      : 'candidate';
 
-  let currentPos = 0;
-  if (input.dryRun !== true && candidates.length >= 2) {
-    try {
-      const selected = await selectHealthyModelCandidate(candidates, {
-        fetchImpl: input.probeFetch,
-        totalTimeoutMs: input.probeTimeoutMs,
+    const needsNativePublicationEndpoint = manifest.spec.publication.mode === 'pull_request'
+      && input.publicationEndpoint === undefined
+      && effectiveCompileMode === 'candidate';
+    const DRY_RUN_PUBLICATION_SENTINEL_URL = 'http://127.0.0.1:65535/loopwright-dry-run-publication';
+
+    let activeGateEndpoints: readonly HostGateEndpointPlan[] = input.gateEndpoints ?? [];
+    let activePublicationEndpoint: HostPublicationEndpointPlan | null = input.publicationEndpoint ?? (
+      input.dryRun === true && needsNativePublicationEndpoint
+        ? {
+          id: 'dry-run-publication',
+          url: DRY_RUN_PUBLICATION_SENTINEL_URL,
+          signingCredentialRef: 'taskpack-publication-signing',
+        }
+        : null
+    );
+    let mcpRegistry: HostMcpRegistry | undefined;
+
+    let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined
+      ? [input.providerTokenEnv]
+      : [];
+    const loggedMemoryWarnings = new Set<string>();
+    const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => {
+      const externalMcpTools = mcpRegistry !== undefined && mcpRegistry.toolNames.length > 0
+        ? mcpRegistry.toolNames
+        : undefined;
+      const externalMcpToolSchemas = mcpRegistry !== undefined && externalMcpTools !== undefined
+        ? mcpRegistry.toolSchemasFor(externalMcpTools)
+        : undefined;
+      const acceptanceCheckIds = [
+        ...manifest.spec.verification.localChecks.map(c => c.id),
+        ...manifest.spec.verification.externalGates.map(g => g.id),
+      ];
+      const baseGeneratedPrompt = buildDefaultAuthorPrompt({
+        mode: effectiveCompileMode,
+        repositoryFullName: input.repositoryFullName,
+        upstreamRecords: effectiveUpstreamRecords,
+        openManagedPr,
+        reviseGuidance,
+        externalMcpTools,
+        acceptanceCheckIds,
+        runtimeEnv,
         scrubber,
       });
-      currentPos = selected.index;
-    } catch (error) {
-      if (error instanceof GitHubAppError) {
-        return blocked(error.code, error.message);
-      }
-      throw error;
+      const wsManifestText = preflightResult !== undefined && preflightResult.workspaceResources.length > 0
+        ? formatWorkspaceResourcesManifest(preflightResult.workspaceResources, preflightResult.stagedDir, scrubber)
+        : undefined;
+      const authorPrompt = input.authorPrompt ?? (
+        wsManifestText !== undefined && wsManifestText.length > 0
+          ? `${baseGeneratedPrompt}\n\n${wsManifestText}`
+          : baseGeneratedPrompt
+      );
+      return {
+        mode: effectiveCompileMode,
+        ...(isAutoNoChange ? { checkOnlyNoChange: true } : {}),
+        hostPolicy,
+        repository: input.repositoryFullName,
+        repositoryRoot: input.repositoryRoot,
+        taskpackPath: input.taskpackPath,
+        baseRevision: effectiveBaseRevision,
+        sourceRevision: effectiveSourceRevision,
+        upstreamRecords: effectiveUpstreamRecords,
+        targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+        roleSelection,
+        ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
+        allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
+        modelsJsonPath: input.modelsJsonPath,
+        runtimeOptions: {},
+        budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
+        limits: explicitLimitsOverride,
+        envLimits: envLimitsFallback,
+        ...(externalMcpTools !== undefined ? { externalMcpTools } : {}),
+        ...(externalMcpToolSchemas !== undefined ? { externalMcpToolSchemas } : {}),
+        gateEndpoints: activeGateEndpoints,
+        publicationEndpoint: activePublicationEndpoint,
+        credentialEnvMap: {
+          provider: candidate !== undefined
+            ? (input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
+              ? input.credentialEnvMap.provider
+              : candidate.providerEnvName)
+            : (input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN'),
+          gate: gateEnvName,
+          publication: publicationEnvName,
+          publicationAuth: publicationAuthEnvName,
+          localCommandGate: localCmdGateEnvName,
+        },
+        ...(trackedSourceTokenEnvNames.length > 0 ? { sourceTokenEnvNames: trackedSourceTokenEnvNames } : {}),
+        resourceVersion: input.resourceVersion,
+        authorPrompt,
+        preflightPromptResources: preflightResult?.promptResources,
+        preflightWorkspaceResources: preflightResult?.workspaceResources,
+        scrubber,
+        onMemoryWarning: message => {
+          if (!loggedMemoryWarnings.has(message)) {
+            loggedMemoryWarnings.add(message);
+            emitProgress?.(`memory: ${message}`);
+          }
+        },
+      };
+    };
+
+    const realRunRoot = await realpath(input.runRoot);
+    const realRepositoryRoot = await realpath(input.repositoryRoot);
+    if (insideRoot(realRunRoot, realRepositoryRoot)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'run root must live outside the target repository checkout');
     }
-  }
 
-  const realRunRoot = await realpath(input.runRoot);
-  const realRepositoryRoot = await realpath(input.repositoryRoot);
-  if (insideRoot(realRunRoot, realRepositoryRoot)) {
-    throw new GitHubAppError('ACTION_INPUT_INVALID', 'run root must live outside the target repository checkout');
-  }
-
-  let localGateServer: LocalCommandGateServer | undefined;
-  let publisherServer: NativePullRequestPublisherServer | undefined;
-  let lastTurnkeySummary: TurnkeyCycleAttemptSummary | undefined;
-
-  try {
-    const ephemeralEnv: Record<string, string> = {};
-    if (turnkeyEnabled && input.delegate === undefined) {
-      if (effectiveMcpDecls.length > 0) {
-        let resolvedMcpConfigs: readonly ExternalMcpServerConfig[];
-        try {
-          resolvedMcpConfigs = resolveExternalMcpConfigs({
-            declarations: effectiveMcpDecls,
-            runtimeEnv,
-            githubToken,
-            allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
-            scrubber,
-          });
-        } catch (error) {
-          if (error instanceof GitHubAppError) {
-            if (error.code === 'MCP_AUTHENTICATION_REQUIRED') {
-              return { kind: 'refused', code: 'MCP_AUTHENTICATION_REQUIRED', reason: scrubber.scrub(error.message) };
-            }
-            return blocked(error.code, scrubber.scrub(error.message));
-          }
-          throw error;
-        }
-        if (resolvedMcpConfigs.length > 0) {
-          try {
-            mcpRegistry = await HostMcpRegistry.connect(resolvedMcpConfigs, {
-              untrustedRoots: [realRepositoryRoot],
-              trustedPathEnv: runtimeEnv['PATH'],
-              scrub: text => scrubber.scrub(text),
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return blocked('MCP_CONNECTION_FAILED', scrubber.scrub(message));
-          }
-          for (const srv of mcpRegistry.servers) {
-            emitProgress?.(`mcp: connected ${srv.id} (${srv.transport}) — ${srv.toolNames.length} tools`);
-          }
-        }
-      }
-
-      if (needsNativePublicationEndpoint) {
-        publisherServer = await startNativePullRequestPublisherServer({
-          runRoot: realRunRoot,
-          repositoryRoot: realRepositoryRoot,
-          repositoryFullName: input.repositoryFullName,
-          targetBranch: manifest.spec.publication.targetBranch,
-          headBranchPrefix: manifest.spec.publication.headBranchPrefix,
-          proposalPath: manifest.spec.proposal.path,
-          titleTemplate: manifest.spec.publication.titleTemplate,
-          openManagedPr,
-          remoteUrl: input.gitRemoteUrl,
-          apiBaseUrl: effectiveApiBaseUrl,
-          gitWriteToken: githubToken,
-          gitCommitIdentity,
-          fetchImpl: input.probeFetch,
+    if (isAutoNoChange) {
+      let checkOnlyCandidate: ResolvedModelCandidate | undefined;
+      try {
+        const resolved = resolveTaskpackModelCandidates(manifest, buildBindings(), {
+          modelsConfig,
+          env: runtimeEnv,
+          explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
           scrubber,
         });
-        activePublicationEndpoint = publisherServer.endpointPlan;
-        ephemeralEnv[publicationEnvName] = publisherServer.signingSecret;
-        ephemeralEnv[publicationAuthEnvName] = publisherServer.authToken;
-      }
-
-      const hasCommandChecks = input.mode === 'candidate'
-        && manifest.spec.verification.localChecks.some(check => check.implementation === 'command.v1');
-      if (hasCommandChecks) {
-        let preview: Awaited<ReturnType<typeof compileDeclarativeTaskpack>>;
-        try {
-          preview = await compileDeclarativeTaskpack(manifest, buildBindings(candidates[currentPos]));
-        } catch (error) {
-          if (error instanceof GitHubAppError) {
-            if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
-              return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
-            }
-            if (error.code === 'ACTION_INPUT_INVALID') {
-              return blocked(error.message);
-            }
-            return blocked(error.code, error.message);
-          }
-          throw error;
+        checkOnlyCandidate = resolved[0];
+      } catch (error) {
+        if (error instanceof GitHubAppError && error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+          return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
         }
+        checkOnlyCandidate = undefined;
+      }
+      const ncForbiddenEnvNames = new Set<string>([
+        ...Object.values(STANDARD_PI_PROVIDER_ENV),
+        ...(checkOnlyCandidate !== undefined
+          ? [
+            checkOnlyCandidate.providerEnvName,
+            ...(checkOnlyCandidate.sourceTokenEnvName !== undefined ? [checkOnlyCandidate.sourceTokenEnvName] : []),
+          ]
+          : []),
+        ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
+        ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
+        ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
+        gateEnvName,
+        publicationEnvName,
+        publicationAuthEnvName,
+        localCmdGateEnvName,
+        ...decisionApiKeyEnvs,
+        ...manifestSecretEnvs,
+        ...collectMcpReferencedEnvNames(effectiveMcpDecls),
+      ]);
+      trackedSourceTokenEnvNames = [...ncForbiddenEnvNames];
+
+      let checkOnlyCompiled: Awaited<ReturnType<typeof compileDeclarativeTaskpack>>;
+      try {
+        checkOnlyCompiled = await compileDeclarativeTaskpack(manifest, buildBindings(checkOnlyCandidate));
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+            return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+          }
+          return blocked(error.code, error.message);
+        }
+        throw error;
+      }
+      let ncLocalGateServer: LocalCommandGateServer | undefined;
+      const ncEphemeralEnv: Record<string, string> = {};
+      try {
+        const ncCommandGates = checkOnlyCompiled.localCommandGates ?? [];
         const hasExplicitLocalEndpoint = (input.gateEndpoints ?? []).some(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
-        if (!hasExplicitLocalEndpoint) {
-          localGateServer = await startLocalCommandGateServer({
+        if (
+          turnkeyEnabled
+          && input.delegate === undefined
+          && ncCommandGates.length > 0
+          && !hasExplicitLocalEndpoint
+        ) {
+          ncLocalGateServer = await startLocalCommandGateServer({
             runRoot: realRunRoot,
             repositoryRoot: realRepositoryRoot,
-            gates: preview.localCommandGates ?? [],
+            gates: ncCommandGates,
             runtimeEnv,
             readOnlyGitHubToken: githubToken,
             scrubber,
-            forbiddenEnvNames: forbiddenCommandEnvNames,
+            forbiddenEnvNames: ncForbiddenEnvNames,
+            checkStagedDir: preflightResult?.checkStagedDir,
             onLog: emitProgress,
           });
-          activeGateEndpoints = [...activeGateEndpoints, localGateServer.endpointPlan];
-          ephemeralEnv[localCmdGateEnvName] = localGateServer.signingSecret;
+          activeGateEndpoints = [...activeGateEndpoints, ncLocalGateServer.endpointPlan];
+          ncEphemeralEnv[localCmdGateEnvName] = ncLocalGateServer.signingSecret;
+          try {
+            checkOnlyCompiled = await compileDeclarativeTaskpack(manifest, buildBindings(checkOnlyCandidate));
+          } catch (error) {
+            if (error instanceof GitHubAppError) {
+              if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+                return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+              }
+              return blocked(error.code, error.message);
+            }
+            throw error;
+          }
+        }
+        const trustedDirectory = join(realRunRoot, `lw-action-nc-${process.pid}-${Date.now().toString(36)}`);
+        const registryDirectory = join(trustedDirectory, 'registry');
+        const configDirectory = join(trustedDirectory, 'config');
+        await mkdir(registryDirectory, { recursive: true });
+        await mkdir(configDirectory, { recursive: true });
+        await chmod(trustedDirectory, 0o700);
+        await chmod(registryDirectory, 0o700);
+        await chmod(configDirectory, 0o700);
+        const registryPath = join(registryDirectory, 'registry.yaml');
+        const configPath = join(configDirectory, 'config.yaml');
+        const configBytes = Buffer.from(serializePrettyYaml(checkOnlyCompiled.config), 'utf8');
+        await writeFile(registryPath, checkOnlyCompiled.registryBytes, { mode: 0o600 });
+        await writeFile(configPath, configBytes, { mode: 0o600 });
+        await chmod(registryPath, 0o600);
+        await chmod(configPath, 0o600);
+        if (checkOnlyCompiled.instructionResources !== undefined && checkOnlyCompiled.instructionResources.length > 0) {
+          await stageCompiledInstructionResources(registryDirectory, checkOnlyCompiled.instructionResources);
+          for (const resource of checkOnlyCompiled.instructionResources) {
+            assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+          }
+        }
+        assertCleanArtifact(checkOnlyCompiled.registryBytes, scrubber, '/registry');
+        assertCleanArtifact(configBytes, scrubber, '/config');
+        const writtenNoChange: WrittenCompiledTaskpack = {
+          ...checkOnlyCompiled,
+          configBytes,
+          trustedDirectory,
+          registryPath,
+          configPath,
+        };
+        const ncDelegate = input.delegate ?? (turnkeyEnabled
+          ? createTurnkeyCycleDelegate({
+            runId: input.runId,
+            repositoryRoot: realRepositoryRoot,
+            runtimeEnv,
+            ephemeralEnv: ncEphemeralEnv,
+            scrubber,
+            allowWorkflowWrites: writtenNoChange.allowWorkflowWrites,
+            openHostSessionAdapter: input.openHostSessionAdapter,
+            onLog: emitProgress,
+          })
+          : undefined);
+        const ncOutcome = (input.dryRun === true || ncDelegate === undefined)
+          ? null
+          : await ncDelegate(writtenNoChange);
+        return {
+          kind: 'no_change',
+          reason: autoCheckOnlyNoChangeReason!,
+          taskpack: writtenNoChange,
+          delegateOutcome: ncOutcome === null ? null : { ok: ncOutcome.ok, detail: scrubber.scrub(ncOutcome.detail) },
+        };
+      } finally {
+        if (ncLocalGateServer !== undefined) {
+          await ncLocalGateServer.close().catch(() => undefined);
         }
       }
     }
 
-    const compileAndWriteCandidate = async (candidate: ResolvedModelCandidate, attemptSeq: number): Promise<WrittenCompiledTaskpack> => {
-      const compiled = await compileDeclarativeTaskpack(manifest, buildBindings(candidate));
-      // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
-      // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
-      const suffix = attemptSeq === 0 ? '' : `-fallback-${attemptSeq}`;
-      const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}${suffix}`);
-      const registryDirectory = join(trustedDirectory, 'registry');
-      const configDirectory = join(trustedDirectory, 'config');
-      await mkdir(registryDirectory, { recursive: true });
-      await mkdir(configDirectory, { recursive: true });
-      await chmod(trustedDirectory, 0o700);
-      await chmod(registryDirectory, 0o700);
-      await chmod(configDirectory, 0o700);
-      const registryPath = join(registryDirectory, 'registry.yaml');
-      const configPath = join(configDirectory, 'config.yaml');
-      const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
-      await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
-      await writeFile(configPath, configBytes, { mode: 0o600 });
-      await chmod(registryPath, 0o600);
-      await chmod(configPath, 0o600);
-      if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
-        await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
-        for (const resource of compiled.instructionResources) {
-          assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+    const roleProviderEnvNames: string[] = [];
+    if (manifest.spec.roles !== undefined && manifest.spec.roles.length > 0) {
+      try {
+        for (const [roleIdx, role] of manifest.spec.roles.entries()) {
+          const normalizedProvider = role.provider.trim().toLowerCase();
+          if (isOAuthOnlyPiProvider(normalizedProvider) || normalizedProvider === 'antigravity' || normalizedProvider === 'pi-oauth') {
+            throw new GitHubAppError(
+              'PROVIDER_OAUTH_UNSUPPORTED',
+              `Pi provider "${role.provider}" uses OAuth or CLI login, which Loopwright refuses; configure a token-authenticated Pi provider`,
+              `/spec/roles/${roleIdx}/provider`,
+            );
+          }
+          if (role.thinking !== undefined && !(PI_THINKING_LEVELS as readonly string[]).includes(role.thinking)) {
+            throw new GitHubAppError(
+              'TASKPACK_MANIFEST_INVALID',
+              `spec.roles[].thinking must be one of ${PI_THINKING_LEVELS.join(', ')}`,
+              `/spec/roles/${roleIdx}/thinking`,
+            );
+          }
+          const roleBindings: HostTaskpackBindings = {
+            ...buildBindings(),
+            candidateIndex: undefined,
+            roleSelection: {
+              provider: role.provider,
+              model: role.model,
+              ...(role.thinking !== undefined ? { thinking: role.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+            },
+          };
+          const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
+          const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
+          roleProviderEnvNames.push(resolveDefaultProviderTokenEnv(selection.provider, {
+            modelsJsonApiKeyEnv,
+            manifestApiKeyEnv: apiKeyEnv,
+            env: runtimeEnv,
+          }));
         }
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+            return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+          }
+          return blocked(error.code, error.message);
+        }
+        throw error;
       }
-      assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
-      assertCleanArtifact(configBytes, scrubber, '/config');
-      return {
-        ...compiled, configBytes, trustedDirectory, registryPath, configPath,
-      };
-    };
+    }
 
-    let activeCandidate = candidates[currentPos]!;
-    let activeTaskpack: WrittenCompiledTaskpack;
+    let candidates: readonly ResolvedModelCandidate[];
     try {
-      activeTaskpack = await compileAndWriteCandidate(activeCandidate, 0);
+      const firstRole = manifest.spec.roles?.[0];
+      const candidateBaseBindings = (manifest.spec.models === undefined && firstRole !== undefined && roleSelection === undefined)
+        ? {
+          ...buildBindings(),
+          roleSelection: {
+            provider: firstRole.provider,
+            model: firstRole.model,
+            ...(firstRole.thinking !== undefined ? { thinking: firstRole.thinking as NonNullable<HostRoleSelection['thinking']> } : {}),
+          },
+        }
+        : buildBindings();
+      candidates = resolveTaskpackModelCandidates(manifest, candidateBaseBindings, {
+        modelsConfig,
+        env: runtimeEnv,
+        explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
+        scrubber,
+      });
     } catch (error) {
       if (error instanceof GitHubAppError) {
         if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
           return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
-        }
-        if (error.code === 'ACTION_INPUT_INVALID') {
-          return blocked(error.message);
         }
         return blocked(error.code, error.message);
       }
       throw error;
     }
 
-    let activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
-    const activeBudgets = activeTaskpack.config.spec.task.spec.budgets;
-    emitProgress?.(
-      `model: ${activeCandidate.selection.provider}/${activeCandidate.selection.model} (thinking=${activeCandidate.selection.thinking ?? 'off'})`
-      + ` — wallTime=${formatDurationMs(activeBudgets.wallTimeMs)}, totalTokens=${formatTokenCount(activeBudgets.totalTokens)}, maxOutputTokens=${formatTokenCount(activeBudgets.perCallOutputTokens)}, contextWindow=${formatTokenCount(activeContextWindow)}`,
-    );
+    const forbiddenCommandEnvNames = new Set<string>([
+      ...candidates.flatMap(candidate => [
+        candidate.providerEnvName,
+        ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
+      ]),
+      ...roleProviderEnvNames,
+      ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
+      ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
+      ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
+      gateEnvName,
+      publicationEnvName,
+      publicationAuthEnvName,
+      localCmdGateEnvName,
+      ...decisionApiKeyEnvs,
+      ...manifestSecretEnvs,
+      ...collectMcpReferencedEnvNames(effectiveMcpDecls),
+    ]);
+    trackedSourceTokenEnvNames = [...forbiddenCommandEnvNames];
 
-    const effectiveDelegate = input.delegate ?? (turnkeyEnabled
-      ? createTurnkeyCycleDelegate({
-        runId: input.runId,
-        repositoryRoot: realRepositoryRoot,
+    let currentPos = 0;
+    if (input.dryRun !== true && candidates.length >= 2) {
+      try {
+        const selected = await selectHealthyModelCandidate(candidates, {
+          fetchImpl: input.probeFetch,
+          totalTimeoutMs: input.probeTimeoutMs,
+          scrubber,
+        });
+        currentPos = selected.index;
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, error.message);
+        }
+        throw error;
+      }
+    }
+
+    let localGateServer: LocalCommandGateServer | undefined;
+    let publisherServer: NativePullRequestPublisherServer | undefined;
+    let lastTurnkeySummary: TurnkeyCycleAttemptSummary | undefined;
+
+    try {
+      const ephemeralEnv: Record<string, string> = {};
+      if (turnkeyEnabled && input.delegate === undefined) {
+        if (effectiveMcpDecls.length > 0) {
+          let resolvedMcpConfigs: readonly ExternalMcpServerConfig[];
+          try {
+            resolvedMcpConfigs = resolveExternalMcpConfigs({
+              declarations: effectiveMcpDecls,
+              runtimeEnv,
+              githubToken,
+              allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
+              scrubber,
+            });
+          } catch (error) {
+            if (error instanceof GitHubAppError) {
+              if (error.code === 'MCP_AUTHENTICATION_REQUIRED') {
+                return { kind: 'refused', code: 'MCP_AUTHENTICATION_REQUIRED', reason: scrubber.scrub(error.message) };
+              }
+              return blocked(error.code, scrubber.scrub(error.message));
+            }
+            throw error;
+          }
+          if (resolvedMcpConfigs.length > 0) {
+            try {
+              mcpRegistry = await HostMcpRegistry.connect(resolvedMcpConfigs, {
+                untrustedRoots: [realRepositoryRoot],
+                trustedPathEnv: runtimeEnv['PATH'],
+                scrub: text => scrubber.scrub(text),
+              });
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return blocked('MCP_CONNECTION_FAILED', scrubber.scrub(message));
+            }
+            for (const srv of mcpRegistry.servers) {
+              emitProgress?.(`mcp: connected ${srv.id} (${srv.transport}) — ${srv.toolNames.length} tools`);
+            }
+          }
+        }
+
+        if (needsNativePublicationEndpoint) {
+          publisherServer = await startNativePullRequestPublisherServer({
+            runRoot: realRunRoot,
+            repositoryRoot: realRepositoryRoot,
+            repositoryFullName: input.repositoryFullName,
+            targetBranch: manifest.spec.publication.targetBranch,
+            headBranchPrefix: manifest.spec.publication.headBranchPrefix,
+            proposalPath: manifest.spec.proposal?.path,
+            titleTemplate: manifest.spec.publication.titleTemplate,
+            openManagedPr,
+            remoteUrl: input.gitRemoteUrl,
+            apiBaseUrl: effectiveApiBaseUrl,
+            gitWriteToken: githubToken,
+            gitCommitIdentity,
+            fetchImpl: input.probeFetch,
+            scrubber,
+          });
+          activePublicationEndpoint = publisherServer.endpointPlan;
+          ephemeralEnv[publicationEnvName] = publisherServer.signingSecret;
+          ephemeralEnv[publicationAuthEnvName] = publisherServer.authToken;
+        }
+
+        const hasCommandChecks = effectiveCompileMode === 'candidate'
+          && manifest.spec.verification.localChecks.some(check => check.implementation === 'command.v1');
+        if (hasCommandChecks) {
+          let preview: Awaited<ReturnType<typeof compileDeclarativeTaskpack>>;
+          try {
+            preview = await compileDeclarativeTaskpack(manifest, buildBindings(candidates[currentPos]));
+          } catch (error) {
+            if (error instanceof GitHubAppError) {
+              if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+                return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+              }
+              if (error.code === 'ACTION_INPUT_INVALID') {
+                return blocked(error.message);
+              }
+              return blocked(error.code, error.message);
+            }
+            throw error;
+          }
+          const hasExplicitLocalEndpoint = (input.gateEndpoints ?? []).some(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
+          if (!hasExplicitLocalEndpoint) {
+            localGateServer = await startLocalCommandGateServer({
+              runRoot: realRunRoot,
+              repositoryRoot: realRepositoryRoot,
+              gates: preview.localCommandGates ?? [],
+              runtimeEnv,
+              readOnlyGitHubToken: githubToken,
+              scrubber,
+              forbiddenEnvNames: forbiddenCommandEnvNames,
+              checkStagedDir: preflightResult?.checkStagedDir,
+              onLog: emitProgress,
+            });
+            activeGateEndpoints = [...activeGateEndpoints, localGateServer.endpointPlan];
+            ephemeralEnv[localCmdGateEnvName] = localGateServer.signingSecret;
+          }
+        }
+      }
+
+      const compileAndWriteCandidate = async (candidate: ResolvedModelCandidate, attemptSeq: number): Promise<WrittenCompiledTaskpack> => {
+        const compiled = await compileDeclarativeTaskpack(manifest, buildBindings(candidate));
+        // The controller loader adds dirname(configPath) to its trust roots and requires every trusted parent
+        // directory to be 0o700, so registry and config live in separate owner-only subdirectories.
+        const suffix = attemptSeq === 0 ? '' : `-fallback-${attemptSeq}`;
+        const trustedDirectory = join(realRunRoot, `lw-action-${process.pid}-${Date.now().toString(36)}${suffix}`);
+        const registryDirectory = join(trustedDirectory, 'registry');
+        const configDirectory = join(trustedDirectory, 'config');
+        await mkdir(registryDirectory, { recursive: true });
+        await mkdir(configDirectory, { recursive: true });
+        await chmod(trustedDirectory, 0o700);
+        await chmod(registryDirectory, 0o700);
+        await chmod(configDirectory, 0o700);
+        const registryPath = join(registryDirectory, 'registry.yaml');
+        const configPath = join(configDirectory, 'config.yaml');
+        const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+        await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
+        await writeFile(configPath, configBytes, { mode: 0o600 });
+        await chmod(registryPath, 0o600);
+        await chmod(configPath, 0o600);
+        if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+          await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+          for (const resource of compiled.instructionResources) {
+            assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+          }
+        }
+        assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+        assertCleanArtifact(configBytes, scrubber, '/config');
+        return {
+          ...compiled, configBytes, trustedDirectory, registryPath, configPath,
+        };
+      };
+
+      let activeCandidate = candidates[currentPos]!;
+      let activeTaskpack: WrittenCompiledTaskpack;
+      try {
+        activeTaskpack = await compileAndWriteCandidate(activeCandidate, 0);
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+            return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+          }
+          if (error.code === 'ACTION_INPUT_INVALID') {
+            return blocked(error.message);
+          }
+          return blocked(error.code, error.message);
+        }
+        throw error;
+      }
+
+      let activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
+      const activeBudgets = activeTaskpack.config.spec.task.spec.budgets;
+      emitProgress?.(
+        `model: ${activeCandidate.selection.provider}/${activeCandidate.selection.model} (thinking=${activeCandidate.selection.thinking ?? 'off'})`
+        + ` — wallTime=${formatDurationMs(activeBudgets.wallTimeMs)}, totalTokens=${formatTokenCount(activeBudgets.totalTokens)}, maxOutputTokens=${formatTokenCount(activeBudgets.perCallOutputTokens)}, contextWindow=${formatTokenCount(activeContextWindow)}`,
+      );
+
+      const decisionPort = createTaskpackDecisionPort(manifest, {
         runtimeEnv,
-        ephemeralEnv,
+        apiKey: input.decisionApiKey,
+        transport: input.decisionTransport,
         scrubber,
-        mcpRegistry,
-        openHostSessionAdapter: input.openHostSessionAdapter,
-        onLog: emitProgress,
-        onAttemptSettled: summary => {
-          lastTurnkeySummary = summary;
-        },
-      })
-      : undefined);
+        hasPinnedRoles: (manifest.spec.roles?.length ?? 0) > 0 || hasHostRoleOverrides,
+      });
+      const stepMcpMetadata = mcpRegistry?.servers.map(srv => ({
+        id: srv.id,
+        transport: srv.transport,
+        toolNames: srv.toolNames,
+      }));
 
-    const reportMcpServers: readonly ReportMcpServerInfo[] | undefined = mcpRegistry?.servers.map((srv): ReportMcpServerInfo => ({
-      id: srv.id,
-      transport: srv.transport,
-      toolCount: srv.toolNames.length,
-      status: 'connected',
-    }));
+      const effectiveDelegate = input.delegate ?? (turnkeyEnabled
+        ? createTurnkeyCycleDelegate({
+          runId: input.runId,
+          repositoryRoot: realRepositoryRoot,
+          runtimeEnv,
+          ephemeralEnv,
+          scrubber,
+          mcpRegistry,
+          mcpServers: stepMcpMetadata,
+          decisions: decisionPort,
+          allowWorkflowWrites: activeTaskpack.allowWorkflowWrites,
+          openHostSessionAdapter: input.openHostSessionAdapter,
+          onLog: emitProgress,
+          onAttemptSettled: summary => {
+            lastTurnkeySummary = summary;
+          },
+        })
+        : undefined);
 
-    if (input.dryRun === true || effectiveDelegate === undefined) {
+      const reportMcpServers: readonly ReportMcpServerInfo[] | undefined = mcpRegistry?.servers.map((srv): ReportMcpServerInfo => ({
+        id: srv.id,
+        transport: srv.transport,
+        toolCount: srv.toolNames.length,
+        status: 'connected',
+      }));
+
+      if (input.dryRun === true || effectiveDelegate === undefined) {
+        input.onTurnkeyReport?.({
+          manifest,
+          scrubber,
+          report: {
+            runId: normalizeControllerRunId(input.runId),
+            status: input.dryRun === true ? 'dry_run' : 'compiled',
+            discovery: intake.kind === 'discover'
+              ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
+              : null,
+            model: {
+              provider: activeCandidate.selection.provider,
+              model: activeCandidate.selection.model,
+              thinking: activeCandidate.selection.thinking ?? null,
+              contextWindow: activeContextWindow,
+            },
+            ...(reportMcpServers !== undefined && reportMcpServers.length > 0 ? { mcpServers: reportMcpServers } : {}),
+            scrub: text => scrubber.scrub(text),
+          },
+        });
+        return { kind: 'compiled', manifest, intake, taskpack: activeTaskpack, delegateOutcome: null };
+      }
+
+      let attemptSeq = 0;
+      let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+      if (candidates.length === 1 && shouldRotateModelCandidate(lastOutcome)) {
+        const elapsedEntrypointMs = Math.max(0, Math.round(performance.now() - entrypointStartedMs));
+        const configuredWallTimeMs = activeTaskpack.config.spec.task.spec.budgets.wallTimeMs;
+        const minReserveMs = Math.min(60_000, Math.floor(configuredWallTimeMs / 4));
+        if (elapsedEntrypointMs + minReserveMs < configuredWallTimeMs) {
+          attemptSeq += 1;
+          emitProgress?.(
+            `model: retrying primary candidate #${attemptSeq} after transient provider failure (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
+          );
+          activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+          lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+        }
+      } else {
+        while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
+          const remaining = candidates.slice(currentPos + 1);
+          let nextSelected;
+          try {
+            nextSelected = await selectHealthyModelCandidate(remaining, {
+              fetchImpl: input.probeFetch,
+              totalTimeoutMs: input.probeTimeoutMs,
+              forceProbe: true,
+              scrubber,
+            });
+          } catch {
+            lastOutcome = {
+              ok: false,
+              detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
+            };
+            break;
+          }
+          currentPos = currentPos + 1 + nextSelected.index;
+          activeCandidate = candidates[currentPos]!;
+          activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
+          attemptSeq += 1;
+          emitProgress?.(
+            `model: rotating to fallback #${attemptSeq} (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
+          );
+          activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
+          lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
+        }
+      }
+
+      const settledRunId = lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId);
+      let memorySummary: TurnkeyMemorySummary | undefined;
+      if (lastTurnkeySummary !== undefined || existsSync(join(realRunRoot, settledRunId, 'run.json'))) {
+        const memoryTargetCell = input.targetMatrix !== undefined
+          ? (input.targetMatrix !== null && input.targetMatrix.length === 1 ? input.targetMatrix[0]! : null)
+          : undefined;
+        try {
+          memorySummary = await finalizeAndPublishTurnkeyMemory({
+            runRoot: realRunRoot,
+            runId: settledRunId,
+            repositoryRoot: realRepositoryRoot,
+            repositoryFullName: input.repositoryFullName,
+            manifest,
+            taskpackPath: input.taskpackPath,
+            baseRevision: effectiveBaseRevision,
+            upstreamRecords: effectiveUpstreamRecords,
+            ...(memoryTargetCell !== undefined ? { targetMatrix: memoryTargetCell } : {}),
+            remoteUrl: input.gitRemoteUrl,
+            apiBaseUrl: effectiveApiBaseUrl,
+            githubToken,
+            gitCommitIdentity,
+            fetchImpl: input.probeFetch,
+            runtimeEnv,
+            scrubber,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          let fallbackDirectory = manifest.spec.memory.directory;
+          try {
+            fallbackDirectory = resolveTaskpackMemoryLocation(manifest, input.taskpackPath).memoryDirectory;
+          } catch {
+            // keep declared directory when location resolution itself failed
+          }
+          memorySummary = Object.freeze({
+            status: 'failed',
+            directory: fallbackDirectory,
+            proposalId: null,
+            entryCount: 0,
+            rebased: false,
+            branchName: null,
+            pullRequestUrl: null,
+            pullRequestNumber: null,
+            reason: scrubber.scrub(message),
+          });
+        }
+        emitProgress?.(
+          `memory: ${memorySummary.status} (${memorySummary.entryCount} entries`
+          + `${memorySummary.pullRequestUrl ? `, pr=${memorySummary.pullRequestUrl}` : ''}`
+          + `${memorySummary.reason ? ` — ${memorySummary.reason}` : ''})`,
+        );
+      }
+
       input.onTurnkeyReport?.({
         manifest,
         scrubber,
+        ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
         report: {
-          runId: normalizeControllerRunId(input.runId),
-          status: input.dryRun === true ? 'dry_run' : 'compiled',
+          runId: settledRunId,
+          status: lastTurnkeySummary?.status ?? (lastOutcome.ok ? 'passed' : 'failed'),
+          reasonCode: lastTurnkeySummary?.reasonCode ?? null,
+          detail: !lastOutcome.ok ? (lastTurnkeySummary?.detail ?? lastOutcome.detail) : null,
           discovery: intake.kind === 'discover'
             ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
             : null,
+          checks: lastTurnkeySummary?.checks,
           model: {
             provider: activeCandidate.selection.provider,
             model: activeCandidate.selection.model,
             thinking: activeCandidate.selection.thinking ?? null,
             contextWindow: activeContextWindow,
+            tokenRotations: attemptSeq,
           },
           ...(reportMcpServers !== undefined && reportMcpServers.length > 0 ? { mcpServers: reportMcpServers } : {}),
+          usage: lastTurnkeySummary?.usage ?? null,
+          elapsedMs: lastTurnkeySummary?.elapsedMs ?? null,
+          externalUrl: lastTurnkeySummary?.externalUrl ?? null,
           scrub: text => scrubber.scrub(text),
         },
       });
-      return { kind: 'compiled', manifest, intake, taskpack: activeTaskpack, delegateOutcome: null };
+
+      return {
+        kind: 'compiled',
+        manifest,
+        intake,
+        taskpack: activeTaskpack,
+        delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
+        ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
+      };
+    } finally {
+      await mcpRegistry?.close().catch(() => undefined);
+      await localGateServer?.close().catch(() => undefined);
+      await publisherServer?.close().catch(() => undefined);
     }
-
-    let attemptSeq = 0;
-    let lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
-    if (candidates.length === 1 && shouldRotateModelCandidate(lastOutcome)) {
-      const elapsedEntrypointMs = Math.max(0, Math.round(performance.now() - entrypointStartedMs));
-      const configuredWallTimeMs = activeTaskpack.config.spec.task.spec.budgets.wallTimeMs;
-      const minReserveMs = Math.min(60_000, Math.floor(configuredWallTimeMs / 4));
-      if (elapsedEntrypointMs + minReserveMs < configuredWallTimeMs) {
-        attemptSeq += 1;
-        emitProgress?.(
-          `model: retrying primary candidate #${attemptSeq} after transient provider failure (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
-        );
-        activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
-        lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
-      }
-    } else {
-      while (shouldRotateModelCandidate(lastOutcome) && currentPos + 1 < candidates.length) {
-        const remaining = candidates.slice(currentPos + 1);
-        let nextSelected;
-        try {
-          nextSelected = await selectHealthyModelCandidate(remaining, {
-            fetchImpl: input.probeFetch,
-            totalTimeoutMs: input.probeTimeoutMs,
-            forceProbe: true,
-            scrubber,
-          });
-        } catch {
-          lastOutcome = {
-            ok: false,
-            detail: scrubber.scrub(`${lastOutcome.detail}; remaining model fallback candidates failed readiness probe`),
-          };
-          break;
-        }
-        currentPos = currentPos + 1 + nextSelected.index;
-        activeCandidate = candidates[currentPos]!;
-        activeContextWindow = resolveCatalogModel(activeCandidate.selection).record.contextWindow;
-        attemptSeq += 1;
-        emitProgress?.(
-          `model: rotating to fallback #${attemptSeq} (${activeCandidate.selection.provider}/${activeCandidate.selection.model}, contextWindow=${formatTokenCount(activeContextWindow)})`,
-        );
-        activeTaskpack = await compileAndWriteCandidate(activeCandidate, attemptSeq);
-        lastOutcome = await invokeDelegateForCandidate(activeCandidate, activeTaskpack, effectiveDelegate);
-      }
-    }
-
-    const settledRunId = lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId);
-    let memorySummary: TurnkeyMemorySummary | undefined;
-    if (lastTurnkeySummary !== undefined || existsSync(join(realRunRoot, settledRunId, 'run.json'))) {
-      const memoryTargetCell = input.targetMatrix !== undefined
-        && input.targetMatrix !== null
-        && input.targetMatrix.length === 1
-        ? input.targetMatrix[0]!
-        : null;
-      try {
-        memorySummary = await finalizeAndPublishTurnkeyMemory({
-          runRoot: realRunRoot,
-          runId: settledRunId,
-          repositoryRoot: realRepositoryRoot,
-          repositoryFullName: input.repositoryFullName,
-          manifest,
-          taskpackPath: input.taskpackPath,
-          baseRevision: effectiveBaseRevision,
-          upstreamRecords: effectiveUpstreamRecords,
-          targetMatrix: memoryTargetCell,
-          remoteUrl: input.gitRemoteUrl,
-          apiBaseUrl: effectiveApiBaseUrl,
-          githubToken,
-          gitCommitIdentity,
-          fetchImpl: input.probeFetch,
-          runtimeEnv,
-          scrubber,
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        let fallbackDirectory = manifest.spec.memory.directory;
-        try {
-          fallbackDirectory = resolveTaskpackMemoryLocation(manifest, input.taskpackPath).memoryDirectory;
-        } catch {
-          // keep declared directory when location resolution itself failed
-        }
-        memorySummary = Object.freeze({
-          status: 'failed',
-          directory: fallbackDirectory,
-          proposalId: null,
-          entryCount: 0,
-          rebased: false,
-          branchName: null,
-          pullRequestUrl: null,
-          pullRequestNumber: null,
-          reason: scrubber.scrub(message),
-        });
-      }
-      emitProgress?.(
-        `memory: ${memorySummary.status} (${memorySummary.entryCount} entries`
-        + `${memorySummary.pullRequestUrl ? `, pr=${memorySummary.pullRequestUrl}` : ''}`
-        + `${memorySummary.reason ? ` — ${memorySummary.reason}` : ''})`,
-      );
-    }
-
-    input.onTurnkeyReport?.({
-      manifest,
-      scrubber,
-      ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
-      report: {
-        runId: settledRunId,
-        status: lastTurnkeySummary?.status ?? (lastOutcome.ok ? 'passed' : 'failed'),
-        reasonCode: lastTurnkeySummary?.reasonCode ?? null,
-        detail: !lastOutcome.ok ? (lastTurnkeySummary?.detail ?? lastOutcome.detail) : null,
-        discovery: intake.kind === 'discover'
-          ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
-          : null,
-        checks: lastTurnkeySummary?.checks,
-        model: {
-          provider: activeCandidate.selection.provider,
-          model: activeCandidate.selection.model,
-          thinking: activeCandidate.selection.thinking ?? null,
-          contextWindow: activeContextWindow,
-          tokenRotations: attemptSeq,
-        },
-        ...(reportMcpServers !== undefined && reportMcpServers.length > 0 ? { mcpServers: reportMcpServers } : {}),
-        usage: lastTurnkeySummary?.usage ?? null,
-        elapsedMs: lastTurnkeySummary?.elapsedMs ?? null,
-        externalUrl: lastTurnkeySummary?.externalUrl ?? null,
-        scrub: text => scrubber.scrub(text),
-      },
-    });
-
-    return {
-      kind: 'compiled',
-      manifest,
-      intake,
-      taskpack: activeTaskpack,
-      delegateOutcome: { ok: lastOutcome.ok, detail: scrubber.scrub(lastOutcome.detail) },
-      ...(memorySummary !== undefined ? { memory: memorySummary } : {}),
-    };
   } finally {
-    await mcpRegistry?.close().catch(() => undefined);
-    await localGateServer?.close().catch(() => undefined);
-    await publisherServer?.close().catch(() => undefined);
+    await preflightResult?.cleanup().catch(() => undefined);
   }
 }
 
@@ -1539,7 +2172,7 @@ export async function runActionCli(
     repositoryFullName: env['LOOPWRIGHT_REPOSITORY'] ?? env['GITHUB_REPOSITORY'] ?? basename(repositoryRoot),
     baseRevision: env['GITHUB_SHA'] ?? 'HEAD',
     sourceRevision,
-    mode: mode === 'no-change' ? 'no-change' : 'candidate',
+    mode: mode === 'no-change' ? 'no-change' : mode === 'auto' ? 'auto' : 'candidate',
     eventName: env['INPUT_EVENT-NAME']?.trim() || env['GITHUB_EVENT_NAME'] || 'workflow_dispatch',
     eventPayload,
     runRoot: env['INPUT_RUN-ROOT']?.trim() || env['RUNNER_TEMP'] || resolve(repositoryRoot, '../.loopwright-runs'),
@@ -1553,6 +2186,8 @@ export async function runActionCli(
     providerTokenEnv: env['INPUT_PROVIDER-TOKEN-ENV']?.trim() || undefined,
     modelsJsonPath: env['INPUT_MODELS-JSON']?.trim() || undefined,
     allowManifestCustomBaseUrl: env['INPUT_ALLOW-CUSTOM-BASE-URL'] === 'true',
+    allowPrivilegedExecution: env['INPUT_ALLOW-PRIVILEGED-EXECUTION'] === 'true',
+    allowWorkflowWrites: env['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true',
     gateEndpoints: gateEndpointUrl ? [{ id: 'default', url: gateEndpointUrl, signingCredentialRef: 'taskpack-gate-signing' }] : undefined,
     publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
@@ -1604,7 +2239,7 @@ export async function runActionCli(
   const report: RunReportInput = capturedReport?.report ?? {
     runId: normalizeControllerRunId(inputRunId),
     status: result.kind === 'no_change'
-      ? 'no_change'
+      ? (result.delegateOutcome?.ok === false ? 'failed' : 'no_change')
       : result.kind === 'blocked'
         ? 'blocked'
         : result.kind === 'refused'
@@ -1616,7 +2251,7 @@ export async function runActionCli(
       : result.kind === 'blocked'
         ? (result.detail ?? null)
         : result.kind === 'no_change'
-          ? result.reason
+          ? (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : result.reason)
           : (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : null),
     scrub: text => fallbackScrubber.scrub(text),
   };
@@ -1635,7 +2270,8 @@ export async function runActionCli(
     alwaysLogTextSummary: !dryRun,
   });
 
-  const executionSucceeded = result.kind === 'no_change'
+  const executionSucceeded = (result.kind === 'no_change'
+    && (result.delegateOutcome === undefined || result.delegateOutcome === null || result.delegateOutcome.ok))
     || (result.kind === 'compiled' && (result.delegateOutcome === null || result.delegateOutcome.ok));
   return executionSucceeded ? 0 : 1;
 }

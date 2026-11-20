@@ -35,7 +35,7 @@ spec:
     noChange: Confirm no upstream changes are needed.
   scope:
     writable:
-      - docs
+      - 'docs/**'
     protected:
       - docs/protected-notes.md
   upstreams:
@@ -206,14 +206,14 @@ describe('Taskpack manifest schema validation for spec.roles (1..4)', () => {
     assert.deepEqual(reviewer.dependsOn, ['coder-a', 'coder-b']);
   });
 
-  it('rejects 0 roles, 5 roles, non-array roles, custom-prototype objects, and unknown role fields with TASKPACK_MANIFEST_INVALID', () => {
+  it('rejects 0 roles, 17 roles, non-array roles, custom-prototype objects, and unknown role fields with TASKPACK_MANIFEST_INVALID', () => {
     assert.throws(
       () => validateTaskpackManifest(mutateManifest(spec => { spec['roles'] = []; })),
       (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/roles',
     );
     assert.throws(
       () => validateTaskpackManifest(mutateManifest(spec => {
-        spec['roles'] = [1, 2, 3, 4, 5].map(i => ({ id: `r${i}`, provider: 'p', model: 'm' }));
+        spec['roles'] = Array.from({ length: 17 }, (_, i) => ({ id: `r${i + 1}`, provider: 'p', model: 'm' }));
       })),
       (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/roles',
     );
@@ -312,7 +312,7 @@ describe('Taskpack manifest schema validation for spec.roles (1..4)', () => {
     );
   });
 
-  it('rejects invalid tools (such as mcp__workspace__read_file or codemode), invalid labels with whitespace, and unasked prompt field', () => {
+  it('accepts valid per-role prompt and rejects invalid tools, invalid labels with whitespace, and empty/non-string prompt field', () => {
     assert.throws(
       () => validateTaskpackManifest(mutateManifest(spec => {
         spec['roles'] = [{ id: 'r1', provider: 'p', model: 'm', tools: ['read', 'mcp__workspace__read_file'] }];
@@ -331,11 +331,15 @@ describe('Taskpack manifest schema validation for spec.roles (1..4)', () => {
       })),
       (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID',
     );
+    const withPrompt = validateTaskpackManifest(mutateManifest(spec => {
+      spec['roles'] = [{ id: 'r1', provider: 'p', model: 'm', prompt: 'custom prompt' }];
+    }));
+    assert.equal(withPrompt.spec.roles?.[0]?.prompt, 'custom prompt');
     assert.throws(
       () => validateTaskpackManifest(mutateManifest(spec => {
-        spec['roles'] = [{ id: 'r1', provider: 'p', model: 'm', prompt: 'custom prompt' }];
+        spec['roles'] = [{ id: 'r1', provider: 'p', model: 'm', prompt: '' }];
       })),
-      (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/roles/0',
+      (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_MANIFEST_INVALID',
     );
   });
 });
@@ -483,7 +487,7 @@ describe('compileDeclarativeTaskpack multi-role and zero-secret delegated mode',
     });
   });
 
-  it('computes dynamic controls.maxAttempts within D <= 64 on 4-role taskpacks and refuses excess capacity with TASKPACK_MANIFEST_INVALID', async () => {
+  it('computes dynamic controls.maxAttempts within D <= 256 on 4-role taskpacks and refuses excess capacity with TASKPACK_MANIFEST_INVALID', async () => {
     await withTempDir(async dir => {
       const manifest4 = validateTaskpackManifest(mutateManifest(spec => {
         spec['roles'] = [
@@ -510,18 +514,18 @@ describe('compileDeclarativeTaskpack multi-role and zero-secret delegated mode',
       const plan = await compilePlan(loaded.value);
       assert.equal(plan.ok, true);
       if (!plan.ok) return;
-      assert.equal(plan.value.capacity.D <= 64, true);
+      assert.equal(plan.value.capacity.D <= 256, true);
 
-      // Excess checks + 4 roles where even A = N exceeds D <= 64 must throw TASKPACK_MANIFEST_INVALID
+      // Excess checks + 12 roles where even A = N exceeds D <= 256 must throw TASKPACK_MANIFEST_INVALID
       const excessManifest = validateTaskpackManifest(mutateManifest(spec => {
-        spec['roles'] = [
-          { id: 'r1', provider: 'antigravity', model: 'gemini-4-carbon' },
-          { id: 'r2', provider: 'antigravity', model: 'gemini-4-carbon', dependsOn: ['r1'] },
-          { id: 'r3', provider: 'antigravity', model: 'gemini-4-carbon', dependsOn: ['r2'] },
-          { id: 'r4', provider: 'antigravity', model: 'gemini-4-carbon', dependsOn: ['r3'] },
-        ];
+        spec['roles'] = Array.from({ length: 12 }, (_, idx) => ({
+          id: `r${idx + 1}`,
+          provider: 'antigravity',
+          model: 'gemini-4-carbon',
+          ...(idx > 0 ? { dependsOn: [`r${idx}`] } : {}),
+        }));
         spec['verification'] = {
-          localChecks: [1, 2, 3, 4, 5].map(i => ({ id: `chk-${i}`, implementation: 'json-artifact.v1' })),
+          localChecks: Array.from({ length: 12 }, (_, idx) => ({ id: `chk-${idx + 1}`, implementation: 'json-artifact.v1' })),
           externalGates: [],
         };
       }));

@@ -1,4 +1,4 @@
-import type { Digest, TaskContract } from '@loopwright/core';
+import type { Digest, OverlayLimits, ReworkPolicy, TaskContract } from '@loopwright/core';
 import type { ClockBasis, ClockSample } from '@loopwright/state';
 import type {
   PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
@@ -44,8 +44,128 @@ export class GitHubAppError extends Error {
 
 export const TASKPACK_MANIFEST_API_VERSION = 'loopwright.dev/v1alpha1' as const;
 export const TASKPACK_MANIFEST_BYTES = 65_536;
-/** Automation paths every target repository keeps protected, regardless of the manifest. */
-export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.claude', '.codex', '.agents', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
+/** Automation paths every target repository keeps protected by default (`.agents/**` is opt-in; `.github/workflows/**` requires dual-key `allowWorkflowWrites`). */
+export const PROTECTED_AUTOMATION_PATHS: readonly string[] = Object.freeze(['.github', '.claude', '.codex', '.loopwright/policies', 'AGENTS.md', 'CLAUDE.md']);
+
+export type TaskpackExecutionMode = 'strict' | 'privileged';
+
+export interface TaskpackExecutionCapabilitiesDeclaration {
+  readonly allowHostEnv?: boolean | undefined;
+  readonly allowHostPath?: boolean | undefined;
+  readonly mountReadOnlyGit?: boolean | undefined;
+  readonly allowCheckNetwork?: boolean | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly allowAgentNetwork?: boolean | undefined;
+}
+
+export interface ResolvedTaskpackExecutionCapabilities {
+  readonly allowHostEnv: boolean;
+  readonly allowHostPath: boolean;
+  readonly mountReadOnlyGit: boolean;
+  readonly allowCheckNetwork: boolean;
+  readonly allowWorkflowWrites: boolean;
+  readonly allowAgentNetwork: boolean;
+}
+
+export interface TaskpackExecutionDigestsDeclaration {
+  readonly pinDigests: boolean;
+  readonly lockfile?: string | undefined;
+}
+
+export interface TaskpackExecutionDeclaration {
+  readonly mode: TaskpackExecutionMode;
+  readonly capabilities: ResolvedTaskpackExecutionCapabilities;
+  readonly digests: TaskpackExecutionDigestsDeclaration;
+}
+
+/** Operator-controlled host flags required to authorize manifest-declared privileged capabilities. */
+export interface ExecutionHostPolicy {
+  readonly allowPrivileged?: boolean | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
+}
+
+export interface TaskpackPreflightDeclaration {
+  readonly script: string;
+  readonly timeoutSeconds?: number | undefined;
+  readonly env?: readonly string[] | undefined;
+}
+
+export type TaskpackUpstreamGroupPolicy = 'lockstep' | 'independent';
+
+export interface TaskpackUpstreamGroupDeclaration {
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly policy: TaskpackUpstreamGroupPolicy;
+}
+
+export type TaskpackStepKind = 'agent' | 'check' | 'compact';
+export const MAX_TASKPACK_STEPS = 16;
+export const MAX_STEP_REWORKS = 8;
+
+export interface TaskpackStepDeclaration {
+  readonly id: string;
+  readonly kind: TaskpackStepKind;
+  readonly role?: string | undefined;
+  readonly check?: string | undefined;
+  readonly dependsOn: readonly string[];
+  readonly onRework?: ReworkPolicy | undefined;
+}
+
+export interface TaskpackProposalDeclaration {
+  readonly path: string;
+  readonly requiredFields: readonly string[];
+  readonly schemaVersion: number;
+}
+
+export interface TaskpackSubmissionDeclaration {
+  readonly path: string;
+  readonly required: boolean;
+}
+
+export interface TaskpackTargetDeclaration {
+  readonly matrix?: readonly TargetMatrixCell[] | null | undefined;
+}
+
+export interface TaskpackDigestTarget {
+  readonly path: string;
+  readonly kind: 'file' | 'directory';
+}
+
+export interface TaskpackDigestLockfileEntry {
+  readonly path: string;
+  readonly kind: 'file' | 'directory';
+  readonly sha256: string;
+}
+
+export interface TaskpackDigestLockfile {
+  readonly version: 1;
+  readonly taskpack: string;
+  readonly entries: readonly TaskpackDigestLockfileEntry[];
+}
+
+export interface TaskpackDigestDrift {
+  readonly path: string;
+  readonly kind: 'file' | 'directory';
+  readonly status: 'drifted' | 'missing' | 'extra';
+  readonly expectedSha256: string | null;
+  readonly actualSha256: string | null;
+}
+
+export type TaskpackDigestVerificationResult =
+  | {
+    readonly ok: true;
+    readonly lockfilePath: string;
+    readonly computed: TaskpackDigestLockfile;
+    readonly expected: TaskpackDigestLockfile;
+  }
+  | {
+    readonly ok: false;
+    readonly lockfilePath: string;
+    readonly reason: string;
+    readonly drifts: readonly TaskpackDigestDrift[];
+    readonly computed: TaskpackDigestLockfile | null;
+    readonly expected: TaskpackDigestLockfile | null;
+  };
 
 export type TaskpackUpstreamKind = 'github-release' | 'git-tag' | 'git-commit' | 'http-json' | 'custom-table';
 export type TaskpackCommentCommand = 'retry' | 'revise' | 'status';
@@ -119,6 +239,7 @@ export interface TaskpackLimitsDeclaration {
   readonly fileBytes?: number | undefined;
   readonly sessionBytes?: number | undefined;
   readonly candidateEntries?: number | undefined;
+  readonly overlay?: OverlayLimits | undefined;
 }
 
 export interface EffectiveTaskpackLimits {
@@ -149,12 +270,34 @@ export interface TaskpackUpstreamDescriptor {
   readonly source: string;
   readonly watchedPaths: readonly string[];
   readonly allowPrerelease?: boolean | undefined;
+  readonly versionPath?: string | undefined;
+  readonly monotonicSemver?: boolean | undefined;
 }
+
+export type TaskpackCheckParameterValue =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly string[]
+  | Readonly<Record<string, string>>;
+
+export type LegacyTaskpackCheckImplementation = 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'command.v1';
+export type TaskpackV2CheckImplementation =
+  | LegacyTaskpackCheckImplementation
+  | 'json-keys-guard.v1'
+  | 'line-section-guard.v1';
 
 export interface TaskpackCheckDeclaration {
   readonly id: string;
-  readonly implementation: 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'command.v1';
-  readonly parameters?: Readonly<Record<string, string | number | boolean | null | readonly string[]>> | undefined;
+  readonly implementation: LegacyTaskpackCheckImplementation;
+  readonly parameters?: Readonly<Record<string, TaskpackCheckParameterValue>> | undefined;
+}
+
+export interface TaskpackV2CheckDeclaration {
+  readonly id: string;
+  readonly implementation: TaskpackV2CheckImplementation;
+  readonly parameters?: Readonly<Record<string, TaskpackCheckParameterValue>> | undefined;
 }
 
 export interface TaskpackExternalGateDeclaration {
@@ -162,12 +305,15 @@ export interface TaskpackExternalGateDeclaration {
   readonly gateId: string;
   readonly endpointId: string;
   readonly required: boolean;
+  readonly signingCredentialRef?: string | undefined;
+  readonly authCredentialRef?: string | undefined;
+  readonly url?: string | undefined;
 }
 
 export type TaskpackRolePurpose = 'task' | 'review';
 export type TaskpackToolName = 'read' | 'write' | 'edit' | 'bash' | 'delete';
 export const TASKPACK_TOOL_NAMES: readonly TaskpackToolName[] = Object.freeze(['read', 'write', 'edit', 'bash', 'delete']);
-export const MAX_TASKPACK_ROLES = 4;
+export const MAX_TASKPACK_ROLES = 16;
 
 export interface TaskpackRoleDeclaration {
   readonly id: string;
@@ -177,6 +323,11 @@ export interface TaskpackRoleDeclaration {
   readonly thinking?: string | undefined;
   readonly tools?: readonly TaskpackToolName[] | undefined;
   readonly dependsOn?: readonly string[] | undefined;
+  readonly instructions?: readonly string[] | undefined;
+  readonly skills?: readonly string[] | undefined;
+  readonly prompt?: string | undefined;
+  readonly mcpServers?: readonly string[] | undefined;
+  readonly models?: readonly string[] | undefined;
 }
 
 export type TaskpackMemoryApplyMode = 'separate-pull-request' | 'local-only' | 'disabled';
@@ -195,37 +346,74 @@ export interface TaskpackMemoryDeclaration {
   readonly skipCi?: boolean | undefined;
 }
 
-export interface TaskpackManifest {
+export interface TaskpackPublicationDeclaration {
+  readonly mode: 'pull_request' | 'disabled';
+  readonly targetBranch: string;
+  readonly headBranchPrefix: string;
+  readonly titleTemplate: string;
+  readonly bodyTemplate?: string | undefined;
+}
+
+export interface TaskpackManifestSpecBase<TCheck> {
+  readonly goal: { readonly candidate: string; readonly noChange: string };
+  readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
+  readonly instructions?: readonly string[] | undefined;
+  readonly skills?: readonly string[] | undefined;
+  readonly execution?: TaskpackExecutionDeclaration | undefined;
+  readonly preflight?: TaskpackPreflightDeclaration | undefined;
+  readonly vars?: Readonly<Record<string, string>> | undefined;
+  readonly target?: TaskpackTargetDeclaration | undefined;
+  readonly upstreams: readonly TaskpackUpstreamDescriptor[];
+  readonly upstreamGroups?: readonly TaskpackUpstreamGroupDeclaration[] | undefined;
+  readonly submission?: TaskpackSubmissionDeclaration | undefined;
+  readonly verification: { readonly localChecks: readonly TCheck[]; readonly externalGates: readonly TaskpackExternalGateDeclaration[] };
+  readonly publication: TaskpackPublicationDeclaration;
+  readonly memory: TaskpackMemoryDeclaration;
+  readonly triggers: {
+    readonly schedule: boolean;
+    readonly workflowDispatch: boolean;
+    readonly releasePublished: boolean;
+    readonly commentCommands: readonly TaskpackCommentCommand[];
+    readonly commentPrefixes: readonly string[];
+  };
+  readonly sandbox?: TaskpackSandboxDeclaration | undefined;
+  readonly decisions?: TaskpackDecisionsDeclaration | undefined;
+  readonly models?: readonly TaskpackModelDeclaration[] | undefined;
+  readonly mcp?: TaskpackMcpDeclaration | undefined;
+  readonly limits?: TaskpackLimitsDeclaration | undefined;
+  readonly roles?: readonly TaskpackRoleDeclaration[] | undefined;
+  readonly steps?: readonly TaskpackStepDeclaration[] | undefined;
+  readonly output?: TaskpackOutputDeclaration | undefined;
+}
+
+/** Taskpack 2.0 manifest with optional `spec.proposal` and built-in structural guard checks. */
+export interface TaskpackV2Manifest {
   readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
   readonly kind: 'Taskpack';
   readonly metadata: { readonly name: string };
   readonly controlRoot?: string | undefined;
   readonly manifestPath?: string | undefined;
-  readonly spec: {
-    readonly goal: { readonly candidate: string; readonly noChange: string };
-    readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
-    readonly instructions?: readonly string[] | undefined;
-    readonly upstreams: readonly TaskpackUpstreamDescriptor[];
-    readonly proposal: { readonly path: string; readonly requiredFields: readonly string[]; readonly schemaVersion: number };
-    readonly verification: { readonly localChecks: readonly TaskpackCheckDeclaration[]; readonly externalGates: readonly TaskpackExternalGateDeclaration[] };
-    readonly publication: { readonly mode: 'pull_request' | 'disabled'; readonly targetBranch: string; readonly headBranchPrefix: string; readonly titleTemplate: string };
-    readonly memory: TaskpackMemoryDeclaration;
-    readonly triggers: {
-      readonly schedule: boolean;
-      readonly workflowDispatch: boolean;
-      readonly releasePublished: boolean;
-      readonly commentCommands: readonly TaskpackCommentCommand[];
-      readonly commentPrefixes: readonly string[];
-    };
-    readonly sandbox?: TaskpackSandboxDeclaration | undefined;
-    readonly decisions?: TaskpackDecisionsDeclaration | undefined;
-    readonly models?: readonly TaskpackModelDeclaration[] | undefined;
-    readonly mcp?: TaskpackMcpDeclaration | undefined;
-    readonly limits?: TaskpackLimitsDeclaration | undefined;
-    readonly roles?: readonly TaskpackRoleDeclaration[] | undefined;
-    readonly output?: TaskpackOutputDeclaration | undefined;
+  readonly spec: TaskpackManifestSpecBase<TaskpackV2CheckDeclaration> & {
+    readonly proposal?: TaskpackProposalDeclaration | undefined;
   };
 }
+
+/**
+ * Legacy manifest view narrowing `spec.proposal` to required for callers of `validateTaskpackManifest`.
+ */
+export interface TaskpackManifestWithProposal {
+  readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
+  readonly kind: 'Taskpack';
+  readonly metadata: { readonly name: string };
+  readonly controlRoot?: string | undefined;
+  readonly manifestPath?: string | undefined;
+  readonly spec: TaskpackManifestSpecBase<TaskpackV2CheckDeclaration> & {
+    readonly proposal: TaskpackProposalDeclaration;
+  };
+}
+
+/** Canonical Taskpack 2.0 manifest type across `@loopwright/github-app`. */
+export type TaskpackManifest = TaskpackV2Manifest;
 
 export const MAX_TASKPACK_MODEL_CANDIDATES = 8;
 export const MAX_EXPANDED_MODEL_CANDIDATES = 16;
@@ -263,6 +451,17 @@ export type TaskpackDecisionDisclosurePolicy =
   | 'repo-approved-redacted-evidence'
   | 'public-metadata-only';
 
+export type TaskpackDecisionTriageSeverity = 'blocking' | 'important' | 'nit';
+export type TaskpackDecisionTriageRuleKind = 'noul' | 'score';
+
+export interface TaskpackDecisionTriageRule {
+  readonly id: string;
+  readonly description: string;
+  readonly severity: TaskpackDecisionTriageSeverity;
+  readonly kind: TaskpackDecisionTriageRuleKind;
+  readonly threshold?: number | undefined;
+}
+
 export interface TaskpackDecisionsDeclaration {
   readonly enabled: boolean;
   readonly provider?: TaskpackDecisionProviderKind | undefined;
@@ -272,6 +471,7 @@ export interface TaskpackDecisionsDeclaration {
   readonly hardDeadlineMs?: number | undefined;
   readonly maxAttempts?: 1 | 2 | undefined;
   readonly allowImages?: boolean | undefined;
+  readonly triageRules?: readonly TaskpackDecisionTriageRule[] | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +537,10 @@ export interface SandboxPolicyInput {
   readonly protectedPaths?: readonly string[] | undefined;
   readonly controlRoot?: string | undefined;
   readonly proposalPath?: string | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly strictExactFiles?: boolean | undefined;
   readonly deniedReadPaths?: readonly string[] | undefined;
+  readonly allowedReadOnlyPaths?: readonly string[] | undefined;
   readonly scratchDirectory?: string | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly requiredCapabilities?: readonly SandboxCapability[] | undefined;
@@ -473,7 +676,7 @@ export const CANONICAL_TASKPACK_STEP_GATE_URL = `http://127.0.0.1:65535/${LOCAL_
 
 export interface CompiledInstructionResource {
   readonly id: string;
-  readonly kind: 'instruction' | 'document';
+  readonly kind: 'instruction' | 'skill' | 'document';
   readonly path: string;
   readonly bytes: Buffer;
   readonly digest: Digest;
@@ -486,13 +689,26 @@ export interface CompiledLocalCommandGate {
   readonly endpointRef: typeof LOCAL_COMMAND_GATE_ENDPOINT_ID;
   readonly script: string;
   readonly scriptSha256: string;
+  readonly scriptDir?: string | undefined;
+  readonly scriptDirSha256?: string | undefined;
+  readonly args?: readonly string[] | undefined;
   readonly timeoutSeconds: number;
   readonly allowReadOnlyGitHubToken: boolean;
   readonly env: readonly string[];
+  readonly envMap?: Readonly<Record<string, string>> | undefined;
+  readonly toolchainPaths?: readonly string[] | undefined;
+  readonly preserveRepoDirName?: boolean | undefined;
+  readonly mountReadOnlyGit?: boolean | undefined;
+  readonly allowHostEnv?: boolean | undefined;
+  readonly allowHostPath?: boolean | undefined;
+  readonly allowCheckNetwork?: boolean | undefined;
+  readonly allowPrivileged?: boolean | undefined;
 }
 
 export interface HostTaskpackBindings {
   readonly mode: 'candidate' | 'no-change';
+  readonly checkOnlyNoChange?: boolean | undefined;
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly executionMode?: 'pi' | 'delegated' | undefined;
   readonly repository: string;
   readonly repositoryRoot?: string | undefined;
@@ -500,8 +716,8 @@ export interface HostTaskpackBindings {
   readonly baseRevision: string;
   readonly sourceRevision: string;
   /**
-   * Deployment/intake metadata only. The frozen controller compile capability accepts only a null task
-   * matrix, so the emitted contract always carries `matrix: null`; this record rides on intake outcomes.
+   * Optional single-cell or multi-cell target matrix forwarded into `TaskContract.spec.target.matrix`
+   * and platform-scoped reviewed memory isolation.
    */
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   readonly roleSelection?: HostRoleSelection | undefined;
@@ -526,6 +742,23 @@ export interface HostTaskpackBindings {
   readonly resourceVersion?: string | undefined;
   readonly authorPrompt?: string | undefined;
   readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
+  readonly preflightPromptResources?: readonly {
+    readonly id: string;
+    readonly kind: 'instruction' | 'skill' | 'document';
+    readonly path: string;
+    readonly bytes: Buffer;
+    readonly sha256: string;
+  }[] | undefined;
+  readonly preflightWorkspaceResources?: readonly {
+    readonly id: string;
+    readonly kind: 'instruction' | 'skill' | 'document';
+    readonly relativePath: string;
+    readonly stagedPath: string;
+    readonly checkStagedPath: string | null;
+    readonly sha256: string;
+    readonly byteLength: number;
+    readonly exposeToChecks: boolean;
+  }[] | undefined;
   readonly nowMs?: number | undefined;
   readonly scrubber?: { scrub(text: string): string } | undefined;
   readonly onMemoryWarning?: ((message: string) => void) | undefined;
@@ -546,13 +779,16 @@ export interface CompiledTaskpack {
   readonly instructionResources?: readonly CompiledInstructionResource[] | undefined;
   readonly localCommandGates?: readonly CompiledLocalCommandGate[] | undefined;
   readonly activeMemory?: CompiledActiveMemorySummary | undefined;
+  readonly digests?: Readonly<Record<string, string>> | undefined;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------
 // Generic repository-agnostic intake
 // ---------------------------------------------------------------------------
 
-export type UpstreamAcquisitionStatus = 'available' | 'up_to_date' | 'failed' | 'blocked';
+export type UpstreamAcquisitionStatus = 'available' | 'up_to_date' | 'held_back' | 'failed' | 'blocked';
 
 export interface TaskpackUpstreamRecord {
   readonly upstreamId: string;
@@ -908,7 +1144,10 @@ export interface ActionEntrypointInput {
   readonly repositoryFullName: string;
   readonly baseRevision: string;
   readonly sourceRevision?: string | undefined;
-  readonly mode: 'candidate' | 'no-change';
+  readonly mode: 'candidate' | 'no-change' | 'auto';
+  readonly allowPrivilegedExecution?: boolean | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;
   readonly runRoot: string;
@@ -984,11 +1223,24 @@ export interface TurnkeyMemorySummary {
 export type ActionEntrypointResult =
   | {
     readonly kind: 'refused';
-    readonly code: 'HOST_PROFILE_UNQUALIFIED' | 'HOST_CLOCK_UNTRUSTED' | 'STORAGE_PROFILE_INSUFFICIENT' | 'MCP_OAUTH_UNSUPPORTED' | 'MCP_AUTHENTICATION_REQUIRED' | 'PROVIDER_OAUTH_UNSUPPORTED';
+    readonly code:
+      | 'HOST_PROFILE_UNQUALIFIED'
+      | 'HOST_CLOCK_UNTRUSTED'
+      | 'STORAGE_PROFILE_INSUFFICIENT'
+      | 'MCP_OAUTH_UNSUPPORTED'
+      | 'MCP_AUTHENTICATION_REQUIRED'
+      | 'PROVIDER_OAUTH_UNSUPPORTED'
+      | 'TASKPACK_HOST_BINDING_INVALID'
+      | 'TASKPACK_SCOPE_VIOLATION';
     readonly reason: string;
     readonly recommendedRunStatus?: 'reconcile_required' | undefined;
   }
-  | { readonly kind: 'no_change'; readonly reason: string }
+  | {
+    readonly kind: 'no_change';
+    readonly reason: string;
+    readonly taskpack?: WrittenCompiledTaskpack | undefined;
+    readonly delegateOutcome?: { readonly ok: boolean; readonly detail: string } | null | undefined;
+  }
   | { readonly kind: 'blocked'; readonly reason: string; readonly detail?: string }
   | {
     readonly kind: 'compiled';

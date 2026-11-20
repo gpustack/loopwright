@@ -16,9 +16,17 @@ inputs:
     required: false
     default: '.loopwright/taskpack.yaml'
   mode:
-    description: "Cycle mode: 'candidate' or 'no-change'."
+    description: "Cycle mode: 'auto', 'candidate', or 'no-change'."
     required: false
     default: 'candidate'
+  allow-privileged-execution:
+    description: "Dual-key operator unlock allowing manifests declaring spec.execution.mode: 'privileged' or privileged execution capabilities when 'true'."
+    required: false
+    default: 'false'
+  allow-workflow-writes:
+    description: "Dual-key operator unlock allowing manifests declaring spec.execution.capabilities.allowWorkflowWrites: true to modify .github/workflows/** when 'true'."
+    required: false
+    default: 'false'
   event-name:
     description: 'Triggering event name (schedule, workflow_dispatch, repository_dispatch, release, issue_comment, pull_request_review).'
     required: false
@@ -160,6 +168,8 @@ runs:
       env:
         INPUT_TASKPACK-PATH: ${{ inputs.taskpack-path }}
         INPUT_MODE: ${{ inputs.mode }}
+        INPUT_ALLOW-PRIVILEGED-EXECUTION: ${{ inputs.allow-privileged-execution }}
+        INPUT_ALLOW-WORKFLOW-WRITES: ${{ inputs.allow-workflow-writes }}
         INPUT_EVENT-NAME: ${{ inputs.event-name }}
         INPUT_EVENT-PATH: ${{ inputs.event-path }}
         INPUT_RUN-ROOT: ${{ inputs.run-root }}

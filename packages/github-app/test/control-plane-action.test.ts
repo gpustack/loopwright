@@ -33,7 +33,7 @@ spec:
     noChange: Confirm the documentation needs no change and settle as no change.
   scope:
     writable:
-      - docs
+      - 'docs/**'
     protected: []
   upstreams:
     - id: engine

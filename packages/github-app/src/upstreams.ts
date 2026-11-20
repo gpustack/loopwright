@@ -1,27 +1,36 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants as fsConstants, existsSync, lstatSync, statSync } from 'node:fs';
-import { open, stat } from 'node:fs/promises';
+import { lstat, open, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { createGitHubAppJwt, SecretScrubber } from './token-broker.js';
+import { parseJsonSubset, type Json } from './schema.js';
 import {
   GitHubAppError, REPOSITORY_FULL_NAME_PATTERN,
   type GitCommitIdentity, type TaskpackManifest, type TaskpackUpstreamDescriptor,
-  type TaskpackUpstreamRecord, type UpstreamAcquisitionStatus,
+  type TaskpackUpstreamGroupDeclaration, type TaskpackUpstreamRecord,
+  type TaskpackV2Manifest, type UpstreamAcquisitionStatus,
 } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_PROPOSAL_BYTES = 262_144;
+const MAX_VERSION_PATH_LENGTH = 256;
+const MAX_VERSION_PATH_SEGMENTS = 32;
+const MAX_RECORD_METADATA_KEYS = 32;
+const MAX_RECORD_METADATA_BYTES = 8_192;
 export const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const SAFE_GIT_REF_PATTERN = /^[A-Za-z0-9_./@^~{}-]{1,256}$/;
 const SEMVER_TAG_PATTERN = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/i;
+const STRICT_SEMVER_PATTERN = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const PRERELEASE_VERSION_TAG_PATTERN = /^v?\d+(?:\.\d+)+(?:[._-]?(?:alpha|beta|rc|dev|pre|preview|nightly|canary)\d*|[ab]\d+)(?:[._-]|$)/i;
+const FORBIDDEN_PATH_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 const UPSTREAM_STATUSES: ReadonlySet<string> = new Set<UpstreamAcquisitionStatus>([
   'available',
   'up_to_date',
+  'held_back',
   'failed',
   'blocked',
 ]);
@@ -30,6 +39,35 @@ const GIT_CANDIDATE_PATHS: readonly string[] = Object.freeze([
   '/opt/homebrew/bin/git',
   '/usr/local/bin/git',
 ]);
+
+/** Extended upstream acquisition record carrying baseline, watched paths, group, failure provenance, and metadata context. */
+export interface UpstreamAcquisitionRecord extends TaskpackUpstreamRecord {
+  readonly currentVersion?: string | undefined;
+  readonly targetVersion?: string | undefined;
+  readonly watchedPaths?: readonly string[] | undefined;
+  readonly groupId?: string | undefined;
+  readonly underlyingStatus?: 'failed' | 'blocked' | undefined;
+  readonly metadata?: Readonly<Record<string, Json>> | undefined;
+}
+
+export type UpstreamIntakeDisposition = 'candidate' | 'no_change' | 'blocked';
+
+export interface UpstreamIntakeDispositionResult {
+  readonly disposition: UpstreamIntakeDisposition;
+  readonly reason: string;
+  readonly available: readonly UpstreamAcquisitionRecord[];
+  readonly heldBack: readonly UpstreamAcquisitionRecord[];
+  readonly upToDate: readonly UpstreamAcquisitionRecord[];
+  readonly failures: readonly UpstreamAcquisitionRecord[];
+}
+
+export interface DiscoverTaskpackUpstreamsV2Result {
+  readonly records: readonly UpstreamAcquisitionRecord[];
+  readonly disposition: UpstreamIntakeDisposition;
+  readonly reason: string;
+  readonly summary: string;
+  readonly memoryVersions: Readonly<Record<string, string>>;
+}
 
 export interface DiscoverTaskpackUpstreamsOptions {
   readonly repositoryRoot?: string | undefined;
@@ -40,6 +78,8 @@ export interface DiscoverTaskpackUpstreamsOptions {
   readonly upstreamRecordsJson?: string | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly timeoutMs?: number | undefined;
+  readonly baselineVersions?: Readonly<Record<string, string>> | ReadonlyMap<string, string> | undefined;
+  readonly includeMetadata?: boolean | undefined;
 }
 
 export interface FindOpenManagedPullRequestOptions {
@@ -322,10 +362,115 @@ async function fetchJson(
   }
 }
 
-export function parseUpstreamRecordsJson(rawJson: string): readonly TaskpackUpstreamRecord[] {
-  let parsed: unknown;
+const MAX_RECORD_METADATA_DEPTH = 12;
+const MAX_VERSION_STRING_LENGTH = 256;
+const MAX_UPSTREAM_ID_LENGTH = 128;
+
+function sanitizeSingleLine(text: string): string {
+  return text.replace(/[\0\r\n]+/g, ' ').trim();
+}
+
+function validateVersionStringField(value: unknown, label: string, maxLength = MAX_VERSION_STRING_LENGTH): string {
+  if (typeof value !== 'string') {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} must be a string`);
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > maxLength || /[\0\r\n]/.test(value)) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `${label} must be a single-line non-empty string of at most ${maxLength} characters`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Normalize `version` / `targetVersion` for `held_back` upstream records so `version` NEVER
+ * substitutes a skipped target version into reviewed-memory metadata when `currentVersion` is known
+ * (or omits `version` if `currentVersion` is unknown).
+ */
+export function normalizeHeldBackVersions(
+  status: UpstreamAcquisitionStatus,
+  version: string | undefined,
+  currentVersion: string | undefined,
+  targetVersion: string | undefined,
+): { readonly version?: string | undefined; readonly targetVersion?: string | undefined } {
+  if (status !== 'held_back') {
+    return { version, targetVersion };
+  }
+  if (currentVersion !== undefined) {
+    const skipped = targetVersion ?? (version !== undefined && version !== currentVersion ? version : undefined);
+    return { version: currentVersion, targetVersion: skipped };
+  }
+  if (version !== undefined) {
+    return { version: undefined, targetVersion: targetVersion ?? version };
+  }
+  return { version: undefined, targetVersion };
+}
+
+function validateBoundedMetadataValue(value: unknown, label: string, depth: number): Json {
+  if (depth > MAX_RECORD_METADATA_DEPTH) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} exceeds maximum nesting depth ${MAX_RECORD_METADATA_DEPTH}`);
+  }
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} contains non-finite number`);
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item, idx) => validateBoundedMetadataValue(item, `${label}[${idx}]`, depth + 1))) as unknown as Json;
+  }
+  if (isPlainRecord(value)) {
+    const out: Record<string, Json> = Object.create(null) as Record<string, Json>;
+    for (const key of Object.keys(value)) {
+      if (FORBIDDEN_PATH_KEYS.has(key)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} contains forbidden key "${key}"`);
+      }
+      out[key] = validateBoundedMetadataValue(value[key], `${label}.${key}`, depth + 1);
+    }
+    return Object.freeze(out);
+  }
+  throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} contains unsupported non-JSON value`);
+}
+
+function validateBoundedMetadataRecord(raw: unknown, label: string): Readonly<Record<string, Json>> {
+  if (!isPlainRecord(raw)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} must be a plain JSON object`);
+  }
+  const entries = Object.keys(raw);
+  if (entries.length > MAX_RECORD_METADATA_KEYS) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} exceeds ${MAX_RECORD_METADATA_KEYS} entries`);
+  }
+  const out = validateBoundedMetadataValue(raw, label, 1) as Record<string, Json>;
+  let serialized: string;
   try {
-    parsed = JSON.parse(rawJson);
+    serialized = JSON.stringify(out);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} is not JSON-serializable`);
+  }
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_RECORD_METADATA_BYTES) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} exceeds ${MAX_RECORD_METADATA_BYTES} bytes`);
+  }
+  return out;
+}
+
+export function parseUpstreamRecordsJson(rawJson: string): readonly UpstreamAcquisitionRecord[] {
+  if (typeof rawJson !== 'string' || Buffer.byteLength(rawJson, 'utf8') > MAX_RESPONSE_BYTES) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson must be a string of at most ${MAX_RESPONSE_BYTES} bytes`);
+  }
+  let parsed: Json;
+  try {
+    parsed = parseJsonSubset(rawJson, {
+      maxNodes: 8_192,
+      maxDepth: MAX_RECORD_METADATA_DEPTH,
+      maxCollection: 256,
+      maxString: 32_768,
+      diagPath: '/upstreamRecordsJson',
+    });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson is not valid JSON: ${detail}`);
@@ -333,43 +478,328 @@ export function parseUpstreamRecordsJson(rawJson: string): readonly TaskpackUpst
   if (!Array.isArray(parsed)) {
     throw new GitHubAppError('ACTION_INPUT_INVALID', 'upstreamRecordsJson must be a JSON array');
   }
-  const records: TaskpackUpstreamRecord[] = [];
+  const records: UpstreamAcquisitionRecord[] = [];
   for (const [index, entry] of parsed.entries()) {
     if (!isPlainRecord(entry)) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}] must be an object`);
     }
-    const upstreamId = entry['upstreamId'];
+    const rawUpstreamId = entry['upstreamId'];
     const status = entry['status'];
-    const version = entry['version'];
+    const rawVersion = entry['version'];
+    const rawCurrentVersion = entry['currentVersion'];
+    const rawTargetVersion = entry['targetVersion'];
     const recentVersions = entry['recentVersions'];
+    const watchedPaths = entry['watchedPaths'];
+    const rawGroupId = entry['groupId'];
+    const rawUnderlyingStatus = entry['underlyingStatus'];
     const reason = entry['reason'];
-    if (typeof upstreamId !== 'string' || upstreamId.trim().length === 0) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].upstreamId must be a non-empty string`);
-    }
+    const metadata = entry['metadata'];
+    const upstreamId = validateVersionStringField(rawUpstreamId, `upstreamRecordsJson[${index}].upstreamId`, MAX_UPSTREAM_ID_LENGTH);
     if (typeof status !== 'string' || !UPSTREAM_STATUSES.has(status)) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].status is invalid`);
     }
-    if (version !== undefined && typeof version !== 'string') {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].version must be a string`);
-    }
+    const version = rawVersion !== undefined
+      ? validateVersionStringField(rawVersion, `upstreamRecordsJson[${index}].version`)
+      : undefined;
+    const currentVersion = rawCurrentVersion !== undefined
+      ? validateVersionStringField(rawCurrentVersion, `upstreamRecordsJson[${index}].currentVersion`)
+      : undefined;
+    const targetVersion = rawTargetVersion !== undefined
+      ? validateVersionStringField(rawTargetVersion, `upstreamRecordsJson[${index}].targetVersion`)
+      : undefined;
     if (
       recentVersions !== undefined
-      && (!Array.isArray(recentVersions) || recentVersions.some(item => typeof item !== 'string' || item.length === 0))
+      && (!Array.isArray(recentVersions) || recentVersions.some(item => typeof item !== 'string' || item.trim().length === 0 || item.length > MAX_VERSION_STRING_LENGTH || /[\0\r\n]/.test(item)))
     ) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].recentVersions must be an array of non-empty strings`);
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].recentVersions must be an array of bounded single-line strings`);
     }
-    if (reason !== undefined && typeof reason !== 'string') {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].reason must be a string`);
+    if (
+      watchedPaths !== undefined
+      && (!Array.isArray(watchedPaths) || watchedPaths.some(item => typeof item !== 'string' || item.length === 0 || item.length > 1024 || /[\0\r\n]/.test(item)))
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].watchedPaths must be an array of non-empty strings`);
     }
+    const groupId = rawGroupId !== undefined
+      ? validateVersionStringField(rawGroupId, `upstreamRecordsJson[${index}].groupId`, MAX_UPSTREAM_ID_LENGTH)
+      : undefined;
+    let underlyingStatus: 'failed' | 'blocked' | undefined;
+    if (rawUnderlyingStatus !== undefined) {
+      if (rawUnderlyingStatus !== 'failed' && rawUnderlyingStatus !== 'blocked') {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].underlyingStatus must be "failed" or "blocked"`);
+      }
+      underlyingStatus = rawUnderlyingStatus;
+    }
+    if (reason !== undefined && (typeof reason !== 'string' || reason.length > 2048)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `upstreamRecordsJson[${index}].reason must be a string of at most 2048 characters`);
+    }
+    const validatedMetadata = metadata !== undefined
+      ? validateBoundedMetadataRecord(metadata, `upstreamRecordsJson[${index}].metadata`)
+      : undefined;
+
+    const typedStatus = status as UpstreamAcquisitionStatus;
+    const normalized = normalizeHeldBackVersions(typedStatus, version, currentVersion, targetVersion);
+
     records.push({
       upstreamId,
-      status: status as UpstreamAcquisitionStatus,
-      ...(version !== undefined ? { version } : {}),
+      status: typedStatus,
+      ...(normalized.version !== undefined ? { version: normalized.version } : {}),
+      ...(currentVersion !== undefined ? { currentVersion } : {}),
+      ...(normalized.targetVersion !== undefined ? { targetVersion: normalized.targetVersion } : {}),
       ...(recentVersions !== undefined ? { recentVersions: Object.freeze([...(recentVersions as string[])]) } : {}),
+      ...(watchedPaths !== undefined ? { watchedPaths: Object.freeze([...(watchedPaths as string[])]) } : {}),
+      ...(groupId !== undefined ? { groupId } : {}),
+      ...(underlyingStatus !== undefined ? { underlyingStatus } : {}),
       ...(reason !== undefined ? { reason } : {}),
+      ...(validatedMetadata !== undefined ? { metadata: validatedMetadata } : {}),
     });
   }
   return Object.freeze(records);
+}
+
+type VersionPathSegment = { readonly kind: 'key'; readonly value: string } | { readonly kind: 'index'; readonly value: number };
+
+function parseVersionPathSegments(versionPath: string): readonly VersionPathSegment[] {
+  if (
+    typeof versionPath !== 'string'
+    || versionPath.length === 0
+    || versionPath.length > MAX_VERSION_PATH_LENGTH
+    || /[\0\r\n]/.test(versionPath)
+  ) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid versionPath selector "${String(versionPath)}"`);
+  }
+
+  const segments: VersionPathSegment[] = [];
+  let cursor: number;
+
+  if (versionPath.startsWith('$')) {
+    cursor = 1;
+    if (cursor === versionPath.length) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'versionPath "$" must select a property or index');
+    }
+  } else {
+    const firstMatch = /^[A-Za-z0-9_-]+/.exec(versionPath);
+    if (firstMatch === null) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid versionPath selector "${versionPath}"`);
+    }
+    const firstKey = firstMatch[0];
+    if (FORBIDDEN_PATH_KEYS.has(firstKey)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath must not access forbidden property "${firstKey}"`);
+    }
+    segments.push({ kind: 'key', value: firstKey });
+    cursor = firstKey.length;
+  }
+
+  while (cursor < versionPath.length) {
+    if (segments.length >= MAX_VERSION_PATH_SEGMENTS) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath exceeds ${MAX_VERSION_PATH_SEGMENTS} segments`);
+    }
+    const rest = versionPath.slice(cursor);
+    if (rest.startsWith('.')) {
+      const dotMatch = /^\.([A-Za-z0-9_-]+)/.exec(rest);
+      if (dotMatch === null) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid dot segment in versionPath "${versionPath}"`);
+      }
+      const key = dotMatch[1]!;
+      if (FORBIDDEN_PATH_KEYS.has(key)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath must not access forbidden property "${key}"`);
+      }
+      segments.push({ kind: 'key', value: key });
+      cursor += dotMatch[0].length;
+    } else if (rest.startsWith('[')) {
+      const idxMatch = /^\[(\d+)\]/.exec(rest);
+      if (idxMatch !== null) {
+        const index = Number.parseInt(idxMatch[1]!, 10);
+        if (!Number.isSafeInteger(index) || index < 0) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid array index in versionPath "${versionPath}"`);
+        }
+        segments.push({ kind: 'index', value: index });
+        cursor += idxMatch[0].length;
+        continue;
+      }
+      const singleQuoteMatch = /^\['([^'\r\n]+)'\]/.exec(rest);
+      if (singleQuoteMatch !== null) {
+        const key = singleQuoteMatch[1]!;
+        if (FORBIDDEN_PATH_KEYS.has(key)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath must not access forbidden property "${key}"`);
+        }
+        segments.push({ kind: 'key', value: key });
+        cursor += singleQuoteMatch[0].length;
+        continue;
+      }
+      const doubleQuoteMatch = /^\["([^"\r\n]+)"\]/.exec(rest);
+      if (doubleQuoteMatch !== null) {
+        const key = doubleQuoteMatch[1]!;
+        if (FORBIDDEN_PATH_KEYS.has(key)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath must not access forbidden property "${key}"`);
+        }
+        segments.push({ kind: 'key', value: key });
+        cursor += doubleQuoteMatch[0].length;
+        continue;
+      }
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid bracket segment in versionPath "${versionPath}"`);
+    } else {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `unexpected token in versionPath "${versionPath}" at offset ${cursor}`);
+    }
+  }
+
+  if (segments.length === 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `versionPath "${versionPath}" selects no segments`);
+  }
+  return segments;
+}
+
+/**
+ * Safely traverse a parsed JSON value using a bounded dot/bracket `versionPath` selector
+ * (e.g. `dist-tags.latest`, `$.data.releases[0].version`, `packages['@scope/pkg'].version`),
+ * refusing prototype-chain keys (`__proto__`, `constructor`, `prototype`).
+ */
+export function extractJsonVersionPath(data: unknown, versionPath: string): string | undefined {
+  const segments = parseVersionPathSegments(versionPath);
+  let current: unknown = data;
+  for (const segment of segments) {
+    if (segment.kind === 'index') {
+      if (!Array.isArray(current) || segment.value < 0 || segment.value >= current.length) {
+        return undefined;
+      }
+      current = current[segment.value];
+    } else {
+      if (!isPlainRecord(current) || !Object.hasOwn(current, segment.value)) {
+        return undefined;
+      }
+      current = current[segment.value];
+    }
+  }
+  if (typeof current !== 'string') return undefined;
+  if (/[\0\r\n]/.test(current)) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `versionPath "${versionPath}" resolved to a multiline or NUL-containing string`,
+    );
+  }
+  const trimmed = current.trim();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.length > MAX_VERSION_STRING_LENGTH) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      `versionPath "${versionPath}" resolved value exceeds ${MAX_VERSION_STRING_LENGTH} characters`,
+    );
+  }
+  return trimmed;
+}
+
+interface StrictSemverParts {
+  readonly major: bigint;
+  readonly minor: bigint;
+  readonly patch: bigint;
+  readonly prerelease: readonly string[];
+}
+
+function parseStrictSemver(raw: string): StrictSemverParts | null {
+  const match = STRICT_SEMVER_PATTERN.exec(raw.trim());
+  if (match === null) return null;
+  return {
+    major: BigInt(match[1]!),
+    minor: BigInt(match[2]!),
+    patch: BigInt(match[3]!),
+    prerelease: match[4] !== undefined ? match[4].split('.') : [],
+  };
+}
+
+/**
+ * Compare two strict SemVer 2.0.0 strings (`major.minor.patch[-prerelease][+build]`).
+ * Returns `< 0` when `a < b`, `0` when equal precedence, `> 0` when `a > b`, or `null` if either is not strict SemVer.
+ */
+export function compareStrictSemver(a: string, b: string): number | null {
+  const semA = parseStrictSemver(a);
+  const semB = parseStrictSemver(b);
+  if (semA === null || semB === null) return null;
+  if (semA.major !== semB.major) return semA.major < semB.major ? -1 : 1;
+  if (semA.minor !== semB.minor) return semA.minor < semB.minor ? -1 : 1;
+  if (semA.patch !== semB.patch) return semA.patch < semB.patch ? -1 : 1;
+  if (semA.prerelease.length === 0 && semB.prerelease.length === 0) return 0;
+  if (semA.prerelease.length === 0) return 1;
+  if (semB.prerelease.length === 0) return -1;
+  const len = Math.min(semA.prerelease.length, semB.prerelease.length);
+  for (let i = 0; i < len; i += 1) {
+    const idA = semA.prerelease[i]!;
+    const idB = semB.prerelease[i]!;
+    const isNumA = /^\d+$/.test(idA);
+    const isNumB = /^\d+$/.test(idB);
+    if (isNumA && isNumB) {
+      const nA = BigInt(idA);
+      const nB = BigInt(idB);
+      if (nA !== nB) return nA < nB ? -1 : 1;
+    } else if (isNumA !== isNumB) {
+      return isNumA ? -1 : 1;
+    } else if (idA !== idB) {
+      return idA < idB ? -1 : 1;
+    }
+  }
+  return semA.prerelease.length - semB.prerelease.length;
+}
+
+function normalizePackageJsonVersionSpec(rawSpec: string): string | undefined {
+  const trimmed = rawSpec.trim();
+  if (
+    trimmed.length === 0
+    || /[\0\r\n\s<>]|[*xX]|\|\|/.test(trimmed)
+    || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(trimmed)
+  ) {
+    return undefined;
+  }
+  const stripped = trimmed.replace(/^[~^=]+/, '');
+  if (stripped.length === 0 || parseSemverTag(stripped) === null) {
+    return undefined;
+  }
+  return stripped;
+}
+
+function extractNpmPackageNameFromSource(source: string): string | undefined {
+  try {
+    const parsed = new URL(source);
+    if (parsed.hostname !== 'registry.npmjs.org') return undefined;
+    const rawPath = parsed.pathname.replace(/^\/+|\/+$/g, '');
+    if (rawPath.length === 0) return undefined;
+    const withoutLatest = rawPath.endsWith('/latest') ? rawPath.slice(0, -'/latest'.length) : rawPath;
+    return decodeURIComponent(withoutLatest);
+  } catch {
+    return undefined;
+  }
+}
+
+function readPackageJsonBaselineVersions(
+  packageJsonRaw: unknown,
+  declaredUpstreams: readonly TaskpackUpstreamDescriptor[],
+): ReadonlyMap<string, string> {
+  const baselines = new Map<string, string>();
+  if (!isPlainRecord(packageJsonRaw)) return baselines;
+  const deps = new Map<string, string>();
+  for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
+    const table = packageJsonRaw[section];
+    if (!isPlainRecord(table)) continue;
+    for (const [pkgName, spec] of Object.entries(table)) {
+      if (typeof spec !== 'string' || deps.has(pkgName)) continue;
+      const normalized = normalizePackageJsonVersionSpec(spec);
+      if (normalized !== undefined) {
+        deps.set(pkgName, normalized);
+      }
+    }
+  }
+  for (const upstream of declaredUpstreams) {
+    const direct = deps.get(upstream.id);
+    if (direct !== undefined) {
+      baselines.set(upstream.id, direct);
+      continue;
+    }
+    const pkgFromUrl = extractNpmPackageNameFromSource(upstream.source);
+    if (pkgFromUrl !== undefined) {
+      const fromUrl = deps.get(pkgFromUrl);
+      if (fromUrl !== undefined) {
+        baselines.set(upstream.id, fromUrl);
+      }
+    }
+  }
+  return baselines;
 }
 
 function readBaselineVersions(
@@ -585,6 +1015,38 @@ function selectLatestVersionTag(tags: readonly string[], upstream: TaskpackUpstr
   return candidates[candidates.length - 1]!;
 }
 
+function validateHttpUpstreamUrl(source: string, kind: 'http-json' | 'custom-table'): URL {
+  if (typeof source !== 'string' || source.length === 0 || /[\0\r\n\s]/.test(source)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${kind} source "${source}" is not a valid URL`);
+  }
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(source);
+  } catch {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${kind} source "${source}" is not a valid URL`);
+  }
+  if (parsedUrl.username.length > 0 || parsedUrl.password.length > 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${kind} source "${source}" must not embed URL credentials`);
+  }
+  if (parsedUrl.hash.length > 0) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `${kind} source "${source}" must not contain a URL fragment`);
+  }
+  if (parsedUrl.protocol === 'https:') {
+    return parsedUrl;
+  }
+  if (parsedUrl.protocol === 'http:') {
+    const host = parsedUrl.hostname.toLowerCase();
+    const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+    if (isLoopback) {
+      return parsedUrl;
+    }
+  }
+  throw new GitHubAppError(
+    'ACTION_INPUT_INVALID',
+    `${kind} source "${source}" must use https:// (plain http:// is allowed only for loopback hosts)`,
+  );
+}
+
 async function resolveSingleUpstreamDetails(
   upstream: TaskpackUpstreamDescriptor,
   context: {
@@ -760,6 +1222,7 @@ async function resolveSingleUpstreamDetails(
     }
 
     case 'http-json': {
+      validateHttpUpstreamUrl(upstream.source, 'http-json');
       const res = await fetchJson(
         upstream.source,
         fetchImpl,
@@ -770,11 +1233,21 @@ async function resolveSingleUpstreamDetails(
       if (!res.ok) {
         throw new GitHubAppError('ACTION_INPUT_INVALID', `http-json fetch failed (${res.status}) for ${upstream.id}`);
       }
+      if (upstream.versionPath !== undefined) {
+        const extracted = extractJsonVersionPath(res.data, upstream.versionPath);
+        if (extracted === undefined) {
+          throw new GitHubAppError(
+            'ACTION_INPUT_INVALID',
+            `http-json versionPath "${upstream.versionPath}" did not resolve to a non-empty string for ${upstream.id}`,
+          );
+        }
+        return { version: extracted };
+      }
       if (isPlainRecord(res.data)) {
         for (const key of ['version', 'tag_name', 'latest', 'sha'] as const) {
           const candidate = res.data[key];
           if (typeof candidate === 'string' && candidate.trim().length > 0) {
-            return { version: candidate.trim() };
+            return { version: validateVersionStringField(candidate, `${upstream.id}.${key}`) };
           }
         }
       }
@@ -784,22 +1257,7 @@ async function resolveSingleUpstreamDetails(
     case 'custom-table': {
       let rawBytes: Buffer;
       if (upstream.source.startsWith('http://') || upstream.source.startsWith('https://')) {
-        let parsedUrl: URL;
-        try {
-          parsedUrl = new URL(upstream.source);
-        } catch {
-          throw new GitHubAppError('ACTION_INPUT_INVALID', `custom-table source "${upstream.source}" is not a valid URL`);
-        }
-        if (parsedUrl.protocol === 'http:') {
-          const host = parsedUrl.hostname.toLowerCase();
-          const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
-          if (!isLoopback) {
-            throw new GitHubAppError(
-              'ACTION_INPUT_INVALID',
-              `custom-table source "${upstream.source}" must use https:// (plain http:// is allowed only for loopback hosts)`,
-            );
-          }
-        }
+        validateHttpUpstreamUrl(upstream.source, 'custom-table');
         const res = await fetchBoundedText(
           upstream.source,
           fetchImpl,
@@ -831,15 +1289,419 @@ async function resolveSingleUpstreamDetails(
 }
 
 /**
+ * Apply declarative `spec.upstreamGroups` (`lockstep` | `independent`) across resolved upstream
+ * acquisition records (supports both HTTP-discovered and preflight-supplied records).
+ *
+ * Under `policy: 'lockstep'`, if any member is missing, lacks a resolved version, has status
+ * `'held_back' | 'blocked' | 'failed'`, or members disagree on target version while at least one
+ * member has an available update, every member of that lockstep group resolves atomically as
+ * `'held_back'` without affecting unrelated groups or independent upstreams.
+ */
+export function applyUpstreamGroups(
+  records: readonly UpstreamAcquisitionRecord[],
+  groups: readonly TaskpackUpstreamGroupDeclaration[] | undefined,
+  baselineVersions?: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined,
+): readonly UpstreamAcquisitionRecord[] {
+  if (groups === undefined || groups.length === 0 || records.length === 0) {
+    return Object.freeze([...records]);
+  }
+
+  const lookupBaseline = (upstreamId: string): string | undefined => {
+    if (baselineVersions === undefined) return undefined;
+    if (baselineVersions instanceof Map) return baselineVersions.get(upstreamId);
+    const val = (baselineVersions as Readonly<Record<string, string>>)[upstreamId];
+    return typeof val === 'string' && val.length > 0 ? val : undefined;
+  };
+
+  const byId = new Map<string, UpstreamAcquisitionRecord>();
+  for (const record of records) {
+    byId.set(record.upstreamId, record);
+  }
+
+  const overrides = new Map<string, UpstreamAcquisitionRecord>();
+
+  for (const group of groups) {
+    if (group.policy === 'independent') {
+      for (const memberId of group.members) {
+        const member = byId.get(memberId);
+        if (member === undefined || member.groupId === group.id) continue;
+        overrides.set(member.upstreamId, Object.freeze({
+          ...member,
+          groupId: group.id,
+        }));
+      }
+      continue;
+    }
+
+    const presentMembers: UpstreamAcquisitionRecord[] = [];
+    const issueReasons: string[] = [];
+
+    for (const memberId of group.members) {
+      const rec = byId.get(memberId);
+      if (rec === undefined) {
+        issueReasons.push(`missing upstream record for member "${memberId}"`);
+      } else {
+        presentMembers.push(rec);
+      }
+    }
+
+    for (const member of presentMembers) {
+      if (member.status === 'held_back' || member.status === 'blocked' || member.status === 'failed') {
+        const detail = member.reason !== undefined && member.reason.length > 0 ? ` (${sanitizeSingleLine(member.reason)})` : '';
+        issueReasons.push(`member "${member.upstreamId}" is ${member.status}${detail}`);
+      } else if (typeof member.version !== 'string' || member.version.trim().length === 0) {
+        issueReasons.push(`member "${member.upstreamId}" has no resolved target version`);
+      }
+    }
+
+    if (issueReasons.length === 0) {
+      const anyAvailable = presentMembers.some(member => member.status === 'available');
+      if (anyAvailable) {
+        const distinctTargetVersions = new Set<string>(presentMembers.map(member => member.version!));
+        if (distinctTargetVersions.size > 1) {
+          const breakdown = presentMembers
+            .map(member => `${member.upstreamId}=${member.version ?? 'unknown'}[${member.status}]`)
+            .join(', ');
+          issueReasons.push(`member target versions disagree (${breakdown})`);
+        }
+      }
+    }
+
+    if (issueReasons.length > 0) {
+      const groupReason = `lockstep group "${group.id}" held back: ${issueReasons.join('; ')}`;
+      for (const memberId of group.members) {
+        const member = byId.get(memberId);
+        if (member === undefined) continue;
+        const preservedCurrent = member.currentVersion
+          ?? lookupBaseline(member.upstreamId)
+          ?? (member.status === 'up_to_date' ? member.version : undefined);
+        const skippedTarget = member.targetVersion
+          ?? (member.status === 'available' ? member.version : undefined);
+        const underlyingStatus: 'failed' | 'blocked' | undefined =
+          member.status === 'failed' || member.status === 'blocked'
+            ? member.status
+            : member.underlyingStatus;
+        overrides.set(member.upstreamId, Object.freeze({
+          upstreamId: member.upstreamId,
+          status: 'held_back' as const,
+          ...(preservedCurrent !== undefined ? { version: preservedCurrent, currentVersion: preservedCurrent } : {}),
+          ...(skippedTarget !== undefined ? { targetVersion: skippedTarget } : {}),
+          ...(member.recentVersions !== undefined ? { recentVersions: member.recentVersions } : {}),
+          ...(member.watchedPaths !== undefined ? { watchedPaths: member.watchedPaths } : {}),
+          ...(member.metadata !== undefined ? { metadata: member.metadata } : {}),
+          ...(underlyingStatus !== undefined ? { underlyingStatus } : {}),
+          groupId: group.id,
+          reason: groupReason,
+        }));
+      }
+    } else {
+      for (const member of presentMembers) {
+        if (member.groupId === group.id) continue;
+        overrides.set(member.upstreamId, Object.freeze({
+          ...member,
+          groupId: group.id,
+        }));
+      }
+    }
+  }
+
+  if (overrides.size === 0) {
+    return Object.freeze([...records]);
+  }
+
+  return Object.freeze(records.map(record => overrides.get(record.upstreamId) ?? record));
+}
+
+/** Propagate declared `watchedPaths` onto resolved upstream acquisition records without mutating inputs. */
+export function attachUpstreamContext(
+  records: readonly UpstreamAcquisitionRecord[],
+  descriptors: readonly TaskpackUpstreamDescriptor[],
+): readonly UpstreamAcquisitionRecord[] {
+  if (records.length === 0 || descriptors.length === 0) {
+    return Object.freeze([...records]);
+  }
+  const byId = new Map<string, TaskpackUpstreamDescriptor>();
+  for (const descriptor of descriptors) {
+    byId.set(descriptor.id, descriptor);
+  }
+  return Object.freeze(records.map(record => {
+    const desc = byId.get(record.upstreamId);
+    if (desc === undefined || (record.watchedPaths !== undefined && record.watchedPaths.length > 0)) {
+      return record;
+    }
+    return Object.freeze({
+      ...record,
+      watchedPaths: Object.freeze([...desc.watchedPaths]),
+    });
+  }));
+}
+
+/**
+ * Evaluate overall intake disposition across upstream acquisition records:
+ * - `'available'` siblings proceed as `'candidate'` even when other upstreams are `'held_back'`.
+ * - Zero `'available'` and zero `'failed' | 'blocked'` resolves cleanly as `'no_change'`,
+ *   distinguishing `'held_back'` upstreams in the returned `reason`.
+ * - Zero `'available'` with one or more `'failed' | 'blocked'` resolves as `'blocked'`.
+ */
+export function evaluateUpstreamIntakeDisposition(
+  records: readonly UpstreamAcquisitionRecord[],
+  options?: {
+    readonly force?: boolean | undefined;
+    readonly managedPrMatchesDiscoveredState?: boolean | undefined;
+  },
+): UpstreamIntakeDispositionResult {
+  const available = Object.freeze(records.filter(record => record.status === 'available'));
+  const heldBack = Object.freeze(records.filter(record => record.status === 'held_back'));
+  const upToDate = Object.freeze(records.filter(record => record.status === 'up_to_date'));
+  const failures = Object.freeze(records.filter(
+    record => record.status === 'failed'
+      || record.status === 'blocked'
+      || record.underlyingStatus === 'failed'
+      || record.underlyingStatus === 'blocked',
+  ));
+
+  if (available.length === 0 && failures.length > 0) {
+    const failedSummary = failures
+      .map(record => {
+        const statusLabel = record.underlyingStatus ?? record.status;
+        const detail = record.reason !== undefined && record.reason.length > 0 ? `: ${sanitizeSingleLine(record.reason)}` : '';
+        return `${record.upstreamId}(${statusLabel}${detail})`;
+      })
+      .join('; ');
+    return Object.freeze({
+      disposition: 'blocked',
+      reason: `upstream acquisition blocked: ${failedSummary}`,
+      available,
+      heldBack,
+      upToDate,
+      failures,
+    });
+  }
+
+  if (options?.force !== true && available.length === 0) {
+    const reason = heldBack.length > 0
+      ? `no updates ready; held_back: ${heldBack.map(record => `${record.upstreamId}${record.reason ? ` (${sanitizeSingleLine(record.reason)})` : ''}`).join('; ')}`
+      : 'no subscription reports an available update';
+    return Object.freeze({
+      disposition: 'no_change',
+      reason,
+      available,
+      heldBack,
+      upToDate,
+      failures,
+    });
+  }
+
+  if (options?.force !== true && options?.managedPrMatchesDiscoveredState === true) {
+    return Object.freeze({
+      disposition: 'no_change',
+      reason: 'an open managed pull request already matches the discovered state',
+      available,
+      heldBack,
+      upToDate,
+      failures,
+    });
+  }
+
+  const availablePart = available.length > 0
+    ? `available: ${available.map(r => `${r.upstreamId}=${sanitizeSingleLine(r.version ?? 'unknown')}`).join(', ')}`
+    : 'forced candidate run';
+  const heldBackPart = heldBack.length > 0
+    ? `; held_back: ${heldBack.map(r => `${r.upstreamId}${r.currentVersion ? `@${sanitizeSingleLine(r.currentVersion)}` : ''}`).join(', ')}`
+    : '';
+
+  return Object.freeze({
+    disposition: 'candidate',
+    reason: `${availablePart}${heldBackPart}`,
+    available,
+    heldBack,
+    upToDate,
+    failures,
+  });
+}
+
+/**
+ * Build deterministic sorted `{ upstreamId: version }` metadata for reviewed memory while keeping
+ * `held_back` upstreams pinned to `currentVersion` (never substituting a skipped target version).
+ */
+export function buildUpstreamMemoryVersions(
+  records: readonly UpstreamAcquisitionRecord[] | undefined,
+): Readonly<Record<string, string>> {
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
+  if (records === undefined || records.length === 0) {
+    return Object.freeze(out);
+  }
+  const sorted = [...records].sort((a, b) => (a.upstreamId < b.upstreamId ? -1 : a.upstreamId > b.upstreamId ? 1 : 0));
+  let count = 0;
+  for (const record of sorted) {
+    if (count >= 128) break;
+    let chosen: string | undefined;
+    if (record.status === 'held_back') {
+      chosen = record.currentVersion;
+    } else if (record.status === 'failed' || record.status === 'blocked') {
+      chosen = record.currentVersion;
+    } else {
+      chosen = record.version ?? record.currentVersion;
+    }
+    if (typeof chosen === 'string' && chosen.length > 0 && chosen.length <= 256) {
+      out[record.upstreamId] = chosen;
+      count += 1;
+    }
+  }
+  return Object.freeze(out);
+}
+
+/** Format a concise multi-line upstream summary including `held_back` reasons and `watchedPaths`. */
+export function formatUpstreamSummary(
+  records: readonly UpstreamAcquisitionRecord[],
+  descriptors?: readonly TaskpackUpstreamDescriptor[],
+): string {
+  const enriched = descriptors !== undefined ? attachUpstreamContext(records, descriptors) : records;
+  if (enriched.length === 0) return 'upstreams: none';
+  const lines = enriched.map(record => {
+    const parts: string[] = [`- ${record.upstreamId}: status=${record.status}`];
+    if (record.currentVersion !== undefined) {
+      parts.push(`current=${record.currentVersion}`);
+    }
+    if (record.status === 'held_back') {
+      if (record.targetVersion !== undefined) {
+        parts.push(`skippedTarget=${record.targetVersion}`);
+      }
+    } else if (record.version !== undefined) {
+      parts.push(`version=${record.version}`);
+    }
+    if (record.groupId !== undefined) {
+      parts.push(`group=${record.groupId}`);
+    }
+    if (record.watchedPaths !== undefined && record.watchedPaths.length > 0) {
+      parts.push(`watchedPaths=[${record.watchedPaths.join(', ')}]`);
+    }
+    if (record.reason !== undefined && record.reason.length > 0) {
+      parts.push(`reason=${sanitizeSingleLine(record.reason)}`);
+    }
+    return parts.join(' ');
+  });
+  return lines.join('\n');
+}
+
+async function readOptionalLocalJsonFile(
+  repositoryRoot: string,
+  relPath: string,
+  maxBytes: number,
+  parseJson: boolean,
+): Promise<unknown | undefined> {
+  const resolvedBase = resolve(repositoryRoot);
+  const fullPath = resolve(resolvedBase, relPath);
+  assertNoSymlinkSegments(resolvedBase, fullPath);
+  try {
+    const info = await lstat(fullPath);
+    if (info.isSymbolicLink()) {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `baseline file "${relPath}" must not be a symbolic link`);
+    }
+  } catch (error) {
+    if (error instanceof GitHubAppError) throw error;
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ENOENT') {
+      return undefined;
+    }
+    if (code === 'ELOOP') {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `baseline file "${relPath}" traverses a symbolic link`);
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `failed to inspect baseline file "${relPath}": ${detail}`);
+  }
+
+  let bytes: Buffer;
+  try {
+    bytes = await readBoundedLocalFile(repositoryRoot, relPath, maxBytes);
+  } catch (error) {
+    if (error instanceof GitHubAppError) throw error;
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ENOENT') {
+      return undefined;
+    }
+    if (code === 'ELOOP') {
+      throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `baseline file "${relPath}" traverses a symbolic link`);
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `failed to read baseline file "${relPath}": ${detail}`);
+  }
+
+  if (!parseJson) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(bytes.toString('utf8')) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `baseline file "${relPath}" contains malformed JSON: ${detail}`);
+  }
+}
+
+/**
+ * Load baseline upstream versions from `spec.proposal.path` (or `package.json` when `spec.proposal`
+ * is omitted), merged with any explicit `baselineVersions` overrides.
+ * Missing files (`ENOENT`) yield an empty map; symlinks, permission errors, oversize files,
+ * non-regular files, and malformed JSON fail closed with `GitHubAppError`.
+ */
+export async function loadRepositoryBaselineVersions(
+  manifest: TaskpackManifest | TaskpackV2Manifest,
+  repositoryRoot?: string | undefined,
+  explicitBaselines?: Readonly<Record<string, string>> | ReadonlyMap<string, string> | undefined,
+): Promise<ReadonlyMap<string, string>> {
+  const baselines = new Map<string, string>();
+  if (repositoryRoot !== undefined) {
+    const proposal = manifest.spec.proposal;
+    if (proposal !== undefined) {
+      const isJsonProposal = proposal.path.toLowerCase().endsWith('.json');
+      const parsed = await readOptionalLocalJsonFile(repositoryRoot, proposal.path, MAX_PROPOSAL_BYTES, isJsonProposal);
+      if (parsed !== undefined) {
+        for (const [id, ver] of readBaselineVersions(parsed, manifest.spec.upstreams)) {
+          baselines.set(id, ver);
+        }
+      }
+    } else {
+      const parsed = await readOptionalLocalJsonFile(repositoryRoot, 'package.json', MAX_PROPOSAL_BYTES, true);
+      if (parsed !== undefined) {
+        for (const [id, ver] of readPackageJsonBaselineVersions(parsed, manifest.spec.upstreams)) {
+          baselines.set(id, ver);
+        }
+      }
+    }
+  }
+  if (explicitBaselines !== undefined) {
+    if (explicitBaselines instanceof Map) {
+      for (const [id, ver] of explicitBaselines.entries()) {
+        if (typeof ver === 'string' && ver.length > 0) baselines.set(id, ver);
+      }
+    } else {
+      for (const [id, ver] of Object.entries(explicitBaselines)) {
+        if (typeof ver === 'string' && ver.length > 0) baselines.set(id, ver);
+      }
+    }
+  }
+  return baselines;
+}
+
+/**
  * Discover upstream states declared by a Taskpack manifest and compare against
- * any existing proposal file under `repositoryRoot`.
+ * any existing proposal file (or `package.json` / explicit `baselineVersions` when `spec.proposal`
+ * is omitted), enforcing `http-json` `versionPath`, `monotonicSemver`, and `spec.upstreamGroups`.
  */
 export async function discoverTaskpackUpstreams(
-  manifest: TaskpackManifest,
+  manifest: TaskpackManifest | TaskpackV2Manifest,
   options: DiscoverTaskpackUpstreamsOptions = {},
-): Promise<readonly TaskpackUpstreamRecord[]> {
+): Promise<readonly UpstreamAcquisitionRecord[]> {
   if (options.upstreamRecordsJson !== undefined && options.upstreamRecordsJson.trim().length > 0) {
-    return parseUpstreamRecordsJson(options.upstreamRecordsJson);
+    const parsed = parseUpstreamRecordsJson(options.upstreamRecordsJson);
+    const withContext = options.includeMetadata === true
+      ? attachUpstreamContext(parsed, manifest.spec.upstreams)
+      : parsed;
+    const baselines = manifest.spec.upstreamGroups !== undefined && manifest.spec.upstreamGroups.length > 0
+      ? await loadRepositoryBaselineVersions(manifest, options.repositoryRoot, options.baselineVersions)
+      : undefined;
+    return applyUpstreamGroups(withContext, manifest.spec.upstreamGroups, baselines);
   }
   if (manifest.spec.upstreams.length === 0) {
     return Object.freeze([]);
@@ -859,19 +1721,12 @@ export async function discoverTaskpackUpstreams(
     githubHeaders['authorization'] = `Bearer ${options.githubToken}`;
   }
 
-  let baselines: ReadonlyMap<string, string> = new Map();
-  if (options.repositoryRoot !== undefined) {
-    try {
-      const bytes = await readBoundedLocalFile(options.repositoryRoot, manifest.spec.proposal.path, MAX_PROPOSAL_BYTES);
-      const parsed = JSON.parse(bytes.toString('utf8')) as unknown;
-      baselines = readBaselineVersions(parsed, manifest.spec.upstreams);
-    } catch {
-      baselines = new Map();
-    }
-  }
+  const baselines = await loadRepositoryBaselineVersions(manifest, options.repositoryRoot, options.baselineVersions);
 
-  const records: TaskpackUpstreamRecord[] = [];
+  const includeMetadata = options.includeMetadata === true;
+  const records: UpstreamAcquisitionRecord[] = [];
   for (const upstream of manifest.spec.upstreams) {
+    const baseline = baselines.get(upstream.id);
     try {
       const resolved = await resolveSingleUpstreamDetails(upstream, {
         repositoryRoot: options.repositoryRoot,
@@ -881,34 +1736,99 @@ export async function discoverTaskpackUpstreams(
         timeoutMs,
         scrubber,
       });
-      const baseline = baselines.get(upstream.id);
-      const isSemverTagKind = upstream.kind === 'github-release' || upstream.kind === 'git-tag';
-      const cmp = isSemverTagKind && baseline !== undefined && parseSemverTag(baseline) !== null && parseSemverTag(resolved.version) !== null
-        ? compareVersionTags(resolved.version, baseline)
-        : null;
-      const upToDateBySemver = cmp !== null && (
-        cmp < 0
-        || (cmp === 0 && !baseline!.includes('+') && !resolved.version.includes('+'))
-      );
-      const status: UpstreamAcquisitionStatus = baseline !== undefined && (baseline === resolved.version || upToDateBySemver)
-        ? 'up_to_date'
-        : 'available';
+
+      let status: UpstreamAcquisitionStatus;
+      let effectiveVersion: string | undefined = resolved.version;
+      let targetVersion: string | undefined;
+      let reason: string | undefined;
+
+      if (upstream.kind === 'http-json') {
+        const monotonic = upstream.monotonicSemver ?? true;
+        if (baseline === undefined) {
+          status = 'available';
+        } else if (baseline === resolved.version) {
+          status = 'up_to_date';
+        } else if (monotonic) {
+          const strictCmp = compareStrictSemver(resolved.version, baseline);
+          if (strictCmp !== null && strictCmp < 0) {
+            status = 'held_back';
+            effectiveVersion = baseline;
+            targetVersion = resolved.version;
+            reason = `downgrade prevented by monotonicSemver: fetched ${resolved.version} is lower than current ${baseline}`;
+          } else if (strictCmp === 0 && !baseline.includes('+') && !resolved.version.includes('+')) {
+            status = 'up_to_date';
+          } else {
+            status = 'available';
+          }
+        } else {
+          status = 'available';
+        }
+      } else {
+        const isSemverTagKind = upstream.kind === 'github-release' || upstream.kind === 'git-tag';
+        const cmp = isSemverTagKind && baseline !== undefined && parseSemverTag(baseline) !== null && parseSemverTag(resolved.version) !== null
+          ? compareVersionTags(resolved.version, baseline)
+          : null;
+        const upToDateBySemver = cmp !== null && (
+          cmp < 0
+          || (cmp === 0 && !baseline!.includes('+') && !resolved.version.includes('+'))
+        );
+        status = baseline !== undefined && (baseline === resolved.version || upToDateBySemver)
+          ? 'up_to_date'
+          : 'available';
+      }
+
+      const emitMetadata = includeMetadata || status === 'held_back';
       records.push({
         upstreamId: upstream.id,
         status,
-        version: resolved.version,
+        ...(effectiveVersion !== undefined ? { version: effectiveVersion } : {}),
+        ...(emitMetadata && baseline !== undefined ? { currentVersion: baseline } : {}),
+        ...(targetVersion !== undefined ? { targetVersion } : {}),
         ...(resolved.recentVersions !== undefined ? { recentVersions: resolved.recentVersions } : {}),
+        ...(includeMetadata ? { watchedPaths: Object.freeze([...upstream.watchedPaths]) } : {}),
+        ...(reason !== undefined ? { reason } : {}),
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       records.push({
         upstreamId: upstream.id,
         status: 'failed',
+        ...(includeMetadata && baseline !== undefined ? { currentVersion: baseline } : {}),
+        ...(includeMetadata ? { watchedPaths: Object.freeze([...upstream.watchedPaths]) } : {}),
         reason: scrubber.scrub(detail),
       });
     }
   }
-  return Object.freeze(records);
+  return applyUpstreamGroups(Object.freeze(records), manifest.spec.upstreamGroups, baselines);
+}
+
+/**
+ * Taskpack 2.0 upstream discovery entrypoint returning enriched records (with `watchedPaths`,
+ * `currentVersion`, `targetVersion`, `groupId`), evaluated disposition, prompt summary, and
+ * reviewed-memory version map (`held_back` pinned to `currentVersion`).
+ */
+export async function discoverTaskpackUpstreamsV2(
+  manifest: TaskpackManifest | TaskpackV2Manifest,
+  options: DiscoverTaskpackUpstreamsOptions & {
+    readonly force?: boolean | undefined;
+    readonly managedPrMatchesDiscoveredState?: boolean | undefined;
+  } = {},
+): Promise<DiscoverTaskpackUpstreamsV2Result> {
+  const records = await discoverTaskpackUpstreams(manifest, {
+    ...options,
+    includeMetadata: true,
+  });
+  const evaluated = evaluateUpstreamIntakeDisposition(records, {
+    force: options.force,
+    managedPrMatchesDiscoveredState: options.managedPrMatchesDiscoveredState,
+  });
+  return Object.freeze({
+    records,
+    disposition: evaluated.disposition,
+    reason: evaluated.reason,
+    summary: formatUpstreamSummary(records, manifest.spec.upstreams),
+    memoryVersions: buildUpstreamMemoryVersions(records),
+  });
 }
 
 export const MEMORY_PULL_REQUEST_BRANCH_PREFIX = 'loopwright/memory/' as const;
@@ -1707,7 +2627,7 @@ export async function resolveGitHubToken(options: ResolveActionGitHubTokenOption
 export interface CheckManagedPrMatchesOptions {
   readonly repositoryRoot: string;
   readonly repositoryFullName: string;
-  readonly manifest: TaskpackManifest;
+  readonly manifest: TaskpackManifest | TaskpackV2Manifest;
   readonly openManagedPr: ManagedPullRequestInfo | null;
   readonly records: readonly TaskpackUpstreamRecord[];
   readonly apiBaseUrl?: string | undefined;
@@ -1742,6 +2662,9 @@ export async function checkManagedPrMatchesDiscoveredState(
     return false;
   }
 
+  if (manifest.spec.proposal === undefined) {
+    return false;
+  }
   const proposalPath = manifest.spec.proposal.path;
   if (proposalPath.startsWith('-') || proposalPath.includes('..') || proposalPath.includes('\0')) {
     return false;

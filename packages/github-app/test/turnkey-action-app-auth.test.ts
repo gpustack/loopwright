@@ -190,7 +190,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
         'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
         'INPUT_REMOTE-URL': fixture.bareRemote,
         LLM_TOKEN: fixture.goodToken,
-        CHECK_SECRET: fixture.verifySecret,
+        CHECK_MARKER: fixture.verifySecret,
       }, { openHostSessionAdapter: fastAdapter });
 
       assert.equal(exitCode, 0, 'Action run with auto-discovered GitHub App installation must succeed');
@@ -584,7 +584,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
             'INPUT_ALLOW-CUSTOM-BASE-URL': 'true',
             'INPUT_REMOTE-URL': fixture.bareRemote,
             LLM_TOKEN: fixture.goodToken,
-            CHECK_SECRET: fixture.verifySecret,
+            CHECK_MARKER: fixture.verifySecret,
           }, { openHostSessionAdapter: fastAdapter });
           assert.equal(code, 0);
           const verifyClone = join(fixture.work, 'verify-custom-override');
@@ -784,7 +784,7 @@ spec:
   scope:
     writable:
       - .auto-sync/proposal.json
-      - pack/cann
+      - 'pack/cann/**'
     protected: []
   upstreams:
     - id: cann

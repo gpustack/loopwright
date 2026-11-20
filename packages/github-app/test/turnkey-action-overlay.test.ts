@@ -214,9 +214,9 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
-      - scripts
+      - 'pack/**'
+      - 'docs/**'
+      - 'scripts/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -493,9 +493,9 @@ spec:
     noChange: Verify no change
   scope:
     writable:
-      - pack
-      - docs
-      - scripts
+      - 'pack/**'
+      - 'docs/**'
+      - 'scripts/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -889,8 +889,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1205,8 +1205,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1586,9 +1586,9 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
-      - scripts
+      - 'pack/**'
+      - 'docs/**'
+      - 'scripts/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1875,8 +1875,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1995,7 +1995,7 @@ spec:
     noChange: Verify no upstream drift.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
     protected:
       - .github
       - .loopwright
@@ -2218,7 +2218,7 @@ spec:
     noChange: Verify no upstream drift.
   scope:
     writable:
-      - pack
+      - 'pack/**'
     protected:
       - .github
   upstreams:
@@ -2432,7 +2432,7 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
+      - 'pack/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -2602,7 +2602,7 @@ spec:
     candidate: Sync pack
     noChange: No change
   scope:
-    writable: [pack]
+    writable: ['pack/**']
   instructions: [.auto-sync/instructions.md]
   upstreams:
     - id: vllm_older
@@ -2785,7 +2785,7 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
+      - 'pack/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -3041,8 +3041,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - vendor
+      - 'pack/**'
+      - 'vendor/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -3345,8 +3345,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - vendor
+      - 'pack/**'
+      - 'vendor/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -3470,7 +3470,7 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
+      - 'pack/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -3706,8 +3706,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - vendor
+      - 'pack/**'
+      - 'vendor/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -4010,8 +4010,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - vendor
+      - 'pack/**'
+      - 'vendor/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -4143,8 +4143,8 @@ spec:
     noChange: No change
   scope:
     writable:
-      - pack
-      - vendor
+      - 'pack/**'
+      - 'vendor/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:

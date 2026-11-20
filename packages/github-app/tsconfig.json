@@ -14,6 +14,7 @@
     { "path": "../agent-pi" },
     { "path": "../controller" },
     { "path": "../core" },
+    { "path": "../decisions" },
     { "path": "../memory" },
     { "path": "../state" }
   ]

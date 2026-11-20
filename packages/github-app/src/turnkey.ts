@@ -1,40 +1,58 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants as fsConstants, existsSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { openPiHostSessionAdapterV2, type HostSessionProgressEvent } from '@loopwright/agent-pi/host-session';
 import type { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
+import { DECISION_PROVIDER_API_KEY_ENV } from '@loopwright/decisions';
 import {
   formatDurationMs,
   formatTokenCount,
   inspectRun,
   loadTrustedConfiguration,
   runCycleWithPorts,
+  signGateVerdict,
   signPayload,
   verifySignedPayload,
+  type AdvisoryDecisionPort,
   type ControllerPorts,
   type ReportCheckItem,
+  type StepMcpServerMetadata,
 } from '@loopwright/controller';
 import {
   bindSubject,
   digestArtifact,
   isWritablePath,
   LIMITS,
+  matchesScopePattern,
   validateDocument,
+  validateRelativePath,
   type ArtifactManifest,
   type BaseTreeAnchor,
+  type MetricsMap,
+  type MetricValue,
+  type StructuredFinding,
   type TaskContract,
   type UsageSummary,
 } from '@loopwright/core';
 import { reopenLocalRun, type LocalRunIdentity, type PageCursor } from '@loopwright/state';
-import { buildDefaultAuthorPrompt, insideRoot } from './action.js';
+import { buildDefaultAuthorPrompt, createTaskpackDecisionPort, insideRoot } from './action.js';
+import { computeDirectoryTreeDigest } from './digests.js';
 import { LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV } from './models-config.js';
 import { sanitizeReportText } from './output-format.js';
+import {
+  collectManifestSecretEnvNames,
+  formatWorkspaceResourcesManifest,
+  isForbiddenPreflightEnvName,
+  PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES,
+  runTaskpackPreflight,
+  type RunTaskpackPreflightResult,
+} from './preflight.js';
 import { IDENTIFIER_PATTERN, normalizeRelativePath } from './schema.js';
 import {
   compileDeclarativeTaskpack,
@@ -55,6 +73,7 @@ import {
   REPOSITORY_FULL_NAME_PATTERN,
   type ActionDelegateOutcome,
   type CompiledLocalCommandGate,
+  type ExecutionHostPolicy,
   type GitCommitIdentity,
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
@@ -66,7 +85,7 @@ import {
   buildCleanGitEnv,
   COMMIT_SHA_PATTERN,
   DEFAULT_GIT_COMMIT_IDENTITY,
-  discoverTaskpackUpstreams,
+  discoverTaskpackUpstreamsV2,
   fetchBoundedText,
   isPlainRecord,
   parseUpstreamRecordsJson,
@@ -149,10 +168,33 @@ type ControllerOpenAdapter = NonNullable<ControllerPorts['openAdapter']>;
 type OpenAdapterHost = Parameters<ControllerOpenAdapter>[0];
 type OpenAdapterInput = Parameters<ControllerOpenAdapter>[1];
 
+function stripUndefinedFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefinedFields);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry === undefined) continue;
+      out[key] = stripUndefinedFields(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
 function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
+  const cleaned = stripUndefinedFields(value);
+  const serialize = (node: unknown): string => {
+    if (node === null || typeof node !== 'object') {
+      if (typeof node === 'number') {
+        return JSON.stringify(Object.is(node, -0) ? 0 : node);
+      }
+      return JSON.stringify(node);
+    }
+    if (Array.isArray(node)) return `[${node.map(serialize).join(',')}]`;
+    return `{${Object.keys(node).sort().map(key => `${JSON.stringify(key)}:${serialize((node as Record<string, unknown>)[key])}`).join(',')}}`;
+  };
+  return serialize(cleaned);
 }
 
 export function truncateCodePoints(text: string, maxCodePoints: number): string {
@@ -160,10 +202,15 @@ export function truncateCodePoints(text: string, maxCodePoints: number): string 
   return chars.length <= maxCodePoints ? text : chars.slice(0, maxCodePoints).join('');
 }
 
-function isForbiddenChildEnvName(key: string): boolean {
-  if (FORBIDDEN_CHILD_ENV_NAMES.has(key)) return true;
+function isForbiddenChildEnvName(key: string, forbiddenEnvNames?: ReadonlySet<string>): boolean {
+  if (FORBIDDEN_CHILD_ENV_NAMES.has(key) || forbiddenEnvNames?.has(key) === true) return true;
   const poolMatch = /^(.+)_([1-9]|1[0-6])$/.exec(key);
-  if (poolMatch !== null && FORBIDDEN_CHILD_ENV_NAMES.has(poolMatch[1]!)) return true;
+  if (
+    poolMatch !== null
+    && (FORBIDDEN_CHILD_ENV_NAMES.has(poolMatch[1]!) || forbiddenEnvNames?.has(poolMatch[1]!) === true)
+  ) {
+    return true;
+  }
   for (const prefix of FORBIDDEN_CHILD_ENV_PREFIXES) {
     if (key.startsWith(prefix)) return true;
   }
@@ -198,8 +245,11 @@ function writeSignedJsonResponse(
   payload: unknown,
 ): void {
   if (res.destroyed || res.writableEnded) return;
-  const body = Buffer.from(canonicalJson(payload), 'utf8');
-  const signature = signPayload(signingSecret, body);
+  const cleaned = stripUndefinedFields(payload);
+  const body = Buffer.from(canonicalJson(cleaned), 'utf8');
+  const signature = isPlainRecord(cleaned) && cleaned['kind'] === 'gate_verdict'
+    ? signGateVerdict(signingSecret, cleaned)
+    : signPayload(signingSecret, body);
   res.writeHead(statusCode, {
     'content-type': 'application/json',
     'content-length': String(body.byteLength),
@@ -241,10 +291,19 @@ function normalizeProtectedPrefix(protectedEntry: string): string {
 function isProtectedCandidatePath(name: string, protectedPaths: readonly string[]): boolean {
   for (const protectedEntry of protectedPaths) {
     if (protectedEntry === '**') return true;
+    const directMatch = matchesScopePattern(protectedEntry, name);
+    if (directMatch.ok && directMatch.value) return true;
     const clean = normalizeProtectedPrefix(protectedEntry);
     if (clean.length === 0) continue;
-    if (name === clean || name.startsWith(`${clean}/`)) {
-      return true;
+    if (!clean.includes('*') && !clean.includes('?')) {
+      if (name === clean || name.startsWith(`${clean}/`)) {
+        return true;
+      }
+    } else {
+      const subtreeMatch = matchesScopePattern(`${clean}/**`, name);
+      if (subtreeMatch.ok && subtreeMatch.value) {
+        return true;
+      }
     }
   }
   return false;
@@ -310,11 +369,13 @@ async function inspectAndVerifyCandidate(
     if (!isPlainRecord(candidateFilesRaw)) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', 'inspected candidate.files.json is invalid');
     }
-    const validManifest = validateDocument(candidateFilesRaw['manifest'], 'ArtifactManifest');
+    const overlayLimits = validLock.value.spec.contract.spec.budgets.overlay;
+    const overlayOpts = overlayLimits !== undefined ? { overlay: overlayLimits } : undefined;
+    const validManifest = validateDocument(candidateFilesRaw['manifest'], 'ArtifactManifest', overlayOpts);
     if (!validManifest.ok) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', 'inspected candidate manifest failed ArtifactManifest validation');
     }
-    const bound = bindSubject(validLock.value, validManifest.value);
+    const bound = bindSubject(validLock.value, validManifest.value, overlayOpts);
     if (!bound.ok || bound.value.candidateDigest.hex !== expectedCandidateDigest) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', 'candidate digest binding mismatch against task lock');
     }
@@ -364,49 +425,543 @@ async function inspectAndVerifyCandidate(
   }
 }
 
-async function verifyAndCopyScriptToWorkDir(
+async function makeTreeReadOnly(rootDir: string): Promise<void> {
+  const entries = await readdir(rootDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const childPath = join(rootDir, entry.name);
+    const st = await lstat(childPath).catch(() => null);
+    if (st === null || st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
+      await makeTreeReadOnly(childPath);
+    } else if (st.isFile()) {
+      const mode = (st.mode & 0o111) !== 0 ? 0o555 : 0o444;
+      await chmod(childPath, mode);
+    }
+  }
+  await chmod(rootDir, 0o555);
+}
+
+async function makeTreeWritableForCleanup(rootDir: string): Promise<void> {
+  const st = await lstat(rootDir).catch(() => null);
+  if (st === null || st.isSymbolicLink() || !st.isDirectory()) return;
+  await chmod(rootDir, 0o700).catch(() => undefined);
+  const entries = await readdir(rootDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const childPath = join(rootDir, entry.name);
+    const childStat = await lstat(childPath).catch(() => null);
+    if (childStat === null || childStat.isSymbolicLink()) continue;
+    if (childStat.isDirectory()) {
+      await makeTreeWritableForCleanup(childPath);
+    } else if (childStat.isFile()) {
+      await chmod(childPath, 0o600).catch(() => undefined);
+    }
+  }
+}
+
+async function copyDirectoryTreeReadOnly(
+  srcDir: string,
+  destDir: string,
+  options?: {
+    readonly maxFiles?: number | undefined;
+    readonly maxTotalBytes?: number | undefined;
+    readonly excludeTopLevelLower?: ReadonlySet<string> | undefined;
+    readonly skipFinalChmod?: boolean | undefined;
+  },
+): Promise<void> {
+  const maxFiles = options?.maxFiles ?? 4_096;
+  const maxTotalBytes = options?.maxTotalBytes ?? 64 * 1024 * 1024;
+  const excludeTopLevelLower = options?.excludeTopLevelLower;
+  let copiedFiles = 0;
+  let copiedBytes = 0;
+
+  const walk = async (curSrc: string, curDest: string, depth: number): Promise<void> => {
+    if (depth > 32) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'mounted directory exceeds maximum depth 32');
+    }
+    const srcStat = await lstat(curSrc);
+    if (srcStat.isSymbolicLink() || !srcStat.isDirectory()) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `mounted directory "${curSrc}" must be a non-symlink directory`);
+    }
+    await mkdir(curDest, { recursive: true, mode: 0o700 });
+    const names = (await readdir(curSrc)).sort();
+    for (const name of names) {
+      if (depth === 0 && excludeTopLevelLower?.has(name.toLowerCase()) === true) {
+        continue;
+      }
+      const childSrc = join(curSrc, name);
+      const childDest = join(curDest, name);
+      const st = await lstat(childSrc);
+      if (st.isSymbolicLink()) {
+        throw new GitHubAppError('TASKPACK_SCOPE_VIOLATION', `symlink "${childSrc}" is forbidden inside mounted directory`);
+      }
+      if (st.isDirectory()) {
+        await walk(childSrc, childDest, depth + 1);
+      } else if (st.isFile()) {
+        copiedFiles += 1;
+        if (copiedFiles > maxFiles || copiedBytes + st.size > maxTotalBytes) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'mounted directory exceeds file or byte cap');
+        }
+        const handle = await open(childSrc, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+        let bytes: Buffer;
+        let execBit: boolean;
+        try {
+          const fstat = await handle.stat();
+          if (!fstat.isFile() || fstat.size !== st.size) {
+            throw new GitHubAppError('ACTION_INPUT_INVALID', `mounted file "${childSrc}" changed during read`);
+          }
+          execBit = (fstat.mode & 0o111) !== 0;
+          bytes = await handle.readFile();
+        } finally {
+          await handle.close();
+        }
+        copiedBytes += bytes.byteLength;
+        const destHandle = await open(
+          childDest,
+          fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+          execBit ? 0o555 : 0o444,
+        );
+        try {
+          await destHandle.writeFile(bytes);
+        } finally {
+          await destHandle.close();
+        }
+        await chmod(childDest, execBit ? 0o555 : 0o444);
+      }
+    }
+  };
+
+  await walk(srcDir, destDir, 0);
+  if (options?.skipFinalChmod !== true) {
+    await makeTreeReadOnly(destDir);
+  }
+}
+
+const EXCLUDED_READ_ONLY_GIT_TOP_LEVEL: ReadonlySet<string> = new Set([
+  'hooks',
+  'credentials',
+  'config',
+  'config.worktree',
+]);
+
+const SANITIZED_READ_ONLY_GIT_CONFIG = [
+  '[core]',
+  '\trepositoryformatversion = 0',
+  '\tfilemode = true',
+  '\tbare = false',
+  '\tlogallrefupdates = false',
+  '\thooksPath = /dev/null',
+  '\tfsmonitor = false',
+  '',
+].join('\n');
+
+async function stageSanitizedReadOnlyGitDir(srcGitDir: string, destGitDir: string): Promise<void> {
+  await copyDirectoryTreeReadOnly(srcGitDir, destGitDir, {
+    excludeTopLevelLower: EXCLUDED_READ_ONLY_GIT_TOP_LEVEL,
+    skipFinalChmod: true,
+  });
+  const configDest = join(destGitDir, 'config');
+  const handle = await open(
+    configDest,
+    fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+    0o444,
+  );
+  try {
+    await handle.writeFile(Buffer.from(SANITIZED_READ_ONLY_GIT_CONFIG, 'utf8'));
+  } finally {
+    await handle.close();
+  }
+  await chmod(configDest, 0o444);
+  await makeTreeReadOnly(destGitDir);
+}
+
+async function verifyAndStageCommandScriptDir(
   repositoryRoot: string,
-  relativeScriptPath: string,
-  expectedSha256: string,
-  destPath: string,
+  gate: CompiledLocalCommandGate,
+  checkDir: string,
 ): Promise<string> {
-  if (!SHA256_HEX_PATTERN.test(expectedSha256)) {
+  if (!SHA256_HEX_PATTERN.test(gate.scriptSha256)) {
     throw new GitHubAppError('ACTION_INPUT_INVALID', 'gate script sha256 metadata is invalid');
   }
-  const cleanRel = normalizeCandidateRelativePath(relativeScriptPath);
-  const fullPath = resolve(repositoryRoot, cleanRel);
+  const cleanScriptRel = normalizeCandidateRelativePath(gate.script);
+  const scriptDirRel = gate.scriptDir ?? (() => {
+    const slash = cleanScriptRel.lastIndexOf('/');
+    return slash > 0 ? cleanScriptRel.slice(0, slash) : '.';
+  })();
+
+  if (scriptDirRel !== '.' && scriptDirRel.length > 0) {
+    const liveDirDigest = await computeDirectoryTreeDigest(repositoryRoot, scriptDirRel);
+    if (gate.scriptDirSha256 !== undefined) {
+      if (!SHA256_HEX_PATTERN.test(gate.scriptDirSha256)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'gate scriptDirSha256 metadata is invalid');
+      }
+      if (liveDirDigest.digest !== gate.scriptDirSha256) {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `gate script directory "${scriptDirRel}" sha256 changed on disk`,
+        );
+      }
+    }
+    const relInsideDir = cleanScriptRel.slice(scriptDirRel.length + 1);
+    await mkdir(checkDir, { recursive: true, mode: 0o700 });
+    for (const fileEntry of liveDirDigest.files) {
+      const srcPath = resolve(repositoryRoot, scriptDirRel, fileEntry.path);
+      assertNoSymlinkSegments(repositoryRoot, srcPath);
+      const handle = await open(srcPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      let bytes: Buffer;
+      let isExec: boolean;
+      try {
+        const info = await handle.stat();
+        if (!info.isFile()) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `gate helper "${fileEntry.path}" is not a regular file`);
+        }
+        if (fileEntry.path === relInsideDir && info.size > MAX_SCRIPT_BYTES) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" exceeds ${MAX_SCRIPT_BYTES} bytes`);
+        }
+        isExec = fileEntry.path === relInsideDir || (info.mode & 0o111) !== 0;
+        bytes = await handle.readFile();
+      } finally {
+        await handle.close();
+      }
+      const actualDigest = createHash('sha256').update(bytes).digest('hex');
+      if (actualDigest !== fileEntry.sha256) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `gate file "${fileEntry.path}" sha256 changed during copy`);
+      }
+      if (fileEntry.path === relInsideDir && actualDigest !== gate.scriptSha256) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" sha256 changed on disk`);
+      }
+      const destPath = resolve(checkDir, fileEntry.path);
+      await mkdir(dirname(destPath), { recursive: true, mode: 0o700 });
+      const destHandle = await open(
+        destPath,
+        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+        isExec ? 0o555 : 0o444,
+      );
+      try {
+        await destHandle.writeFile(bytes);
+      } finally {
+        await destHandle.close();
+      }
+      await chmod(destPath, isExec ? 0o555 : 0o444);
+    }
+    const mountedScriptPath = resolve(checkDir, relInsideDir);
+    if (!existsSync(mountedScriptPath)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" missing inside "${scriptDirRel}"`);
+    }
+    await makeTreeReadOnly(checkDir);
+    return mountedScriptPath;
+  }
+
+  await mkdir(checkDir, { recursive: true, mode: 0o700 });
+  const fullPath = resolve(repositoryRoot, cleanScriptRel);
   assertNoSymlinkSegments(repositoryRoot, fullPath);
   const handle = await open(fullPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   let bytes: Buffer;
   try {
     const info = await handle.stat();
     if (!info.isFile()) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${relativeScriptPath}" is not a regular file`);
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" is not a regular file`);
     }
     if (info.size > MAX_SCRIPT_BYTES) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${relativeScriptPath}" exceeds ${MAX_SCRIPT_BYTES} bytes`);
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" exceeds ${MAX_SCRIPT_BYTES} bytes`);
     }
     bytes = await handle.readFile();
     const digest = createHash('sha256').update(bytes).digest('hex');
-    if (digest !== expectedSha256) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${relativeScriptPath}" sha256 changed on disk`);
+    if (digest !== gate.scriptSha256) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `gate script "${gate.script}" sha256 changed on disk`);
     }
   } finally {
     await handle.close();
   }
-
+  const destPath = join(checkDir, basename(cleanScriptRel));
   const destHandle = await open(
     destPath,
     fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
-    0o700,
+    0o555,
   );
   try {
     await destHandle.writeFile(bytes);
   } finally {
     await destHandle.close();
   }
-  await chmod(destPath, 0o700);
+  await chmod(destPath, 0o555);
+  await makeTreeReadOnly(checkDir);
   return destPath;
+}
+
+const CHECK_OUT_LONE_SURROGATE_PATTERN = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+const CHECK_OUT_METRIC_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9._-]*$/;
+const MAX_CHECK_OUT_BYTES = 65_536;
+
+interface ValidatedCheckOutPayload {
+  readonly detail?: string | null | undefined;
+  readonly metrics?: Readonly<Record<string, MetricValue>> | undefined;
+  readonly findings?: readonly StructuredFinding[] | undefined;
+}
+
+function parseStrictCheckOutJson(source: string): unknown {
+  let offset = 0;
+  let nodes = 0;
+  const skipSpace = (): void => {
+    while (offset < source.length && /[\t\n\r ]/.test(source[offset]!)) offset += 1;
+  };
+  const readJsonString = (): string => {
+    const start = offset++;
+    while (offset < source.length) {
+      const ch = source[offset++];
+      if (ch === '\\') {
+        offset += 1;
+        continue;
+      }
+      if (ch === '"') {
+        const parsed: unknown = JSON.parse(source.slice(start, offset));
+        if (typeof parsed !== 'string' || parsed.length > 16_384 || CHECK_OUT_LONE_SURROGATE_PATTERN.test(parsed)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT string exceeds bounds or contains lone surrogates');
+        }
+        return parsed;
+      }
+    }
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT contains unterminated string');
+  };
+  const scanValue = (depth: number): void => {
+    nodes += 1;
+    if (nodes > 8_192 || depth > 32) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT exceeds JSON complexity bounds');
+    }
+    skipSpace();
+    const ch = source[offset];
+    if (ch === '"') {
+      readJsonString();
+      return;
+    }
+    if (ch === '{' || ch === '[') {
+      offset += 1;
+      skipSpace();
+      const close = ch === '{' ? '}' : ']';
+      const seenKeys = new Set<string>();
+      let count = 0;
+      if (source[offset] === close) {
+        offset += 1;
+        return;
+      }
+      for (;;) {
+        count += 1;
+        if (count > 128) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT collection exceeds 128 items');
+        }
+        skipSpace();
+        if (ch === '{') {
+          if (source[offset] !== '"') {
+            throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT object key must be a string');
+          }
+          const key = readJsonString();
+          if (STAGED_FORBIDDEN_KEYS.has(key) || seenKeys.has(key)) {
+            throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT duplicate or forbidden key "${key}"`);
+          }
+          seenKeys.add(key);
+          skipSpace();
+          if (source[offset++] !== ':') {
+            throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT invalid object syntax');
+          }
+        }
+        scanValue(depth + 1);
+        skipSpace();
+        const delim = source[offset++];
+        if (delim === close) return;
+        if (delim !== ',') {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT invalid delimiter');
+        }
+      }
+    }
+    const lit = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(source.slice(offset));
+    if (!lit) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT invalid JSON token');
+    }
+    offset += lit[0].length;
+    if (lit[0] !== 'true' && lit[0] !== 'false' && lit[0] !== 'null') {
+      const num = Number(lit[0]);
+      if (!Number.isFinite(num)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT non-finite number');
+      }
+    }
+  };
+
+  scanValue(1);
+  skipSpace();
+  if (offset !== source.length) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT trailing bytes');
+  }
+  return JSON.parse(source) as unknown;
+}
+
+async function readAndValidateCheckOutFile(
+  checkOutPath: string,
+  scrubber: SecretScrubber,
+): Promise<ValidatedCheckOutPayload | null> {
+  let st;
+  try {
+    st = await lstat(checkOutPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT could not be inspected');
+  }
+  if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1 || st.size > MAX_CHECK_OUT_BYTES) {
+    throw new GitHubAppError(
+      'ACTION_INPUT_INVALID',
+      'LOOPWRIGHT_CHECK_OUT must be a regular non-hardlinked file of at most 65536 bytes',
+    );
+  }
+  const handle = await open(checkOutPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let rawBytes: Buffer;
+  try {
+    const fstat = await handle.stat();
+    if (!fstat.isFile() || fstat.nlink !== 1 || fstat.size !== st.size || fstat.size > MAX_CHECK_OUT_BYTES) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT changed during read');
+    }
+    rawBytes = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  const textContent = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes);
+  const parsed = parseStrictCheckOutJson(textContent);
+  if (!isPlainRecord(parsed)) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT must be a JSON object');
+  }
+  for (const key of Object.keys(parsed)) {
+    if (key !== 'detail' && key !== 'metrics' && key !== 'findings') {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT contains unsupported field "${key}"`);
+    }
+  }
+
+  let detail: string | null | undefined;
+  if (Object.hasOwn(parsed, 'detail') && parsed['detail'] !== undefined) {
+    if (parsed['detail'] === null) {
+      detail = null;
+    } else if (
+      typeof parsed['detail'] === 'string'
+      && parsed['detail'].length >= 1
+      && parsed['detail'].length <= LIMITS.string
+      && !CHECK_OUT_LONE_SURROGATE_PATTERN.test(parsed['detail'])
+    ) {
+      const scrubbed = truncateCodePoints(scrubber.scrub(parsed['detail']), 4_096);
+      detail = scrubbed.length > 0 ? scrubbed : '[REDACTED]';
+    } else {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT detail must be a non-empty string or null');
+    }
+  }
+
+  let metrics: Readonly<Record<string, MetricValue>> | undefined;
+  if (Object.hasOwn(parsed, 'metrics') && parsed['metrics'] !== undefined) {
+    const rawMetrics = parsed['metrics'];
+    if (!isPlainRecord(rawMetrics)) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT metrics must be a plain object');
+    }
+    const keys = Object.keys(rawMetrics).sort();
+    if (keys.length > LIMITS.metricEntries) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT metrics exceeds ${LIMITS.metricEntries} entries`);
+    }
+    const cleanMetrics: Record<string, MetricValue> = {};
+    for (const key of keys) {
+      if (
+        key.length < 1
+        || key.length > LIMITS.metricKey
+        || STAGED_FORBIDDEN_KEYS.has(key)
+        || !CHECK_OUT_METRIC_KEY_PATTERN.test(key)
+      ) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT metric key "${key}" is invalid`);
+      }
+      const val = rawMetrics[key];
+      if (typeof val === 'number') {
+        if (!Number.isFinite(val)) {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT metric "${key}" must be finite`);
+        }
+        cleanMetrics[key] = Object.is(val, -0) ? 0 : val;
+      } else if (typeof val === 'boolean') {
+        cleanMetrics[key] = val;
+      } else if (
+        typeof val === 'string'
+        && val.length <= LIMITS.metricStringValue
+        && !CHECK_OUT_LONE_SURROGATE_PATTERN.test(val)
+      ) {
+        cleanMetrics[key] = truncateCodePoints(scrubber.scrub(val), LIMITS.metricStringValue);
+      } else {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT metric "${key}" value is invalid`);
+      }
+    }
+    metrics = Object.freeze(cleanMetrics);
+  }
+
+  let findings: readonly StructuredFinding[] | undefined;
+  if (Object.hasOwn(parsed, 'findings') && parsed['findings'] !== undefined) {
+    const rawFindings = parsed['findings'];
+    if (!Array.isArray(rawFindings) || rawFindings.length > LIMITS.findings) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT findings must be an array of at most ${LIMITS.findings} items`);
+    }
+    const cleanFindings: StructuredFinding[] = [];
+    for (const item of rawFindings) {
+      if (!isPlainRecord(item)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT finding must be an object');
+      }
+      for (const k of Object.keys(item)) {
+        if (k !== 'title' && k !== 'severity' && k !== 'evidence' && k !== 'path' && k !== 'line') {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', `LOOPWRIGHT_CHECK_OUT finding has unknown key "${k}"`);
+        }
+      }
+      const rawTitle = item['title'];
+      const rawSeverity = item['severity'];
+      const rawEvidence = item['evidence'];
+      if (
+        typeof rawTitle !== 'string' || rawTitle.length < 1 || rawTitle.length > LIMITS.findingTitle
+        || CHECK_OUT_LONE_SURROGATE_PATTERN.test(rawTitle)
+        || (rawSeverity !== 'critical' && rawSeverity !== 'high' && rawSeverity !== 'medium' && rawSeverity !== 'low')
+        || typeof rawEvidence !== 'string' || rawEvidence.length < 1 || rawEvidence.length > LIMITS.findingEvidence
+        || CHECK_OUT_LONE_SURROGATE_PATTERN.test(rawEvidence)
+      ) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT finding fields are invalid');
+      }
+      const title = truncateCodePoints(scrubber.scrub(rawTitle), LIMITS.findingTitle) || '[REDACTED]';
+      const evidence = truncateCodePoints(scrubber.scrub(rawEvidence), LIMITS.findingEvidence) || '[REDACTED]';
+      let findingPath: string | null | undefined;
+      if (Object.hasOwn(item, 'path') && item['path'] !== undefined) {
+        if (item['path'] === null) {
+          findingPath = null;
+        } else if (typeof item['path'] === 'string' && !CHECK_OUT_LONE_SURROGATE_PATTERN.test(item['path'])) {
+          const v = validateRelativePath(item['path']);
+          if (!v.ok) {
+            throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT finding path is invalid');
+          }
+          findingPath = v.value;
+        } else {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT finding path must be relative string or null');
+        }
+      }
+      let findingLine: number | null | undefined;
+      if (Object.hasOwn(item, 'line') && item['line'] !== undefined) {
+        if (item['line'] === null) {
+          findingLine = null;
+        } else if (typeof item['line'] === 'number' && Number.isSafeInteger(item['line']) && item['line'] >= 1) {
+          findingLine = item['line'];
+        } else {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'LOOPWRIGHT_CHECK_OUT finding line must be positive integer or null');
+        }
+      }
+      cleanFindings.push(Object.freeze({
+        title,
+        severity: rawSeverity,
+        ...(findingPath !== undefined ? { path: findingPath } : {}),
+        ...(findingLine !== undefined ? { line: findingLine } : {}),
+        evidence,
+      }));
+    }
+    findings = Object.freeze(cleanFindings);
+  }
+
+  return Object.freeze({
+    ...(detail !== undefined ? { detail } : {}),
+    ...(metrics !== undefined ? { metrics } : {}),
+    ...(findings !== undefined ? { findings } : {}),
+  });
 }
 
 async function materializeCandidateFiles(
@@ -1044,30 +1599,72 @@ async function assertDeletedPathsAbsent(
 function buildSandboxedChildEnv(
   gate: CompiledLocalCommandGate,
   candidateDir: string,
+  baseDir: string,
+  checkOutPath: string,
   scratchHome: string,
   scratchTmp: string,
   runtimeEnv: NodeJS.ProcessEnv | undefined,
   readOnlyGitHubToken: string | undefined,
   forbiddenEnvNames?: ReadonlySet<string> | undefined,
+  resolvedToolchainPaths?: readonly string[] | undefined,
+  checkStagedDir?: string | null | undefined,
 ): Record<string, string> {
-  const childEnv: Record<string, string> = {
-    PATH: '/usr/local/bin:/usr/bin:/bin',
-    HOME: scratchHome,
-    TMPDIR: scratchTmp,
-    LANG: 'C.UTF-8',
-    LC_ALL: 'C.UTF-8',
-    LOOPWRIGHT_CANDIDATE_DIR: candidateDir,
-    LOOPWRIGHT_CHECK_ID: gate.checkId,
-  };
+  const childEnv: Record<string, string> = {};
+
+  if (gate.allowHostEnv === true && runtimeEnv !== undefined) {
+    for (const [key, value] of Object.entries(runtimeEnv)) {
+      if (typeof value !== 'string') continue;
+      if (
+        key === 'PATH' || key === 'HOME' || key === 'TMPDIR' || key === 'LANG' || key === 'LC_ALL'
+        || isForbiddenChildEnvName(key, forbiddenEnvNames)
+        || isForbiddenPreflightEnvName(key, forbiddenEnvNames)
+      ) {
+        continue;
+      }
+      childEnv[key] = value;
+    }
+  }
 
   for (const envName of gate.env) {
-    if (isForbiddenChildEnvName(envName) || forbiddenEnvNames?.has(envName) === true) {
+    if (isForbiddenChildEnvName(envName, forbiddenEnvNames) || isForbiddenPreflightEnvName(envName, forbiddenEnvNames)) {
       throw new GitHubAppError('ACTION_INPUT_INVALID', `forbidden env variable "${envName}" in command.v1 gate`);
     }
     const value = runtimeEnv?.[envName];
     if (typeof value === 'string') {
       childEnv[envName] = value;
     }
+  }
+
+  if (gate.envMap !== undefined) {
+    for (const [envName, envValue] of Object.entries(gate.envMap)) {
+      if (isForbiddenChildEnvName(envName, forbiddenEnvNames) || isForbiddenPreflightEnvName(envName, forbiddenEnvNames)) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', `forbidden envMap variable "${envName}" in command.v1 gate`);
+      }
+      childEnv[envName] = envValue;
+    }
+  }
+
+  const hostPath = gate.allowHostPath === true ? runtimeEnv?.['PATH'] : undefined;
+  const basePath = typeof hostPath === 'string' && hostPath.trim().length > 0
+    ? hostPath.trim()
+    : '/usr/local/bin:/usr/bin:/bin';
+  const effectivePath = resolvedToolchainPaths !== undefined && resolvedToolchainPaths.length > 0
+    ? `${resolvedToolchainPaths.join(':')}:${basePath}`
+    : basePath;
+
+  childEnv['PATH'] = effectivePath;
+  childEnv['HOME'] = scratchHome;
+  childEnv['TMPDIR'] = scratchTmp;
+  childEnv['LANG'] = 'C.UTF-8';
+  childEnv['LC_ALL'] = 'C.UTF-8';
+  childEnv['GIT_CONFIG_NOSYSTEM'] = '1';
+  childEnv['GIT_CONFIG_GLOBAL'] = '/dev/null';
+  childEnv['LOOPWRIGHT_CANDIDATE_DIR'] = candidateDir;
+  childEnv['LOOPWRIGHT_BASE_DIR'] = baseDir;
+  childEnv['LOOPWRIGHT_CHECK_ID'] = gate.checkId;
+  childEnv['LOOPWRIGHT_CHECK_OUT'] = checkOutPath;
+  if (typeof checkStagedDir === 'string' && checkStagedDir.length > 0) {
+    childEnv['LOOPWRIGHT_STAGED_DIR'] = checkStagedDir;
   }
 
   if (gate.allowReadOnlyGitHubToken && typeof readOnlyGitHubToken === 'string' && readOnlyGitHubToken.length > 0) {
@@ -1174,8 +1771,32 @@ function formatCommandFailureOutput(
 }
 
 interface RunCommandScriptOptions {
+  readonly args?: readonly string[] | undefined;
+  readonly allowCheckNetwork?: boolean | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly registerKiller?: ((kill: () => void) => () => void) | undefined;
+  readonly onLog?: ((line: string) => void) | undefined;
+}
+
+const CHECK_NO_NET_SEATBELT_PROFILE = '(version 1)(allow default)(deny network*)';
+let cachedLinuxBwrapNetPath: string | null | undefined;
+
+function resolveLinuxBwrapForNoNet(): string | null {
+  if (cachedLinuxBwrapNetPath !== undefined) return cachedLinuxBwrapNetPath;
+  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) {
+    if (!existsSync(candidate)) continue;
+    const probe = spawnSync(
+      candidate,
+      ['--unshare-net', '--die-with-parent', '--ro-bind', '/', '/', '--', '/bin/true'],
+      { stdio: 'ignore', timeout: 3_000 },
+    );
+    if (probe.status === 0 && probe.error === undefined) {
+      cachedLinuxBwrapNetPath = candidate;
+      return candidate;
+    }
+  }
+  cachedLinuxBwrapNetPath = null;
+  return null;
 }
 
 async function runCommandScript(
@@ -1193,8 +1814,31 @@ async function runCommandScript(
     };
   }
   const shell = resolveShellExecutable();
+  const baseArgs = [scriptFullPath, ...(options?.args ?? [])];
+  let spawnCmd = shell;
+  let spawnArgs = baseArgs;
+  if (options?.allowCheckNetwork !== true) {
+    let isolated = false;
+    if (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) {
+      spawnCmd = '/usr/bin/sandbox-exec';
+      spawnArgs = ['-p', CHECK_NO_NET_SEATBELT_PROFILE, shell, ...baseArgs];
+      isolated = true;
+    } else if (process.platform === 'linux') {
+      const bwrapBin = resolveLinuxBwrapForNoNet();
+      if (bwrapBin !== null) {
+        spawnCmd = bwrapBin;
+        spawnArgs = ['--unshare-net', '--die-with-parent', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--', shell, ...baseArgs];
+        isolated = true;
+      }
+    }
+    if (!isolated) {
+      options?.onLog?.(
+        `warning: command.v1 network isolation unavailable on ${process.platform}; running check without OS network namespace`,
+      );
+    }
+  }
   return await new Promise((resolvePromise, reject) => {
-    const child = spawn(shell, [scriptFullPath], {
+    const child = spawn(spawnCmd, spawnArgs, {
       cwd,
       env,
       detached: true,
@@ -1298,6 +1942,7 @@ export interface LocalCommandGateServerOptions {
   readonly signingSecret?: string | undefined;
   readonly scratchRoot?: string | undefined;
   readonly forbiddenEnvNames?: ReadonlySet<string> | undefined;
+  readonly checkStagedDir?: string | null | undefined;
   readonly syncWaitMs?: number | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
 }
@@ -1312,7 +1957,11 @@ export interface LocalCommandGateServer {
 interface LocalCommandGateJob {
   readonly key: string;
   promise: Promise<void>;
-  settled: { readonly status: 'approved' | 'denied'; readonly reason: string | null } | null;
+  settled: {
+    readonly status: 'approved' | 'denied';
+    readonly reason: string | null;
+    readonly extra?: ValidatedCheckOutPayload | null | undefined;
+  } | null;
 }
 
 /**
@@ -1349,16 +1998,49 @@ export async function startLocalCommandGateServer(
   const settledOrder: string[] = [];
   const inFlightPromises = new Set<Promise<void>>();
   const activeKillers = new Set<() => void>();
+  const baseDirCache = new Map<string, Promise<string>>();
+  const cachedBaseDirs = new Set<string>();
   const closeController = new AbortController();
   let closing = false;
+
+  const getOrMaterializeBaseDir = (
+    baseRevision: string,
+    objectFormat: 'sha1' | 'sha256',
+    protectedPaths: readonly string[],
+    entries: readonly BaselineRegularEntry[],
+    timeoutMs: number,
+  ): Promise<string> => {
+    const entriesDigest = createHash('sha256')
+      .update(entries.map(entry => `${entry.path}\0${entry.mode}\0${entry.oid}`).sort().join('\n'), 'utf8')
+      .digest('hex');
+    const cacheKey = canonicalJson({ baseRevision, objectFormat, protectedPaths, entriesDigest });
+    const existing = baseDirCache.get(cacheKey);
+    if (existing !== undefined) return existing;
+    const pending = (async () => {
+      const dir = await mkdtemp(join(scratchBase, 'base-cache-'));
+      cachedBaseDirs.add(dir);
+      await chmod(dir, 0o700);
+      await materializeBaselineBatchForGate(options.repositoryRoot, objectFormat, entries, dir, timeoutMs);
+      await makeTreeReadOnly(dir);
+      return dir;
+    })();
+    baseDirCache.set(cacheKey, pending);
+    pending.catch(() => {
+      if (baseDirCache.get(cacheKey) === pending) {
+        baseDirCache.delete(cacheKey);
+      }
+    });
+    return pending;
+  };
 
   const recordSettled = (
     job: LocalCommandGateJob,
     status: 'approved' | 'denied',
     reason: string | null,
+    extra?: ValidatedCheckOutPayload | null,
   ): void => {
     if (job.settled !== null) return;
-    job.settled = { status, reason };
+    job.settled = { status, reason, ...(extra !== undefined ? { extra } : {}) };
     settledOrder.push(job.key);
     while (settledOrder.length > MAX_SETTLED_GATE_JOBS) {
       const oldestKey = settledOrder.shift();
@@ -1416,25 +2098,96 @@ export async function startLocalCommandGateServer(
     const checkId = String(request['checkId'] ?? '');
     const candidateDigest = String(request['candidateDigest'] ?? '');
 
+    const VERDICT_SOFT_BYTE_BUDGET = 64_000;
+    const VERDICT_HARD_BYTE_LIMIT = 65_536;
     const makeVerdict = (
       status: 'pending' | 'approved' | 'denied',
       reason: string | null,
-    ) => ({
-      version: 1,
-      kind: 'gate_verdict',
-      storeId,
-      runId,
-      lockHash,
-      operationId,
-      dispatchId,
-      dispatchGeneration,
-      gateId,
-      checkId,
-      candidateDigest,
-      status,
-      reason: status === 'pending' ? null : reason,
-      expiresAtMs: String(Date.now() + verdictTtlMs),
-    });
+      extra?: ValidatedCheckOutPayload | null,
+    ) => {
+      const includeExtra = status !== 'pending' && extra !== undefined && extra !== null;
+      let detail = includeExtra ? extra.detail : undefined;
+      let metrics = includeExtra ? extra.metrics : undefined;
+      let findings = includeExtra ? extra.findings : undefined;
+      const buildObj = (
+        d: string | null | undefined,
+        m: MetricsMap | undefined,
+        f: readonly StructuredFinding[] | undefined,
+      ) => ({
+        version: 1,
+        kind: 'gate_verdict',
+        storeId,
+        runId,
+        lockHash,
+        operationId,
+        dispatchId,
+        dispatchGeneration,
+        gateId,
+        checkId,
+        candidateDigest,
+        status,
+        reason: status === 'pending' ? null : reason,
+        expiresAtMs: String(Date.now() + verdictTtlMs),
+        ...(d !== undefined ? { detail: d } : {}),
+        ...(m !== undefined ? { metrics: m } : {}),
+        ...(f !== undefined ? { findings: f } : {}),
+      });
+      const serializedBytes = (candidate: unknown): number =>
+        Buffer.byteLength(canonicalJson(stripUndefinedFields(candidate)), 'utf8');
+
+      let verdict = buildObj(detail, metrics, findings);
+      if (serializedBytes(verdict) > VERDICT_SOFT_BYTE_BUDGET) {
+        if (typeof detail === 'string') {
+          detail = truncateCodePoints(detail, 512);
+          verdict = buildObj(detail, metrics, findings);
+        }
+        if (serializedBytes(verdict) > VERDICT_SOFT_BYTE_BUDGET && findings !== undefined && findings.length > 0) {
+          const trimmedFindings = [...findings];
+          while (
+            trimmedFindings.length > 0
+            && serializedBytes(buildObj(detail, metrics, trimmedFindings)) > VERDICT_SOFT_BYTE_BUDGET
+          ) {
+            trimmedFindings.pop();
+          }
+          if (trimmedFindings.length === 0) {
+            const first = findings[0]!;
+            const compactEvidence = truncateCodePoints(first.evidence, 256);
+            if (compactEvidence.length > 0) {
+              const compacted = Object.freeze([{ ...first, evidence: compactEvidence }]);
+              if (serializedBytes(buildObj(detail, metrics, compacted)) <= VERDICT_SOFT_BYTE_BUDGET) {
+                trimmedFindings.push(compacted[0]!);
+              }
+            }
+          }
+          findings = trimmedFindings.length > 0 ? Object.freeze(trimmedFindings) : undefined;
+          verdict = buildObj(detail, metrics, findings);
+        }
+        if (serializedBytes(verdict) > VERDICT_SOFT_BYTE_BUDGET && metrics !== undefined) {
+          const metricEntries = Object.entries(metrics);
+          while (metricEntries.length > 0) {
+            metricEntries.pop();
+            if (metricEntries.length === 0) {
+              metrics = undefined;
+              verdict = buildObj(detail, metrics, findings);
+              break;
+            }
+            const nextMap: Record<string, MetricValue> = Object.create(null) as Record<string, MetricValue>;
+            for (const [k, v] of metricEntries) {
+              nextMap[k] = v;
+            }
+            const nextMetrics = Object.freeze(nextMap);
+            verdict = buildObj(detail, nextMetrics, findings);
+            if (serializedBytes(verdict) <= VERDICT_SOFT_BYTE_BUDGET) {
+              break;
+            }
+          }
+        }
+        if (serializedBytes(verdict) > VERDICT_HARD_BYTE_LIMIT) {
+          verdict = buildObj(undefined, undefined, undefined);
+        }
+      }
+      return verdict;
+    };
 
     const sanitizeFailureReason = (raw: string): string => {
       const cleaned = sanitizeReportText(raw, {
@@ -1485,19 +2238,33 @@ export async function startLocalCommandGateServer(
           }
           workDir = await mkdtemp(join(scratchBase, 'exec-'));
           await chmod(workDir, 0o700);
-          const candidateDir = join(workDir, 'candidate');
+          const candidateHolder = join(workDir, 'candidate');
+          await mkdir(candidateHolder, { mode: 0o700 });
+          const rawRepoName = basename(resolve(options.repositoryRoot));
+          const safeRepoName = /^[A-Za-z0-9._-]+$/.test(rawRepoName) && rawRepoName !== '.' && rawRepoName !== '..'
+            ? rawRepoName
+            : 'repo';
+          const candidateDir = gate.preserveRepoDirName === true
+            ? join(candidateHolder, safeRepoName)
+            : candidateHolder;
+          if (candidateDir !== candidateHolder) {
+            await mkdir(candidateDir, { mode: 0o700 });
+          }
+          let baseDir = join(workDir, 'base');
+          const outDir = join(workDir, 'out');
+          const checkDir = join(workDir, 'check-dir');
           const scratchHome = join(workDir, 'home');
           const scratchTmp = join(workDir, 'tmp');
 
-          await mkdir(candidateDir, { mode: 0o700 });
+          await mkdir(baseDir, { mode: 0o700 });
+          await mkdir(outDir, { mode: 0o700 });
           await mkdir(scratchHome, { mode: 0o700 });
           await mkdir(scratchTmp, { mode: 0o700 });
 
-          const scriptCopyPath = await verifyAndCopyScriptToWorkDir(
+          const scriptCopyPath = await verifyAndStageCommandScriptDir(
             options.repositoryRoot,
-            gate.script,
-            gate.scriptSha256,
-            join(workDir, 'gate-script.sh'),
+            gate,
+            checkDir,
           );
           const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
           const gitEnv = buildCleanGitEnv();
@@ -1600,8 +2367,6 @@ export async function startLocalCommandGateServer(
                 }
               }
             } else {
-              // ArtifactManifest under loopwright.dev/v1alpha1 with baseTree === undefined and deleted === undefined
-              // is classic full-snapshot mode where snapshot.files holds the complete candidate file set.
               if (snapshot.manifest.spec.deleted !== undefined || snapshot.manifest.apiVersion !== 'loopwright.dev/v1alpha1') {
                 throw new GitHubAppError(
                   'ACTION_INPUT_INVALID',
@@ -1626,8 +2391,14 @@ export async function startLocalCommandGateServer(
             const toMaterialize = Array.from(effectiveBaseline.values()).filter(
               entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
             );
-            // Classic mode requires 40-hex SHA-1 commit OIDs via COMMIT_SHA_PATTERN above.
             const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
+            baseDir = await getOrMaterializeBaseDir(
+              snapshot.baseRevision,
+              objectFormat,
+              snapshot.protectedPaths,
+              baseRegularEntries,
+              Math.max(60_000, gate.timeoutSeconds * 1000),
+            );
             await materializeBaselineBatchForGate(
               options.repositoryRoot,
               objectFormat,
@@ -1652,6 +2423,13 @@ export async function startLocalCommandGateServer(
             const toMaterialize = baselineEntries.filter(
               entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
             );
+            baseDir = await getOrMaterializeBaseDir(
+              snapshot.manifest.spec.baseTree.commitOid,
+              snapshot.manifest.spec.baseTree.objectFormat,
+              snapshot.protectedPaths,
+              baselineEntries,
+              Math.max(60_000, gate.timeoutSeconds * 1000),
+            );
             await materializeBaselineBatchForGate(
               options.repositoryRoot,
               snapshot.manifest.spec.baseTree.objectFormat,
@@ -1663,6 +2441,78 @@ export async function startLocalCommandGateServer(
             await assertDeletedPathsAbsent(candidateDir, deletedPaths);
           } else {
             await materializeCandidateFiles(candidateDir, snapshot.files);
+            if (existsSync(join(options.repositoryRoot, '.git')) && COMMIT_SHA_PATTERN.test(snapshot.baseRevision)) {
+              const baselineEntries = await listBaselineRegularEntries(
+                options.repositoryRoot,
+                snapshot.baseRevision,
+                snapshot.protectedPaths,
+              );
+              baseDir = await getOrMaterializeBaseDir(
+                snapshot.baseRevision,
+                'sha1',
+                snapshot.protectedPaths,
+                baselineEntries,
+                Math.max(60_000, gate.timeoutSeconds * 1000),
+              );
+            } else {
+              await makeTreeReadOnly(baseDir);
+            }
+          }
+
+          if (gate.mountReadOnlyGit === true) {
+            const srcGitDir = join(options.repositoryRoot, '.git');
+            const gitStat = await lstat(srcGitDir).catch(() => null);
+            if (gitStat !== null) {
+              if (gitStat.isSymbolicLink() || !gitStat.isDirectory()) {
+                throw new GitHubAppError('ACTION_INPUT_INVALID', 'repository .git must be a non-symlink directory for mountReadOnlyGit');
+              }
+              await stageSanitizedReadOnlyGitDir(srcGitDir, join(candidateDir, '.git'));
+            }
+          }
+
+          const resolvedToolchainPaths: string[] = [];
+          const realTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
+          for (const [tpIndex, tp] of (gate.toolchainPaths ?? []).entries()) {
+            if (tp.startsWith('/')) {
+              const tpStat = await lstat(tp).catch(() => null);
+              if (tpStat === null || tpStat.isSymbolicLink() || !tpStat.isDirectory()) {
+                throw new GitHubAppError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
+              }
+              const realTp = await realpath(tp);
+              if (gate.allowPrivileged !== true) {
+                if (
+                  insideRoot(realTp, realTmpRoot)
+                  || insideRoot(realTp, '/tmp')
+                  || insideRoot(realTp, '/private/tmp')
+                ) {
+                  throw new GitHubAppError(
+                    'ACTION_INPUT_INVALID',
+                    `absolute toolchainPath "${tp}" under tmpdir is forbidden without allowPrivileged`,
+                  );
+                }
+                if ((tpStat.mode & 0o022) !== 0) {
+                  throw new GitHubAppError(
+                    'ACTION_INPUT_INVALID',
+                    `absolute toolchainPath "${tp}" must not be group- or world-writable without allowPrivileged`,
+                  );
+                }
+                const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+                if (currentUid !== undefined && tpStat.uid !== 0 && tpStat.uid !== currentUid) {
+                  throw new GitHubAppError(
+                    'ACTION_INPUT_INVALID',
+                    `absolute toolchainPath "${tp}" must be owned by root or the current user without allowPrivileged`,
+                  );
+                }
+              }
+              resolvedToolchainPaths.push(realTp);
+            } else {
+              const cleanTp = normalizeCandidateRelativePath(tp);
+              const fullTp = resolve(options.repositoryRoot, cleanTp);
+              assertNoSymlinkSegments(options.repositoryRoot, fullTp);
+              const destTp = join(workDir, 'toolchains', String(tpIndex));
+              await copyDirectoryTreeReadOnly(fullTp, destTp);
+              resolvedToolchainPaths.push(destTp);
+            }
           }
 
           if (closeController.signal.aborted) {
@@ -1670,14 +2520,19 @@ export async function startLocalCommandGateServer(
             return;
           }
 
+          const checkOutPath = join(outDir, 'check-out.json');
           const childEnv = buildSandboxedChildEnv(
             gate,
             candidateDir,
+            baseDir,
+            checkOutPath,
             scratchHome,
             scratchTmp,
             options.runtimeEnv,
             options.readOnlyGitHubToken,
             options.forbiddenEnvNames,
+            resolvedToolchainPaths,
+            options.checkStagedDir,
           );
 
           options.onLog?.(scrubber.scrub(
@@ -1690,7 +2545,10 @@ export async function startLocalCommandGateServer(
             childEnv,
             gate.timeoutSeconds * 1000,
             {
+              args: gate.args,
+              allowCheckNetwork: gate.allowCheckNetwork === true,
               signal: closeController.signal,
+              onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
               registerKiller: kill => {
                 activeKillers.add(kill);
                 return () => {
@@ -1700,9 +2558,10 @@ export async function startLocalCommandGateServer(
             },
           );
           const cmdElapsed = Math.max(1, Math.round(performance.now() - cmdStarted));
+          const checkOutPayload = await readAndValidateCheckOutFile(checkOutPath, scrubber);
           if (!result.timedOut && result.exitCode === 0) {
             options.onLog?.(scrubber.scrub(`check ${gate.checkId}: passed (${formatDurationMs(cmdElapsed)})`));
-            recordSettled(newJob, 'approved', null);
+            recordSettled(newJob, 'approved', null, checkOutPayload);
           } else {
             const prefix = result.timedOut
               ? `command timed out after ${gate.timeoutSeconds}s`
@@ -1710,13 +2569,16 @@ export async function startLocalCommandGateServer(
             const rawReason = result.output.length > 0 ? `${prefix}: ${result.output}` : prefix;
             const sanitizedReason = sanitizeFailureReason(rawReason);
             options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed (${formatDurationMs(cmdElapsed)}) — ${sanitizedReason}`));
-            recordSettled(newJob, 'denied', sanitizedReason);
+            recordSettled(newJob, 'denied', sanitizedReason, checkOutPayload);
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          recordSettled(newJob, 'denied', sanitizeFailureReason(message));
+          const sanitizedReason = sanitizeFailureReason(message);
+          options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed — ${sanitizedReason}`));
+          recordSettled(newJob, 'denied', sanitizedReason);
         } finally {
           if (workDir !== undefined) {
+            await makeTreeWritableForCleanup(workDir).catch(() => undefined);
             await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
           }
         }
@@ -1736,7 +2598,7 @@ export async function startLocalCommandGateServer(
     }
 
     if (job.settled !== null) {
-      writeSignedJsonResponse(res, 200, signingSecret, makeVerdict(job.settled.status, job.settled.reason));
+      writeSignedJsonResponse(res, 200, signingSecret, makeVerdict(job.settled.status, job.settled.reason, job.settled.extra));
     } else {
       writeSignedJsonResponse(res, 200, signingSecret, makeVerdict('pending', null));
     }
@@ -1783,7 +2645,14 @@ export async function startLocalCommandGateServer(
       await Promise.allSettled([...inFlightPromises]);
       server.closeIdleConnections?.();
       await closePromise;
+      for (const cachedDir of cachedBaseDirs) {
+        await makeTreeWritableForCleanup(cachedDir).catch(() => undefined);
+        await rm(cachedDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      cachedBaseDirs.clear();
+      baseDirCache.clear();
       if (ownedScratch) {
+        await makeTreeWritableForCleanup(scratchBase).catch(() => undefined);
         await rm(scratchBase, { recursive: true, force: true }).catch(() => undefined);
       }
     },
@@ -3231,6 +4100,9 @@ export interface TurnkeyCycleDelegateOptions {
   readonly ephemeralEnv?: Readonly<Record<string, string>> | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly mcpRegistry?: HostMcpRegistry | undefined;
+  readonly mcpServers?: readonly StepMcpServerMetadata[] | undefined;
+  readonly decisions?: AdvisoryDecisionPort | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
   readonly onAttemptSettled?: ((summary: TurnkeyCycleAttemptSummary) => void) | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -3396,6 +4268,20 @@ async function inspectRunChecksAndExternalWrites(
   const checks: ReportCheckItem[] = [];
 
   try {
+    let resultCheckDetails = new Map<string, string>();
+    try {
+      const resultRaw = JSON.parse(await readFile(join(tempOutputDir, 'result.json'), 'utf8')) as unknown;
+      if (isPlainRecord(resultRaw) && isPlainRecord(resultRaw['spec']) && Array.isArray(resultRaw['spec']['checks'])) {
+        resultCheckDetails = new Map(
+          resultRaw['spec']['checks'].flatMap(entry =>
+            isPlainRecord(entry) && typeof entry['checkId'] === 'string' && typeof entry['detail'] === 'string'
+              ? [[entry['checkId'], entry['detail']] as const]
+              : []),
+        );
+      }
+    } catch {
+      // result.json is optional when incident occurred.
+    }
     const verificationRaw = await readFile(join(tempOutputDir, 'verification.json'), 'utf8');
     const parsed = JSON.parse(verificationRaw) as unknown;
     if (isPlainRecord(parsed)) {
@@ -3418,7 +4304,7 @@ async function inspectRunChecksAndExternalWrites(
               ? entry['reason']
               : typeof entry['detail'] === 'string'
                 ? entry['detail']
-                : null,
+                : (resultCheckDetails.get(checkId) ?? null),
           });
         }
       }
@@ -3511,7 +4397,12 @@ export async function executeTurnkeyActionCycle(
   let formatRepairDispatches = 0;
   let implRepairDispatches = 0;
 
+  const effectiveAllowWorkflowWrites = options.allowWorkflowWrites ?? options.taskpack.allowWorkflowWrites;
   const ports: ControllerPorts = {
+    ...(effectiveAllowWorkflowWrites !== undefined ? { allowWorkflowWrites: effectiveAllowWorkflowWrites } : {}),
+    ...(options.taskpack.roleMcpServers !== undefined ? { roleMcpServers: options.taskpack.roleMcpServers } : {}),
+    ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
+    ...(options.decisions !== undefined ? { decisions: options.decisions } : {}),
     openAdapter: async (host: OpenAdapterHost, adapterInput: OpenAdapterInput) => {
       const wrappedHost: OpenAdapterHost = {
         ...host,
@@ -3978,6 +4869,10 @@ export interface StageTaskpackForStepOptions {
   readonly runRoot: string;
   readonly runId: string;
   readonly mode?: 'candidate' | 'no-change' | undefined;
+  readonly hostPolicy?: import('./types.js').ExecutionHostPolicy | undefined;
+  readonly allowPrivileged?: boolean | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly runPreflight?: boolean | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly upstreamRecordsJson?: string | undefined;
   readonly discoverUpstreams?: boolean | undefined;
@@ -3992,18 +4887,31 @@ export interface StagedTaskpackForStep {
   readonly signingEnvName: string;
   readonly localCommandGates: readonly CompiledLocalCommandGate[];
   readonly repositoryRoot: string;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
+  readonly mcpServers?: readonly import('@loopwright/controller').StepMcpServerMetadata[] | undefined;
+  readonly checkStagedDir?: string | null | undefined;
+  readonly workspaceStagedDir?: string | null | undefined;
+  readonly digests?: Readonly<Record<string, string>> | undefined;
 }
 
 export interface OpenStagedTaskpackStepGateOptions {
   readonly runRoot: string;
   readonly runId: string;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
+  readonly decisionTransport?: import('@loopwright/decisions').DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
 }
 
 export interface StagedTaskpackStepGateHandle {
   readonly staged: StagedTaskpackForStep;
   readonly environment: (name: string) => string | undefined;
   readonly gateUrlOverrides: Readonly<Record<string, string>>;
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
+  readonly mcpServers?: readonly import('@loopwright/controller').StepMcpServerMetadata[] | undefined;
+  readonly decisions?: import('@loopwright/controller').AdvisoryDecisionPort | undefined;
+  readonly ports?: Pick<import('@loopwright/controller').ControllerPorts, 'gateUrlOverrides' | 'allowWorkflowWrites' | 'roleMcpServers' | 'mcpServers' | 'decisions'> | undefined;
   readonly serverUrl?: string | undefined;
   close(): Promise<void>;
 }
@@ -4015,12 +4923,19 @@ const STAGED_SECRETS_KEYS: ReadonlySet<string> = new Set([
   'version',
   'runId',
   'repositoryRoot',
+  'manifestPath',
   'configPath',
   'registryPath',
   'registrySha256',
   'signingSecret',
   'signingEnvName',
   'localCommandGates',
+  'allowWorkflowWrites',
+  'roleMcpServers',
+  'mcpServers',
+  'checkStagedDir',
+  'workspaceStagedDir',
+  'digests',
 ]);
 const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'checkId',
@@ -4028,6 +4943,17 @@ const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'endpointRef',
   'script',
   'scriptSha256',
+  'scriptDir',
+  'scriptDirSha256',
+  'args',
+  'envMap',
+  'toolchainPaths',
+  'preserveRepoDirName',
+  'mountReadOnlyGit',
+  'allowHostEnv',
+  'allowHostPath',
+  'allowCheckNetwork',
+  'allowPrivileged',
   'timeoutSeconds',
   'allowReadOnlyGitHubToken',
   'env',
@@ -4211,16 +5137,100 @@ async function readAndValidateStagedTaskpackSecrets(
     } catch {
       throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates script path is invalid');
     }
+    const scriptDir = typeof gate['scriptDir'] === 'string' && gate['scriptDir'].length > 0 ? gate['scriptDir'] : undefined;
+    const scriptDirSha256 = typeof gate['scriptDirSha256'] === 'string' && SHA256_HEX_PATTERN.test(gate['scriptDirSha256'])
+      ? gate['scriptDirSha256']
+      : undefined;
+    const args = Array.isArray(gate['args']) && gate['args'].every(a => typeof a === 'string')
+      ? Object.freeze([...(gate['args'] as string[])])
+      : undefined;
+    const toolchainPaths = Array.isArray(gate['toolchainPaths']) && gate['toolchainPaths'].every(a => typeof a === 'string')
+      ? Object.freeze([...(gate['toolchainPaths'] as string[])])
+      : undefined;
+    let envMap: Readonly<Record<string, string>> | undefined;
+    if (isPlainRecord(gate['envMap'])) {
+      const cleanMap: Record<string, string> = {};
+      for (const [k, v] of Object.entries(gate['envMap'])) {
+        if (!STAGED_COMMAND_ENV_NAME_PATTERN.test(k) || isForbiddenChildEnvName(k) || typeof v !== 'string') {
+          throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates envMap is invalid');
+        }
+        cleanMap[k] = v;
+      }
+      envMap = Object.freeze(cleanMap);
+    }
     localCommandGates.push({
       checkId: gate['checkId'],
       gateId: gate['gateId'],
       endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
       script: normalizedScript,
       scriptSha256: gate['scriptSha256'],
+      ...(scriptDir !== undefined ? { scriptDir } : {}),
+      ...(scriptDirSha256 !== undefined ? { scriptDirSha256 } : {}),
+      ...(args !== undefined ? { args } : {}),
+      ...(envMap !== undefined ? { envMap } : {}),
+      ...(toolchainPaths !== undefined ? { toolchainPaths } : {}),
+      ...(typeof gate['preserveRepoDirName'] === 'boolean' ? { preserveRepoDirName: gate['preserveRepoDirName'] } : {}),
+      ...(typeof gate['mountReadOnlyGit'] === 'boolean' ? { mountReadOnlyGit: gate['mountReadOnlyGit'] } : {}),
+      ...(typeof gate['allowHostEnv'] === 'boolean' ? { allowHostEnv: gate['allowHostEnv'] } : {}),
+      ...(typeof gate['allowHostPath'] === 'boolean' ? { allowHostPath: gate['allowHostPath'] } : {}),
+      ...(typeof gate['allowCheckNetwork'] === 'boolean' ? { allowCheckNetwork: gate['allowCheckNetwork'] } : {}),
+      ...(typeof gate['allowPrivileged'] === 'boolean' ? { allowPrivileged: gate['allowPrivileged'] } : {}),
       timeoutSeconds: gate['timeoutSeconds'],
       env: Object.freeze([...(gate['env'] as string[])]),
       allowReadOnlyGitHubToken: gate['allowReadOnlyGitHubToken'],
     });
+  }
+
+  const allowWorkflowWrites = typeof parsed['allowWorkflowWrites'] === 'boolean' ? parsed['allowWorkflowWrites'] : undefined;
+  let roleMcpServers: Readonly<Record<string, readonly string[]>> | undefined;
+  if (isPlainRecord(parsed['roleMcpServers'])) {
+    const cleanRoleMcp: Record<string, readonly string[]> = {};
+    for (const [roleId, list] of Object.entries(parsed['roleMcpServers'])) {
+      if (STAGED_FORBIDDEN_KEYS.has(roleId) || !Array.isArray(list) || list.some(s => typeof s !== 'string')) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack roleMcpServers is invalid');
+      }
+      cleanRoleMcp[roleId] = Object.freeze([...(list as string[])]);
+    }
+    roleMcpServers = Object.freeze(cleanRoleMcp);
+  }
+  let mcpServers: readonly StepMcpServerMetadata[] | undefined;
+  if (Array.isArray(parsed['mcpServers'])) {
+    const cleanServers: StepMcpServerMetadata[] = [];
+    for (const item of parsed['mcpServers']) {
+      if (
+        !isPlainRecord(item)
+        || typeof item['id'] !== 'string'
+        || (item['transport'] !== 'stdio' && item['transport'] !== 'http')
+        || !Array.isArray(item['toolNames'])
+        || item['toolNames'].some(t => typeof t !== 'string')
+      ) {
+        throw new GitHubAppError('ACTION_INPUT_INVALID', 'staged taskpack mcpServers entry is invalid');
+      }
+      cleanServers.push(Object.freeze({
+        id: item['id'],
+        transport: item['transport'],
+        toolNames: Object.freeze([...(item['toolNames'] as string[])]),
+      }));
+    }
+    mcpServers = Object.freeze(cleanServers);
+  }
+  const checkStagedDir = typeof parsed['checkStagedDir'] === 'string' && parsed['checkStagedDir'].length > 0
+    ? parsed['checkStagedDir']
+    : parsed['checkStagedDir'] === null
+      ? null
+      : undefined;
+  const workspaceStagedDir = typeof parsed['workspaceStagedDir'] === 'string' && parsed['workspaceStagedDir'].length > 0
+    ? parsed['workspaceStagedDir']
+    : parsed['workspaceStagedDir'] === null
+      ? null
+      : undefined;
+  let digests: Readonly<Record<string, string>> | undefined;
+  if (isPlainRecord(parsed['digests'])) {
+    const cleanDigests: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed['digests'])) {
+      if (!STAGED_FORBIDDEN_KEYS.has(k) && typeof v === 'string') cleanDigests[k] = v;
+    }
+    digests = Object.freeze(cleanDigests);
   }
 
   return {
@@ -4232,6 +5242,12 @@ async function readAndValidateStagedTaskpackSecrets(
     signingEnvName,
     localCommandGates: Object.freeze(localCommandGates),
     repositoryRoot,
+    ...(allowWorkflowWrites !== undefined ? { allowWorkflowWrites } : {}),
+    ...(roleMcpServers !== undefined ? { roleMcpServers } : {}),
+    ...(mcpServers !== undefined ? { mcpServers } : {}),
+    ...(checkStagedDir !== undefined ? { checkStagedDir } : {}),
+    ...(workspaceStagedDir !== undefined ? { workspaceStagedDir } : {}),
+    ...(digests !== undefined ? { digests } : {}),
   };
 }
 
@@ -4349,6 +5365,10 @@ export async function stageTaskpackForStep(
   }
 
   const runtimeEnv = options.runtimeEnv ?? process.env;
+  const hostPolicy: ExecutionHostPolicy = {
+    allowPrivileged: options.hostPolicy?.allowPrivileged ?? options.allowPrivileged ?? false,
+    allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? options.allowWorkflowWrites ?? false,
+  };
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY']) {
     const val = runtimeEnv[key];
@@ -4369,178 +5389,274 @@ export async function stageTaskpackForStep(
   const manifest = await loadDeclarativeTaskpack({
     manifestPath: relativeTaskpackPath,
     repositoryRoot: realRepositoryRoot,
-  });
-
-  const rawGithubWorkspace = runtimeEnv['GITHUB_WORKSPACE']?.trim();
-  let matchesGithubWorkspace = rawGithubWorkspace === undefined || rawGithubWorkspace.length === 0;
-  if (!matchesGithubWorkspace && rawGithubWorkspace !== undefined) {
-    const realGithubWorkspace = await realpath(rawGithubWorkspace).catch(() => null);
-    matchesGithubWorkspace = realGithubWorkspace === realRepositoryRoot;
-  }
-
-  const envRepo = runtimeEnv['LOOPWRIGHT_REPOSITORY']?.trim()
-    || (matchesGithubWorkspace ? runtimeEnv['GITHUB_REPOSITORY']?.trim() : undefined);
-  const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
-    ? envRepo
-    : 'local/repo';
-
-  let baseRevision = 'HEAD';
-  const envGithubSha = matchesGithubWorkspace ? runtimeEnv['GITHUB_SHA']?.trim() : undefined;
-  if (envGithubSha !== undefined && envGithubSha.length > 0) {
-    if (COMMIT_SHA_PATTERN.test(envGithubSha)) {
-      const existsInRepo = await execGit(
-        realRepositoryRoot,
-        ['rev-parse', '--verify', '--quiet', '--end-of-options', `${envGithubSha.toLowerCase()}^{commit}`],
-        { env: buildCleanGitEnv(), timeoutMs: 5_000 },
-      ).then(() => true, () => false);
-      if (existsInRepo) {
-        baseRevision = envGithubSha.toLowerCase();
-      }
-    } else {
-      baseRevision = envGithubSha;
-    }
-  }
-
-  const resolvedRepo = await resolveRepositoryAndRevisions({
-    repositoryRoot: realRepositoryRoot,
-    repositoryFullName,
-    baseRevision,
-    eventName: 'workflow_dispatch',
-    scrubber,
-  });
-
-  let upstreamRecords: readonly TaskpackUpstreamRecord[] = [];
-  if (options.upstreamRecordsJson !== undefined) {
-    upstreamRecords = parseUpstreamRecordsJson(options.upstreamRecordsJson);
-  } else if (options.discoverUpstreams !== false && manifest.spec.upstreams.length > 0) {
-    upstreamRecords = await discoverTaskpackUpstreams(manifest, {
-      repositoryRoot: realRepositoryRoot,
-      scrubber,
-      env: runtimeEnv,
-    });
-  }
-
-  const signingSecret = randomBytes(32).toString('hex');
-  scrubber.register(signingSecret);
-  const signingEnvName = DEFAULT_LOCAL_COMMAND_GATE_ENV;
-
-  const envLimits = parseLoopwrightEnvLimits(runtimeEnv);
-  const actionInputLimits = parseActionInputLimits(runtimeEnv);
-  const effectiveStepLimits = mergeTaskpackLimits(envLimits, manifest.spec.limits, actionInputLimits);
-
-  const commandChecks = mode === 'candidate'
-    ? manifest.spec.verification.localChecks.filter(check => check.implementation === 'command.v1')
-    : [];
-  const gateEndpoints: HostGateEndpointPlan[] = [];
-  if (commandChecks.length > 0) {
-    let maxTimeoutSeconds = effectiveStepLimits.commandTimeoutSeconds ?? 30;
-    for (const check of commandChecks) {
-      const rawTimeout = check.parameters?.['timeoutSeconds'];
-      if (typeof rawTimeout === 'number' && Number.isSafeInteger(rawTimeout) && rawTimeout > maxTimeoutSeconds) {
-        maxTimeoutSeconds = rawTimeout;
-      }
-    }
-    const timeoutMs = Math.min(3_600_000, Math.max(35_000, maxTimeoutSeconds * 1000 + 15_000));
-    const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
-    gateEndpoints.push({
-      id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
-      url: CANONICAL_TASKPACK_STEP_GATE_URL,
-      signingCredentialRef: 'taskpack-local-command-signing',
-      authCredentialRef: null,
-      timeoutMs,
-      maxPollMs,
-      pollInitialMs: 100,
-      pollMaxMs: 500,
-      jitter: 0,
-    });
-  }
-
-  const authorPrompt = buildDefaultAuthorPrompt({
-    mode,
-    repositoryFullName,
-    upstreamRecords,
-    acceptanceCheckIds: [
-      ...manifest.spec.verification.localChecks.map(c => c.id),
-      ...manifest.spec.verification.externalGates.map(g => g.id),
-    ],
-    runtimeEnv,
-    scrubber,
-  });
-  const compiled = await compileDeclarativeTaskpack(manifest, {
-    mode,
+    hostPolicy,
     executionMode: 'delegated',
-    repository: repositoryFullName,
-    repositoryRoot: realRepositoryRoot,
-    taskpackPath: relativeTaskpackPath,
-    baseRevision: resolvedRepo.baseRevision,
-    sourceRevision: resolvedRepo.sourceRevision,
-    budgets: DEFAULT_HOST_BUDGETS,
-    limits: actionInputLimits,
-    envLimits,
-    gateEndpoints,
-    credentialEnvMap: {
-      localCommandGate: signingEnvName,
-    },
-    authorPrompt,
-    upstreamRecords,
-    scrubber,
   });
 
-  const registryDirectory = join(stageDir, 'registry');
-  const configDirectory = join(stageDir, 'config');
-  await mkdir(stageDir, { recursive: true, mode: 0o700 });
-  await chmod(stageDir, 0o700);
-  await assertOwnedPrivateDirectory(stageDir);
-  await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
-  await chmod(registryDirectory, 0o700);
-  await assertOwnedPrivateDirectory(registryDirectory);
-  await mkdir(configDirectory, { recursive: true, mode: 0o700 });
-  await chmod(configDirectory, 0o700);
-  await assertOwnedPrivateDirectory(configDirectory);
-
-  const registryPath = join(registryDirectory, 'registry.yaml');
-  const configPath = join(configDirectory, 'controller.yaml');
-  const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
-
-  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
-  assertCleanArtifact(configBytes, scrubber, '/config');
-  if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
-    await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
-    for (const resource of compiled.instructionResources) {
-      assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+  let preflightResult: RunTaskpackPreflightResult | undefined;
+  let persistentCheckStagedDir: string | null = null;
+  let persistentWorkspaceStagedDir: string | null = null;
+  try {
+    const shouldRunPreflight = options.runPreflight ?? (manifest.spec.preflight !== undefined);
+    if (shouldRunPreflight && manifest.spec.preflight !== undefined) {
+      preflightResult = await runTaskpackPreflight({
+        manifest,
+        repositoryRoot: realRepositoryRoot,
+        authorized: true,
+        hostPolicy,
+        env: runtimeEnv,
+        scrubber,
+        tempRoot: realRunRoot,
+      });
+      if (preflightResult.disposition === 'blocked') {
+        const rawReason = preflightResult.reason?.trim();
+        const message = rawReason !== undefined && rawReason.length > 0
+          ? `preflight blocked: ${rawReason}`
+          : 'preflight blocked: blocked by preflight';
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          scrubber.scrub(message),
+        );
+      }
     }
-  }
 
-  await writeExclusiveFile(registryPath, compiled.registryBytes, 0o600);
-  await writeExclusiveFile(configPath, configBytes, 0o600);
+    const rawGithubWorkspace = runtimeEnv['GITHUB_WORKSPACE']?.trim();
+    let matchesGithubWorkspace = rawGithubWorkspace === undefined || rawGithubWorkspace.length === 0;
+    if (!matchesGithubWorkspace && rawGithubWorkspace !== undefined) {
+      const realGithubWorkspace = await realpath(rawGithubWorkspace).catch(() => null);
+      matchesGithubWorkspace = realGithubWorkspace === realRepositoryRoot;
+    }
 
-  const localCommandGates = compiled.localCommandGates ?? [];
-  const secretsPayload = Buffer.from(
-    `${JSON.stringify({
-      version: 1,
-      runId,
+    const envRepo = runtimeEnv['LOOPWRIGHT_REPOSITORY']?.trim()
+      || (matchesGithubWorkspace ? runtimeEnv['GITHUB_REPOSITORY']?.trim() : undefined);
+    const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
+      ? envRepo
+      : 'local/repo';
+
+    let baseRevision = 'HEAD';
+    const envGithubSha = matchesGithubWorkspace ? runtimeEnv['GITHUB_SHA']?.trim() : undefined;
+    if (envGithubSha !== undefined && envGithubSha.length > 0) {
+      if (COMMIT_SHA_PATTERN.test(envGithubSha)) {
+        const existsInRepo = await execGit(
+          realRepositoryRoot,
+          ['rev-parse', '--verify', '--quiet', '--end-of-options', `${envGithubSha.toLowerCase()}^{commit}`],
+          { env: buildCleanGitEnv(), timeoutMs: 5_000 },
+        ).then(() => true, () => false);
+        if (existsInRepo) {
+          baseRevision = envGithubSha.toLowerCase();
+        }
+      } else {
+        baseRevision = envGithubSha;
+      }
+    }
+
+    const resolvedRepo = await resolveRepositoryAndRevisions({
       repositoryRoot: realRepositoryRoot,
+      repositoryFullName,
+      baseRevision,
+      eventName: 'workflow_dispatch',
+      scrubber,
+    });
+
+    let upstreamRecords: readonly TaskpackUpstreamRecord[] = preflightResult?.upstreams ?? [];
+    if (options.upstreamRecordsJson !== undefined) {
+      upstreamRecords = parseUpstreamRecordsJson(options.upstreamRecordsJson);
+    } else if (
+      options.discoverUpstreams !== false
+      && manifest.spec.upstreams.length > 0
+      && (preflightResult === undefined || preflightResult.upstreams.length === 0)
+    ) {
+      const discovered = await discoverTaskpackUpstreamsV2(manifest, {
+        repositoryRoot: realRepositoryRoot,
+        scrubber,
+        env: runtimeEnv,
+      });
+      upstreamRecords = discovered.records;
+    }
+
+    const signingSecret = randomBytes(32).toString('hex');
+    scrubber.register(signingSecret);
+    const signingEnvName = DEFAULT_LOCAL_COMMAND_GATE_ENV;
+
+    const envLimits = parseLoopwrightEnvLimits(runtimeEnv);
+    const actionInputLimits = parseActionInputLimits(runtimeEnv);
+    const effectiveStepLimits = mergeTaskpackLimits(envLimits, manifest.spec.limits, actionInputLimits);
+
+    const commandChecks = mode === 'candidate'
+      ? manifest.spec.verification.localChecks.filter(check => check.implementation === 'command.v1')
+      : [];
+    const gateEndpoints: HostGateEndpointPlan[] = [];
+    if (commandChecks.length > 0) {
+      let maxTimeoutSeconds = effectiveStepLimits.commandTimeoutSeconds ?? 30;
+      for (const check of commandChecks) {
+        const rawTimeout = check.parameters?.['timeoutSeconds'];
+        if (typeof rawTimeout === 'number' && Number.isSafeInteger(rawTimeout) && rawTimeout > maxTimeoutSeconds) {
+          maxTimeoutSeconds = rawTimeout;
+        }
+      }
+      const timeoutMs = Math.min(3_600_000, Math.max(35_000, maxTimeoutSeconds * 1000 + 15_000));
+      const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
+      gateEndpoints.push({
+        id: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+        url: CANONICAL_TASKPACK_STEP_GATE_URL,
+        signingCredentialRef: 'taskpack-local-command-signing',
+        authCredentialRef: null,
+        timeoutMs,
+        maxPollMs,
+        pollInitialMs: 100,
+        pollMaxMs: 500,
+        jitter: 0,
+      });
+    }
+
+    if (
+      preflightResult?.stagedDir !== undefined
+      && preflightResult.stagedDir !== null
+      && preflightResult.workspaceResources.length > 0
+    ) {
+      persistentWorkspaceStagedDir = join(stageDir, 'preflight-workspace');
+    }
+
+    const wsResourcesManifestText = preflightResult !== undefined && preflightResult.workspaceResources.length > 0
+      ? formatWorkspaceResourcesManifest(
+        preflightResult.workspaceResources,
+        persistentWorkspaceStagedDir,
+        scrubber,
+      )
+      : undefined;
+    const baseAuthorPrompt = buildDefaultAuthorPrompt({
+      mode,
+      repositoryFullName,
+      upstreamRecords,
+      acceptanceCheckIds: [
+        ...manifest.spec.verification.localChecks.map(c => c.id),
+        ...manifest.spec.verification.externalGates.map(g => g.id),
+      ],
+      runtimeEnv,
+      scrubber,
+    });
+    const authorPrompt = wsResourcesManifestText !== undefined && wsResourcesManifestText.length > 0
+      ? `${baseAuthorPrompt}\n\n${wsResourcesManifestText}`
+      : baseAuthorPrompt;
+
+    const compiled = await compileDeclarativeTaskpack(manifest, {
+      mode,
+      executionMode: 'delegated',
+      hostPolicy,
+      repository: repositoryFullName,
+      repositoryRoot: realRepositoryRoot,
+      taskpackPath: relativeTaskpackPath,
+      baseRevision: resolvedRepo.baseRevision,
+      sourceRevision: resolvedRepo.sourceRevision,
+      budgets: DEFAULT_HOST_BUDGETS,
+      limits: actionInputLimits,
+      envLimits,
+      gateEndpoints,
+      credentialEnvMap: {
+        localCommandGate: signingEnvName,
+      },
+      authorPrompt,
+      upstreamRecords,
+      preflightPromptResources: preflightResult?.promptResources,
+      preflightWorkspaceResources: preflightResult?.workspaceResources,
+      scrubber,
+    });
+
+    const registryDirectory = join(stageDir, 'registry');
+    const configDirectory = join(stageDir, 'config');
+    await mkdir(stageDir, { recursive: true, mode: 0o700 });
+    await chmod(stageDir, 0o700);
+    await assertOwnedPrivateDirectory(stageDir);
+    await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+    await chmod(registryDirectory, 0o700);
+    await assertOwnedPrivateDirectory(registryDirectory);
+    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+    await chmod(configDirectory, 0o700);
+    await assertOwnedPrivateDirectory(configDirectory);
+
+    if (preflightResult?.checkStagedDir !== undefined && preflightResult.checkStagedDir !== null) {
+      persistentCheckStagedDir = join(stageDir, 'preflight-staged');
+      await copyDirectoryTreeReadOnly(preflightResult.checkStagedDir, persistentCheckStagedDir, {
+        maxTotalBytes: PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES,
+      });
+    }
+    if (
+      persistentWorkspaceStagedDir !== null
+      && preflightResult?.stagedDir !== undefined
+      && preflightResult.stagedDir !== null
+    ) {
+      await copyDirectoryTreeReadOnly(preflightResult.stagedDir, persistentWorkspaceStagedDir, {
+        maxTotalBytes: PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES,
+      });
+    }
+
+    const registryPath = join(registryDirectory, 'registry.yaml');
+    const configPath = join(configDirectory, 'controller.yaml');
+    const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+
+    assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+    assertCleanArtifact(configBytes, scrubber, '/config');
+    if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+      await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+      for (const resource of compiled.instructionResources) {
+        assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+      }
+    }
+
+    await writeExclusiveFile(registryPath, compiled.registryBytes, 0o600);
+    await writeExclusiveFile(configPath, configBytes, 0o600);
+
+    const mcpServersMeta: readonly StepMcpServerMetadata[] = Object.freeze(
+      (manifest.spec.mcp?.servers ?? []).map(srv => Object.freeze({
+        id: srv.id,
+        transport: srv.transport,
+        toolNames: Object.freeze([] as readonly string[]),
+      })),
+    );
+
+    const localCommandGates = compiled.localCommandGates ?? [];
+    const secretsPayload = Buffer.from(
+      `${JSON.stringify({
+        version: 1,
+        runId,
+        repositoryRoot: realRepositoryRoot,
+        manifestPath: relativeTaskpackPath,
+        configPath,
+        registryPath,
+        registrySha256: compiled.registrySha256,
+        signingSecret,
+        signingEnvName,
+        localCommandGates,
+        ...(compiled.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: compiled.allowWorkflowWrites } : {}),
+        ...(compiled.roleMcpServers !== undefined ? { roleMcpServers: compiled.roleMcpServers } : {}),
+        ...(mcpServersMeta.length > 0 ? { mcpServers: mcpServersMeta } : {}),
+        ...(persistentCheckStagedDir !== null ? { checkStagedDir: persistentCheckStagedDir } : {}),
+        ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
+        ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
+      }, null, 2)}\n`,
+      'utf8',
+    );
+    await writeExclusiveFile(secretsPath, secretsPayload, 0o600);
+
+    return {
+      stageDir,
       configPath,
       registryPath,
       registrySha256: compiled.registrySha256,
       signingSecret,
       signingEnvName,
-      localCommandGates,
-    }, null, 2)}\n`,
-    'utf8',
-  );
-  await writeExclusiveFile(secretsPath, secretsPayload, 0o600);
-
-  return {
-    stageDir,
-    configPath,
-    registryPath,
-    registrySha256: compiled.registrySha256,
-    signingSecret,
-    signingEnvName,
-    localCommandGates: Object.freeze([...localCommandGates]),
-    repositoryRoot: realRepositoryRoot,
-  };
+      localCommandGates: Object.freeze([...localCommandGates]),
+      repositoryRoot: realRepositoryRoot,
+      ...(compiled.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: compiled.allowWorkflowWrites } : {}),
+      ...(compiled.roleMcpServers !== undefined ? { roleMcpServers: compiled.roleMcpServers } : {}),
+      ...(mcpServersMeta.length > 0 ? { mcpServers: mcpServersMeta } : {}),
+      ...(persistentCheckStagedDir !== null ? { checkStagedDir: persistentCheckStagedDir } : {}),
+      ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
+      ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
+    };
+  } finally {
+    await preflightResult?.cleanup().catch(() => undefined);
+  }
 }
 
 /**
@@ -4582,19 +5698,141 @@ export async function openStagedTaskpackStepGate(
       ? staged.signingSecret
       : (Object.hasOwn(baseEnv, name) ? baseEnv[name] : undefined);
 
-  if (staged.localCommandGates.length === 0) {
-    return {
-      staged,
-      environment,
-      gateUrlOverrides: Object.freeze({}),
-      close: async () => undefined,
-    };
-  }
-
   const readOnlyGitHubToken = baseEnv['INPUT_GITHUB-TOKEN']?.trim()
     || baseEnv['GITHUB_TOKEN']?.trim()
     || baseEnv['GH_TOKEN']?.trim()
     || undefined;
+  const stepScrubber = new SecretScrubber();
+  stepScrubber.register(staged.signingSecret);
+  if (readOnlyGitHubToken !== undefined) stepScrubber.register(readOnlyGitHubToken);
+  if (typeof options.decisionApiKey === 'string' && options.decisionApiKey.trim().length > 0) {
+    stepScrubber.register(options.decisionApiKey.trim());
+  }
+  const decisionApiKeyEnvs = Object.values(DECISION_PROVIDER_API_KEY_ENV).flat();
+  const forbiddenEnvNames = new Set<string>([
+    staged.signingEnvName,
+    ...Object.values(STANDARD_PI_PROVIDER_ENV),
+    ...decisionApiKeyEnvs,
+  ]);
+  for (const key of [
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'INPUT_GITHUB-TOKEN',
+    'INPUT_GITHUB-APP-PRIVATE-KEY',
+    'LOOPWRIGHT_GATE_SIGNING_SECRET',
+    'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+    'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+    DEFAULT_LOCAL_COMMAND_GATE_ENV,
+    ...Object.values(STANDARD_PI_PROVIDER_ENV),
+    ...decisionApiKeyEnvs,
+  ]) {
+    const val = baseEnv[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      stepScrubber.register(val.trim());
+    }
+  }
+
+  let decisions: AdvisoryDecisionPort | undefined;
+  try {
+    const rawSecrets = JSON.parse(await readFile(join(stageDir, 'secrets.json'), 'utf8')) as Record<string, unknown>;
+    const manifestRel = typeof rawSecrets['manifestPath'] === 'string' ? rawSecrets['manifestPath'] : '.loopwright/taskpack.yaml';
+    const manifestSegments = manifestRel.split(/[\\/]/).filter(Boolean);
+    if (manifestRel.length === 0 || isAbsolute(manifestRel) || manifestSegments.includes('..')) {
+      throw new GitHubAppError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `staged taskpack manifest path "${manifestRel}" escapes repository root`,
+        '/',
+      );
+    }
+    const realStagedRepoRoot = await realpath(staged.repositoryRoot);
+    let cursor = realStagedRepoRoot;
+    let manifestExists = true;
+    let leafStat: Awaited<ReturnType<typeof lstat>> | null = null;
+    for (const seg of manifestSegments) {
+      cursor = join(cursor, seg);
+      const st = await lstat(cursor).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return null;
+        throw err;
+      });
+      if (st === null) {
+        manifestExists = false;
+        break;
+      }
+      if (st.isSymbolicLink()) {
+        throw new GitHubAppError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `staged taskpack manifest "${manifestRel}" must not contain symbolic links`,
+          '/',
+        );
+      }
+      leafStat = st;
+    }
+    if (manifestExists) {
+      if (leafStat === null || !leafStat.isFile()) {
+        throw new GitHubAppError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `staged taskpack manifest "${manifestRel}" must be a regular non-symlink file`,
+          '/',
+        );
+      }
+      const realManifest = await realpath(cursor);
+      if (!insideRoot(realManifest, realStagedRepoRoot)) {
+        throw new GitHubAppError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `staged taskpack manifest "${manifestRel}" escapes repository root`,
+          '/',
+        );
+      }
+      const loadedManifest = await loadDeclarativeTaskpack({
+        manifestPath: manifestRel,
+        repositoryRoot: staged.repositoryRoot,
+        enforceHostAuthority: false,
+        executionMode: 'delegated',
+      });
+      for (const secretEnvName of collectManifestSecretEnvNames(loadedManifest)) {
+        forbiddenEnvNames.add(secretEnvName);
+        const val = baseEnv[secretEnvName];
+        if (typeof val === 'string' && val.trim().length > 0) {
+          stepScrubber.register(val.trim());
+        }
+      }
+      decisions = createTaskpackDecisionPort(loadedManifest, {
+        runtimeEnv: baseEnv,
+        transport: options.decisionTransport,
+        apiKey: options.decisionApiKey,
+        scrubber: stepScrubber,
+        hasPinnedRoles: (loadedManifest.spec.roles ?? []).length > 0,
+      });
+    }
+  } catch (error) {
+    if (error instanceof GitHubAppError) {
+      throw error;
+    }
+    decisions = undefined;
+  }
+
+  if (staged.localCommandGates.length === 0) {
+    const gateUrlOverrides = Object.freeze({});
+    const ports = Object.freeze({
+      gateUrlOverrides,
+      ...(staged.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: staged.allowWorkflowWrites } : {}),
+      ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
+      ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
+      ...(decisions !== undefined ? { decisions } : {}),
+    });
+    return {
+      staged,
+      environment,
+      gateUrlOverrides,
+      ...(staged.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: staged.allowWorkflowWrites } : {}),
+      ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
+      ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
+      ...(decisions !== undefined ? { decisions } : {}),
+      ports,
+      close: async () => undefined,
+    };
+  }
+
   const server = await startLocalCommandGateServer({
     runRoot: realRunRoot,
     repositoryRoot: staged.repositoryRoot,
@@ -4602,13 +5840,28 @@ export async function openStagedTaskpackStepGate(
     signingSecret: staged.signingSecret,
     runtimeEnv: baseEnv,
     readOnlyGitHubToken,
-    forbiddenEnvNames: new Set([staged.signingEnvName, ...Object.values(STANDARD_PI_PROVIDER_ENV)]),
+    scrubber: stepScrubber,
+    checkStagedDir: staged.checkStagedDir,
+    forbiddenEnvNames,
+  });
+  const gateUrlOverrides = Object.freeze({ [LOCAL_COMMAND_GATE_ENDPOINT_ID]: server.url });
+  const ports = Object.freeze({
+    gateUrlOverrides,
+    ...(staged.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: staged.allowWorkflowWrites } : {}),
+    ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
+    ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
+    ...(decisions !== undefined ? { decisions } : {}),
   });
 
   return {
     staged,
     environment,
-    gateUrlOverrides: Object.freeze({ [LOCAL_COMMAND_GATE_ENDPOINT_ID]: server.url }),
+    gateUrlOverrides,
+    ...(staged.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: staged.allowWorkflowWrites } : {}),
+    ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
+    ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
+    ...(decisions !== undefined ? { decisions } : {}),
+    ports,
     serverUrl: server.url,
     close: () => server.close(),
   };

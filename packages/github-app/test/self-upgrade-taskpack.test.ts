@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -13,11 +13,15 @@ import {
   compileDeclarativeTaskpack,
   DEFAULT_HOST_BUDGETS,
   DEFAULT_LOCAL_COMMAND_GATE_ENV,
+  GitHubAppError,
   loadDeclarativeTaskpack,
   openStagedTaskpackStepGate,
   resolveEffectiveTaskpackSandboxPolicy,
   runActionCli,
+  runTaskpackPreflight,
+  SecretScrubber,
   stageTaskpackForStep,
+  verifyDigestLockfile,
   type TaskpackUpstreamRecord,
 } from '../src/index.js';
 import {
@@ -33,7 +37,7 @@ import {
 } from './self-upgrade-fixtures.js';
 
 describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained command.v1 gate', () => {
-  it('compiles committed .auto-sync/taskpack.yaml in candidate and no-change modes with strict scope boundaries', async () => {
+  it('compiles committed .auto-sync/taskpack.yaml in candidate and no-change modes with Taskpack 2.0 scope, dual-key authority, digests, and upstreamGroups', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
       const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
@@ -43,12 +47,33 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       assert.equal(baseline.lockfileBytes <= 900 * 1024, true);
     });
 
+    // Dual-key authority: allowHostPath: true fails closed without hostPolicy.allowPrivileged: true
+    await assert.rejects(
+      () => loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: REPO_ROOT,
+      }),
+      (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+    );
+
+    const hostPolicy = { allowPrivileged: true, allowWorkflowWrites: false } as const;
     const manifest = await loadDeclarativeTaskpack({
       manifestPath: '.auto-sync/taskpack.yaml',
       repositoryRoot: REPO_ROOT,
+      hostPolicy,
     });
     assert.equal(manifest.metadata.name, 'self-upgrade');
     assert.equal(manifest.spec.sandbox, undefined);
+    assert.equal(manifest.spec.execution?.mode, 'strict');
+    assert.equal(manifest.spec.execution?.capabilities.allowHostPath, true);
+    assert.equal(manifest.spec.execution?.capabilities.allowHostEnv, false);
+    assert.equal(manifest.spec.execution?.capabilities.mountReadOnlyGit, false);
+    assert.equal(manifest.spec.execution?.capabilities.allowCheckNetwork, true);
+    assert.equal(manifest.spec.execution?.capabilities.allowWorkflowWrites, false);
+    assert.equal(manifest.spec.execution?.capabilities.allowAgentNetwork, false);
+    assert.equal(manifest.spec.execution?.digests.pinDigests, true);
+    assert.equal(manifest.spec.preflight?.script, 'scripts/prepare-self-upgrade.mjs');
+    assert.equal(manifest.spec.preflight?.timeoutSeconds, 600);
     assert.equal(manifest.spec.limits?.commandTimeoutSeconds, 900);
     assert.equal(manifest.spec.limits?.contextWindow, 1_000_000);
     assert.equal(manifest.spec.limits?.maxOutputTokens, 65_536);
@@ -58,12 +83,27 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     assert.ok((manifest.spec.models?.length ?? 0) >= 1);
     assert.equal(manifest.spec.models?.[0]?.apiKeyEnv, 'LOOPWRIGHT_PROVIDER_TOKEN');
     assert.equal(manifest.spec.upstreams.length, 7);
+    assert.equal(manifest.spec.upstreams.every(u => u.versionPath === 'version' && u.monotonicSemver === true), true);
+    assert.equal(manifest.spec.upstreamGroups?.length, 1);
+    assert.equal(manifest.spec.upstreamGroups?.[0]?.id, 'pi-family');
+    assert.equal(manifest.spec.upstreamGroups?.[0]?.policy, 'lockstep');
+    assert.equal(manifest.spec.upstreamGroups?.[0]?.members.length, 6);
+
+    // Pinned digest lockfile verifies cleanly against the committed repository
+    const digestVerification = await verifyDigestLockfile(REPO_ROOT, manifest, manifest.controlRoot);
+    assert.equal(digestVerification.ok, true, digestVerification.ok ? '' : digestVerification.reason);
+    if (digestVerification.ok) {
+      assert.equal(digestVerification.lockfilePath, '.auto-sync/digests.lock.json');
+      assert.equal(digestVerification.computed.entries.some(e => e.path === '.auto-sync/checks' && e.kind === 'directory'), true);
+      assert.equal(digestVerification.computed.entries.some(e => e.path === 'scripts/prepare-self-upgrade.mjs' && e.kind === 'file'), true);
+    }
 
     // Omitted spec.sandbox resolves to direct-dedicated on GitHub Actions and host OS sandbox locally
     const ghaPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
       workspaceRoot: REPO_ROOT,
       relativeTaskpackPath: '.auto-sync/taskpack.yaml',
       env: { GITHUB_ACTIONS: 'true' },
+      hostPolicy,
     });
     assert.deepEqual(ghaPolicy.preferredBackends, ['direct-dedicated']);
     assert.equal(ghaPolicy.allowDedicatedDirectOverride, true);
@@ -72,18 +112,27 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       workspaceRoot: REPO_ROOT,
       relativeTaskpackPath: '.auto-sync/taskpack.yaml',
       env: {},
+      hostPolicy,
     });
     assert.equal(localPolicy.preferredBackends, undefined);
     assert.equal(localPolicy.allowDedicatedDirectOverride, undefined);
 
     const checkEntry = manifest.spec.verification.localChecks.find(c => c.id === 'self-upgrade-verify');
     const allowedEnv = checkEntry?.parameters?.['env'] as readonly string[] | undefined;
+    const toolchainPaths = checkEntry?.parameters?.['toolchainPaths'] as readonly string[] | undefined;
+    assert.deepEqual(toolchainPaths, ['/usr/local/bin', '/usr/bin']);
     assert.equal(allowedEnv?.includes('SELF_UPGRADE_RUN_ROOT'), true);
-    assert.equal(allowedEnv?.includes('SELF_UPGRADE_STAGE_DIR'), true);
+    assert.equal(allowedEnv?.includes('SELF_UPGRADE_STAGE_DIR'), false);
+    assert.equal(allowedEnv?.includes('SELF_UPGRADE_NPM_CACHE'), false);
+    assert.equal(allowedEnv?.includes('SELF_UPGRADE_REPO_ROOT'), false);
+    assert.equal(allowedEnv?.includes('NODE_BIN_DIR'), false);
+    assert.equal(allowedEnv?.includes('HUGO_BIN'), false);
+    assert.equal(allowedEnv?.includes('PYTHON_BIN'), false);
 
     const candidateCompiled = await compileDeclarativeTaskpack(manifest, {
       mode: 'candidate',
       executionMode: 'delegated',
+      hostPolicy,
       repository: 'gpustack/loopwright',
       baseRevision: 'a'.repeat(40),
       sourceRevision: 'a'.repeat(40),
@@ -94,6 +143,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     const noChangeCompiled = await compileDeclarativeTaskpack(manifest, {
       mode: 'no-change',
       executionMode: 'delegated',
+      hostPolicy,
       repository: 'gpustack/loopwright',
       baseRevision: 'a'.repeat(40),
       sourceRevision: 'a'.repeat(40),
@@ -105,6 +155,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     assert.equal(candidateCompiled.localCommandGates?.length, 1);
     assert.equal(candidateCompiled.localCommandGates?.[0]?.timeoutSeconds, 900);
     assert.equal(candidateCompiled.localCommandGates?.[0]?.script, '.auto-sync/checks/verify.sh');
+    assert.deepEqual(candidateCompiled.localCommandGates?.[0]?.toolchainPaths, ['/usr/local/bin', '/usr/bin']);
     assert.deepEqual(noChangeCompiled.config.spec.task.spec.acceptance.required, ['taskpack-no-change']);
 
     const contract = candidateCompiled.config.spec.task;
@@ -126,9 +177,11 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
 
     const protectedPaths = [
       '.auto-sync/taskpack.yaml',
+      '.auto-sync/digests.lock.json',
       '.auto-sync/instructions.md',
       '.auto-sync/checks/verify.sh',
       '.auto-sync/memory/self-upgrade/index.json',
+      '.claude/skills',
       'package.json',
       'scripts/prepare-self-upgrade.mjs',
       'action.yml',
@@ -174,19 +227,17 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     const unchanged = preflight.evaluateUpstreamEligibility({
       baselineByUpstream,
       discoveredRecords: makeRecords({}),
-      stageDir: '/tmp/stage-test',
     });
     assert.equal(unchanged.recommendedMode, 'no-change');
     assert.equal(unchanged.actionMode, 'no-change');
     assert.equal(unchanged.upstreamRecords.every(r => r.status === 'up_to_date'), true);
 
-    // 2) Aligned Pi bump -> candidate
+    // 2) Aligned Pi bump -> candidate (zero stageDir= smuggling in reason!)
     const alignedPi = preflight.evaluateUpstreamEligibility({
       baselineByUpstream,
       discoveredRecords: makeRecords(
         Object.fromEntries(preflight.PI_UPSTREAM_IDS.map(id => [id, '1.6.0'])),
       ),
-      stageDir: '/tmp/stage-test',
     });
     assert.equal(alignedPi.recommendedMode, 'candidate');
     assert.equal(alignedPi.targetPiVersion, '1.6.0');
@@ -195,10 +246,10 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       const rec = alignedPi.upstreamRecords.find(r => r.upstreamId === id);
       assert.equal(rec?.status, 'available');
       assert.equal(rec?.version, '1.6.0');
-      assert.equal(rec?.reason?.includes('stageDir=/tmp/stage-test'), true);
+      assert.equal(rec?.reason?.includes('stageDir='), false);
     }
 
-    // 3) Partial Pi publish + unchanged YAML -> blocked
+    // 3) Partial Pi publish + unchanged YAML -> native held_back + no-change
     const partialPiOnly = preflight.evaluateUpstreamEligibility({
       baselineByUpstream,
       discoveredRecords: makeRecords({
@@ -209,12 +260,16 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         'pi-codemode': '1.6.0',
         'pi-tui': '1.5.0',
       }),
-      stageDir: '/tmp/stage-test',
     });
-    assert.equal(partialPiOnly.recommendedMode, 'blocked');
-    assert.equal(partialPiOnly.upstreamRecords.some(r => r.status === 'blocked'), true);
+    assert.equal(partialPiOnly.recommendedMode, 'no-change');
+    assert.equal(partialPiOnly.piOutcome, 'partial_hold');
+    for (const id of preflight.PI_UPSTREAM_IDS) {
+      const piRec = partialPiOnly.upstreamRecords.find(r => r.upstreamId === id);
+      assert.equal(piRec?.status, 'held_back');
+      assert.equal(piRec?.version, '1.5.0');
+    }
 
-    // 4) Partial Pi publish + YAML bump -> YAML-only candidate (Pi held at baseline)
+    // 4) Partial Pi publish + YAML bump -> YAML-only candidate (Pi natively held_back at baseline)
     const partialPiWithYaml = preflight.evaluateUpstreamEligibility({
       baselineByUpstream,
       discoveredRecords: makeRecords({
@@ -222,7 +277,6 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         'pi-ai': '1.5.0',
         yaml: '2.10.0',
       }),
-      stageDir: '/tmp/stage-test',
     });
     assert.equal(partialPiWithYaml.recommendedMode, 'candidate');
     assert.equal(partialPiWithYaml.targetPiVersion, '1.5.0');
@@ -230,9 +284,10 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     const yamlRec = partialPiWithYaml.upstreamRecords.find(r => r.upstreamId === 'yaml');
     assert.equal(yamlRec?.status, 'available');
     assert.equal(yamlRec?.version, '2.10.0');
+    assert.equal(yamlRec?.reason?.includes('stageDir='), false);
     for (const id of preflight.PI_UPSTREAM_IDS) {
       const piRec = partialPiWithYaml.upstreamRecords.find(r => r.upstreamId === id);
-      assert.equal(piRec?.status, 'up_to_date');
+      assert.equal(piRec?.status, 'held_back');
       assert.equal(piRec?.version, '1.5.0');
     }
 
@@ -254,10 +309,12 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     assert.equal(prerelease.recommendedMode, 'blocked');
     assert.equal(prerelease.reasons.some(msg => msg.includes('non-canonical SemVer')), true);
 
-    // 7) Missing-version 16-hex SHA hash from http-json -> rejected (blocked)
+    // 7) Missing-version response from http-json -> rejected (blocked) via delegated versionPath,
+    //    and raw 16-hex SHA hash -> rejected (blocked) as non-canonical SemVer
     const manifest = await loadDeclarativeTaskpack({
       manifestPath: '.auto-sync/taskpack.yaml',
       repositoryRoot: REPO_ROOT,
+      hostPolicy: { allowPrivileged: true, allowWorkflowWrites: false },
     });
     const fixturesWithMissingVersion: Record<string, unknown> = Object.fromEntries(
       preflight.ALL_UPSTREAM_IDS.map(id => [
@@ -270,18 +327,25 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       baselineByUpstream,
       registryFixtures: fixturesWithMissingVersion,
     });
-    const missingHashEval = preflight.evaluateUpstreamEligibility({
+    const missingVersionEval = preflight.evaluateUpstreamEligibility({
       baselineByUpstream,
       discoveredRecords: discoveredMissingVersion,
     });
-    assert.equal(missingHashEval.recommendedMode, 'blocked');
-    assert.equal(missingHashEval.reasons.some(msg => msg.includes('non-canonical SemVer')), true);
+    assert.equal(missingVersionEval.recommendedMode, 'blocked');
+    assert.equal(missingVersionEval.reasons.some(msg => msg.includes('versionPath')), true);
 
-    // 8) Incremental streaming >256 KiB response cancels mid-stream without buffering full payload
+    const hashEval = preflight.evaluateUpstreamEligibility({
+      baselineByUpstream,
+      discoveredRecords: makeRecords({ yaml: '0123456789abcdef' }),
+    });
+    assert.equal(hashEval.recommendedMode, 'blocked');
+    assert.equal(hashEval.reasons.some(msg => msg.includes('non-canonical SemVer')), true);
+
+    // 8) Incremental streaming >MAX_HTTP_JSON_BYTES response cancels mid-stream without buffering full payload
     let chunksPulled = 0;
     let streamCancelled = false;
     const chunkSize = 64 * 1024;
-    const totalChunks = 12; // 768 KiB total if uncancelled
+    const totalChunks = 24; // 1.5 MiB total if uncancelled (> 1 MiB delegated cap)
     const oversizedFetch: typeof globalThis.fetch = async url => {
       const urlText = String(url);
       if (!urlText.endsWith('/yaml/latest')) {
@@ -317,7 +381,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     assert.equal(yamlStreamRec?.status, 'failed');
     assert.equal(yamlStreamRec?.reason?.includes(`${preflight.MAX_HTTP_JSON_BYTES} bytes`), true);
     assert.equal(streamCancelled, true, 'oversized HTTP stream must be cancelled incrementally');
-    assert.equal(chunksPulled <= 5, true, `expected <=5 64KiB chunks read before cancel, got ${chunksPulled}`);
+    assert.equal(chunksPulled <= 18, true, `expected <=18 64KiB chunks read before cancel, got ${chunksPulled}`);
   });
 
   it('fails nonzero on malformed JSON, invalid schema, or drifted .auto-sync/proposal.json and stages read-only candidate bundles', async () => {
@@ -393,10 +457,15 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       assert.equal(prepared.recommendedMode, 'candidate');
       assert.notEqual(prepared.staged, null);
       const targetInfo = await stat(prepared.staged!.targetVersionsPath);
-      const lockInfo = await stat(prepared.staged!.candidateLockPath);
+      const lockInfo = await stat(prepared.staged!.candidateLockPath!);
+      const patchInfo = await stat(prepared.staged!.lockfilePatchPath!);
+      const cacheTgzInfo = await stat(prepared.staged!.npmCacheArchivePath!);
       const dirInfo = await stat(prepared.staged!.stageDir);
       assert.equal(targetInfo.mode & 0o222, 0, 'target-versions.json must be read-only');
       assert.equal(lockInfo.mode & 0o222, 0, 'package-lock.candidate.json must be read-only');
+      assert.equal(patchInfo.mode & 0o222, 0, 'package-lock.patch must be read-only');
+      assert.equal(cacheTgzInfo.mode & 0o222, 0, 'npm-cache.tgz must be read-only');
+      assert.equal(cacheTgzInfo.isFile() && cacheTgzInfo.nlink === 1, true, 'npm-cache.tgz must be a single-link regular file');
       assert.equal(dirInfo.mode & 0o222, 0, 'stage directory must be read-only');
 
       // Verify checkManagedPrMatchesDiscoveredState matches a committed proposal carrying those versions
@@ -410,6 +479,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
       const manifest = await loadDeclarativeTaskpack({
         manifestPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: repoRoot,
+        hostPolicy: { allowPrivileged: true, allowWorkflowWrites: false },
       });
       const prMatches = await checkManagedPrMatchesDiscoveredState({
         repositoryRoot: repoRoot,
@@ -452,7 +522,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(ghActionsRefused.status, 0);
       assert.equal(ghActionsRefused.stderr.includes('GITHUB_ACTIONS'), true);
@@ -470,7 +540,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: unchangedStageDir,
+        LOOPWRIGHT_STAGED_DIR: unchangedStageDir,
       });
       assert.notEqual(unchangedCandidateRes.status, 0);
       assert.equal(unchangedCandidateRes.stderr.includes('do not advance'), true);
@@ -500,7 +570,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(scriptTamperRes.status, 0);
       assert.equal(scriptTamperRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
@@ -514,7 +584,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(piSkewRes.status, 0);
       assert.equal(piSkewRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
@@ -535,7 +605,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(wsEntrySkewRes.status, 0);
       assert.equal(wsEntrySkewRes.stderr.includes("packages/cli.dependencies['yaml']"), true);
@@ -555,7 +625,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(hoistedSkewRes.status, 0);
       assert.equal(hoistedSkewRes.stderr.includes('direct resolution for packages/cli -> yaml'), true);
@@ -575,7 +645,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(compilerHijackRes.status, 0);
       assert.equal(compilerHijackRes.stderr.includes('unauthorized link entry'), true);
@@ -595,7 +665,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(gitUrlRes.status, 0);
       assert.equal(gitUrlRes.stderr.includes('unapproved resolved source'), true);
@@ -615,7 +685,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(shaMismatchRes.status, 0);
       assert.equal(shaMismatchRes.stderr.includes('does not match trusted staged package-lock.candidate.json'), true);
@@ -635,7 +705,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(oversizedRes.status, 0);
       assert.equal(oversizedRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
@@ -646,7 +716,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       if (CAN_RUN_KERNEL_CONTAINMENT) {
         assert.equal(nestedAllowedRes.status, 0, `expected verify.sh to pass: ${nestedAllowedRes.stderr}`);
@@ -681,7 +751,7 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
           SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
           SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
           SELF_UPGRADE_REPO_ROOT: repoRoot,
-          SELF_UPGRADE_STAGE_DIR: stageDir,
+          LOOPWRIGHT_STAGED_DIR: stageDir,
         });
         assert.notEqual(res.status, 0);
         assert.equal(res.stderr.includes('failing closed'), true);
@@ -740,7 +810,7 @@ process.exit(blockedCount === 2 ? 42 : 0);
           SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
           SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
           SELF_UPGRADE_REPO_ROOT: readEscapeRepo,
-          SELF_UPGRADE_STAGE_DIR: stageDir,
+          LOOPWRIGHT_STAGED_DIR: stageDir,
           SELF_UPGRADE_RUN_ROOT: disjointRunRoot,
         });
         assert.notEqual(readEscapeRes.status, 0);
@@ -788,7 +858,7 @@ try {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: writeEscapeRepo,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(writeEscapeRes.status, 0);
       assert.equal(writeEscapeRes.stderr.includes('CHECKOUT_WRITE_SUCCEEDED'), false);
@@ -824,7 +894,7 @@ try {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: rewriteGateRepo,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(rewriteRes.status, 0);
       assert.equal(rewriteRes.stderr.includes('GATE_REWRITE_SUCCEEDED'), false);
@@ -930,7 +1000,7 @@ await new Promise((resolveConn, rejectConn) => {
               SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
               SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
               SELF_UPGRADE_REPO_ROOT: netEscapeRepo,
-              SELF_UPGRADE_STAGE_DIR: stageDir,
+              LOOPWRIGHT_STAGED_DIR: stageDir,
             },
           },
         );
@@ -1047,7 +1117,7 @@ process.exit(45);
           SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
           SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
           SELF_UPGRADE_REPO_ROOT: procEscapeRepo,
-          SELF_UPGRADE_STAGE_DIR: stageDir,
+          LOOPWRIGHT_STAGED_DIR: stageDir,
         });
         assert.notEqual(procEscapeRes.status, 0, 'contained candidate must be denied cross-process inspection and signaling');
         assert.equal(procEscapeRes.stderr.includes('LEAKED_ENV=true'), false);
@@ -1066,20 +1136,21 @@ process.exit(45);
     const hostNodeModules = join(REPO_ROOT, 'node_modules');
 
     await withTempDir(async dir => {
-      const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
+      const { repoRoot } = await createMiniSelfUpgradeRepo(dir, { includeClaudeSymlink: true });
       const runRoot = join(dir, 'runs');
       await mkdir(runRoot, { recursive: true, mode: 0o700 });
 
-      // 1) --mode no-change settles no_change via no-change.v1
+      // 1) --mode no-change settles no_change via no-change.v1 (with .claude/skills -> ../.agents/skills symlink passing freezeSource!)
+      const noChangeFixtures = Object.fromEntries(
+        preflight.ALL_UPSTREAM_IDS.map(id => [
+          id,
+          { version: id === 'yaml' ? '2.9.0' : '1.5.0' },
+        ]),
+      );
       const noChangePrep = await preflight.runPrepareSelfUpgrade({
         repoRoot,
         stageDir: join(dir, 'stage-no-change'),
-        registryFixtures: Object.fromEntries(
-          preflight.ALL_UPSTREAM_IDS.map(id => [
-            id,
-            { version: id === 'yaml' ? '2.9.0' : '1.5.0' },
-          ]),
-        ),
+        registryFixtures: noChangeFixtures,
       });
       assert.equal(noChangePrep.recommendedMode, 'no-change');
 
@@ -1089,8 +1160,13 @@ process.exit(45);
         runRoot,
         runId: 'self-upgrade-no-change-01',
         mode: 'no-change',
+        allowPrivileged: true,
         discoverUpstreams: false,
         upstreamRecordsJson: JSON.stringify(noChangePrep.upstreamRecords),
+        runtimeEnv: {
+          ...process.env,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(noChangeFixtures),
+        },
       });
       const loadedNoChange = await loadTrustedConfiguration({
         configPath: stagedNoChange.configPath,
@@ -1108,7 +1184,7 @@ process.exit(45);
         runId: 'self-upgrade-no-change-01',
         mode: 'no-change',
       });
-      assert.equal(nextNoChange.ok, true);
+      assert.equal(nextNoChange.ok, true, `stepNext with .claude/skills symlink failed: ${JSON.stringify(nextNoChange)}`);
       if (!nextNoChange.ok || nextNoChange.value.kind !== 'step') {
         assert.fail('expected step yield in no-change mode');
       }
@@ -1129,14 +1205,14 @@ process.exit(45);
           'no_change',
           '--reason',
           'All runtime dependencies match baseline.',
+          '--allow-privileged',
           '--json',
         ],
         {
           cwd: repoRoot,
           env: {
             ...process.env,
-            NODE_BIN_DIR: dirname(process.execPath),
-            SELF_UPGRADE_REPO_ROOT: repoRoot,
+            PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
           },
           encoding: 'utf8',
           timeout: 60_000,
@@ -1150,28 +1226,23 @@ process.exit(45);
       assert.equal(parsedNoChange.kind, 'result');
       assert.equal(parsedNoChange.data?.result?.spec?.status, 'no_change');
 
-      // 2) --mode candidate applies staged upgrade INSIDE yielded candidateDir (leaving repoRoot clean!)
-      const stageDir = join(dir, 'stage-candidate');
-      const candidatePrep = await preflight.runPrepareSelfUpgrade({
-        repoRoot,
-        stageDir,
-        registryFixtures: Object.fromEntries(
-          preflight.ALL_UPSTREAM_IDS.map(id => [
-            id,
-            { version: id === 'yaml' ? '2.10.0' : '1.6.0' },
-          ]),
-        ),
-        lockfileBuilder: async ({ targetVersions }) => Buffer.from(
-          buildSyntheticLockfile({
-            piVersion: targetVersions.upstreams['pi-coding-agent']!.version,
-            yamlVersion: targetVersions.upstreams['yaml']!.version,
-            nestedPiTransitiveYamlVersion: '2.9.0',
-          }),
-          'utf8',
-        ),
-      });
-      assert.equal(candidatePrep.recommendedMode, 'candidate');
-      assert.notEqual(candidatePrep.staged, null);
+      // 2) --mode candidate uses native spec.preflight staging -> LOOPWRIGHT_STAGED_DIR & LOOPWRIGHT_BASE_DIR (zero env path smuggling!)
+      const candidateLockFixturePath = join(dir, 'candidate-lock-fixture.json');
+      await writeFile(
+        candidateLockFixturePath,
+        buildSyntheticLockfile({
+          piVersion: '1.6.0',
+          yamlVersion: '2.10.0',
+          nestedPiTransitiveYamlVersion: '2.9.0',
+        }),
+        { mode: 0o600 },
+      );
+      const candidateFixtures = Object.fromEntries(
+        preflight.ALL_UPSTREAM_IDS.map(id => [
+          id,
+          { version: id === 'yaml' ? '2.10.0' : '1.6.0' },
+        ]),
+      );
 
       const stagedCandidate = await stageTaskpackForStep({
         taskpackPath: '.auto-sync/taskpack.yaml',
@@ -1179,9 +1250,17 @@ process.exit(45);
         runRoot,
         runId: 'self-upgrade-candidate-01',
         mode: 'candidate',
+        allowPrivileged: true,
+        runPreflight: true,
         discoverUpstreams: false,
-        upstreamRecordsJson: JSON.stringify(candidatePrep.upstreamRecords),
+        runtimeEnv: {
+          ...process.env,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(candidateFixtures),
+          SELF_UPGRADE_LOCKFILE_FIXTURE: candidateLockFixturePath,
+        },
       });
+      assert.notEqual(stagedCandidate.checkStagedDir, undefined);
+      assert.notEqual(stagedCandidate.checkStagedDir, null);
 
       const gateHandle = await openStagedTaskpackStepGate({
         runRoot,
@@ -1234,9 +1313,9 @@ process.exit(45);
       }
 
       // Apply staged target-versions.json and package-lock.candidate.json ONLY inside yieldedCandidateDir
-      const stagedTargetRaw = await readFile(candidatePrep.staged!.targetVersionsPath, 'utf8');
+      const stagedTargetRaw = await readFile(join(stagedCandidate.checkStagedDir!, 'target-versions.json'), 'utf8');
       const stagedTarget = JSON.parse(stagedTargetRaw) as TargetVersionsPayload;
-      const stagedLockRaw = await readFile(candidatePrep.staged!.candidateLockPath);
+      const stagedLockRaw = await readFile(join(stagedCandidate.checkStagedDir!, 'package-lock.candidate.json'));
 
       await writeFile(join(yieldedCandidateDir, '.auto-sync/proposal.json'), stagedTargetRaw, { mode: 0o600 });
       await writeFile(join(yieldedCandidateDir, 'package-lock.json'), stagedLockRaw, { mode: 0o600 });
@@ -1265,18 +1344,16 @@ process.exit(45);
           'completed',
           '--reason',
           'Upgraded @earendil-works/pi-* to 1.6.0 and yaml to 2.10.0.',
+          '--allow-privileged',
           '--json',
         ],
         {
           cwd: repoRoot,
           env: {
             ...process.env,
+            PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
             GITHUB_ACTIONS: '',
-            NODE_BIN_DIR: dirname(process.execPath),
             SELF_UPGRADE_RUN_ROOT: runRoot,
-            SELF_UPGRADE_STAGE_DIR: candidatePrep.staged!.stageDir,
-            SELF_UPGRADE_NPM_CACHE: candidatePrep.staged!.npmCacheDir,
-            SELF_UPGRADE_REPO_ROOT: repoRoot,
             SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
             SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
           },
@@ -1307,8 +1384,8 @@ process.exit(45);
         kind: string;
         data?: { result?: { spec?: { status?: string } } };
       };
-      assert.equal(parsedCandidate.kind, 'result');
-      assert.equal(parsedCandidate.data?.result?.spec?.status, 'completed');
+      assert.equal(parsedCandidate.kind, 'result', `unexpected step submit output: ${submitCandidate.stdout}`);
+      assert.equal(parsedCandidate.data?.result?.spec?.status, 'completed', `unexpected step submit output: ${submitCandidate.stdout}`);
 
       // Base repository checkout must remain 100% clean and at baseline 1.5.0 / 2.9.0
       const baseGitStatus = spawnSync(
@@ -1373,37 +1450,235 @@ process.exit(45);
     });
   });
 
-  it('compiles dry-run candidate action from .auto-sync/taskpack.yaml with token scrubbing and zero PublicationEndpoint', async () => {
+  it('executes spec.preflight staging target-versions.json (prompt+workspace), package-lock.candidate.json, preflight-metadata.json, and npm-cache.tgz with lockstep held_back and zero reason path smuggling', async () => {
     const preflight = await loadPreflightModule();
     await withTempDir(async dir => {
-      const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir);
+      const { repoRoot } = await createMiniSelfUpgradeRepo(dir);
+      const hostPolicy = { allowPrivileged: true, allowWorkflowWrites: false } as const;
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repoRoot,
+        hostPolicy,
+      });
+
+      const lockFixturePath = join(dir, 'lock-160-2100.json');
+      await writeFile(lockFixturePath, buildSyntheticLockfile({ piVersion: '1.6.0', yamlVersion: '2.10.0' }), { mode: 0o600 });
+
+      // 1) Candidate preflight stages prompt + workspace resources (including npm-cache.tgz) with zero stageDir= smuggling
+      const candidateRes = await runTaskpackPreflight({
+        manifest,
+        repositoryRoot: repoRoot,
+        authorized: true,
+        hostPolicy,
+        scrubber: new SecretScrubber(),
+        env: {
+          PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+            Object.fromEntries(
+              preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.10.0' : '1.6.0' }]),
+            ),
+          ),
+          SELF_UPGRADE_LOCKFILE_FIXTURE: lockFixturePath,
+        },
+        tempRoot: dir,
+      });
+      try {
+        assert.equal(candidateRes.disposition, 'candidate');
+        assert.equal(candidateRes.upstreams.every(u => !(u.reason ?? '').includes('stageDir=')), true);
+        assert.equal(candidateRes.promptResources.length, 2);
+        const targetPromptRes = candidateRes.promptResources.find(r => r.id === 'target-versions-prompt');
+        const lockPatchPromptRes = candidateRes.promptResources.find(r => r.id === 'package-lock-patch');
+        assert.equal(targetPromptRes?.path, 'target-versions.json');
+        assert.equal(lockPatchPromptRes?.path, 'package-lock.patch');
+        assert.equal(lockPatchPromptRes?.exposeToChecks, false);
+        assert.equal(lockPatchPromptRes?.content.startsWith('--- a/package-lock.json\n+++ b/package-lock.json\n'), true);
+        assert.equal(lockPatchPromptRes?.content.includes('/tmp'), false);
+
+        const wsIds = candidateRes.workspaceResources.map(r => r.id).sort();
+        assert.deepEqual(wsIds, ['npm-cache-archive', 'package-lock-candidate', 'preflight-metadata', 'target-versions']);
+        assert.equal(candidateRes.workspaceResources.every(r => r.exposeToChecks === true), true);
+        assert.notEqual(candidateRes.checkStagedDir, null);
+        for (const rel of ['target-versions.json', 'preflight-metadata.json', 'package-lock.candidate.json', 'npm-cache.tgz']) {
+          const info = await stat(join(candidateRes.checkStagedDir!, rel));
+          assert.equal(info.isFile() && info.nlink === 1, true, `expected single-link regular file ${rel} in checkStagedDir`);
+        }
+
+        // End-to-end offline agent test: apply ONLY promptResources (target-versions.json + package-lock.patch)
+        // to baseline repo without reading package-lock.candidate.json, prove exact SHA-256 parity, and pass verify.sh!
+        const agentCandidateDir = join(dir, 'agent-prompt-only-candidate');
+        spawnSync('git', ['clone', '--quiet', '--no-hardlinks', repoRoot, agentCandidateDir], { stdio: 'ignore' });
+        await rm(join(agentCandidateDir, '.git'), { recursive: true, force: true });
+
+        const applyRes = spawnSync('git', ['apply', '-'], {
+          cwd: agentCandidateDir,
+          input: lockPatchPromptRes!.content,
+          encoding: 'utf8',
+        });
+        assert.equal(applyRes.status, 0, `git apply package-lock.patch failed: ${applyRes.stderr}`);
+
+        const patchedLockBytes = await readFile(join(agentCandidateDir, 'package-lock.json'));
+        const stagedCandidateLockBytes = await readFile(join(candidateRes.checkStagedDir!, 'package-lock.candidate.json'));
+        assert.equal(
+          createHash('sha256').update(patchedLockBytes).digest('hex'),
+          createHash('sha256').update(stagedCandidateLockBytes).digest('hex'),
+          'prompt-only package-lock.patch must reproduce package-lock.candidate.json SHA-256 byte-for-byte',
+        );
+
+        const promptTargetDoc = JSON.parse(targetPromptRes!.content) as TargetVersionsPayload;
+        await writeFile(join(agentCandidateDir, '.auto-sync/proposal.json'), targetPromptRes!.content, { mode: 0o600 });
+        for (const [ws, depUpdates] of Object.entries(promptTargetDoc.packages)) {
+          const wsManifestPath = join(agentCandidateDir, ws, 'package.json');
+          const wsManifest = JSON.parse(await readFile(wsManifestPath, 'utf8')) as { dependencies: Record<string, string> };
+          wsManifest.dependencies = { ...wsManifest.dependencies, ...depUpdates };
+          await writeFile(wsManifestPath, `${JSON.stringify(wsManifest, null, 2)}\n`, { mode: 0o600 });
+        }
+
+        const promptOnlyVerify = runVerifyScript(agentCandidateDir, {
+          SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+          SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
+          SELF_UPGRADE_REPO_ROOT: repoRoot,
+          LOOPWRIGHT_STAGED_DIR: candidateRes.checkStagedDir!,
+        });
+        if (CAN_RUN_KERNEL_CONTAINMENT) {
+          assert.equal(promptOnlyVerify.status, 0, `prompt-only verify.sh failed: ${promptOnlyVerify.stderr}`);
+        } else {
+          assert.notEqual(promptOnlyVerify.status, 0);
+          assert.equal(promptOnlyVerify.stderr.includes('failing closed'), true);
+        }
+      } finally {
+        await candidateRes.cleanup();
+      }
+
+      // 2) Partial Pi publish + YAML upgrade: pi-family natively held_back while yaml is available
+      const yamlOnlyLockFixturePath = join(dir, 'lock-150-2100.json');
+      await writeFile(yamlOnlyLockFixturePath, buildSyntheticLockfile({ piVersion: '1.5.0', yamlVersion: '2.10.0' }), { mode: 0o600 });
+      const partialRes = await runTaskpackPreflight({
+        manifest,
+        repositoryRoot: repoRoot,
+        authorized: true,
+        hostPolicy,
+        scrubber: new SecretScrubber(),
+        env: {
+          PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify({
+            'pi-coding-agent': { version: '1.6.0' },
+            'pi-ai': { version: '1.5.0' },
+            'pi-agent-core': { version: '1.5.0' },
+            'pi-mcp': { version: '1.5.0' },
+            'pi-codemode': { version: '1.5.0' },
+            'pi-tui': { version: '1.5.0' },
+            yaml: { version: '2.10.0' },
+          }),
+          SELF_UPGRADE_LOCKFILE_FIXTURE: yamlOnlyLockFixturePath,
+        },
+        tempRoot: dir,
+      });
+      try {
+        assert.equal(partialRes.disposition, 'candidate');
+        const yamlUpstream = partialRes.upstreams.find(u => u.upstreamId === 'yaml');
+        assert.equal(yamlUpstream?.status, 'available');
+        assert.equal(yamlUpstream?.version, '2.10.0');
+        for (const piId of preflight.PI_UPSTREAM_IDS) {
+          const piRec = partialRes.upstreams.find(u => u.upstreamId === piId);
+          assert.equal(piRec?.status, 'held_back');
+          assert.equal(piRec?.groupId, 'pi-family');
+          assert.equal(piRec?.version, '1.5.0');
+          assert.equal(piRec?.currentVersion, '1.5.0');
+        }
+      } finally {
+        await partialRes.cleanup();
+      }
+
+      // 3) All up-to-date -> disposition=no_change stages lightweight preflight-metadata.json + target-versions.json (no npm-cache.tgz or package-lock.candidate.json)
+      const noChangeRes = await runTaskpackPreflight({
+        manifest,
+        repositoryRoot: repoRoot,
+        authorized: true,
+        hostPolicy,
+        scrubber: new SecretScrubber(),
+        env: {
+          PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+            Object.fromEntries(
+              preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
+            ),
+          ),
+        },
+        tempRoot: dir,
+      });
+      try {
+        assert.equal(noChangeRes.disposition, 'no_change');
+        assert.equal(noChangeRes.promptResources.length, 0);
+        const ncWsIds = noChangeRes.workspaceResources.map(r => r.id).sort();
+        assert.deepEqual(ncWsIds, ['preflight-metadata', 'target-versions']);
+        assert.equal(noChangeRes.workspaceResources.every(r => r.exposeToChecks === true), true);
+        assert.notEqual(noChangeRes.checkStagedDir, null);
+        const ncMeta = JSON.parse(await readFile(join(noChangeRes.checkStagedDir!, 'preflight-metadata.json'), 'utf8')) as Record<string, unknown>;
+        assert.deepEqual(ncMeta, { schema_version: 1, force: false, disposition: 'no_change' });
+        await assert.rejects(stat(join(noChangeRes.checkStagedDir!, 'npm-cache.tgz')), { code: 'ENOENT' });
+        await assert.rejects(stat(join(noChangeRes.checkStagedDir!, 'package-lock.candidate.json')), { code: 'ENOENT' });
+      } finally {
+        await noChangeRes.cleanup();
+      }
+    });
+  });
+
+  it('drives .auto-sync/taskpack.yaml through runActionCli with mode: auto across candidate, no-change, blocked, and dual-key refusal', async () => {
+    const preflight = await loadPreflightModule();
+    await withTempDir(async dir => {
+      const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir, { includeClaudeSymlink: true });
       const runRoot = join(dir, 'dry-runs');
       await mkdir(runRoot, { recursive: true, mode: 0o700 });
-      const ghOut = join(dir, 'gh-out.txt');
-      const exitCode = await runActionCli({
-        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+      const lockFixturePath = join(dir, 'action-lock-fixture.json');
+      await writeFile(lockFixturePath, buildSyntheticLockfile({ piVersion: '1.6.0', yamlVersion: '2.10.0' }), { mode: 0o600 });
+
+      // 0) Without INPUT_ALLOW-PRIVILEGED-EXECUTION=true, dual-key authority refuses before preflight
+      const refusedOut = join(dir, 'gh-out-refused.txt');
+      const refusedExit = await runActionCli({
+        PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
         GITHUB_ACTIONS: 'true',
         GITHUB_WORKSPACE: repoRoot,
         GITHUB_REPOSITORY: 'gpustack/loopwright',
         GITHUB_SHA: headSha,
         'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
-        'INPUT_MODE': 'candidate',
+        INPUT_MODE: 'auto',
         'INPUT_EVENT-NAME': 'workflow_dispatch',
         'INPUT_RUN-ROOT': runRoot,
-        'INPUT_RUN-ID': 'dry-run-self-upgrade-1',
+        'INPUT_RUN-ID': 'auto-refused-1',
         'INPUT_DRY-RUN': 'true',
-        'INPUT_UPSTREAM-RECORDS': JSON.stringify(
-          preflight.ALL_UPSTREAM_IDS.map(id => ({
-            upstreamId: id,
-            status: 'available',
-            version: id === 'yaml' ? '2.10.0' : '1.6.0',
-          })),
-        ),
-        LOOPWRIGHT_PROVIDER_TOKEN: 'sk-test-token-123456',
-        GITHUB_OUTPUT: ghOut,
+        GITHUB_OUTPUT: refusedOut,
       });
-      assert.equal(exitCode, 0);
-      const outRaw = await readFile(ghOut, 'utf8');
+      assert.equal(refusedExit, 1);
+      const refusedRaw = await readFile(refusedOut, 'utf8');
+      assert.equal(refusedRaw.includes('"kind":"refused"'), true);
+      assert.equal(refusedRaw.includes('TASKPACK_HOST_BINDING_INVALID'), true);
+
+      // 1) mode: auto -> candidate (preflight stages resources, token scrubbed)
+      const ghOutCandidate = join(dir, 'gh-out-candidate.txt');
+      const exitCodeCandidate = await runActionCli({
+        PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repoRoot,
+        GITHUB_REPOSITORY: 'gpustack/loopwright',
+        GITHUB_SHA: headSha,
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        INPUT_MODE: 'auto',
+        'INPUT_ALLOW-PRIVILEGED-EXECUTION': 'true',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'dry-run-self-upgrade-candidate',
+        'INPUT_DRY-RUN': 'true',
+        SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+          Object.fromEntries(
+            preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.10.0' : '1.6.0' }]),
+          ),
+        ),
+        SELF_UPGRADE_LOCKFILE_FIXTURE: lockFixturePath,
+        LOOPWRIGHT_PROVIDER_TOKEN: 'sk-test-token-123456',
+        GITHUB_OUTPUT: ghOutCandidate,
+      });
+      assert.equal(exitCodeCandidate, 0);
+      const outRaw = await readFile(ghOutCandidate, 'utf8');
       assert.equal(outRaw.includes('sk-test-token-123456'), false);
       assert.equal(outRaw.includes('"kind":"compiled"'), true);
       const resultMatch = /result<<[^\n]+\n([^\n]+)\n/.exec(outRaw)
@@ -1411,6 +1686,87 @@ process.exit(45);
       const compiledResult = JSON.parse(resultMatch?.[1] ?? '') as { taskpack?: { configPath?: string } };
       const compiledConfigRaw = await readFile(compiledResult.taskpack!.configPath!, 'utf8');
       assert.equal(compiledConfigRaw.includes('LOOPWRIGHT_PROVIDER_TOKEN'), true);
+      assert.equal(compiledConfigRaw.includes('target-versions-prompt'), true);
+      assert.equal(compiledConfigRaw.includes('stageDir='), false);
+
+      // 2) mode: auto -> no_change (check-only short-circuit, exit 0)
+      const ghOutNoChange = join(dir, 'gh-out-no-change.txt');
+      const exitCodeNoChange = await runActionCli({
+        PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repoRoot,
+        GITHUB_REPOSITORY: 'gpustack/loopwright',
+        GITHUB_SHA: headSha,
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        INPUT_MODE: 'auto',
+        'INPUT_ALLOW-PRIVILEGED-EXECUTION': 'true',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'dry-run-self-upgrade-no-change',
+        'INPUT_DRY-RUN': 'true',
+        SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+          Object.fromEntries(
+            preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
+          ),
+        ),
+        GITHUB_OUTPUT: ghOutNoChange,
+      });
+      assert.equal(exitCodeNoChange, 0);
+      const noChangeRaw = await readFile(ghOutNoChange, 'utf8');
+      assert.equal(noChangeRaw.includes('"kind":"no_change"'), true);
+
+      // 2b) Live non-dry-run mode: auto -> no_change executes verify.sh through command.v1 and settles no_change with exit 0
+      const ghOutLiveNoChange = join(dir, 'gh-out-live-no-change.txt');
+      const exitCodeLiveNoChange = await runActionCli({
+        PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repoRoot,
+        GITHUB_REPOSITORY: 'gpustack/loopwright',
+        GITHUB_SHA: headSha,
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        INPUT_MODE: 'auto',
+        'INPUT_ALLOW-PRIVILEGED-EXECUTION': 'true',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'live-self-upgrade-no-change',
+        'INPUT_DRY-RUN': 'false',
+        SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+          Object.fromEntries(
+            preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
+          ),
+        ),
+        GITHUB_OUTPUT: ghOutLiveNoChange,
+      });
+      assert.equal(exitCodeLiveNoChange, 0, `expected live non-dry-run mode=auto no_change to exit 0`);
+      const liveNoChangeRaw = await readFile(ghOutLiveNoChange, 'utf8');
+      assert.equal(liveNoChangeRaw.includes('"kind":"no_change"'), true);
+      assert.equal(liveNoChangeRaw.includes('"ok":true'), true);
+
+      // 3) mode: auto -> blocked (rollback rejected by preflight)
+      const ghOutBlocked = join(dir, 'gh-out-blocked.txt');
+      const exitCodeBlocked = await runActionCli({
+        PATH: `${dirname(process.execPath)}:${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
+        GITHUB_ACTIONS: 'true',
+        GITHUB_WORKSPACE: repoRoot,
+        GITHUB_REPOSITORY: 'gpustack/loopwright',
+        GITHUB_SHA: headSha,
+        'INPUT_TASKPACK-PATH': '.auto-sync/taskpack.yaml',
+        INPUT_MODE: 'auto',
+        'INPUT_ALLOW-PRIVILEGED-EXECUTION': 'true',
+        'INPUT_EVENT-NAME': 'workflow_dispatch',
+        'INPUT_RUN-ROOT': runRoot,
+        'INPUT_RUN-ID': 'dry-run-self-upgrade-blocked',
+        'INPUT_DRY-RUN': 'true',
+        SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+          Object.fromEntries(
+            preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.8.0' : '1.5.0' }]),
+          ),
+        ),
+        GITHUB_OUTPUT: ghOutBlocked,
+      });
+      assert.equal(exitCodeBlocked, 1);
+      const blockedRaw = await readFile(ghOutBlocked, 'utf8');
+      assert.equal(blockedRaw.includes('"kind":"blocked"'), true);
     });
   });
 
@@ -1473,7 +1829,7 @@ process.exit(45);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       if (CAN_RUN_KERNEL_CONTAINMENT) {
         assert.equal(verifyRes.status, 0, verifyRes.stderr);
@@ -1495,11 +1851,26 @@ process.exit(45);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: join(REPO_ROOT, 'node_modules'),
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: unforcedStageDir,
+        LOOPWRIGHT_STAGED_DIR: unforcedStageDir,
         SELF_UPGRADE_FORCE: '1',
       });
       assert.notEqual(spoofedRes.status, 0);
       assert.equal(spoofedRes.stderr.includes('do not advance'), true);
+
+      // Invoking prepare-self-upgrade.mjs --offline-check via a symlinked directory path still runs main()
+      const symlinkRepoRoot = join(dir, 'symlink-to-repo');
+      await symlink(REPO_ROOT, symlinkRepoRoot);
+      const symlinkOfflineRun = spawnSync(
+        process.execPath,
+        [join(symlinkRepoRoot, 'scripts/prepare-self-upgrade.mjs'), '--repo', repoRoot, '--offline-check'],
+        { encoding: 'utf8', timeout: 30_000 },
+      );
+      assert.equal(symlinkOfflineRun.status, 0, `symlink invocation failed: ${symlinkOfflineRun.stderr}`);
+      assert.equal(
+        symlinkOfflineRun.stdout.includes('self-upgrade offline check passed:'),
+        true,
+        `expected main() output via symlinked path, got stdout=${JSON.stringify(symlinkOfflineRun.stdout)}`,
+      );
     });
   });
 });

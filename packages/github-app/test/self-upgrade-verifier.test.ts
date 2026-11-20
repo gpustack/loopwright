@@ -17,6 +17,8 @@ import {
   DEFAULT_LOCAL_COMMAND_GATE_ENV,
   loadDeclarativeTaskpack,
   LOCAL_COMMAND_GATE_ENDPOINT_ID,
+  PREFLIGHT_MAX_WORKSPACE_RESOURCE_BYTES,
+  PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES,
   resolveRepositoryAndRevisions,
   serializePrettyYaml,
 } from '../src/index.js';
@@ -78,7 +80,7 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
 
         const fifoVerify = runVerifyScript(repoRoot, {
           SELF_UPGRADE_REPO_ROOT: repoRoot,
-          SELF_UPGRADE_STAGE_DIR: stageWithHardlink,
+          LOOPWRIGHT_STAGED_DIR: stageWithHardlink,
         });
         assert.notEqual(fifoVerify.status, 0);
         assert.equal(fifoVerify.stderr.includes('regular file') || fifoVerify.stderr.includes('non-regular'), true);
@@ -157,21 +159,25 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
       assert.equal(validNoChange.actionMode, 'no-change');
       assert.equal(validNoChange.upstreamVerified, true);
 
-      // Refuse --offline-check combined with --github-output so synthetic smoke checks cannot feed workflows
-      const ghOutRefused = spawnSync(
+      // Refuse --offline-check combined with LOOPWRIGHT_PREFLIGHT_OUT so synthetic smoke checks cannot feed preflight runs
+      const preflightOutRefused = spawnSync(
         process.execPath,
         [
           join(REPO_ROOT, 'scripts/prepare-self-upgrade.mjs'),
           '--repo',
           repoRoot,
           '--offline-check',
-          '--github-output',
-          join(dir, 'gh-output.txt'),
         ],
-        { encoding: 'utf8' },
+        {
+          env: {
+            ...process.env,
+            LOOPWRIGHT_PREFLIGHT_OUT: join(dir, 'preflight-out.json'),
+          },
+          encoding: 'utf8',
+        },
       );
-      assert.notEqual(ghOutRefused.status, 0);
-      assert.equal(ghOutRefused.stderr.includes('Refusing --github-output with --offline-check'), true);
+      assert.notEqual(preflightOutRefused.status, 0);
+      assert.equal(preflightOutRefused.stderr.includes('Refusing --offline-check with LOOPWRIGHT_PREFLIGHT_OUT'), true);
     });
   });
 
@@ -519,7 +525,7 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         ...PI_PACKAGE_NAMES.map(pkg => piBuiltByPkg.get(pkg)!.get('1.6.0')!.tgz),
       ];
 
-      await preflight.stageCandidateBundle({
+      const stagedOffline = await preflight.stageCandidateBundle({
         repoRoot,
         stageDir: realOfflineStage,
         targetVersions,
@@ -540,6 +546,8 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
           return offlineLockBytes;
         },
       });
+      const tgzStat = await stat(stagedOffline.npmCacheArchivePath!);
+      assert.equal(tgzStat.isFile() && tgzStat.nlink === 1 && tgzStat.size > 0, true, 'expected packed npm-cache.tgz');
 
       await writeFile(join(repoRoot, '.auto-sync/proposal.json'), `${JSON.stringify(targetVersions, null, 2)}\n`, { mode: 0o600 });
       await writeFile(join(repoRoot, 'package-lock.json'), offlineLockBytes, { mode: 0o600 });
@@ -550,17 +558,17 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         await writeFile(wsManifestPath, `${JSON.stringify(wsManifest, null, 2)}\n`, { mode: 0o600 });
       }
 
-      // 1) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) runs offline gates without requiring bwrap
+      // 1) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) unpacks npm-cache.tgz from LOOPWRIGHT_STAGED_DIR without requiring bwrap
       const ghaDirectRes = runVerifyScript(repoRoot, {
         GITHUB_ACTIONS: 'true',
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+        LOOPWRIGHT_STAGED_DIR: realOfflineStage,
         PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
       });
       assert.equal(
         ghaDirectRes.status,
         0,
-        `expected GITHUB_ACTIONS=true direct-dedicated offline verify.sh to succeed: ${ghaDirectRes.stderr}`,
+        `expected GITHUB_ACTIONS=true direct-dedicated offline verify.sh to succeed via LOOPWRIGHT_STAGED_DIR/npm-cache.tgz: ${ghaDirectRes.stderr}`,
       );
 
       // 1b) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) catches stealth same-UID chmod +
@@ -602,7 +610,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         const ghaStealthTamperRes = runVerifyScript(repoRoot, {
           GITHUB_ACTIONS: 'true',
           SELF_UPGRADE_REPO_ROOT: repoRoot,
-          SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+          LOOPWRIGHT_STAGED_DIR: realOfflineStage,
           PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
         });
         assert.notEqual(
@@ -623,7 +631,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       if (CAN_RUN_KERNEL_CONTAINMENT) {
         const realOfflineRes = runVerifyScript(repoRoot, {
           SELF_UPGRADE_REPO_ROOT: repoRoot,
-          SELF_UPGRADE_STAGE_DIR: realOfflineStage,
+          LOOPWRIGHT_STAGED_DIR: realOfflineStage,
           PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
         });
         assert.equal(
@@ -632,6 +640,30 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
           `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
         );
       }
+
+      // 3) Malicious npm-cache.tgz containing a symlink entry is rejected by verify.sh before unpacking
+      const evilStageDir = join(dir, 'stage-evil-tgz');
+      await mkdir(evilStageDir, { recursive: true, mode: 0o700 });
+      for (const rel of ['target-versions.json', 'preflight-metadata.json', 'package-lock.candidate.json']) {
+        await writeFile(join(evilStageDir, rel), await readFile(join(realOfflineStage, rel)), { mode: 0o444 });
+      }
+      const evilTarPy = `
+import tarfile, sys
+with tarfile.open(sys.argv[1], "w:gz") as tf:
+    ti = tarfile.TarInfo(name="evil-link")
+    ti.type = tarfile.SYMTYPE
+    ti.linkname = "/etc/passwd"
+    tf.addfile(ti)
+`;
+      const mkEvil = spawnSync(existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3', ['-c', evilTarPy, join(evilStageDir, 'npm-cache.tgz')], { encoding: 'utf8' });
+      assert.equal(mkEvil.status, 0, mkEvil.stderr);
+      const evilRes = runVerifyScript(repoRoot, {
+        GITHUB_ACTIONS: 'true',
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        LOOPWRIGHT_STAGED_DIR: evilStageDir,
+      });
+      assert.notEqual(evilRes.status, 0);
+      assert.equal(evilRes.stderr.includes('forbidden non-regular entry'), true);
     });
   });
 
@@ -647,7 +679,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       return (res.stdout ?? '').trim();
     };
 
-    // 1) Workflow contract: issue_comment fetches +refs/pull/<n>/head without checking out PR head
+    // 1) Workflow contract: Taskpack 2.0 mode: auto + dual-key allow-privileged-execution + issue_comment fork PR fetch
     const workflowRaw = await readFile(join(REPO_ROOT, '.github/workflows/auto-sync.yml'), 'utf8');
     const workflowDoc = parseDocument(workflowRaw, { version: '1.2', schema: 'core', uniqueKeys: true });
     assert.equal(workflowDoc.errors.length, 0, 'auto-sync.yml must parse cleanly as YAML');
@@ -671,6 +703,20 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       workflowRaw.includes('INPUT_TASKPACK-PATH: .auto-sync/taskpack.yaml'),
       true,
     );
+    assert.equal(workflowRaw.includes('INPUT_MODE: auto'), true);
+    assert.equal(workflowRaw.includes("INPUT_ALLOW-PRIVILEGED-EXECUTION: 'true'"), true);
+    assert.equal(workflowRaw.includes('INPUT_ALLOW-WORKFLOW-WRITES'), false);
+    assert.equal(workflowRaw.includes('bootstrap-loopwright'), false);
+    assert.equal(workflowRaw.includes('92d90440b9e48cac42dd7ef058da1e8c48ec858c'), false);
+    assert.equal(workflowRaw.includes('node "${GITHUB_WORKSPACE}/packages/github-app/dist/action.js"'), true);
+    assert.equal(workflowRaw.includes('name: Run preflight'), false);
+    assert.equal(workflowRaw.includes('name: Resolve mode'), false);
+    assert.equal(workflowRaw.includes('name: Verify no-change'), false);
+
+    // 1b) Aligned workspace resource / npm-cache archive ceilings (>= 128 MiB single / 256 MiB total)
+    assert.equal(PREFLIGHT_MAX_WORKSPACE_RESOURCE_BYTES, 128 * 1024 * 1024);
+    assert.equal(PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES, 256 * 1024 * 1024);
+    assert.equal(preflight.MAX_NPM_CACHE_ARCHIVE_BYTES, 128 * 1024 * 1024);
 
     // 2) Fork-PR issue_comment intake: unfetched fork PR head fails closed; fetching +refs/pull/77/head without checkout succeeds
     await withTempDir(async rawDir => {
@@ -751,13 +797,16 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       await mkdir(forkRunRoot, { recursive: true, mode: 0o700 });
       await mkdir(forkCfgDir, { recursive: true, mode: 0o700 });
 
+      const hostPolicy = { allowPrivileged: true, allowWorkflowWrites: false } as const;
       const manifest = await loadDeclarativeTaskpack({
         manifestPath: '.auto-sync/taskpack.yaml',
         repositoryRoot: runnerCheckout,
+        hostPolicy,
       });
       const compiledFork = await compileDeclarativeTaskpack(manifest, {
         mode: 'candidate',
         executionMode: 'delegated',
+        hostPolicy,
         repository: 'gpustack/loopwright',
         baseRevision: resolved.baseRevision,
         sourceRevision: resolved.sourceRevision,
@@ -883,7 +932,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(privateIntRes.status, 0);
       assert.equal(privateIntRes.stderr.includes("field 'private' must not be modified"), true);
@@ -900,7 +949,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(unmanagedIntRes.status, 0);
       assert.equal(
@@ -919,7 +968,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(boolSchemaRes.status, 0);
       assert.equal(boolSchemaRes.stderr.includes('schema_version must be 1'), true);
@@ -932,7 +981,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(nestedEslintRes.status, 0);
       assert.equal(nestedEslintRes.stderr.includes('unauthorized ESLint configuration'), true);
@@ -946,12 +995,47 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: repoRoot,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.notEqual(extraTsconfigRes.status, 0);
       assert.equal(extraTsconfigRes.stderr.includes('tsconfig*.json'), true);
       assert.equal(extraTsconfigRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
       await unlink(extraTsconfigPath);
+
+      // Refuse fallback to SELF_UPGRADE_STAGE_DIR / /tmp when LOOPWRIGHT_CHECK_ID is set and LOOPWRIGHT_STAGED_DIR is unset
+      const missingStagedDirRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        SELF_UPGRADE_STAGE_DIR: stageDir,
+      });
+      assert.notEqual(missingStagedDirRes.status, 0);
+      assert.equal(missingStagedDirRes.stderr.includes('LOOPWRIGHT_STAGED_DIR must be set under command.v1'), true);
+      assert.equal(missingStagedDirRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+
+      // no_change staged bundle verifies baseline parity & exits 0 cleanly without running candidate build,
+      // and rejects any candidate edit under disposition=no_change
+      const { repoRoot: ncRepo } = await createMiniSelfUpgradeRepo(join(dir, 'nc-check'), { emitBuildCanary: true });
+      const ncStageDir = join(dir, 'stage-no-change-verify');
+      await preflight.stageNoChangeBundle({
+        repoRoot: ncRepo,
+        stageDir: ncStageDir,
+        targetVersions: preflight.buildTargetVersionsPayload('1.5.0', '2.9.0'),
+      });
+      const ncPassRes = runVerifyScript(ncRepo, {
+        SELF_UPGRADE_REPO_ROOT: ncRepo,
+        LOOPWRIGHT_STAGED_DIR: ncStageDir,
+      });
+      assert.equal(ncPassRes.status, 0, `expected no_change verify.sh to exit 0: ${ncPassRes.stderr}`);
+      assert.equal(ncPassRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+
+      await writeFile(join(ncRepo, 'docs/development.md'), '# Modified under no_change\n', { mode: 0o600 });
+      const ncEditedRes = runVerifyScript(ncRepo, {
+        SELF_UPGRADE_REPO_ROOT: ncRepo,
+        LOOPWRIGHT_STAGED_DIR: ncStageDir,
+      });
+      assert.notEqual(ncEditedRes.status, 0);
+      assert.equal(ncEditedRes.stderr.includes('differs from baseline'), true);
     });
 
     if (!CAN_RUN_KERNEL_CONTAINMENT) {
@@ -1032,7 +1116,7 @@ if (mod.ok !== true) {
         SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
         SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
         SELF_UPGRADE_REPO_ROOT: survivorRepo,
-        SELF_UPGRADE_STAGE_DIR: stageDir,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
       });
       assert.equal(
         survivorRes.status,
@@ -1157,7 +1241,7 @@ if (!/^ERR:(EPERM|EACCES|ENOENT)$/.test(String(unixOutcome))) {
                   SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
                   SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
                   SELF_UPGRADE_REPO_ROOT: runtimeNetRepo,
-                  SELF_UPGRADE_STAGE_DIR: stageDir,
+                  LOOPWRIGHT_STAGED_DIR: stageDir,
                 },
                 stdio: ['ignore', 'pipe', 'pipe'],
               },
