@@ -464,7 +464,7 @@ spec:
     noChange: Confirm the documentation needs no change and settle as no change.
   scope:
     writable:
-      - docs
+      - docs/**
     protected:
       - docs/protected-notes.md
   upstreams:
@@ -507,10 +507,39 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
   const manifest = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
   r.expect(String(manifest.metadata.name), 'docs-sync', 'the declarative taskpack manifest parses and validates');
   const escalated = structuredClone(manifest) as unknown as Record<string, unknown>;
-  ((escalated.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows', 'docs'], protected: [] };
+  ((escalated.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows/**', 'docs/**'], protected: [] };
   let scopeCode: string | null = null;
   try { validateTaskpackManifest(escalated as never); } catch (error) { scopeCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
   r.expect(scopeCode ?? '', 'TASKPACK_SCOPE_VIOLATION', 'protected-path escalation refuses with TASKPACK_SCOPE_VIOLATION');
+  const privilegedWithoutUnlock = structuredClone(manifest) as unknown as Record<string, unknown>;
+  (privilegedWithoutUnlock.spec as Record<string, unknown>).execution = { mode: 'privileged', digests: { pinDigests: false } };
+  let privCode: string | null = null;
+  try { validateTaskpackManifest(privilegedWithoutUnlock as never, { hostPolicy: { allowPrivileged: false, allowWorkflowWrites: false } }); } catch (error) { privCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  r.expect(privCode ?? '', 'TASKPACK_HOST_BINDING_INVALID', 'privileged mode without operator host unlock refuses with TASKPACK_HOST_BINDING_INVALID');
+  const wfWithoutUnlock = structuredClone(manifest) as unknown as Record<string, unknown>;
+  (wfWithoutUnlock.spec as Record<string, unknown>).execution = { mode: 'strict', capabilities: { allowWorkflowWrites: true }, digests: { pinDigests: false } };
+  ((wfWithoutUnlock.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows/**', 'docs/**'], protected: [] };
+  let wfCode: string | null = null;
+  try { validateTaskpackManifest(wfWithoutUnlock as never, { hostPolicy: { allowPrivileged: false, allowWorkflowWrites: false } }); } catch (error) { wfCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  r.expect(wfCode ?? '', 'TASKPACK_SCOPE_VIOLATION', 'allowWorkflowWrites without operator host unlock refuses with TASKPACK_SCOPE_VIOLATION');
+  let untrustedInterpCode: string | null = null;
+  try {
+    await loadDeclarativeTaskpack({
+      bytes: Buffer.from(VALID_MANIFEST_YAML.replace("titleTemplate: 'docs: sync upstream documentation'", "titleTemplate: 'docs: sync ${AMBIENT_SECRET}'"), 'utf8'),
+      format: 'yaml',
+    });
+  } catch (error) { untrustedInterpCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  r.expect(untrustedInterpCode ?? '', 'TASKPACK_UNTRUSTED_INTERPOLATION', 'undeclared ${...} interpolation refuses with TASKPACK_UNTRUSTED_INTERPOLATION');
+  const withDeclaredVars = await loadDeclarativeTaskpack({
+    bytes: Buffer.from(
+      VALID_MANIFEST_YAML
+        .replace('spec:\n', 'spec:\n  vars:\n    CHANNEL: stable\n')
+        .replace("titleTemplate: 'docs: sync upstream documentation'", "titleTemplate: 'docs: sync ${CHANNEL}'"),
+      'utf8',
+    ),
+    format: 'yaml',
+  });
+  r.expect(withDeclaredVars.spec.publication.titleTemplate, 'docs: sync stable', 'declared spec.vars interpolate safely in permitted fields');
   for (const oauthProvider of ['github-copilot', 'openai-codex', 'claude-code', 'gemini']) {
     const withOauthModel = structuredClone(manifest) as unknown as Record<string, unknown>;
     (withOauthModel.spec as Record<string, unknown>).models = [
@@ -582,12 +611,17 @@ const PROBES: readonly Probe[] = [
 /** Run all 14 cross-package failure probes in-process; deterministic, offline, and Docker-free. */
 export async function runIntegratedFailureMatrix(options: IntegratedFailureMatrixOptions = {}): Promise<IntegratedFailureMatrixReport> {
   const scenarios: IntegratedFailureScenarioResult[] = [];
-  for (const entry of PROBES) {
-    const override = options.scenarioOverrides?.[entry.id];
-    if (process.env.LW_MATRIX_DEBUG === '1') console.error('[matrix-debug] start', entry.id);
-    const result = override === undefined ? await probe(entry.id, entry.run) : await override();
-    if (process.env.LW_MATRIX_DEBUG === '1') console.error('[matrix-debug] done', entry.id, result.passed, result.elapsedMs + 'ms');
-    scenarios.push(result);
+  const keepAlive = setInterval(() => { /* keep event loop ref'd while unref'd probe servers respond */ }, 1000);
+  try {
+    for (const entry of PROBES) {
+      const override = options.scenarioOverrides?.[entry.id];
+      if (process.env.LW_MATRIX_DEBUG === '1') console.error('[matrix-debug] start', entry.id);
+      const result = override === undefined ? await probe(entry.id, entry.run) : await override();
+      if (process.env.LW_MATRIX_DEBUG === '1') console.error('[matrix-debug] done', entry.id, result.passed, result.elapsedMs + 'ms');
+      scenarios.push(result);
+    }
+  } finally {
+    clearInterval(keepAlive);
   }
   const passed = scenarios.filter(result => result.passed).length;
   return { version: 1, total: scenarios.length, passed, failed: scenarios.length - passed, allPassed: passed === scenarios.length, scenarios };

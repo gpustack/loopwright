@@ -327,7 +327,7 @@ export async function createTaskpackRepo(
         noChange: 'Confirm no changes needed.',
       },
       scope: {
-        writable: [...(options?.writable ?? ['docs'])],
+        writable: [...(options?.writable ?? ['docs/**'])],
         protected: ['docs/protected.md'],
       },
       roles: [

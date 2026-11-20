@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { lstat, realpath, rm } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { chmod, lstat, readdir, realpath, rm } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, runCycle, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput, type StepTickResult } from '@loopwright/controller';
-import { GitHubAppError, openStagedTaskpackStepGate, SecretScrubber, stageTaskpackForStep, startConfiguredGitHubApp, type GitHubAppErrorCode, type StagedTaskpackStepGateHandle } from '@loopwright/github-app';
+import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput, type StepTickResult } from '@loopwright/controller';
+import { computeTaskpackDigests, GitHubAppError, loadDeclarativeTaskpack, openStagedTaskpackStepGate, resolveDigestLockfilePath, SecretScrubber, stageTaskpackForStep, startConfiguredGitHubApp, verifyDigestLockfile, writeDigestLockfile, type GitHubAppErrorCode, type StagedTaskpackStepGateHandle } from '@loopwright/github-app';
 import { parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
@@ -16,8 +16,8 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
-export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
 }
@@ -212,6 +212,21 @@ async function canonicalPath(target: string): Promise<string> {
 function isInsidePathRoot(target: string, root: string): boolean {
   return target === root || target.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
+async function removeStagedDirSafely(dirPath: string): Promise<void> {
+  const restoreDirs = async (target: string): Promise<void> => {
+    const st = await lstat(target).catch(() => null);
+    if (st === null || st.isSymbolicLink() || !st.isDirectory()) return;
+    await chmod(target, 0o700).catch(() => {});
+    const entries = await readdir(target, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        await restoreDirs(join(target, entry.name));
+      }
+    }
+  };
+  await restoreDirs(dirPath);
+  await rm(dirPath, { recursive: true, force: true }).catch(() => {});
+}
 async function inspectExistingDisjointRunRoot(resolvedRunRoot: string, requestedRepo: string): Promise<{
   readonly exists: boolean;
   readonly prospectiveRunRoot: string | null;
@@ -272,10 +287,110 @@ async function withSignalAbort<T>(
     process.off('SIGTERM', terminate);
   }
 }
+async function runDigestCommand(args: Arguments, emit: EmitFn): Promise<number> {
+  const rawRepoRoot = resolve(args.values.has('repo') ? args.values.get('repo')! : process.cwd());
+  const repoRoot = await canonicalPath(rawRepoRoot);
+  let manifestPath = args.values.get('taskpack')!;
+  if (isAbsolute(manifestPath)) {
+    const absManifest = resolve(manifestPath);
+    const relFromRaw = relative(rawRepoRoot, absManifest);
+    if (relFromRaw.length > 0 && relFromRaw !== '..' && !relFromRaw.startsWith(`..${sep}`) && !isAbsolute(relFromRaw)) {
+      manifestPath = relFromRaw.split(sep).join('/');
+    } else {
+      let ancestor = dirname(absManifest);
+      let prev = '';
+      while (ancestor !== prev) {
+        const realAncestor = await realpath(ancestor).catch(() => null);
+        if (realAncestor === repoRoot) {
+          const relFromAncestor = relative(ancestor, absManifest);
+          if (relFromAncestor.length > 0 && relFromAncestor !== '..' && !relFromAncestor.startsWith(`..${sep}`) && !isAbsolute(relFromAncestor)) {
+            manifestPath = relFromAncestor.split(sep).join('/');
+          }
+          break;
+        }
+        prev = ancestor;
+        ancestor = dirname(ancestor);
+      }
+    }
+  }
+  const checkOnly = args.flags.has('check');
+  try {
+    const manifest = await loadDeclarativeTaskpack({
+      manifestPath,
+      repositoryRoot: repoRoot,
+      enforceHostAuthority: false,
+    });
+    const lockfilePath = resolveDigestLockfilePath(manifest, manifest.controlRoot);
+    if (checkOnly) {
+      const verified = await verifyDigestLockfile(repoRoot, manifest, manifest.controlRoot, lockfilePath);
+      if (verified.ok) {
+        await emit(
+          'digest',
+          {
+            version: 1,
+            action: 'sync',
+            check: true,
+            ok: true,
+            taskpack: manifest.metadata.name,
+            lockfilePath: verified.lockfilePath,
+            entries: verified.computed.entries,
+          },
+          `digest sync --check: ok (${verified.computed.entries.length} entries in ${verified.lockfilePath})`,
+        );
+        return 0;
+      }
+      const scrubbedReason = createCliScrubber().scrub(verified.reason);
+      await emit(
+        'diagnostic',
+        {
+          version: 1,
+          code: 'DIGEST_LOCKFILE_DRIFT',
+          message: scrubbedReason,
+          lockfilePath: verified.lockfilePath,
+          taskpack: manifest.metadata.name,
+          drifts: verified.drifts,
+        },
+        scrubbedReason,
+      );
+      return 4;
+    }
+    const lockfile = await computeTaskpackDigests(repoRoot, manifest, manifest.controlRoot);
+    await writeDigestLockfile(repoRoot, lockfilePath, lockfile);
+    await emit(
+      'digest',
+      {
+        version: 1,
+        action: 'sync',
+        check: false,
+        ok: true,
+        taskpack: manifest.metadata.name,
+        lockfilePath,
+        entries: lockfile.entries,
+      },
+      `digest sync: wrote ${lockfile.entries.length} entries to ${lockfilePath}`,
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof GitHubAppError) {
+      const scrubber = createCliScrubber();
+      const message = scrubber.scrub(err.message);
+      const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
+      await emit(
+        'diagnostic',
+        { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
+        err.code,
+      );
+      return gitHubAppExitCode(err.code);
+    }
+    throw err;
+  }
+}
 async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Promise<number> {
   const get = (key: string) => args.values.get(key)!;
   const runId = get('run-id');
   const runRoot = resolve(get('run-root'));
+  const allowPrivileged = args.flags.has('allow-privileged');
+  const allowWorkflowWrites = args.flags.has('allow-workflow-writes');
   let gateHandle: StagedTaskpackStepGateHandle | null = null;
   let stagedDirToCleanOnUnadmittedFailure: string | null = null;
   try {
@@ -301,7 +416,7 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
               && stageStat.isDirectory()
               && !isInsidePathRoot(requestedRepo, stageCandidate)
             ) {
-              await rm(stageCandidate, { recursive: true, force: true }).catch(() => {});
+              await removeStagedDirSafely(stageCandidate);
             }
           }
         }
@@ -311,6 +426,11 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
           runRoot,
           runId,
           mode: (args.values.get('mode') as 'candidate' | 'no-change' | undefined) ?? 'candidate',
+          allowPrivileged,
+          allowWorkflowWrites,
+          hostPolicy: { allowPrivileged, allowWorkflowWrites },
+          runPreflight: true,
+          runtimeEnv: process.env,
         });
         if (!hadRunDir) stagedDirToCleanOnUnadmittedFailure = staged.stageDir;
         const prevSecret = Object.hasOwn(process.env, staged.signingEnvName)
@@ -354,9 +474,20 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
 
       gateHandle = args.stepAction === 'next' && args.values.has('config')
         ? null
-        : await openStagedTaskpackStepGate({ runRoot, runId });
+        : await openStagedTaskpackStepGate({ runRoot, runId, runtimeEnv: process.env });
       const gateEnvOpt = gateHandle ? { environment: gateHandle.environment } : {};
-      const gatePorts = gateHandle ? { gateUrlOverrides: gateHandle.gateUrlOverrides } : {};
+      const basePorts: ControllerPorts = gateHandle
+        ? (gateHandle.ports ?? {
+            gateUrlOverrides: gateHandle.gateUrlOverrides,
+            ...(gateHandle.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: gateHandle.allowWorkflowWrites } : {}),
+            ...(gateHandle.roleMcpServers !== undefined ? { roleMcpServers: gateHandle.roleMcpServers } : {}),
+            ...(gateHandle.mcpServers !== undefined ? { mcpServers: gateHandle.mcpServers } : {}),
+            ...(gateHandle.decisions !== undefined ? { decisions: gateHandle.decisions } : {}),
+          })
+        : {};
+      const gatePorts: ControllerPorts = allowWorkflowWrites && gateHandle === null
+        ? { ...basePorts, allowWorkflowWrites: true }
+        : basePorts;
 
       if (args.stepAction === 'next') {
         const modeOpt = args.values.has('mode') ? { mode: get('mode') as 'candidate' | 'no-change' } : {};
@@ -434,7 +565,7 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
     if (stagedDirToCleanOnUnadmittedFailure !== null) {
       const hasRunDirNow = await lstat(join(dirname(stagedDirToCleanOnUnadmittedFailure), runId)).then(() => true, () => false);
       if (!hasRunDirNow) {
-        await rm(stagedDirToCleanOnUnadmittedFailure, { recursive: true, force: true }).catch(() => {});
+        await removeStagedDirSafely(stagedDirToCleanOnUnadmittedFailure);
       }
     }
   }
@@ -493,7 +624,13 @@ export async function main(argv: readonly string[]): Promise<number> {
       runId = get('run-id');
       const trusted = await loadTrustedConfiguration({ configPath: resolve(get('config')), registryPath: resolve(get('registry')), registrySha256: get('registry-sha256'), untrustedRoots: [resolve(get('repo'))] });
       if (!trusted.ok) { await emit('diagnostic', trusted.error, trusted.error.code); return diagnosticExit(trusted.error); }
-      const reconciled = await reconcileCycle({ configuration: trusted.value, runRoot: resolve(get('run-root')), runId, receipt: resolve(get('receipt')) });
+      const reconcilePorts: ControllerPorts | undefined = args.flags.has('allow-workflow-writes')
+        ? { allowWorkflowWrites: true }
+        : undefined;
+      const reconciled = await reconcileCycle(
+        { configuration: trusted.value, runRoot: resolve(get('run-root')), runId, receipt: resolve(get('receipt')) },
+        reconcilePorts,
+      );
       if (!reconciled.ok) { await emit('diagnostic', reconciled.error, reconciled.error.code); return diagnosticExit(reconciled.error); }
       if (args.values.has('output')) await writeOutput(resolve(get('output')), Buffer.from(encoded(reconciled.value)));
       await emitOutcomeReports({
@@ -508,6 +645,9 @@ export async function main(argv: readonly string[]): Promise<number> {
         emitDefault: () => emit('result', reconciled.value, reconciled.value.kind === 'settled' ? 'reconciled: ' + reconciled.value.status : 'unresolved: ' + reconciled.value.reason),
       });
       return reconciled.value.kind === 'settled' ? reconciled.value.status === 'completed' ? 0 : reconciled.value.status === 'blocked' ? 3 : 4 : 7;
+    }
+    if (args.command === 'digest') {
+      return await runDigestCommand(args, emit);
     }
     if (args.command === 'step') {
       runId = get('run-id');
@@ -533,7 +673,12 @@ export async function main(argv: readonly string[]): Promise<number> {
         configuration: loaded.value, repository: resolve(get('repo')), runRoot: resolve(get('run-root')), runId: targetRunId, signal,
         onEvent: async (event: unknown) => { if (json) await emit('event', event); else process.stderr.write('progress\n'); },
       };
-      const execution = args.command === 'resume' ? await resumeCycle(input) : await runCycle(input);
+      const ports: ControllerPorts | undefined = args.flags.has('allow-workflow-writes')
+        ? { allowWorkflowWrites: true }
+        : undefined;
+      const execution = args.command === 'resume'
+        ? (ports ? await resumeCycleWithPorts(input, ports) : await resumeCycle(input))
+        : (ports ? await runCycleWithPorts(input, ports) : await runCycle(input));
       if (!execution.ok) { await emit('diagnostic', execution.error, execution.error.code); return diagnosticExit(execution.error); }
       await emitExecutionOutcome(args, resolve(get('run-root')), targetRunId, json, execution.value, loaded.value, emit);
       return executionExit(execution.value, getSignal());

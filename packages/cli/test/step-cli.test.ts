@@ -354,7 +354,7 @@ test('step-cli: zero-secret --taskpack turnkey CLI step lifecycle with ephemeral
           noChange: 'Confirm no changes needed.',
         },
         scope: {
-          writable: ['docs'],
+          writable: ['docs/**'],
           protected: ['docs/protected.md'],
         },
         roles: [

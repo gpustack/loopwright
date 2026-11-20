@@ -214,8 +214,8 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
     manifestPath: '.auto-sync/charts.taskpack.yaml',
   });
   assert.equal(validatedBootstrap.metadata.name, 'charts-sync');
-  assert.deepEqual(validatedBootstrap.spec.scope.writable, ['charts']);
-  assert.deepEqual(validatedBootstrap.spec.scope.protected, ['.auto-sync']);
+  assert.deepEqual(validatedBootstrap.spec.scope.writable, ['charts/**']);
+  assert.deepEqual(validatedBootstrap.spec.scope.protected, ['.auto-sync/**']);
   assert.equal(validatedBootstrap.spec.publication.headBranchPrefix, 'auto-sync-charts-');
   assert.equal(validatedBootstrap.spec.memory.directory, '.auto-sync/memory/charts-sync');
 
@@ -401,7 +401,7 @@ test('coding-agents apply snippet: matches loopwright-step skill, handles inspec
         '    noChange: Confirm no changes needed.',
         '  scope:',
         '    writable:',
-        '      - docs',
+        '      - docs/**',
         '    protected: []',
         '  upstreams:',
         '    - id: up',

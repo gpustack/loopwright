@@ -1,4 +1,4 @@
-export { parseArguments, UsageError, type Arguments } from './arguments.js';
+export { parseArguments, UsageError, type Arguments, type DigestAction, type StepAction } from './arguments.js';
 export { canonicalPath, initDraft, writeOutput, appendStepSummary } from './draft.js';
 export { encoded, diagnosticExit, executionExit, closureExitCode, main, type Envelope } from './main.js';
 export {

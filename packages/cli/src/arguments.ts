@@ -2,9 +2,11 @@ import { parseReportOutputFormats, type RoleModelOverride } from '@loopwright/co
 
 export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
 export type StepAction = 'next' | 'submit' | 'cancel';
+export type DigestAction = 'sync';
 export interface Arguments {
-  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step';
+  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest';
   readonly stepAction?: StepAction;
+  readonly digestAction?: DigestAction;
   readonly roleModelOverrides?: readonly RoleModelOverride[];
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
@@ -15,28 +17,35 @@ interface CommandRule {
   readonly flags: readonly string[];
   readonly allowRoleModel?: boolean;
 }
-const commands: Record<Exclude<Arguments['command'], 'step'>, CommandRule> = {
+const commands: Record<Exclude<Arguments['command'], 'step' | 'digest'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
-  run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run'], allowRoleModel: true },
-  resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json'], allowRoleModel: true },
-  reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json'] },
+  run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
+  resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
+  reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'allow-workflow-writes'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
   inspect: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id', 'output'], flags: ['json'] },
   closure: { required: [], values: ['repo', 'output'], flags: ['json', 'verify-failures'] },
   'app-serve': { required: ['config'], values: ['config', 'repo'], flags: ['json'] },
 };
+const digestRules: Record<DigestAction, CommandRule> = {
+  sync: {
+    required: ['taskpack'],
+    values: ['taskpack', 'repo'],
+    flags: ['check', 'json'],
+  },
+};
 const stepRules: Record<StepAction, CommandRule> = {
   next: {
     required: ['run-root', 'run-id'],
     values: ['run-root', 'run-id', 'config', 'registry', 'registry-sha256', 'taskpack', 'repo', 'mode', 'output-format', 'step-summary-file'],
-    flags: ['reissue-lease', 'json'],
+    flags: ['reissue-lease', 'json', 'allow-privileged', 'allow-workflow-writes'],
     allowRoleModel: true,
   },
   submit: {
     required: ['run-root', 'run-id', 'lease'],
     values: ['run-root', 'run-id', 'lease', 'submission-file', 'status', 'reason', 'output-format', 'step-summary-file'],
-    flags: ['json'],
+    flags: ['json', 'allow-privileged', 'allow-workflow-writes'],
   },
   cancel: {
     required: ['run-root', 'run-id'],
@@ -176,13 +185,33 @@ export function parseArguments(argv: readonly string[]): Arguments {
     };
   }
 
-  const command = rawCommand as Exclude<Arguments['command'], 'step'>;
+  if (rawCommand === 'digest') {
+    const rawAction = argv[1];
+    if (rawAction !== 'sync') throw new UsageError();
+    const rule = digestRules[rawAction];
+    parseOptions(2, key => rule.flags.includes(key), key => rule.values.includes(key), false);
+    if (rule.required.some(key => !values.has(key))) throw new UsageError();
+    if (values.get('taskpack')!.trim().length === 0) throw new UsageError();
+    if (values.has('repo') && values.get('repo')!.trim().length === 0) throw new UsageError();
+    return {
+      command: 'digest',
+      digestAction: rawAction,
+      values,
+      flags,
+    };
+  }
+
+  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest'>;
   if (!Object.hasOwn(commands, command)) throw new UsageError();
   const rule = commands[command];
   parseOptions(1, key => rule.flags.includes(key), key => rule.values.includes(key), rule.allowRoleModel === true);
   const required = [...rule.required];
   if (command === 'run' && !flags.has('dry-run')) { required.push('repo', 'run-root', 'run-id'); if (values.has('output')) throw new UsageError(); }
-  if (command === 'run' && flags.has('dry-run') && ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))) throw new UsageError();
+  if (command === 'run' && flags.has('dry-run') && (
+    ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))
+    || flags.has('allow-privileged')
+    || flags.has('allow-workflow-writes')
+  )) throw new UsageError();
   validateCommonValues(values);
   if (required.some(key => !values.has(key))) throw new UsageError();
   return {
