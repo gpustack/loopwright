@@ -1968,6 +1968,60 @@ interface LocalCommandGateJob {
   } | null;
 }
 
+const DEFAULT_COMMAND_PATH_ENTRIES: ReadonlySet<string> = new Set(['/usr/local/bin', '/usr/bin', '/bin']);
+
+async function validateGateToolchainPath(
+  tp: string,
+  gate: CompiledLocalCommandGate,
+  repositoryRoot: string,
+  realTmpRoot: string,
+): Promise<{ readonly kind: 'absolute'; readonly realPath: string } | { readonly kind: 'relative'; readonly fullPath: string }> {
+  if (tp.startsWith('/')) {
+    const tpStat = await lstat(tp).catch(() => null);
+    if (tpStat === null || tpStat.isSymbolicLink() || !tpStat.isDirectory()) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
+    }
+    const realTp = await realpath(tp);
+    if (gate.allowPrivileged !== true) {
+      if (
+        insideRoot(realTp, realTmpRoot)
+        || insideRoot(realTp, '/tmp')
+        || insideRoot(realTp, '/private/tmp')
+      ) {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" under tmpdir is forbidden without allowPrivileged`,
+        );
+      }
+      if ((tpStat.mode & 0o022) !== 0) {
+        const defaultPathHint = DEFAULT_COMMAND_PATH_ENTRIES.has(tp)
+          ? ' (default command.v1 PATH already includes /usr/local/bin:/usr/bin:/bin)'
+          : '';
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" must not be group- or world-writable without allowPrivileged${defaultPathHint}`,
+        );
+      }
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      if (currentUid !== undefined && tpStat.uid !== 0 && tpStat.uid !== currentUid) {
+        throw new GitHubAppError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" must be owned by root or the current user without allowPrivileged`,
+        );
+      }
+    }
+    return { kind: 'absolute', realPath: realTp };
+  }
+  const cleanTp = normalizeCandidateRelativePath(tp);
+  const fullTp = resolve(repositoryRoot, cleanTp);
+  assertNoSymlinkSegments(repositoryRoot, fullTp);
+  const relStat = await lstat(fullTp).catch(() => null);
+  if (relStat === null || relStat.isSymbolicLink() || !relStat.isDirectory()) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
+  }
+  return { kind: 'relative', fullPath: fullTp };
+}
+
 /**
  * Start a loopback HTTP server implementing Loopwright's `gate.v1` protocol for
  * repository-declared `command.v1` checks against inspected candidate bytes.
@@ -1979,6 +2033,13 @@ export async function startLocalCommandGateServer(
   const signingSecret = options.signingSecret ?? randomBytes(32).toString('hex');
   scrubber.register(signingSecret);
   if (options.readOnlyGitHubToken) scrubber.register(options.readOnlyGitHubToken);
+
+  const realTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
+  for (const gate of options.gates) {
+    for (const tp of gate.toolchainPaths ?? []) {
+      await validateGateToolchainPath(tp, gate, options.repositoryRoot, realTmpRoot);
+    }
+  }
 
   const ownedScratch = options.scratchRoot === undefined;
   const rawScratchBase = options.scratchRoot ?? await mkdtemp(join(tmpdir(), 'loopwright-gate-'));
@@ -2475,46 +2536,14 @@ export async function startLocalCommandGateServer(
           }
 
           const resolvedToolchainPaths: string[] = [];
-          const realTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
+          const requestTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
           for (const [tpIndex, tp] of (gate.toolchainPaths ?? []).entries()) {
-            if (tp.startsWith('/')) {
-              const tpStat = await lstat(tp).catch(() => null);
-              if (tpStat === null || tpStat.isSymbolicLink() || !tpStat.isDirectory()) {
-                throw new GitHubAppError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
-              }
-              const realTp = await realpath(tp);
-              if (gate.allowPrivileged !== true) {
-                if (
-                  insideRoot(realTp, realTmpRoot)
-                  || insideRoot(realTp, '/tmp')
-                  || insideRoot(realTp, '/private/tmp')
-                ) {
-                  throw new GitHubAppError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" under tmpdir is forbidden without allowPrivileged`,
-                  );
-                }
-                if ((tpStat.mode & 0o022) !== 0) {
-                  throw new GitHubAppError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" must not be group- or world-writable without allowPrivileged`,
-                  );
-                }
-                const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-                if (currentUid !== undefined && tpStat.uid !== 0 && tpStat.uid !== currentUid) {
-                  throw new GitHubAppError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" must be owned by root or the current user without allowPrivileged`,
-                  );
-                }
-              }
-              resolvedToolchainPaths.push(realTp);
+            const validated = await validateGateToolchainPath(tp, gate, options.repositoryRoot, requestTmpRoot);
+            if (validated.kind === 'absolute') {
+              resolvedToolchainPaths.push(validated.realPath);
             } else {
-              const cleanTp = normalizeCandidateRelativePath(tp);
-              const fullTp = resolve(options.repositoryRoot, cleanTp);
-              assertNoSymlinkSegments(options.repositoryRoot, fullTp);
               const destTp = join(workDir, 'toolchains', String(tpIndex));
-              await copyDirectoryTreeReadOnly(fullTp, destTp);
+              await copyDirectoryTreeReadOnly(validated.fullPath, destTp);
               resolvedToolchainPaths.push(destTp);
             }
           }

@@ -1569,17 +1569,27 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           && ncCommandGates.length > 0
           && !hasExplicitLocalEndpoint
         ) {
-          ncLocalGateServer = await startLocalCommandGateServer({
-            runRoot: realRunRoot,
-            repositoryRoot: realRepositoryRoot,
-            gates: ncCommandGates,
-            runtimeEnv,
-            readOnlyGitHubToken: githubToken,
-            scrubber,
-            forbiddenEnvNames: ncForbiddenEnvNames,
-            checkStagedDir: preflightResult?.checkStagedDir,
-            onLog: emitProgress,
-          });
+          try {
+            ncLocalGateServer = await startLocalCommandGateServer({
+              runRoot: realRunRoot,
+              repositoryRoot: realRepositoryRoot,
+              gates: ncCommandGates,
+              runtimeEnv,
+              readOnlyGitHubToken: githubToken,
+              scrubber,
+              forbiddenEnvNames: ncForbiddenEnvNames,
+              checkStagedDir: preflightResult?.checkStagedDir,
+              onLog: emitProgress,
+            });
+          } catch (error) {
+            if (error instanceof GitHubAppError) {
+              if (error.code === 'ACTION_INPUT_INVALID') {
+                return blocked(scrubber.scrub(error.message));
+              }
+              return blocked(error.code, scrubber.scrub(error.message));
+            }
+            throw error;
+          }
           activeGateEndpoints = [...activeGateEndpoints, ncLocalGateServer.endpointPlan];
           ncEphemeralEnv[localCmdGateEnvName] = ncLocalGateServer.signingSecret;
           try {
@@ -1849,17 +1859,27 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           }
           const hasExplicitLocalEndpoint = (input.gateEndpoints ?? []).some(plan => plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID);
           if (!hasExplicitLocalEndpoint) {
-            localGateServer = await startLocalCommandGateServer({
-              runRoot: realRunRoot,
-              repositoryRoot: realRepositoryRoot,
-              gates: preview.localCommandGates ?? [],
-              runtimeEnv,
-              readOnlyGitHubToken: githubToken,
-              scrubber,
-              forbiddenEnvNames: forbiddenCommandEnvNames,
-              checkStagedDir: preflightResult?.checkStagedDir,
-              onLog: emitProgress,
-            });
+            try {
+              localGateServer = await startLocalCommandGateServer({
+                runRoot: realRunRoot,
+                repositoryRoot: realRepositoryRoot,
+                gates: preview.localCommandGates ?? [],
+                runtimeEnv,
+                readOnlyGitHubToken: githubToken,
+                scrubber,
+                forbiddenEnvNames: forbiddenCommandEnvNames,
+                checkStagedDir: preflightResult?.checkStagedDir,
+                onLog: emitProgress,
+              });
+            } catch (error) {
+              if (error instanceof GitHubAppError) {
+                if (error.code === 'ACTION_INPUT_INVALID') {
+                  return blocked(scrubber.scrub(error.message));
+                }
+                return blocked(error.code, scrubber.scrub(error.message));
+              }
+              throw error;
+            }
             activeGateEndpoints = [...activeGateEndpoints, localGateServer.endpointPlan];
             ephemeralEnv[localCmdGateEnvName] = localGateServer.signingSecret;
           }

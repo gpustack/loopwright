@@ -2383,7 +2383,8 @@ exit 0
       await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(tcManifestObj), 'utf8');
       const headSha = initGitRepo(repoRoot);
 
-      // Strict mode denies tmpdir-rooted absolute toolchainPath
+      // Strict mode fails fast before invoking the agent or check controller on tmpdir-rooted absolute toolchainPath
+      let strictAdapterCalls = 0;
       const strictTcRes = await runGitHubActionEntrypoint({
         turnkey: true,
         repositoryRoot: repoRoot,
@@ -2396,12 +2397,39 @@ exit 0
         runRoot,
         runId: 'tc-strict',
         env: {},
-        openHostSessionAdapter: FAST_ADAPTER,
+        openHostSessionAdapter: async (host, input, opts) => {
+          strictAdapterCalls += 1;
+          return FAST_ADAPTER(host, input, opts);
+        },
       });
-      assert.equal(strictTcRes.kind, 'no_change');
-      if (strictTcRes.kind === 'no_change') {
-        assert.equal(strictTcRes.delegateOutcome?.ok, false, 'strict mode must reject tmpdir-rooted absolute toolchainPath');
+      assert.equal(strictTcRes.kind, 'blocked', 'strict mode must fail fast as blocked on invalid absolute toolchainPath');
+      assert.equal(strictAdapterCalls, 0, 'strict mode must not invoke agent adapter when toolchainPath fails pre-validation');
+      if (strictTcRes.kind === 'blocked') {
+        assert.match(strictTcRes.reason, /under tmpdir is forbidden without allowPrivileged/);
       }
+
+      // startLocalCommandGateServer also rejects invalid toolchainPaths up front at server startup
+      await assert.rejects(
+        () => startLocalCommandGateServer({
+          runRoot,
+          repositoryRoot: repoRoot,
+          gates: [{
+            checkId: 'check-a',
+            gateId: 'gate-check-a',
+            endpointRef: 'loopwright-local-command',
+            script: '.loopwright/checks/check-a.sh',
+            scriptSha256: '0'.repeat(64),
+            timeoutSeconds: 30,
+            allowReadOnlyGitHubToken: false,
+            env: [],
+            toolchainPaths: [tmpToolchain],
+            allowPrivileged: false,
+          }],
+        }),
+        (err: unknown) => err instanceof GitHubAppError
+          && err.code === 'ACTION_INPUT_INVALID'
+          && /under tmpdir is forbidden without allowPrivileged/.test(err.message),
+      );
 
       // Privileged mode succeeds AND both check-a and check-b observe the EXACT same cached LOOPWRIGHT_BASE_DIR!
       const privTcRes = await runGitHubActionEntrypoint({
