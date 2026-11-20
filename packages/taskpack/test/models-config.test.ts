@@ -118,5 +118,52 @@ describe('models-config.ts: validation, token pools, and health selection', () =
     assert.equal(selection.index, 1);
     assert.equal(selection.probed, true);
     assert.equal(selection.attempts.length, 2);
+
+    const multiProviderManifest = validateTaskpackV2Manifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'multi-provider-pin' },
+      spec: {
+        goal: { candidate: 'Work', noChange: 'Verify' },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [
+          { provider: 'openai', id: 'gpt-5', apiKeyEnv: 'OPENAI_API_KEY' },
+          { provider: 'anthropic', id: 'claude-sonnet-4-5', apiKeyEnv: 'ANTHROPIC_API_KEY' },
+        ],
+        verification: { localChecks: [], externalGates: [] },
+      },
+    } as Json);
+    const modelPinned = resolveTaskpackModelCandidates(multiProviderManifest, {
+      mode: 'candidate',
+      repository: 'local/repo',
+      baseRevision: 'a'.repeat(40),
+      sourceRevision: 'a'.repeat(40),
+      roleSelection: { model: 'claude-sonnet-4-5' },
+      budgets: {
+        wallTimeMs: 60_000,
+        totalTokens: 100_000,
+        perCallOutputTokens: 16_384,
+        maxModelCalls: 8,
+        maxConcurrency: 1,
+        maxFormatRepairs: 2,
+        maxImplementationRepairs: 2,
+        maxTransportRetries: 2,
+        enforcement: {
+          wallTime: 'hard_admission',
+          tokens: 'soft_accounting',
+          modelCalls: 'hard_admission',
+          concurrency: 'hard_admission',
+          formatRepairs: 'hard_admission',
+          implementationRepairs: 'hard_admission',
+          transportRetries: 'hard_admission',
+        },
+      },
+    }, {
+      env: { ANTHROPIC_API_KEY: 'sk-ant-test-123456' },
+      scrubber,
+    });
+    assert.equal(modelPinned.length, 1);
+    assert.equal(modelPinned[0]?.selection.provider, 'anthropic');
+    assert.equal(modelPinned[0]?.selection.model, 'claude-sonnet-4-5');
   });
 });

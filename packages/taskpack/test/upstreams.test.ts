@@ -10,6 +10,7 @@ import {
   discoverTaskpackUpstreams,
   discoverTaskpackUpstreamsV2,
   extractJsonVersionPath,
+  findOpenManagedPullRequest,
 } from '../src/upstreams.js';
 
 async function startServer(
@@ -125,5 +126,25 @@ describe('upstreams.ts: injectable auth, SemVer tuple sorting, and lockstep grou
       },
     } as Json);
     assert.deepEqual(await discoverTaskpackUpstreams(emptyManifest), []);
+
+    await assert.rejects(
+      findOpenManagedPullRequest({
+        apiBaseUrl: 'https://api.example.test',
+        repositoryFullName: 'octo/tool',
+        targetBranch: 'main',
+        headBranchPrefix: 'lw/',
+        fetchImpl: async () => new Response(
+          JSON.stringify(Array.from({ length: 100 }, (_, idx) => ({
+            number: idx + 1,
+            html_url: `https://example.test/pull/${idx + 1}`,
+            head: { ref: `feature/${idx}`, sha: 'a'.repeat(40), repo: { full_name: 'octo/tool', fork: false } },
+            base: { ref: 'main', sha: 'b'.repeat(40) },
+            title: 'other',
+          }))),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      }),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'ACTION_INPUT_INVALID',
+    );
   });
 });

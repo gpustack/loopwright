@@ -1896,6 +1896,7 @@ export async function findOpenManagedPullRequest(
     scrubber,
   );
 
+  let confirmedAbsence = false;
   for (let page = 1; page <= 5; page += 1) {
     const url = `${apiBaseUrl}/repos/${options.repositoryFullName}/pulls?state=open&base=${encodeURIComponent(options.targetBranch)}&per_page=100&page=${page}`;
     const res = await fetchJson(url, fetchImpl, headers, timeoutMs, scrubber);
@@ -1957,8 +1958,16 @@ export async function findOpenManagedPullRequest(
     }
 
     if (res.data.length < 100) {
+      confirmedAbsence = true;
       break;
     }
+  }
+
+  if (!confirmedAbsence) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `open pull requests lookup exhausted pagination (500 open pull requests) for ${options.repositoryFullName} without confirming absence`,
+    );
   }
 
   return null;
@@ -2125,7 +2134,7 @@ export async function resolveGitCommitSha(
     const { stdout } = await execFileAsync(
       gitBin,
       ['-C', repositoryRoot, 'rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`],
-      { timeout: timeoutMs, maxBuffer: 4096, encoding: 'utf8' },
+      { env: buildCleanGitEnv(), timeout: timeoutMs, maxBuffer: 4096, encoding: 'utf8' },
     );
     const sha = stdout.trim().toLowerCase();
     if (!COMMIT_SHA_PATTERN.test(sha)) {

@@ -826,7 +826,13 @@ export function resolveTaskpackModelCandidates(
 
   let baseEntries: { readonly manifestIndex: number; readonly selection: PiModelSelection; readonly apiKeyEnv?: string }[];
   if (hostPinsProviderOrModel) {
-    const matchingIdx = manifestModels?.findIndex(m => m.provider === (hostRole?.provider ?? m.provider)) ?? -1;
+    let matchingIdx = manifestModels?.findIndex(
+      m => (hostRole?.provider === undefined || m.provider === hostRole.provider)
+        && (hostRole?.model === undefined || m.id === hostRole.model),
+    ) ?? -1;
+    if (matchingIdx < 0 && hostRole?.provider !== undefined) {
+      matchingIdx = manifestModels?.findIndex(m => m.provider === hostRole.provider) ?? -1;
+    }
     const matchedEntry = matchingIdx >= 0 ? manifestModels![matchingIdx] : manifestModels?.[0];
     const resolved = resolveSingleModelEntry(matchedEntry, Math.max(0, matchingIdx), bindings, options.modelsConfig, true, manifestLimitsContextWindow);
     baseEntries = [{ manifestIndex: Math.max(0, matchingIdx), ...resolved }];
