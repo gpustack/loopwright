@@ -399,7 +399,8 @@ export class Cycle {
             'execution',
           );
           addedLines += Math.max(1, count);
-        } catch {
+        } catch (error) {
+          if (error instanceof ControllerFailure) throw error;
           addedLines += 1;
         }
       }

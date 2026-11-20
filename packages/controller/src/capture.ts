@@ -615,7 +615,7 @@ export function assertNoHostProtectedMutations(
   hostProtection: boolean | HostPathProtectionOptions,
   phase: ControllerDiagnostic['phase'] = 'execution',
 ): void {
-  const code: ControllerDiagnostic['code'] = phase === 'recovery' ? 'ARTIFACT_INVALID' : 'ARTIFACT_INVALID';
+  const code: ControllerDiagnostic['code'] = 'ARTIFACT_INVALID';
   for (const deletedPath of manifest.spec.deleted ?? []) {
     if (isHostProtectedPath(deletedPath, hostProtection)) {
       refuse(code, '', phase);
