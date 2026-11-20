@@ -5,7 +5,7 @@ import {
   type Infer, type MetricsMap, type MetricValue, type StructuredFinding,
 } from './contracts.js';
 import { DIAGNOSTIC_CODES, attempt, fail, type Diagnostic, type Result } from './diagnostics.js';
-import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifact } from './artifacts.js';
+import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifactInput } from './artifacts.js';
 import { claimSchema, evidenceSchema, type Evidence, type SubmittedCheck } from './evidence.js';
 import { unique } from './graph.js';
 import { deriveSubject, lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
@@ -142,7 +142,7 @@ export function verificationSchema(input: Json, path = ''): VerificationResult {
 }
 export function evaluateValidated(
   input: EvaluationInput,
-  artifacts: readonly ResolvedArtifact[],
+  artifacts: readonly ResolvedArtifactInput[],
   claimsPath: string,
   options?: OverlayLimitOptions,
 ): VerificationResult {
@@ -247,7 +247,7 @@ export function evaluateValidated(
 }
 export function evaluateAcceptance(
   input: unknown,
-  artifacts: readonly ResolvedArtifact[],
+  artifacts: readonly ResolvedArtifactInput[],
   options?: OverlayLimitOptions,
 ): Result<VerificationResult> {
   return attempt(() => {

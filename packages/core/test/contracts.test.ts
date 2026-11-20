@@ -175,14 +175,18 @@ test('OVERLAY_LIMITS and resolveOverlayLimits validate configurable overlay ceil
   assert.equal(OVERLAY_LIMITS.defaultMaxFiles, 128);
   assert.equal(OVERLAY_LIMITS.defaultMaxBytes, 4_194_304);
   assert.equal(OVERLAY_LIMITS.maxMaxFiles, 4_096);
-  assert.equal(OVERLAY_LIMITS.maxMaxBytes, 67_108_864);
+  assert.equal(OVERLAY_LIMITS.maxMaxBytes, 17_179_869_184);
+  assert.equal(LIMITS.inputBytes, 1_048_576);
+  assert.equal(LIMITS.artifactBytes, 67_108_864);
+  assert.equal(LIMITS.resolvedBytes, 134_217_728);
 
+  const fiveGiB = 5 * 1024 * 1024 * 1024;
   assert.deepEqual(value(resolveOverlayLimits()), { maxFiles: 128, maxBytes: 4_194_304 });
   assert.deepEqual(value(resolveOverlayLimits({})), { maxFiles: 128, maxBytes: 4_194_304 });
-  assert.deepEqual(value(resolveOverlayLimits({ maxFiles: 512, maxBytes: 16_777_216 })), { maxFiles: 512, maxBytes: 16_777_216 });
+  assert.deepEqual(value(resolveOverlayLimits({ maxFiles: 512, maxBytes: fiveGiB })), { maxFiles: 512, maxBytes: fiveGiB });
   assert.deepEqual(
-    value(resolveOverlayLimits(Object.assign(Object.create(null), { maxFiles: 4_096, maxBytes: 67_108_864 }))),
-    { maxFiles: 4_096, maxBytes: 67_108_864 },
+    value(resolveOverlayLimits(Object.assign(Object.create(null), { maxFiles: 4_096, maxBytes: 17_179_869_184 }))),
+    { maxFiles: 4_096, maxBytes: 17_179_869_184 },
   );
 
   for (const invalid of [
@@ -191,7 +195,7 @@ test('OVERLAY_LIMITS and resolveOverlayLimits validate configurable overlay ceil
     { maxFiles: 128.5 },
     { maxFiles: NaN },
     { maxBytes: 512 },
-    { maxBytes: 67_108_865 },
+    { maxBytes: 17_179_869_185 },
     { maxBytes: 4_194_304.5 },
   ]) {
     assert.equal(code(resolveOverlayLimits(invalid)), 'VALUE_RANGE', JSON.stringify(invalid));
@@ -208,9 +212,9 @@ test('TaskContract.spec.budgets.overlay is optional, omitted when unset, and bou
   assert.equal(Object.hasOwn(baseLock.spec.contract.spec.budgets, 'overlay'), false);
 
   const widened = contract();
-  Object.assign(widened.spec.budgets, { overlay: { maxFiles: 512, maxBytes: 16_777_216 } });
+  Object.assign(widened.spec.budgets, { overlay: { maxFiles: 512, maxBytes: 17_179_869_184 } });
   const widenedLock = value(admitTask(widened, { admissionId: 'admission-1', runId: 'run-1' }));
-  assert.deepEqual({ ...widenedLock.spec.contract.spec.budgets.overlay }, { maxFiles: 512, maxBytes: 16_777_216 });
+  assert.deepEqual({ ...widenedLock.spec.contract.spec.budgets.overlay }, { maxFiles: 512, maxBytes: 17_179_869_184 });
   assert.notEqual(widenedLock.spec.contractHash.hex, baseLock.spec.contractHash.hex);
 
   for (const badOverlay of [
@@ -218,7 +222,7 @@ test('TaskContract.spec.budgets.overlay is optional, omitted when unset, and bou
     { maxFiles: 4_097, maxBytes: 16_777_216 },
     { maxFiles: 512.5, maxBytes: 16_777_216 },
     { maxFiles: 512, maxBytes: 512 },
-    { maxFiles: 512, maxBytes: 67_108_865 },
+    { maxFiles: 512, maxBytes: 17_179_869_185 },
   ]) {
     const bad = contract();
     Object.assign(bad.spec.budgets, { overlay: badOverlay });

@@ -9,8 +9,9 @@ export {
 } from './contracts.js';
 export { admitTask, identifyManifest, bindSubject, type TaskLock, type Subject } from './identity.js';
 export {
-  digestArtifact, resolveInventory,
-  type ArtifactManifest, type ArtifactRefOptions, type ArtifactBytes, type BaseTreeAnchor, type ResolvedArtifact,
+  digestArtifact, digestArtifactFromMetadata, resolveInventory,
+  type ArtifactManifest, type ArtifactMetadataInput, type ArtifactRefOptions, type ArtifactBytes,
+  type BaseTreeAnchor, type ResolvedArtifact, type ResolvedArtifactInput, type VerifiedArtifactDescriptor,
 } from './artifacts.js';
 export { evaluateAcceptance, type VerificationResult, type EvaluatedCheck } from './acceptance.js';
 export type { Evidence, SubmittedCheck } from './evidence.js';
