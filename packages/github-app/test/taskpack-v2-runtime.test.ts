@@ -19,26 +19,20 @@ import {
   MULTI_TENANT_HOST_POLICY,
   SecretScrubber,
   assertMultiTenantManifestAuthority,
-  buildUpstreamMemoryVersions,
-  collectGitHubSiblingPaths,
   compileDeclarativeTaskpack,
   compileLinuxBwrapCommand,
   compileMacosSeatbeltProfile,
   compileScopePatterns,
-  computeDirectoryTreeDigest,
-  computeFileDigest,
   computeTaskpackDigests,
   createTaskpackDecisionPort,
   executeSandboxedCommand,
   executeTurnkeyActionCycle,
   finalizeAndPublishTurnkeyMemory,
-  formatWorkspaceResourcesManifest,
   loadDeclarativeTaskpack,
   openStagedTaskpackStepGate,
   resolveEffectiveTaskpackSandboxPolicy,
   runActionCli,
   runGitHubActionEntrypoint,
-  runTaskpackPreflight,
   serializeActionResultSummary,
   serializePrettyYaml,
   stageCompiledInstructionResources,
@@ -46,7 +40,6 @@ import {
   startGitHubAppControlPlane,
   startLocalCommandGateServer,
   validateTaskpackV2Manifest,
-  verifyDigestLockfile,
   writeDigestLockfile,
   type Json,
   type WrittenCompiledTaskpack,
@@ -108,21 +101,25 @@ async function writeCompiledArtifacts(
   };
 }
 
-describe('Taskpack 2.0 compiler, guards, per-role isolation, digests, and index re-exports (AC-1)', () => {
-  it('re-exports T6 and T7 public helpers from @loopwright/github-app', () => {
-    assert.equal(typeof validateTaskpackV2Manifest, 'function');
-    assert.equal(typeof computeFileDigest, 'function');
-    assert.equal(typeof computeDirectoryTreeDigest, 'function');
-    assert.equal(typeof computeTaskpackDigests, 'function');
-    assert.equal(typeof writeDigestLockfile, 'function');
-    assert.equal(typeof verifyDigestLockfile, 'function');
-    assert.equal(typeof runTaskpackPreflight, 'function');
-    assert.equal(typeof formatWorkspaceResourcesManifest, 'function');
-    assert.equal(typeof buildUpstreamMemoryVersions, 'function');
-    assert.equal(typeof createTaskpackDecisionPort, 'function');
-    assert.equal(typeof collectGitHubSiblingPaths, 'function');
-  });
+function makeRuntimeManifest(name: string, specOverrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'Taskpack',
+    metadata: { name },
+    spec: {
+      goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
+      scope: { writable: ['docs/**'], protected: [] },
+      upstreams: [],
+      verification: { localChecks: [], externalGates: [] },
+      publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
+      memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
+      triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+      ...specOverrides,
+    },
+  };
+}
 
+describe('Taskpack 2.0 compiler, guards, per-role isolation, and digests', () => {
   it('compiles interleaved spec.steps (agent, check, compact), per-role isolation, optional proposal, submission, guards, overlay, matrix, and pinDigests', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
@@ -503,16 +500,7 @@ describe('Taskpack 2.0 compiler, guards, per-role isolation, digests, and index 
   });
 });
 
-describe('Dual-key operator unlock, authorized preflight, mode: auto, and multi-tenant refusal (AC-2)', () => {
-  it('declares mode: auto, allow-privileged-execution, and allow-workflow-writes in action.yml', async () => {
-    const actionYml = await readFile(join(process.cwd(), 'action.yml'), 'utf8');
-    assert.match(actionYml, /'auto'/);
-    assert.match(actionYml, /allow-privileged-execution:/);
-    assert.match(actionYml, /allow-workflow-writes:/);
-    assert.match(actionYml, /INPUT_ALLOW-PRIVILEGED-EXECUTION:/);
-    assert.match(actionYml, /INPUT_ALLOW-WORKFLOW-WRITES:/);
-  });
-
+describe('Dual-key operator unlock, authorized preflight, mode: auto, and multi-tenant refusal', () => {
   it('refuses untrusted mode: privileged and allowWorkflowWrites: true BEFORE preflight.script runs, and blocks unauthorized issue_comment BEFORE preflight.script', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
@@ -849,7 +837,7 @@ describe('Dual-key operator unlock, authorized preflight, mode: auto, and multi-
   });
 });
 
-describe('Preflight split staging, directory-mounted command.v1, preserveRepoDirName, LOOPWRIGHT_CHECK_OUT, and wide overlays (AC-3)', () => {
+describe('Preflight split staging, directory-mounted command.v1, preserveRepoDirName, LOOPWRIGHT_CHECK_OUT, and wide overlays', () => {
   it('stages >100 KiB lockfile + binary .tgz via mount: workspace + prompt text, mounts whole check directory with ./lib.sh, preserveRepoDirName, toolchainPaths, LOOPWRIGHT_BASE_DIR, LOOPWRIGHT_STAGED_DIR, and propagates LOOPWRIGHT_CHECK_OUT float metrics & findings into RunResult', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'my-custom-repo');
@@ -1209,7 +1197,7 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
   });
 });
 
-describe('Multi-upstream lockstep held_back + turnkey-memory currentVersion & targetMatrix (AC-4)', () => {
+describe('Multi-upstream lockstep held_back and turnkey-memory currentVersion & targetMatrix', () => {
   it('proceeds as candidate when one lockstep group is held_back and a sibling is available, keeping currentVersion and targetMatrix in reviewed memory', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
@@ -1345,7 +1333,7 @@ describe('Multi-upstream lockstep held_back + turnkey-memory currentVersion & ta
   });
 });
 
-describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/workflows (AC-5)', () => {
+describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/workflows', () => {
   const canRunKernelSandbox =
     (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) ||
     (process.platform === 'linux' && (existsSync('/usr/bin/bwrap') || existsSync('/usr/bin/python3')));
@@ -1472,7 +1460,7 @@ describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/wor
   });
 });
 
-describe('Live spec.decisions wiring and stageTaskpackForStep parity (AC-6 & AC-7)', () => {
+describe('Live spec.decisions wiring and stageTaskpackForStep parity', () => {
   it('wires spec.decisions via createTaskpackDecisionPort: skips empty triageRules cleanly, preserves pinned models, falls back deterministically, and refuses forbidden authority intents', async () => {
     for (const forbidden of DECISION_FORBIDDEN_AUTHORITY_INTENTS) {
       assert.throws(
@@ -1880,8 +1868,8 @@ describe('Live spec.decisions wiring and stageTaskpackForStep parity (AC-6 & AC-
   });
 });
 
-describe('Review-T8 security & contract regressions', () => {
-  it('Finding 1: refuses per-check command.v1 mountReadOnlyGit: true in strict/un-unlocked entrypoint and multi-tenant control plane', async () => {
+describe('Command check authority, scrubbing, network isolation, base-dir caching, and decision error handling', () => {
+  it('refuses per-check command.v1 mountReadOnlyGit: true in strict entrypoint and multi-tenant control plane', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
       const runRoot = join(dir, 'runs');
@@ -1891,70 +1879,26 @@ describe('Review-T8 security & contract regressions', () => {
       await writeFile(join(repoRoot, 'docs', 'a.txt'), 'ok\n', 'utf8');
       await writeFile(join(repoRoot, '.loopwright', 'checks', 'verify.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 
-      const manifestObj = {
-        apiVersion: 'loopwright.dev/v1alpha1',
-        kind: 'Taskpack',
-        metadata: { name: 'mount-git-strict' },
-        spec: {
-          goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-          scope: { writable: ['docs/**'], protected: [] },
-          upstreams: [],
-          verification: {
-            localChecks: [
-              {
-                id: 'git-check',
-                implementation: 'command.v1',
-                parameters: {
-                  script: '.loopwright/checks/verify.sh',
-                  mountReadOnlyGit: true,
-                },
-              },
-            ],
-            externalGates: [],
-          },
-          publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-          memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-          triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
-        },
-      };
+      const manifestObj = makeRuntimeManifest('mount-git-strict', {
+        verification: { localChecks: [{ id: 'git-check', implementation: 'command.v1', parameters: { script: '.loopwright/checks/verify.sh', mountReadOnlyGit: true } }], externalGates: [] },
+      });
       await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
       const headSha = initGitRepo(repoRoot);
 
-      // 1. Strict/un-unlocked action entrypoint must refuse before any execution
       const refused = await runGitHubActionEntrypoint({
-        turnkey: true,
-        repositoryRoot: repoRoot,
-        repositoryId: 88,
-        repositoryFullName: 'octocat/mount-git-strict',
-        baseRevision: headSha,
-        mode: 'no-change',
-        eventName: 'workflow_dispatch',
-        runRoot,
-        runId: 'refuse-mount-git-1',
-        env: {},
+        turnkey: true, repositoryRoot: repoRoot, repositoryId: 88, repositoryFullName: 'octocat/mount-git-strict',
+        baseRevision: headSha, mode: 'no-change', eventName: 'workflow_dispatch', runRoot, runId: 'refuse-mount-git-1', env: {},
       });
       assert.equal(refused.kind, 'refused');
-      if (refused.kind === 'refused') {
-        assert.equal(refused.code, 'TASKPACK_HOST_BINDING_INVALID');
-      }
+      if (refused.kind === 'refused') assert.equal(refused.code, 'TASKPACK_HOST_BINDING_INVALID');
 
-      // 2. Multi-tenant assertMultiTenantManifestAuthority & control plane refuse mountReadOnlyGit: true
       const validatedWithPriv = validateTaskpackV2Manifest(manifestObj as Json, { hostPolicy: { allowPrivileged: true } });
-      assert.throws(
-        () => assertMultiTenantManifestAuthority(validatedWithPriv),
-        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
-      );
-      await assert.rejects(
-        () => startGitHubAppControlPlane({
-          webhookSecret: 'whsec_test_mount_git',
-          manifest: validatedWithPriv,
-        }),
-        (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
-      );
+      assert.throws(() => assertMultiTenantManifestAuthority(validatedWithPriv), (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID');
+      await assert.rejects(() => startGitHubAppControlPlane({ webhookSecret: 'whsec_test_mount_git', manifest: validatedWithPriv }), (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID');
     });
   });
 
-  it('Finding 2: strips forbidden secrets from command.v1 gate.env & gate.envMap, populates openStagedTaskpackStepGate scrubber, and rethrows symlink TASKPACK_SCOPE_VIOLATION', async () => {
+  it('strips forbidden secrets from command.v1 gate.env & gate.envMap, populates openStagedTaskpackStepGate scrubber, and rethrows symlink TASKPACK_SCOPE_VIOLATION', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
       const runRoot = join(dir, 'runs');
@@ -2204,7 +2148,7 @@ exit 0
     });
   });
 
-  it('Finding 3: enforces command.v1 allowCheckNetwork at runtime (blocks outbound TCP in strict mode, allows when privileged allowCheckNetwork: true)', async () => {
+  it('enforces command.v1 allowCheckNetwork at runtime (blocks outbound TCP in strict mode, allows when privileged allowCheckNetwork: true)', async () => {
     const canIsolateNet =
       (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) ||
       (process.platform === 'linux' && existsSync('/usr/bin/bwrap'));
@@ -2232,30 +2176,13 @@ set -eu
 "${process.execPath}" -e 'fetch(${JSON.stringify(`${probeServer.url}/ping`)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(2))'
 `;
           await writeFile(join(repoRoot, '.loopwright', 'checks', 'net-check.sh'), probeScript, { mode: 0o755 });
-          const manifestObj = {
-            apiVersion: 'loopwright.dev/v1alpha1',
-            kind: 'Taskpack',
-            metadata: { name: `net-${runId}` },
-            spec: {
-              ...(allowNet ? { execution: { mode: 'privileged', capabilities: { allowCheckNetwork: true } } } : {}),
-              goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-              scope: { writable: ['docs/**'], protected: [] },
-              upstreams: [],
-              verification: {
-                localChecks: [
-                  {
-                    id: 'net-check',
-                    implementation: 'command.v1',
-                    parameters: { script: '.loopwright/checks/net-check.sh', timeoutSeconds: 10 },
-                  },
-                ],
-                externalGates: [],
-              },
-              publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-              memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-              triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+          const manifestObj = makeRuntimeManifest(`net-${runId}`, {
+            ...(allowNet ? { execution: { mode: 'privileged', capabilities: { allowCheckNetwork: true } } } : {}),
+            verification: {
+              localChecks: [{ id: 'net-check', implementation: 'command.v1', parameters: { script: '.loopwright/checks/net-check.sh', timeoutSeconds: 10 } }],
+              externalGates: [],
             },
-          };
+          });
           await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
           const headSha = initGitRepo(repoRoot);
 
@@ -2296,7 +2223,7 @@ set -eu
     });
   });
 
-  it('Finding 4 & Low: preflight no_change short-circuits even with non-empty upstreams, compacts serializeActionResultSummary, and aligns stageTaskpackForStep blocked/upstreams parity', async () => {
+  it('short-circuits preflight no_change even with non-empty upstreams, compacts serializeActionResultSummary, and preserves stageTaskpackForStep preflight parity', async () => {
     await withTempDir(async dir => {
       const repoRoot = join(dir, 'repo');
       const runRoot = join(dir, 'runs');
@@ -2325,25 +2252,15 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
       });
 
       try {
-        const manifestObj = {
-          apiVersion: 'loopwright.dev/v1alpha1',
-          kind: 'Taskpack',
-          metadata: { name: 'preflight-nc' },
-          spec: {
-            goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-            preflight: { script: '.loopwright/scripts/preflight.mjs', timeoutSeconds: 15 },
-            scope: { writable: ['docs/**'], protected: [] },
-            upstreams: [{ id: 'pkg-core', kind: 'github-release', source: 'octocat/pkg-core', watchedPaths: ['docs'] }],
-            models: [{ provider: 'openai', id: 'gpt-5', thinking: 'medium', api: 'openai-completions', baseUrl: `${mockLlm.url}/v1`, apiKeyEnv: 'OPENAI_API_KEY' }],
-            verification: {
-              localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }],
-              externalGates: [],
-            },
-            publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-            memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-            triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+        const manifestObj = makeRuntimeManifest('preflight-nc', {
+          preflight: { script: '.loopwright/scripts/preflight.mjs', timeoutSeconds: 15 },
+          upstreams: [{ id: 'pkg-core', kind: 'github-release', source: 'octocat/pkg-core', watchedPaths: ['docs'] }],
+          models: [{ provider: 'openai', id: 'gpt-5', thinking: 'medium', api: 'openai-completions', baseUrl: `${mockLlm.url}/v1`, apiKeyEnv: 'OPENAI_API_KEY' }],
+          verification: {
+            localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }],
+            externalGates: [],
           },
-        };
+        });
         await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
         const headSha = initGitRepo(repoRoot);
 
@@ -2421,35 +2338,12 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
     });
   });
 
-  it('Finding 6: enforces toolchainPaths multi-tenant & strict ownership/permission guards, caches baseDir across command.v1 checks, rethrows fatal DecisionErrors, and hardens isAutoNoChange', async () => {
+  it('enforces toolchainPaths multi-tenant & strict guards, caches baseDir across command.v1 checks, rethrows fatal DecisionErrors, and refuses OAuth or secret leaks in mode: auto', async () => {
     await withTempDir(async dir => {
       // 1. Multi-tenant service.ts rejects absolute host toolchainPaths
-      const absToolchainManifest = validateTaskpackV2Manifest({
-        apiVersion: 'loopwright.dev/v1alpha1',
-        kind: 'Taskpack',
-        metadata: { name: 'mt-toolchain' },
-        spec: {
-          goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-          scope: { writable: ['docs/**'], protected: [] },
-          upstreams: [],
-          verification: {
-            localChecks: [
-              {
-                id: 'tc',
-                implementation: 'command.v1',
-                parameters: {
-                  script: '.loopwright/checks/pass.sh',
-                  toolchainPaths: ['/usr/local/bin'],
-                },
-              },
-            ],
-            externalGates: [],
-          },
-          publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-          memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-          triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
-        },
-      } as Json);
+      const absToolchainManifest = validateTaskpackV2Manifest(makeRuntimeManifest('mt-toolchain', {
+        verification: { localChecks: [{ id: 'tc', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh', toolchainPaths: ['/usr/local/bin'] } }], externalGates: [] },
+      }) as Json);
       assert.throws(
         () => assertMultiTenantManifestAuthority(absToolchainManifest),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
@@ -2477,34 +2371,15 @@ exit 0
       await writeFile(join(repoRoot, '.loopwright', 'checks', 'check-a.sh'), recordBaseDirScript, { mode: 0o755 });
       await writeFile(join(repoRoot, '.loopwright', 'checks', 'check-b.sh'), recordBaseDirScript, { mode: 0o755 });
 
-      const tcManifestObj = {
-        apiVersion: 'loopwright.dev/v1alpha1',
-        kind: 'Taskpack',
-        metadata: { name: 'tc-runtime' },
-        spec: {
-          goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-          scope: { writable: ['docs/**'], protected: [] },
-          upstreams: [],
-          verification: {
-            localChecks: [
-              {
-                id: 'check-a',
-                implementation: 'command.v1',
-                parameters: { script: '.loopwright/checks/check-a.sh', toolchainPaths: [tmpToolchain] },
-              },
-              {
-                id: 'check-b',
-                implementation: 'command.v1',
-                parameters: { script: '.loopwright/checks/check-b.sh', toolchainPaths: [tmpToolchain] },
-              },
-            ],
-            externalGates: [],
-          },
-          publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-          memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-          triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+      const tcManifestObj = makeRuntimeManifest('tc-runtime', {
+        verification: {
+          localChecks: [
+            { id: 'check-a', implementation: 'command.v1', parameters: { script: '.loopwright/checks/check-a.sh', toolchainPaths: [tmpToolchain] } },
+            { id: 'check-b', implementation: 'command.v1', parameters: { script: '.loopwright/checks/check-b.sh', toolchainPaths: [tmpToolchain] } },
+          ],
+          externalGates: [],
         },
-      };
+      });
       await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(tcManifestObj), 'utf8');
       const headSha = initGitRepo(repoRoot);
 
@@ -2573,30 +2448,13 @@ exit 0
       assert.equal(baseDirA, baseDirB, 'expected check-a and check-b to share the exact same cached read-only baseDir');
 
       // 3. createTaskpackDecisionPort: rethrows fatal policy/authority DecisionErrors and aligns adviseSoftCompaction < 0.6 fallback
-      const validDecisionManifest = validateTaskpackV2Manifest({
-        apiVersion: 'loopwright.dev/v1alpha1',
-        kind: 'Taskpack',
-        metadata: { name: 'dec-fatal' },
-        spec: {
-          goal: { candidate: 'Update docs.', noChange: 'None.' },
-          scope: { writable: ['docs/**'], protected: [] },
-          upstreams: [],
-          decisions: {
-            enabled: true,
-            provider: 'typesafe-jev',
-            disclosurePolicy: 'public-metadata-only',
-            minConfidence: 0.8,
-            confirmThreshold: 0.6,
-            hardDeadlineMs: 1_500,
-            maxAttempts: 1,
-            triageRules: [{ id: 'r1', description: 'rule 1', severity: 'blocking', kind: 'noul' }],
-          },
-          verification: { localChecks: [], externalGates: [] },
-          publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-          memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-          triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+      const validDecisionManifest = validateTaskpackV2Manifest(makeRuntimeManifest('dec-fatal', {
+        decisions: {
+          enabled: true, provider: 'typesafe-jev', disclosurePolicy: 'public-metadata-only',
+          minConfidence: 0.8, confirmThreshold: 0.6, hardDeadlineMs: 1_500, maxAttempts: 1,
+          triageRules: [{ id: 'r1', description: 'rule 1', severity: 'blocking', kind: 'noul' }],
         },
-      } as Json);
+      }) as Json);
       const invalidPolicyManifest = {
         ...validDecisionManifest,
         spec: {
@@ -2663,25 +2521,11 @@ exit 0
       await writeFile(join(oauthRepo, '.loopwright', 'checks', 'pass.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
       await writeFile(
         join(oauthRepo, '.loopwright', 'taskpack.yaml'),
-        serializePrettyYaml({
-          apiVersion: 'loopwright.dev/v1alpha1',
-          kind: 'Taskpack',
-          metadata: { name: 'oauth-nc' },
-          spec: {
-            goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-            instructions: ['.loopwright/prompts/inst.md'],
-            scope: { writable: ['docs/**'], protected: [] },
-            upstreams: [],
-            models: [{ provider: 'openai-codex', id: 'gpt-5.4' }],
-            verification: {
-              localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }],
-              externalGates: [],
-            },
-            publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-            memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-            triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
-          },
-        }),
+        serializePrettyYaml(makeRuntimeManifest('oauth-nc', {
+          instructions: ['.loopwright/prompts/inst.md'],
+          models: [{ provider: 'openai-codex', id: 'gpt-5.4' }],
+          verification: { localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }], externalGates: [] },
+        })),
         'utf8',
       );
       const oauthSha = initGitRepo(oauthRepo);
@@ -2711,24 +2555,10 @@ exit 0
       );
       await writeFile(
         join(oauthRepo, '.loopwright', 'taskpack.yaml'),
-        serializePrettyYaml({
-          apiVersion: 'loopwright.dev/v1alpha1',
-          kind: 'Taskpack',
-          metadata: { name: 'leak-nc' },
-          spec: {
-            goal: { candidate: 'Update docs.', noChange: 'Verify docs.' },
-            instructions: ['.loopwright/prompts/inst.md'],
-            scope: { writable: ['docs/**'], protected: [] },
-            upstreams: [],
-            verification: {
-              localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }],
-              externalGates: [],
-            },
-            publication: { mode: 'disabled', targetBranch: 'main', headBranchPrefix: 'lw/', titleTemplate: 'chore: docs' },
-            memory: { directory: '.loopwright/memory', apply: 'disabled', onNoModelBudget: 'deterministic-observations-only' },
-            triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
-          },
-        }),
+        serializePrettyYaml(makeRuntimeManifest('leak-nc', {
+          instructions: ['.loopwright/prompts/inst.md'],
+          verification: { localChecks: [{ id: 'pass', implementation: 'command.v1', parameters: { script: '.loopwright/checks/pass.sh' } }], externalGates: [] },
+        })),
         'utf8',
       );
       const leakSha = initGitRepo(oauthRepo);

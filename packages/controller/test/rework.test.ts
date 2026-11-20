@@ -853,72 +853,34 @@ test('controller.ts: full rework loop with unchanged candidateDigest, crash reco
   }
 });
 
-test('step.ts parity: 5-step rework pipeline with unchanged candidateDigest + mid-gate crash + reconcileCycle() + per-role resourceIds & allowedMcpServers', async () => {
+test('step.ts parity: 5-step rework pipeline with unchanged candidateDigest and per-role resourceIds & allowedMcpServers', async () => {
   const f = await configurationFixture();
   let gateCalls = 0;
-  let crashNextGate = false;
   const gateSecret = 'STEP_REWORK_GATE_SECRET_998877665544';
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     void (async () => {
       gateCalls++;
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
-      if (crashNextGate) {
-        res.destroy();
-        return;
-      }
       const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
       const verdict = {
-        version: 1,
-        kind: 'gate_verdict',
-        storeId: parsed.storeId,
-        runId: parsed.runId,
-        lockHash: parsed.lockHash,
-        operationId: parsed.operationId,
-        dispatchId: parsed.dispatchId,
-        dispatchGeneration: parsed.dispatchGeneration,
-        gateId: parsed.gateId,
-        checkId: parsed.checkId,
-        candidateDigest: parsed.candidateDigest,
-        status: 'approved',
-        reason: null,
-        expiresAtMs: String(Date.now() + 60_000),
+        version: 1, kind: 'gate_verdict', storeId: parsed.storeId, runId: parsed.runId, lockHash: parsed.lockHash,
+        operationId: parsed.operationId, dispatchId: parsed.dispatchId, dispatchGeneration: parsed.dispatchGeneration,
+        gateId: parsed.gateId, checkId: parsed.checkId, candidateDigest: parsed.candidateDigest,
+        status: 'approved', reason: null, expiresAtMs: String(Date.now() + 60_000),
       };
       const body = Buffer.from(canonical(verdict), 'utf8');
-      res.writeHead(200, {
-        'content-type': 'application/json',
-        'x-loopwright-signature': signPayload(gateSecret, body),
-      });
+      res.writeHead(200, { 'content-type': 'application/json', 'x-loopwright-signature': signPayload(gateSecret, body) });
       res.end(body);
     })();
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()));
-  const addr = server.address() as { port: number };
-  const gateUrl = `http://127.0.0.1:${addr.port}/gate`;
+  const gateUrl = `http://127.0.0.1:${(server.address() as { port: number }).port}/gate`;
 
   try {
     const repository = join(f.root, 'repository');
     const runRoot = join(f.root, 'runs');
-    await mkdir(join(repository, 'packages'), { recursive: true, mode: 0o700 });
-    await writeFile(join(repository, 'packages', 'result.json'), JSON.stringify({ ok: false }), { mode: 0o600 });
-    const git = (args: string[]) =>
-      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-        cwd: repository,
-        env: {
-          PATH: '/usr/bin:/bin',
-          LANG: 'C',
-          LC_ALL: 'C',
-          GIT_CONFIG_NOSYSTEM: '1',
-          GIT_CONFIG_GLOBAL: '/dev/null',
-          HOME: '/nonexistent',
-          GIT_TERMINAL_PROMPT: '0',
-        },
-        encoding: 'utf8',
-      });
-    git(['init', '-q']);
-    git(['add', '.']);
-    git(['-c', 'user.name=Step Fixture', '-c', 'user.email=fixture@localhost.invalid', 'commit', '-qm', 'init']);
-    const rev = git(['rev-parse', 'HEAD']).trim();
+    const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: false }) });
 
     const resABytes = Buffer.from('Resource A only for implementer\n', 'utf8');
     const resBBytes = Buffer.from('Resource B only for planner\n', 'utf8');
@@ -938,21 +900,11 @@ test('step.ts parity: 5-step rework pipeline with unchanged candidateDigest + mi
       { name: 'GATE_SECRET', classification: 'credential', paths: ['/spec/credentials/0/template'] },
     ]);
     setFixture(f.registry, ['spec', 'gateEndpoints'], [
-      {
-        id: 'fast-gate',
-        url: gateUrl,
-        signingCredentialRef: 'gate-signer',
-        authCredentialRef: null,
-        timeoutMs: 1000,
-        maxPollMs: 2000,
-        pollInitialMs: 100,
-        pollMaxMs: 200,
-        jitter: 0,
-      },
+      { id: 'fast-gate', url: gateUrl, signingCredentialRef: 'gate-signer', authCredentialRef: null, timeoutMs: 1000, maxPollMs: 2000, pollInitialMs: 100, pollMaxMs: 200, jitter: 0 },
     ]);
     setFixture(f.registry, ['spec', 'roleProfiles'], [
-      { id: 'delegated-read', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
-      { id: 'delegated-write', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write', 'edit'], mcp: null },
+      { id: 'delegated-read', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'review-model', thinking: 'low' }, tools: ['read'], mcp: null },
+      { id: 'delegated-write', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'author-model', thinking: 'high' }, tools: ['read', 'write', 'edit'], mcp: null },
     ]);
     setFixture(f.registry, ['spec', 'handlers'], [
       { id: 'plan.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Plan work.', purpose: 'task' }, capabilities: ['pi'] },
@@ -974,10 +926,10 @@ test('step.ts parity: 5-step rework pipeline with unchanged candidateDigest + mi
       checks: [{ id: 'fast-check', allowedEvidenceLevels: ['external_service'] }],
     });
     setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
-      { id: 'planner', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'], resourceIds: ['res-b'] },
-      { id: 'implementer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write', 'edit'], resourceIds: ['res-a'] },
-      { id: 'documenter', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write'], resourceIds: [] },
-      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'], resourceIds: [] },
+      { id: 'planner', adapter: 'delegated', provider: 'delegated-provider', model: 'review-model', thinking: 'low', tools: ['read'], resourceIds: ['res-b'] },
+      { id: 'implementer', adapter: 'delegated', provider: 'delegated-provider', model: 'author-model', thinking: 'high', tools: ['read', 'write', 'edit'], resourceIds: ['res-a'] },
+      { id: 'documenter', adapter: 'delegated', provider: 'delegated-provider', model: 'author-model', thinking: 'high', tools: ['read', 'write'], resourceIds: [] },
+      { id: 'reviewer', adapter: 'delegated', provider: 'delegated-provider', model: 'review-model', thinking: 'low', tools: ['read'], resourceIds: [] },
     ]);
     setFixture(f.config, ['spec', 'profiles', 'roles'], [
       { roleId: 'planner', profileRef: 'delegated-read' },
@@ -1097,13 +1049,7 @@ test('step.ts parity: 5-step rework pipeline with unchanged candidateDigest + mi
     );
     assert.equal(docs1.stepId, 'docs');
 
-    // 7. Simulate crash mid-`fast-check` gate in Epoch 1 + `reconcileCycle()`!
-    // Submit `docs1` with normal gate first? Or simulate interrupted gate at verify.<gen>.0.pre!
-    // Let's submit docs1 normally through gate, OR simulate dispatch_uncertain gate in Epoch 1 and call reconcileCycle!
-    crashNextGate = true;
-    // Wait: a closed socket in Gate.#roundTrip settles as blocked GATE_TIMEOUT unless process crashes mid-dispatch!
-    // To simulate a real mid-flight crash at verifier_pre (dispatch_uncertain), we let docs1 finish, or test Gate normal run + reconcileCycle!
-    crashNextGate = false;
+    // 7. Gate re-runs in Epoch 1 despite unchanged candidateDigest
     const rev1 = assertStepYield(
       assertOk(await stepSubmit({ runRoot, runId, leaseToken: docs1.leaseToken, environment: envFn }), 'submit docs1'),
     );
@@ -1170,18 +1116,7 @@ test('step.ts parity: mid-POST gate crash in rework Epoch 1 reconciles cleanly v
   try {
     const repository = join(f.root, 'repository');
     const runRoot = join(f.root, 'runs');
-    await mkdir(join(repository, 'packages'), { recursive: true, mode: 0o700 });
-    await writeFile(join(repository, 'packages', 'result.json'), JSON.stringify({ ok: true }), { mode: 0o600 });
-    const git = (args: string[]) =>
-      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-        cwd: repository,
-        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
-        encoding: 'utf8',
-      });
-    git(['init', '-q']);
-    git(['add', '.']);
-    git(['-c', 'user.name=Step Fixture', '-c', 'user.email=fixture@localhost.invalid', 'commit', '-qm', 'init']);
-    const rev = git(['rev-parse', 'HEAD']).trim();
+    const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: true }) });
 
     f.environment.GATE_SECRET = gateSecret;
     const prevGateEnv = process.env.GATE_SECRET;
@@ -1199,8 +1134,8 @@ test('step.ts parity: mid-POST gate crash in rework Epoch 1 reconciles cleanly v
         { id: 'fast-gate', url: gateUrl, signingCredentialRef: 'gate-signer', authCredentialRef: null, timeoutMs: 1000, maxPollMs: 2000, pollInitialMs: 100, pollMaxMs: 200, jitter: 0 },
       ]);
       setFixture(f.registry, ['spec', 'roleProfiles'], [
-        { id: 'del-write', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
-        { id: 'del-read', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
+        { id: 'del-write', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'author-model', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
+        { id: 'del-read', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'review-model', thinking: 'low' }, tools: ['read'], mcp: null },
       ]);
       setFixture(f.registry, ['spec', 'handlers'], [
         { id: 'impl.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
@@ -1218,8 +1153,8 @@ test('step.ts parity: mid-POST gate crash in rework Epoch 1 reconciles cleanly v
         checks: [{ id: 'fast-check', allowedEvidenceLevels: ['external_service'] }],
       });
       setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
-        { id: 'impl', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write'] },
-        { id: 'rev', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
+        { id: 'impl', adapter: 'delegated', provider: 'delegated-provider', model: 'author-model', thinking: 'high', tools: ['read', 'write'] },
+        { id: 'rev', adapter: 'delegated', provider: 'delegated-provider', model: 'review-model', thinking: 'low', tools: ['read'] },
       ]);
       setFixture(f.config, ['spec', 'profiles', 'roles'], [
         { roleId: 'impl', profileRef: 'del-write' },
@@ -1507,53 +1442,70 @@ async function createGitRepo(directory: string, files: Readonly<Record<string, s
   return git(['rev-parse', 'HEAD']).trim();
 }
 
-test('Review-T4 #1 & #2: stepSubmit strips undefined optional finding fields, compacts StoredStepVerdict, and bounds observations for inspectRun while returning all >256 findings', async () => {
+async function setupDelegatedAuthorReviewFixture(options: {
+  readonly initialOk: boolean;
+  readonly maxAttempts: number;
+  readonly maxFormatRepairs?: number;
+  readonly onRework?: { readonly rejectTo: string; readonly maxReworks: number };
+}) {
   const f = await configurationFixture();
+  const repository = join(f.root, 'repository');
+  const runRoot = join(f.root, 'runs');
+  const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: options.initialOk }) });
+  const installed = await installedHandlerDigests();
+  setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+  setFixture(f.registry, ['spec', 'credentialBindings'], []);
+  setFixture(f.registry, ['spec', 'environmentBindings'], []);
+  setFixture(f.registry, ['spec', 'roleProfiles'], [
+    { id: 'del-author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'author-model', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
+    { id: 'del-review', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'delegated-provider', model: 'review-model', thinking: 'low' }, tools: ['read'], mcp: null },
+  ]);
+  setFixture(f.registry, ['spec', 'handlers'], [
+    { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
+    { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
+    { id: 'tests', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'tests', path: 'packages/result.json', required: ['ok'], equals: { ok: true } }, capabilities: ['inert_bytes', 'read_only'] },
+    ...f.registry.spec.handlers.filter(h => h.id === 'scope' || h.id === 'no-change'),
+  ]);
+  setFixture(f.config, ['spec', 'credentials'], []);
+  setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+  setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+  setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
+  setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+    { id: 'author', adapter: 'delegated', provider: 'delegated-provider', model: 'author-model', thinking: 'high', tools: ['read', 'write'] },
+    { id: 'reviewer', adapter: 'delegated', provider: 'delegated-provider', model: 'review-model', thinking: 'low', tools: ['read'] },
+  ]);
+  setFixture(f.config, ['spec', 'profiles', 'roles'], [
+    { roleId: 'author', profileRef: 'del-author' },
+    { roleId: 'reviewer', profileRef: 'del-review' },
+  ]);
+  setFixture(f.config, ['spec', 'controls', 'maxAttempts'], options.maxAttempts);
+  if (options.maxFormatRepairs !== undefined) {
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxFormatRepairs'], options.maxFormatRepairs);
+  }
+  setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], 0);
+  setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+    { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
+    { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'], ...(options.onRework ? { onRework: options.onRework } : {}) },
+    { id: 'verify', kind: 'check', uses: 'tests', roleId: null, dependsOn: ['review'] },
+  ]);
+  setFixture(f.config, ['spec', 'profiles', 'steps'], [
+    { stepId: 'author', handlerRef: 'author.h' },
+    { stepId: 'review', handlerRef: 'review.h' },
+    { stepId: 'verify', handlerRef: 'tests' },
+  ]);
+  f.input.untrustedRoots = [f.taskDirectory, repository];
+  await f.save();
+  const loaded = assertOk(await f.load(), 'load delegated author-review fixture');
+  return { f, repository, runRoot, loaded };
+}
+
+test('stepSubmit strips undefined optional finding fields, compacts StoredStepVerdict, and bounds observations for inspectRun while returning all >256 findings', async () => {
+  const { f, repository, runRoot, loaded } = await setupDelegatedAuthorReviewFixture({
+    initialOk: false,
+    maxAttempts: 10,
+    onRework: { rejectTo: 'author', maxReworks: 4 },
+  });
   try {
-    const repository = join(f.root, 'repository');
-    const runRoot = join(f.root, 'runs');
-    const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: false }) });
-    const installed = await installedHandlerDigests();
-    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
-    setFixture(f.registry, ['spec', 'credentialBindings'], []);
-    setFixture(f.registry, ['spec', 'environmentBindings'], []);
-    setFixture(f.registry, ['spec', 'roleProfiles'], [
-      { id: 'del-author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
-      { id: 'del-review', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
-    ]);
-    setFixture(f.registry, ['spec', 'handlers'], [
-      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
-      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
-      { id: 'tests', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'tests', path: 'packages/result.json', required: ['ok'], equals: { ok: true } }, capabilities: ['inert_bytes', 'read_only'] },
-      ...f.registry.spec.handlers.filter(h => h.id === 'scope' || h.id === 'no-change'),
-    ]);
-    setFixture(f.config, ['spec', 'credentials'], []);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
-    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
-      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write'] },
-      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'roles'], [
-      { roleId: 'author', profileRef: 'del-author' },
-      { roleId: 'reviewer', profileRef: 'del-review' },
-    ]);
-    setFixture(f.config, ['spec', 'controls', 'maxAttempts'], 10);
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], 0);
-    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
-      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
-      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'], onRework: { rejectTo: 'author', maxReworks: 4 } },
-      { id: 'verify', kind: 'check', uses: 'tests', roleId: null, dependsOn: ['review'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'steps'], [
-      { stepId: 'author', handlerRef: 'author.h' },
-      { stepId: 'review', handlerRef: 'review.h' },
-      { stepId: 'verify', handlerRef: 'tests' },
-    ]);
-    f.input.untrustedRoots = [f.taskDirectory, repository];
-    await f.save();
-    const loaded = assertOk(await f.load(), 'load large-verdict fixture');
 
     const makeLargeFindings = (epoch: number, count: number): StepVerdict['findings'] =>
       Array.from({ length: count }, (_, i) => ({
@@ -1619,54 +1571,13 @@ test('Review-T4 #1 & #2: stepSubmit strips undefined optional finding fields, co
   }
 });
 
-test('Review-T4 #3: strict StepVerdict vs Submission step binding refuses cross-schema outputs, resets stale failedRaw after verdict repair, and synthesizes StepVerdict on review stepSubmit({})', async () => {
-  const f = await configurationFixture();
+test('strict StepVerdict vs Submission step binding refuses cross-schema outputs, resets stale failedRaw after verdict repair, and synthesizes StepVerdict on review stepSubmit({})', async () => {
+  const { f, repository, runRoot, loaded } = await setupDelegatedAuthorReviewFixture({
+    initialOk: false,
+    maxAttempts: 6,
+    maxFormatRepairs: 2,
+  });
   try {
-    const repository = join(f.root, 'repository');
-    const runRoot = join(f.root, 'runs');
-    const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: false }) });
-    const installed = await installedHandlerDigests();
-    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
-    setFixture(f.registry, ['spec', 'credentialBindings'], []);
-    setFixture(f.registry, ['spec', 'environmentBindings'], []);
-    setFixture(f.registry, ['spec', 'roleProfiles'], [
-      { id: 'del-author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
-      { id: 'del-review', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
-    ]);
-    setFixture(f.registry, ['spec', 'handlers'], [
-      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
-      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
-      { id: 'tests', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'tests', path: 'packages/result.json', required: ['ok'], equals: { ok: true } }, capabilities: ['inert_bytes', 'read_only'] },
-      ...f.registry.spec.handlers.filter(h => h.id === 'scope' || h.id === 'no-change'),
-    ]);
-    setFixture(f.config, ['spec', 'credentials'], []);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
-    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
-      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write'] },
-      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'roles'], [
-      { roleId: 'author', profileRef: 'del-author' },
-      { roleId: 'reviewer', profileRef: 'del-review' },
-    ]);
-    setFixture(f.config, ['spec', 'controls', 'maxAttempts'], 6);
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxFormatRepairs'], 2);
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], 0);
-    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
-      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
-      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'] },
-      { id: 'verify', kind: 'check', uses: 'tests', roleId: null, dependsOn: ['review'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'steps'], [
-      { stepId: 'author', handlerRef: 'author.h' },
-      { stepId: 'review', handlerRef: 'review.h' },
-      { stepId: 'verify', handlerRef: 'tests' },
-    ]);
-    f.input.untrustedRoots = [f.taskDirectory, repository];
-    await f.save();
-    const loaded = assertOk(await f.load(), 'load schema-binding fixture');
 
     // A. Non-verdict task step emitting StepVerdict JSON refuses SUBMISSION_INVALID (triggers format repair for submission.v1!)
     //    AND review step emitting submission.v1 refuses SUBMISSION_INVALID (triggers verdictFormatPrompt!)
@@ -1766,54 +1677,13 @@ test('Review-T4 #3: strict StepVerdict vs Submission step binding refuses cross-
   }
 });
 
-test('Review-T4 #4: retainedPrimary and post-terminal.intent crash recovery preserve findings & stepVerdicts, and resumeCycleWithPorts refuses delegated format repair with upstream submission', async () => {
-  const f = await configurationFixture();
+test('retainedPrimary and post-terminal.intent crash recovery preserve findings & stepVerdicts, and resumeCycleWithPorts refuses delegated format repair with upstream submission', async () => {
+  const { f, repository, runRoot, loaded } = await setupDelegatedAuthorReviewFixture({
+    initialOk: true,
+    maxAttempts: 6,
+    maxFormatRepairs: 2,
+  });
   try {
-    const repository = join(f.root, 'repository');
-    const runRoot = join(f.root, 'runs');
-    const rev = await createGitRepo(repository, { 'packages/result.json': JSON.stringify({ ok: true }) });
-    const installed = await installedHandlerDigests();
-    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
-    setFixture(f.registry, ['spec', 'credentialBindings'], []);
-    setFixture(f.registry, ['spec', 'environmentBindings'], []);
-    setFixture(f.registry, ['spec', 'roleProfiles'], [
-      { id: 'del-author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write'], mcp: null },
-      { id: 'del-review', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
-    ]);
-    setFixture(f.registry, ['spec', 'handlers'], [
-      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
-      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
-      { id: 'tests', kind: 'check', implementation: 'json-artifact.v1', version: 1, digest: installed['json-artifact.v1'], parameters: { checkId: 'tests', path: 'packages/result.json', required: ['ok'], equals: { ok: true } }, capabilities: ['inert_bytes', 'read_only'] },
-      ...f.registry.spec.handlers.filter(h => h.id === 'scope' || h.id === 'no-change'),
-    ]);
-    setFixture(f.config, ['spec', 'credentials'], []);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
-    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
-    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
-      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write'] },
-      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'roles'], [
-      { roleId: 'author', profileRef: 'del-author' },
-      { roleId: 'reviewer', profileRef: 'del-review' },
-    ]);
-    setFixture(f.config, ['spec', 'controls', 'maxAttempts'], 6);
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxFormatRepairs'], 2);
-    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], 0);
-    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
-      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
-      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'] },
-      { id: 'verify', kind: 'check', uses: 'tests', roleId: null, dependsOn: ['review'] },
-    ]);
-    setFixture(f.config, ['spec', 'profiles', 'steps'], [
-      { stepId: 'author', handlerRef: 'author.h' },
-      { stepId: 'review', handlerRef: 'review.h' },
-      { stepId: 'verify', handlerRef: 'tests' },
-    ]);
-    f.input.untrustedRoots = [f.taskDirectory, repository];
-    await f.save();
-    const loaded = assertOk(await f.load(), 'load recovery findings fixture');
 
     // A. Crash right after terminal.intent (preserving controller-events.open as SIGKILL does), then reopen via resumeCycleWithPorts & post-terminal stepNext -> findings, stepVerdicts, and recovered observations preserved!
     const runCrash = 'run-crash-terminal-intent';
@@ -1905,7 +1775,7 @@ test('Review-T4 #4: retainedPrimary and post-terminal.intent crash recovery pres
   }
 });
 
-test('Review-T4 #5: kind: check step with onRework triggers rework with StepReworkContext and halts blocked at maxReworks in both controller.ts (Pi) and step.ts (delegated)', async () => {
+test('kind: check step with onRework triggers rework with StepReworkContext and halts blocked at maxReworks in both controller.ts (Pi) and step.ts (delegated)', async () => {
   const f = await configurationFixture();
   try {
     const repository = join(f.root, 'repository');
@@ -2017,7 +1887,7 @@ test('Review-T4 #5: kind: check step with onRework triggers rework with StepRewo
   }
 });
 
-test('Review-T4 #6a: adoptRoleCapture enforces allowWorkflowWrites on Pi runs, and readStepMeta refuses symlink/corrupt step-meta.json and ports.allowWorkflowWrites mismatch', async () => {
+test('adoptRoleCapture enforces allowWorkflowWrites on Pi runs, and readStepMeta refuses symlink/corrupt step-meta.json and ports.allowWorkflowWrites mismatch', async () => {
   const f = await configurationFixture();
   try {
     const repository = join(f.root, 'repository');
@@ -2130,7 +2000,7 @@ test('Review-T4 #6a: adoptRoleCapture enforces allowWorkflowWrites on Pi runs, a
   }
 });
 
-test('Review-T4 #6b: 2-step Pi run with budgets.overlay (>128 files / >32 KiB manifest) passes schedulingSnapshot on step 2', async () => {
+test('2-step Pi run with budgets.overlay (>128 files / >32 KiB manifest) passes schedulingSnapshot on step 2', async () => {
   const f = await configurationFixture();
   try {
     const repository = join(f.root, 'repository');

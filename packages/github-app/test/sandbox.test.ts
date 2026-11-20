@@ -794,7 +794,7 @@ spec:
   });
 });
 
-describe('Review-T8: sandbox networkMode preservation, bounded glob traversal, and Linux leaf-glob exact binds', () => {
+describe('Sandbox networkMode preservation, bounded glob traversal, and Linux leaf-glob exact binds', () => {
   it('preserves allowAgentNetwork -> allow-outbound when spec.sandbox omits networkMode', async () => {
     await withTempWorkspace(async workspaceRoot => {
       await mkdir(join(workspaceRoot, '.loopwright'), { recursive: true });
