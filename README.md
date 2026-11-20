@@ -44,10 +44,10 @@ Loopwright offers **two operating modes** sharing one verification kernel:
 
 ### Bootstrap or Migrate in One Prompt (`llms.txt`)
 
-No custom skill is required. Open any coding agent inside your repository (for example, to migrate an existing automatic synchronized workflow) and paste:
+No custom skill is required. Open any coding agent inside your repository (for example, to migrate an existing automatic synchronized workflow) and paste this prompt (guided by [Bootstrap Interview Reference](./docs/references/bootstrap-interview.md)):
 
 ```text
-Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Declarative Taskpack, Taskpack, and GitHub Action. Inspect this repository (including existing automatic synchronized workflows, scripts, version tables, and directory layout), confirm my upstream sources, writable/protected scope, verification checks, and PR settings with me, then generate .loopwright/taskpack.yaml and .github/workflows/loopwright.yml (apiVersion: loopwright.dev/v1alpha1) without hardcoding secrets.
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on operating mode, which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -> offline sandbox -> independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.
 ```
 
 ### Install the Laptop CLI

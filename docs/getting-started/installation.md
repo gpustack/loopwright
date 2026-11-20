@@ -108,13 +108,13 @@ No custom skill or plugin is required to author Loopwright YAML. Open your codin
 ### Taskpack prompt
 
 ```text
-Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Declarative Taskpack, Taskpack, and GitHub Action. Inspect this repository (including any existing automatic synchronized workflows, scripts, version tables, and directory layout), confirm my upstream sources, writable/protected paths, verification checks, and PR settings with me, then generate .loopwright/taskpack.yaml and .github/workflows/loopwright.yml (apiVersion: loopwright.dev/v1alpha1) without hardcoding secrets.
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -> offline sandbox -> independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.
 ```
 
 ### Controller prompt
 
 ```text
-Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Managed Controller, Task Contract, and Controller and Registry. Help me design an out-of-repo TrustedRegistry (registry.yaml) and SHA-256-pinned ControllerConfig (controller.yaml) for this repository, compute the local Loopwright handler and graph digests, and verify the plan with loopwright check.
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.
 ```
 
 ---

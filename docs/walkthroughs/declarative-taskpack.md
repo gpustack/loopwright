@@ -33,13 +33,13 @@ Declarative taskpack mode eliminates manual boilerplate while preserving every L
 
 ## Prompt bootstrap
 
-`loopwright init` only scaffolds low-level controller drafts; it does not inspect your repository. To initialize `.loopwright/taskpack.yaml` from scratch or migrate an existing automatic synchronized workflow, paste this prompt into your coding agent inside the target repository:
+`loopwright init` only scaffolds low-level controller drafts; it does not inspect your repository. To run an interview-first setup or migrate an existing automatic synchronized workflow, paste this prompt into your coding agent inside the target repository:
 
 ```text
-Read https://docs.gpustack.ai/loopwright/llms.txt and follow the Markdown links for Declarative Taskpack, Taskpack, and GitHub Action. Inspect this repository (especially existing automatic synchronized workflows, scripts, version manifests, and docs/config directories), ask me to confirm any ambiguous upstream sources, writable/protected scope, or checks, and generate .loopwright/taskpack.yaml plus .github/workflows/loopwright.yml using apiVersion: loopwright.dev/v1alpha1.
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -> offline sandbox -> independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.
 ```
 
-Through normal back-and-forth conversation, the agent reads the live Loopwright specification from `llms.txt`, maps your existing sync logic into `upstreams`, `scope`, `proposal`, and `verification`, and tells you which GitHub Secrets to configure.
+The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks, bounded preflight/verifier hooks, and workflows.
 
 ## Step 1: Author taskpack
 

@@ -203,6 +203,22 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.equal(validatedTaskpackRef.spec.memory.publishOnFailure, false);
   assert.equal(validatedTaskpackRef.spec.memory.skipCi, true);
 
+  // Verify embedded Taskpack YAML example in docs/references/bootstrap-interview.md validates against schema
+  const bootstrapRefDoc = readFileSync(join(REPO_ROOT, 'docs', 'references', 'bootstrap-interview.md'), 'utf8');
+  const bootstrapYamlMatch = bootstrapRefDoc.match(/```yaml\n([\s\S]*?)\n```/);
+  assert.ok(bootstrapYamlMatch?.[1], 'docs/references/bootstrap-interview.md must include a YAML Taskpack example');
+  const parsedBootstrapTaskpack = parseDocument(bootstrapYamlMatch[1], { version: '1.2', schema: 'core', uniqueKeys: true });
+  assert.equal(parsedBootstrapTaskpack.errors.length, 0, 'bootstrap-interview.md YAML must parse cleanly');
+  const validatedBootstrap = validateTaskpackManifest(parsedBootstrapTaskpack.toJS(), {
+    controlRoot: '.auto-sync',
+    manifestPath: '.auto-sync/charts.taskpack.yaml',
+  });
+  assert.equal(validatedBootstrap.metadata.name, 'charts-sync');
+  assert.deepEqual(validatedBootstrap.spec.scope.writable, ['charts']);
+  assert.deepEqual(validatedBootstrap.spec.scope.protected, ['.auto-sync']);
+  assert.equal(validatedBootstrap.spec.publication.headBranchPrefix, 'auto-sync-charts-');
+  assert.equal(validatedBootstrap.spec.memory.directory, '.auto-sync/memory/charts-sync');
+
   // 4. .claude/skills symlink
   const claudeSkillsPath = join(REPO_ROOT, '.claude', 'skills');
   assert.ok(existsSync(claudeSkillsPath), '.claude/skills must exist');
@@ -266,9 +282,15 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
   const llms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
   const llmsMatches = llms.match(/^-\s+\[[^\]]+\]\(\/docs\/[^)]+\):/gm);
   assert.equal(llmsMatches?.length, 13, 'llms.txt must list exactly 13 docs pages');
+  assert.match(llms, /\[Bootstrap Interview Reference\]\(\/references\/bootstrap-interview\.md\)/, 'llms.txt must link to Bootstrap Interview Reference');
   assert.ok(!llms.includes('/docs/development/'), 'llms.txt must not contain /docs/development/');
   assert.ok(!llms.includes('/docs/contribute/'), 'llms.txt must not contain /docs/contribute/');
   assert.ok(!llms.includes('/docs/adr/'), 'llms.txt must not contain /docs/adr/');
+  assert.ok(!llms.includes('/docs/references/'), 'llms.txt must not contain /docs/references/');
+  assert.ok(existsSync(join(publicDir, 'references', 'bootstrap-interview.md')), 'references/bootstrap-interview.md must exist');
+  const exportedBootstrapRef = readFileSync(join(publicDir, 'references', 'bootstrap-interview.md'), 'utf8');
+  assert.match(exportedBootstrapRef, /\(\.\.\/docs\/walkthroughs\/declarative-taskpack\/index\.md\)/, 'exported bootstrap-interview.md must rewrite doc links');
+  assert.ok(!exportedBootstrapRef.includes('](../walkthroughs/'), 'exported bootstrap-interview.md must not retain unrewritten ../<group>/ links');
 
   // Verify site-version.json content
   const version = JSON.parse(readFileSync(join(publicDir, 'site-version.json'), 'utf8')) as { version?: string };
@@ -308,20 +330,23 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
   assert.ok(contractsHtml.includes('<ul class="related-pages">'), 'task-contract/index.html must render <ul class="related-pages">');
   assert.ok(contractsHtml.includes('<section class="next-page">'), 'task-contract/index.html must render <section class="next-page">');
 
-  // Verify excluded Contribute and ADR pages do NOT exist in site/public/docs/
+  // Verify excluded Contribute, ADR, and static reference pages do NOT exist in site/public/docs/
   assert.ok(!existsSync(join(publicDir, 'docs', 'development')), 'docs/development must not exist in site/public');
   assert.ok(!existsSync(join(publicDir, 'docs', 'contribute')), 'docs/contribute must not exist in site/public');
   assert.ok(!existsSync(join(publicDir, 'docs', 'adr')), 'docs/adr must not exist in site/public');
+  assert.ok(!existsSync(join(publicDir, 'docs', 'references')), 'docs/references must not exist in site/public');
 
   // Verify subpath SITE_BASE_URL build and verification (GitHub Pages subpath deployment)
   const subpathBuild = spawnSync(process.execPath, [siteScript, 'build'], {
     encoding: 'utf8',
     timeout: 30000,
     cwd: REPO_ROOT,
-    env: { ...process.env, SITE_BASE_URL: 'https://docs.gpustack.ai/loopwright/' }
+    env: { ...process.env, SITE_BASE_URL: 'https://docs.gpustack.ai/loopwright/latest/' }
   });
   assert.equal(subpathBuild.status, 0, `subpath site.mjs build failed:\nstdout: ${subpathBuild.stdout}\nstderr: ${subpathBuild.stderr}`);
   assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 13 Markdown exports; 0 broken link\(s\)/);
+  const subpathLlms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
+  assert.match(subpathLlms, /\[Bootstrap Interview Reference\]\(\/loopwright\/latest\/references\/bootstrap-interview\.md\)/, 'subpath llms.txt must prefix relURL cleanly');
 
   // Restore default "/" build
   const restoreBuild = spawnSync(process.execPath, [siteScript, 'build'], {

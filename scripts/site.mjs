@@ -45,9 +45,49 @@ export function isSiteExcludedDoc(relFromDocs) {
     normalized === "development.md" ||
     normalized === "assets" ||
     normalized.startsWith("assets/") ||
+    normalized === "references" ||
+    normalized.startsWith("references/") ||
     normalized === "contribute" ||
     normalized.startsWith("contribute/")
   );
+}
+
+function rewriteReferenceDocLinks(text, docsPrefix) {
+  const lines = [];
+  let fence = "";
+  let comment = false;
+  const normalizedPrefix = docsPrefix.replace(/\/+$/, "");
+  for (const line of text.split("\n")) {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      const m = marker[1];
+      if (!fence) {
+        fence = m;
+      } else if (marker[0][0] === fence[0] && m.length >= fence.length) {
+        fence = "";
+      }
+    } else if (!fence) {
+      const stripped = line.trimStart();
+      if (comment) {
+        if (line.includes("-->")) {
+          comment = false;
+        }
+      } else if (stripped.startsWith("<!--")) {
+        if (!line.includes("-->")) {
+          comment = true;
+        }
+      } else {
+        const rewritten = line.replace(
+          /(!?\[[^\]\n]*\]\()(?:\.\.\/(?:docs\/)?([a-z0-9-]+\/[a-z0-9-]+)(?:\/index\.md|\.md)(#[^)\n]*)?)\)/g,
+          (_, prefix, docPath, fragment = "") => `${prefix}${normalizedPrefix}/${docPath}/index.md${fragment})`
+        );
+        lines.push(rewritten);
+        continue;
+      }
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
 }
 
 function withoutLinkUrls(text) {
@@ -228,6 +268,51 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
         }
       }
     }
+
+    const hasBootstrapRefLink = proseLinks(llmsContent).some(link => {
+      const normalizedTarget = stripBasePathFromRawPath(stripBasePrefix(link.target.trim()));
+      return normalizedTarget === "/references/bootstrap-interview.md";
+    });
+    if (!hasBootstrapRefLink) {
+      errors.push("llms.txt missing reference link to /references/bootstrap-interview.md");
+    }
+  }
+
+  const bootstrapRefSrc = path.join(docsDir, "references", "bootstrap-interview.md");
+  const bootstrapRefOut = path.join(publicDir, "references", "bootstrap-interview.md");
+  if (!fs.existsSync(bootstrapRefOut)) {
+    errors.push("site: missing references/bootstrap-interview.md");
+  } else {
+    const refContent = fs.readFileSync(bootstrapRefOut, "utf8");
+    if (fs.existsSync(bootstrapRefSrc)) {
+      const srcContent = fs.readFileSync(bootstrapRefSrc, "utf8");
+      if (withoutLinkUrls(srcContent) !== withoutLinkUrls(refContent)) {
+        errors.push("site: references/bootstrap-interview.md changed body or code blocks");
+      }
+    }
+    for (const link of proseLinks(refContent)) {
+      const target = stripBasePrefix(link.target);
+      if (/^(?:https?:\/\/|mailto:|javascript:)/i.test(target)) {
+        continue;
+      }
+      let [rawPath] = target.split("#");
+      try { rawPath = decodeURIComponent(rawPath); } catch { /* ignore */ }
+      rawPath = stripBasePathFromRawPath(rawPath);
+      let resolved;
+      if (!rawPath) {
+        resolved = bootstrapRefOut;
+      } else if (rawPath.startsWith("/")) {
+        resolved = path.join(publicDir, rawPath.replace(/^\//, ""));
+      } else {
+        resolved = path.resolve(path.dirname(bootstrapRefOut), rawPath);
+      }
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+        resolved = path.join(resolved, "index.md");
+      }
+      if (!resolved.startsWith(publicDir) || !fs.existsSync(resolved)) {
+        errors.push(`references/bootstrap-interview.md: missing markdown target ${link.target}`);
+      }
+    }
   }
 
   // 2. Verify site-version.json and index.json
@@ -291,6 +376,7 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
     path.join(publicDir, "docs", "development"),
     path.join(publicDir, "docs", "contribute"),
     path.join(publicDir, "docs", "adr"),
+    path.join(publicDir, "docs", "references"),
     ...excludedDocFiles.flatMap(relFromDocs => {
       const slug = relFromDocs.replace(/\.md$/, "");
       return [
@@ -451,6 +537,14 @@ export function buildSite(rootDir = process.cwd(), options = {}) {
     throw new Error(`Hugo build exited with code ${result.status}`);
   }
 
+  const refSource = path.join(root, "docs", "references", "bootstrap-interview.md");
+  if (fs.existsSync(refSource)) {
+    const refDestDir = path.join(destination, "references");
+    fs.mkdirSync(refDestDir, { recursive: true });
+    const rewrittenRef = rewriteReferenceDocLinks(fs.readFileSync(refSource, "utf8"), "../docs");
+    fs.writeFileSync(path.join(refDestDir, "bootstrap-interview.md"), rewrittenRef, "utf8");
+  }
+
   console.log("Verifying built site assets, markdown exports, and links...");
   const verifyResult = verifySite(root, { baseURL, publicDir: destination });
   if (!verifyResult.ok) {
@@ -545,6 +639,19 @@ export function syncGhPagesRoot(ghPagesDir) {
   const sourceLlms = fs.existsSync(latestLlms) ? latestLlms : fallbackLlms;
   if (fs.existsSync(sourceLlms)) {
     fs.copyFileSync(sourceLlms, path.join(root, "llms.txt"));
+  }
+
+  const latestRef = path.join(root, "latest", "references", "bootstrap-interview.md");
+  const fallbackVersionDir = latestRelease ?? (hasMain ? "main" : null);
+  const fallbackRef = fallbackVersionDir
+    ? path.join(root, fallbackVersionDir, "references", "bootstrap-interview.md")
+    : null;
+  const sourceRef = fs.existsSync(latestRef) ? latestRef : (fallbackRef && fs.existsSync(fallbackRef) ? fallbackRef : null);
+  if (sourceRef) {
+    const targetPrefix = fs.existsSync(latestRef) ? "../latest/docs" : `../${fallbackVersionDir}/docs`;
+    const rewrittenRef = rewriteReferenceDocLinks(fs.readFileSync(sourceRef, "utf8"), targetPrefix);
+    fs.mkdirSync(path.join(root, "references"), { recursive: true });
+    fs.writeFileSync(path.join(root, "references", "bootstrap-interview.md"), rewrittenRef, "utf8");
   }
 
   return { versions, latestVersion: latestRelease ?? (hasMain ? "main" : null) };
