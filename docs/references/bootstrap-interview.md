@@ -33,9 +33,9 @@ Confirm whether the repository needs Mode 1 (`.loopwright/taskpack.yaml` or `.au
 
 ### Modular domain decomposition
 
-Non-trivial repositories mix independent toolchains, release cadences, and ownership boundaries. Split automation into independent domains with mutually exclusive `scope.writable` directories instead of one monolith taskpack.
+Non-trivial repositories mix independent toolchains, release cadences, and ownership boundaries. Split automation into independent domains with mutually exclusive `scope.writable` `/**` directories instead of one monolith taskpack.
 
-Place multi-domain manifests directly under `.auto-sync/` as `.auto-sync/<domain>.taskpack.yaml`. That keeps `.auto-sync` as the shared control root, protects all `.auto-sync/**` assets, and permits `.auto-sync/memory/<domain>-sync`.
+Place multi-domain manifests directly under `.auto-sync/` as `.auto-sync/<domain>.taskpack.yaml`. That keeps `.auto-sync` as the shared control root, protects `.auto-sync/**` assets, and permits `.auto-sync/memory/<domain>-sync`.
 
 | Repository shape | Recommended layout | Example domains |
 | --- | --- | --- |
@@ -50,64 +50,63 @@ Ask one question at a time to confirm:
 
 ## Stage 2: Upstream policy
 
-Map each automated domain to explicit `spec.upstreams[]` entries and version promotion rules.
+Map each automated domain to explicit `spec.upstreams[]` entries, `spec.upstreamGroups[]`, and version promotion rules.
 
 ### Upstream source kinds
 
 | Upstream kind | Use case | Guardrail |
 | --- | --- | --- |
 | `github-release` | GitHub repositories publishing Releases | Set `allowPrerelease: false`; avoids archive or branch git tags |
-| `git-tag` | Repositories without Releases | Filter non-SemVer tags deterministically in preflight |
-| `git-commit` | Path-scoped source synchronization | Set `watchedPaths`; filter path noise via preflight `upstream-records` |
-| `http-json` | JSON catalogs, OCI registries, PyPI, npm | Parse deterministically on host preflight |
+| `git-tag` | Repositories without Releases | Filter non-SemVer tags deterministically in `spec.preflight` |
+| `git-commit` | Path-scoped source synchronization | Set `watchedPaths`; Taskpack 2.0 wires `watchedPaths` into intake summaries and prompts |
+| `http-json` | JSON catalogs, OCI registries, PyPI, npm | Use native `versionPath` selector and `monotonicSemver: true` (default) to block downgrades |
 | `custom-table` | Repository-local version matrix | Keep source table outside `scope.writable` |
 
-Prefer `github-release` with `allowPrerelease: false` over `git-tag` whenever an upstream repository carries non-SemVer branch or archive tags. Built-in `git-commit` queries `/commits?per_page=1`, so enforce path-scoped `git-commit` noise suppression in host preflight (`upstream-records`).
+Prefer `github-release` with `allowPrerelease: false` over `git-tag` whenever an upstream repository carries non-SemVer branch or archive tags. For `http-json` feeds, configure `versionPath` and `monotonicSemver` natively instead of custom parser glue.
 
 ### Version policy and promotion
 
 Confirm three version guardrails one question at a time:
 
-1. **Lockstep constraints**: Same-minor lockstep (for example Kubernetes or Helm minor alignment) and cross-repo pin matching.
+1. **Lockstep constraints**: Declare `spec.upstreamGroups[]` (`{ id, policy: lockstep | independent, members }`) so mismatched or partial lockstep releases resolve atomically as `held_back` without blocking sibling upstreams.
 2. **Two-stage promotion**: Whether image consumers need Stage A (recipe or Dockerfile sync) separate from Stage B (promoting built image tags via `target_tag` after registry publish).
-3. **Setting-image holds**: Whether to keep a protected hold list (for example `.auto-sync/setting-image-holds.json` outside `scope.writable`) so newer base images publish ahead of runtime default bumps.
+3. **Setting-image holds**: Whether to keep a protected hold list (for example `.auto-sync/setting-image-holds.json` outside `scope.writable`) or use native `held_back` status so newer base images publish ahead of runtime default bumps.
 
 ## Stage 3: Bounded execution
 
-Separate online deterministic preparation from offline agent authoring and independent verification.
+Separate authorized host preflight from offline sandboxed agent steps and directory-mounted independent checks.
 
 ```text
-Host Preflight (online, clean repo_root)
-  -> source-revision commit + upstream-records JSON
-  -> Isolated Agent (networkMode: none, writable scope only)
-  -> Independent command.v1 Verifier (ephemeral git + LFS hydration)
+Host Preflight (post-auth, $LOOPWRIGHT_PREFLIGHT_OUT, $LOOPWRIGHT_STAGING_DIR)
+  -> Split stagedResources (mount: prompt vs mount: workspace + exposeToChecks)
+  -> Isolated Agent (networkMode: none, explicit /** & */? writable scope)
+  -> Independent Verifiers (directory-mounted command.v1, built-in guards)
 ```
 
 ### Host preflight responsibilities
 
-Run deterministic preparation on the host before invoking Loopwright so the isolated agent stays offline (`networkMode: none`):
+Declare `spec.preflight` (`script` under a protected path such as `scripts/**` or `.auto-sync/**`) so Loopwright runs it post-auth and pre-compilation:
 
-- **Discovery and filtering**: Query upstreams, apply lockstep or hold filters, and pass precomputed `upstream-records` JSON to the Action.
-- **Toolchain caching**: Pre-warm Go, `uv`, Hugo, or Helm caches outside the writable tree before isolation starts.
-- **LFS and Go isolation**: Stage Git-LFS objects without smudging `repo_root`, and run `go mod download all` inside a temporary copy so `repo_root` remains clean.
-- **Staged revision**: Build a clean `source-revision` commit parented on `GITHUB_SHA` when preflight prepares deterministic fixtures or lockfiles.
+- **Disposition and upstreams**: Emit `{ disposition: 'candidate' | 'no_change' | 'blocked', upstreams, stagedResources }` to `$LOOPWRIGHT_PREFLIGHT_OUT`, using native `held_back` status without smuggling paths in `reason`.
+- **Split staged resources**: Use `mount: 'prompt'` (`<= 64 KiB` UTF-8 per file, `<= 256 KiB` total) for `trustedContext.resources` text, and `mount: 'workspace'` (`<= 128 MiB`, `<= 256 MiB` total) plus `exposeToChecks: true` for large lockfiles or `.tgz` offline caches exposed via `$LOOPWRIGHT_STAGED_DIR` (single-link regular files only; pack directories such as `npm-cache` as `.tgz`).
+- **Clean baselines**: Keep `repo_root` clean and hydrate LFS or vendor caches inside ephemeral verifier directories.
 
 ### Scope and verifier contract
 
-Protected paths always override writable ancestors. Keep `.github/workflows/`, taskpacks, instruction files, `command.v1` scripts, hold files, and `.auto-sync/memory/**` (or `.loopwright/memory/**`) protected.
+Use explicit `dir/**` for recursive directories, exact paths without `/**` for single files, and single-segment `*`/`?` globs (`packages/*/package.json`). Protected paths always override writable ancestors; `.agents/**` is opt-in, built-in agent-instruction directories and `digests.lock.json` stay protected, and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
 
-Configure `verification.localChecks` with `json-artifact.v1` for the proposal and `command.v1` scripts for repository invariants:
+Configure `verification.localChecks` with `json-artifact.v1`, `json-keys-guard.v1`, `line-section-guard.v1`, and directory-mounted `command.v1` scripts:
 
-- **Zero-drift checks**: Verify `make generate`, `go mod tidy`, chart lint, schema validation, and unit tests inside an ephemeral copy of `$LOOPWRIGHT_CANDIDATE_DIR`.
-- **Clean hydration**: Hydrate Git-LFS or vendor caches inside the verifier temp directory rather than mutating `repo_root`.
+- **Directory-mounted checks**: `command.v1` mounts the script's parent directory read-only (whole-tree SHA-256 digest so `./lib.sh` works), supports `toolchainPaths`, and exports `$LOOPWRIGHT_BASE_DIR`, `$LOOPWRIGHT_STAGED_DIR`, and `$LOOPWRIGHT_CHECK_OUT`.
+- **Inner sandboxes**: Checks running inner OS sandboxes (such as macOS `sandbox-exec`) should opt into `allowCheckNetwork: true` under dual-key `allow-privileged-execution` to prevent nested Seatbelt `EPERM`.
 
 ## Stage 4: Workflow governance
 
-Standardize model declarations, GitHub Actions inputs, slash commands, memory mode, and repository secrets.
+Standardize trust modes, model declarations, GitHub Actions inputs, slash commands, memory mode, and repository secrets.
 
-### Unified model configuration
+### Model and trust config
 
-Declare model pools exclusively inside `*taskpack.yaml` (`spec.models`) using unified `apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN`. Never generate model-specific Python or JavaScript helper scripts (such as `write_models_json.py`) and never hardcode vendor names in workflows or scripts.
+Declare model pools exclusively inside `*taskpack.yaml` (`spec.models`) using unified `apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN`. Never generate model-specific helper scripts and never hardcode vendor names in workflows or scripts. Keep `spec.execution.mode: strict` unless host toolchains require dual-key privileged unlock (`allow-privileged-execution: 'true'` or `--allow-privileged`):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -118,11 +117,18 @@ spec:
   goal:
     candidate: Sync Helm chart dependencies from upstream releases and pass checks.
     noChange: Confirm chart versions match upstream releases and settle cleanly.
+  execution:
+    mode: strict
+    digests:
+      pinDigests: false
+  preflight:
+    script: .auto-sync/preflight.mjs
+    timeoutSeconds: 120
   scope:
     writable:
-      - charts
+      - charts/**
     protected:
-      - .auto-sync
+      - .auto-sync/**
   upstreams:
     - id: engine
       kind: github-release
@@ -170,7 +176,7 @@ spec:
 
 ### Standard workflow panel
 
-Use one `workflow_dispatch` panel across domains, adding `domain` for multi-domain repos and `target_tag` when Stage B promotion is enabled:
+Use `mode: auto` in `.github/workflows/loopwright.yml` so Loopwright dispatches `candidate` or check-only `no-change` runs from preflight without external bash mode-resolution glue. Add `domain` for multi-domain repos and `target_tag` when Stage B promotion is enabled:
 
 | Input | Type | Values or default | Purpose |
 | --- | --- | --- | --- |
@@ -184,7 +190,7 @@ Follow three operational rules when authoring `.github/workflows/loopwright.yml`
 
 - **Comment routing**: On `issue_comment`, GitHub omits `pull_request.head.ref` and `inputs.domain`. Resolve the PR head branch first and match each domain's `headBranchPrefix` to select `domain` and its `concurrency` group.
 - **Revise checkout**: Check out `refs/heads/main` with `fetch-depth: 0` and `persist-credentials: false`. Fetch `+refs/pull/<number>/head` into `.git/objects` without checking it out so `/auto-sync revise` can materialize the PR head commit.
-- **Action auth**: Prefer `github-app-id` and `github-app-private-key` (or explicit `with: github-token:`). `resolveGitHubAuth` ignores `GH_TOKEN`.
+- **Action auth and dual-key flags**: Prefer `github-app-id` and `github-app-private-key` (or explicit `with: github-token:`). Enable `allow-privileged-execution: 'true'` or `allow-workflow-writes: 'true'` only when the taskpack requires them.
 
 ### Memory and secrets
 
@@ -204,20 +210,20 @@ Present a concise architecture summary table covering every confirmed decision a
 | --- | --- | --- | --- | --- | --- |
 | `<domain>` | `<id (kind)>` | `<cron/manual>` | `<writable / protected>` | `<localChecks>` | `<env names>` |
 
-Before emitting YAML, fetch the owning Mode 1 Markdown guides linked from `llms.txt` (`Taskpack` and `GitHub Action`). Verify exact `command.v1` parameters, `spec.models[]` custom gateway fields, and Action `with:` input names rather than guessing.
+Before emitting YAML, fetch the owning Mode 1 Markdown guides linked from `llms.txt` (`Taskpack` and `GitHub Action`). Verify exact `spec.execution`, `spec.preflight`, `command.v1` parameters, `spec.models[]` fields, and Action `with:` input names rather than guessing.
 
 Once approved, generate:
 
 1. Two-space Pretty YAML taskpack manifests (`apiVersion: loopwright.dev/v1alpha1`, `kind: Taskpack`).
-2. Protected instruction files (`spec.instructions`) and `command.v1` verification scripts.
-3. Workflow YAML (`.github/workflows/loopwright.yml` or per-domain workflows) with least-privilege permissions.
+2. Protected `spec.preflight` scripts, instruction files, and `command.v1` verification scripts (plus `digests.lock.json` via `loopwright digest sync` when `pinDigests: true`).
+3. Workflow YAML (`.github/workflows/loopwright.yml` or per-domain workflows) with `mode: auto` and least-privilege permissions.
 4. Deterministic offline fixture selftests exercising real contracts, schema validation, and fail-closed guards (never brittle workflow-text scraping assertions).
 
 ## Stage 6: Tiered qualification
 
 Qualify the generated configuration in three ordered tiers and report exact observed outcomes at each tier:
 
-1. **Tier 1 (Local offline)**: Run offline fixture selftests, taskpack schema validation, and `dry-run: 'true'` compilation.
+1. **Tier 1 (Local offline)**: Run offline fixture selftests, taskpack schema validation, `loopwright digest sync --taskpack ... --check`, and `dry-run: 'true'` compilation.
 2. **Tier 2 (GitHub Actions dry run)**: Dispatch the live workflow with `dry-run=true` to verify preflight, App token minting, and compilation on the runner.
 3. **Tier 3 (Live per-domain qualification)**: Dispatch each domain with `dry-run=false` (add `force=true` to test candidate authoring). Verify the opened PR and test `/auto-sync status` or `/auto-sync retry`.
 

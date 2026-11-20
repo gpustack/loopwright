@@ -51,9 +51,9 @@ loopwright step next --config <controller.yaml> --registry <registry.yaml> --reg
 ### 2. Dispatch the role and enforce tools
 
 - **Model routing**: Dispatch each yielded role to a host subagent or supervised Orca worker matching `selection.provider`, `selection.model`, and `selection.thinking`. Execute inline only when the active session already matches `selection`.
-- **Workspace confinement**: Work ONLY inside `candidateDir`. Never edit `--repo` directly during stepping, follow paths into `<runRoot>/<runId>` or `.taskpack-<runId>`, or create symlinks, hardlinks (`nlink > 1`), or `.git` entries. Keep overlay changes within 128 files and 4 MiB (`<= 1 MiB` per file).
+- **Workspace confinement**: Work ONLY inside `candidateDir`. Never edit `--repo` directly during stepping, follow paths into `<runRoot>/<runId>` or `.taskpack-<runId>`, or create symlinks, hardlinks (`nlink > 1`), or `.git` entries. Keep overlay changes within default 128 files and 4 MiB (`<= 1 MiB` per file), or the taskpack's `spec.limits.overlay` ceiling (up to 4096 files and 64 MiB).
 - **Read-only and format repairs**: When `repair === "format"` or `allowedTools` excludes mutating tools (`write`, `edit`, `delete`, `bash`) — such as `purpose: "reviewer"` — leave `candidateDir` byte-identical and report findings via `--status`, `--reason`, or `--submission-file`.
-- **Protected paths**: Never touch `0o400` / `0o500` files in `candidateDir` or `.github/workflows/**`, `.claude/**`, `.agents/**`, `AGENTS.md`, and `CLAUDE.md`.
+- **Protected paths**: Never touch `0o400` / `0o500` read-only files in `candidateDir` or any path matched by `scope.protected` (plus host-protected workflow and agent-instruction paths unless explicitly unlocked).
 
 ### 3. Optional fast screening (`jev`)
 
