@@ -17,12 +17,15 @@ import {
   loadDeclarativeTaskpack,
   openStagedTaskpackStepGate,
   resolveEffectiveTaskpackSandboxPolicy,
+  runGitHubActionEntrypoint,
   runTaskpackPreflight,
   SecretScrubber,
   stageTaskpackForStep,
   verifyDigestLockfile,
   type TaskpackUpstreamRecord,
 } from '../src/index.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+import { readJsonBody, sseStop, sseToolCalls, startHttpServer } from './mcp-test-fixtures.js';
 import {
   REPO_ROOT,
   CAN_RUN_KERNEL_CONTAINMENT,
@@ -62,9 +65,9 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
     const digestVerification = await verifyDigestLockfile(REPO_ROOT, manifest, manifest.controlRoot);
     assert.equal(digestVerification.ok, true, digestVerification.ok ? '' : digestVerification.reason);
 
-    // Omitted spec.sandbox resolves to direct-dedicated on GitHub Actions and host OS sandbox locally
+    // Omitted spec.sandbox resolves to direct-dedicated on GitHub-hosted Actions and host OS sandbox locally
     const ghaPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
-      workspaceRoot: REPO_ROOT, relativeTaskpackPath: '.auto-sync/taskpack.yaml', env: { GITHUB_ACTIONS: 'true' }, hostPolicy,
+      workspaceRoot: REPO_ROOT, relativeTaskpackPath: '.auto-sync/taskpack.yaml', env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' }, hostPolicy,
     });
     assert.deepEqual(ghaPolicy.preferredBackends, ['direct-dedicated']);
     const localPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
@@ -89,20 +92,35 @@ describe('Self-upgrade dogfooding Taskpack, preflight stager, and OS-contained c
         'controller-manifest-keys',
         'decisions-manifest-keys',
         'github-app-manifest-keys',
+        'taskpack-manifest-keys',
       ],
     );
+    const taskpackGuard = manifest.spec.verification.localChecks.find(c => c.id === 'taskpack-manifest-keys');
+    assert.equal(taskpackGuard?.parameters?.['path'], 'packages/taskpack/package.json');
+    assert.deepEqual(taskpackGuard?.parameters?.['allowedPointers'], ['/dependencies/yaml']);
+    assert.equal(manifest.spec.scope.protected.includes('.claude/**'), true);
+    assert.equal(manifest.spec.scope.protected.includes('CLAUDE.md'), true);
+    assert.equal(manifest.spec.scope.protected.includes('AGENTS.md'), true);
     assert.deepEqual(noChangeCompiled.config.spec.task.spec.acceptance.required, ['taskpack-no-change']);
 
     const contract = candidateCompiled.config.spec.task;
-    for (const rel of ['.auto-sync/proposal.json', 'package-lock.json', 'packages/agent-pi/package.json', 'docs/development.md']) {
+    for (const rel of [
+      '.auto-sync/proposal.json',
+      'package-lock.json',
+      'packages/agent-pi/package.json',
+      'packages/taskpack/package.json',
+      'docs/development.md',
+    ]) {
       const check = isWritablePath(contract, rel);
       assert.equal(check.ok && check.value, true, `expected ${rel} to be writable`);
     }
     for (const rel of [
       '.auto-sync/taskpack.yaml', '.auto-sync/digests.lock.json', '.auto-sync/checks/verify.sh',
-      '.claude/skills', 'package.json', 'scripts/prepare-self-upgrade.mjs', 'action.yml',
+      '.auto-sync/other.json', '.claude/skills', '.claude/settings.json', 'CLAUDE.md', 'AGENTS.md',
+      'package.json', 'scripts/prepare-self-upgrade.mjs', 'action.yml',
       '.github/workflows/ci.yml', 'packages/core/src/contracts.ts', 'packages/cli/src/closure.ts',
-      'packages/cli/tsconfig.json', 'packages/cli/tsconfig.extra.json', 'packages/cli/eslint.config.mjs',
+      'packages/taskpack/src/index.ts', 'packages/cli/tsconfig.json', 'packages/cli/tsconfig.extra.json',
+      'packages/cli/eslint.config.mjs',
     ]) {
       const check = isWritablePath(contract, rel);
       assert.equal(check.ok && check.value, false, `expected ${rel} to be non-writable`);
@@ -1325,31 +1343,51 @@ process.exit(45);
       assert.equal(inspectRun.status, 0, `inspect failed: ${inspectRun.stderr}`);
 
       const exportedBundle = JSON.parse(await readFile(join(inspectDir, 'candidate.files.json'), 'utf8')) as {
-        files: readonly { name: string; encoding: string; body: string }[];
+        version?: number;
+        files: readonly {
+          name: string;
+          sha256?: string;
+          uri?: string;
+          blobPath?: string;
+          encoding?: string;
+          body?: string;
+        }[];
       };
-      const decodeExportedJson = (name: string): Record<string, unknown> => {
+      const decodeExportedJson = async (name: string): Promise<Record<string, unknown>> => {
         const entry = exportedBundle.files.find(f => f.name === name);
         assert.notEqual(entry, undefined, `expected ${name} in candidate.files.json`);
+        if (exportedBundle.version === 2 || entry!.blobPath !== undefined) {
+          assert.equal(typeof entry!.blobPath, 'string');
+          assert.equal(entry!.uri, `cas://sha256/${String(entry!.sha256)}`);
+          const raw = await readFile(entry!.blobPath!);
+          assert.equal(createHash('sha256').update(raw).digest('hex'), entry!.sha256);
+          return JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+        }
         assert.equal(entry!.encoding, 'base64');
-        return JSON.parse(Buffer.from(entry!.body, 'base64').toString('utf8')) as Record<string, unknown>;
+        return JSON.parse(Buffer.from(entry!.body!, 'base64').toString('utf8')) as Record<string, unknown>;
       };
 
-      const exportedProposal = decodeExportedJson('.auto-sync/proposal.json') as unknown as TargetVersionsPayload;
+      const exportedProposal = (await decodeExportedJson('.auto-sync/proposal.json')) as unknown as TargetVersionsPayload;
       assert.equal(exportedProposal.upstreams['pi-coding-agent']?.version, '1.6.0');
       assert.equal(exportedProposal.upstreams['yaml']?.version, '2.10.0');
 
-      const exportedAgentPi = decodeExportedJson('packages/agent-pi/package.json') as {
+      const exportedAgentPi = (await decodeExportedJson('packages/agent-pi/package.json')) as {
         dependencies: Record<string, string>;
       };
       assert.equal(exportedAgentPi.dependencies['@earendil-works/pi-coding-agent'], '1.6.0');
       assert.equal(exportedAgentPi.dependencies['@earendil-works/pi-tui'], '1.6.0');
 
-      const exportedCli = decodeExportedJson('packages/cli/package.json') as {
+      const exportedCli = (await decodeExportedJson('packages/cli/package.json')) as {
         dependencies: Record<string, string>;
       };
       assert.equal(exportedCli.dependencies['yaml'], '2.10.0');
 
-      const exportedLock = decodeExportedJson('package-lock.json') as {
+      const exportedTaskpack = (await decodeExportedJson('packages/taskpack/package.json')) as {
+        dependencies: Record<string, string>;
+      };
+      assert.equal(exportedTaskpack.dependencies['yaml'], '2.10.0');
+
+      const exportedLock = (await decodeExportedJson('package-lock.json')) as {
         packages: Record<string, { version?: string }>;
       };
       assert.equal(exportedLock.packages['node_modules/yaml']?.version, '2.10.0');
@@ -1713,6 +1751,186 @@ process.exit(45);
         true,
         `expected main() output via symlinked path, got stdout=${JSON.stringify(symlinkOfflineRun.stdout)}`,
       );
+    });
+  });
+
+  it('runs .auto-sync/taskpack.yaml and verify.sh under mode: auto across no-change and candidate dispositions with explicit .claude/** protection', async () => {
+    const preflight = await loadPreflightModule();
+    const hostNodeModules = join(REPO_ROOT, 'node_modules');
+
+    await withTempDir(async dir => {
+      const { repoRoot, headSha } = await createMiniSelfUpgradeRepo(dir, { includeClaudeSymlink: true });
+      const runRoot = join(dir, 'runs');
+      const bareRemote = join(dir, 'origin.git');
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await mkdir(bareRemote, { recursive: true, mode: 0o700 });
+      const initBare = spawnSync('git', ['init', '--bare', '--initial-branch=main'], { cwd: bareRemote, encoding: 'utf8' });
+      assert.equal(initBare.status, 0, initBare.stderr);
+      const pushSeed = spawnSync('git', ['push', bareRemote, 'HEAD:refs/heads/main'], { cwd: repoRoot, encoding: 'utf8' });
+      assert.equal(pushSeed.status, 0, pushSeed.stderr);
+
+      // 1) mode: 'auto' with baseline upstreams -> no_change check-only execution (zero LLM calls)
+      const noChangeFixtures = Object.fromEntries(
+        preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.9.0' : '1.5.0' }]),
+      );
+      const noChangeRes = await runGitHubActionEntrypoint({
+        turnkey: true,
+        repositoryRoot: repoRoot,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryId: 88,
+        repositoryFullName: 'gpustack/loopwright',
+        baseRevision: headSha,
+        mode: 'auto',
+        allowPrivilegedExecution: true,
+        eventName: 'schedule',
+        runRoot,
+        runId: 'self-upgrade-auto-nc-01',
+        env: {
+          ...process.env,
+          PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+          SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(noChangeFixtures),
+        },
+      });
+      assert.equal(noChangeRes.kind, 'no_change', JSON.stringify(noChangeRes));
+      if (noChangeRes.kind === 'no_change') {
+        assert.equal(noChangeRes.delegateOutcome?.ok, true, noChangeRes.delegateOutcome?.detail ?? '');
+      }
+
+      if (!CAN_RUN_KERNEL_CONTAINMENT) {
+        return;
+      }
+
+      // 2) mode: 'auto' with yaml 2.10.0 upgrade -> candidate execution updating packages/taskpack/package.json + proposal.json + verify.sh
+      const targetPayload = preflight.buildTargetVersionsPayload('1.5.0', '2.10.0');
+      const lockBytes = Buffer.from(
+        buildSyntheticLockfile({ piVersion: '1.5.0', yamlVersion: '2.10.0' }),
+        'utf8',
+      );
+      const candidateLockPath = join(dir, 'auto-candidate-lock.json');
+      await writeFile(candidateLockPath, lockBytes, { mode: 0o600 });
+
+      const updatedManifests = await Promise.all(
+        Object.entries(targetPayload.packages).map(async ([ws, depUpdates]) => {
+          const wsPkgPath = join(repoRoot, ws, 'package.json');
+          const wsPkg = JSON.parse(await readFile(wsPkgPath, 'utf8')) as { dependencies: Record<string, string> };
+          wsPkg.dependencies = { ...wsPkg.dependencies, ...depUpdates };
+          return {
+            id: `call_write_${ws.replaceAll('/', '_')}`,
+            name: 'write',
+            args: { path: `${ws}/package.json`, content: `${JSON.stringify(wsPkg, null, 2)}\n` },
+          };
+        }),
+      );
+
+      let llmStep = 0;
+      const mockLlm = await startHttpServer(async (req, res) => {
+        await readJsonBody(req);
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        llmStep += 1;
+        if (llmStep === 1) {
+          res.end(sseToolCalls('glm-5.3', 'auto_turn_1', [
+            { id: 'call_write_proposal', name: 'write', args: { path: '.auto-sync/proposal.json', content: `${JSON.stringify(targetPayload, null, 2)}\n` } },
+            { id: 'call_write_lock', name: 'write', args: { path: 'package-lock.json', content: lockBytes.toString('utf8') } },
+            ...updatedManifests,
+          ]));
+          return;
+        }
+        res.end(sseStop('glm-5.3', JSON.stringify({
+          version: 1,
+          status: 'completed',
+          checks: [],
+          reason: 'Updated yaml to 2.10.0 across all managed workspaces including packages/taskpack.',
+        })));
+      });
+
+      const createdPrs: Record<string, unknown>[] = [];
+      const mockGitHubApi = await startHttpServer(async (req, res) => {
+        const url = req.url ?? '/';
+        if (req.method === 'GET' && url === '/repos/gpustack/loopwright') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 88, full_name: 'gpustack/loopwright' }));
+          return;
+        }
+        if (req.method === 'GET' && url.includes('/pulls')) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('[]');
+          return;
+        }
+        if (req.method === 'POST' && url.endsWith('/repos/gpustack/loopwright/pulls')) {
+          const payload = await readJsonBody(req);
+          createdPrs.push(payload);
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: 901,
+            html_url: 'https://github.com/gpustack/loopwright/pull/901',
+            head: { ref: payload['head'], sha: 'b'.repeat(40) },
+          }));
+          return;
+        }
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"error":"not_found"}');
+      });
+
+      const modelsJsonPath = join(dir, 'models.json');
+      await writeFile(
+        modelsJsonPath,
+        `${JSON.stringify({
+          providers: {
+            'zai-coding-cn': {
+              baseUrl: `${mockLlm.url}/v1`,
+              api: 'openai-completions',
+              apiKey: 'LOOPWRIGHT_PROVIDER_TOKEN',
+              models: [{ id: 'glm-5.3' }],
+            },
+          },
+        }, null, 2)}\n`,
+        { mode: 0o600 },
+      );
+
+      try {
+        const candidateRes = await runGitHubActionEntrypoint({
+          turnkey: true,
+          repositoryRoot: repoRoot,
+          taskpackPath: '.auto-sync/taskpack.yaml',
+          repositoryId: 88,
+          repositoryFullName: 'gpustack/loopwright',
+          baseRevision: headSha,
+          mode: 'auto',
+          allowPrivilegedExecution: true,
+          allowManifestCustomBaseUrl: true,
+          modelsJsonPath,
+          openHostSessionAdapter: createFastTurnkeyAdapter(),
+          gitRemoteUrl: bareRemote,
+          githubApiBaseUrl: mockGitHubApi.url,
+          githubToken: 'ghp_self_upgrade_auto_test_token',
+          eventName: 'workflow_dispatch',
+          runRoot,
+          runId: 'self-upgrade-auto-cand-01',
+          env: {
+            ...process.env,
+            PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+            GITHUB_ACTIONS: '',
+            LOOPWRIGHT_PROVIDER_TOKEN: 'sk-self-upgrade-auto-test-token',
+            SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(
+              Object.fromEntries(preflight.ALL_UPSTREAM_IDS.map(id => [id, { version: id === 'yaml' ? '2.10.0' : '1.5.0' }])),
+            ),
+            SELF_UPGRADE_LOCKFILE_FIXTURE: candidateLockPath,
+            SELF_UPGRADE_RUN_ROOT: runRoot,
+            SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+            SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+          },
+        });
+        assert.equal(candidateRes.kind, 'compiled', JSON.stringify(candidateRes));
+        if (candidateRes.kind === 'compiled') {
+          assert.equal(candidateRes.delegateOutcome?.ok, true, candidateRes.delegateOutcome?.detail ?? '');
+        }
+        const candidatePrs = createdPrs.filter(pr => String(pr['head']).startsWith('auto-sync/'));
+        assert.equal(candidatePrs.length, 1);
+        assert.equal(String(candidatePrs[0]?.['body']).includes('packages/taskpack/package.json'), true);
+      } finally {
+        await mockLlm.close();
+        await mockGitHubApi.close();
+      }
     });
   });
 });

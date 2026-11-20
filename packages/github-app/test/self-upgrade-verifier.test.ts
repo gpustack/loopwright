@@ -558,9 +558,10 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
         await writeFile(wsManifestPath, `${JSON.stringify(wsManifest, null, 2)}\n`, { mode: 0o600 });
       }
 
-      // 1) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) unpacks npm-cache.tgz from LOOPWRIGHT_STAGED_DIR without requiring bwrap
+      // 1) Dedicated GitHub-hosted Actions VM mode (`GITHUB_ACTIONS=true` + `RUNNER_ENVIRONMENT=github-hosted`) unpacks npm-cache.tgz from LOOPWRIGHT_STAGED_DIR without requiring bwrap
       const ghaDirectRes = runVerifyScript(repoRoot, {
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         LOOPWRIGHT_STAGED_DIR: realOfflineStage,
         PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
@@ -568,10 +569,10 @@ describe('Self-upgrade verifier offline tarballs, hardlink/FIFO guards, and loop
       assert.equal(
         ghaDirectRes.status,
         0,
-        `expected GITHUB_ACTIONS=true direct-dedicated offline verify.sh to succeed via LOOPWRIGHT_STAGED_DIR/npm-cache.tgz: ${ghaDirectRes.stderr}`,
+        `expected GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted direct-dedicated offline verify.sh to succeed via LOOPWRIGHT_STAGED_DIR/npm-cache.tgz: ${ghaDirectRes.stderr}`,
       );
 
-      // 1b) Dedicated GitHub Actions VM mode (`GITHUB_ACTIONS=true`) catches stealth same-UID chmod +
+      // 1b) Dedicated GitHub-hosted Actions VM mode (`GITHUB_ACTIONS=true` + `RUNNER_ENVIRONMENT=github-hosted`) catches stealth same-UID chmod +
       // same-byte in-place overwrite + nanosecond-exact timestamp restore against a masked file inside build_dir,
       // triggered from an allowed `packages/` file so Phase 1's git HEAD protected-prefix gate passes first.
       const agentPiIndexPath = join(repoRoot, 'packages/agent-pi/src/index.ts');
@@ -609,6 +610,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
       try {
         const ghaStealthTamperRes = runVerifyScript(repoRoot, {
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           SELF_UPGRADE_REPO_ROOT: repoRoot,
           LOOPWRIGHT_STAGED_DIR: realOfflineStage,
           PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
@@ -616,7 +618,7 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         assert.notEqual(
           ghaStealthTamperRes.status,
           0,
-          'GITHUB_ACTIONS=true must reject same-size + timestamp-restored tamper of masked file',
+          'GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted must reject same-size + timestamp-restored tamper of masked file',
         );
         assert.equal(
           ghaStealthTamperRes.stderr.includes('masked file modified during stage:'),
@@ -627,7 +629,8 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
         await writeFile(agentPiIndexPath, cleanAgentPiIndex, { mode: 0o600 });
       }
 
-      // 2) Local workstation mode (`GITHUB_ACTIONS` unset) enforces OS kernel containment (`sandbox-exec` / `bwrap`)
+      // 2) Local workstation mode (`GITHUB_ACTIONS` unset) AND non-github-hosted Actions (`GITHUB_ACTIONS=true` with
+      //    `RUNNER_ENVIRONMENT=self-hosted` or missing `RUNNER_ENVIRONMENT`) enforce OS kernel containment (`sandbox-exec` / `bwrap`)
       if (CAN_RUN_KERNEL_CONTAINMENT) {
         const realOfflineRes = runVerifyScript(repoRoot, {
           SELF_UPGRADE_REPO_ROOT: repoRoot,
@@ -639,6 +642,48 @@ chmodSync(maskedDir, dirStat.mode & 0o777);
           0,
           `expected full offline verify.sh (without SELF_UPGRADE_TEST_NODE_MODULES) to succeed: ${realOfflineRes.stderr}`,
         );
+
+        await writeFile(
+          agentPiIndexPath,
+          `import { chmodSync } from 'node:fs';
+export const PACKAGE_ID = '@loopwright/agent-pi';
+let kernelDenied = false;
+try {
+  chmodSync('scripts/check-docs.mjs', 0o644);
+} catch (err) {
+  const code = err && typeof err === 'object' ? err.code : '';
+  if (code === 'EPERM' || code === 'EACCES' || code === 'EROFS') {
+    kernelDenied = true;
+  }
+}
+if (!kernelDenied) {
+  console.error('OS_CONTAINMENT_BYPASSED');
+  process.exit(88);
+}
+`,
+          { mode: 0o600 },
+        );
+        try {
+          for (const nonHostedEnv of [
+            { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'self-hosted' },
+            { GITHUB_ACTIONS: 'true' },
+          ]) {
+            const containedRes = runVerifyScript(repoRoot, {
+              ...nonHostedEnv,
+              SELF_UPGRADE_REPO_ROOT: repoRoot,
+              LOOPWRIGHT_STAGED_DIR: realOfflineStage,
+              PYTHON_BIN: existsSync('/usr/bin/python3') ? '/usr/bin/python3' : undefined,
+            });
+            assert.equal(
+              containedRes.status,
+              0,
+              `expected ${JSON.stringify(nonHostedEnv)} to enforce OS kernel containment without bypass: ${containedRes.stderr}`,
+            );
+            assert.equal(containedRes.stderr.includes('OS_CONTAINMENT_BYPASSED'), false, containedRes.stderr);
+          }
+        } finally {
+          await writeFile(agentPiIndexPath, cleanAgentPiIndex, { mode: 0o600 });
+        }
       }
 
       // 3) Malicious npm-cache.tgz containing a symlink entry is rejected by verify.sh before unpacking
@@ -659,6 +704,7 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
       assert.equal(mkEvil.status, 0, mkEvil.stderr);
       const evilRes = runVerifyScript(repoRoot, {
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         SELF_UPGRADE_REPO_ROOT: repoRoot,
         LOOPWRIGHT_STAGED_DIR: evilStageDir,
       });
@@ -955,6 +1001,23 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
       assert.equal(failCheckOut.findings[0]?.path, 'packages/cli/package.json');
       assert.equal(failCheckOut.findings[0]?.evidence.includes("field 'private' must not be modified"), true);
       await writeFile(cliPkgPath, goodCliRaw, { mode: 0o600 });
+
+      // Also verify packages/taskpack/package.json type-strict field guard in Phase 1
+      const taskpackPkgPath = join(repoRoot, 'packages/taskpack/package.json');
+      const goodTaskpackRaw = await readFile(taskpackPkgPath, 'utf8');
+      const taskpackMutated = JSON.parse(goodTaskpackRaw) as Record<string, unknown>;
+      taskpackMutated['private'] = 1;
+      await writeFile(taskpackPkgPath, `${JSON.stringify(taskpackMutated, null, 2)}\n`, { mode: 0o600 });
+      const taskpackIntRes = runVerifyScript(repoRoot, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+        SELF_UPGRADE_REPO_ROOT: repoRoot,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
+      });
+      assert.notEqual(taskpackIntRes.status, 0);
+      assert.equal(taskpackIntRes.stderr.includes("field 'private' must not be modified"), true);
+      assert.equal(taskpackIntRes.stderr.includes('CANDIDATE_BUILD_EXECUTED_CANARY'), false);
+      await writeFile(taskpackPkgPath, goodTaskpackRaw, { mode: 0o600 });
 
       // Unmanaged manifest "private": true -> 1 rejected
       const corePkgPath = join(repoRoot, 'packages/core/package.json');

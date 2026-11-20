@@ -39,6 +39,7 @@ export const YAML_WORKSPACES = Object.freeze([
   'packages/controller',
   'packages/decisions',
   'packages/github-app',
+  'packages/taskpack',
 ]);
 export const MANAGED_WORKSPACES = Object.freeze(['packages/agent-pi', ...YAML_WORKSPACES]);
 export const UNMANAGED_WORKSPACES = Object.freeze([
@@ -67,18 +68,18 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CANONICAL_SEMVER_RE = /^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$/;
 
 async function loadTaskpackCompilerModule(repoRoot) {
-  const distIndexUrl = new URL('../packages/github-app/dist/index.js', import.meta.url);
+  const distIndexUrl = new URL('../packages/taskpack/dist/index.js', import.meta.url);
   const distPath = fileURLToPath(distIndexUrl);
   if (existsSync(distPath)) return await import(distIndexUrl.href);
   try {
-    return await import('@loopwright/github-app');
+    return await import('@loopwright/taskpack');
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Missing compiled @loopwright/github-app at "${relative(repoRoot, distPath)}"; run "npm run build" first (${detail})`, { cause: error });
+    throw new Error(`Missing compiled @loopwright/taskpack at "${relative(repoRoot, distPath)}"; run "npm run build" first (${detail})`, { cause: error });
   }
 }
 
-const githubApp = await loadTaskpackCompilerModule(process.cwd());
+const taskpackModule = await loadTaskpackCompilerModule(process.cwd());
 
 export function isPlainRecord(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -102,7 +103,7 @@ export function compareCanonicalSemver(left, right) {
   if (parseCanonicalSemver(left) === null || parseCanonicalSemver(right) === null) {
     throw new Error(`Invalid canonical SemVer comparison: "${String(left)}" vs "${String(right)}"`);
   }
-  return githubApp.compareStrictSemver(left, right);
+  return taskpackModule.compareStrictSemver(left, right);
 }
 
 const isInsidePath = (candidate, root) =>
@@ -239,6 +240,7 @@ export function buildExpectedPackagesMap(piVersion, yamlVersion) {
     'packages/controller': Object.freeze({ yaml: yamlVersion }),
     'packages/decisions': Object.freeze({ yaml: yamlVersion }),
     'packages/github-app': Object.freeze({ yaml: yamlVersion }),
+    'packages/taskpack': Object.freeze({ yaml: yamlVersion }),
   });
 }
 
@@ -464,8 +466,8 @@ export function evaluateUpstreamEligibility({
     });
   }
 
-  const groupedRecords = githubApp.applyUpstreamGroups(normalizedRecords, upstreamGroups, baselineByUpstream);
-  const intake = githubApp.evaluateUpstreamIntakeDisposition(groupedRecords, { force });
+  const groupedRecords = taskpackModule.applyUpstreamGroups(normalizedRecords, upstreamGroups, baselineByUpstream);
+  const intake = taskpackModule.evaluateUpstreamIntakeDisposition(groupedRecords, { force });
   const groupedById = new Map(groupedRecords.map(rec => [rec.upstreamId, rec]));
   const piLead = groupedById.get('pi-coding-agent');
   const yamlRec = groupedById.get('yaml');
@@ -519,7 +521,7 @@ export async function discoverNpmUpstreams({ manifest, baselineByUpstream, fetch
   const effectiveFetch = registryFixtures !== undefined
     ? buildFixtureFetch(effectiveManifest.spec.upstreams, registryFixtures)
     : fetchImpl;
-  const discovered = await githubApp.discoverTaskpackUpstreamsV2(effectiveManifest, {
+  const discovered = await taskpackModule.discoverTaskpackUpstreamsV2(effectiveManifest, {
     baselineVersions: baselineByUpstream,
     fetchImpl: effectiveFetch,
   });
@@ -927,7 +929,7 @@ export async function stageCandidateBundle({
 export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingVerifyScript = false } = {}) {
   const resolvedRepo = resolve(repoRoot);
   const hostPolicy = { allowPrivileged: true, allowWorkflowWrites: false };
-  const manifest = await githubApp.loadDeclarativeTaskpack({
+  const manifest = await taskpackModule.loadDeclarativeTaskpack({
     manifestPath: join(resolvedRepo, '.auto-sync/taskpack.yaml'),
     repositoryRoot: resolvedRepo,
     hostPolicy,
@@ -948,12 +950,12 @@ export async function verifyTaskpackOfflineCompilation(repoRoot, { allowMissingV
     taskpackPath: '.auto-sync/taskpack.yaml',
     executionMode: 'delegated',
     hostPolicy,
-    budgets: githubApp.DEFAULT_HOST_BUDGETS,
+    budgets: taskpackModule.DEFAULT_HOST_BUDGETS,
   };
   return Object.freeze({
     manifest,
-    candidateCompiled: await githubApp.compileDeclarativeTaskpack(manifest, { ...baseBindings, mode: 'candidate' }),
-    noChangeCompiled: await githubApp.compileDeclarativeTaskpack(manifest, { ...baseBindings, mode: 'no-change' }),
+    candidateCompiled: await taskpackModule.compileDeclarativeTaskpack(manifest, { ...baseBindings, mode: 'candidate' }),
+    noChangeCompiled: await taskpackModule.compileDeclarativeTaskpack(manifest, { ...baseBindings, mode: 'no-change' }),
   });
 }
 
@@ -1061,7 +1063,7 @@ export async function runPrepareSelfUpgrade(options = {}) {
 
   const manifestPath = join(repoRoot, '.auto-sync/taskpack.yaml');
   const manifest = existsSync(manifestPath)
-    ? await githubApp.loadDeclarativeTaskpack({ manifestPath, repositoryRoot: repoRoot, hostPolicy: { allowPrivileged: true, allowWorkflowWrites: false } })
+    ? await taskpackModule.loadDeclarativeTaskpack({ manifestPath, repositoryRoot: repoRoot, hostPolicy: { allowPrivileged: true, allowWorkflowWrites: false } })
     : undefined;
 
   const discoveredRecords = options.discoveredRecords !== undefined

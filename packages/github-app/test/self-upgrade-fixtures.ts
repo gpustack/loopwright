@@ -222,6 +222,7 @@ export const ALL_WORKSPACES = [
   'packages/controller',
   'packages/cli',
   'packages/taskpack-runner',
+  'packages/taskpack',
   'packages/github-app',
   'packages/memory',
   'packages/decisions',
@@ -326,6 +327,10 @@ export function buildSyntheticLockfile(options: {
       version: '0.0.0',
       dependencies: { '@loopwright/core': '0.0.0', yaml: options.yamlVersion },
     },
+    'packages/taskpack': {
+      version: '0.0.0',
+      dependencies: { '@loopwright/core': '0.0.0', yaml: options.yamlVersion },
+    },
     'node_modules/typescript': options.forgedTypescriptLinkTarget !== undefined
       ? {
         version: '6.0.3',
@@ -403,18 +408,23 @@ export async function createMiniSelfUpgradeRepo(
   },
 ): Promise<{ readonly repoRoot: string; readonly headSha: string }> {
   const repoRoot = join(parentDir, 'fixture-repo');
-  const shimDir = join(parentDir, 'node_modules', '@loopwright', 'github-app');
-  await mkdir(shimDir, { recursive: true, mode: 0o700 });
-  await writeFile(
-    join(shimDir, 'package.json'),
-    `${JSON.stringify({ name: '@loopwright/github-app', type: 'module', exports: { '.': './index.js' } })}\n`,
-    { mode: 0o600 },
-  );
-  await writeFile(
-    join(shimDir, 'index.js'),
-    `export * from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, 'packages/github-app/dist/index.js')).href)};\n`,
-    { mode: 0o600 },
-  );
+  for (const [pkgName, distRel] of [
+    ['github-app', 'packages/github-app/dist/index.js'],
+    ['taskpack', 'packages/taskpack/dist/index.js'],
+  ] as const) {
+    const shimDir = join(parentDir, 'node_modules', '@loopwright', pkgName);
+    await mkdir(shimDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(shimDir, 'package.json'),
+      `${JSON.stringify({ name: `@loopwright/${pkgName}`, type: 'module', exports: { '.': './index.js' } })}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(shimDir, 'index.js'),
+      `export * from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, distRel)).href)};\n`,
+      { mode: 0o600 },
+    );
+  }
   await mkdir(join(repoRoot, '.auto-sync/checks'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, '.agents/skills/loopwright-step'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, 'scripts'), { recursive: true, mode: 0o700 });
@@ -528,6 +538,7 @@ export async function createMiniSelfUpgradeRepo(
     'packages/controller': { '@loopwright/core': '0.0.0', yaml: '2.9.0' },
     'packages/decisions': { '@loopwright/core': '0.0.0', yaml: '2.9.0' },
     'packages/github-app': { '@loopwright/core': '0.0.0', yaml: '2.9.0' },
+    'packages/taskpack': { '@loopwright/core': '0.0.0', yaml: '2.9.0' },
   };
 
   for (const [ws, deps] of Object.entries(workspaces)) {
