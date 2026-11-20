@@ -1790,6 +1790,8 @@ process.exit(45);
           PATH: `${dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
           GITHUB_TOKEN: '',
           GH_TOKEN: '',
+          GITHUB_API_URL: '',
+          'INPUT_GITHUB-TOKEN': '',
           GITHUB_ACTIONS: 'true',
           RUNNER_ENVIRONMENT: 'github-hosted',
           SELF_UPGRADE_REGISTRY_FIXTURES: JSON.stringify(noChangeFixtures),
