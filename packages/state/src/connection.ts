@@ -1,7 +1,7 @@
 import { DatabaseSync as Database, type SQLInputValue, type SQLOutputValue, type StatementSync } from 'node:sqlite';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
-import { addMono, canonical, checkedAdd, enumeration, equal, freeze, hash, id, identity, identityBody, integer, mono, record, text } from './boundary.js';
+import { addMono, canonical, checkedAdd, enumeration, equal, freeze, hash, id, identity, identityBody, integer, mono, overlayCheckpointBounds, record, STATE_LIMITS, text } from './boundary.js';
 import { clockBasis, clockSample, clockValid, makeBasis, project, systemClock, type ClockSource } from './clock.js';
 import { attempt, fail, StateFailure, type StateErrorCode } from './errors.js';
 import { storedRequest, storedOperation, validateLinks } from './admission.js';
@@ -88,10 +88,11 @@ export class Connection {
         const operation=storedOperation({sequence:row.sequence,intent:parse(row.intent_json,16384),intentDigest:{algorithm:'sha256',hex:row.intent_digest},intentGeneration:row.intent_generation,linkedRequestId:row.linked_request_id,...state});
         if(operation.intent.operationId!==row.operation_id)fail('STORE_CORRUPT');return operation;
       });
-      const checkpointRows=this.prepare('SELECT * FROM checkpoints ORDER BY sequence LIMIT 65').all();
+      const checkpointRows=this.prepare('SELECT * FROM checkpoints ORDER BY sequence LIMIT 257').all();
       const data:Data={identity:savedBody,identityDigest:hash('identity',savedBody),startedAtMs:numberColumn(r,'started_at_ms'),deadlineMs:numberColumn(r,'deadline_ms'),revision:numberColumn(r,'revision'),owner,basis,last,requests:requests as Data['requests'],operations:operations as Data['operations'],checkpoints:[],ledger:parse(r.ledger_json,16384) as Data['ledger'],counts:parse(r.record_counts_json,1024) as Data['counts'],ledgerRoot:{algorithm:'sha256',hex:text(r.ledger_root,'',64)}};
       if(data.startedAtMs!==basis.created.wallMs||data.deadlineMs!==checkedAdd(data.startedAtMs,saved.lock.spec.contract.spec.budgets.wallTimeMs))fail('STORE_CORRUPT');
-      data.checkpoints=checkpointRows.map(row=>{const input=parse(row.input_json,65536),content=parse(row.checkpoint_json,65536);const result=storedCheckpoint(input,content,data);if(result.record.checkpointId!==row.checkpoint_id||result.record.sequence!==row.sequence||result.record.inputDigest.hex!==row.input_digest||hash('checkpoint-record',result.record).hex!==row.checkpoint_digest)fail('STORE_CORRUPT');return result;});
+      const checkpointInputMaxBytes=overlayCheckpointBounds(saved.lock.spec.contract.spec.budgets.overlay).maxBytes;
+      data.checkpoints=checkpointRows.map(row=>{const input=parse(row.input_json,checkpointInputMaxBytes),content=parse(row.checkpoint_json,STATE_LIMITS.checkpointBytes);const result=storedCheckpoint(input,content,data);if(result.record.checkpointId!==row.checkpoint_id||result.record.sequence!==row.sequence||result.record.inputDigest.hex!==row.input_digest||hash('checkpoint-record',result.record).hex!==row.checkpoint_digest)fail('STORE_CORRUPT');return result;});
       if(data.checkpoints.some((c,i)=>c.record.sequence!==i+1))fail('STORE_CORRUPT');
       validateLinks(data);
       const expected=summaries(data);if([expected.ledger.chargedTokens,expected.ledger.reportedTokens,expected.ledger.estimatedTokens,expected.ledger.reportedCostMicrousd,expected.ledger.estimatedCostMicrousd].some(q=>q.safeValue===null)&&!expected.ledger.violations.includes('usage_overflow'))fail('STORE_CORRUPT');if(!equal(data.ledger,expected.ledger)||!equal(data.counts,expected.counts)||!equal(data.ledgerRoot,expected.ledgerRoot))fail('STORE_CORRUPT');
@@ -136,7 +137,8 @@ export class Connection {
       const {sequence,intent,intentDigest,intentGeneration,linkedRequestId,...state}=operation;
       this.upsert('operations','operation_id',{operation_id:intent.operationId,sequence,intent_json:this.encoded(intent,16384),intent_digest:intentDigest.hex,intent_generation:intentGeneration,linked_request_id:linkedRequestId,state_json:this.encoded(state,16384)});
     }
-    for(const checkpoint of data.checkpoints)this.upsert('checkpoints','checkpoint_id',{checkpoint_id:checkpoint.record.checkpointId,sequence:checkpoint.record.sequence,input_json:this.encoded(checkpoint.input,65536),input_digest:checkpoint.record.inputDigest.hex,checkpoint_json:this.encoded(checkpoint.record,65536),checkpoint_digest:hash('checkpoint-record',checkpoint.record).hex});
+    const checkpointInputMaxBytes=overlayCheckpointBounds(data.identity.lock.spec.contract.spec.budgets.overlay).maxBytes;
+    for(const checkpoint of data.checkpoints)this.upsert('checkpoints','checkpoint_id',{checkpoint_id:checkpoint.record.checkpointId,sequence:checkpoint.record.sequence,input_json:this.encoded(checkpoint.input,checkpointInputMaxBytes),input_digest:checkpoint.record.inputDigest.hex,checkpoint_json:this.encoded(checkpoint.record,STATE_LIMITS.checkpointBytes),checkpoint_digest:hash('checkpoint-record',checkpoint.record).hex});
     const row=runRow(data);const columns=Object.keys(row).filter(key=>key!=='singleton');
     const result=this.prepare(`UPDATE run SET ${columns.map(c=>`${c}=?`).join(',')} WHERE singleton=1 AND revision=?`).run(...columns.map(c=>row[c]!),oldRevision);
     if(Number(result.changes)!==1)fail('REVISION_CONFLICT');

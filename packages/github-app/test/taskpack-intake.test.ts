@@ -32,7 +32,7 @@ spec:
     noChange: Confirm the documentation needs no change and settle as no change.
   scope:
     writable:
-      - docs
+      - 'docs/**'
     protected:
       - docs/protected-notes.md
   upstreams:
@@ -171,7 +171,7 @@ describe('declarative taskpack loading (AC-1)', () => {
   });
 
   it('refuses ${...} interpolation in YAML and JSON manifests', () => {
-    assert.throws(() => parseTaskpackDocument(Buffer.from(`${VALID_MANIFEST_YAML}\n# \${SECRET}\n`, 'utf8'), 'yaml'),
+    assert.throws(() => parseTaskpackDocument(Buffer.from('apiVersion: loopwright.dev/v1alpha1\nnote: "${SECRET}"\n', 'utf8'), 'yaml'),
       (error: GitHubAppError) => error.code === 'TASKPACK_UNTRUSTED_INTERPOLATION');
     assert.throws(() => parseTaskpackDocument(Buffer.from('{"apiVersion":"loopwright.dev/v1alpha1","note":"${SECRET}"}', 'utf8'), 'json'),
       (error: GitHubAppError) => error.code === 'TASKPACK_UNTRUSTED_INTERPOLATION');
@@ -231,7 +231,7 @@ describe('declarative taskpack loading (AC-1)', () => {
     })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
     // proposal.path covering a protected path as a parent directory
     assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
-      (draft.spec as Record<string, unknown>).scope = { writable: ['docs'], protected: ['docs/proposals'] };
+      (draft.spec as Record<string, unknown>).scope = { writable: ['docs/**'], protected: ['docs/proposals'] };
       (draft.spec as Record<string, unknown>).proposal = { path: 'docs/proposals', requiredFields: ['schema_version'], schemaVersion: 1 };
     })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
   });
@@ -1236,12 +1236,13 @@ spec:
       assert.deepEqual(compiledCustom.config.spec.task.spec.roles[0]?.tools, ['read', 'write', 'edit', 'bash', 'delete']);
       const protectedPatterns = compiledCustom.config.spec.task.spec.scope.protected;
       for (const expected of [
-        '.github/**', '.claude/**', '.codex/**', '.agents/**', '.loopwright/policies/**',
+        '.github/**', '.claude/**', '.codex/**', '.loopwright/policies/**',
         'AGENTS.md/**', 'CLAUDE.md/**', '.auto-sync/policies/**', '.auto-sync/checks/**',
         '.auto-sync/memory/**', '.auto-sync/sync.yaml/**',
       ]) {
         assert.equal(protectedPatterns.includes(expected), true, `missing protected pattern ${expected}`);
       }
+      assert.equal(protectedPatterns.includes('.agents/**'), false, '.agents must not be unconditionally protected in Taskpack 2.0');
 
       // Root taskpack.yaml defaults controlRoot to .loopwright while protecting exact taskpack.yaml
       const rootManifestYaml = customManifestYaml.replace('directory: .auto-sync/memory', 'directory: .loopwright/memory/auto-sync');
@@ -1269,8 +1270,8 @@ spec:
   it('enforces strict @loopwright/core path grammar, explicit empty writable refusal, and blacklist-wins scope compilation', async () => {
     const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
 
-    // Reject globs, spaces, +, trailing dots, and reserved Windows device names
-    for (const badPath of ['**', 'docs/**', 'docs/*.md', 'docs with space', 'c++', 'docs/sub.', 'con', 'docs/nul.txt']) {
+    // Reject invalid globs ('**', mid-path '**'), brace expansion, spaces, +, trailing dots, and reserved Windows device names
+    for (const badPath of ['**', 'docs/**/sub', 'docs/{a,b}', 'docs with space', 'c++', 'docs/sub.', 'con', 'docs/nul.txt']) {
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
           (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [badPath], protected: [] };
@@ -1288,8 +1289,8 @@ spec:
       (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
     );
 
-    // Reject .claude, .codex, and .agents in writable
-    for (const protectedWritable of ['.claude', '.claude/skills', '.codex', '.codex/config.toml', '.agents', '.agents/prompts']) {
+    // Reject .claude and .codex in writable
+    for (const protectedWritable of ['.claude', '.claude/skills', '.codex', '.codex/config.toml']) {
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
           (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [protectedWritable] };
@@ -1298,21 +1299,21 @@ spec:
       );
     }
 
-    // Blacklist-wins: broad writable parent 'pack' with protected descendant 'pack/dependencies.json'
+    // Blacklist-wins: broad writable parent 'pack/**' with protected descendant 'pack/dependencies.json'
     const blacklistWins = validateTaskpackManifest(editedManifest(base, draft => {
       (draft['spec'] as Record<string, unknown>)['scope'] = {
-        writable: ['pack', 'docs'],
+        writable: ['pack/**', 'docs/**'],
         protected: ['pack/dependencies.json', 'docs/protected-notes.md'],
       };
     }));
     assert.deepEqual(blacklistWins.spec.scope, {
-      writable: ['pack', 'docs'],
+      writable: ['pack/**', 'docs/**'],
       protected: ['pack/dependencies.json', 'docs/protected-notes.md'],
     });
     assert.deepEqual(compileScopePatterns(undefined, 'writable'), ['**']);
     assert.deepEqual(compileScopePatterns([], 'writable'), ['**']);
     assert.deepEqual(compileScopePatterns(undefined, 'protected'), []);
-    assert.deepEqual(compileScopePatterns(['pack', 'docs'], 'writable'), ['pack/**', 'docs/**']);
+    assert.deepEqual(compileScopePatterns(['pack', 'docs/**'], 'writable'), ['pack', 'docs/**']);
 
     // proposal.path inside protected descendant is still refused with TASKPACK_SCOPE_VIOLATION
     assert.throws(
@@ -1671,7 +1672,7 @@ spec:
       assert.equal(compiledAutoSync.config.spec.task.spec.scope.protected.includes('.auto-sync/**'), true);
       assert.throws(
         () => validateTaskpackManifest(editedManifest(loadedAutoSync, draft => {
-          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs', '.auto-sync/sub'], protected: [] };
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs/**', '.auto-sync/sub'], protected: [] };
         }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/sync.yaml' }),
         (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
       );
@@ -1700,18 +1701,18 @@ spec:
         process.chdir(prevCwd);
       }
 
-      // 3. 1021-char path cap and 128-entry effectiveProtectedPaths cap
+      // 3. 1024-char path cap and 128-entry effectiveProtectedPaths cap
       const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
-          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs'], protected: [`docs/${'a'.repeat(1017)}`] };
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs/**'], protected: [`docs/${'a'.repeat(1020)}`] };
         })),
         (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
       );
       const manyProtected = Array.from({ length: 120 }, (_, i) => `docs/protected-${i}.md`);
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
-          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs'], protected: manyProtected };
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['docs/**'], protected: manyProtected };
         })),
         (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/scope/protected',
       );
@@ -1909,7 +1910,7 @@ spec:
   scope:
     writable:
       - .auto-sync/proposal.json
-      - pack/cann
+      - 'pack/cann/**'
     protected: []
   upstreams:
     - id: cann
@@ -1956,14 +1957,14 @@ spec:
         repositoryRoot: root,
       });
       assert.equal(loaded.controlRoot, '.auto-sync');
-      assert.equal(loaded.spec.proposal.path, '.auto-sync/proposal.json');
+      assert.equal(loaded.spec.proposal?.path, '.auto-sync/proposal.json');
 
       const protectedSet = effectiveProtectedPaths(loaded.spec.scope.protected, {
         controlRoot: '.auto-sync',
         manifestPath: '.auto-sync/taskpack.yaml',
         instructions: loaded.spec.instructions,
         commandScripts: ['.auto-sync/checks/verify.sh'],
-        proposalPath: loaded.spec.proposal.path,
+        proposalPath: loaded.spec.proposal?.path,
       });
       assert.equal(protectedSet.includes('.auto-sync'), false, 'bare .auto-sync directory must be carved out');
       for (const expectedProtected of [
@@ -2191,7 +2192,7 @@ spec:
       ]) {
         assert.throws(
           () => validateTaskpackManifest(editedManifest(loaded, draft => {
-            (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [forbiddenProposal, 'pack/cann'], protected: [] };
+            (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [forbiddenProposal, 'pack/cann/**'], protected: [] };
             ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = forbiddenProposal;
           }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
           (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
@@ -2202,7 +2203,7 @@ spec:
       assert.throws(
         () => validateTaskpackManifest(editedManifest(loaded, draft => {
           delete (draft['spec'] as Record<string, unknown>)['instructions'];
-          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['.auto-sync/instructions.md', 'pack/cann'], protected: [] };
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: ['.auto-sync/instructions.md', 'pack/cann/**'], protected: [] };
           ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = '.auto-sync/instructions.md';
         }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',

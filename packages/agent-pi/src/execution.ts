@@ -347,8 +347,11 @@ export class Execution implements ToolExecutor {
           ? { content: [{ type: 'text', text: 'Deleted scoped candidate file: ' + change.path }], details: { operationId, deleted: change.path } }
           : { content: [{ type: 'text', text: 'Committed scoped candidate change: ' + ref.name }], details: { operationId, artifact: ref } };
       } else if (isExternalMcp) {
+        if (!this.input.policy.tools.includes(identity.name) || this.#ports.mcpExecutor?.hasTool(identity.name) !== true) {
+          refuse('TOOL_DENIED', '', { phase: 'tool', operationId });
+        }
         guard();
-        const rawMcp = await this.#ports.mcpExecutor!.callTool(identity.name, (parsedArgs as { readonly args: Record<string, unknown> }).args, {
+        const rawMcp = await this.#ports.mcpExecutor.callTool(identity.name, (parsedArgs as { readonly args: Record<string, unknown> }).args, {
           signal: combined,
           maxResultBytes: this.input.policy.limits.toolResultBytes,
         });

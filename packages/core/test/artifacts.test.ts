@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import {
-  admitTask, bindSubject, digestArtifact, evaluateAcceptance, identifyManifest,
+  admitTask, bindSubject, digestArtifact, evaluateAcceptance, identifyManifest, resolveInventory,
   LIMITS, validateDocument, type ArtifactManifest, type BaseTreeAnchor,
 } from '../src/index.js';
 import { createLocalRun, reopenLocalRun } from '../../state/src/index.js';
@@ -409,4 +409,130 @@ test('classic 128-entry and tree-overlay 128+128-entry manifests round-trip thro
     store?.close();
     rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test('ArtifactRef supports optional uri and mediaType while preserving legacy manifest digests when omitted', () => {
+  const bytes = Buffer.from('kernel binary');
+  const legacyRef = value(digestArtifact('kernel.cubin', bytes));
+  assert.equal(Object.hasOwn(legacyRef, 'uri'), false);
+  assert.equal(Object.hasOwn(legacyRef, 'mediaType'), false);
+
+  const legacyManifest = {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { entries: [legacyRef] },
+  };
+  const legacyIdentified = value(identifyManifest(legacyManifest));
+  assert.equal(Object.hasOwn(legacyIdentified.manifest.spec.entries[0]!, 'uri'), false);
+  assert.equal(Object.hasOwn(legacyIdentified.manifest.spec.entries[0]!, 'mediaType'), false);
+
+  const expectedCanonical = JSON.stringify({
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { entries: [{ byteLength: legacyRef.byteLength, digest: legacyRef.digest, name: legacyRef.name }] },
+  });
+  const expectedHex = createHash('sha256').update('loopwright.dev/artifact-manifest/v1alpha1\0' + expectedCanonical).digest('hex');
+  assert.equal(legacyIdentified.digest.hex, expectedHex);
+
+  const extRef = value(digestArtifact('kernel.cubin', bytes, {
+    uri: 's3://bench-bucket/runs/1/kernel.cubin',
+    mediaType: 'application/octet-stream',
+  }));
+  assert.equal(extRef.uri, 's3://bench-bucket/runs/1/kernel.cubin');
+  assert.equal(extRef.mediaType, 'application/octet-stream');
+
+  const extManifest = {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { entries: [extRef] },
+  };
+  const extIdentified = value(identifyManifest(extManifest));
+  assert.equal(extIdentified.manifest.spec.entries[0]!.uri, 's3://bench-bucket/runs/1/kernel.cubin');
+  assert.equal(extIdentified.manifest.spec.entries[0]!.mediaType, 'application/octet-stream');
+  assert.notEqual(extIdentified.digest.hex, legacyIdentified.digest.hex);
+
+  // Explicit null and mediaType with parameter are also valid
+  const nullExtRef = value(digestArtifact('notes.txt', Buffer.from('hi'), { uri: null, mediaType: 'text/plain; charset=utf-8' }));
+  assert.equal(nullExtRef.uri, null);
+  assert.equal(nullExtRef.mediaType, 'text/plain; charset=utf-8');
+
+  // Invalid uri and mediaType values are rejected with VALUE_RANGE
+  for (const badUri of ['', 'relative/no-scheme', 'https://example.com/has space', 'https://example.com/\nbad', '123://bad', 'http:', 'https://' + 'a'.repeat(LIMITS.artifactUri)]) {
+    assert.equal(code(digestArtifact('a.bin', bytes, { uri: badUri })), 'VALUE_RANGE', badUri);
+  }
+  for (const badMediaType of ['', 'application', 'application/', '/json', 'text/plain\r\nX-Inject: 1', 'text/plain; badparam', 'application/' + 'a'.repeat(LIMITS.mediaType)]) {
+    assert.equal(code(digestArtifact('a.bin', bytes, { mediaType: badMediaType })), 'VALUE_RANGE', badMediaType);
+  }
+  assert.equal(code(digestArtifact('a.bin', bytes, { extra: true } as unknown as { uri?: string })), 'FIELD_UNKNOWN');
+  assert.equal(code(digestArtifact('a.bin', bytes, 'bad' as unknown as { uri?: string })), 'VALUE_TYPE');
+});
+
+test('configurable overlay limits admit 512-file and 2048-file manifests, reject 513/2049, and keep 129 rejected by default', () => {
+  const anchor = sha256Anchor();
+  const names129 = sortedNames(129, 'file');
+  const names512 = sortedNames(512, 'file');
+  const names513 = sortedNames(513, 'file');
+  const overlay129 = overlayManifest(anchor, names129, []);
+  const overlay512 = overlayManifest(anchor, names512, []);
+  const overlay513 = overlayManifest(anchor, names513, []);
+  const opts512 = { overlay: { maxFiles: 512, maxBytes: 16_777_216 } } as const;
+
+  // Default limits still reject 129 entries
+  assert.equal(code(identifyManifest(overlay129)), 'VALUE_RANGE');
+  assert.equal(code(validateDocument(overlay129, 'ArtifactManifest')), 'VALUE_RANGE');
+  const defaultLock = value(admitTask(contract(), { admissionId: 'admission-1', runId: 'run-1' }));
+  assert.equal(code(bindSubject(defaultLock, overlay129)), 'VALUE_RANGE');
+
+  // Explicit { maxFiles: 512, maxBytes: 16_777_216 } admits 512 entries and fails closed at 513
+  const identified512 = value(identifyManifest(overlay512, opts512));
+  assert.equal(identified512.manifest.spec.entries.length, 512);
+  assert.equal(value(validateDocument(overlay512, 'ArtifactManifest', opts512)).spec.entries.length, 512);
+  assert.equal(value(bindSubject(defaultLock, overlay512, opts512)).candidateDigest.hex, identified512.digest.hex);
+  assert.equal(code(identifyManifest(overlay513, opts512)), 'VALUE_RANGE');
+  assert.equal(code(validateDocument(overlay513, 'ArtifactManifest', opts512)), 'VALUE_RANGE');
+  assert.equal(code(bindSubject(defaultLock, overlay513, opts512)), 'VALUE_RANGE');
+
+  // Derived automatically from expectedLock.spec.contract.spec.budgets.overlay without passing options
+  const widenedContract = contract();
+  Object.assign(widenedContract.spec.budgets, { overlay: { maxFiles: 512, maxBytes: 16_777_216 } });
+  const widenedLock = value(admitTask(widenedContract, { admissionId: 'admission-1', runId: 'run-1' }));
+  assert.equal(value(bindSubject(widenedLock, overlay512)).candidateDigest.hex, identified512.digest.hex);
+  assert.equal(code(bindSubject(widenedLock, overlay513)), 'VALUE_RANGE');
+
+  // Scales snapshot collection/nodes/inputBytes above default LIMITS.collection (1024) when requested up to 4096
+  const names2048 = Array.from({ length: 2_048 }, (_, i) => `f-${String(i).padStart(4, '0')}`).sort();
+  const names2049 = Array.from({ length: 2_049 }, (_, i) => `f-${String(i).padStart(4, '0')}`).sort();
+  const opts2048 = { overlay: { maxFiles: 2_048, maxBytes: 67_108_864 } } as const;
+  assert.equal(value(identifyManifest(overlayManifest(anchor, names2048, []), opts2048)).manifest.spec.entries.length, 2_048);
+  assert.equal(code(identifyManifest(overlayManifest(anchor, names2049, []), opts2048)), 'VALUE_RANGE');
+
+  // resolveInventory preserves 384 non-overlay artifact slots (LIMITS.resolvedArtifacts - LIMITS.overlayEntries)
+  const inventory896 = Array.from({ length: 512 + (LIMITS.resolvedArtifacts - LIMITS.overlayEntries) }, (_, i) => ({ name: `item-${i}`, bytes: new Uint8Array(1) }));
+  assert.throws(() => resolveInventory(inventory896));
+  assert.equal(resolveInventory(inventory896, opts512).size, 896);
+  const inventory897 = [...inventory896, { name: 'item-896', bytes: new Uint8Array(1) }];
+  assert.throws(() => resolveInventory(inventory897, opts512));
+
+  // Worst-case 1024-entry + 1024-deleted manifest with long ArtifactRef.uri and mediaType passes overlaySnapshotBounds
+  const opts1024 = { overlay: { maxFiles: 1_024, maxBytes: 67_108_864 } } as const;
+  const longUriPrefix = 's3://bench-bucket/' + 'a'.repeat(1_800) + '/';
+  const richEntries = Array.from({ length: 1_024 }, (_, i) => {
+    const name = `entries/${'p'.repeat(120)}-${String(i).padStart(4, '0')}.bin`;
+    return value(digestArtifact(name, Buffer.from(`v-${i}`), {
+      uri: `${longUriPrefix}${String(i).padStart(4, '0')}.bin`,
+      mediaType: 'application/vnd.loopwright.benchmark+octet-stream',
+    }));
+  }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const richDeleted = Array.from({ length: 1_024 }, (_, i) => `deleted/${'d'.repeat(200)}-${String(i).padStart(4, '0')}.txt`).sort();
+  const richManifest = {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { baseTree: anchor, entries: richEntries, deleted: richDeleted },
+  };
+  assert.equal(value(identifyManifest(richManifest, opts1024)).manifest.spec.entries.length, 1_024);
+  assert.equal(value(validateDocument(JSON.stringify(richManifest), 'ArtifactManifest', opts1024)).spec.deleted?.length, 1_024);
 });

@@ -9,12 +9,23 @@ export function packetFixture(handler: ByteHandler = 'json-artifact.v1', sourceF
   const source = manifest(sourceFiles), candidate = manifest(candidateFiles), subject = bindSubject(lockResult.value, candidate); assert.equal(subject.ok, true); if (!subject.ok) throw new Error('fixture');
   const ref = (name: string, value: ArtifactManifest) => ({ name, digest: hash(canonical(value)), byteLength: Buffer.byteLength(canonical(value)) });
   const selected = candidate.spec.entries.find(entry => entry.name === 'packages/result.json') ?? null;
-  const parameters = handler === 'json-artifact.v1' ? { path: 'packages/result.json', expected: selected, required: ['ok'], equals: { ok: true }, sourceManifest: source, candidateManifest: candidate } : handler === 'scope.v1' ? { contract: task } : {};
+  const parameters = handler === 'json-artifact.v1' ? { path: 'packages/result.json', expected: selected, required: ['ok'], equals: { ok: true } } : handler === 'scope.v1' ? { contract: task } : {};
   const header: VerifierHeader = { version: 1, jobId: 'job.one', handler, handlerVersion: 1, handlerDigest: hash('trusted-unit-handler'), checkId: 'tests', producerNonce: 'a'.repeat(32), operationId: 'verify.one', dispatchId: 'dispatch.one', generation: 0,
     subject: subject.value, source: descriptor(source, ref('source.bin', source)), candidate: descriptor(candidate, ref('candidate.bin', candidate)), parameters: parameters as unknown as Record<string, Json>, payloadKind: handler === 'json-artifact.v1' ? 'json' : 'inventories' };
+  const first = encodeInventory(source), second = encodeInventory(candidate);
   let payload: Uint8Array;
-  if (handler === 'json-artifact.v1') { const bytes = candidateFiles.find(file => file.name === 'packages/result.json')?.bytes ?? Buffer.alloc(0); payload = new Uint8Array(4 + bytes.byteLength); new DataView(payload.buffer).setUint32(0, bytes.byteLength); payload.set(bytes, 4); }
-  else { const first = encodeInventory(source), second = encodeInventory(candidate); payload = new Uint8Array(first.byteLength + second.byteLength); payload.set(first); payload.set(second, first.byteLength); }
+  if (handler === 'json-artifact.v1') {
+    const bytes = candidateFiles.find(file => file.name === 'packages/result.json')?.bytes ?? Buffer.alloc(0);
+    payload = new Uint8Array(first.byteLength + second.byteLength + 4 + bytes.byteLength);
+    payload.set(first, 0);
+    payload.set(second, first.byteLength);
+    new DataView(payload.buffer).setUint32(first.byteLength + second.byteLength, bytes.byteLength);
+    payload.set(bytes, first.byteLength + second.byteLength + 4);
+  } else {
+    payload = new Uint8Array(first.byteLength + second.byteLength);
+    payload.set(first, 0);
+    payload.set(second, first.byteLength);
+  }
   return { task, lock: lockResult.value, source, candidate, sourceFiles, candidateFiles, header, payload, packet: () => encodePacket(header, payload) };
 }
 

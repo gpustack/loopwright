@@ -17,7 +17,7 @@ import { preparePublication } from '../src/publication.js';
 import { prepareGate } from '../src/gate.js';
 import { incident } from '../src/finalize.js';
 import { installedHandlerDigests } from '../src/handlers.js';
-import { signPayload, verifySignedPayload } from '../src/gate.js';
+import { signGateVerdict, signPayload, verifySignedPayload } from '../src/gate.js';
 import { canonical, hash } from '../src/schema.js';
 import { stateValue } from '../src/storage.js';
 import { setFixture } from './progress-fixtures.js';
@@ -612,4 +612,446 @@ test('reconciling an incident-terminalized publication run records the receipt a
     assert.ok(!conflict.ok && conflict.error.code === 'RECEIPT_CONFLICT');
     await rm(receiptPath, { force: true }); await rm(conflictPath, { force: true });
   } finally { await f.cleanup(); await publisher.close(); }
+});
+
+test('reconcileCycle preserves extended HMAC gate_verdict metrics (-0 -> 0), findings, detail, and retryablePreemption and refuses tampering or conflicts', { timeout: 120000 }, async () => {
+  const gate = await publicationServer();
+  const f = await gateCrashFixture(gate.url.replace('/publish', '/gate'), false);
+  try {
+    const runId = 'run-gate-ext-reconcile', captured = await crashMidGate(f, runId);
+    const baseBody: Record<string, unknown> = {
+      version: 1,
+      kind: 'gate_verdict',
+      storeId: captured.storeId,
+      runId: captured.runId,
+      lockHash: captured.lockHash,
+      operationId: captured.operationId,
+      dispatchId: captured.dispatchId,
+      dispatchGeneration: captured.dispatchGeneration,
+      gateId: captured.gateId,
+      checkId: captured.checkId,
+      candidateDigest: captured.candidateDigest,
+      status: 'approved',
+      reason: null,
+      expiresAtMs: String(Date.now() + 600000),
+      detail: 'Reconciled benchmark verdict approved',
+      metrics: { latency_us: 19.25, speedup: 1.42, delta: -0, arch: 'sm90', verified: true },
+      findings: [{ title: 'Occupancy advisory', severity: 'low', path: 'result.json', line: 1, evidence: 'register pressure nominal' }],
+      retryablePreemption: false,
+    };
+    const validSig = signGateVerdict(GATE_SECRET, baseBody);
+
+    // Tampering with metrics, findings, detail, or retryablePreemption without re-signing fails HMAC verification
+    for (const [label, tampered] of [
+      ['metrics', { ...baseBody, metrics: { latency_us: 99.9, speedup: 1.42, delta: 0, arch: 'sm90', verified: true } }],
+      ['findings', { ...baseBody, findings: [] }],
+      ['detail', { ...baseBody, detail: 'forged detail' }],
+      ['retryablePreemption', { ...baseBody, retryablePreemption: true }],
+    ] as const) {
+      const badPath = join(tmpdir(), `s05-ext-tampered-${label}-${process.pid}.json`);
+      await writeFile(badPath, JSON.stringify({ ...tampered, signature: validSig }), { mode: 0o600 });
+      const badRes = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId, receipt: badPath });
+      assert.ok(!badRes.ok && badRes.error.code === 'EVIDENCE_UNAVAILABLE' && badRes.error.path === '/receipt', label);
+      await rm(badPath, { force: true });
+    }
+
+    // Properly signed contradictory verdicts (approved+retryablePreemption, pending+retryablePreemption, lone UTF-16 surrogates) fail closed as EVIDENCE_UNAVAILABLE at /receipt
+    for (const [label, invalidBody] of [
+      ['approved-preempted', { ...baseBody, retryablePreemption: true }],
+      ['pending-preempted', { ...baseBody, status: 'pending', retryablePreemption: true }],
+      ['surrogate-detail', { ...baseBody, detail: 'bad \ud800 detail' }],
+      ['surrogate-metric', { ...baseBody, metrics: { tag: 'bad \udfff metric' } }],
+      ['surrogate-finding', { ...baseBody, findings: [{ title: 'bad \ud800', severity: 'low', evidence: 'e' }] }],
+    ] as const) {
+      const invalidPath = join(tmpdir(), `s05-ext-invalid-${label}-${process.pid}.json`);
+      const sig = signGateVerdict(GATE_SECRET, invalidBody);
+      await writeFile(invalidPath, JSON.stringify({ ...invalidBody, signature: sig }), { mode: 0o600 });
+      const invalidRes = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId, receipt: invalidPath });
+      assert.ok(!invalidRes.ok && invalidRes.error.code === 'EVIDENCE_UNAVAILABLE' && invalidRes.error.path === '/receipt', label);
+      await rm(invalidPath, { force: true });
+    }
+
+    // Write raw JSON receipt containing literal -0 in metrics to verify -0 -> 0 normalization on operator receipt load
+    const goodPath = join(tmpdir(), `s05-ext-good-${process.pid}.json`);
+    const rawWithNegZero = JSON.stringify({ ...baseBody, signature: validSig }).replace('"delta":0', '"delta":-0');
+    await writeFile(goodPath, rawWithNegZero, { mode: 0o600 });
+
+    const reconciled = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId, receipt: goodPath });
+    assert.ok(reconciled.ok && reconciled.value.kind === 'settled', JSON.stringify(reconciled.ok ? reconciled.value : reconciled.error));
+    if (!reconciled.ok || reconciled.value.kind !== 'settled') return;
+    assert.equal(reconciled.value.status, 'completed');
+    assert.equal(reconciled.value.outcome, 'succeeded');
+
+    // Idempotent replay succeeds
+    const again = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId, receipt: goodPath });
+    assert.ok(again.ok && again.value.kind === 'settled' && again.value.status === 'completed');
+
+    // Conflicting signed receipt where only metrics differ refuses with RECEIPT_CONFLICT
+    const conflictBody = { ...baseBody, metrics: { latency_us: 20.0, speedup: 1.42, delta: 0, arch: 'sm90', verified: true } };
+    const conflictPath = join(tmpdir(), `s05-ext-conflict-${process.pid}.json`);
+    await writeFile(conflictPath, JSON.stringify({ ...conflictBody, signature: signGateVerdict(GATE_SECRET, conflictBody) }), { mode: 0o600 });
+    const conflict = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId, receipt: conflictPath });
+    assert.ok(!conflict.ok && conflict.error.code === 'RECEIPT_CONFLICT' && conflict.error.path === '/receipt');
+
+    // Verify Evidence -> evaluateAcceptance -> constructRunResult -> inspectRun propagated all fields
+    const bundle = join(f.root, 'bundle-ext-gate');
+    const inspected = await inspectRun({ runRoot: f.runRoot, runId, output: bundle });
+    assert.ok(inspected.ok && inspected.value.manifest !== null);
+    const resultJson = JSON.parse(await readFile(join(bundle, 'result.json'), 'utf8')) as {
+      spec: { status: string; verification: { spec: { required: { checkId: string; status: string; detail: string | null; metrics?: Record<string, unknown>; findings?: unknown[] }[] } } };
+    };
+    assert.equal(resultJson.spec.status, 'completed');
+    const approvalRow = resultJson.spec.verification.spec.required.find(r => r.checkId === 'approval')!;
+    assert.equal(approvalRow.status, 'passed');
+    assert.equal(approvalRow.detail, 'Reconciled benchmark verdict approved');
+    assert.deepEqual(approvalRow.metrics, { arch: 'sm90', delta: 0, latency_us: 19.25, speedup: 1.42, verified: true });
+    assert.deepEqual(approvalRow.findings, [{ title: 'Occupancy advisory', severity: 'low', path: 'result.json', line: 1, evidence: 'register pressure nominal' }]);
+
+    await rm(goodPath, { force: true });
+    await rm(conflictPath, { force: true });
+
+    // Non-approved (expired) verdict with retryablePreemption: true settles blocked without falsely marking passed
+    const runId2 = 'run-gate-ext-preempt', captured2 = await crashMidGate(f, runId2);
+    const preemptBody: Record<string, unknown> = {
+      version: 1,
+      kind: 'gate_verdict',
+      storeId: captured2.storeId,
+      runId: captured2.runId,
+      lockHash: captured2.lockHash,
+      operationId: captured2.operationId,
+      dispatchId: captured2.dispatchId,
+      dispatchGeneration: captured2.dispatchGeneration,
+      gateId: captured2.gateId,
+      checkId: captured2.checkId,
+      candidateDigest: captured2.candidateDigest,
+      status: 'expired',
+      reason: 'spot_preempted',
+      expiresAtMs: String(Date.now() - 5000),
+      detail: 'Node reclaimed during kernel warmup',
+      metrics: { warmup_ms: 120.5 },
+      retryablePreemption: true,
+    };
+    const preemptPath = join(tmpdir(), `s05-ext-preempt-${process.pid}.json`);
+    await writeFile(preemptPath, JSON.stringify({ ...preemptBody, signature: signGateVerdict(GATE_SECRET, preemptBody) }), { mode: 0o600 });
+    const preemptRes = await reconcileCycle({ configuration: f.loaded, runRoot: f.runRoot, runId: runId2, receipt: preemptPath });
+    assert.ok(preemptRes.ok && preemptRes.value.kind === 'settled');
+    if (preemptRes.ok && preemptRes.value.kind === 'settled') {
+      assert.equal(preemptRes.value.status, 'blocked');
+      const savedOut = JSON.parse(await readFile(join(f.runRoot, runId2, 'artifacts', preemptRes.value.receipt.evidence.artifact.name), 'utf8')) as {
+        verdict: { retryablePreemption?: boolean };
+        disposition: { status: string; retryablePreemption?: boolean };
+      };
+      assert.equal(savedOut.verdict.retryablePreemption, true);
+      assert.equal(savedOut.disposition.retryablePreemption, true);
+      assert.equal(savedOut.disposition.status, 'blocked');
+    }
+    await rm(preemptPath, { force: true });
+  } finally { await f.cleanup(); await gate.close(); }
+});
+
+test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions, and gateUrlOverrides into Cycle repair resumption', { timeout: 120000 }, async () => {
+  // Approving local gate server used when the post-reconcile repair re-runs verification
+  const approvingGate = await new Promise<{ readonly url: string; readonly close: () => Promise<void> }>(resolveServer => {
+    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const body = Buffer.concat(chunks);
+        const sig = req.headers['x-loopwright-signature'];
+        if (typeof sig !== 'string' || !verifySignedPayload(GATE_SECRET, body, sig)) {
+          res.writeHead(403).end();
+          return;
+        }
+        const parsed = JSON.parse(body.toString('utf8')) as Record<string, unknown>;
+        const verdict = {
+          version: 1,
+          kind: 'gate_verdict',
+          storeId: parsed.storeId,
+          runId: parsed.runId,
+          lockHash: parsed.lockHash,
+          operationId: parsed.operationId,
+          dispatchId: parsed.dispatchId,
+          dispatchGeneration: parsed.dispatchGeneration,
+          gateId: parsed.gateId,
+          checkId: parsed.checkId,
+          candidateDigest: parsed.candidateDigest,
+          status: 'approved',
+          reason: null,
+          expiresAtMs: String(Date.now() + 600_000),
+        };
+        const bytes = Buffer.from(JSON.stringify(verdict), 'utf8');
+        res.writeHead(200, { 'content-type': 'application/json', connection: 'close', 'x-loopwright-signature': signPayload(GATE_SECRET, bytes) });
+        res.end(bytes);
+      })().catch(() => { try { res.writeHead(500).end(); } catch { /* ignore */ } });
+    });
+    server.listen(0, '127.0.0.1', () =>
+      resolveServer({
+        url: 'http://127.0.0.1:' + (server.address() as { port: number }).port + '/gate',
+        close: () => new Promise((done, fail) => { server.closeAllConnections(); server.close(err => (err ? fail(err) : done())); }),
+      }),
+    );
+  });
+
+  // Hanging gate server to park the initial run mid-gate at verifier_pre (dispatch_uncertain)
+  const hangingGate = await publicationServer();
+  const f = await configurationFixture();
+  try {
+    f.environment.GATE_SECRET = GATE_SECRET;
+    setFixture(f.registry, ['spec', 'credentialBindings'], [
+      ...f.registry.spec.credentialBindings,
+      { id: 'gate-signer', consumer: 'gate', destinationRef: 'gate-service', environmentNames: ['GATE_SECRET'], template: '${GATE_SECRET}' },
+    ]);
+    setFixture(f.registry, ['spec', 'environmentBindings'], [
+      { name: 'PROVIDER_TOKEN', classification: 'credential', paths: ['/spec/credentials/0/template'] },
+      { name: 'GATE_SECRET', classification: 'credential', paths: ['/spec/credentials/1/template'] },
+    ]);
+    setFixture(f.config, ['spec', 'credentials'], [
+      { ref: 'copilot', template: '${PROVIDER_TOKEN}' },
+      { ref: 'gate-signer', template: '${GATE_SECRET}' },
+    ]);
+    setFixture(f.registry, ['spec', 'gateEndpoints'], [
+      { id: 'ci-gate', url: hangingGate.url.replace('/publish', '/gate'), signingCredentialRef: 'gate-signer', authCredentialRef: null, timeoutMs: 1500, maxPollMs: 20_000, pollInitialMs: 100, pollMaxMs: 200, jitter: 0 },
+    ]);
+    const installed = await installedHandlerDigests();
+    setFixture(f.registry, ['spec', 'handlers'], [
+      ...f.registry.spec.handlers,
+      { id: 'approval', kind: 'check', implementation: 'gate.v1', version: 1, digest: installed['gate.v1'], parameters: { checkId: 'approval', endpointRef: 'ci-gate', gateId: 'merge-gate' }, capabilities: ['external_service', 'read_only'] },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], {
+      writable: ['result.json', '.github/workflows/**'],
+      protected: ['docs/**'],
+    });
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], 1);
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'maxModelCalls'], 4);
+    setFixture(f.config, ['spec', 'controls', 'maxAttempts'], 4);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'build', kind: 'agent', uses: 'package.patch', roleId: 'builder', dependsOn: [] },
+      { id: 'approval', kind: 'check', uses: 'approval', roleId: null, dependsOn: ['build'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [
+      { stepId: 'build', handlerRef: 'package.patch' },
+      { stepId: 'approval', handlerRef: 'approval' },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+      required: ['approval'],
+      checks: [{ id: 'approval', allowedEvidenceLevels: ['external_service'] }],
+    });
+    // Ensure builder role has write tool
+    setFixture(f.registry, ['spec', 'roleProfiles', '0', 'tools'], ['read', 'write']);
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles', '0', 'tools'], ['read', 'write']);
+
+    const repository = join(f.root, 'repository');
+    const runRoot = join(f.root, 'runs');
+    await mkdir(join(repository, '.github', 'workflows'), { recursive: true, mode: 0o700 });
+    const git = (args: string[]) =>
+      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        cwd: repository,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
+        timeout: 5000,
+        encoding: 'utf8',
+      });
+    git(['init', '-q']);
+    await writeFile(join(repository, 'result.json'), JSON.stringify({ ok: false }), { mode: 0o600 });
+    await writeFile(join(repository, '.github', 'workflows', 'ci.yml'), 'name: CI\n', { mode: 0o600 });
+    git(['add', '.']);
+    git(['-c', 'user.name=Reconcile Ports', '-c', 'user.email=fixture@localhost.invalid', 'commit', '-qm', 'init']);
+    const rev = git(['rev-parse', 'HEAD']).trim();
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    await f.save();
+    const loadedRes = await f.load();
+    assert.equal(loadedRes.ok, true);
+    if (!loadedRes.ok) return;
+    const loaded = loadedRes.value;
+
+    let turnSeq = 0;
+    const openAdapter: import('../src/controller.js').ControllerPorts['openAdapter'] = async (host, openInput) => {
+      const files = new Map<string, Uint8Array>(openInput.candidate.artifacts.map(a => [a.name, new Uint8Array(a.bytes)]));
+      let lastPrompt = '';
+      let subText = '';
+      const adapter: import('@loopwright/agent-pi').PiAdapterV2 = {
+        capabilities: () => { throw new Error('unused'); },
+        events: () => ({ async *[Symbol.asyncIterator]() { yield* []; } }),
+        cancel: async () => ({
+          ok: true,
+          value: { status: 'cancelled', requestIds: [], operationIds: [], providerTermination: 'none', usage: 'none', localCleanup: 'complete', error: null, cleanupError: null },
+        }),
+        compact: async () => { throw new Error('unused'); },
+        close: async () => ({ ok: true, value: { closed: true } }),
+        execute: async cmd => {
+          turnSeq++;
+          lastPrompt = cmd.text;
+          files.set('result.json', new Uint8Array(Buffer.from(JSON.stringify({ ok: true, turn: turnSeq }), 'utf8')));
+          if (cmd.repair === 'implementation') {
+            files.set('.github/workflows/ci.yml', new Uint8Array(Buffer.from('name: CI\non: push\n', 'utf8')));
+          }
+          subText = JSON.stringify({
+            version: 1,
+            status: 'completed',
+            checks: [{ checkId: 'approval', status: 'passed', evidenceId: null, reason: null }],
+            reason: null,
+          });
+          const reqId = `rec-port-req-${turnSeq}`;
+          const opId = `rec-port-op-${turnSeq}`;
+          stateValue(host.store.reserveRequest(host.authority, {
+            requestId: reqId, roleId: openInput.roleId, nodeId: openInput.stepId, attemptId: cmd.commandId,
+            purpose: 'task', repair: cmd.repair, transportRetryOf: null, requestDigest: hash(reqId),
+            inputUpperBound: 100, outputUpperBound: 50, totalUpperBound: 150,
+            capability: { adapterId: 'pi', adapterVersion: '0.0.0', provider: openInput.policy.selection.provider, model: openInput.policy.selection.model, kind: 'soft_only', coversAllBillableTokens: false, enforcesOutputBound: false },
+            operationId: opId, targetIdentity: 'fixture:reconcile-ports',
+          }));
+          stateValue(host.store.authorizeRequestDispatch(host.authority, reqId));
+          const op = stateValue(host.store.getOperation(opId));
+          const view = stateValue(host.store.inspect());
+          const uBytes = Buffer.from(canonical({ turnSeq }));
+          const uName = `rec-u-${hash(uBytes).hex}.bin`;
+          await writeFile(join(host.artifactsDirectory, uName), uBytes, { mode: 0o600 });
+          stateValue(host.store.observeRequest(host.authority, reqId, {
+            receiptId: `rec-rcpt-${turnSeq}`, termination: 'confirmed', outcome: 'succeeded',
+            evidence: {
+              evidenceId: `rec-ev-${turnSeq}`, producerId: 'rec-mock', method: 'synthetic',
+              artifact: { name: uName, byteLength: uBytes.byteLength, digest: hash(uBytes) },
+              subject: { storeId: view.storeId, runId: view.runId, lockHash: view.lockHash, operationId: opId, requestId: reqId, intentDigest: op.intentDigest, dispatchGeneration: op.dispatch!.generation, dispatchId: op.dispatch!.dispatchId },
+            },
+            usage: { requestId: reqId, inputTokens: { provenance: 'reported', value: 50 }, outputTokens: { provenance: 'reported', value: 10 }, costMicrousd: { provenance: 'reported', value: 50 } },
+          }));
+          return { ok: true, value: { status: 'execution_settled', requestIds: [reqId], operationIds: [opId], providerTermination: 'confirmed', usage: 'complete', localCleanup: 'complete', error: null, cleanupError: null } };
+        },
+        capture: async ({ checkpointId }) => {
+          const sorted = [...files.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, bytes]) => ({ name, bytes, ref: { name, byteLength: bytes.byteLength, digest: hash(bytes) } }));
+          const manifest = { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { entries: sorted.map(s => s.ref) } };
+          const current = stateValue(host.store.inspect());
+          const sourceDigest = hash('loopwright.dev/pi-policy/v2\0' + canonical(openInput.policy));
+          const nativePolicy = { ...openInput.policy, version: 1, policyId: 'v2.' + BigInt('0x' + sourceDigest.hex).toString(36) };
+          const candidateDigest = hash('loopwright.dev/artifact-manifest/v1alpha1\0' + canonical(manifest));
+          const binding = {
+            version: 1, checkpointId, storeId: current.storeId, runId: current.runId, lockHash: current.lockHash,
+            sessionId: openInput.sessionId, roleId: openInput.roleId, stepId: openInput.stepId, runtime: openInput.policy.runtime,
+            policyDigest: hash(canonical(nativePolicy)), resourcesDigest: hash(canonical(openInput.policy.resources)), candidateDigest,
+            clockBasis: current.clock.basis, accountingDigest: hash(canonical({ ledger: current.ledger, requests: current.counts.requests, operations: current.counts.operations })), sequence: 1,
+          };
+          const line = (v: unknown) => JSON.stringify(v) + '\n';
+          let wsBody = line({ type: 'workspace_snapshot', version: 1, binding, manifest });
+          for (const s of sorted) {
+            wsBody += line({ type: 'file', ref: s.ref });
+            if (s.bytes.byteLength > 0) wsBody += line({ type: 'chunk', index: 0, data: Buffer.from(s.bytes).toString('base64') });
+            wsBody += line({ type: 'file_end', byteLength: s.bytes.byteLength, digest: s.ref.digest.hex });
+          }
+          wsBody += line({ type: 'end', files: sorted.length });
+          const wsBytes = Buffer.from(wsBody, 'utf8');
+          const wsName = `rec-ws-${hash(wsBytes).hex}.bin`;
+          await writeFile(join(host.artifactsDirectory, wsName), wsBytes, { mode: 0o600 });
+          const wsRef = { name: wsName, byteLength: wsBytes.byteLength, digest: hash(wsBytes) };
+          const ts = '2026-11-19T00:00:00.000Z';
+          const sessBody =
+            line({ type: 'session_snapshot', version: 1, binding }) +
+            line({ type: 'session', version: 3, id: 's1', cwd: '/workspace/candidate', timestamp: ts }) +
+            line({ type: 'message', id: 'u1', parentId: null, timestamp: ts, message: { role: 'user', content: lastPrompt } }) +
+            line({ type: 'message', id: 'a1', parentId: 'u1', timestamp: ts, message: { role: 'assistant', ...openInput.policy.selection, content: [{ type: 'text', text: subText }], stopReason: 'stop' } });
+          const sessBytes = Buffer.from(sessBody, 'utf8');
+          const sessName = `rec-sess-${hash(sessBytes).hex}.bin`;
+          await writeFile(join(host.artifactsDirectory, sessName), sessBytes, { mode: 0o600 });
+          const sessRef = { name: sessName, byteLength: sessBytes.byteLength, digest: hash(sessBytes) };
+          stateValue(host.store.writeCheckpoint(host.authority, { checkpointId, expectedRevision: stateValue(host.store.inspect()).revision, candidateManifest: manifest, workspace: wsRef, privateSession: sessRef, additionalArtifacts: [] }));
+          return { ok: true, value: { checkpointId, candidate: manifest, workspace: wsRef, session: sessRef } };
+        },
+      };
+      return { ok: true, value: adapter };
+    };
+
+    const parkRunMidGate = async (runId: string) => {
+      const context = await createCycle({ configuration: loaded, repository, runRoot, runId }, { openAdapter, allowWorkflowWrites: true });
+      const cycle = new Cycle(context);
+      await cycle.bootstrap();
+      await cycle.role('build');
+      const slot = context.plan.verifierSlots.find(s => s.handler.implementation === 'gate.v1')!;
+      const nonce = randomBytes(16).toString('hex');
+      const job = prepareGate(context.plan, context.lock, slot.id, cycle.candidate, cycle.generation, nonce, loaded.registry.spec.gateEndpoints);
+      const bound = bindSubject(context.lock, cycle.candidate.manifest);
+      assert.ok(bound.ok);
+      if (!bound.ok) throw new Error('bindSubject');
+      const head = await context.progress.read();
+      assert.ok(head);
+      if (!head) throw new Error('head');
+      const ordinal = context.plan.verifierSlots.findIndex(item => item.id === slot.id);
+      await cycle.publish(
+        {
+          ...cycle.draft,
+          stage: { ...cycle.draft.stage, kind: 'verifier_pre' },
+          verifierReceipts: [{ slot: slot.id, generation: cycle.generation, operationId: job.operationId, producerNonce: nonce, output: null, receipt: null }],
+        },
+        `verify.${cycle.generation}.${ordinal}.pre`,
+      );
+      stateValue(context.store.putIntent(context.authority, {
+        operationId: job.operationId, nodeId: context.plan.orderedDAG[0]!.id,
+        attemptId: 'job.' + hash(job.operationId + '\0' + nonce).hex.slice(0, 40),
+        effect: 'read_only', requestDigest: job.requestDigest,
+        targetIdentity: `gate:${slot.id}:${cycle.generation}:${bound.value.candidateDigest.hex}`,
+      }));
+      const dispatched = stateValue(context.store.authorizeOperationDispatch(context.authority, job.operationId));
+      if (dispatched.kind !== 'new_dispatch') throw new Error('dispatch');
+      const op = stateValue(context.store.getOperation(job.operationId));
+      const storeId = stateValue(context.store.inspect()).storeId;
+      const req: Record<string, unknown> = {
+        version: 1, kind: 'gate_request', gateId: 'merge-gate', checkId: slot.checkId,
+        candidateDigest: bound.value.candidateDigest.hex, subject: bound.value,
+        storeId, runId, lockHash: context.lock.spec.lockHash, operationId: job.operationId,
+        dispatchId: dispatched.permit.dispatchId, dispatchGeneration: dispatched.permit.generation, requestDigest: job.requestDigest.hex,
+      };
+      const prefix = join(context.artifacts.directory, 'gate-producer-' + hash(job.operationId + '\0' + nonce).hex);
+      await writeFile(prefix + '.binding.json', canonical({
+        version: 1, planDigest: context.plan.planDigest, operationId: job.operationId, producerNonce: nonce,
+        requestDigest: job.requestDigest, requestBytesDigest: hash(Buffer.from(canonical(req))).hex, intentDigest: op.intentDigest,
+        subject: bound.value, generation: cycle.generation, endpoint: 'ci-gate',
+        dispatchReceipt: { generation: dispatched.permit.generation, dispatchId: dispatched.permit.dispatchId, revision: dispatched.permit.authorizedRevision, clockEpoch: dispatched.permit.clockEpoch },
+      }), { mode: 0o600 });
+      await cycle.deadline.dispose();
+      await cycle.events.suspend();
+      stateValue(context.store.release(context.authority));
+      stateValue(context.store.close());
+      await context.owner.release();
+      const deniedBody = {
+        version: 1, kind: 'gate_verdict', storeId, runId, lockHash: context.lock.spec.lockHash,
+        operationId: job.operationId, dispatchId: dispatched.permit.dispatchId, dispatchGeneration: dispatched.permit.generation,
+        gateId: 'merge-gate', checkId: slot.checkId, candidateDigest: bound.value.candidateDigest.hex,
+        status: 'denied' as const, reason: 'workflow_fix_required', expiresAtMs: String(Date.now() + 600_000),
+      };
+      const rPath = join(tmpdir(), `s05-rec-ports-${runId}-${process.pid}.json`);
+      await writeFile(rPath, JSON.stringify({ ...deniedBody, signature: signGateVerdict(GATE_SECRET, deniedBody) }), { mode: 0o600 });
+      return rPath;
+    };
+
+    // 1. Without allowWorkflowWrites: true, repair touching .github/workflows/ci.yml fails closed (incident -> RECOVERY_REQUIRED)
+    const rPathBlocked = await parkRunMidGate('run-rec-wf-blocked');
+    const blockedRes = await reconcileCycle(
+      { configuration: loaded, runRoot, runId: 'run-rec-wf-blocked', receipt: rPathBlocked },
+      { openAdapter, gateUrlOverrides: { 'ci-gate': approvingGate.url } },
+    );
+    assert.equal(blockedRes.ok, false);
+    await rm(rPathBlocked, { force: true });
+
+    // 2. With { allowWorkflowWrites: true, decisions, gateUrlOverrides }, repair touching .github/workflows/ci.yml succeeds and settles completed!
+    let routingCalls = 0;
+    const decisions: import('../src/types.js').AdvisoryDecisionPort = {
+      routeCapabilityTier: async () => {
+        routingCalls++;
+        return { tier: 'balanced', source: 'deterministic_heuristic' };
+      },
+    };
+    const rPathAllowed = await parkRunMidGate('run-rec-wf-allowed');
+    const allowedRes = await reconcileCycle(
+      { configuration: loaded, runRoot, runId: 'run-rec-wf-allowed', receipt: rPathAllowed },
+      { allowWorkflowWrites: true, openAdapter, gateUrlOverrides: { 'ci-gate': approvingGate.url }, decisions },
+    );
+    assert.ok(allowedRes.ok && allowedRes.value.kind === 'settled', JSON.stringify(allowedRes.ok ? allowedRes.value : allowedRes.error));
+    if (allowedRes.ok && allowedRes.value.kind === 'settled') {
+      assert.equal(allowedRes.value.status, 'completed');
+    }
+    assert.ok(routingCalls >= 1, 'expected AdvisoryDecisionPort to be invoked during reconciled repair');
+    await rm(rPathAllowed, { force: true });
+  } finally {
+    await f.cleanup();
+    await hangingGate.close();
+    await approvingGate.close();
+  }
 });

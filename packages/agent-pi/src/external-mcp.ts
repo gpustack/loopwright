@@ -10,10 +10,15 @@ import {
   type McpTransport,
   type Tool,
 } from '@earendil-works/pi-mcp';
+import { list } from './boundary.js';
+import { refuse } from './errors.js';
+import type { ExternalMcpExecutorPort } from './execution.js';
 import { clampToolResultBytes, type ToolResult } from './tools.js';
 
-export const EXTERNAL_MCP_TOOL_NAME_PATTERN = /^mcp__([a-z][a-z0-9_]*(?:-[a-z0-9_]+)*)__([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)$/;
-const MCP_SERVER_ID_PATTERN = /^[a-z][a-z0-9_]*(?:-[a-z0-9_]+)*$/;
+export type { ExternalMcpExecutorPort, ToolResult };
+
+export const EXTERNAL_MCP_TOOL_NAME_PATTERN = /^mcp__([a-z][a-z0-9]*(?:[_-][a-z0-9]+)*)__([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)$/;
+const MCP_SERVER_ID_PATTERN = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/;
 const MAX_MCP_SERVER_ID_LENGTH = 24;
 const MAX_PROVIDER_TOOL_NAME_LENGTH = 64;
 const BARE_EXECUTABLE_PATTERN = /^[A-Za-z0-9._+-]{1,128}$/;
@@ -79,10 +84,122 @@ export interface CallExternalMcpToolOptions {
   readonly timeoutMs?: number | undefined;
 }
 
-export function isExternalMcpToolName(name: string): boolean {
-  if (name.length > MAX_PROVIDER_TOOL_NAME_LENGTH) return false;
+export function parseExternalMcpServerId(name: string): string | null {
+  if (typeof name !== 'string' || name.length > MAX_PROVIDER_TOOL_NAME_LENGTH) return null;
   const match = EXTERNAL_MCP_TOOL_NAME_PATTERN.exec(name);
-  return match !== null && match[1] !== 'workspace' && match[1]!.length <= MAX_MCP_SERVER_ID_LENGTH;
+  if (match === null || match[1] === 'workspace' || match[1]!.length > MAX_MCP_SERVER_ID_LENGTH) {
+    return null;
+  }
+  return match[1]!;
+}
+
+export function isExternalMcpToolName(name: string): boolean {
+  return parseExternalMcpServerId(name) !== null;
+}
+
+export interface RoleMcpAllowlistOptions {
+  readonly roleTools: readonly string[];
+  readonly policyTools: readonly string[];
+  readonly allowedServers?: readonly string[] | undefined;
+}
+
+export interface RoleMcpAllowlist {
+  readonly allowedServers: ReadonlySet<string> | null;
+  isToolAllowed(name: string, serverId?: string | null): boolean;
+  filterToolNames(toolNames: readonly string[]): readonly string[];
+}
+
+export function validateAllowedMcpServers(
+  allowedServers: readonly string[] | undefined,
+  path = '/options/allowedMcpServers',
+): ReadonlySet<string> | null {
+  if (allowedServers === undefined) return null;
+  const items = list(allowedServers, 128, path);
+  const serverSet = new Set<string>();
+  for (let index = 0; index < items.length; index++) {
+    const serverId = items[index];
+    if (
+      typeof serverId !== 'string'
+      || serverId.length === 0
+      || serverId.length > MAX_MCP_SERVER_ID_LENGTH
+      || serverId === 'workspace'
+      || !MCP_SERVER_ID_PATTERN.test(serverId)
+    ) {
+      refuse('INPUT_INVALID', `${path}/${index}`);
+    }
+    serverSet.add(serverId);
+  }
+  return serverSet;
+}
+
+export function createRoleMcpAllowlist(options: RoleMcpAllowlistOptions): RoleMcpAllowlist {
+  const roleTools = new Set(options.roleTools);
+  const policyTools = new Set(options.policyTools);
+  const allowedServers = validateAllowedMcpServers(options.allowedServers);
+  const isToolAllowed = (name: string, serverId?: string | null): boolean => {
+    const parsedServerId = parseExternalMcpServerId(name);
+    if (parsedServerId === null) return false;
+    if (serverId !== undefined && serverId !== null && serverId !== parsedServerId) return false;
+    if (!roleTools.has(name) || !policyTools.has(name)) return false;
+    if (allowedServers !== null && !allowedServers.has(parsedServerId)) return false;
+    return true;
+  };
+  return Object.freeze({
+    allowedServers,
+    isToolAllowed,
+    filterToolNames: (toolNames: readonly string[]): readonly string[] =>
+      Object.freeze(toolNames.filter(name => !isExternalMcpToolName(name) || isToolAllowed(name))),
+  });
+}
+
+function isRoleMcpAllowlist(value: RoleMcpAllowlistOptions | RoleMcpAllowlist): value is RoleMcpAllowlist {
+  return 'isToolAllowed' in value && typeof value.isToolAllowed === 'function';
+}
+
+export function createRoleScopedMcpExecutor(
+  registry: ExternalMcpExecutorPort,
+  allowlistOrOptions: RoleMcpAllowlistOptions | RoleMcpAllowlist,
+): ExternalMcpExecutorPort {
+  const allowlist = isRoleMcpAllowlist(allowlistOrOptions)
+    ? allowlistOrOptions
+    : createRoleMcpAllowlist(allowlistOrOptions);
+  const resolveServerId = (name: string): string | null => {
+    const parsed = parseExternalMcpServerId(name);
+    if (parsed === null) return null;
+    const identity = registry.targetIdentityFor(name);
+    if (identity !== null) {
+      if (!identity.startsWith('mcp:')) return null;
+      const colon = identity.indexOf(':', 4);
+      if (colon <= 4) return null;
+      const identityServerId = identity.slice(4, colon);
+      if (identityServerId !== parsed) return null;
+    } else if (registry.hasTool(name)) {
+      return null;
+    }
+    return parsed;
+  };
+  return Object.freeze<ExternalMcpExecutorPort>({
+    hasTool(name: string): boolean {
+      const serverId = resolveServerId(name);
+      return serverId !== null && allowlist.isToolAllowed(name, serverId) && registry.hasTool(name);
+    },
+    targetIdentityFor(name: string): string | null {
+      const serverId = resolveServerId(name);
+      if (serverId === null || !allowlist.isToolAllowed(name, serverId)) return null;
+      return registry.targetIdentityFor(name);
+    },
+    async callTool(
+      name: string,
+      args: Readonly<Record<string, unknown>>,
+      options: { readonly signal?: AbortSignal | undefined; readonly maxResultBytes: number },
+    ): Promise<ToolResult> {
+      const serverId = resolveServerId(name);
+      if (serverId === null || !allowlist.isToolAllowed(name, serverId)) {
+        refuse('TOOL_DENIED', `/mcp/${name}`, { phase: 'tool' });
+      }
+      return registry.callTool(name, args, options);
+    },
+  });
 }
 
 function isInsideRoot(targetPath: string, rootPath: string): boolean {
@@ -447,17 +564,27 @@ export class HostMcpRegistry {
     return this.#toolsByName.has(name);
   }
 
+  serverIdFor(name: string): string | null {
+    return this.#toolsByName.get(name)?.schema.serverId ?? null;
+  }
+
   targetIdentityFor(name: string): string | null {
     const entry = this.#toolsByName.get(name);
     if (!entry) return null;
     return `mcp:${entry.schema.serverId}:${entry.schema.upstreamName}`;
   }
 
-  toolSchemasFor(allowedToolNames: readonly string[]): readonly ExternalMcpToolSchema[] {
+  toolSchemasFor(
+    allowedToolNames: readonly string[],
+    allowedServers?: readonly string[],
+  ): readonly ExternalMcpToolSchema[] {
     const allowed = new Set(allowedToolNames);
+    const allowedServerSet = allowedServers !== undefined ? new Set(allowedServers) : null;
     const result: ExternalMcpToolSchema[] = [];
     for (const [name, entry] of this.#toolsByName.entries()) {
-      if (allowed.has(name)) result.push(entry.schema);
+      if (allowed.has(name) && (allowedServerSet === null || allowedServerSet.has(entry.schema.serverId))) {
+        result.push(entry.schema);
+      }
     }
     return Object.freeze(result);
   }

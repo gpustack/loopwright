@@ -2,7 +2,18 @@ import { constants, existsSync, type BigIntStats } from 'node:fs';
 import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
-import { LIMITS, digestArtifact, isWritablePath, type ArtifactRef, type ArtifactManifest } from '@loopwright/core';
+import {
+  LIMITS,
+  OVERLAY_LIMITS,
+  digestArtifact,
+  identifyManifest,
+  isWritablePath,
+  resolveOverlayLimits,
+  type ArtifactManifest,
+  type ArtifactRef,
+  type OverlayLimits,
+  type OverlayLimitsInput,
+} from '@loopwright/core';
 import { canonical, freeze, object, list } from './boundary.js';
 import { refuse, PiFailure } from './errors.js';
 import type { PiBaselineEntry, PiCandidateBaseline, PiOpenInput } from './types.js';
@@ -30,8 +41,33 @@ export interface BaselineStatFingerprint {
   readonly mtimeNs: bigint;
 }
 
-const OVERLAY_MAX_BYTES = 4_194_304;
-const OVERLAY_MANIFEST_MAX_BYTES = 32_768;
+export interface ResolvedCandidateOverlayLimits extends OverlayLimits {
+  readonly manifestMaxBytes: number;
+}
+
+export const DEFAULT_OVERLAY_MANIFEST_MAX_BYTES = 32_768;
+const EXTRA_OVERLAY_MANIFEST_BYTES_PER_FILE = 512;
+const MAX_OVERLAY_MANIFEST_BYTES = 4_194_304;
+
+export function overlayManifestMaxBytes(maxFiles: number): number {
+  if (maxFiles <= OVERLAY_LIMITS.defaultMaxFiles) {
+    return DEFAULT_OVERLAY_MANIFEST_MAX_BYTES;
+  }
+  return Math.min(
+    MAX_OVERLAY_MANIFEST_BYTES,
+    DEFAULT_OVERLAY_MANIFEST_MAX_BYTES + (maxFiles - OVERLAY_LIMITS.defaultMaxFiles) * EXTRA_OVERLAY_MANIFEST_BYTES_PER_FILE,
+  );
+}
+
+export function resolveCandidateOverlayLimits(overlayInput?: OverlayLimitsInput): ResolvedCandidateOverlayLimits {
+  const resolved = resolveOverlayLimits(overlayInput);
+  if (!resolved.ok) refuse('INPUT_INVALID', '/lock/spec/contract/spec/budgets/overlay');
+  return Object.freeze({
+    maxFiles: resolved.value.maxFiles,
+    maxBytes: resolved.value.maxBytes,
+    manifestMaxBytes: overlayManifestMaxBytes(resolved.value.maxFiles),
+  });
+}
 
 export function gitBlobOid(objectFormat: 'sha1' | 'sha256', bytes: Uint8Array): string {
   return createHash(objectFormat).update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
@@ -265,6 +301,7 @@ export async function materializeCandidateDirectory(candidateDir: string, input:
 export class Candidate {
   readonly #isOverlay: boolean;
   readonly #objectFormat: 'sha1' | 'sha256' | null;
+  readonly #overlayLimits: ResolvedCandidateOverlayLimits;
   readonly #files: Map<string, ArtifactRef>;
   readonly #deleted: Set<string>;
   readonly #baseline: Map<string, PiBaselineEntry>;
@@ -285,6 +322,7 @@ export class Candidate {
     const baseTree = input.candidate.manifest.spec.baseTree;
     this.#isOverlay = baseTree !== undefined;
     this.#objectFormat = baseTree?.objectFormat ?? null;
+    this.#overlayLimits = resolveCandidateOverlayLimits(input.lock.spec.contract.spec.budgets.overlay);
     this.#files = new Map(input.candidate.manifest.spec.entries.map(entry => [entry.name, freeze(structuredClone(entry))]));
     this.#deleted = new Set(input.candidate.manifest.spec.deleted ?? []);
     this.#baseline = new Map((input.candidate.baseline?.entries ?? []).map(entry => [entry.name, entry]));
@@ -292,6 +330,10 @@ export class Candidate {
       this.#baselineNorm.set(normalizePathKey(entry.name), entry.name);
     }
     this.#total = [...this.#files.values()].reduce((total, value) => total + value.byteLength, 0);
+  }
+
+  #effectiveOverlayMaxEntries(): number {
+    return Math.min(this.#overlayLimits.maxFiles, this.input.policy.limits.candidateEntries);
   }
 
   #activeBaselineDirs(): ReadonlySet<string> {
@@ -569,7 +611,7 @@ export class Candidate {
 
   #dirEntryLimit(includeTemp: boolean): number {
     const baseLimit = this.#isOverlay
-      ? LIMITS.baselineEntries + LIMITS.overlayEntries
+      ? LIMITS.baselineEntries + this.#overlayLimits.maxFiles
       : this.input.policy.limits.candidateEntries;
     return includeTemp ? baseLimit + 1 : baseLimit;
   }
@@ -990,11 +1032,11 @@ export class Candidate {
       const prevOverlayBytes = this.#overlayByteLength(path);
       const nextOverlayBytes = revertsToBaseline ? 0 : bytes.length;
       const projectedTotal = this.#total - prevOverlayBytes + nextOverlayBytes;
-      if (projectedTotal > OVERLAY_MAX_BYTES || projectedTotal > capacity) {
+      if (projectedTotal > this.#overlayLimits.maxBytes || projectedTotal > capacity) {
         refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
       }
       const addsOverlayEntry = !revertsToBaseline && !this.#files.has(path);
-      if (addsOverlayEntry && this.#files.size >= LIMITS.overlayEntries) {
+      if (addsOverlayEntry && this.#files.size >= this.#effectiveOverlayMaxEntries()) {
         refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
       }
       const nextOverlay = new Map(this.#files);
@@ -1003,7 +1045,7 @@ export class Candidate {
       if (revertsToBaseline) nextOverlay.delete(path);
       else nextOverlay.set(path, after);
       const projectedManifest = this.#buildOverlayManifest(nextOverlay, nextDeleted);
-      if (Buffer.byteLength(canonical(projectedManifest)) > OVERLAY_MANIFEST_MAX_BYTES) {
+      if (Buffer.byteLength(canonical(projectedManifest)) > this.#overlayLimits.manifestMaxBytes) {
         refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
       }
     }
@@ -1066,11 +1108,11 @@ export class Candidate {
       nextOverlay.delete(path);
       const nextDeleted = new Set(this.#deleted);
       nextDeleted.add(path);
-      if (nextDeleted.size > LIMITS.overlayEntries) {
+      if (nextDeleted.size > this.#overlayLimits.maxFiles) {
         refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
       }
       const projectedManifest = this.#buildOverlayManifest(nextOverlay, nextDeleted);
-      if (Buffer.byteLength(canonical(projectedManifest)) > OVERLAY_MANIFEST_MAX_BYTES) {
+      if (Buffer.byteLength(canonical(projectedManifest)) > this.#overlayLimits.manifestMaxBytes) {
         refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
       }
     }
@@ -1553,7 +1595,18 @@ export class Candidate {
 
     if (this.#isOverlay) {
       const manifest = this.#buildOverlayManifest(this.#files, this.#deleted);
-      if (manifest.spec.entries.length > LIMITS.overlayEntries || (manifest.spec.deleted?.length ?? 0) > LIMITS.overlayEntries || this.#total > OVERLAY_MAX_BYTES || Buffer.byteLength(canonical(manifest)) > OVERLAY_MANIFEST_MAX_BYTES) {
+      if (
+        manifest.spec.entries.length > this.#effectiveOverlayMaxEntries()
+        || (manifest.spec.deleted?.length ?? 0) > this.#overlayLimits.maxFiles
+        || this.#total > this.#overlayLimits.maxBytes
+        || Buffer.byteLength(canonical(manifest)) > this.#overlayLimits.manifestMaxBytes
+      ) {
+        refuse('OUTPUT_LIMIT', '/candidate');
+      }
+      const identified = identifyManifest(manifest, {
+        overlay: { maxFiles: this.#overlayLimits.maxFiles, maxBytes: this.#overlayLimits.maxBytes },
+      });
+      if (!identified.ok) {
         refuse('OUTPUT_LIMIT', '/candidate');
       }
       return freeze(manifest);

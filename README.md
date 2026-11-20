@@ -94,7 +94,7 @@ spec:
     noChange: Confirm the documentation needs no change and settle as no change.
   scope:
     writable:
-      - docs
+      - docs/**
     protected:
       - policy/protected-notes.md
   upstreams:
@@ -280,7 +280,7 @@ spec:
   maxAttempts: 1
 ```
 
-Alternatively, declare `spec.decisions` inside `.loopwright/taskpack.yaml`: `Taskpack.spec.decisions` validates the policy and exposes it for host callers to pass to `validateDecisionPolicy`; the Action does not instantiate a provider automatically.
+Alternatively, declare `spec.decisions` inside `.loopwright/taskpack.yaml`: both the GitHub Action and CLI wire live `@loopwright/decisions` adapters into `ControllerPorts.decisions` (falling back deterministically when credentials or endpoints are unavailable).
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1

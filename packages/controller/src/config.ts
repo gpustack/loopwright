@@ -17,6 +17,23 @@ const approved = new WeakMap<object, ApprovedState>();
 export function approvedState(value: LoadedConfiguration): ApprovedState {
   const state = approved.get(value); if (!state) refuse('REGISTRY_UNTRUSTED', '', 'compile'); return state;
 }
+export function selectRoleResources<T extends { readonly id: string }>(
+  all: readonly T[],
+  resourceIds: readonly string[] | undefined,
+  phase: 'compile' | 'execution',
+): readonly T[] {
+  if (resourceIds === undefined) return all;
+  const seen = new Set<string>();
+  const selected: T[] = [];
+  for (const resId of resourceIds) {
+    if (seen.has(resId)) continue;
+    seen.add(resId);
+    const found = all.find(item => item.id === resId);
+    if (!found) refuse('CONFIG_REFERENCE', '/spec/task/spec/roles', phase);
+    selected.push(found);
+  }
+  return selected;
+}
 export interface ConfigurationPorts { readonly environment: (name: string) => string | undefined }
 function format(path: string): 'json' | 'yaml' {
   const extension = extname(path); if (extension === '.json') return 'json'; if (['.yml', '.yaml'].includes(extension)) return 'yaml'; refuse('CONFIG_SYNTAX');
@@ -85,7 +102,7 @@ function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<s
   if (new Set(selectedSteps).size !== selectedSteps.length) refuse('CONFIG_REFERENCE', '/spec/profiles/steps');
   spec.profiles = { roles: normalizedRoles, steps: profiles.steps };
   const controls = record(spec.controls, ['drainReserveMs', 'maxAttempts', 'repeatFailureLimit', 'submission'], '/spec/controls');
-  integer(controls.drainReserveMs, 5000, 600000, '/spec/controls/drainReserveMs'); integer(controls.maxAttempts, 1, 16, '/spec/controls/maxAttempts'); integer(controls.repeatFailureLimit, 2, 2, '/spec/controls/repeatFailureLimit');
+  integer(controls.drainReserveMs, 5000, 600000, '/spec/controls/drainReserveMs'); integer(controls.maxAttempts, 1, 64, '/spec/controls/maxAttempts'); integer(controls.repeatFailureLimit, 2, 2, '/spec/controls/repeatFailureLimit');
   const submission = record(controls.submission, ['mode', 'path'], '/spec/controls/submission');
   if (submission.mode !== 'artifact_or_assistant' || submission.path !== null && !digestArtifact(text(submission.path), new Uint8Array()).ok) refuse('CONFIG_SCHEMA', '/spec/controls/submission');
   spec.publication = publicationBlock(spec.publication === undefined ? { mode: 'disabled' } : spec.publication);
@@ -145,7 +162,11 @@ export function loadConfiguration(unowned: LoadConfigurationInput, ports: Config
         }
         return { ...role, provider, model, thinking };
       });
-      const revalidated = validateDocument({ ...finalTask, spec: { ...finalTask.spec, roles: updatedRoles } }, 'TaskContract');
+      const revalidated = validateDocument(
+        { ...finalTask, spec: { ...finalTask.spec, roles: updatedRoles } },
+        'TaskContract',
+        finalTask.spec.budgets.overlay ? { overlay: finalTask.spec.budgets.overlay } : undefined,
+      );
       if (!revalidated.ok) refuse(revalidated.errors.some(error => error.code.includes('GRAPH') || error.code.includes('REFERENCE')) ? 'CONFIG_REFERENCE' : 'CONFIG_SCHEMA', '/spec/task');
       finalTask = revalidated.value;
     }

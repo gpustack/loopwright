@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -76,12 +76,35 @@ export interface BaselineParityResult {
 }
 
 export interface StageResult {
+  readonly kind: 'candidate' | 'no-change';
   readonly stageDir: string;
   readonly targetVersionsPath: string;
   readonly preflightMetadataPath: string;
-  readonly candidateLockPath: string;
-  readonly npmCacheDir: string;
+  readonly candidateLockPath: string | null;
+  readonly lockfilePatchPath: string | null;
+  readonly npmCacheArchivePath: string | null;
   readonly candidateLockBytes: number;
+  readonly lockfilePatchBytes: number;
+  readonly npmCacheArchiveBytes: number;
+}
+
+export interface PreflightOutputDocument {
+  readonly disposition: 'candidate' | 'no_change' | 'blocked';
+  readonly reason: string;
+  readonly upstreams: readonly {
+    readonly id: string;
+    readonly status: string;
+    readonly version?: string | undefined;
+    readonly currentVersion?: string | undefined;
+    readonly reason?: string | undefined;
+  }[];
+  readonly stagedResources: readonly {
+    readonly id: string;
+    readonly kind: 'instruction' | 'skill' | 'document';
+    readonly path: string;
+    readonly mount: 'prompt' | 'workspace';
+    readonly exposeToChecks: boolean;
+  }[];
 }
 
 export interface PrepareSelfUpgradeRunResult {
@@ -90,28 +113,29 @@ export interface PrepareSelfUpgradeRunResult {
   readonly recommendedMode: 'no-change' | 'candidate' | 'blocked';
   readonly actionMode: 'no-change' | 'candidate';
   readonly stageDir: string;
-  readonly npmCacheDir: string;
+  readonly npmCacheArchivePath: string;
   readonly baseline: BaselineParityResult;
   readonly evaluation: EligibilityResult | null;
   readonly staged: StageResult | null;
-  readonly upstreamRecords: readonly TaskpackUpstreamRecord[];
+  readonly upstreamRecords: readonly (TaskpackUpstreamRecord & { readonly currentVersion?: string | undefined })[];
 }
 
 export interface PrepareSelfUpgradeModule {
   readonly PI_UPSTREAM_IDS: readonly string[];
   readonly ALL_UPSTREAM_IDS: readonly string[];
   readonly MAX_HTTP_JSON_BYTES: number;
+  readonly MAX_PROMPT_RESOURCE_BYTES: number;
+  readonly MAX_NPM_CACHE_ARCHIVE_BYTES: number;
   readonly buildTargetVersionsPayload: (piVersion: string, yamlVersion: string) => TargetVersionsPayload;
   readonly parseCanonicalSemver: (value: unknown) => { major: number; minor: number; patch: number; raw: string } | null;
   readonly auditBaselineParity: (repoRoot: string) => Promise<BaselineParityResult>;
   readonly evaluateUpstreamEligibility: (input: {
     readonly baselineByUpstream: Readonly<Record<string, string>>;
     readonly discoveredRecords: readonly TaskpackUpstreamRecord[];
-    readonly stageDir?: string | undefined;
     readonly force?: boolean | undefined;
   }) => EligibilityResult;
   readonly discoverNpmUpstreams: (input: {
-    readonly manifest: Awaited<ReturnType<typeof loadDeclarativeTaskpack>>;
+    readonly manifest?: Awaited<ReturnType<typeof loadDeclarativeTaskpack>> | undefined;
     readonly baselineByUpstream: Readonly<Record<string, string>>;
     readonly fetchImpl?: typeof globalThis.fetch | undefined;
     readonly registryFixtures?: Readonly<Record<string, unknown>> | undefined;
@@ -122,11 +146,21 @@ export interface PrepareSelfUpgradeModule {
     readonly npmCacheDir: string;
     readonly registryUrl?: string | undefined;
   }) => Promise<Buffer>;
+  readonly packNpmCacheArchive: (npmCacheDir: string, archivePath: string) => Promise<number>;
+  readonly computeUnifiedLockfilePatch: (baselineLockPath: string, candidateLockPath: string) => Promise<string>;
+  readonly formatPreflightOutput: (result: PrepareSelfUpgradeRunResult) => PreflightOutputDocument;
+  readonly stageNoChangeBundle: (input: {
+    readonly repoRoot: string;
+    readonly stageDir: string;
+    readonly targetVersions: TargetVersionsPayload;
+    readonly preserveStageDirRoot?: boolean | undefined;
+  }) => Promise<StageResult>;
   readonly stageCandidateBundle: (input: {
     readonly repoRoot: string;
     readonly stageDir: string;
     readonly targetVersions: TargetVersionsPayload;
     readonly force?: boolean | undefined;
+    readonly preserveStageDirRoot?: boolean | undefined;
     readonly lockfileBuilder?: (ctx: {
       readonly repoRoot: string;
       readonly targetVersions: TargetVersionsPayload;
@@ -140,6 +174,7 @@ export interface PrepareSelfUpgradeModule {
     readonly force?: boolean | undefined;
     readonly skipStage?: boolean | undefined;
     readonly offlineCheck?: boolean | undefined;
+    readonly preserveStageDirRoot?: boolean | undefined;
     readonly discoveredRecords?: readonly TaskpackUpstreamRecord[] | undefined;
     readonly registryFixtures?: Readonly<Record<string, unknown>> | undefined;
     readonly lockfileBuilder?: (ctx: {
@@ -359,9 +394,22 @@ export async function createMiniSelfUpgradeRepo(
     readonly buildScriptBody?: string | undefined;
     readonly cliMainBody?: string | undefined;
     readonly testScriptBody?: string | undefined;
+    readonly includeClaudeSymlink?: boolean | undefined;
   },
 ): Promise<{ readonly repoRoot: string; readonly headSha: string }> {
   const repoRoot = join(parentDir, 'fixture-repo');
+  const shimDir = join(parentDir, 'node_modules', '@loopwright', 'github-app');
+  await mkdir(shimDir, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(shimDir, 'package.json'),
+    `${JSON.stringify({ name: '@loopwright/github-app', type: 'module', exports: { '.': './index.js' } })}\n`,
+    { mode: 0o600 },
+  );
+  await writeFile(
+    join(shimDir, 'index.js'),
+    `export * from ${JSON.stringify(pathToFileURL(join(REPO_ROOT, 'packages/github-app/dist/index.js')).href)};\n`,
+    { mode: 0o600 },
+  );
   await mkdir(join(repoRoot, '.auto-sync/checks'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, '.agents/skills/loopwright-step'), { recursive: true, mode: 0o700 });
   await mkdir(join(repoRoot, 'scripts'), { recursive: true, mode: 0o700 });
@@ -369,13 +417,20 @@ export async function createMiniSelfUpgradeRepo(
 
   for (const rel of [
     '.auto-sync/taskpack.yaml',
+    '.auto-sync/digests.lock.json',
     '.auto-sync/instructions.md',
     '.auto-sync/checks/verify.sh',
+    'scripts/prepare-self-upgrade.mjs',
   ]) {
     const raw = await readFile(join(REPO_ROOT, rel));
     await writeFile(join(repoRoot, rel), raw, {
-      mode: rel.endsWith('.sh') ? 0o755 : 0o600,
+      mode: rel.endsWith('.sh') || rel.endsWith('.mjs') ? 0o755 : 0o600,
     });
+  }
+
+  if (options?.includeClaudeSymlink === true) {
+    await mkdir(join(repoRoot, '.claude'), { recursive: true, mode: 0o700 });
+    await symlink('../.agents/skills', join(repoRoot, '.claude/skills'));
   }
 
   const preflight = await loadPreflightModule();

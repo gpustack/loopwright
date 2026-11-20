@@ -2,8 +2,23 @@ import { parseDocument, isAlias, isMap, isSeq, isScalar, Lexer, CST } from 'yaml
 import { refuse } from './errors.js';
 import type { Json } from './schema.js';
 export const DOCUMENT_BYTES = 1048576;
+function normalizeZero(input: Json): Json {
+  if (typeof input === 'number') return Object.is(input, -0) ? 0 : input;
+  if (input === null || typeof input !== 'object') return input;
+  if (Array.isArray(input)) return input.map(item => normalizeZero(item as Json));
+  const out: Record<string, Json> = {};
+  for (const key of Object.keys(input)) {
+    Object.defineProperty(out, key, {
+      value: normalizeZero((input as Record<string, Json>)[key]!),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return out;
+}
 /** Lex before JSON.parse so duplicate names and hostile nesting cannot disappear during conversion. */
-function json(source: string, collectionLimit = 128, nodeLimit = 8192, stringLimit = 16384): Json {
+function json(source: string, collectionLimit = 128, nodeLimit = 8192, stringLimit = 16384, allowPrivateFloats = false): Json {
   let offset = 0, nodes = 0;
   const space = () => { while (/[\t\n\r ]/.test(source[offset] ?? '') && offset < source.length) offset++; };
   const string = (): string => {
@@ -37,10 +52,17 @@ function json(source: string, collectionLimit = 128, nodeLimit = 8192, stringLim
     }
     const literal = /^(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)/.exec(source.slice(offset));
     if (!literal) refuse('CONFIG_SYNTAX'); offset += literal[0].length;
-    if (!['true', 'false', 'null'].includes(literal[0])) { const number = Number(literal[0]); if (!Number.isFinite(number) || Math.abs(number) > Number.MAX_SAFE_INTEGER || Object.is(number, -0)) refuse('CONFIG_LIMIT'); }
+    if (!['true', 'false', 'null'].includes(literal[0])) {
+      const number = Number(literal[0]);
+      if (!Number.isFinite(number)) refuse('CONFIG_LIMIT');
+      if (!allowPrivateFloats && (Math.abs(number) > Number.MAX_SAFE_INTEGER || Object.is(number, -0))) refuse('CONFIG_LIMIT');
+    }
   };
   value(1); space(); if (offset !== source.length) refuse('CONFIG_SYNTAX');
-  try { return JSON.parse(source) as Json; } catch { refuse('CONFIG_SYNTAX'); }
+  try {
+    const parsed = JSON.parse(source) as Json;
+    return allowPrivateFloats ? normalizeZero(parsed) : parsed;
+  } catch { refuse('CONFIG_SYNTAX'); }
 }
 function yaml(source: string): Json {
   let flow = 0, tokens = 0, scalar = false, inlineSequence = 0;
@@ -79,7 +101,8 @@ export function parseDocumentBytes(bytes: Uint8Array, format: 'json' | 'yaml'): 
 }
 /** Private immutable records have their own explicit collection bound; authoring config keeps the default 128. */
 export function parsePrivateJson(bytes: Uint8Array, maximum: number, collectionLimit = 256): Json {
-  if (bytes.byteLength > maximum || maximum > 16777216 || collectionLimit > 16384) refuse('ARTIFACT_INVALID', '', 'recovery');
-  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, 262144, 1048576); }
+  if (bytes.byteLength > maximum || maximum > 100_663_296 || collectionLimit > 16384) refuse('ARTIFACT_INVALID', '', 'recovery');
+  const stringLimit = Math.min(44_739_248, Math.max(1_048_576, maximum));
+  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, 262144, stringLimit, true); }
   catch { refuse('ARTIFACT_INVALID', '', 'recovery'); }
 }

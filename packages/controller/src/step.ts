@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { bindSubject, digestArtifact, identifyManifest, type ArtifactManifest, type ArtifactRef, type Digest } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
@@ -27,20 +27,32 @@ import {
   canonicalizeCandidateManifest,
   compareUtf16,
   gitObjectOid,
+  isHostProtectedPath,
   matchesScopePattern,
   materializeBaseline,
+  overlayManifestBounds,
   restoreSource,
   type FrozenSource,
 } from './source.js';
-import { normalizeSubmission, type RetainedSubmission, type Submission } from './submission.js';
+import { isVerdictStep, normalizeSubmission, validateStepVerdictObject, type RetainedSubmission, type Submission } from './submission.js';
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
 import { descendants, nextNode } from './scheduler.js';
-import { formatPolicy, formatPrompt } from './repair.js';
+import { formatPolicy, reworkPrompt } from './repair.js';
 import { countDelegatedBudgets, observeParentExhaustion, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { validateGateUrlOverrides } from './gate.js';
-import { createCycle, Cycle, type ControllerPorts, type CycleContext } from './controller.js';
-import { incident, type ControllerIncident, type CycleExecution } from './finalize.js';
-import type { CompiledPlan, ControllerAttempt, DelegatedSelection, LoadedConfiguration, PlannedRole, StepYield } from './types.js';
+import { createCycle, Cycle, roleResourcesFor, type ControllerPorts, type CycleContext } from './controller.js';
+import { incident, type ControllerIncident } from './finalize.js';
+import type {
+  CompiledPlan,
+  ControllerAttempt,
+  CycleExecution,
+  DelegatedSelection,
+  LoadedConfiguration,
+  PlannedRole,
+  StepMcpServerMetadata,
+  StepVerdict,
+  StepYield,
+} from './types.js';
 
 export type RunExecution = CycleExecution;
 export type StepTickResult = StepYield | RunExecution;
@@ -52,6 +64,9 @@ export interface StepNextInput {
   readonly runId: string;
   readonly mode?: 'candidate' | 'no-change';
   readonly reissueLease?: boolean;
+  readonly allowWorkflowWrites?: boolean;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
+  readonly mcpServers?: readonly StepMcpServerMetadata[];
   readonly environment?: (name: string) => string | undefined;
   readonly signal?: AbortSignal;
 }
@@ -61,6 +76,7 @@ export interface StepSubmitInput {
   readonly runId: string;
   readonly leaseToken: string;
   readonly submissionFile?: string;
+  readonly verdict?: StepVerdict;
   readonly status?: 'completed' | 'no_change' | 'failed' | 'blocked';
   readonly reason?: string;
   readonly environment?: (name: string) => string | undefined;
@@ -76,6 +92,9 @@ export interface StepCancelInput {
 interface StepMetaRecord {
   readonly version: 1;
   readonly mode: 'candidate' | 'no-change';
+  readonly allowWorkflowWrites?: boolean;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
+  readonly mcpServers?: readonly StepMcpServerMetadata[];
 }
 
 interface StepLeaseRecord {
@@ -88,16 +107,8 @@ interface StepLeaseRecord {
   readonly contextFiles: readonly string[];
 }
 
-const ALWAYS_PROTECTED_PATTERNS: readonly string[] = [
-  '.github/workflows/**',
-  '.claude/**',
-  '.agents/**',
-  'AGENTS.md',
-  'CLAUDE.md',
-];
-
-function isWritableCandidateFile(name: string, scope: CompiledPlan['scope']): boolean {
-  if (ALWAYS_PROTECTED_PATTERNS.some(pattern => matchesScopePattern(pattern, name))) return false;
+function isWritableCandidateFile(name: string, scope: CompiledPlan['scope'], allowWorkflowWrites = false): boolean {
+  if (isHostProtectedPath(name, allowWorkflowWrites)) return false;
   if (scope.protected.some(pattern => matchesScopePattern(pattern, name))) return false;
   return scope.writable.some(pattern => matchesScopePattern(pattern, name));
 }
@@ -127,17 +138,78 @@ async function writeAtomicPrivateJson(
   }
 }
 
+function normalizeRoleMcpServers(
+  raw: unknown,
+  phase: ControllerDiagnostic['phase'],
+): Readonly<Record<string, readonly string[]>> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) refuse('CONFIG_SCHEMA', '/roleMcpServers', phase);
+  const keys = Object.keys(raw);
+  if (keys.length > 16) refuse('CONFIG_LIMIT', '/roleMcpServers', phase);
+  const out: Record<string, readonly string[]> = {};
+  for (const key of keys) {
+    id(key, '/roleMcpServers');
+    const servers = list(raw[key], '/roleMcpServers/' + key, 32).map(s => id(s, '/roleMcpServers/' + key));
+    out[key] = freeze([...new Set(servers)]);
+  }
+  return freeze(out);
+}
+
+function normalizeMcpServersMetadata(
+  raw: unknown,
+  phase: ControllerDiagnostic['phase'],
+): readonly StepMcpServerMetadata[] | undefined {
+  if (raw === undefined) return undefined;
+  const items = list(raw, '/mcpServers', 32).map((item, idx) => {
+    const fields = record(item, ['id', 'transport', 'toolNames'], `/mcpServers/${idx}`);
+    const srvId = id(fields.id, `/mcpServers/${idx}/id`);
+    const transportRaw = text(fields.transport, `/mcpServers/${idx}/transport`, 16);
+    if (transportRaw !== 'stdio' && transportRaw !== 'http') refuse('CONFIG_SCHEMA', `/mcpServers/${idx}/transport`, phase);
+    const transport: 'stdio' | 'http' = transportRaw;
+    const toolNames = list(fields.toolNames, `/mcpServers/${idx}/toolNames`, 128).map(t => text(t, `/mcpServers/${idx}/toolNames`, 128));
+    return freeze({ id: srvId, transport, toolNames: freeze(toolNames) });
+  });
+  return freeze(items);
+}
+
 async function readStepMeta(directory: string): Promise<StepMetaRecord> {
   const path = join(directory, 'step-meta.json');
-  let bytes: Buffer;
   try {
-    bytes = await readBoundedFile(path, 4096, true);
-  } catch {
-    return { version: 1, mode: 'candidate' };
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { version: 1, mode: 'candidate' };
+    }
+    refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
-  const raw = record(parsePrivateJson(bytes, 4096), ['version', 'mode']);
+  let bytes: Buffer;
+  let parsed: unknown;
+  try {
+    bytes = await readBoundedFile(path, 65_536, true);
+    parsed = parsePrivateJson(bytes, 65_536);
+  } catch {
+    refuse('RECOVERY_REQUIRED', '', 'recovery');
+  }
+  if (!isRecord(parsed)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const allowedKeys = [
+    'version',
+    'mode',
+    ...(Object.hasOwn(parsed, 'allowWorkflowWrites') ? ['allowWorkflowWrites' as const] : []),
+    ...(Object.hasOwn(parsed, 'roleMcpServers') ? ['roleMcpServers' as const] : []),
+    ...(Object.hasOwn(parsed, 'mcpServers') ? ['mcpServers' as const] : []),
+  ];
+  const raw = record(parsed, allowedKeys);
   if (raw.version !== 1 || (raw.mode !== 'candidate' && raw.mode !== 'no-change')) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return { version: 1, mode: raw.mode };
+  if (raw.allowWorkflowWrites !== undefined && typeof raw.allowWorkflowWrites !== 'boolean') refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const roleMcpServers = normalizeRoleMcpServers(raw.roleMcpServers, 'recovery');
+  const mcpServers = normalizeMcpServersMetadata(raw.mcpServers, 'recovery');
+  return freeze({
+    version: 1,
+    mode: raw.mode,
+    ...(raw.allowWorkflowWrites === true ? { allowWorkflowWrites: true } : {}),
+    ...(roleMcpServers !== undefined ? { roleMcpServers } : {}),
+    ...(mcpServers !== undefined ? { mcpServers } : {}),
+  });
 }
 
 async function readStepLease(directory: string): Promise<StepLeaseRecord | null> {
@@ -155,7 +227,7 @@ async function readStepLease(directory: string): Promise<StepLeaseRecord | null>
     version: 1,
     runId: id(raw.runId),
     attemptId: id(raw.attemptId),
-    ordinal: integer(raw.ordinal, 1, 64),
+    ordinal: integer(raw.ordinal, 1, 256),
     leaseDigest: text(raw.leaseDigest),
     prompt: text(raw.prompt, '', 1_048_576),
     contextFiles: list(raw.contextFiles, '', 64).map(item => text(item, '', 4096)),
@@ -192,8 +264,9 @@ async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead
   }
   if (head && !same(head.progress.candidate.workspace, context.source.workspace)) {
     try {
-      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, 8_388_608);
-      const parsed = parsePrivateJson(Buffer.from(wsBytes), 8_388_608);
+      const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, bounds.workspaceMaxBytes);
+      const parsed = parsePrivateJson(Buffer.from(wsBytes), bounds.workspaceMaxBytes, bounds.collectionLimit);
       if (isRecord(parsed) && parsed.format === 'delegated-capture.v1') {
         const decoded = decodeDelegatedWorkspace(wsBytes, head.manifest, context.lock, 'recovery');
         for (const item of decoded.payload.overlay) modes.set(item.name, item.mode);
@@ -211,6 +284,7 @@ async function materializeAttemptWorkspace(
   attemptId: string,
   role: PlannedRole,
   repair: ControllerAttempt['repair'],
+  allowWorkflowWrites: boolean,
 ): Promise<{ readonly candidateDir: string; readonly contextFiles: readonly string[] }> {
   const { context } = cycle;
   const { plan, loaded, source, owner } = context;
@@ -260,7 +334,7 @@ async function materializeAttemptWorkspace(
     for (const file of cycle.candidate.files) allPaths.add(file.name);
     for (const relPath of allPaths) {
       const gitMode = modes.get(relPath) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope);
+      const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope, allowWorkflowWrites);
       const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
       await chmod(join(candidateDir, relPath), perm);
     }
@@ -269,7 +343,7 @@ async function materializeAttemptWorkspace(
       const targetPath = join(candidateDir, item.name);
       await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
       const gitMode = modes.get(item.name) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope);
+      const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope, allowWorkflowWrites);
       const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
       const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, perm);
       try {
@@ -283,7 +357,8 @@ async function materializeAttemptWorkspace(
   }
 
   const contextFiles: string[] = [];
-  for (const resource of state.resources) {
+  const roleResources = roleResourcesFor(loaded, plan, role.roleId);
+  for (const resource of roleResources) {
     const targetPath = join(contextDir, resource.ref.name);
     await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
     const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400);
@@ -300,7 +375,7 @@ async function materializeAttemptWorkspace(
   return { candidateDir, contextFiles };
 }
 
-function buildStepYield(
+async function buildStepYield(
   cycle: Cycle,
   runRoot: string,
   attempt: ControllerAttempt,
@@ -308,9 +383,24 @@ function buildStepYield(
   prompt: string,
   contextFiles: readonly string[],
   leaseToken: string,
-): StepYield {
-  const { plan, lock } = cycle.context;
+  meta: StepMetaRecord,
+): Promise<StepYield> {
+  const { plan, lock, ports } = cycle.context;
   const effectiveTools = attempt.repair === 'format' ? [] : role.policy.tools;
+  const roleMcpMap = meta.roleMcpServers ?? ports.roleMcpServers;
+  const declaredServers = meta.mcpServers ?? ports.mcpServers ?? [];
+  const allowedMcpServers =
+    attempt.repair === 'format'
+      ? []
+      : roleMcpMap !== undefined
+        ? [...(roleMcpMap[role.roleId] ?? [])]
+        : role.policy.mcp.names.length > 0
+          ? [role.policy.mcp.serverId]
+          : [];
+  const mcpServers = attempt.repair === 'format' ? [] : declaredServers.filter(srv => allowedMcpServers.includes(srv.id));
+  const allowWorkflowWrites = meta.allowWorkflowWrites === true;
+  const reworkEpoch = attempt.reworkEpoch ?? cycle.reworkEpoch;
+  const rework = attempt.repair === 'none' ? await cycle.activeReworkForNode(attempt.nodeId) : null;
   const selection: DelegatedSelection = {
     provider: role.policy.selection.provider,
     model: role.policy.selection.model,
@@ -328,10 +418,15 @@ function buildStepYield(
     repair: attempt.repair,
     selection,
     allowedTools: [...effectiveTools],
+    allowedMcpServers,
+    mcpServers,
     scope: plan.scope,
+    allowWorkflowWrites,
     candidateDir,
     contextFiles: [...contextFiles],
     prompt,
+    reworkEpoch,
+    rework,
     submissionMode: plan.controls.submission.mode,
     submissionPath: plan.controls.submission.path,
     leaseToken,
@@ -342,6 +437,7 @@ async function yieldDelegatedRole(
   cycle: Cycle,
   runRoot: string,
   nodeId: string,
+  meta: StepMetaRecord,
   repair: ControllerAttempt['repair'] = 'none',
   customPrompt?: string,
 ): Promise<StepYield> {
@@ -356,15 +452,20 @@ async function yieldDelegatedRole(
   const role: PlannedRole = repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
   const purpose = node.handler.implementation === 'pi.compact.v1' ? 'compaction' : node.handler.parameters.purpose === 'review' ? 'reviewer' : 'task';
   if (purpose === 'compaction') refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
+  const roleResources = roleResourcesFor(loaded, plan, role.roleId);
+  await cycle.adviseCapabilityRouting(nodeId, role, purpose, roleResources);
   const nativeStepId = nodeId;
   const ordinal = cycle.draft.attempts.length + 1;
+  const attemptEpoch = cycle.reworkEpoch;
   const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal);
-  const sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy);
+  const sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy, attemptEpoch);
   const configured = text(loaded.registry.spec.handlers.find(handler => handler.id === node.handler.id)?.parameters.prompt);
   if (node.handler.parameters.prompt !== '[private command sha256:' + hash(configured).hex + ']') refuse('RECOVERY_REQUIRED', '', 'execution');
-  const promptText = customPrompt ?? configured;
+  const reworkCtx = repair === 'none' && customPrompt === undefined ? await cycle.activeReworkForNode(nodeId) : null;
+  const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(65_536, role.policy.limits.promptBytes)) : configured;
+  const promptText = customPrompt ?? defaultPrompt;
   const command = await artifacts.put('command', Buffer.from(promptText), Math.min(1_048_576, role.policy.limits.promptBytes));
-  const originalSubmission = cycle.draft.submission;
+  const originalSubmission = cycle.draft.failures.at(-1)?.evidence ?? cycle.draft.submission;
   const before = journal(store).view.counts;
   const oldDigest = cycle.draft.candidate.digest;
   observeParentExhaustion(cycle.deadline.assert(), lock, delegated.modelCalls);
@@ -379,13 +480,14 @@ async function yieldDelegatedRole(
     command,
     before: { requests: before.requests, operations: before.operations },
     finished: null,
+    ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}),
   };
   if (repair === 'format') {
     await artifacts.json('format-intent', {
       version: 1,
       attemptId: commandId,
       original: originalSubmission,
-      schema: 'submission.v1',
+      schema: isVerdictStep(node) ? 'step-verdict.v1' : 'submission.v1',
       candidate: oldDigest,
       output: 'new_assistant_representation',
     }, 65_536);
@@ -400,7 +502,8 @@ async function yieldDelegatedRole(
     },
     'role.' + ordinal + '.pre',
   );
-  const { contextFiles } = await materializeAttemptWorkspace(cycle, runRoot, commandId, role, repair);
+  const allowWorkflowWrites = meta.allowWorkflowWrites === true;
+  const { contextFiles } = await materializeAttemptWorkspace(cycle, runRoot, commandId, role, repair, allowWorkflowWrites);
   const leaseToken = randomBytes(32).toString('hex');
   await writeAtomicPrivateJson(
     join(directory, 'step-lease.json'),
@@ -415,12 +518,13 @@ async function yieldDelegatedRole(
     } satisfies StepLeaseRecord,
     artifacts.vault,
   );
-  return buildStepYield(cycle, runRoot, attempt, role, promptText, contextFiles, leaseToken);
+  return await buildStepYield(cycle, runRoot, attempt, role, promptText, contextFiles, leaseToken, meta);
 }
 
 async function advanceStepCycle(
   cycle: Cycle,
   runRoot: string,
+  meta: StepMetaRecord,
   options?: { readonly postStructureFailure?: { readonly nodeId: string; readonly code: ControllerDiagnostic['code'] | null } },
 ): Promise<{ readonly kind: 'yield'; readonly step: StepYield } | { readonly kind: 'done'; readonly primary: AcceptanceObservation }> {
   const { plan } = cycle.context;
@@ -442,16 +546,20 @@ async function advanceStepCycle(
           const disallowMutations =
             active.repair === 'format' ||
             !effectiveRole.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
-          const captured = await adoptDelegatedCapture(cycle.context.store, cycle.context.artifacts, cycle.context.lock, effectiveRole, active, cycle.context.source);
+          const captured = await adoptDelegatedCapture(
+            cycle.context.store,
+            cycle.context.artifacts,
+            cycle.context.lock,
+            effectiveRole,
+            active,
+            cycle.context.source,
+            meta.allowWorkflowWrites === true || cycle.context.ports.allowWorkflowWrites === true,
+          );
           const failure = await cycle.completeCapture(active, captured, { ignoreArtifactPath: disallowMutations });
           if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
           if (failure === 'SUBMISSION_INVALID') {
-            const raw = cycle.draft.submission;
-            cycle.repairBound('format', raw !== null);
-            if (!raw) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-            const allowedCheckIds = plan.task.spec.acceptance.checks.map(item => item.id);
-            const prompt = formatPrompt(await cycle.context.artifacts.read(raw, 1_048_576), allowedCheckIds, Math.min(16_384, delegatedRole.policy.limits.promptBytes));
-            return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, active.nodeId, 'format', prompt) };
+            const prompt = await cycle.formatRepairPrompt(active.nodeId);
+            return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, active.nodeId, meta, 'format', prompt) };
           }
         } else {
           refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -470,18 +578,14 @@ async function advanceStepCycle(
     }
     if (
       lastAttempt?.finished?.nativeCheckpointId &&
-      cycle.submission === null &&
       lastAttempt.purpose !== 'compaction' &&
+      !cycle.haltedVerdictStatus() &&
       cycle.draft.nodes.find(node => node.id === lastAttempt.nodeId)?.state === 'failed'
     ) {
       const delegatedRole = isDelegatedNode(lastAttempt.nodeId);
       if (delegatedRole) {
-        const raw = cycle.draft.submission;
-        cycle.repairBound('format', raw !== null);
-        if (!raw) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-        const allowedCheckIds = plan.task.spec.acceptance.checks.map(item => item.id);
-        const prompt = formatPrompt(await cycle.context.artifacts.read(raw, 1_048_576), allowedCheckIds, Math.min(16_384, delegatedRole.policy.limits.promptBytes));
-        return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, lastAttempt.nodeId, 'format', prompt) };
+        const prompt = await cycle.formatRepairPrompt(lastAttempt.nodeId);
+        return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, lastAttempt.nodeId, meta, 'format', prompt) };
       }
       await cycle.repairFormat(lastAttempt.nodeId);
     }
@@ -491,17 +595,10 @@ async function advanceStepCycle(
     const { nodeId, code } = options.postStructureFailure;
     if (code === 'SUBMISSION_AMBIGUOUS') refuse(code, '', 'verification');
     if (code === 'SUBMISSION_INVALID') {
-      const raw = cycle.draft.submission;
-      cycle.repairBound('format', raw !== null);
-      if (!raw) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+      const prompt = await cycle.formatRepairPrompt(nodeId);
       const delegatedRole = isDelegatedNode(nodeId);
-      const node = plan.orderedDAG.find(item => item.id === nodeId);
-      const role = plan.roles.find(item => item.roleId === node?.roleId);
-      const maxPromptBytes = role ? Math.min(16_384, role.policy.limits.promptBytes) : 16_384;
-      const allowedCheckIds = plan.task.spec.acceptance.checks.map(item => item.id);
-      const prompt = formatPrompt(await cycle.context.artifacts.read(raw, 1_048_576), allowedCheckIds, maxPromptBytes);
       if (delegatedRole) {
-        return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, nodeId, 'format', prompt) };
+        return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, nodeId, meta, 'format', prompt) };
       }
       await cycle.role(nodeId, 'format', prompt);
     }
@@ -514,24 +611,27 @@ async function advanceStepCycle(
       if (node.kind === 'agent') {
         const delegatedRole = isDelegatedNode(node.id);
         if (delegatedRole) {
-          return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, node.id, 'none') };
+          return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, node.id, meta, 'none') };
         }
         await cycle.role(node.id);
       } else {
         const slot = plan.verifierSlots.find(item => item.handler.id === node.handler.id);
         if (!slot) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+        const epochBefore = cycle.reworkEpoch;
         const checked = await cycle.runVerifier(slot.id);
         const state = checked.status === 'passed' ? 'completed' : checked.status;
-        if (cycle.draft.nodes.find(item => item.id === node.id)!.state !== state) refuse('RECOVERY_REQUIRED', '', 'execution');
+        const actualState = cycle.draft.nodes.find(item => item.id === node.id)!.state;
+        const validCheckRework =
+          node.onRework !== undefined &&
+          checked.status === 'failed' &&
+          ((cycle.reworkEpoch === epochBefore + 1 && actualState === 'pending') ||
+            (cycle.haltedVerdictStatus() === 'blocked' && actualState === 'blocked'));
+        if (actualState !== state && !validCheckRework) refuse('RECOVERY_REQUIRED', '', 'execution');
       }
     }
     await cycle.verifyEligible();
-    if (!cycle.submission) {
-      if (plan.orderedDAG.some(node => node.kind === 'agent')) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-      const value: Submission = { version: 1, status: 'completed', checks: [], reason: null };
-      const raw = await cycle.context.artifacts.json('submission', value, 1_048_576);
-      cycle.submission = { version: 1, origin: 'controller', raw, value };
-    }
+    await cycle.ensureSubmissionForAcceptance();
+    const verdictHalt = cycle.haltedVerdictStatus();
     const acceptance = evaluateControllerAcceptance(
       plan,
       cycle.context.lock,
@@ -539,17 +639,17 @@ async function advanceStepCycle(
       cycle.candidate.files,
       cycle.generation,
       cycle.currentChecks(),
-      cycle.submission.value,
+      cycle.submission!.value,
       cycle.context.store,
-      null,
+      verdictHalt,
       cycle.draft.nodes.every(node => node.state === 'completed'),
       cycle.currentRefusals(),
     );
-    if (acceptance.result.spec.status === 'failed') {
+    if (verdictHalt === null && acceptance.result.spec.status === 'failed') {
       const repairSpec = await cycle.prepareImplementationRepair();
       if (repairSpec) {
         if (repairSpec.role.adapter === 'delegated') {
-          return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, repairSpec.targetNodeId, 'implementation', repairSpec.prompt) };
+          return { kind: 'yield', step: await yieldDelegatedRole(cycle, runRoot, repairSpec.targetNodeId, meta, 'implementation', repairSpec.prompt) };
         }
         await cycle.role(repairSpec.targetNodeId, 'implementation', repairSpec.prompt);
         continue;
@@ -563,15 +663,25 @@ async function advanceStepCycle(
 async function runStepTickWithCycle(
   context: CycleContext,
   runRoot: string,
-  restored?: { readonly head: ProgressHead | null; readonly candidate: import('./verification.js').ByteInventory; readonly submission: RetainedSubmission | null; readonly adopt: boolean },
+  meta: StepMetaRecord,
+  restored?: {
+    readonly head: ProgressHead | null;
+    readonly candidate: import('./verification.js').ByteInventory;
+    readonly submission: RetainedSubmission | null;
+    readonly adopt: boolean;
+    readonly advisoryObservations?: readonly Record<string, unknown>[];
+  },
   options?: { readonly postStructureFailure?: { readonly nodeId: string; readonly code: ControllerDiagnostic['code'] | null } },
 ): Promise<StepTickResult> {
   const cycle = new Cycle(context, restored?.head ?? null, restored?.candidate, restored?.adopt);
   cycle.submission = restored?.submission ?? null;
+  if (restored?.advisoryObservations && restored.advisoryObservations.length > 0) {
+    cycle.advisoryObservations.push(...restored.advisoryObservations);
+  }
   let yielded: StepYield | null = null;
   let primary: AcceptanceObservation | ControllerIncident | null = null;
   try {
-    const outcome = await advanceStepCycle(cycle, runRoot, options);
+    const outcome = await advanceStepCycle(cycle, runRoot, meta, options);
     if (outcome.kind === 'yield') {
       yielded = outcome.step;
     } else {
@@ -737,7 +847,7 @@ async function reopenStepContext(input: {
       }),
     ).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
-    const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path)))];
+    const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
     const source = await restoreSource(descriptor.repository, plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source);
     let head = await progress.read();
@@ -920,12 +1030,20 @@ async function scanCandidateDirectory(
   source: FrozenSource,
   previousDigest: Digest,
   disallowMutations: boolean,
+  overlayConfig: CompiledPlan['budgets']['overlay'],
+  allowWorkflowWrites: boolean,
 ): Promise<{
   readonly manifest: ArtifactManifest;
   readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[];
   readonly overlay: readonly { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[];
   readonly deleted: readonly string[];
 }> {
+  const bounds = overlayManifestBounds(overlayConfig);
+  const v2BaseTree = source.version === 2 ? source.manifest.spec.baseTree! : undefined;
+  const v2BaselineByPath =
+    source.version === 2
+      ? new Map((source.baselineEntries ?? []).map(entry => [entry.name, entry]))
+      : undefined;
   let rootStat;
   try {
     rootStat = await lstat(candidateDir);
@@ -935,6 +1053,8 @@ async function scanCandidateDirectory(
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) refuse('ARTIFACT_INVALID', '', 'execution');
 
   const scannedFiles: { readonly name: string; readonly mode: '100644' | '100755'; readonly bytes: Uint8Array }[] = [];
+  const seenPaths = new Set<string>();
+  const streamChunk = Buffer.allocUnsafe(65_536);
   let entriesSeen = 0;
 
   const visit = async (absDir: string, relPrefix: string, depth: number): Promise<void> => {
@@ -955,14 +1075,61 @@ async function scanCandidateDirectory(
       }
       if (!st.isFile() || st.nlink !== 1) refuse('ARTIFACT_INVALID', '', 'execution');
       if (!digestArtifact(relPath, new Uint8Array()).ok) refuse('ARTIFACT_INVALID', '', 'execution');
-      if (st.size > 1_048_576) refuse('OUTPUT_LIMIT', '', 'execution');
+
+      const baseEntry = v2BaselineByPath?.get(relPath);
+      if (baseEntry !== undefined && st.size === baseEntry.byteLength && (st.size > bounds.perFileMaxBytes || st.size > 65_536)) {
+        const fh = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        let buf: Buffer;
+        try {
+          const fst = await fh.stat();
+          if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size !== st.size) {
+            refuse('ARTIFACT_INVALID', '', 'execution');
+          }
+          const hasher = createHash(v2BaseTree!.objectFormat === 'sha256' ? 'sha256' : 'sha1');
+          hasher.update(`blob ${fst.size}\0`, 'utf8');
+          let offset = 0;
+          while (offset < fst.size) {
+            const toRead = Math.min(streamChunk.length, fst.size - offset);
+            const { bytesRead } = await fh.read(streamChunk, 0, toRead, offset);
+            if (bytesRead <= 0) break;
+            hasher.update(streamChunk.subarray(0, bytesRead));
+            offset += bytesRead;
+          }
+          if (offset !== fst.size) refuse('ARTIFACT_INVALID', '', 'execution');
+          if (hasher.digest('hex') === baseEntry.oid) {
+            seenPaths.add(relPath);
+            continue;
+          }
+          if (fst.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
+          buf = Buffer.alloc(fst.size);
+          let readOffset = 0;
+          while (readOffset < fst.size) {
+            const { bytesRead } = await fh.read(buf, readOffset, fst.size - readOffset, readOffset);
+            if (bytesRead <= 0) break;
+            readOffset += bytesRead;
+          }
+          const after = await fh.stat();
+          if (readOffset !== fst.size || after.dev !== fst.dev || after.ino !== fst.ino || after.nlink !== 1 || !after.isFile() || after.size !== fst.size) {
+            refuse('ARTIFACT_INVALID', '', 'execution');
+          }
+        } finally {
+          await fh.close();
+        }
+        seenPaths.add(relPath);
+        const mode: '100644' | '100755' = (st.mode & 0o111) !== 0 ? '100755' : '100644';
+        scannedFiles.push({ name: relPath, mode, bytes: new Uint8Array(buf) });
+        continue;
+      }
+
+      if (st.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
       const fh = await open(absPath, constants.O_RDONLY | constants.O_NOFOLLOW);
       let buf: Buffer;
       try {
         const fst = await fh.stat();
-        if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size > 1_048_576) {
+        if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size !== st.size) {
           refuse('ARTIFACT_INVALID', '', 'execution');
         }
+        if (fst.size > bounds.perFileMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
         buf = Buffer.alloc(fst.size);
         let offset = 0;
         while (offset < fst.size) {
@@ -974,6 +1141,7 @@ async function scanCandidateDirectory(
       } finally {
         await fh.close();
       }
+      seenPaths.add(relPath);
       const mode: '100644' | '100755' = (st.mode & 0o111) !== 0 ? '100755' : '100644';
       scannedFiles.push({ name: relPath, mode, bytes: new Uint8Array(buf) });
     }
@@ -983,12 +1151,14 @@ async function scanCandidateDirectory(
   scannedFiles.sort((a, b) => compareUtf16(a.name, b.name));
 
   if (source.version === 2) {
-    const baseTree = source.manifest.spec.baseTree!;
-    const baselineByPath = new Map((source.baselineEntries ?? []).map(entry => [entry.name, entry]));
-    const scannedByPath = new Map(scannedFiles.map(file => [file.name, file]));
+    const baseTree = v2BaseTree!;
+    const baselineByPath = v2BaselineByPath!;
     const deleted: string[] = [];
     for (const baseEntry of source.baselineEntries ?? []) {
-      if (!scannedByPath.has(baseEntry.name)) deleted.push(baseEntry.name);
+      if (!seenPaths.has(baseEntry.name)) {
+        if (isHostProtectedPath(baseEntry.name, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+        deleted.push(baseEntry.name);
+      }
     }
     deleted.sort(compareUtf16);
     const overlay: { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[] = [];
@@ -1000,7 +1170,12 @@ async function scanCandidateDirectory(
       if (baseEntry && gitObjectOid(baseTree.objectFormat, 'blob', file.bytes) === baseEntry.oid) {
         continue;
       }
-      if (overlay.length >= 128 || (totalOverlayBytes += file.bytes.byteLength) > 4_194_304) {
+      if (isHostProtectedPath(file.name, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+      if (
+        file.bytes.byteLength > bounds.perFileMaxBytes ||
+        overlay.length >= bounds.maxFiles ||
+        (totalOverlayBytes += file.bytes.byteLength) > bounds.maxBytes
+      ) {
         refuse('OUTPUT_LIMIT', '', 'execution');
       }
       const ref = digestArtifact(file.name, file.bytes);
@@ -1016,6 +1191,7 @@ async function scanCandidateDirectory(
         metadata: { id: 'candidate' },
         spec: { baseTree, entries: manifestEntries, deleted },
       }),
+      bounds.options,
     );
     if (!identified.ok) refuse('ARTIFACT_INVALID', '', 'execution');
     if (disallowMutations && !same(identified.value.digest, previousDigest)) {
@@ -1025,20 +1201,28 @@ async function scanCandidateDirectory(
   }
 
   // source.version === 1 (classic mode)
-  if (scannedFiles.length > 128) refuse('OUTPUT_LIMIT', '', 'execution');
+  if (scannedFiles.length > bounds.maxFiles) refuse('OUTPUT_LIMIT', '', 'execution');
   let totalBytes = 0;
-  const baselineNames = new Set(source.artifacts.map(item => item.name));
+  const baselineByPath = new Map(source.artifacts.map(item => [item.name, item.bytes]));
   const scannedNames = new Set(scannedFiles.map(item => item.name));
   const deleted: string[] = [];
-  for (const baseName of baselineNames) {
-    if (!scannedNames.has(baseName)) deleted.push(baseName);
+  for (const baseName of baselineByPath.keys()) {
+    if (!scannedNames.has(baseName)) {
+      if (isHostProtectedPath(baseName, allowWorkflowWrites)) refuse('ARTIFACT_INVALID', '', 'execution');
+      deleted.push(baseName);
+    }
   }
   deleted.sort(compareUtf16);
   const overlay: { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[] = [];
   const files: { readonly name: string; readonly bytes: Uint8Array }[] = [];
   const manifestEntries: ArtifactRef[] = [];
   for (const file of scannedFiles) {
-    if ((totalBytes += file.bytes.byteLength) > 4_194_304) refuse('OUTPUT_LIMIT', '', 'execution');
+    const baseBytes = baselineByPath.get(file.name);
+    const modifiedOrAdded = baseBytes === undefined || !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
+    if (modifiedOrAdded && isHostProtectedPath(file.name, allowWorkflowWrites)) {
+      refuse('ARTIFACT_INVALID', '', 'execution');
+    }
+    if ((totalBytes += file.bytes.byteLength) > bounds.maxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
     const ref = digestArtifact(file.name, file.bytes);
     if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');
     overlay.push({ name: file.name, mode: file.mode, bodyBase64: Buffer.from(file.bytes).toString('base64') });
@@ -1052,6 +1236,7 @@ async function scanCandidateDirectory(
       metadata: { id: 'candidate' },
       spec: { entries: manifestEntries },
     }),
+    bounds.options,
   );
   if (!identified.ok) refuse('ARTIFACT_INVALID', '', 'execution');
   if (disallowMutations && !same(identified.value.digest, previousDigest)) {
@@ -1087,14 +1272,20 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
     const fields = Object.keys(input);
     record(input, fields);
     if (
-      fields.some(key => !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'environment', 'signal'].includes(key)) ||
+      fields.some(
+        key =>
+          !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'allowWorkflowWrites', 'roleMcpServers', 'mcpServers', 'environment', 'signal'].includes(key),
+      ) ||
       (input.mode !== undefined && input.mode !== 'candidate' && input.mode !== 'no-change') ||
       (input.reissueLease !== undefined && typeof input.reissueLease !== 'boolean') ||
+      (input.allowWorkflowWrites !== undefined && typeof input.allowWorkflowWrites !== 'boolean') ||
       (input.environment !== undefined && typeof input.environment !== 'function') ||
       (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     ) {
       refuse('CONFIG_SCHEMA', '', 'admission');
     }
+    const normalizedRoleMcp = normalizeRoleMcpServers(input.roleMcpServers ?? ports.roleMcpServers, 'admission');
+    const normalizedMcpServers = normalizeMcpServersMetadata(input.mcpServers ?? ports.mcpServers, 'admission');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'admission');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'admission');
 
@@ -1121,20 +1312,22 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         },
         ports,
       );
-      await writeAtomicPrivateJson(
-        join(context.directory, 'step-meta.json'),
-        {
-          version: 1,
-          mode: input.mode ?? 'candidate',
-        } satisfies StepMetaRecord,
-        context.artifacts.vault,
-      );
+      const allowWf = input.allowWorkflowWrites === true || ports.allowWorkflowWrites === true;
+      const initialMeta: StepMetaRecord = {
+        version: 1,
+        mode: input.mode ?? 'candidate',
+        ...(allowWf ? { allowWorkflowWrites: true } : {}),
+        ...(normalizedRoleMcp !== undefined ? { roleMcpServers: normalizedRoleMcp } : {}),
+        ...(normalizedMcpServers !== undefined ? { mcpServers: normalizedMcpServers } : {}),
+      };
+      await writeAtomicPrivateJson(join(context.directory, 'step-meta.json'), initialMeta, context.artifacts.vault);
       const view = stateValue(context.store.inspect());
       const expiredAtStart =
         (view.clock.remainingTaskMs.safeValue ?? 0) <= 0 ||
         BigInt(view.clock.sampledNow.monotonicMs) >= BigInt(view.clock.basis.taskDeadlineMonotonicMs) - BigInt(context.plan.controls.drainReserveMs);
       if (expiredAtStart) {
-        const initialManifestRef = await context.artifacts.json('manifest', context.source.manifest, 32_768);
+        const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+        const initialManifestRef = await context.artifacts.json('manifest', context.source.manifest, bounds.manifestMaxBytes);
         return await settleForcedStepRun(
           context,
           null,
@@ -1144,7 +1337,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
           'expired',
         );
       }
-      return await runStepTickWithCycle(context, input.runRoot);
+      return await runStepTickWithCycle(context, input.runRoot, initialMeta);
     }
 
     const reopened = await reopenStepContext({
@@ -1159,20 +1352,30 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
     });
     const { context, head, candidate, submission, decision, expired } = reopened;
 
-    if (input.mode !== undefined) {
-      const existingMeta = await readStepMeta(context.directory).catch(async error => {
-        stateValue(context.store.release(context.authority));
-        stateValue(context.store.close());
-        await context.owner.release();
-        throw error;
-      });
-      if (input.mode !== existingMeta.mode) {
-        stateValue(context.store.release(context.authority));
-        stateValue(context.store.close());
-        await context.owner.release();
-        refuse('RECOVERY_REQUIRED', '/mode', 'execution');
-      }
+    const existingMeta = await readStepMeta(context.directory).catch(async error => {
+      stateValue(context.store.release(context.authority));
+      stateValue(context.store.close());
+      await context.owner.release();
+      throw error;
+    });
+    if (input.mode !== undefined && input.mode !== existingMeta.mode) {
+      stateValue(context.store.release(context.authority));
+      stateValue(context.store.close());
+      await context.owner.release();
+      refuse('RECOVERY_REQUIRED', '/mode', 'execution');
     }
+    const requestedAllowWorkflowWrites = input.allowWorkflowWrites ?? ports.allowWorkflowWrites;
+    if (requestedAllowWorkflowWrites !== undefined && requestedAllowWorkflowWrites !== (existingMeta.allowWorkflowWrites === true)) {
+      stateValue(context.store.release(context.authority));
+      stateValue(context.store.close());
+      await context.owner.release();
+      refuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'execution');
+    }
+    const effectiveMeta: StepMetaRecord = {
+      ...existingMeta,
+      ...(normalizedRoleMcp !== undefined ? { roleMcpServers: normalizedRoleMcp } : {}),
+      ...(normalizedMcpServers !== undefined ? { mcpServers: normalizedMcpServers } : {}),
+    };
 
     if (decision === 'terminal') {
       try {
@@ -1222,7 +1425,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       );
       const effectiveRole = active.repair === 'format' ? { ...activeRole, policy: formatPolicy(activeRole.policy) } : activeRole;
       const cycle = new Cycle(context, head, candidate, false);
-      const stepYield = buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken);
+      const stepYield = await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
       await cycle.deadline.dispose();
       await cycle.events.suspend();
       stateValue(context.store.release(context.authority));
@@ -1231,7 +1434,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       return stepYield;
     }
 
-    return await runStepTickWithCycle(context, input.runRoot, {
+    return await runStepTickWithCycle(context, input.runRoot, effectiveMeta, {
       head,
       candidate,
       submission,
@@ -1245,14 +1448,21 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     const fields = Object.keys(input);
     record(input, fields);
     if (
-      fields.some(key => !['runRoot', 'runId', 'leaseToken', 'submissionFile', 'status', 'reason', 'environment', 'signal'].includes(key)) ||
+      fields.some(key => !['runRoot', 'runId', 'leaseToken', 'submissionFile', 'verdict', 'status', 'reason', 'environment', 'signal'].includes(key)) ||
       (input.status !== undefined && !['completed', 'no_change', 'failed', 'blocked'].includes(input.status)) ||
       (input.reason !== undefined && typeof input.reason !== 'string') ||
       (input.submissionFile !== undefined && typeof input.submissionFile !== 'string') ||
+      (input.verdict !== undefined && input.submissionFile !== undefined) ||
       (input.environment !== undefined && typeof input.environment !== 'function') ||
       (input.signal !== undefined && !(input.signal instanceof AbortSignal))
     ) {
       refuse('CONFIG_SCHEMA', '', 'execution');
+    }
+    let explicitVerdictBytes: Uint8Array | null = null;
+    if (input.verdict !== undefined) {
+      if (!isRecord(input.verdict)) refuse('CONFIG_SCHEMA', '/verdict', 'execution');
+      const parsedVerdict = validateStepVerdictObject(input.verdict, 'SUBMISSION_INVALID', 'execution');
+      explicitVerdictBytes = new Uint8Array(Buffer.from(canonical(parsedVerdict), 'utf8'));
     }
     validateGateUrlOverrides(ports.gateUrlOverrides, 'execution');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'execution');
@@ -1296,6 +1506,16 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       return await releaseAndRefuse('AUTHORITY_REFUSED', '/leaseToken', 'execution');
     }
 
+    const meta = await readStepMeta(context.directory).catch(async error => {
+      stateValue(context.store.release(context.authority));
+      stateValue(context.store.close());
+      await context.owner.release();
+      throw error;
+    });
+    if (ports.allowWorkflowWrites !== undefined && ports.allowWorkflowWrites !== (meta.allowWorkflowWrites === true)) {
+      return await releaseAndRefuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'execution');
+    }
+    const allowWorkflowWrites = meta.allowWorkflowWrites === true;
     const role: PlannedRole = active.repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
     const disallowMutations =
       active.repair === 'format' ||
@@ -1303,9 +1523,16 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     const candidateDir = join(resolve(input.runRoot), 'workspaces', context.lock.spec.runId, active.id, 'candidate');
 
     let scanned: Awaited<ReturnType<typeof scanCandidateDirectory>>;
-    let explicitSubmissionBytes: Uint8Array | null = null;
+    let explicitSubmissionBytes: Uint8Array | null = explicitVerdictBytes;
     try {
-      scanned = await scanCandidateDirectory(candidateDir, context.source, head.progress.candidate.digest, disallowMutations);
+      scanned = await scanCandidateDirectory(
+        candidateDir,
+        context.source,
+        head.progress.candidate.digest,
+        disallowMutations,
+        context.plan.budgets.overlay,
+        allowWorkflowWrites,
+      );
       if (input.submissionFile !== undefined) {
         explicitSubmissionBytes = await readExplicitSubmissionFile(input.submissionFile);
       }
@@ -1316,7 +1543,6 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       throw error;
     }
 
-    const meta = await readStepMeta(context.directory);
     const unchangedFromBaseline = same(scanned.manifest, context.source.manifest);
     const effectiveStatus: 'completed' | 'no_change' | 'failed' | 'blocked' =
       input.status ?? (meta.mode === 'no-change' && unchangedFromBaseline ? 'no_change' : 'completed');
@@ -1333,26 +1559,36 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       assistantText = new TextDecoder('utf-8', { fatal: true }).decode(explicitSubmissionBytes);
       submissionBytes = explicitSubmissionBytes;
     } else if (artifactSubmissionFile === undefined || active.repair === 'format' || ignoreArtifactPath) {
-      const checkStatus =
-        effectiveStatus === 'completed' || effectiveStatus === 'no_change'
-          ? ('passed' as const)
-          : effectiveStatus === 'blocked'
-            ? ('blocked' as const)
-            : ('failed' as const);
-      const checkReason = checkStatus === 'passed' ? null : (effectiveReason ?? 'check_not_satisfied');
-      const synthetic: Submission = {
-        version: 1,
-        status: effectiveStatus,
-        checks: context.plan.task.spec.acceptance.checks.map(check => ({
-          checkId: check.id,
-          status: checkStatus,
-          evidenceId: null,
-          reason: checkReason,
-        })),
-        reason: effectiveReason,
-      };
-      assistantText = canonical(synthetic);
-      submissionBytes = new Uint8Array(Buffer.from(assistantText, 'utf8'));
+      if (isVerdictStep(activeNode)) {
+        const syntheticVerdict: StepVerdict = {
+          verdict: effectiveStatus === 'failed' ? 'fail' : effectiveStatus === 'blocked' ? 'human' : 'pass',
+          summary: effectiveReason ?? 'Passed via step submit.',
+          findings: [],
+        };
+        assistantText = canonical(syntheticVerdict);
+        submissionBytes = new Uint8Array(Buffer.from(assistantText, 'utf8'));
+      } else {
+        const checkStatus =
+          effectiveStatus === 'completed' || effectiveStatus === 'no_change'
+            ? ('passed' as const)
+            : effectiveStatus === 'blocked'
+              ? ('blocked' as const)
+              : ('failed' as const);
+        const checkReason = checkStatus === 'passed' ? null : (effectiveReason ?? 'check_not_satisfied');
+        const synthetic: Submission = {
+          version: 1,
+          status: effectiveStatus,
+          checks: context.plan.task.spec.acceptance.checks.map(check => ({
+            checkId: check.id,
+            status: checkStatus,
+            evidenceId: null,
+            reason: checkReason,
+          })),
+          reason: effectiveReason,
+        };
+        assistantText = canonical(synthetic);
+        submissionBytes = new Uint8Array(Buffer.from(assistantText, 'utf8'));
+      }
     }
 
     const payload: DelegatedCapturePayload = {
@@ -1368,18 +1604,19 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     };
 
     try {
-      const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(scanned.manifest));
-      if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest), 'utf8') > 32_768) {
+      const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+      const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(scanned.manifest), bounds.options);
+      if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest), 'utf8') > bounds.manifestMaxBytes) {
         refuse('OUTPUT_LIMIT', '', 'execution');
       }
       assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, scanned.files, context.source, 'execution');
-      const subject = bindSubject(context.lock, canonicalManifest.value.manifest);
+      const subject = bindSubject(context.lock, canonicalManifest.value.manifest, bounds.options);
       if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'execution');
       const changed = !same(subject.value.candidateDigest, head.progress.candidate.digest);
       const nextGeneration = head.progress.candidate.generation + (changed ? 1 : 0);
       if (nextGeneration >= context.plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
       const payloadBytes = Buffer.from(canonical(payload), 'utf8');
-      if (payloadBytes.byteLength > 8_388_608) refuse('OUTPUT_LIMIT', '', 'execution');
+      if (payloadBytes.byteLength > bounds.workspaceMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
       context.artifacts.vault.assertClean(payloadBytes);
       if (submissionBytes !== null) {
         if (submissionBytes.byteLength > 1_048_576) refuse('OUTPUT_LIMIT', '', 'execution');
@@ -1424,11 +1661,13 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     return await runStepTickWithCycle(
       context,
       input.runRoot,
+      meta,
       {
         head: cycle.head,
         candidate: cycle.candidate,
         submission: cycle.submission,
         adopt: false,
+        advisoryObservations: cycle.advisoryObservations,
       },
       { postStructureFailure: { nodeId: active.nodeId, code: structureFailure } },
     );

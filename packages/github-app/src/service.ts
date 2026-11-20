@@ -1,11 +1,40 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';
+import { validateExecutionAuthority, validateTaskpackV2Manifest } from './schema.js';
 import { InstallationTokenBroker, SecretScrubber } from './token-broker.js';
 import { intakeWebhookDelivery, WebhookDeliveryStore } from './webhook.js';
 import { TenantAdmissionQueue } from './tenant-queue.js';
-import type {
-  ClockSample, GitHubAppErrorCode, QueueItem, TaskpackReviseCommand, WebhookIntakeOutcome,
+import {
+  GitHubAppError,
+  type ClockSample, type ExecutionHostPolicy, type GitHubAppErrorCode, type QueueItem,
+  type TaskpackManifest, type TaskpackReviseCommand, type TaskpackV2Manifest, type WebhookIntakeOutcome,
 } from './types.js';
+
+export const MULTI_TENANT_HOST_POLICY: ExecutionHostPolicy = Object.freeze({
+  allowPrivileged: false,
+  allowWorkflowWrites: false,
+});
+
+export function assertMultiTenantManifestAuthority(manifest: TaskpackManifest | TaskpackV2Manifest): void {
+  validateExecutionAuthority(manifest.spec.execution, MULTI_TENANT_HOST_POLICY, {
+    localChecks: manifest.spec.verification.localChecks,
+  });
+  for (const [checkIdx, check] of manifest.spec.verification.localChecks.entries()) {
+    if (check.implementation !== 'command.v1') continue;
+    const rawToolchains = check.parameters?.['toolchainPaths'];
+    if (Array.isArray(rawToolchains)) {
+      for (const [tIdx, entry] of rawToolchains.entries()) {
+        if (typeof entry === 'string' && entry.startsWith('/')) {
+          throw new GitHubAppError(
+            'TASKPACK_HOST_BINDING_INVALID',
+            `multi-tenant control plane refuses absolute host toolchainPaths entry "${entry}"`,
+            `/spec/verification/localChecks/${checkIdx}/parameters/toolchainPaths/${tIdx}`,
+          );
+        }
+      }
+    }
+  }
+}
 
 export interface ControlPlaneHandle {
   readonly host: string;
@@ -36,6 +65,8 @@ export interface ControlPlaneOptions {
   readonly taskpackId?: string | undefined;
   /** Base revision bound to webhook-triggered queue items when the operator pins one. */
   readonly baseRevision?: string | undefined;
+  /** Optional validated manifest bound to this multi-tenant control plane (enforced under MULTI_TENANT_HOST_POLICY). */
+  readonly manifest?: TaskpackManifest | TaskpackV2Manifest | undefined;
 }
 
 function systemSample(): ClockSample {
@@ -110,6 +141,17 @@ function readReviseBinding(rawBody: Buffer): TaskpackReviseCommand | null {
   }
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'number') return JSON.stringify(Object.is(value, -0) ? 0 : value);
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).filter(key => record[key] !== undefined).sort();
+  return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
 function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: string; readonly runId: string; readonly kind: string; readonly baseRevision: string } | null {
   return item === undefined ? null : { queueItemId: item.queueItemId, runId: item.runId, kind: item.kind, baseRevision: item.baseRevision };
 }
@@ -119,6 +161,15 @@ function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: str
  * dispatch with scoped installation tokens, and scrubbed structured JSON on every response.
  */
 export async function startGitHubAppControlPlane(options: ControlPlaneOptions): Promise<ControlPlaneHandle> {
+  if (options.manifest !== undefined) {
+    assertMultiTenantManifestAuthority(options.manifest);
+  }
+  const pinnedManifestCanonical = options.manifest !== undefined
+    ? canonicalJson(options.manifest)
+    : null;
+  const effectiveTaskpackId = options.taskpackId ?? options.manifest?.metadata.name;
+  const effectiveCommentPrefixes = options.commentPrefixes ?? options.manifest?.spec.triggers.commentPrefixes;
+  const effectiveCommentCommands = options.commentCommands ?? options.manifest?.spec.triggers.commentCommands;
   const deliveryStore = options.deliveryStore ?? new WebhookDeliveryStore();
   const queue = options.queue ?? new TenantAdmissionQueue({
     maxPendingPerGroup: options.maxPendingPerGroup,
@@ -216,9 +267,9 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         eventName: String(request.headers['x-github-event'] ?? ''),
         deliveryId: headerDeliveryId,
         receivedAtMs: Date.now(),
-        taskpackId: options.taskpackId,
-        commentPrefixes: options.commentPrefixes,
-        commentCommands: options.commentCommands,
+        taskpackId: effectiveTaskpackId,
+        commentPrefixes: effectiveCommentPrefixes,
+        commentCommands: effectiveCommentCommands,
         operatorAllowlist: options.operatorAllowlist,
       }, deliveryStore);
       if (outcome.kind === 'signature_rejected') {
@@ -303,6 +354,30 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       const workerId = typeof parsed.body['workerId'] === 'string' ? parsed.body['workerId'] : '';
       try {
         if (action === 'lease') {
+          if (parsed.body['manifest'] !== undefined) {
+            const tenantManifest = validateTaskpackV2Manifest(
+              parsed.body['manifest'] as Parameters<typeof validateTaskpackV2Manifest>[0],
+              {
+                hostPolicy: MULTI_TENANT_HOST_POLICY,
+                enforceHostAuthority: true,
+              },
+            );
+            assertMultiTenantManifestAuthority(tenantManifest);
+            if (tenantManifest.metadata.name !== taskpackId) {
+              throw new GitHubAppError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                `leased manifest metadata.name "${tenantManifest.metadata.name}" does not match tenant taskpackId "${taskpackId}"`,
+                '/metadata/name',
+              );
+            }
+            if (pinnedManifestCanonical !== null && canonicalJson(tenantManifest) !== pinnedManifestCanonical) {
+              throw new GitHubAppError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                'leased manifest does not match control-plane pinned manifest',
+                '/manifest',
+              );
+            }
+          }
           if (options.tokenBroker === undefined) {
             return respond(response, 503, { error: { code: 'TOKEN_BROKER_CONFIG_INVALID', message: 'this control plane has no installation token broker configured' } });
           }

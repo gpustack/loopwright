@@ -11,60 +11,111 @@ spec:
     noChange: >-
       Verify that .auto-sync/proposal.json, workspace package manifests, and package-lock.json already match
       eligible upstream releases with zero repository modifications.
+  execution:
+    mode: strict
+    capabilities:
+      allowHostPath: true
+      allowCheckNetwork: true
+    digests:
+      pinDigests: true
+  preflight:
+    script: scripts/prepare-self-upgrade.mjs
+    timeoutSeconds: 600
+    env:
+      - SELF_UPGRADE_FORCE
+      - SELF_UPGRADE_REQUESTED_MODE
+      - SELF_UPGRADE_REGISTRY_FIXTURES
+      - SELF_UPGRADE_LOCKFILE_FIXTURE
+      - SELF_UPGRADE_SKIP_STAGE
   scope:
     writable:
       - .auto-sync/proposal.json
       - package-lock.json
-      - packages/agent-pi
-      - packages/cli
-      - packages/controller
-      - packages/decisions
-      - packages/github-app
-      - docs
+      - packages/agent-pi/**
+      - packages/cli/**
+      - packages/controller/**
+      - packages/decisions/**
+      - packages/github-app/**
+      - docs/**
     protected:
-      - packages/agent-pi/qualification
-      - packages/controller/qualification
+      - packages/agent-pi/qualification/**
+      - packages/controller/qualification/**
       - packages/cli/src/closure.ts
       - packages/cli/src/failure-matrix.ts
-      - docs/contribute
+      - docs/contribute/**
+      - scripts/**
   instructions:
     - .auto-sync/instructions.md
   upstreams:
     - id: pi-coding-agent
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: pi-ai
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-ai/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: pi-agent-core
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-agent-core/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: pi-mcp
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-mcp/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: pi-codemode
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-codemode/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: pi-tui
       kind: http-json
       source: https://registry.npmjs.org/@earendil-works/pi-tui/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/agent-pi/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
     - id: yaml
       kind: http-json
       source: https://registry.npmjs.org/yaml/latest
-      watchedPaths: []
+      watchedPaths:
+        - packages/cli/package.json
+        - packages/controller/package.json
+        - packages/decisions/package.json
+        - packages/github-app/package.json
       allowPrerelease: false
+      versionPath: version
+      monotonicSemver: true
+  upstreamGroups:
+    - id: pi-family
+      policy: lockstep
+      members:
+        - pi-coding-agent
+        - pi-ai
+        - pi-agent-core
+        - pi-mcp
+        - pi-codemode
+        - pi-tui
   proposal:
     path: .auto-sync/proposal.json
     requiredFields:
@@ -85,14 +136,11 @@ spec:
           script: .auto-sync/checks/verify.sh
           timeoutSeconds: 900
           allowReadOnlyGitHubToken: false
+          toolchainPaths:
+            - /usr/local/bin
+            - /usr/bin
           env:
             - GITHUB_ACTIONS
-            - NODE_BIN_DIR
-            - HUGO_BIN
-            - PYTHON_BIN
-            - SELF_UPGRADE_STAGE_DIR
-            - SELF_UPGRADE_NPM_CACHE
-            - SELF_UPGRADE_REPO_ROOT
             - SELF_UPGRADE_RUN_ROOT
             - SELF_UPGRADE_REQUIRE_HUGO
             - SELF_UPGRADE_ALLOW_TEST_FIXTURE

@@ -279,7 +279,7 @@ spec:
     noChange: Confirm upstreams are current.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
   upstreams:
     - id: vllm
       kind: custom-table
@@ -551,7 +551,7 @@ spec:
     noChange: Confirm no updates needed.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
   upstreams:
     - id: vllm
       kind: custom-table
@@ -800,7 +800,7 @@ spec:
     noChange: Confirm no drift.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
   upstreams:
     - id: vllm
       kind: custom-table
@@ -1039,7 +1039,7 @@ spec:
     noChange: Confirm no drift.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
   upstreams:
     - id: vllm
       kind: custom-table

@@ -459,7 +459,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
     await writeFile(join(repoRoot, 'pack', 'cann', 'upstream-versions.json'), JSON.stringify({ version: '2.0.0' }), { mode: 0o600 });
     await writeFile(join(repoRoot, 'pack', 'cann', 'version.txt'), '1.0.0\n', { mode: 0o600 });
     await writeFile(
-      join(repoRoot, '.auto-sync', 'verify.sh'),
+      join(repoRoot, '.auto-sync', 'checks', 'verify.sh'),
       '#!/bin/sh\ntest -f .auto-sync/proposal.json && grep -q \'"ready"\' .auto-sync/proposal.json\n',
       { mode: 0o755 },
     );
@@ -477,7 +477,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
           maxAttempts: 1,
         },
         scope: {
-          writable: ['.auto-sync/proposal.json', 'pack/cann'],
+          writable: ['.auto-sync/proposal.json', 'pack/cann/**'],
           protected: [],
         },
         roles: [
@@ -494,7 +494,7 @@ test('step-cli: allows explicit .auto-sync/proposal.json inside controlRoot whil
         verification: {
           localChecks: [
             { id: 'proposal-json', implementation: 'json-artifact.v1' },
-            { id: 'cmd-check', implementation: 'command.v1', parameters: { script: '.auto-sync/verify.sh', timeoutSeconds: 10 } },
+            { id: 'cmd-check', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', timeoutSeconds: 10 } },
           ],
           externalGates: [],
         },

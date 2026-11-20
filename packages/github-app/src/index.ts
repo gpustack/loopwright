@@ -6,19 +6,39 @@ export {
 export type * from './types.js';
 export {
   assertManifestScopeInvariants, canCarveOutControlRootProposal, IDENTIFIER_PATTERN,
-  isControlRootProposalWritableAllowed, normalizeRelativePath, parseTaskpackDocument, pathCoveredBy,
-  effectiveProtectedPaths, validateTaskpackManifest, validateTaskpackLimitsDeclaration,
-  validateMcpServerDeclarations, collectMcpReferencedEnvNames,
-  type EffectiveProtectedPathsOptions, type Json,
+  isControlRootProposalWritableAllowed, normalizeRelativePath, normalizeScopePattern, parseJsonSubset,
+  parseTaskpackDocument, pathCoveredBy, resolveExecutionCapabilities, tryNormalizeRelativePath,
+  effectiveProtectedPaths, validateExecutionAuthority, validateTaskpackManifest, validateTaskpackV2Manifest,
+  validateTaskpackLimitsDeclaration, validateMcpServerDeclarations, collectMcpReferencedEnvNames,
+  type EffectiveProtectedPathsOptions, type Json, type ParseJsonSubsetLimits, type ValidateTaskpackManifestOptions,
 } from './schema.js';
 export {
+  assertDigestLockfileVerified, collectTaskpackDigestTargets, computeDirectoryTreeDigest, computeFileDigest,
+  computeTaskpackDigests, DIGEST_LOCKFILE_MAX_BYTES, DIGEST_LOCKFILE_MAX_ENTRIES, DIGEST_MAX_FILE_BYTES,
+  DIGEST_MAX_TREE_BYTES, DIGEST_MAX_TREE_DEPTH, DIGEST_MAX_TREE_FILES, readDigestLockfile,
+  resolveDigestLockfilePath, verifyDigestLockfile, writeDigestLockfile,
+  type DigestLimitsOptions, type DirectoryTreeDigestResult, type DirectoryTreeFileDigest,
+} from './digests.js';
+export {
+  collectManifestSecretEnvNames, formatWorkspaceResourcesManifest, isForbiddenPreflightEnvName,
+  PREFLIGHT_DEFAULT_TIMEOUT_SECONDS, PREFLIGHT_MAX_METADATA_BYTES, PREFLIGHT_MAX_METADATA_KEYS,
+  PREFLIGHT_MAX_OUTPUT_JSON_BYTES, PREFLIGHT_MAX_PROMPT_RESOURCE_BYTES, PREFLIGHT_MAX_PROMPT_RESOURCES_TOTAL_BYTES,
+  PREFLIGHT_MAX_STAGED_RESOURCES, PREFLIGHT_MAX_STDIO_BYTES, PREFLIGHT_MAX_TIMEOUT_SECONDS,
+  PREFLIGHT_MAX_UPSTREAMS, PREFLIGHT_MAX_WORKSPACE_RESOURCE_BYTES, PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES,
+  PREFLIGHT_OUTPUT_MAX_DEPTH, PREFLIGHT_SAFE_DEFAULT_PATH, runTaskpackPreflight,
+  type PreflightDisposition, type PreflightPromptResource, type PreflightStagedResourceKind,
+  type PreflightStagedResourceMount, type PreflightWorkspaceResource,
+  type RunTaskpackPreflightOptions, type RunTaskpackPreflightResult,
+} from './preflight.js';
+export {
   ACTIONS_RUN_URL_PATTERN, applyLimitsToBudgets, authorizeRepositoryActor, boundDiagnosticLog,
-  buildUpstreamVersionsMap, collectControlRootSiblingPaths, compileDeclarativeTaskpack, DEFAULT_AUTHOR_PROMPT_HEAD,
-  DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES,
-  GUIDANCE_SENTINEL, INSTRUCTION_MAX_AGGREGATE_BYTES, loadDeclarativeTaskpack, mergeTaskpackLimits,
-  parseActionInputLimits, parseActionsRunUrl, parseCommentCommand, parseEnvAndInputLimitsOverride,
-  parseLoopwrightEnvLimits, prepareTaskpackIntake, resolveTaskpackMemoryLocation, stageCompiledInstructionResources,
-  validateCommentGuidance, type ControlRootSiblingSet, type ResolvedTaskpackMemoryLocation,
+  buildUpstreamVersionsMap, collectControlRootSiblingPaths, collectGitHubSiblingPaths, compileDeclarativeTaskpack,
+  compileScopePatterns, DEFAULT_AUTHOR_PROMPT_HEAD, DEFAULT_HOST_BUDGETS, DIAGNOSTIC_LOG_LIMIT, GUIDANCE_CONTRACT_PREFIXES,
+  GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES, GUIDANCE_SENTINEL, INSTRUCTION_MAX_AGGREGATE_BYTES,
+  loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits, parseActionsRunUrl, parseCommentCommand,
+  parseEnvAndInputLimitsOverride, parseLoopwrightEnvLimits, prepareTaskpackIntake, resolveTaskpackMemoryLocation,
+  stageCompiledInstructionResources, validateCommentGuidance,
+  type CollectGitHubSiblingPathsOptions, type ControlRootSiblingSet, type ResolvedTaskpackMemoryLocation,
 } from './taskpack.js';
 export {
   intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore,
@@ -41,23 +61,27 @@ export {
   TRUSTED_PYTHON_PATHS, TRUSTED_SEATBELT_PATHS, type ResolveTaskpackSandboxOptions,
 } from './sandbox.js';
 export {
-  buildDefaultAuthorPrompt, runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload,
+  buildDefaultAuthorPrompt, createTaskpackDecisionPort, runActionCli, runGitHubActionEntrypoint, evaluateCommentPayload,
   mergeMcpServerDeclarations, parseMcpServersOverride, serializeActionResultSummary,
-  type TurnkeyActionEntrypointInput, type TurnkeyActionExecutionReport,
+  type CreateTaskpackDecisionPortOptions, type TurnkeyActionEntrypointInput, type TurnkeyActionExecutionReport,
 } from './action.js';
 export {
-  checkManagedPrMatchesDiscoveredState, compareVersionTags, DEFAULT_GIT_COMMIT_IDENTITY,
-  discoverTaskpackUpstreams, findOpenManagedPullRequest, findOpenMemoryPullRequest,
-  isPrereleaseVersionTag, MEMORY_PULL_REQUEST_BRANCH_PREFIX, parseOptionalGitIdentityInput,
-  parseUpstreamRecordsJson, resolveGitHubAuth, resolveGitHubToken,
+  applyUpstreamGroups, attachUpstreamContext, buildUpstreamMemoryVersions,
+  checkManagedPrMatchesDiscoveredState, compareStrictSemver, compareVersionTags, DEFAULT_GIT_COMMIT_IDENTITY,
+  discoverTaskpackUpstreams, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition,
+  extractJsonVersionPath, findOpenManagedPullRequest, findOpenMemoryPullRequest, formatUpstreamSummary,
+  isPrereleaseVersionTag, loadRepositoryBaselineVersions, MEMORY_PULL_REQUEST_BRANCH_PREFIX,
+  normalizeHeldBackVersions, parseOptionalGitIdentityInput,
+  parseUpstreamRecordsJson, resolveGitCommitSha, resolveGitHubAuth, resolveGitHubToken,
   resolveRepositoryAndRevisions, validateGitAuthorEmail, validateGitAuthorName,
   validateGitCommitIdentity,
-  type CheckManagedPrMatchesOptions, type DiscoverTaskpackUpstreamsOptions,
+  type CheckManagedPrMatchesOptions, type DiscoverTaskpackUpstreamsOptions, type DiscoverTaskpackUpstreamsV2Result,
   type FindOpenManagedPullRequestOptions, type FindOpenMemoryPullRequestOptions,
   type ManagedPullRequestInfo,
   type ResolveActionGitHubAuthOptions, type ResolveActionGitHubTokenOptions,
   type ResolvedActionGitHubAuth, type ResolvedRepositoryAndRevisions,
-  type ResolveRepositoryAndRevisionsOptions,
+  type ResolveRepositoryAndRevisionsOptions, type UpstreamAcquisitionRecord,
+  type UpstreamIntakeDisposition, type UpstreamIntakeDispositionResult,
 } from './upstreams.js';
 export {
   formatByteCount, formatCostUsd, formatDurationMs, formatRunReport, formatTokenCount,
@@ -83,7 +107,10 @@ export {
   finalizeAndPublishTurnkeyMemory,
   type FinalizeAndPublishTurnkeyMemoryOptions,
 } from './turnkey-memory.js';
-export { startGitHubAppControlPlane, type ControlPlaneHandle, type ControlPlaneOptions } from './service.js';
+export {
+  assertMultiTenantManifestAuthority, MULTI_TENANT_HOST_POLICY, startGitHubAppControlPlane,
+  type ControlPlaneHandle, type ControlPlaneOptions,
+} from './service.js';
 export { serializePrettyYaml } from './yaml.js';
 export {
   DEFAULT_PI_MODEL, DEFAULT_PI_PROVIDER, DEFAULT_PI_THINKING, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV,

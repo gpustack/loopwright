@@ -624,8 +624,8 @@ spec:
     noChange: Confirm pack/proposal.json matches upstream.
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
     protected: []
   instructions:
     - .auto-sync/prompts/guide.md
@@ -1288,7 +1288,7 @@ spec:
     noChange: Confirm pack/proposal.json is current.
   scope:
     writable:
-      - pack
+      - 'pack/**'
   instructions:
     - .loopwright/instructions.md
   upstreams:
@@ -1467,7 +1467,7 @@ spec:
     noChange: Verify no drift.
   scope:
     writable:
-      - .autosync
+      - '.autosync/**'
   upstreams:
     - id: vllm
       kind: custom-table
@@ -1528,9 +1528,9 @@ ${checks}
         /"version":1,"status":"completed"\|"no_change"\|"failed"\|"blocked"/,
       );
 
-      // With 4 localChecks + 2 implicit checks = 6 verifier slots and PR publication,
-      // calcD(5, 3) > 64 so compileDeclarativeTaskpack clamps maxAttempts cleanly to fit 64 checkpoints.
-      await writeFile(join(repo, '.loopwright', 'taskpack.yaml'), makeManifestYaml(4), 'utf8');
+      // With 15 localChecks + 2 implicit checks = 17 verifier slots, maxAttempts=8, and PR publication,
+      // calcD(8, 1, ..., 17, true) > 256 so compileDeclarativeTaskpack clamps maxAttempts cleanly to fit 256 checkpoints.
+      await writeFile(join(repo, '.loopwright', 'taskpack.yaml'), makeManifestYaml(15), 'utf8');
       const manifest4 = await loadDeclarativeTaskpack({
         manifestPath: join(repo, '.loopwright', 'taskpack.yaml'),
         repositoryRoot: repo,
@@ -1542,6 +1542,7 @@ ${checks}
         baseRevision: 'a'.repeat(40),
         sourceRevision: 'a'.repeat(40),
         targetMatrix: null,
+        maxAttempts: 8,
         runtimeOptions: {},
         budgets: DEFAULT_HOST_BUDGETS,
         publicationEndpoint: {
@@ -1554,7 +1555,7 @@ ${checks}
           publication: 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
         },
       });
-      assert.ok(compiledClamped.config.spec.controls.maxAttempts < 5);
+      assert.ok(compiledClamped.config.spec.controls.maxAttempts < 8);
       assert.ok(compiledClamped.config.spec.controls.maxAttempts >= 1);
 
       const regDir = join(operator, 'registry');

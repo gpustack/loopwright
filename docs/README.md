@@ -62,7 +62,7 @@
 - Use for: author taskpacks and assess offline runner parity
 - Aliases: taskpacks
 - Guides: [walkthroughs/declarative-taskpack.md](walkthroughs/declarative-taskpack.md), [configuration/taskpack.md](configuration/taskpack.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/runner-taskpack.md](contribute/runner-taskpack.md)
-- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md)
+- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md)
 - Code: [taskpack-runner](../packages/taskpack-runner/)
 - Related: [github-app](#github-app-and-action-control-plane), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
@@ -84,7 +84,7 @@
 - Use for: configure App intake, Action execution, and sandboxes
 - Aliases: github-app
 - Guides: [operations/github-action.md](operations/github-action.md), [operations/github-app.md](operations/github-app.md), [contribute/github-app-internals.md](contribute/github-app-internals.md)
-- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md), [Turnkey Execution](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md)
+- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md), [Turnkey Execution](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md)
 - Code: [github-app](../packages/github-app/)
 - Related: [taskpacks](#declarative-taskpacks-and-runner-parity), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -133,6 +133,7 @@
 | [2026-11-14-delegated-role-stepping-and-multi-model-routing.md](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md) | Delegated role stepping and multi-model routing |
 | [2026-11-15-self-upgrade-dogfooding.md](../specs/2026-11-15-self-upgrade-dogfooding.md) | Self-upgrade Taskpack dogfooding and OS-contained verification |
 | [2026-11-19-lightweight-memory-lifecycle-and-gc.md](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md) | Lightweight memory lifecycle, eager cleanup, and configurable GC |
+| [2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md) | Taskpack 2.0 orchestration, trust modes, preflight, and extensible contracts |
 
 ## All pages
 

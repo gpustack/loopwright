@@ -90,7 +90,7 @@ The loader enforces the hard invariants before anything compiles:
 
 - Manifests are read with a bounded (`65536`-byte) `O_NOFOLLOW` file read; symlinks, `..` traversal,
   `__proto__`/`constructor`/`prototype` keys, and any `${...}` interpolation expression are refused.
-- `PROTECTED_AUTOMATION_PATHS` includes `.codex`, `.github`, `.claude`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md`.
+- `PROTECTED_AUTOMATION_PATHS` includes `.codex`, `.github`, `.claude`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` (`.agents/**` is opt-in).
 - Effective protected paths also include the control root, manifest, instructions, and scripts.
 - Omitted writable scope defaults to `**`; protected paths take precedence over writable ancestors.
 - The proposal must be writable. Memory must stay under the control root's `memory` directory.
@@ -107,7 +107,7 @@ from explicitly bound environment variables.
 
 - **macOS Seatbelt (`macos-seatbelt`)**: `compileMacosSeatbeltProfile` canonicalizes paths with `realpath` and denies sensitive credential directories, including `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh`, and `deniedReadPaths`.
 - **Seatbelt writes**: The profile denies writes globally, then grants writes to canonicalized `writablePaths` and scratch directories.
-- **Seatbelt masks**: Protected paths include `.git`, `.github`, `.loopwright`, `.claude`, `.agents`, `AGENTS.md`, `CLAUDE.md`, and manifest `scope.protected`. Overrides follow writable grants, so last-match-wins precedence blocks modifications inside writable roots.
+- **Seatbelt masks**: Protected paths include `.git`, `.github`, `.loopwright`, `.claude`, `AGENTS.md`, `CLAUDE.md`, and manifest `scope.protected` (`.agents/**` is opt-in). Overrides follow writable grants, so last-match-wins precedence blocks modifications inside writable roots.
 - **Linux Bubblewrap (`linux-bwrap`)**: `compileLinuxBwrapCommand` applies namespace isolation, a read-only root, credential masks, writable binds, protected-path masks, and the `computeSandboxSeccompProfile` syscall filter.
 - **Linux Landlock (`linux-landlock`)**: Without unprivileged user namespaces or `bwrap`, Landlock enforces `PR_SET_NO_NEW_PRIVS` and `LANDLOCK_RULE_PATH_BENEATH` rules through recursive tree-splitting.
 - **Fail-closed negotiation (`negotiateSandboxBackend`)**: refuses missing or untrusted binaries

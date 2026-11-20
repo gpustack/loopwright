@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import { snapshot, type Json } from './boundary.js';
 import {
-  artifactRefSchema, arrayOf, branch, document, enumeration, nameSchema,
-  object, record, text, type ArtifactRef, type Digest, type Infer, type Schema,
+  artifactRefSchema, artifactUri, arrayOf, branch, document, enumeration, mediaType, nameSchema,
+  nullable, object, optional, record, resolveOverlayOptions, text,
+  type ArtifactRef, type Digest, type Infer, type Schema,
 } from './contracts.js';
 import { attempt, fail, type DiagnosticCode, type Result } from './diagnostics.js';
-import { LIMITS } from './limits.js';
+import { LIMITS, type OverlayLimitOptions } from './limits.js';
 
 export function byteDigest(bytes: Uint8Array): Digest {
   return { algorithm: 'sha256', hex: createHash('sha256').update(bytes).digest('hex') };
@@ -26,11 +27,27 @@ function byteView(input: unknown, path: string): Uint8Array {
   if (length > LIMITS.artifactBytes) fail('LIMIT_ARTIFACT_BYTES', path);
   return new Uint8Array(buffer, offsetGetter.call(input) as number, length);
 }
-export function digestArtifact(name: unknown, bytes: Uint8Array): Result<ArtifactRef> {
+export interface ArtifactRefOptions {
+  readonly uri?: string | null;
+  readonly mediaType?: string | null;
+}
+
+const artifactOptionsSchema = record({
+  uri: optional(nullable(artifactUri)),
+  mediaType: optional(nullable(mediaType)),
+});
+
+export function digestArtifact(name: unknown, bytes: Uint8Array, options?: ArtifactRefOptions): Result<ArtifactRef> {
   return attempt(() => {
     const validName = nameSchema(object(snapshot({ name }), '').name!, '/name');
     const owned = byteView(bytes, '/bytes').slice();
-    return { name: validName, digest: byteDigest(owned), byteLength: owned.byteLength };
+    const ref: Record<string, unknown> = { name: validName, digest: byteDigest(owned), byteLength: owned.byteLength };
+    if (options !== undefined) {
+      const parsedOptions = artifactOptionsSchema(object(snapshot({ options }), '').options!, '');
+      if (Object.hasOwn(parsedOptions, 'uri')) ref.uri = parsedOptions.uri;
+      if (Object.hasOwn(parsedOptions, 'mediaType')) ref.mediaType = parsedOptions.mediaType;
+    }
+    return ref as ArtifactRef;
   });
 }
 export interface BaseTreeAnchor {
@@ -54,21 +71,26 @@ function baseTreeSchema(value: Json, path: string): BaseTreeAnchor {
 }
 
 const classicSpecShape = record({ entries: arrayOf(artifactRefSchema, 0, LIMITS.manifest) });
-const overlaySpecShape = record({
-  baseTree: baseTreeSchema,
-  entries: arrayOf(artifactRefSchema, 0, LIMITS.overlayEntries),
-  deleted: arrayOf(nameSchema, 0, LIMITS.overlayEntries),
-});
-const manifestSpecShape: Schema<
-  | { readonly entries: readonly ArtifactRef[]; readonly baseTree?: undefined; readonly deleted?: undefined }
-  | { readonly baseTree: BaseTreeAnchor; readonly entries: readonly ArtifactRef[]; readonly deleted: readonly string[] }
-> = branch(
-  input => Object.hasOwn(input, 'baseTree') || Object.hasOwn(input, 'deleted'),
-  overlaySpecShape,
-  classicSpecShape,
-);
-const manifestShape = document('ArtifactManifest', manifestSpecShape);
-export type ArtifactManifest = Infer<typeof manifestShape>;
+function overlaySpecShape(maxOverlayEntries: number) {
+  return record({
+    baseTree: baseTreeSchema,
+    entries: arrayOf(artifactRefSchema, 0, maxOverlayEntries),
+    deleted: arrayOf(nameSchema, 0, maxOverlayEntries),
+  });
+}
+function createManifestShape(maxOverlayEntries: number) {
+  const specShape: Schema<
+    | { readonly entries: readonly ArtifactRef[]; readonly baseTree?: undefined; readonly deleted?: undefined }
+    | { readonly baseTree: BaseTreeAnchor; readonly entries: readonly ArtifactRef[]; readonly deleted: readonly string[] }
+  > = branch(
+    input => Object.hasOwn(input, 'baseTree') || Object.hasOwn(input, 'deleted'),
+    overlaySpecShape(maxOverlayEntries),
+    classicSpecShape,
+  );
+  return document('ArtifactManifest', specShape);
+}
+const defaultManifestShape = createManifestShape(LIMITS.overlayEntries);
+export type ArtifactManifest = Infer<typeof defaultManifestShape>;
 
 function validateGitPath(name: string, path: string): void {
   for (const segment of name.split('/')) {
@@ -90,8 +112,9 @@ function requireAscending<T>(
   }
 }
 
-export function manifestSchema(value: Json, path = ''): ArtifactManifest {
-  const manifest = manifestShape(value, path);
+export function manifestSchema(value: Json, path = '', maxOverlayEntries: number = LIMITS.overlayEntries): ArtifactManifest {
+  const shape = maxOverlayEntries === LIMITS.overlayEntries ? defaultManifestShape : createManifestShape(maxOverlayEntries);
+  const manifest = shape(value, path);
   const spec = manifest.spec;
   if (spec.baseTree) {
     spec.entries.forEach((entry, index) => {
@@ -126,11 +149,18 @@ export function manifestSchema(value: Json, path = ''): ArtifactManifest {
 export interface ResolvedArtifact { readonly name: string; readonly bytes: Uint8Array }
 export interface ArtifactBytes { readonly byteLength: number; readonly digest: Digest }
 
+const NON_OVERLAY_ARTIFACTS = LIMITS.resolvedArtifacts - LIMITS.overlayEntries;
+
 /** Validate inventory shape and all byte limits before copying or hashing. */
-export function resolveInventory(input: readonly ResolvedArtifact[]): ReadonlyMap<string, ArtifactBytes> {
+export function resolveInventory(
+  input: readonly ResolvedArtifact[],
+  options?: OverlayLimitOptions,
+): ReadonlyMap<string, ArtifactBytes> {
+  const overlay = resolveOverlayOptions(options);
+  const maxArtifacts = overlay ? Math.max(LIMITS.resolvedArtifacts, overlay.maxFiles + NON_OVERLAY_ARTIFACTS) : LIMITS.resolvedArtifacts;
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) fail('INPUT_UNSUPPORTED', '/artifacts');
   const count = Object.getOwnPropertyDescriptor(input, 'length')!.value as number;
-  if (count > LIMITS.resolvedArtifacts) fail('LIMIT_COLLECTION', '/artifacts');
+  if (count > maxArtifacts) fail('LIMIT_COLLECTION', '/artifacts');
   if (Reflect.ownKeys(input).length !== count + 1) fail('INPUT_UNSUPPORTED', '/artifacts');
   const names = new Set<string>(), views: { name: string; view: Uint8Array }[] = [];
   let total = 0;

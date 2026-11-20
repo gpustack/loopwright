@@ -4,6 +4,7 @@ import { bindSubject, digestArtifact, validateDocument, type ArtifactManifest, t
 import type { CheckpointRecord } from '@loopwright/state';
 import type { AdapterPolicy, PiResult } from './types.js';
 import { canonical, digest, freeze, id, integer, object, snapshot } from './boundary.js';
+import { DEFAULT_OVERLAY_MANIFEST_MAX_BYTES, resolveCandidateOverlayLimits } from './candidate.js';
 import { result, refuse } from './errors.js';
 import { sameIdentity, validateDigest, validatePolicy } from './policy.js';
 import { NativeSnapshot, snapshotRow } from './snapshot.js';
@@ -98,10 +99,14 @@ export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<P
     const entries = native.finish();
     const workspaceRows = rows(workspaceBytes), header = object(workspaceRows[0], ['type', 'version', 'binding', 'manifest']);
     if (header.type !== 'workspace_snapshot' || header.version !== 1 || !sameIdentity(header.binding, binding)) refuse('BINDING_MISMATCH');
-    const manifest = validateDocument(header.manifest, 'ArtifactManifest');
-    if (!manifest.ok || Buffer.byteLength(canonical(manifest.value)) > 32768 || manifest.value.spec.entries.length > policy.limits.candidateEntries) refuse('RECOVERY_REQUIRED');
-    if (manifest.value.spec.baseTree !== undefined && manifest.value.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) > 4_194_304) refuse('OUTPUT_LIMIT');
-    const subject = bindSubject(lock, manifest.value);
+    const overlayLimits = resolveCandidateOverlayLimits(lock.spec.contract.spec.budgets.overlay);
+    const overlayOptions = { overlay: { maxFiles: overlayLimits.maxFiles, maxBytes: overlayLimits.maxBytes } };
+    const manifest = validateDocument(header.manifest, 'ArtifactManifest', overlayOptions);
+    if (!manifest.ok || manifest.value.spec.entries.length > policy.limits.candidateEntries) refuse('RECOVERY_REQUIRED');
+    const manifestMaxBytes = manifest.value.spec.baseTree !== undefined ? overlayLimits.manifestMaxBytes : DEFAULT_OVERLAY_MANIFEST_MAX_BYTES;
+    if (Buffer.byteLength(canonical(manifest.value)) > manifestMaxBytes) refuse('RECOVERY_REQUIRED');
+    if (manifest.value.spec.baseTree !== undefined && manifest.value.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) > overlayLimits.maxBytes) refuse('OUTPUT_LIMIT');
+    const subject = bindSubject(lock, manifest.value, overlayOptions);
     if (!subject.ok || !sameIdentity(subject.value, checkpoint.subject)) refuse('BINDING_MISMATCH');
     const artifacts: { name: string; bytes: Uint8Array }[] = [];
     let index = 1, total = workspaceBytes.length + sessionBytes.length;

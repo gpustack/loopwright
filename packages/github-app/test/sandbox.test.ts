@@ -532,7 +532,7 @@ spec:
   scope:
     writable:
       - ${proposalRel}
-      - pack/cann
+      - pack/cann/**
     protected: []
   upstreams:
     - id: cann
@@ -584,7 +584,7 @@ spec:
         });
         assert.equal(policy.controlRoot, controlRoot);
         assert.equal(policy.proposalPath, proposalRel);
-        assert.deepEqual(policy.writablePaths, [proposalRel, 'pack/cann']);
+        assert.deepEqual(policy.writablePaths, [proposalRel, 'pack/cann/**']);
         assert.equal(policy.protectedPaths?.includes(controlRoot), false);
         assert.equal(policy.protectedPaths?.includes(taskpackRel), true);
         assert.equal(policy.protectedPaths?.includes(instructionsRel), true);
@@ -742,7 +742,7 @@ spec:
           const nestedSiblingAbs = join(workspaceRoot, `${controlRoot}/output/sibling.json`);
           const nestedPolicy = {
             ...policy,
-            writablePaths: [nestedProposalRel, 'pack/cann'],
+            writablePaths: [nestedProposalRel, 'pack/cann/**'],
             proposalPath: nestedProposalRel,
           };
           const createNested = await executeSandboxedCommand({
@@ -790,6 +790,217 @@ spec:
           }
         }
       }
+    });
+  });
+});
+
+describe('Review-T8: sandbox networkMode preservation, bounded glob traversal, and Linux leaf-glob exact binds', () => {
+  it('preserves allowAgentNetwork -> allow-outbound when spec.sandbox omits networkMode', async () => {
+    await withTempWorkspace(async workspaceRoot => {
+      await mkdir(join(workspaceRoot, '.loopwright'), { recursive: true });
+      await writeFile(
+        join(workspaceRoot, '.loopwright', 'taskpack.yaml'),
+        `apiVersion: loopwright.dev/v1alpha1
+kind: Taskpack
+metadata:
+  name: net-preserve
+spec:
+  execution:
+    mode: privileged
+    capabilities:
+      allowAgentNetwork: true
+  sandbox:
+    preferredBackends:
+      - macos-seatbelt
+  goal:
+    candidate: Update docs.
+    noChange: No change.
+  scope:
+    writable:
+      - docs/**
+    protected: []
+  upstreams: []
+  verification:
+    localChecks: []
+    externalGates: []
+  publication:
+    mode: disabled
+    targetBranch: main
+    headBranchPrefix: lw/
+    titleTemplate: "chore: docs"
+  memory:
+    directory: .loopwright/memory
+    apply: disabled
+    onNoModelBudget: deterministic-observations-only
+  triggers:
+    schedule: true
+    workflowDispatch: true
+    releasePublished: false
+    commentCommands: []
+`,
+        'utf8',
+      );
+
+      const loaded = await loadDeclarativeTaskpack({
+        manifestPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: workspaceRoot,
+        hostPolicy: { allowPrivileged: true },
+      });
+      assert.equal(loaded.spec.sandbox?.networkMode, undefined);
+
+      const policy = resolveEffectiveTaskpackSandboxPolicy(loaded, {
+        workspaceRoot,
+        relativeTaskpackPath: '.loopwright/taskpack.yaml',
+        hostPolicy: { allowPrivileged: true },
+        env: {},
+      });
+      assert.equal(policy.networkMode, 'allow-outbound');
+      assert.deepEqual(policy.preferredBackends, ['macos-seatbelt']);
+    });
+  });
+
+  it('fails closed with SANDBOX_POLICY_INVALID when glob expansion exceeds directory traversal budget', async () => {
+    await withTempWorkspace(async workspaceRoot => {
+      const fanRoot = join(workspaceRoot, 'fan');
+      await mkdir(fanRoot, { recursive: true });
+      // Create 2,060 directories (> MAX_GLOB_VISITED_DIRS = 2,048) under fan/
+      const batch: Promise<string | undefined>[] = [];
+      for (let i = 0; i < 2_060; i += 1) {
+        batch.push(mkdir(join(fanRoot, `d${String(i).padStart(4, '0')}`), { recursive: true }));
+        if (batch.length >= 200) {
+          await Promise.all(batch.splice(0, batch.length));
+        }
+      }
+      if (batch.length > 0) await Promise.all(batch);
+
+      assert.throws(
+        () => compileMacosSeatbeltProfile(
+          { workspaceRoot, writablePaths: ['fan/*/sub/**'] },
+          { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+        ),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID' && /exceeded/.test(err.message),
+      );
+    });
+  });
+
+  it('binds only exact existing regular files for leaf globs on Linux bwrap without over-granting parent directories or symlinks', async () => {
+    await withTempWorkspace(async workspaceRoot => {
+      await mkdir(join(workspaceRoot, 'packages', 'core'), { recursive: true });
+      await mkdir(join(workspaceRoot, 'packages', 'cli'), { recursive: true });
+      const corePkg = join(workspaceRoot, 'packages', 'core', 'package.json');
+      const coreSrc = join(workspaceRoot, 'packages', 'core', 'index.ts');
+      const cliPkg = join(workspaceRoot, 'packages', 'cli', 'package.json');
+      await writeFile(corePkg, '{"name":"core"}\n', 'utf8');
+      await writeFile(coreSrc, 'export const x = 1;\n', 'utf8');
+      await writeFile(cliPkg, '{"name":"cli"}\n', 'utf8');
+      await writeFile(join(workspaceRoot, 'docs', 'existing.md'), '# ok\n', 'utf8');
+      await writeFile(join(workspaceRoot, 'docs', 'other.txt'), 'secret\n', 'utf8');
+      await symlink(join(workspaceRoot, 'AGENTS.md'), join(workspaceRoot, 'docs', 'linked.md'));
+
+      const bwrap = compileLinuxBwrapCommand(
+        { workspaceRoot, writablePaths: ['packages/*/package.json', 'docs/*.md'] },
+        { platform: 'linux', arch: 'x64', probeExecutables: false },
+      );
+
+      const boundPaths: string[] = [];
+      for (let i = 0; i < bwrap.args.length; i += 1) {
+        if (bwrap.args[i] === '--bind' && bwrap.args[i + 1] !== undefined) {
+          boundPaths.push(bwrap.args[i + 1]!);
+        }
+      }
+      assert.equal(boundPaths.includes(corePkg), true, 'must bind exact matched packages/core/package.json');
+      assert.equal(boundPaths.includes(cliPkg), true, 'must bind exact matched packages/cli/package.json');
+      assert.equal(boundPaths.includes(join(workspaceRoot, 'docs', 'existing.md')), true, 'must bind exact matched docs/existing.md');
+      assert.equal(boundPaths.includes(join(workspaceRoot, 'packages', 'core')), false, 'must NOT bind parent dir packages/core');
+      assert.equal(boundPaths.includes(join(workspaceRoot, 'docs')), false, 'must NOT bind parent dir docs');
+      assert.equal(boundPaths.includes(coreSrc), false, 'must NOT bind non-matching sibling packages/core/index.ts');
+      assert.equal(boundPaths.includes(join(workspaceRoot, 'docs', 'other.txt')), false, 'must NOT bind non-matching sibling docs/other.txt');
+      assert.equal(boundPaths.includes(join(workspaceRoot, 'docs', 'linked.md')), false, 'must NOT bind symlinked leaf match');
+    });
+  });
+
+  it('keeps allowedReadOnlyPaths readable (and non-writable) even under a deniedReadPaths ancestor across Seatbelt, bwrap, and Landlock', async () => {
+    await withTempWorkspace(async (workspaceRoot, scratchDir) => {
+      const deniedParent = join(scratchDir, 'denied-parent');
+      const siblingSecret = join(deniedParent, 'sibling-secret.txt');
+      const stagedReadOnlyDir = join(deniedParent, 'loopwright-staged-ro');
+      const stagedFile = join(stagedReadOnlyDir, 'artifact.json');
+      await mkdir(stagedReadOnlyDir, { recursive: true });
+      await writeFile(siblingSecret, 'DENIED_SIBLING_SECRET', 'utf8');
+      await writeFile(stagedFile, '{"ok":true}\n', 'utf8');
+
+      const policy = {
+        workspaceRoot,
+        writablePaths: ['docs'],
+        deniedReadPaths: [deniedParent],
+        allowedReadOnlyPaths: [stagedReadOnlyDir],
+        networkMode: 'none' as const,
+      };
+
+      const seatbelt = compileMacosSeatbeltProfile(policy, { platform: 'darwin', arch: 'arm64', probeExecutables: false });
+      const denyIdx = seatbelt.profileText.indexOf(`(subpath "${deniedParent}")`);
+      const allowIdx = seatbelt.profileText.indexOf(`(allow file-read*\n  (subpath "${stagedReadOnlyDir}")`);
+      assert.ok(denyIdx >= 0, 'Seatbelt must deny parent');
+      assert.ok(allowIdx > denyIdx, 'Seatbelt must allow allowedReadOnlyPaths after deny file-read*');
+
+      const bwrap = compileLinuxBwrapCommand(policy, { platform: 'linux', arch: 'x64', probeExecutables: false });
+      const roBindIdx = bwrap.args.findIndex((arg, idx) => arg === '--ro-bind-try' && bwrap.args[idx + 1] === stagedReadOnlyDir);
+      assert.ok(roBindIdx >= 0, 'bwrap must bind allowedReadOnlyPaths read-only');
+
+      // Default home secrets (e.g. ~/.ssh) can never be unlocked via allowedReadOnlyPaths
+      assert.throws(
+        () => compileMacosSeatbeltProfile(
+          { workspaceRoot, writablePaths: ['docs'], allowedReadOnlyPaths: ['/Users/tester/.ssh/id_ed25519'] },
+          { platform: 'darwin', arch: 'arm64', homeDirectory: '/Users/tester', probeExecutables: false },
+        ),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+      );
+
+      const seatbeltLive = process.platform === 'darwin'
+        && existsSync('/usr/bin/sandbox-exec')
+        && spawnSync('/usr/bin/sandbox-exec', ['-p', '(version 1)\n(allow default)\n', '/usr/bin/true'], { stdio: 'ignore' }).status === 0;
+      if (seatbeltLive) {
+        const readAllowed = await executeSandboxedCommand({
+          policy: { ...policy, preferredBackends: ['macos-seatbelt'] },
+          command: '/bin/cat',
+          args: [stagedFile],
+        });
+        assert.equal(readAllowed.exitCode, 0, readAllowed.stderr);
+        assert.equal(readAllowed.stdout.trim(), '{"ok":true}');
+
+        const readSibling = await executeSandboxedCommand({
+          policy: { ...policy, preferredBackends: ['macos-seatbelt'] },
+          command: '/bin/cat',
+          args: [siblingSecret],
+        });
+        assert.notEqual(readSibling.exitCode, 0, 'sibling under deniedParent must remain unreadable');
+
+        const writeAllowed = await executeSandboxedCommand({
+          policy: { ...policy, preferredBackends: ['macos-seatbelt'] },
+          command: '/bin/sh',
+          args: ['-c', 'echo mutated > "$1"', 'sh', stagedFile],
+        });
+        assert.notEqual(writeAllowed.exitCode, 0, 'allowedReadOnlyPaths must remain non-writable');
+      }
+    });
+  });
+
+  it('refuses double quotes and line breaks in Seatbelt writable glob segments with SANDBOX_POLICY_INVALID', async () => {
+    await withTempWorkspace(async workspaceRoot => {
+      assert.throws(
+        () => compileMacosSeatbeltProfile(
+          { workspaceRoot, writablePaths: ['docs/quote"*.md'] },
+          { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+        ),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+      );
+      assert.throws(
+        () => compileMacosSeatbeltProfile(
+          { workspaceRoot, writablePaths: ['docs/bad\n*.md'] },
+          { platform: 'darwin', arch: 'arm64', probeExecutables: false },
+        ),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
+      );
     });
   });
 });

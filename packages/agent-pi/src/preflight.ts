@@ -1,11 +1,11 @@
 import { isAbsolute } from 'node:path';
 import { types } from 'node:util';
-import { LIMITS, validateDocument, digestArtifact } from '@loopwright/core';
-import { canonical, freeze, id, integer, list, object, snapshot, text } from './boundary.js';
-import { gitBlobOid } from './candidate.js';
+import { LIMITS, OVERLAY_LIMITS, validateDocument, digestArtifact } from '@loopwright/core';
+import { canonical, freeze, id, integer, list, object, snapshot, text, type SnapshotBounds } from './boundary.js';
+import { gitBlobOid, resolveCandidateOverlayLimits } from './candidate.js';
 import { refuse } from './errors.js';
 import { sameIdentity, validatePolicy } from './policy.js';
-import { PREAMBLE_IDENTITY, systemPrompt } from './resources.js';
+import { PREAMBLE_IDENTITY, decodePromptResourceUtf8, systemPrompt } from './resources.js';
 import type { PiBaselineEntry, PiCandidateBaseline, PiOpenInput } from './types.js';
 const typedArray = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const intrinsic = (name: string) => Object.getOwnPropertyDescriptor(typedArray, name)!.get!;
@@ -126,13 +126,40 @@ export function prepareInput(input: unknown): PiOpenInput {
   const slots = [...artifacts, ...resources, ...(workspace && session ? [workspace, session] : [])];
   const views = slots.map((item, index) => byteView(item.bytes, '/artifacts/' + index));
   if (views.reduce((sum, view) => sum + view.byteLength, 0) > 268435456) refuse('OUTPUT_LIMIT', '/artifacts');
-  const metadata = snapshot({ version: top.version, lock: top.lock, roleId: top.roleId, stepId: top.stepId, sessionId: top.sessionId, policy: top.policy,
-    candidate: { manifest: candidate.manifest, baseRevision: candidate.baseRevision, sourceRevision: candidate.sourceRevision, artifacts: artifacts.map(item => ({ name: item.name })) },
-    resources: resources.map(item => ({ id: item.id, kind: item.kind, ref: item.ref })), restore: restore ? { checkpointId: restore.checkpointId, workspace: { ref: workspace!.ref }, session: { ref: session!.ref } } : null });
-  const owned = metadata as unknown as PiOpenInput;
-  if (owned.version !== 1) refuse('INPUT_INVALID', '/version');
-  const checkedLock = validateDocument(owned.lock, 'TaskLock'); if (!checkedLock.ok) refuse('INPUT_INVALID', '/lock');
+  const baseMeta = snapshot({ version: top.version, lock: top.lock, roleId: top.roleId, stepId: top.stepId, sessionId: top.sessionId, policy: top.policy,
+    baseRevision: candidate.baseRevision, sourceRevision: candidate.sourceRevision,
+    resources: resources.map(item => ({ id: item.id, kind: item.kind, ref: item.ref })), restore: restore ? { checkpointId: restore.checkpointId, workspace: { ref: workspace!.ref }, session: { ref: session!.ref } } : null }) as Record<string, unknown>;
+  if (baseMeta.version !== 1) refuse('INPUT_INVALID', '/version');
+  const checkedLock = validateDocument(baseMeta.lock, 'TaskLock'); if (!checkedLock.ok) refuse('INPUT_INVALID', '/lock');
   const lock = checkedLock.value, contract = lock.spec.contract.spec;
+  const overlayLimits = resolveCandidateOverlayLimits(contract.budgets.overlay);
+  const candidateSnapshotBounds: SnapshotBounds | undefined = overlayLimits.maxFiles > OVERLAY_LIMITS.defaultMaxFiles
+    ? {
+        maxArray: Math.max(1024, overlayLimits.maxFiles),
+        maxNodes: Math.max(65536, 65536 + (overlayLimits.maxFiles - OVERLAY_LIMITS.defaultMaxFiles) * 16),
+        maxBytes: Math.max(1048576, overlayLimits.manifestMaxBytes * 2),
+      }
+    : undefined;
+  const candidateMeta = snapshot(
+    { manifest: candidate.manifest, artifacts: artifacts.map(item => ({ name: item.name })) },
+    candidateSnapshotBounds,
+  ) as Record<string, unknown>;
+  const owned = {
+    version: baseMeta.version,
+    lock: baseMeta.lock,
+    roleId: baseMeta.roleId,
+    stepId: baseMeta.stepId,
+    sessionId: baseMeta.sessionId,
+    policy: baseMeta.policy,
+    candidate: {
+      manifest: candidateMeta.manifest,
+      baseRevision: baseMeta.baseRevision,
+      sourceRevision: baseMeta.sourceRevision,
+      artifacts: candidateMeta.artifacts,
+    },
+    resources: baseMeta.resources,
+    restore: baseMeta.restore,
+  } as unknown as PiOpenInput;
   id(owned.roleId, '/roleId'); id(owned.stepId, '/stepId'); id(owned.sessionId, '/sessionId');
   const role = contract.roles.find(item => item.id === owned.roleId), step = contract.steps.find(item => item.id === owned.stepId);
   if (!role || !step || step.kind !== 'agent' || step.roleId !== role.id || role.adapter !== 'pi') refuse('BINDING_MISMATCH', '/roleId');
@@ -140,7 +167,9 @@ export function prepareInput(input: unknown): PiOpenInput {
   const policy = validatePolicy(owned.policy as unknown as import('./boundary.js').Json);
   if (policy.selection.provider !== role.provider || policy.selection.model !== role.model || policy.selection.thinking !== role.thinking) refuse('BINDING_MISMATCH', '/policy/selection');
   if (policy.tools.some(name => !role.tools.includes(name))) refuse('TOOL_DENIED', '/policy/tools');
-  const manifest = validateDocument(owned.candidate.manifest, 'ArtifactManifest'); if (!manifest.ok) refuse('INPUT_INVALID', '/candidate/manifest');
+  const manifest = validateDocument(owned.candidate.manifest, 'ArtifactManifest', {
+    overlay: { maxFiles: overlayLimits.maxFiles, maxBytes: overlayLimits.maxBytes },
+  }); if (!manifest.ok) refuse('INPUT_INVALID', '/candidate/manifest');
   if (owned.candidate.baseRevision !== contract.target.baseRevision || owned.candidate.sourceRevision !== contract.target.sourceRevision) refuse('BINDING_MISMATCH', '/candidate');
   if (owned.candidate.artifacts.length !== manifest.value.spec.entries.length || artifacts.length > policy.limits.candidateEntries) refuse('RESOURCE_MISMATCH', '/candidate/artifacts');
   let index = 0;
@@ -148,8 +177,29 @@ export function prepareInput(input: unknown): PiOpenInput {
     const view = views[index++]!, copy = new Uint8Array(view.byteLength); copy.set(view);
     (item as { bytes: Uint8Array }).bytes = copy;
   }
-  const expected = [PREAMBLE_IDENTITY, ...contract.trustedContext.resources];
-  if (!sameIdentity(policy.resources, expected) || owned.resources.length !== contract.trustedContext.resources.length) refuse('RESOURCE_MISMATCH', '/resources');
+  let admittedResources: readonly (typeof contract.trustedContext.resources)[number][];
+  if (role.resourceIds === undefined) {
+    const expected = [PREAMBLE_IDENTITY, ...contract.trustedContext.resources];
+    if (!sameIdentity(policy.resources, expected) || owned.resources.length !== contract.trustedContext.resources.length) refuse('RESOURCE_MISMATCH', '/resources');
+    admittedResources = contract.trustedContext.resources;
+  } else {
+    const allowedIds = new Set(role.resourceIds);
+    const byId = new Map(contract.trustedContext.resources.map(item => [item.id, item] as const));
+    if (policy.resources.length !== 1 + allowedIds.size || !sameIdentity(policy.resources[0], PREAMBLE_IDENTITY)) {
+      refuse('RESOURCE_MISMATCH', '/resources');
+    }
+    const seenResourceIds = new Set<string>();
+    const resolvedRoleResources: (typeof contract.trustedContext.resources)[number][] = [];
+    for (const entry of policy.resources.slice(1)) {
+      if (!allowedIds.has(entry.id) || seenResourceIds.has(entry.id)) refuse('RESOURCE_MISMATCH', '/resources');
+      const admitted = byId.get(entry.id);
+      if (!admitted || !sameIdentity(entry, admitted)) refuse('RESOURCE_MISMATCH', '/resources');
+      seenResourceIds.add(entry.id);
+      resolvedRoleResources.push(admitted);
+    }
+    if (owned.resources.length !== resolvedRoleResources.length) refuse('RESOURCE_MISMATCH', '/resources');
+    admittedResources = resolvedRoleResources;
+  }
   const validateBytes = (ref: import('@loopwright/core').ArtifactRef, bytes: Uint8Array, path: string) => {
     const actual = digestArtifact(ref.name, bytes); if (!actual.ok || !sameIdentity(actual.value, ref)) refuse('RESOURCE_MISMATCH', path);
     if (bytes.byteLength > policy.limits.fileBytes) refuse('OUTPUT_LIMIT', path);
@@ -171,7 +221,7 @@ export function prepareInput(input: unknown): PiOpenInput {
     if (candidate.baseline !== undefined) refuse('INPUT_INVALID', '/candidate/baseline');
   } else {
     const overlayBytes = manifest.value.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0);
-    if (overlayBytes > 4_194_304 || Buffer.byteLength(canonical(manifest.value)) > 32_768) {
+    if (overlayBytes > overlayLimits.maxBytes || Buffer.byteLength(canonical(manifest.value)) > overlayLimits.manifestMaxBytes) {
       refuse('OUTPUT_LIMIT', '/candidate/manifest');
     }
     if (candidate.baseline === undefined) refuse('INPUT_INVALID', '/candidate/baseline');
@@ -184,9 +234,10 @@ export function prepareInput(input: unknown): PiOpenInput {
     );
   }
   owned.resources.forEach((resource, offset) => {
-    const admitted = contract.trustedContext.resources[offset]!;
+    const admitted = admittedResources[offset]!;
     if (resource.id !== admitted.id || resource.kind !== admitted.kind || resource.ref.name !== admitted.path || !sameIdentity(resource.ref.digest, admitted.digest)) refuse('RESOURCE_MISMATCH', '/resources/' + offset);
-    validateBytes(resource.ref, resource.bytes, '/resources/' + offset); try { new TextDecoder('utf-8', { fatal: true }).decode(resource.bytes); } catch { refuse('RESOURCE_MISMATCH', '/resources/' + offset); }
+    validateBytes(resource.ref, resource.bytes, '/resources/' + offset);
+    decodePromptResourceUtf8(resource.bytes, '/resources/' + offset);
   });
   if (owned.restore) { id(owned.restore.checkpointId, '/restore/checkpointId'); validateBytes(owned.restore.workspace.ref, owned.restore.workspace.bytes, '/restore/workspace'); validateBytes(owned.restore.session.ref, owned.restore.session.bytes, '/restore/session'); }
   const aggregate = views.reduce((sum, view) => sum + view.byteLength, 0);

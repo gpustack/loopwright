@@ -1726,10 +1726,9 @@ test('controls.submission.path with multi-role delegated pipeline allows read-on
     await writeFile(
       explicitSubPath,
       JSON.stringify({
-        version: 1,
-        status: 'blocked',
-        checks: [{ checkId: 'tests', status: 'blocked', evidenceId: null, reason: 'blocked_by_reviewer' }],
-        reason: 'blocked_by_reviewer',
+        verdict: 'human',
+        summary: 'blocked_by_reviewer',
+        findings: [],
       }),
       { mode: 0o600 },
     );
@@ -2948,6 +2947,175 @@ test('stepNext classifies confirmed mid-session BUDGET_EXHAUSTED role refusal as
     assert.equal(resumed.incident.code, 'BUDGET_EXHAUSTED');
     assert.equal(resumed.incident.cleanup, 'complete');
     assert.deepEqual(resumed.incident.unavailable, ['current_candidate', 'submission', 'authoritative_result']);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('stepNext + stepSubmit succeed cleanly with untouched git-tracked baseline files > 1 MiB while still enforcing 1 MiB default cap on modified files', async () => {
+  const f = await delegatedRepoFixture();
+  try {
+    // Commit three 1.5 MiB untouched baseline files (> 4 MiB total -> source.version === 2 tree overlay) with budgets.overlay unset (perFileMaxBytes = 1 MiB)
+    const untouchedSize = 1_572_864;
+    await mkdir(join(f.repository, 'assets'), { recursive: true, mode: 0o700 });
+    for (let i = 0; i < 3; i++) {
+      const buf = Buffer.alloc(untouchedSize, 0x41 + i);
+      buf.write(`header-${i}\n`, 0, 'utf8');
+      await writeFile(join(f.repository, 'assets', `baseline-${i}.bin`), buf, { mode: 0o600 });
+    }
+    const git = (args: string[]) =>
+      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        cwd: f.repository,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
+        timeout: 5000,
+        encoding: 'utf8',
+      });
+    git(['add', 'assets']);
+    git(['-c', 'user.name=Step Fixture', '-c', 'user.email=fixture@localhost.invalid', 'commit', '-qm', 'add >1 MiB baseline blobs']);
+    const rev = git(['rev-parse', 'HEAD']).trim();
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    await f.save();
+    const reloaded = assertOk(await f.load(), 'reload config with 1.5 MiB baseline');
+
+    const runId = 'run-untouched-oversize-baseline';
+    const step = assertStepYield(
+      assertOk(
+        await stepNext({ configuration: reloaded, repository: f.repository, runRoot: f.runRoot, runId }),
+        'stepNext with 1.5 MiB untouched baseline files',
+      ),
+    );
+    const stat0 = await lstat(join(step.candidateDir, 'assets', 'baseline-0.bin'));
+    assert.equal(stat0.size, untouchedSize);
+
+    // Adding a > 1 MiB new overlay file with default budgets.overlay === undefined still refuses OUTPUT_LIMIT
+    const oversizeAdded = join(step.candidateDir, 'packages', 'oversize-new.bin');
+    await writeFile(oversizeAdded, Buffer.alloc(untouchedSize, 0x5a), { mode: 0o600 });
+    const rejected = await stepSubmit({ runRoot: f.runRoot, runId, leaseToken: step.leaseToken, status: 'completed' });
+    assert.equal(rejected.ok, false);
+    if (!rejected.ok) assert.equal(rejected.error.code, 'OUTPUT_LIMIT');
+    await rm(oversizeAdded, { force: true });
+
+    // Updating packages/result.json while leaving the three 1.5 MiB baseline files untouched succeeds cleanly!
+    await writeFile(join(step.candidateDir, 'packages', 'result.json'), JSON.stringify({ ok: true }), { mode: 0o600 });
+    const settled = assertOk(
+      await stepSubmit({ runRoot: f.runRoot, runId, leaseToken: step.leaseToken, status: 'completed' }),
+      'stepSubmit with untouched 1.5 MiB baseline files',
+    );
+    assert.equal(settled.kind, 'result');
+    if (settled.kind === 'result') {
+      assert.equal(settled.result.spec.status, 'completed');
+      assert.deepEqual(
+        settled.result.spec.verification.spec.subject.candidateDigest.algorithm,
+        'sha256',
+      );
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('wide overlay (maxFiles: 512, maxBytes: 16 MiB) with > 13 MiB modified files and a 2 MiB file succeeds on stepSubmit + decodeDelegatedWorkspace without OUTPUT_LIMIT', async () => {
+  const f = await delegatedRepoFixture({ multiRole: true });
+  try {
+    const { decodeDelegatedWorkspace } = await import('../src/capture.js');
+    const { overlayManifestBounds } = await import('../src/source.js');
+    const { readRetained } = await import('../src/retained.js');
+
+    // Verify bounds scaling up to 64 MiB maxBytes and ArtifactStore 96 MiB single-artifact cap
+    const maxBounds = overlayManifestBounds({ maxFiles: 4096, maxBytes: 67_108_864 });
+    assert.equal(maxBounds.perFileMaxBytes, 33_554_432);
+    assert.ok(maxBounds.workspaceMaxBytes > 89_000_000 && maxBounds.workspaceMaxBytes <= 100_663_296);
+
+    const wideOverlay = { maxFiles: 512, maxBytes: 16_777_216 };
+    const bounds = overlayManifestBounds(wideOverlay);
+    assert.equal(bounds.perFileMaxBytes, 16_777_216);
+    assert.equal(bounds.workspaceMaxBytes, Math.ceil((16_777_216 * 4) / 3) + 512 * 256 + 1_114_112);
+
+    // Commit a 4.2 MiB untouched baseline file so freezeSource selects source.version === 2 (tree overlay)
+    const git = (args: string[]) =>
+      execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        cwd: f.repository,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
+        timeout: 5000,
+        encoding: 'utf8',
+      });
+    await mkdir(join(f.repository, 'assets'), { recursive: true, mode: 0o700 });
+    await writeFile(join(f.repository, 'assets', 'untouched-4m.bin'), Buffer.alloc(4_404_019, 0x4b), { mode: 0o600 });
+    git(['add', 'assets']);
+    git(['-c', 'user.name=Step Fixture', '-c', 'user.email=fixture@localhost.invalid', 'commit', '-qm', 'add 4.2 MiB baseline']);
+    const rev = git(['rev-parse', 'HEAD']).trim();
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'overlay'], wideOverlay);
+    await f.save();
+    const loaded = assertOk(await f.load(), 'load wide overlay config');
+
+    const runId = 'run-wide-overlay-submit';
+    const s1 = assertStepYield(
+      assertOk(
+        await stepNext({ configuration: loaded, repository: f.repository, runRoot: f.runRoot, runId }),
+        'stepNext wide overlay author',
+      ),
+    );
+
+    // Write 1 modified file of 2 MiB + 13 files of 950 KiB + packages/result.json -> ~14.06 MiB raw (> 13 MiB, ~18.75 MiB base64 JSON > old 16 MiB cap)
+    const twoMib = Buffer.alloc(2_097_152, 0x62);
+    twoMib.write('two-mib-head', 0, 'utf8');
+    await writeFile(join(s1.candidateDir, 'packages', 'large-2mib.bin'), twoMib, { mode: 0o600 });
+    let totalRawOverlayBytes = twoMib.byteLength;
+    for (let i = 0; i < 13; i++) {
+      const chunk = Buffer.alloc(972_800, 0x30 + (i % 10));
+      chunk.write(`chunk-${i}`, 0, 'utf8');
+      await writeFile(join(s1.candidateDir, 'packages', `chunk-${String(i).padStart(2, '0')}.bin`), chunk, { mode: 0o600 });
+      totalRawOverlayBytes += chunk.byteLength;
+    }
+    const resultBytes = Buffer.from(JSON.stringify({ ok: true }), 'utf8');
+    await writeFile(join(s1.candidateDir, 'packages', 'result.json'), resultBytes, { mode: 0o600 });
+    totalRawOverlayBytes += resultBytes.byteLength;
+    assert.ok(totalRawOverlayBytes > 13 * 1024 * 1024 && totalRawOverlayBytes <= 16_777_216);
+
+    const s2 = assertStepYield(
+      assertOk(
+        await stepSubmit({ runRoot: f.runRoot, runId, leaseToken: s1.leaseToken, status: 'completed' }),
+        'stepSubmit wide overlay > 13 MiB',
+      ),
+    );
+    assert.equal(s2.roleId, 'review');
+
+    // Verify persisted workspace artifact (> 18 MiB JSON) decodes cleanly via decodeDelegatedWorkspace
+    const retained = await readRetained({ runRoot: f.runRoot, runId });
+    const store = stateValue(reopenLocalRun(retained.descriptor.identity));
+    try {
+      const progress = new ProgressStore(store, null, retained.artifacts, retained.plan, retained.lock, retained.descriptor.plan, retained.descriptor.source);
+      const head = await progress.read();
+      assert.ok(head !== null);
+      if (!head) return;
+      assert.ok(head.progress.candidate.workspace.byteLength > 18_000_000);
+      const wsBytes = await retained.artifacts.read(head.progress.candidate.workspace, bounds.workspaceMaxBytes);
+      const decoded = decodeDelegatedWorkspace(wsBytes, head.manifest, retained.lock, 'inspection');
+      assert.equal(decoded.artifacts.length, 15);
+      const decodedTwoMib = decoded.artifacts.find(a => a.name === 'packages/large-2mib.bin');
+      assert.ok(decodedTwoMib !== undefined);
+      assert.equal(decodedTwoMib?.bytes.byteLength, 2_097_152);
+      assert.equal(Buffer.from(decodedTwoMib!.bytes.subarray(0, 12)).toString('utf8'), 'two-mib-head');
+    } finally {
+      stateValue(store.close());
+    }
+
+    const done = assertOk(
+      await stepSubmit({
+        runRoot: f.runRoot,
+        runId,
+        leaseToken: s2.leaseToken,
+        verdict: { verdict: 'pass', summary: 'Wide overlay verified.', findings: [] },
+      }),
+      'stepSubmit reviewer after wide overlay',
+    );
+    assert.equal(done.kind, 'result');
+    if (done.kind === 'result') {
+      assert.equal(done.result.spec.status, 'completed');
+    }
   } finally {
     await f.cleanup();
   }

@@ -138,6 +138,10 @@ test('closure: the full 14-scenario matrix passes against real public APIs', { t
   assert.ok(scenario13.assertions.some(claim => claim.includes('SANDBOX_CAPABILITY_INSUFFICIENT')));
   assert.ok(scenario13.assertions.some(claim => claim.includes('macOS Seatbelt profile')));
   assert.ok(scenario13.assertions.some(claim => claim.includes('Linux Bubblewrap command')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('TASKPACK_HOST_BINDING_INVALID')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('allowWorkflowWrites')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('TASKPACK_UNTRUSTED_INTERPOLATION')));
+  assert.ok(scenario13.assertions.some(claim => claim.includes('spec.vars')));
   assert.equal(codes.get('decision_authority_escalation_refusal'), 'DECISION_AUTHORITY_VIOLATION');
   for (const scenario of report.scenarios) { assert.ok(scenario.assertions.length > 0, scenario.scenarioId); assert.ok(scenario.elapsedMs >= 0); }
   assert.equal(closureExitCode({ version: 1, integrity: { ok: true, checkedFiles: 23, failures: [] }, falsificationDetected: false, diagnostics: [], summary: { total: 23, closedLocal: 18, deferredOwned: 2, blockedExternal: 3, unprovisionedExternal: 5, passed: 18 }, failureMatrix: report } as ClosureMatrixReport, true), 0);

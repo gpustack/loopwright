@@ -358,7 +358,7 @@ spec:
   scope:
     writable:
       - .auto-sync/proposal.json
-      - pack
+      - 'pack/**'
   upstreams:
     - id: vllm
       kind: custom-table

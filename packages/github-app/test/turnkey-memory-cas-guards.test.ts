@@ -136,8 +136,8 @@ spec:
     noChange: Confirm no upstream update is pending.
   scope:
     writable:
-      - docs
-      - pack
+      - 'docs/**'
+      - 'pack/**'
     protected:
       - pack/frozen.json
   instructions:

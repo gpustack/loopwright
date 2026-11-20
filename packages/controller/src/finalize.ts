@@ -1,4 +1,4 @@
-import type { ArtifactRef, Digest, RunResult } from '@loopwright/core';
+import type { ArtifactRef, Digest } from '@loopwright/core';
 import { ControllerFailure, type ControllerDiagnostic } from './errors.js';
 import { canonical, freeze } from './schema.js';
 import type { ArtifactStore } from './storage.js';
@@ -8,9 +8,6 @@ export interface ControllerIncident {
   readonly stage: ControllerDiagnostic['phase']; readonly knownReferences: readonly ArtifactRef[]; readonly unavailable: readonly string[];
   readonly cleanup: typeof CONTROLLER_CLEANUP_STATES[number];
 }
-export type CycleExecution = { readonly kind: 'result'; readonly version: 1; readonly runId: string; readonly result: RunResult;
-  readonly observations: ArtifactRef | null; readonly secondary: readonly ControllerDiagnostic['code'][] }
-  | { readonly kind: 'incident'; readonly version: 1; readonly incident: ControllerIncident };
 export function incident(diagnostic: ControllerDiagnostic, runId: string, lockHash: Digest, references: readonly ArtifactRef[], unavailable: readonly string[], cleanup: ControllerIncident['cleanup']): ControllerIncident {
   return freeze({ version: 1, code: diagnostic.code, runId, lockHash, stage: diagnostic.phase, knownReferences: [...references], unavailable: [...unavailable], cleanup });
 }

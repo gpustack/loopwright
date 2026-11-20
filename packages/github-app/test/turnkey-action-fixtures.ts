@@ -185,7 +185,7 @@ if [[ "$content" == "verified-ok" ]]; then
   exit 0
 fi
 pad="$(printf 'x%.0s' $(seq 1 4100))"
-echo "verification failure using token \${CHECK_SECRET:-unset}: \${pad}" >&2
+echo "verification failure using token \${CHECK_MARKER:-unset}: \${pad}" >&2
 exit 1
 `;
   const scriptPath = join(repo, '.auto-sync', 'checks', 'verify.sh');
@@ -230,8 +230,8 @@ spec:
     noChange: Verify upstream status matches pack/proposal.json.
   scope:
     writable:
-      - pack
-      - docs
+      - 'pack/**'
+      - 'docs/**'
     protected:
       - pack/dependencies.json
   instructions:
@@ -260,7 +260,7 @@ spec:
           timeoutSeconds: 15
           allowReadOnlyGitHubToken: true
           env:
-            - CHECK_SECRET
+            - CHECK_MARKER
   publication:
     mode: pull_request
     targetBranch: main

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { signPayload, verifySignedPayload } from '@loopwright/controller';
-import { identifyManifest } from '@loopwright/core';
+import { identifyManifest, type BaseTreeAnchor, type MetricsMap, type OverlayLimitsInput, type StructuredFinding } from '@loopwright/core';
 import { verifyFrozenCorpus } from './corpus.js';
 import { PythonBridge } from './python-bridge.js';
 import { RunnerTaskpackError } from './types.js';
@@ -164,14 +164,20 @@ export interface RunnerCandidateIdentity {
   readonly prHeadSha?: string | null;
 }
 
+export interface GateVerdictMetadata {
+  readonly detail?: string | null | undefined;
+  readonly metrics?: MetricsMap | undefined;
+  readonly findings?: readonly StructuredFinding[] | undefined;
+}
+
 /** Candidate files, exact-source fixtures, and the target snapshot a registered run's gate requests bind to. */
 export interface RunnerCandidateRegistration {
   readonly storeId: string;
   readonly runId: string;
   /** Optional pin: when set, gate requests carrying a different candidate digest are denied. */
-  readonly candidateDigest?: string | null;
-  /** The operator-registered proposal; used only for direct (Path B) digest computation, never as the validated candidate. */
-  readonly proposalJson: string;
+  readonly candidateDigest?: string | null | undefined;
+  /** The operator-registered proposal; optional when the taskpack omits `spec.proposal`. */
+  readonly proposalJson?: string | null | undefined;
   readonly identity: RunnerCandidateIdentity;
   readonly repositorySnapshot: string;
   readonly upstreamSources: Readonly<Record<string, string>>;
@@ -179,11 +185,15 @@ export interface RunnerCandidateRegistration {
   readonly enginePrereleases: readonly string[];
   readonly prereleasePackages: readonly string[];
   /** Run root when the candidate comes from a controller cycle's checkpoint snapshots (Path A). */
-  readonly runRoot?: string;
+  readonly runRoot?: string | undefined;
   /** Direct candidate file overrides for unit-level registrations (Path B). */
-  readonly candidateFiles?: Readonly<Record<string, string>>;
+  readonly candidateFiles?: Readonly<Record<string, string>> | undefined;
   /** Authorized revise command body; required (with commandDigest) when identity.mode is 'revise'. */
-  readonly reviseCommentBody?: string;
+  readonly reviseCommentBody?: string | undefined;
+  /** Optional overlay limits forwarded to `identifyManifest` when verifying >128-file candidates. */
+  readonly overlay?: OverlayLimitsInput | undefined;
+  /** Optional Taskpack 2.0 extensible verdict metadata (`detail`, `metrics`, `findings`) attached to `gate_verdict`. */
+  readonly gateVerdictMetadata?: GateVerdictMetadata | undefined;
 }
 
 export interface RunnerTaskpackServiceOptions {
@@ -231,28 +241,32 @@ export interface RunnerTaskpackService {
 export interface ComputeRunnerCandidateDigestOptions {
   readonly repositorySnapshot: string;
   readonly headSha: string;
-  readonly proposalJson?: string;
-  readonly candidateFiles?: Readonly<Record<string, string | Uint8Array>>;
+  readonly proposalJson?: string | null | undefined;
+  readonly candidateFiles?: Readonly<Record<string, string | Uint8Array>> | undefined;
+  readonly overlay?: OverlayLimitsInput | undefined;
+  readonly baseTree?: BaseTreeAnchor | undefined;
 }
 
 /**
- * Deterministic candidate digest: the git tree at headSha overlaid with the proposal document and any extra
- * candidate files, identified through the same ArtifactManifest discipline the controller uses.
+ * Deterministic candidate digest: the git tree at headSha (or `baseTree` overlay when provided) overlaid with
+ * the proposal document and any extra candidate files, identified through ArtifactManifest discipline.
  */
 export async function computeRunnerCandidateDigest(options: ComputeRunnerCandidateDigestOptions): Promise<{ readonly digest: string; readonly files: ReadonlyMap<string, Buffer> }> {
-  const tree = await execFileAsync('/usr/bin/git', ['ls-tree', '-rz', '--full-tree', options.headSha], { cwd: options.repositorySnapshot, encoding: 'utf8', maxBuffer: 33554432 });
   const files = new Map<string, Buffer>();
-  for (const line of tree.stdout.split('\0')) {
-    if (line.trim() === '') continue;
-    const metadata = line.split('\t');
-    if (metadata.length !== 2) continue;
-    const info = metadata[0]!.split(/\s+/);
-    const blobSha = info[2]!;
-    const path = metadata[1]!;
-    const blob = await execFileAsync('/usr/bin/git', ['cat-file', 'blob', blobSha], { cwd: options.repositorySnapshot, maxBuffer: 33554432, encoding: 'buffer' });
-    files.set(path, blob.stdout as Buffer);
+  if (options.baseTree === undefined) {
+    const tree = await execFileAsync('/usr/bin/git', ['ls-tree', '-rz', '--full-tree', options.headSha], { cwd: options.repositorySnapshot, encoding: 'utf8', maxBuffer: 33554432 });
+    for (const line of tree.stdout.split('\0')) {
+      if (line.trim() === '') continue;
+      const metadata = line.split('\t');
+      if (metadata.length !== 2) continue;
+      const info = metadata[0]!.split(/\s+/);
+      const blobSha = info[2]!;
+      const path = metadata[1]!;
+      const blob = await execFileAsync('/usr/bin/git', ['cat-file', 'blob', blobSha], { cwd: options.repositorySnapshot, maxBuffer: 33554432, encoding: 'buffer' });
+      files.set(path, blob.stdout as Buffer);
+    }
   }
-  if (options.proposalJson !== undefined && options.proposalJson !== '') {
+  if (options.proposalJson != null && options.proposalJson !== '') {
     files.set('.autosync/proposal.json', Buffer.from(options.proposalJson, 'utf8'));
   }
   if (options.candidateFiles !== undefined) {
@@ -261,7 +275,13 @@ export async function computeRunnerCandidateDigest(options: ComputeRunnerCandida
     }
   }
   const entries = [...files.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([name, bytes]) => ({ name, digest: { algorithm: 'sha256' as const, hex: createHash('sha256').update(bytes).digest('hex') }, byteLength: bytes.byteLength }));
-  const identified = identifyManifest({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+  const spec = options.baseTree !== undefined
+    ? { baseTree: options.baseTree, entries, deleted: [] }
+    : { entries };
+  const identified = identifyManifest(
+    { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec },
+    options.overlay !== undefined ? { overlay: options.overlay } : undefined,
+  );
   if (!identified.ok) throw new RunnerTaskpackError('SERVICE_FAULT', `candidate manifest rejected: ${JSON.stringify(identified.errors).slice(0, 200)}`);
   return { digest: identified.value.digest.hex, files };
 }
@@ -304,7 +324,20 @@ function respondJson(response: ServerResponse, bytes: Buffer, signature: string)
   response.end(bytes);
 }
 
-function verdictDocument(binding: Binding, extra: { gateId: string; checkId: string; candidateDigest: string; status: 'approved' | 'denied'; reason: string | null; expiresAtMs: string }): Buffer {
+function verdictDocument(
+  binding: Binding,
+  extra: {
+    gateId: string;
+    checkId: string;
+    candidateDigest: string;
+    status: 'approved' | 'denied';
+    reason: string | null;
+    expiresAtMs: string;
+    detail?: string | null | undefined;
+    metrics?: MetricsMap | undefined;
+    findings?: readonly StructuredFinding[] | undefined;
+  },
+): Buffer {
   return Buffer.from(JSON.stringify({ version: 1, kind: 'gate_verdict', ...binding, ...extra }));
 }
 
@@ -320,7 +353,7 @@ async function headRevision(repository: string): Promise<string> {
 }
 
 /** Reconstruct the candidate files from the run's checkpoint workspace snapshots for a given manifest digest. */
-async function candidateFilesFromRunArtifacts(runRoot: string, runId: string, candidateDigest: string): Promise<Map<string, Buffer> | null> {
+async function candidateFilesFromRunArtifacts(runRoot: string, runId: string, candidateDigest: string, overlay?: OverlayLimitsInput): Promise<Map<string, Buffer> | null> {
   let checkpoints: string;
   try { checkpoints = join(runRoot, runId, 'artifacts', 'pi-checkpoints'); } catch { return null; }
   let files: string[];
@@ -332,11 +365,23 @@ async function candidateFilesFromRunArtifacts(runRoot: string, runId: string, ca
     let header: { type?: unknown; manifest?: unknown };
     try { header = JSON.parse(lines[0]!) as typeof header; } catch { continue; }
     if (header.type !== 'workspace_snapshot') continue;
-    const manifestCandidate = header.manifest as { spec?: { entries?: { name: string; digest: { hex: string }; byteLength: number }[] } } | undefined;
+    const manifestCandidate = header.manifest as { spec?: { entries?: { name: string; digest: { hex: string }; byteLength: number }[]; baseTree?: unknown; deleted?: readonly string[] } } | undefined;
     const entries = manifestCandidate?.spec?.entries;
     if (!Array.isArray(entries)) continue;
     // Identify the manifest the same way the controller does, then compare.
-    const identified = identifyManifest({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries: entries.map(entry => ({ name: entry.name, digest: { algorithm: 'sha256' as const, hex: entry.digest.hex }, byteLength: entry.byteLength })) } });
+    const identified = identifyManifest(
+      {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'ArtifactManifest',
+        metadata: { id: 'candidate' },
+        spec: {
+          ...(manifestCandidate?.spec?.baseTree !== undefined ? { baseTree: manifestCandidate.spec.baseTree } : {}),
+          entries: entries.map(entry => ({ name: entry.name, digest: { algorithm: 'sha256' as const, hex: entry.digest.hex }, byteLength: entry.byteLength })),
+          ...(manifestCandidate?.spec?.deleted !== undefined ? { deleted: manifestCandidate.spec.deleted } : {}),
+        },
+      },
+      overlay !== undefined ? { overlay } : undefined,
+    );
     if (!identified.ok) continue;
     if (identified.value.digest.hex !== candidateDigest) continue;
     const reconstructed = new Map<string, Buffer>();
@@ -508,11 +553,17 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
 
   async function resolveCandidateFiles(request: Record<string, unknown>, registration: RunnerCandidateRegistration, candidateDigest: string): Promise<Map<string, Buffer> | null> {
     if (registration.runRoot !== undefined) {
-      const fromRun = await candidateFilesFromRunArtifacts(registration.runRoot, registration.runId, candidateDigest);
+      const fromRun = await candidateFilesFromRunArtifacts(registration.runRoot, registration.runId, candidateDigest, registration.overlay);
       if (fromRun !== null) return fromRun;
       return null;
     }
-    const expected = await computeRunnerCandidateDigest({ repositorySnapshot: registration.repositorySnapshot, headSha: registration.identity.headSha, proposalJson: registration.proposalJson, ...(registration.candidateFiles === undefined ? {} : { candidateFiles: registration.candidateFiles }) });
+    const expected = await computeRunnerCandidateDigest({
+      repositorySnapshot: registration.repositorySnapshot,
+      headSha: registration.identity.headSha,
+      ...(registration.proposalJson !== undefined ? { proposalJson: registration.proposalJson } : {}),
+      ...(registration.candidateFiles === undefined ? {} : { candidateFiles: registration.candidateFiles }),
+      ...(registration.overlay !== undefined ? { overlay: registration.overlay } : {}),
+    });
     if (expected.digest !== candidateDigest) return null;
     return new Map(expected.files);
   }
@@ -555,9 +606,16 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
     if (candidateFiles === null) {
       return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'candidate digest does not match registered candidate snapshot', expiresAtMs: String(Date.now() + 60000) }) };
     }
+    const metaFields = registration.gateVerdictMetadata !== undefined
+      ? {
+          ...(Object.hasOwn(registration.gateVerdictMetadata, 'detail') ? { detail: registration.gateVerdictMetadata.detail } : {}),
+          ...(registration.gateVerdictMetadata.metrics !== undefined ? { metrics: registration.gateVerdictMetadata.metrics } : {}),
+          ...(registration.gateVerdictMetadata.findings !== undefined ? { findings: registration.gateVerdictMetadata.findings } : {}),
+        }
+      : {};
     const proposalBytes = candidateFiles.get('.autosync/proposal.json');
     if (proposalBytes === undefined) {
-      return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'candidate snapshot omits .autosync/proposal.json', expiresAtMs: String(Date.now() + 60000) }) };
+      return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'candidate snapshot omits .autosync/proposal.json', expiresAtMs: String(Date.now() + 60000), ...metaFields }) };
     }
     const key = `${normalized.storeId}|${normalized.runId}|${candidateDigest}`;
     const cached = checkedCache.get(key);
@@ -581,12 +639,12 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
         }),
       });
       if (outcome.exitCode !== 0) {
-        return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: `validator transport failed: ${outcome.stderr.slice(0, 180)}`, expiresAtMs: String(Date.now() + 60000) }) };
+        return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: `validator transport failed: ${outcome.stderr.slice(0, 180)}`, expiresAtMs: String(Date.now() + 60000), ...metaFields }) };
       }
       let report: { ok?: unknown; checked?: unknown; error?: unknown };
-      try { report = JSON.parse(outcome.stdout) as typeof report; } catch { return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'validator produced unreadable output', expiresAtMs: String(Date.now() + 60000) }) }; }
+      try { report = JSON.parse(outcome.stdout) as typeof report; } catch { return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'validator produced unreadable output', expiresAtMs: String(Date.now() + 60000), ...metaFields }) }; }
       if (report.ok !== true || report.checked === null || typeof report.checked !== 'object') {
-        return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: String(report.error ?? 'candidate validation failed').slice(0, 256), expiresAtMs: String(Date.now() + 60000) }) };
+        return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: String(report.error ?? 'candidate validation failed').slice(0, 256), expiresAtMs: String(Date.now() + 60000), ...metaFields }) };
       }
       const checked = report.checked as Record<string, unknown>;
       const patchDigest = typeof checked.patch_digest === 'string' ? checked.patch_digest : null;
@@ -595,7 +653,7 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
         await execFileAsync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Human Committer', '-c', 'user.email=human@example.invalid', 'commit', '--allow-empty', '-qm', options.headMutation.message], { cwd: registration.repositorySnapshot, env: { HOME: scratch, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }).catch(() => undefined);
       }
     }
-    return { bytes: verdictDocument(binding, { ...verdictBase, status: 'approved', reason: null, expiresAtMs: String(Date.now() + 3600000) }) };
+    return { bytes: verdictDocument(binding, { ...verdictBase, status: 'approved', reason: null, expiresAtMs: String(Date.now() + 3600000), ...metaFields }) };
   }
 
   class ChaosDrop extends Error {

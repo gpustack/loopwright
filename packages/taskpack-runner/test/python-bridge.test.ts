@@ -270,5 +270,7 @@ except Exception as error:
       join(root, 'nested-home'),
     );
     assert.equal(profileWithNestedHome.includes('(deny file-read*'), false);
+    assert.equal(profileWithNestedHome.includes('.claude")'), true);
+    assert.equal(profileWithNestedHome.includes('.agents")'), false);
   });
 });
