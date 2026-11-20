@@ -2708,6 +2708,14 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     ...(input.digests !== undefined ? { digests: input.digests } : {}),
     roleMcpServers: input.roleMcpServers,
     allowWorkflowWrites: input.allowWorkflowWrites,
+    ...(mergedLimits.maxTurns !== undefined || mergedLimits.maxRepairTurns !== undefined
+      ? {
+        circuitBreakerLimits: Object.freeze({
+          ...(mergedLimits.maxTurns !== undefined ? { maxTurns: mergedLimits.maxTurns } : {}),
+          ...(mergedLimits.maxRepairTurns !== undefined ? { maxRepairTurns: mergedLimits.maxRepairTurns } : {}),
+        }),
+      }
+      : {}),
   };
 }
 

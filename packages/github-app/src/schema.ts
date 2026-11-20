@@ -1261,7 +1261,7 @@ function requireSafeIntInRange(value: unknown, path: string, min: number, max: n
 export function validateTaskpackLimitsDeclaration(value: unknown, path: string): TaskpackLimitsDeclaration {
   const raw = requireObject(value, path, [
     'wallTimeSeconds', 'totalTokens', 'contextWindow', 'maxOutputTokens',
-    'maxModelCalls', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
+    'maxModelCalls', 'maxTurns', 'maxRepairTurns', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
     'toolTimeoutSeconds', 'commandTimeoutSeconds', 'responseBytes', 'toolResultBytes',
     'toolArgsBytes', 'promptBytes', 'maxRequestBytes', 'workingWindowBytes', 'fileBytes',
     'sessionBytes', 'candidateEntries', 'overlay',
@@ -1277,6 +1277,8 @@ export function validateTaskpackLimitsDeclaration(value: unknown, path: string):
   setOpt('contextWindow', 1_024, 10_000_000);
   setOpt('maxOutputTokens', 256, 262_144);
   setOpt('maxModelCalls', 1, 1_024);
+  setOpt('maxTurns', 1, 1_024);
+  setOpt('maxRepairTurns', 1, 1_024);
   setOpt('maxAttempts', 1, 16);
   setOpt('maxFormatRepairs', 0, 1_024);
   setOpt('maxImplementationRepairs', 0, 1_024);

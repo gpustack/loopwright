@@ -16,20 +16,24 @@ const deleteParameters: ToolDefinition['parameters'] = {
   required: ['path'],
   additionalProperties: false,
 };
-const deleteToolDefinition: ToolDefinition = {
+const deleteToolDefinition = (isHostSession: boolean): ToolDefinition => ({
   name: 'delete',
   label: 'delete',
-  description: 'Delete a writable file in /workspace/candidate using a repository-relative path (e.g. pack/matrix.yaml, without ./candidate/).',
+  description: isHostSession
+    ? 'Delete a writable repository file using a repository-relative path (e.g. pack/matrix.yaml, without ./candidate/).'
+    : 'Delete a writable file in /workspace/candidate using a repository-relative path (e.g. pack/matrix.yaml, without ./candidate/).',
   parameters: deleteParameters,
   executionMode: 'sequential',
   execute: async () => ({ content: [], details: null }),
-};
+});
 /** Public native descriptors with an official custom-tool execution bridge, never SDK-local effects. */
 export function bridgedTools(
   names: readonly string[],
   execute: (name: BridgedToolName, id: string, args: unknown, signal?: AbortSignal) => Promise<ToolResult>,
   externalMcpTools: readonly ExternalMcpToolSchema[] = [],
+  options: { readonly isHostSession?: boolean | undefined } = {},
 ): ToolDefinition[] {
+  const isHostSession = options.isHostSession === true;
   const editDef = createEditToolDefinition('/workspace/candidate');
   const editParamsRecord = editDef.parameters as unknown as { properties?: Record<string, unknown> };
   const editWithShorthand: ToolDefinition = {
@@ -49,13 +53,15 @@ export function bridgedTools(
     executionMode: 'sequential',
     execute: async () => ({ content: [], details: null }),
   };
-  const definitions = [createReadToolDefinition('/workspace/candidate', { autoResizeImages: false }), createBashToolDefinition('/scratch', { exposeSessionEnvironment: false, shellPath: '/bin/bash' }), createWriteToolDefinition('/workspace/candidate'), editWithShorthand, deleteToolDefinition];
+  const definitions = [createReadToolDefinition('/workspace/candidate', { autoResizeImages: false }), createBashToolDefinition('/scratch', { exposeSessionEnvironment: false, shellPath: '/bin/bash' }), createWriteToolDefinition('/workspace/candidate'), editWithShorthand, deleteToolDefinition(isHostSession)];
   const localTools: ToolDefinition[] = definitions.filter(definition => names.includes(definition.name)).map(definition => ({
     name: definition.name,
     label: definition.label,
     description: definition.description + (
       definition.name === 'bash'
-        ? '\nCandidate is read-only (/workspace/candidate or $CANDIDATE_DIR / ./candidate in bash; pass repository-relative paths such as pack/matrix.yaml without ./candidate/ to read, write, edit, and delete). Each call has fresh /scratch; batch related commands in one call.'
+        ? (isHostSession
+          ? '\nCandidate is read-only at ./candidate (and $CANDIDATE_DIR) in bash — /workspace/candidate and /scratch do not exist on disk in this runtime; pass repository-relative paths such as pack/matrix.yaml without ./candidate/ to read, write, edit, and delete. Each bash call runs in a fresh writable scratch directory (.) with no outbound network; batch related commands in one call.'
+          : '\nCandidate is read-only (/workspace/candidate or $CANDIDATE_DIR / ./candidate in bash; pass repository-relative paths such as pack/matrix.yaml without ./candidate/ to read, write, edit, and delete). Each call has fresh /scratch; batch related commands in one call.')
         : definition.name === 'delete'
           ? ''
           : '\nPass a repository-relative file path (e.g. pack/matrix.yaml, without ./candidate/).'
