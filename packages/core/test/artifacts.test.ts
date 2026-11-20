@@ -663,9 +663,13 @@ test('resolveInventory accepts VerifiedArtifactDescriptor up to 16 GiB while pre
     (err: unknown) => err instanceof Error && err.message === 'LIMIT_ARTIFACT_BYTES',
   );
 
-  // Verified descriptors exceeding 16 GiB aggregate fail with LIMIT_RESOLVED_BYTES
+  // Verified descriptors exceeding 16 GiB aggregate (or configured overlay.maxBytes) fail with LIMIT_RESOLVED_BYTES
   assert.throws(
     () => resolveInventory([...exact16GiB, { name: 'c-verified.bin', byteLength: 1, digest: d1 }]),
+    (err: unknown) => err instanceof Error && err.message === 'LIMIT_RESOLVED_BYTES',
+  );
+  assert.throws(
+    () => resolveInventory([{ name: 'over4m.bin', byteLength: 5 * 1024 * 1024, digest: d1 }], { overlay: { maxFiles: 128, maxBytes: 4 * 1024 * 1024 } }),
     (err: unknown) => err instanceof Error && err.message === 'LIMIT_RESOLVED_BYTES',
   );
 

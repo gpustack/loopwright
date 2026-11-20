@@ -295,7 +295,8 @@ export function resolveInventory(
       metadataObj.digest = digestDescriptor.value;
       metadataObj.byteLength = byteLengthDescriptor.value;
       const verified = parseArtifactMetadataFields(name, metadataObj, path, OVERLAY_LIMITS.maxMaxBytes);
-      if (verified.byteLength > OVERLAY_LIMITS.maxMaxBytes - verifiedTotal) fail('LIMIT_RESOLVED_BYTES', path);
+      const verifiedBudget = overlay?.maxBytes ?? OVERLAY_LIMITS.maxMaxBytes;
+      if (verified.byteLength > verifiedBudget - verifiedTotal) fail('LIMIT_RESOLVED_BYTES', path);
       verifiedTotal += verified.byteLength;
       entries.push({
         kind: 'verified',
