@@ -2,7 +2,7 @@
 
 > Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: 5c9b49eac68cd595d6687d0db9d38245d00c8de8.
+Documentation version: main. Source revision: e336989a02d8ab553120d3cff0af5cc71e4d3c19.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
@@ -11,10 +11,10 @@ documentation and code for your release. This index routes questions; follow its
 Follow the [Bootstrap Interview Reference](/loopwright/latest/references/bootstrap-interview.md) when initializing or migrating Loopwright automation.
 
 1. Inspect first, edit last: scan existing sync scripts, Dockerfiles, dependency manifests (go.mod, package.json, pyproject.toml), Helm charts, version tables, and workflows BEFORE asking questions or editing any files.
-2. Interview one question at a time: ask one focused question per turn with a repository-grounded `(Recommended)` default, covering operating mode (Declarative Taskpack vs Managed Controller), modular domain split and exclusions, schedule cadence, upstream source kinds (prefer github-release with allowPrerelease: false over git-tag when non-SemVer tags exist), lockstep/Stage-B/hold policies, bounded Host Preflight -> networkMode: none -> command.v1 Verifier boundaries, spec.memory.apply, and workflow panel inputs.
+2. Interview one question at a time: ask one focused question per turn with a repository-grounded `(Recommended)` default, covering operating mode (Declarative Taskpack vs Managed Controller), modular domain split (explicit /** scopes) and exclusions, schedule cadence, upstream source kinds (prefer github-release with allowPrerelease: false, http-json versionPath/monotonicSemver, and upstreamGroups lockstep), bounded Host Preflight (split stagedResources) -> networkMode: none -> directory-mounted command.v1 and structural guards, spec.execution trust mode, spec.memory.apply, and workflow panel inputs (mode: auto).
 3. Enforce zero model-specific code coupling: declare model pools and unified apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN exclusively in *taskpack.yaml (spec.models); never generate model-specific helper scripts or hardcode vendor names in workflows or scripts.
-4. Fetch schema guides before writing YAML: read the owning Markdown exports linked below right before emitting config (Taskpack + GitHub Action for Mode 1; Managed Controller + Task Contract + Controller and Registry for Mode 2) so command.v1 parameters, spec.models[] fields, Action inputs, and controller schemas match verbatim.
-5. Gate on Stage 5 approval: present the architecture summary table and wait for explicit user confirmation before generating two-space Pretty YAML (apiVersion: loopwright.dev/v1alpha1), deterministic offline fixture selftests, and tiered qualification steps.
+4. Fetch schema guides before writing YAML: read the owning Markdown exports linked below right before emitting config (Taskpack + GitHub Action for Mode 1; Managed Controller + Task Contract + Controller and Registry for Mode 2) so spec.execution, spec.preflight, command.v1 parameters, spec.models[] fields, Action inputs, and controller schemas match verbatim.
+5. Gate on Stage 5 approval: present the architecture summary table and wait for explicit user confirmation before generating two-space Pretty YAML (apiVersion: loopwright.dev/v1alpha1), deterministic offline fixture selftests, loopwright digest sync --check, and tiered qualification steps.
 
 ## Getting Started
 
@@ -43,4 +43,4 @@ Follow the [Bootstrap Interview Reference](/loopwright/latest/references/bootstr
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/5c9b49eac68cd595d6687d0db9d38245d00c8de8/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/e336989a02d8ab553120d3cff0af5cc71e4d3c19/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.

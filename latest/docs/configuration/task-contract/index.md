@@ -103,7 +103,7 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `spec.target.repository` | Yes | Repo slug (`1..256` chars) | Target `owner/repo` path (`[A-Za-z0-9._/-]+`) |
 | `spec.target.baseRevision` | Yes | Revision (`1..128` chars) | Base commit SHA, tag, or branch checked out before agent execution |
 | `spec.target.sourceRevision` | Yes | Revision (`1..128` chars) | Upstream release, tag, or commit revision that triggered the work |
-| `spec.target.matrix` | Yes (`null` allowed) | `null` or cell list (`1..64`) | Target matrix (`{ id, platform, variant }`); set `null` for controller runs |
+| `spec.target.matrix` | Yes (`null` allowed) | `null` or cell list (`1..64`) | Target matrix (`{ id, platform, variant }`); allowed when no check requires `hardware_execution` |
 
 ## Scope and context
 
@@ -119,7 +119,7 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `resources[].path` | Conditional | Relative path (`1..1024` chars) | **Required** per item; path resolved under `TrustedRegistry` directory |
 | `resources[].digest` | Conditional | `{ algorithm: 'sha256', hex }` | **Required** per item; 64-char lowercase SHA-256 hex digest |
 
-Turnkey taskpacks protect `.github`, `.claude`, `.codex`, `.agents`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` by default.
+Turnkey taskpacks protect `.github`, `.loopwright/policies`, `digests.lock.json`, and built-in agent-instruction paths (`AGENTS.md` and tool-specific config directories) by default; `.agents/**` is opt-in via `writable`, and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
 
 ## Roles and steps
 
@@ -134,12 +134,14 @@ Turnkey taskpacks protect `.github`, `.claude`, `.codex`, `.agents`, `.loopwrigh
 | `roles[].model` | Yes | Label (`1..128` chars) | Coding model ID (for example `glm-5.3`; see [Model configuration](/loopwright/latest/docs/configuration/taskpack/index.md#model-configuration)) |
 | `roles[].thinking` | Yes | Label (`1..128` chars) | Pi reasoning level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) |
 | `roles[].tools` | Yes | Tool list (`0..128` unique) | Allowed tools include `read`, `write`, `edit`, `bash`, `delete`, `mcp`, `codemode`, and `mcp__workspace__read_file` |
-| `spec.steps` | Yes | Object list (`1..256` nodes) | Acyclic execution graph (`<= 2048` edges) of authoring and check steps |
+| `roles[].resourceIds` | No | Identifier list (`0..128`) | Optional subset of `trustedContext.resources[].id` injected for this role |
+| `spec.steps` | Yes | Object list (`1..256` nodes) | Acyclic execution graph (`<= 2048` edges) of authoring and check steps (`<= 256` checkpoints) |
 | `steps[].id` | Yes | Identifier (`1..64` chars) | Unique step node ID bound via `ControllerConfig.spec.profiles.steps` |
 | `steps[].kind` | Yes | `'agent'` or `'check'` | Selects isolated role execution or independent verification |
 | `steps[].uses` | Yes | Identifier (`1..64` chars) | Logical operation label mapped to an approved `TrustedRegistry` handler |
 | `steps[].roleId` | Yes (`null` for check) | Identifier or `null` | Non-null `roles[].id` when `kind: agent`; must be `null` when `kind: check` |
 | `steps[].dependsOn` | Yes | Identifier list | Upstream `steps[].id` nodes that must succeed first (pass `[]` for roots) |
+| `steps[].onRework` | No | `{ rejectTo, maxReworks }` | Optional bounded subgraph reset targeting an ancestor step (`maxReworks`: `1..8`) |
 
 The Pi adapter restricts its runtime tool names further.
 For MCP access, it accepts `mcp__workspace__read_file`, not the generic `mcp` name.
@@ -168,6 +170,7 @@ Every retry and repair attempt draws from the same parent `budgets` envelope. Va
 | `budgets.maxImplementationRepairs` | Yes | Integer (`0 .. maxModelCalls`) | Allowed repair turns after an independent check or gate reports failure |
 | `budgets.maxTransportRetries` | Yes | Integer (`0 .. maxModelCalls`) | Allowed retries on transient network/provider transport failures |
 | `budgets.enforcement.*` | Yes | All 7 dimension keys | Enforcement mode for `wallTime`, `tokens`, `modelCalls`, `concurrency`, `formatRepairs`, `implementationRepairs`, `transportRetries` |
+| `budgets.overlay` | No | `{ maxFiles, maxBytes }` | Optional overlay caps (`maxFiles`: `1..4096`, `maxBytes`: `1024..67108864`; default `128`, `4 MiB`) |
 
 ### Enforcement modes
 
@@ -187,9 +190,9 @@ Classic `{ entries }` supports up to 256 entries.
 Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.
 
-Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }`.
-The baseline supports up to 65,536 regular files.
-The overlay supports up to 128 added or modified entries, 128 deleted paths, and 4 MiB of aggregate entry bytes.
+Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }` (`<= 256` state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors `budgets.overlay` (default `128` entries / `4 MiB`, configurable up to `4096` / `64 MiB`).
+
+`ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence` and `EvaluatedCheck` accept optional `metrics` (finite numbers, strings, or booleans), `findings`, and `detail` even on `passed` (`Evidence.spec.reason` stays `null`).
 
 ### Acceptance fields
 

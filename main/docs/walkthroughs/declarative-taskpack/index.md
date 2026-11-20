@@ -1,8 +1,8 @@
 # Declarative Taskpack
 
-Declarative taskpack mode is Loopwright's simple automated workflow for repository maintainers. Author one `.loopwright/taskpack.yaml` file in your repository, and the GitHub Action or App compiles contracts, handler digests, and registry bindings automatically.
+Declarative taskpack mode is Loopwright's automated workflow for repository maintainers. Author one `.loopwright/taskpack.yaml` file in your repository, and the GitHub Action or App compiles contracts, handler digests, preflight stages, and credential bindings automatically.
 
-For strict separation between task authors and platform-owned `TrustedRegistry` files, custom multi-step DAGs, or local CLI execution, follow [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md) instead.
+For strict separation between task authors and out-of-repo `TrustedRegistry` files, or local CLI controller configs, follow [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md) instead.
 
 ## Contents
 
@@ -25,11 +25,11 @@ Declarative taskpack mode eliminates manual boilerplate while preserving every L
 
 | Responsibility | Authored in taskpack | Compiled by Loopwright |
 | --- | --- | --- |
-| Work scope | Optionally declare `writable` and `protected` paths | Adds control paths and built-in masks; protected paths take precedence |
-| Execution | Declare `upstreams` and `proposal` artifact | Compiles `TaskContract`, `ControllerConfig`, and `TrustedRegistry` (`0600`) |
-| Digests | None required | Computes SHA-256 digests for installed handlers and `package-lock.json` |
-| Secrets | Pass GitHub Secrets to Action or App env | Generates scoped `${ENV}` credential bindings and scrubs logs |
-| Settlement | Choose `pull_request` or `disabled` | Opens head-pinned PRs or settles verified `no_change` runs |
+| Work scope | Explicit `dir/**`, exact files, or `*`/`?` `writable` and `protected` paths | Adds control paths, scripts, and built-in masks; protected paths win |
+| Execution | Declare `spec.execution`, `spec.preflight`, `upstreams`, and optional `proposal` | Runs preflight post-auth and compiles `TaskContract`, `ControllerConfig`, and `TrustedRegistry` (`0600`) |
+| Digests | Optional `digests.pinDigests` (`digests.lock.json`) | Computes runtime SHA-256 digests for handlers, check directories, instructions, and skills |
+| Secrets | Pass GitHub Secrets to Action or App env | Generates scoped `${ENV}` credential bindings and scrubs preflight and run logs |
+| Settlement | Choose `pull_request` or `disabled` | Opens head-pinned PRs or settles check-only `no_change` runs |
 
 ## Prompt bootstrap
 
@@ -54,9 +54,19 @@ spec:
   goal:
     candidate: Refresh documentation from upstream releases and pass local checks.
     noChange: Confirm upstream documentation needs no update and settle as no change.
+  execution: # Optional trust mode and lockfile pinning
+    mode: strict # Optional (defaults to strict)
+    digests:
+      pinDigests: true
+  preflight: # Optional post-auth host preflight hook
+    script: scripts/prepare-docs-sync.mjs
+    timeoutSeconds: 120 # Optional
   scope: # Optional
+    writable:
+      - docs/**
     protected:
       - docs/protected-notes.md
+      - scripts/**
   instructions: # Optional
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -66,7 +76,7 @@ spec:
       watchedPaths:
         - docs
       allowPrerelease: false # Optional (defaults to false)
-  proposal:
+  proposal: # Optional structured proposal ledger
     path: docs/proposal.json
     requiredFields:
       - schema_version
@@ -114,7 +124,7 @@ spec:
     formats:
       - json
       - github-step-summary
-  decisions: # Optional System-One triage policy
+  decisions: # Optional live System-One triage policy
     enabled: true
     provider: typesafe-jev # Optional
     disclosurePolicy: public-metadata-only # Optional
@@ -126,14 +136,13 @@ spec:
 ```
 
 - **Field dictionary**: Inspect every field, bound, and enum in [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md).
-- **Scope**: Omitted `writable` permits `**`, except effective protected paths. Protected paths always win.
-- **Inputs**: Create the instruction file and verification script before running. Loopwright pins and protects both files.
-- **Proposal**: The proposal must be writable and end in `.yaml`, `.yml`, or `.json`.
-- **Secrets**: Never place tokens or `${ENV}` templates inside `taskpack.yaml`; the parser rejects untrusted interpolation.
+- **Explicit scopes**: Write `docs/**` for recursive directories and exact paths (or single-segment `*`/`?` globs) for files; protected paths always win.
+- **Inputs**: Create instruction files, `preflight.script`, and `command.v1` scripts under protected paths before running. When configuring `spec.proposal.path`, place it inside a writable path with a `.yaml`, `.yml`, or `.json` extension.
+- **Secrets**: Never place tokens or ambient `${ENV}` templates inside `taskpack.yaml`; use `spec.vars` only for non-secret static values.
 
 ### Delegated role DAG
 
-Add roles to the taskpack from Step 1. This example runs a read-only review after the author:
+Add roles and optional `spec.steps` to the taskpack from Step 1. This example runs a read-only review after the author:
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -160,17 +169,22 @@ loopwright step next --taskpack .loopwright/taskpack.yaml --repo . --run-root ..
 loopwright step submit --run-root ../runs --run-id demo-1 --lease TOKEN --status completed --json
 ```
 
-Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See [CLI](/loopwright/main/docs/operations/cli/index.md) for leases and [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md#role-dag) for role bounds.
+Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See [CLI](/loopwright/main/docs/operations/cli/index.md) for leases and [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md#roles-and-steps) for role and step bounds.
 
 ## Step 2: Validate taskpack
 
-Verify your host meets the [runtime baseline](/loopwright/main/docs/getting-started/architecture/index.md#runtime-baseline), then test compilation in dry-run mode before enabling live mutations.
+Verify your host meets the [runtime baseline](/loopwright/main/docs/getting-started/architecture/index.md#runtime-baseline), sync `digests.lock.json` when `pinDigests: true`, and test compilation in dry-run mode before enabling live mutations:
 
-Run the GitHub Action with `dry-run: 'true'` in a pull request workflow, or call `loadDeclarativeTaskpack` and `compileDeclarativeTaskpack` in a local check script. Dry-run mode validates the manifest, negotiates sandbox capabilities, and compiles `config.yaml` and `registry.yaml` without invoking model providers or pushing branches.
+```sh
+loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
+loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json
+```
+
+Run the GitHub Action with `dry-run: 'true'` in a pull request workflow to validate the manifest, verify `digests.lock.json`, negotiate sandbox capabilities, and compile artifacts without invoking model providers or pushing branches.
 
 ## Step 3: Configure workflow
 
-Add `.github/workflows/loopwright.yml` to your repository to run on `schedule`, `workflow_dispatch`, or `/loopwright` issue comments:
+Add `.github/workflows/loopwright.yml` to your repository to run on `schedule`, `workflow_dispatch`, or `/loopwright` issue comments with `mode: auto`:
 
 ```yaml
 name: Loopwright Sync
@@ -197,6 +211,7 @@ jobs:
       - uses: gpustack/loopwright@main
         with:
           taskpack-path: .auto-sync/taskpack.yaml # Optional custom control root
+          mode: auto # Optional (candidate or check-only no-change via preflight)
           github-token: ${{ steps.app-token.outputs.token }}
           event-name: ${{ github.event_name }} # Optional (defaults to GITHUB_EVENT_NAME)
           event-path: ${{ github.event_path }} # Optional for schedule/manual; needed on comments
@@ -221,7 +236,7 @@ Enforce two provenance rules in comment-driven and self-upgrading workflows:
 Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.
 
 1. **Candidate pull request**: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching `headBranchPrefix`.
-2. **Verified no-change**: When no update is needed, the compiled `no-change.v1` check verifies an untouched tree and settles cleanly without opening an empty PR.
+2. **Verified no-change**: When preflight or upstream discovery reports `no_change` under `mode: auto`, Loopwright runs check-only `no-change.v1` verification without invoking agent models.
 3. **Slash-command iteration**: Collaborators with write access comment `/loopwright status`, `/loopwright retry`, or `/loopwright revise` on managed issues or pull requests.
 4. **Reviewed memory**: Active entries live under `.loopwright/memory/<name>`. Separate PRs skip non-passing runs (`publishOnFailure: false`) and add `[skip ci]` (`skipCi: true`). Use `local-only` or `disabled` without blocking task completion.
 

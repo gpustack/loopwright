@@ -351,7 +351,7 @@
       <article>
         
   <h1 id="github-action">GitHub Action</h1>
-<p>The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It discovers upstream changes, verifies candidates, and can publish a managed pull request.</p>
+<p>The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It executes optional host preflight, discovers upstream changes, verifies candidates, and can publish a managed pull request.</p>
 <h2 id="contents">Contents</h2>
 <ul>
 <li><a href="#workflow">Workflow</a>
@@ -392,6 +392,9 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional (auto, candidate, or no-change)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-privileged-execution</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key host unlock</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-workflow-writes</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key workflow write unlock</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
@@ -402,13 +405,13 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Taskpack</strong>: Set publication to <code>pull_request</code> to enable native PR publication, or <code>disabled</code> to omit it.</li>
+<li><strong>Mode <code>auto</code></strong>: Runs <code>spec.preflight</code> or upstream discovery, dispatches <code>candidate</code> when updates exist or <code>force</code> is <code>'true'</code>, and compiles a check-only <code>no-change</code> run with zero agent model calls when settled.</li>
+<li><strong>Dual-key authority</strong>: Even under <code>spec.execution.mode: strict</code>, enabling <code>allowHostEnv</code>, <code>allowHostPath</code>, <code>mountReadOnlyGit</code>, <code>allowCheckNetwork</code>, <code>allowAgentNetwork</code>, or <code>command.v1</code> <code>mountReadOnlyGit: true</code> requires <code>allow-privileged-execution: 'true'</code>. Enabling <code>allowWorkflowWrites: true</code> independently requires <code>allow-workflow-writes: 'true'</code>.</li>
 <li><strong>Provider</strong>: Set the token variable for the selected model, not necessarily <code>ZAI_API_KEY</code>.</li>
 <li><strong>Runtime</strong>: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.</li>
-<li><strong>Dry run</strong>: Set <code>dry-run: 'true'</code> to compile without running the controller.</li>
 </ul>
 <h2 id="execution-and-publication">Execution and publication</h2>
-<p>A live Action resolves repository identity and revisions, discovers upstreams, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, then runs the controller for admitted work.</p>
+<p>A live Action resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code> if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires <code>spec.decisions</code> into <code>ControllerPorts.decisions</code>, and runs the controller.</p>
 <table>
   <thead>
       <tr>
@@ -418,28 +421,31 @@
   </thead>
   <tbody>
       <tr>
+          <td>Preflight</td>
+          <td>Runs <code>spec.preflight.script</code> strictly after actor authorization and scrubber setup, stripping Loopwright, GitHub, and provider secrets</td>
+      </tr>
+      <tr>
           <td>Discover</td>
-          <td>Read GitHub releases, Git tags or commits, HTTP JSON, or custom tables; compare versions with the proposal.</td>
+          <td>Resolves upstreams, <code>upstreamGroups</code> lockstep holds (<code>held_back</code>), or <code>upstream-records</code>; <code>mode: auto</code> routes <code>no_change</code> to check-only checks</td>
       </tr>
       <tr>
           <td>Execute</td>
-          <td>Author a candidate and verify scope and configured checks; eligible failures can enter bounded repair.</td>
+          <td>Authors a candidate in sandboxed steps and verifies scope and local or external checks; eligible failures can enter bounded repair or <code>rejectTo</code> rework</td>
       </tr>
       <tr>
           <td>Publish</td>
-          <td>For <code>pull_request</code> mode, create or update a managed PR after verification.</td>
+          <td>For <code>pull_request</code> mode, creates or updates a managed PR after verification</td>
       </tr>
   </tbody>
 </table>
-<p>Use <code>upstream-records</code> to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as <code>no_change</code>. Unavailable upstreams can block execution.</p>
 <p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Local checks and publication keep protected and non-writable files at <code>GITHUB_SHA</code>, and squash writable changes onto a commit parented on <code>GITHUB_SHA</code>.</p>
 <p>Native publication uses a detached <code>git worktree</code>, a signed-off diff-only commit, and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
-<p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>local-only</code>, or <code>disabled</code>) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs (<code>failed</code>, <code>blocked</code>, <code>exhausted</code>, <code>expired</code>, <code>cancelled</code>, or incident) by default (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> before the DCO trailer (<code>skipCi: true</code>). Memory errors or skipped updates never block primary task completion.</p>
-<p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.</p>
+<p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>local-only</code>, or <code>disabled</code>) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs by default (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> before the DCO trailer (<code>skipCi: true</code>). Memory errors or skipped updates never block primary task completion.</p>
+<p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script&rsquo;s parent directory read-only with whole-tree SHA-256 verification and exposing <code>$LOOPWRIGHT_BASE_DIR</code>, <code>$LOOPWRIGHT_STAGED_DIR</code> (when <code>exposeToChecks: true</code>), and <code>$LOOPWRIGHT_CHECK_OUT</code>. If a check opts into a GitHub token, grant that token only the permissions the check may use.</p>
 <p>On GitHub Actions, an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. This uses host process isolation, not a container security boundary. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
  for isolation tradeoffs.</p>
-<p>Protected paths override writable paths. Workflow files and taskpack control assets remain protected. See <a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
- for scope, instructions, and check configuration.</p>
+<p>Protected paths override writable paths. <code>.github/workflows/**</code> stays write-protected unless both <code>spec.execution.capabilities.allowWorkflowWrites: true</code> and <code>allow-workflow-writes: 'true'</code> are set. See <a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
+ for full manifest fields.</p>
 <h2 id="secrets-and-environment">Secrets and environment</h2>
 <p>Pass <code>github-token</code> directly, or pass <code>github-app-id</code> and <code>github-app-private-key</code> to mint an installation token. Explicit <code>github-token</code> takes precedence over App credentials, and App credentials take precedence over ambient <code>GITHUB_TOKEN</code>. When <code>github-app-installation-id</code> is omitted, the Action discovers the repository installation automatically. <code>GH_TOKEN</code> is not the Action token fallback.</p>
 <p>The App ID and optional installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub&rsquo;s App event rules.</p>
@@ -493,7 +499,17 @@
       <tr>
           <td><code>mode</code></td>
           <td><code>candidate</code></td>
-          <td><code>candidate</code> or <code>no-change</code> cycle mode.</td>
+          <td><code>auto</code> (preflight-driven candidate or check-only <code>no-change</code>), <code>candidate</code>, or <code>no-change</code>.</td>
+      </tr>
+      <tr>
+          <td><code>allow-privileged-execution</code></td>
+          <td><code>false</code></td>
+          <td>Dual-key host unlock for <code>spec.execution.mode: privileged</code> or privileged capabilities.</td>
+      </tr>
+      <tr>
+          <td><code>allow-workflow-writes</code></td>
+          <td><code>false</code></td>
+          <td>Dual-key host unlock allowing <code>allowWorkflowWrites: true</code> manifests to edit <code>.github/workflows/**</code>.</td>
       </tr>
       <tr>
           <td><code>event-name</code></td>
@@ -553,7 +569,7 @@
       <tr>
           <td><code>force</code></td>
           <td><code>false</code></td>
-          <td>Set <code>true</code> on non-comment trigger events in candidate mode to bypass <code>no_change</code> and open-PR deduplication.</td>
+          <td>Set <code>true</code> on non-comment triggers to bypass <code>no_change</code> and open-PR deduplication.</td>
       </tr>
       <tr>
           <td><code>gate-endpoint-url</code></td>
@@ -603,12 +619,12 @@
       <tr>
           <td><code>upstream-records</code></td>
           <td>Unset</td>
-          <td>JSON array of precomputed upstream acquisition records.</td>
+          <td>JSON array of precomputed upstream acquisition records (<code>github-release</code>, <code>git-tag</code>, <code>git-commit</code>, <code>http-json</code>, or <code>custom-table</code>).</td>
       </tr>
       <tr>
           <td><code>source-revision</code></td>
           <td><code>GITHUB_SHA</code></td>
-          <td>Git commit SHA or ref materialized as the candidate source tree while keeping <code>GITHUB_SHA</code> as the base revision.</td>
+          <td>Git commit SHA or ref materialized as the candidate source tree while keeping <code>GITHUB_SHA</code> as base revision.</td>
       </tr>
       <tr>
           <td><code>mcp-servers</code></td>
@@ -657,7 +673,7 @@
       </tr>
   </tbody>
 </table>
-<p>Explicit configuration takes precedence over environment variables (<code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> environment variables &gt; compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical <code>spec.limits</code> keys and <code>LOOPWRIGHT_*</code> fallbacks; see <a href="/loopwright/latest/docs/configuration/taskpack/#execution-limits">Execution limits</a>
+<p>Explicit configuration takes precedence over environment variables (<code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> environment variables &gt; compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical <code>spec.limits</code> keys and <code>LOOPWRIGHT_*</code> fallbacks; see <a href="/loopwright/latest/docs/configuration/taskpack/#execution-limits">Taskpack</a>
 . Interactive OAuth and CLI providers or MCP servers are unsupported.</p>
 <p>The <code>force</code> input applies only to candidate discovery on non-comment trigger events (<code>workflow_dispatch</code>, <code>schedule</code>, <code>repository_dispatch</code>, <code>release</code>), while PR comment commands (<code>/auto-sync retry</code>, <code>revise</code>, <code>status</code>) follow comment-command dispatch semantics.</p>
 <h2 id="outputs">Outputs</h2>

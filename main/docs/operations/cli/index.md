@@ -1,6 +1,6 @@
 # CLI
 
-The CLI validates trusted configuration and manages bounded local runs. Install the `loopwright` command on your laptop first via [Installation](/loopwright/main/docs/getting-started/installation/index.md), then use it to prepare, inspect, resume, or reconcile work and audit capability closure.
+The CLI validates trusted configuration, syncs taskpack digest lockfiles, and manages bounded local runs. Install the `loopwright` command on your laptop first via [Installation](/loopwright/main/docs/getting-started/installation/index.md), then use it to prepare, inspect, resume, or reconcile work and audit capability closure.
 
 ## Contents
 
@@ -10,6 +10,7 @@ The CLI validates trusted configuration and manages bounded local runs. Install 
 - [Step 4: Run work](#step-4-run-work)
 - [Step 5: Inspect recovery](#step-5-inspect-recovery)
 - [Step 6: Audit closure](#step-6-audit-closure)
+- [Digest lockfile](#digest-lockfile)
 - [Delegated stepping](#delegated-stepping)
 - [Command reference](#command-reference)
 - [Exit codes](#exit-codes)
@@ -59,7 +60,7 @@ loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --
 loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
 ```
 
-Both commands validate and compile statically. Neither proves execution readiness, provider availability, or host qualification.
+Both commands validate and compile statically. Neither proves execution readiness, provider availability, or host qualification. `run --dry-run` refuses `--allow-privileged` and `--allow-workflow-writes`.
 
 ## Step 4: Run work
 
@@ -69,6 +70,10 @@ loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST -
 ```
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
+
+`run`, `resume`, `step next`, and `step submit` accept opt-in `--allow-privileged` (unlocks privileged execution capabilities) and `--allow-workflow-writes` (unlocks `.github/workflows/**` writes when the taskpack also enables them). `reconcile` accepts `--allow-workflow-writes` and refuses `--allow-privileged`. Other non-execution commands (`init`, `check`, `run --dry-run`, `status`, `inspect`, `closure`, `digest`, `app-serve`) refuse both flags.
+
+`run` and `step` runs wire live `@loopwright/decisions` adapters into `ControllerPorts.decisions` whenever `spec.decisions.enabled` is `true` (falling back deterministically when credentials or endpoints are unavailable).
 
 `run`, `resume`, and `reconcile` accept `--output-format <csv>` with `json`, `github-step-summary`, `markdown`, and `text`.
 Use `--step-summary-file <path>` to select the summary file.
@@ -105,6 +110,15 @@ Closure exits `0` for a valid report, `3` for falsification or unsupported capab
 | `blocked_external` | Unprovisioned external dependency | Live service, host, or hardware remains external |
 | `deferred_owned` | Deferred owned capability | Recorded prerequisite remains unimplemented or deferred |
 
+## Digest lockfile
+
+```sh
+loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
+loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json
+```
+
+`digest sync` computes deterministic SHA-256 digests for `spec.preflight.script`, mounted `command.v1` check directories, instructions, and skills, writing `<controlRoot>/digests.lock.json` (or `spec.execution.digests.lockfile`). Pass `--check` in CI to fail closed (`DIGEST_LOCKFILE_DRIFT`, exit `4`) when any tracked file or check helper drifts.
+
 ## Delegated stepping
 
 Use `step` to hand each delegated role to a host agent (see [Coding Agents](/loopwright/main/docs/operations/coding-agents/index.md) for the end-to-end coroutine workflow and overlay application). Start with either trusted configuration or a taskpack:
@@ -116,7 +130,9 @@ loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --sta
 loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json
 ```
 
-Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`. A parked run rejects another pull unless `--reissue-lease` replaces a lost lease. Submit each single-use `--lease` token once. `--submission-file` supplies an artifact; `--status` accepts `completed`, `no_change`, `failed`, or `blocked`. Use `--reason` for a failure or block.
+Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`, `--allow-privileged`, and `--allow-workflow-writes`. Pass the same privilege flags to `step submit` when running `command.v1` checks that require privileged host capabilities.
+
+A parked run rejects another pull unless `--reissue-lease` replaces a lost lease. Submit each single-use `--lease` token once. `--submission-file` supplies an artifact; `--status` accepts `completed`, `no_change`, `failed`, or `blocked`. Use `--reason` for a failure or block.
 
 JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'awaiting_role'`, selection, prompt, allowed tools, scope, workspace paths, and lease token. Follow those bounds before submitting. Cancellation exits `130`; SIGINT and SIGTERM exit `130` and `143`, subject to uncertainty precedence.
 
@@ -128,10 +144,11 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | --- | --- | --- | --- |
 | `init` | `--directory` | `--force`, `--json` | Emit `controller.draft.yaml` and `registry.draft.yaml` |
 | `check` | `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile and verify configuration and registry digest statically |
-| `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Execute a bounded controller run |
-| `run --dry-run` | `--dry-run`, `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile plan statically (`--repo`, `--run-root`, `--run-id` disallowed) |
-| `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
-| `step` | `--run-root`, `--run-id`, action | `--action`, `--json` | Pull, submit, or cancel delegated work |
+| `digest sync` | `--taskpack` | `--repo`, `--check`, `--json` | Write or verify `digests.lock.json` SHA-256 digests |
+| `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Execute a bounded controller run |
+| `run --dry-run` | `--dry-run`, `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile plan statically (`--repo`, `--run-root`, `--run-id`, privilege flags disallowed) |
+| `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
+| `step` | `--run-root`, `--run-id`, action | `--action`, `--allow-privileged`, `--allow-workflow-writes`, `--json` | Pull, submit, or cancel delegated work |
 | `status` | `--run-root`, `--run-id` | `--json` | Read current run stage, lease state, and checkpoint summary |
 | `inspect` | `--run-root`, `--run-id` | `--output`, `--json` | Export redacted run receipts, checkpoints, and diagnostics |
 | `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json`, `--output-format`, `--step-summary-file` | Settle an unknown external outcome with an authenticated receipt |

@@ -49,7 +49,7 @@ spec:
 
 - **Priority order**: Loopwright probes `preferredBackends` in order and picks the first backend supporting every listed `requiredCapabilities` item.
 - **Declared policy**: Omitting `networkMode` in an explicit sandbox policy defaults to `none`.
-- **Additive path masks**: `deniedReadPaths` supplements built-in `.github`, `.loopwright/policies`, `AGENTS.md`, and `CLAUDE.md` protections.
+- **Additive path masks**: `deniedReadPaths` supplements built-in `.github`, `.loopwright/policies`, and repository agent-instruction protections.
 
 When `GITHUB_ACTIONS=true` and `spec.sandbox` is omitted, `resolveEffectiveTaskpackSandboxPolicy` selects `direct-dedicated`.
 It sets `allow-outbound`, requires `processTreeCleanup`, and enables `allowDedicatedDirectOverride`.

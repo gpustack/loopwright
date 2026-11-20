@@ -351,8 +351,8 @@
       <article>
         
   <h1 id="declarative-taskpack">Declarative Taskpack</h1>
-<p>Declarative taskpack mode is Loopwright&rsquo;s simple automated workflow for repository maintainers. Author one <code>.loopwright/taskpack.yaml</code> file in your repository, and the GitHub Action or App compiles contracts, handler digests, and registry bindings automatically.</p>
-<p>For strict separation between task authors and platform-owned <code>TrustedRegistry</code> files, custom multi-step DAGs, or local CLI execution, follow <a href="/loopwright/latest/docs/walkthroughs/managed-controller/">Managed Controller</a>
+<p>Declarative taskpack mode is Loopwright&rsquo;s automated workflow for repository maintainers. Author one <code>.loopwright/taskpack.yaml</code> file in your repository, and the GitHub Action or App compiles contracts, handler digests, preflight stages, and credential bindings automatically.</p>
+<p>For strict separation between task authors and out-of-repo <code>TrustedRegistry</code> files, or local CLI controller configs, follow <a href="/loopwright/latest/docs/walkthroughs/managed-controller/">Managed Controller</a>
  instead.</p>
 <h2 id="contents">Contents</h2>
 <ul>
@@ -386,28 +386,28 @@
   <tbody>
       <tr>
           <td>Work scope</td>
-          <td>Optionally declare <code>writable</code> and <code>protected</code> paths</td>
-          <td>Adds control paths and built-in masks; protected paths take precedence</td>
+          <td>Explicit <code>dir/**</code>, exact files, or <code>*</code>/<code>?</code> <code>writable</code> and <code>protected</code> paths</td>
+          <td>Adds control paths, scripts, and built-in masks; protected paths win</td>
       </tr>
       <tr>
           <td>Execution</td>
-          <td>Declare <code>upstreams</code> and <code>proposal</code> artifact</td>
-          <td>Compiles <code>TaskContract</code>, <code>ControllerConfig</code>, and <code>TrustedRegistry</code> (<code>0600</code>)</td>
+          <td>Declare <code>spec.execution</code>, <code>spec.preflight</code>, <code>upstreams</code>, and optional <code>proposal</code></td>
+          <td>Runs preflight post-auth and compiles <code>TaskContract</code>, <code>ControllerConfig</code>, and <code>TrustedRegistry</code> (<code>0600</code>)</td>
       </tr>
       <tr>
           <td>Digests</td>
-          <td>None required</td>
-          <td>Computes SHA-256 digests for installed handlers and <code>package-lock.json</code></td>
+          <td>Optional <code>digests.pinDigests</code> (<code>digests.lock.json</code>)</td>
+          <td>Computes runtime SHA-256 digests for handlers, check directories, instructions, and skills</td>
       </tr>
       <tr>
           <td>Secrets</td>
           <td>Pass GitHub Secrets to Action or App env</td>
-          <td>Generates scoped <code>${ENV}</code> credential bindings and scrubs logs</td>
+          <td>Generates scoped <code>${ENV}</code> credential bindings and scrubs preflight and run logs</td>
       </tr>
       <tr>
           <td>Settlement</td>
           <td>Choose <code>pull_request</code> or <code>disabled</code></td>
-          <td>Opens head-pinned PRs or settles verified <code>no_change</code> runs</td>
+          <td>Opens head-pinned PRs or settles check-only <code>no_change</code> runs</td>
       </tr>
   </tbody>
 </table>
@@ -430,9 +430,19 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Refresh documentation from upstream releases and pass local checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream documentation needs no update and settle as no change.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">execution</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional trust mode and lockfile pinning</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">strict</span><span class="w"> </span><span class="c"># Optional (defaults to strict)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">digests</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">pinDigests</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">preflight</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional post-auth host preflight hook</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">scripts/prepare-docs-sync.mjs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">120</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">writable</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/**</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/protected-notes.md</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">scripts/**</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.auto-sync/prompts/instructions.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
@@ -442,7 +452,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">docs</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">allowPrerelease</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">proposal</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">proposal</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional structured proposal ledger</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">docs/proposal.json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">schema_version</span><span class="w">
@@ -490,7 +500,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional System-One triage policy</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional live System-One triage policy</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">disclosurePolicy</span><span class="p">:</span><span class="w"> </span><span class="l">public-metadata-only</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
@@ -503,13 +513,12 @@
 <ul>
 <li><strong>Field dictionary</strong>: Inspect every field, bound, and enum in <a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
 .</li>
-<li><strong>Scope</strong>: Omitted <code>writable</code> permits <code>**</code>, except effective protected paths. Protected paths always win.</li>
-<li><strong>Inputs</strong>: Create the instruction file and verification script before running. Loopwright pins and protects both files.</li>
-<li><strong>Proposal</strong>: The proposal must be writable and end in <code>.yaml</code>, <code>.yml</code>, or <code>.json</code>.</li>
-<li><strong>Secrets</strong>: Never place tokens or <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; the parser rejects untrusted interpolation.</li>
+<li><strong>Explicit scopes</strong>: Write <code>docs/**</code> for recursive directories and exact paths (or single-segment <code>*</code>/<code>?</code> globs) for files; protected paths always win.</li>
+<li><strong>Inputs</strong>: Create instruction files, <code>preflight.script</code>, and <code>command.v1</code> scripts under protected paths before running. When configuring <code>spec.proposal.path</code>, place it inside a writable path with a <code>.yaml</code>, <code>.yml</code>, or <code>.json</code> extension.</li>
+<li><strong>Secrets</strong>: Never place tokens or ambient <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; use <code>spec.vars</code> only for non-secret static values.</li>
 </ul>
 <h3 id="delegated-role-dag">Delegated role DAG</h3>
-<p>Add roles to the taskpack from Step 1. This example runs a read-only review after the author:</p>
+<p>Add roles and optional <code>spec.steps</code> to the taskpack from Step 1. This example runs a read-only review after the author:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -535,14 +544,19 @@
 </span></span><span class="line"><span class="cl">loopwright step submit --run-root ../runs --run-id demo-1 --lease TOKEN --status completed --json</span></span></code></pre></div>
 </div>
 <p>Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See <a href="/loopwright/latest/docs/operations/cli/">CLI</a>
- for leases and <a href="/loopwright/latest/docs/configuration/taskpack/#role-dag">Taskpack</a>
- for role bounds.</p>
+ for leases and <a href="/loopwright/latest/docs/configuration/taskpack/#roles-and-steps">Taskpack</a>
+ for role and step bounds.</p>
 <h2 id="step-2-validate-taskpack">Step 2: Validate taskpack</h2>
 <p>Verify your host meets the <a href="/loopwright/latest/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
-, then test compilation in dry-run mode before enabling live mutations.</p>
-<p>Run the GitHub Action with <code>dry-run: 'true'</code> in a pull request workflow, or call <code>loadDeclarativeTaskpack</code> and <code>compileDeclarativeTaskpack</code> in a local check script. Dry-run mode validates the manifest, negotiates sandbox capabilities, and compiles <code>config.yaml</code> and <code>registry.yaml</code> without invoking model providers or pushing branches.</p>
+, sync <code>digests.lock.json</code> when <code>pinDigests: true</code>, and test compilation in dry-run mode before enabling live mutations:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
+</span></span><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json</span></span></code></pre></div>
+</div>
+<p>Run the GitHub Action with <code>dry-run: 'true'</code> in a pull request workflow to validate the manifest, verify <code>digests.lock.json</code>, negotiate sandbox capabilities, and compile artifacts without invoking model providers or pushing branches.</p>
 <h2 id="step-3-configure-workflow">Step 3: Configure workflow</h2>
-<p>Add <code>.github/workflows/loopwright.yml</code> to your repository to run on <code>schedule</code>, <code>workflow_dispatch</code>, or <code>/loopwright</code> issue comments:</p>
+<p>Add <code>.github/workflows/loopwright.yml</code> to your repository to run on <code>schedule</code>, <code>workflow_dispatch</code>, or <code>/loopwright</code> issue comments with <code>mode: auto</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">Loopwright Sync</span><span class="w">
@@ -569,6 +583,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">gpustack/loopwright@main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional custom control root</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional (candidate or check-only no-change via preflight)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-token</span><span class="p">:</span><span class="w"> </span><span class="l">${{ steps.app-token.outputs.token }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w"> </span><span class="c"># Optional (defaults to GITHUB_EVENT_NAME)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w"> </span><span class="c"># Optional for schedule/manual; needed on comments</span><span class="w">
@@ -593,7 +608,7 @@
 <p>Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.</p>
 <ol>
 <li><strong>Candidate pull request</strong>: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching <code>headBranchPrefix</code>.</li>
-<li><strong>Verified no-change</strong>: When no update is needed, the compiled <code>no-change.v1</code> check verifies an untouched tree and settles cleanly without opening an empty PR.</li>
+<li><strong>Verified no-change</strong>: When preflight or upstream discovery reports <code>no_change</code> under <code>mode: auto</code>, Loopwright runs check-only <code>no-change.v1</code> verification without invoking agent models.</li>
 <li><strong>Slash-command iteration</strong>: Collaborators with write access comment <code>/loopwright status</code>, <code>/loopwright retry</code>, or <code>/loopwright revise</code> on managed issues or pull requests.</li>
 <li><strong>Reviewed memory</strong>: Active entries live under <code>.loopwright/memory/&lt;name&gt;</code>. Separate PRs skip non-passing runs (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> (<code>skipCi: true</code>). Use <code>local-only</code> or <code>disabled</code> without blocking task completion.</li>
 </ol>

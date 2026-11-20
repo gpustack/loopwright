@@ -1,6 +1,6 @@
 # GitHub Action
 
-The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It discovers upstream changes, verifies candidates, and can publish a managed pull request.
+The reusable Action runs a taskpack cycle in a consumer repository without a resident server. It executes optional host preflight, discovers upstream changes, verifies candidates, and can publish a managed pull request.
 
 ## Contents
 
@@ -37,6 +37,9 @@ jobs:
         id: loopwright
         with:
           taskpack-path: .loopwright/taskpack.yaml # Optional
+          mode: auto # Optional (auto, candidate, or no-change)
+          allow-privileged-execution: 'false' # Optional dual-key host unlock
+          allow-workflow-writes: 'false' # Optional dual-key workflow write unlock
           event-name: ${{ github.event_name }}
           event-path: ${{ github.event_path }}
           github-app-id: ${{ secrets.LOOPWRIGHT_APP_ID }}
@@ -47,34 +50,33 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
 ```
 
-- **Taskpack**: Set publication to `pull_request` to enable native PR publication, or `disabled` to omit it.
+- **Mode `auto`**: Runs `spec.preflight` or upstream discovery, dispatches `candidate` when updates exist or `force` is `'true'`, and compiles a check-only `no-change` run with zero agent model calls when settled.
+- **Dual-key authority**: Even under `spec.execution.mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'`. Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writes: 'true'`.
 - **Provider**: Set the token variable for the selected model, not necessarily `ZAI_API_KEY`.
 - **Runtime**: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.
-- **Dry run**: Set `dry-run: 'true'` to compile without running the controller.
 
 ## Execution and publication
 
-A live Action resolves repository identity and revisions, discovers upstreams, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, then runs the controller for admitted work.
+A live Action resolves repository identity and revisions, authorizes the actor, initializes `SecretScrubber`, runs `spec.preflight` if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires `spec.decisions` into `ControllerPorts.decisions`, and runs the controller.
 
 | Stage | Behavior |
 | --- | --- |
-| Discover | Read GitHub releases, Git tags or commits, HTTP JSON, or custom tables; compare versions with the proposal. |
-| Execute | Author a candidate and verify scope and configured checks; eligible failures can enter bounded repair. |
-| Publish | For `pull_request` mode, create or update a managed PR after verification. |
-
-Use `upstream-records` to supply precomputed acquisition records instead of live discovery. Matching upstream state can settle as `no_change`. Unavailable upstreams can block execution.
+| Preflight | Runs `spec.preflight.script` strictly after actor authorization and scrubber setup, stripping Loopwright, GitHub, and provider secrets |
+| Discover | Resolves upstreams, `upstreamGroups` lockstep holds (`held_back`), or `upstream-records`; `mode: auto` routes `no_change` to check-only checks |
+| Execute | Authors a candidate in sandboxed steps and verifies scope and local or external checks; eligible failures can enter bounded repair or `rejectTo` rework |
+| Publish | For `pull_request` mode, creates or updates a managed PR after verification |
 
 Pass `source-revision` when preflight stages writable files onto a commit separate from `GITHUB_SHA`. Local checks and publication keep protected and non-writable files at `GITHUB_SHA`, and squash writable changes onto a commit parented on `GITHUB_SHA`.
 
 Native publication uses a detached `git worktree`, a signed-off diff-only commit, and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
 
-Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `local-only`, or `disabled`) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs (`failed`, `blocked`, `exhausted`, `expired`, `cancelled`, or incident) by default (`publishOnFailure: false`) and add `[skip ci]` before the DCO trailer (`skipCi: true`). Memory errors or skipped updates never block primary task completion.
+Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `local-only`, or `disabled`) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs by default (`publishOnFailure: false`) and add `[skip ci]` before the DCO trailer (`skipCi: true`). Memory errors or skipped updates never block primary task completion.
 
-Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot. The Action verifies each script digest and passes a limited environment. If a check opts into a GitHub token, it receives the resolved token; grant that token only the permissions the check may use.
+Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script's parent directory read-only with whole-tree SHA-256 verification and exposing `$LOOPWRIGHT_BASE_DIR`, `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`. If a check opts into a GitHub token, grant that token only the permissions the check may use.
 
 On GitHub Actions, an omitted `spec.sandbox` selects `direct-dedicated`. This uses host process isolation, not a container security boundary. The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`. See [Sandbox Backends](/loopwright/latest/docs/configuration/sandbox-backends/index.md) for isolation tradeoffs.
 
-Protected paths override writable paths. Workflow files and taskpack control assets remain protected. See [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md) for scope, instructions, and check configuration.
+Protected paths override writable paths. `.github/workflows/**` stays write-protected unless both `spec.execution.capabilities.allowWorkflowWrites: true` and `allow-workflow-writes: 'true'` are set. See [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md) for full manifest fields.
 
 ## Secrets and environment
 
@@ -99,7 +101,9 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `taskpack-path` | `.loopwright/taskpack.yaml` | Repository-relative manifest path, including a custom control directory. |
-| `mode` | `candidate` | `candidate` or `no-change` cycle mode. |
+| `mode` | `candidate` | `auto` (preflight-driven candidate or check-only `no-change`), `candidate`, or `no-change`. |
+| `allow-privileged-execution` | `false` | Dual-key host unlock for `spec.execution.mode: privileged` or privileged capabilities. |
+| `allow-workflow-writes` | `false` | Dual-key host unlock allowing `allowWorkflowWrites: true` manifests to edit `.github/workflows/**`. |
 | `event-name` | `workflow_dispatch` | GitHub event name; pass `github.event_name` for other triggers. |
 | `event-path` | Unset | Event payload path; pass `github.event_path` for comment and review events. |
 | `run-root` | `RUNNER_TEMP` or `../.loopwright-runs` | Trusted artifact root outside the checkout. |
@@ -111,7 +115,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `models-json` | Unset | Trusted Pi model configuration path; shell credential resolvers are refused. |
 | `allow-custom-base-url` | `false` | Set `true` to permit model base URLs declared in the taskpack. |
 | `dry-run` | `false` | Set `true` to compile without executing the controller. |
-| `force` | `false` | Set `true` on non-comment trigger events in candidate mode to bypass `no_change` and open-PR deduplication. |
+| `force` | `false` | Set `true` on non-comment triggers to bypass `no_change` and open-PR deduplication. |
 | `gate-endpoint-url` | Unset | External gate endpoint, bound as `default`. |
 | `publication-endpoint-url` | Unset | External managed publication endpoint; otherwise native PR publication is available. |
 | `output` | Taskpack formats or `json` | Comma-separated output formats; overrides `spec.output.formats`. |
@@ -121,8 +125,8 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `github-app-installation-id` | Auto-discovered | Optional installation ID; discovered from `owner/repo` when omitted. |
 | `git-author-name` | Dynamic or `github-actions[bot]` | Optional commit author, committer, and DCO `Signed-off-by` name override. |
 | `git-author-email` | Dynamic noreply email | Optional commit author, committer, and DCO `Signed-off-by` email override. |
-| `upstream-records` | Unset | JSON array of precomputed upstream acquisition records. |
-| `source-revision` | `GITHUB_SHA` | Git commit SHA or ref materialized as the candidate source tree while keeping `GITHUB_SHA` as the base revision. |
+| `upstream-records` | Unset | JSON array of precomputed upstream acquisition records (`github-release`, `git-tag`, `git-commit`, `http-json`, or `custom-table`). |
+| `source-revision` | `GITHUB_SHA` | Git commit SHA or ref materialized as the candidate source tree while keeping `GITHUB_SHA` as base revision. |
 | `mcp-servers` | Taskpack `spec.mcp.servers` | JSON or YAML MCP server declarations merged by `id` (`LOOPWRIGHT_MCP_SERVERS` fallback). |
 | `wall-time-seconds` | `3600` | Run wall-time limit override in seconds (`60..21600`; `LOOPWRIGHT_WALL_TIME_SECONDS`). |
 | `total-tokens` | `20000000` | Total token ceiling across model calls (`1000..1000000000`; `LOOPWRIGHT_TOTAL_TOKENS`). |
@@ -133,7 +137,7 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | `tool-timeout-seconds` | `300` | Per-tool execution timeout in seconds (`1..1800`; `LOOPWRIGHT_TOOL_TIMEOUT_SECONDS`). |
 | `command-timeout-seconds` | `30` | Fallback `command.v1` check timeout in seconds (`1..3600`; `LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS`). |
 
-Explicit configuration takes precedence over environment variables (`Action with:` inputs > `taskpack.yaml` `spec.limits` > `LOOPWRIGHT_*` environment variables > compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical `spec.limits` keys and `LOOPWRIGHT_*` fallbacks; see [Execution limits](/loopwright/latest/docs/configuration/taskpack/index.md#execution-limits). Interactive OAuth and CLI providers or MCP servers are unsupported.
+Explicit configuration takes precedence over environment variables (`Action with:` inputs > `taskpack.yaml` `spec.limits` > `LOOPWRIGHT_*` environment variables > compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical `spec.limits` keys and `LOOPWRIGHT_*` fallbacks; see [Taskpack](/loopwright/latest/docs/configuration/taskpack/index.md#execution-limits). Interactive OAuth and CLI providers or MCP servers are unsupported.
 
 The `force` input applies only to candidate discovery on non-comment trigger events (`workflow_dispatch`, `schedule`, `repository_dispatch`, `release`), while PR comment commands (`/auto-sync retry`, `revise`, `status`) follow comment-command dispatch semantics.
 

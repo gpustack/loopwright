@@ -271,7 +271,7 @@ spec:
 
 ### Handler implementations
 
-Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (installed file SHA-256 from `installedHandlerDigests()`), `kind`, `implementation`, `parameters`, and exact `capabilities`:
+Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (installed file SHA-256 from `installedHandlerDigests()`), `kind`, `implementation`, `parameters`, and exact `capabilities` (`<= 256` checkpoints; roles bind `resourceIds`, steps set `onRework`, and `Evidence` carries `metrics`, `findings`, `detail`):
 
 | Implementation | `kind` | Required `capabilities` | Required `parameters` keys |
 | --- | --- | --- | --- |
@@ -279,14 +279,14 @@ Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (
 | `pi.compact.v1` | `agent` | `['pi', 'compaction']` | `{}` (empty mapping; compacts session context) |
 | `scope.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId` (identifier or `null` for implicit guard) |
 | `json-artifact.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId`, `path`, `required` (key list), `equals` (scalar map) |
+| `json-keys-guard.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId`, `path`, `allowedPointers` (JSON pointer list) |
+| `line-section-guard.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId`, `path`, `startMarker`, `endMarker` |
 | `no-change.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId` (identifier or `null` for implicit comparison) |
 | `gate.v1` | `check` | `['external_service', 'read_only']` | `checkId`, `endpointRef` (`gateEndpoints[].id`), `gateId` |
 
 ### Role and runtime profiles
 
-A role profile accepts `adapter: pi` or `adapter: delegated`. For secret-free delegated profiles, set `runtimeRef: null`, `providerCredentialRef: null`, and `mcp: null`. `providerCredentialRef` must be null. Their optional `context` defaults to `DEFAULT_DELEGATED_CONTEXT`. Delegated selections accept valid labels without Docker or provider secrets. `pi.compact.v1` cannot target delegated roles. Unattended `run` and `resume` refuse active or parked delegated roles with `CAPABILITY_UNSUPPORTED`.
-
-`ControllerConfig.spec.profiles.roles[]` accepts optional `selection` with `provider`, `model`, and optional `thinking`. The per-role `--role-model` override takes precedence and persists in `run.json` for recovery.
+A role profile accepts `adapter: pi` or `adapter: delegated`. Secret-free delegated profiles set `runtimeRef: null`, `providerCredentialRef: null`, and `mcp: null`, defaulting `context` to `DEFAULT_DELEGATED_CONTEXT`. `pi.compact.v1` cannot target delegated roles, and unattended `run`/`resume` refuse active or parked delegated roles (`CAPABILITY_UNSUPPORTED`). `ControllerConfig.spec.profiles.roles[]` accepts optional `selection` (`provider`, `model`, `thinking`); `--role-model` overrides take precedence and persist in `run.json`.
 
 Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` (`version: 1`, `resourceVersion`, `handlers`, `roleProfiles`, `resources`, `runtimeProfiles`, `credentialBindings`, `environmentBindings`; `gateEndpoints` and `publicationEndpoints` are optional keys):
 
@@ -322,7 +322,7 @@ Top-level `TrustedRegistry` requires `metadata.name` (`1..64` chars) and `spec` 
 
 ### MCP configuration
 
-`roleProfiles[].mcp` (`serverId: 'workspace'`) is **required** on every `roleProfiles[]` entry and supports two modes (`names: ['mcp__workspace__read_file']` and `effects: ['read_only']` when `mcp__workspace__read_file` is in `tools`, or `[]` when unused; `idleTimeoutSeconds: 1..2`, `absoluteTimeoutSeconds: idle..10`):
+`roleProfiles[].mcp` (`serverId: 'workspace'`) is required on every `roleProfiles[]` entry (`names: ['mcp__workspace__read_file']`, `effects: ['read_only']`, or `[]` when unused; `idleTimeoutSeconds: 1..2`, `absoluteTimeoutSeconds: idle..10`):
 
 | MCP mode | Required keys | Security constraint |
 | --- | --- | --- |
@@ -352,11 +352,11 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 
 - **Escape and non-execution**: Write `$$` for a literal `$` (`$${NAME}` stays `${NAME}`). Shell command substitution `$(...)`, `!command` resolvers, and `${NAME:-default}` fallbacks never execute (`CONFIG_ENV_SYNTAX`).
 - **JSON Pointer allowlist**: Every `${NAME}` must match `TrustedRegistry.spec.environmentBindings[]` at that exact JSON Pointer (`CONFIG_ENV_DENIED` if unlisted, `CONFIG_ENV_MISSING` if unset): `credential` is restricted to `/spec/credentials/<n>/template`, whereas `nonsecret` injects non-credential values such as `/spec/task/spec/target/sourceRevision`.
-- **Untrusted manifests**: In-repo `.loopwright/taskpack.yaml` (`kind: Taskpack`) rejects `${...}` (`TASKPACK_UNTRUSTED_INTERPOLATION`) and binds host variables by name via `spec.models[].apiKeyEnv`.
+- **Untrusted manifests**: In-repo `.loopwright/taskpack.yaml` (`kind: Taskpack`) permits declared non-secret `spec.vars` `${VAR}` interpolation in allowlisted fields, while undeclared or secret `${...}` still refuses (`TASKPACK_UNTRUSTED_INTERPOLATION`), and binds host variables by name via `spec.models[].apiKeyEnv`.
 
 ### Gate and publication endpoints
 
-`spec.gateEndpoints` and `spec.publicationEndpoints` are optional top-level keys in `TrustedRegistry` (`0..16` items). When an item is declared, all keys below are required (`https://` or loopback `http://127.0.0.1:<port>` / `http://[::1]:<port>` with zero URL credentials, query strings, or `#` fragments):
+`spec.gateEndpoints` and `spec.publicationEndpoints` are optional top-level keys (`0..16` items). Declared items require all keys below (`https://` or loopback `http://127.0.0.1:<port>` / `http://[::1]:<port>`, no credentials, queries, or `#`):
 
 | Field path | Required | Bounds | Meaning |
 | --- | --- | --- | --- |
@@ -364,12 +364,12 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 | `*.id` / `*.url` | Conditional | Identifier (`1..64`) / HTTPS URL | **Required** per endpoint item; unique ID and target service URL |
 | `gateEndpoints[].signingCredentialRef` | Conditional | `credentialBindings[].id` (`consumer: gate`) | **Required** per gate item; HMAC key verifying `gate.v1` receipts |
 | `gateEndpoints[].authCredentialRef` | Conditional | `credentialBindings[].id` or `null` | **Required** per gate item (`null` when no bearer header is used) |
-| `gateEndpoints[].timeoutMs` / `maxPollMs` | Conditional | `1000 .. 60000` ms / `1000 .. 600000` ms | **Required** per gate item; per-request and total polling timeouts |
+| `gateEndpoints[].timeoutMs` / `maxPollMs` | Conditional | `1000 .. 3600000` ms / `1000 .. 3600000` ms | **Required** per gate item; per-request and total polling timeouts |
 | `gateEndpoints[].pollInitialMs` / `pollMaxMs` | Conditional | `100 .. 30000` ms / `pollInitialMs .. maxPollMs` | **Required** per gate item; exponential backoff polling interval bounds |
 | `gateEndpoints[].jitter` | Conditional | `0 .. 1000` ms | **Required** per gate item; random jitter added between gate polls |
 | `publicationEndpoints[].signingCredentialRef` | Conditional | `credentialBindings[].id` (`consumer: publisher`) | **Required** per publication item; HMAC key verifying PR receipts |
 | `publicationEndpoints[].authCredentialRef` | Conditional | `credentialBindings[].id` or `null` | **Required** per publication item (`null` when unused) |
-| `publicationEndpoints[].timeoutMs` | Conditional | `1000 .. 60000` ms | **Required** per publication item; HTTP timeout for PR requests |
+| `publicationEndpoints[].timeoutMs` | Conditional | `1000 .. 300000` ms | **Required** per publication item; HTTP timeout for PR requests |
 
 ## Controller controls
 
@@ -380,8 +380,8 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 | `spec.profiles.roles` | Yes | `{ roleId, profileRef }` (`0..16` items) | Connects each `TaskContract` role to a `TrustedRegistry` `RoleProfile` |
 | `spec.profiles.steps` | Yes | `{ stepId, handlerRef }` (`0..16` items) | Connects each `TaskContract` step to a `TrustedRegistry` `Handler` |
 | `spec.credentials` | Yes | `{ ref, template }` list (pass `[]` if none) | Declares credential templates interpolated from approved env vars |
-| `controls.drainReserveMs` | Yes | `120000 .. 300000` ms (`< budgets.wallTimeMs`) | Time reserved before `wallTimeMs` to drain processes and persist state |
-| `controls.maxAttempts` | Yes | `1 .. 16` | Total execution and repair attempts allowed across the cycle |
+| `controls.drainReserveMs` | Yes | `5000 .. 600000` ms (`< budgets.wallTimeMs`) | Time reserved before `wallTimeMs` to drain processes and persist state |
+| `controls.maxAttempts` | Yes | `1 .. 64` | Total execution and repair attempts allowed across the cycle |
 | `controls.repeatFailureLimit` | Yes | `2` | Stops repair loops when the exact same failure signature occurs twice |
 | `controls.submission` | Yes | `mode: 'artifact_or_assistant'`, `path: null` or relative path | Accepts candidate output from a named workspace file or final assistant turn |
 | `spec.publication` | No | Defaults to `{ mode: 'disabled' }`; or `{ mode: 'pull_request', endpointRef, targetBranch, headBranchPrefix, titleTemplate }` | Optional block; when `mode: 'pull_request'`, all four PR keys are required |
@@ -390,7 +390,7 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 
 ### Gates and reconciliation
 
-Run `loopwright check` or `loopwright run --dry-run` before execution. When an external gate or pull request call terminates in an uncertain state (`unknown`), never replay the side effect blindly; verify the remote state and settle the run with `loopwright reconcile` and an authenticated receipt.
+Run `loopwright check` or `loopwright run --dry-run` before execution. When an external gate or pull request call terminates in `unknown`, never replay blindly; settle with `loopwright reconcile` and an authenticated receipt.
 
 ---
 

@@ -505,7 +505,7 @@
           <td><code>spec.target.matrix</code></td>
           <td>Yes (<code>null</code> allowed)</td>
           <td><code>null</code> or cell list (<code>1..64</code>)</td>
-          <td>Target matrix (<code>{ id, platform, variant }</code>); set <code>null</code> for controller runs</td>
+          <td>Target matrix (<code>{ id, platform, variant }</code>); allowed when no check requires <code>hardware_execution</code></td>
       </tr>
   </tbody>
 </table>
@@ -576,7 +576,7 @@
       </tr>
   </tbody>
 </table>
-<p>Turnkey taskpacks protect <code>.github</code>, <code>.claude</code>, <code>.codex</code>, <code>.agents</code>, <code>.loopwright/policies</code>, <code>AGENTS.md</code>, and <code>CLAUDE.md</code> by default.</p>
+<p>Turnkey taskpacks protect <code>.github</code>, <code>.loopwright/policies</code>, <code>digests.lock.json</code>, and built-in agent-instruction paths (<code>AGENTS.md</code> and tool-specific config directories) by default; <code>.agents/**</code> is opt-in via <code>writable</code>, and <code>.github/workflows/**</code> requires dual-key <code>allowWorkflowWrites</code>.</p>
 <h2 id="roles-and-steps">Roles and steps</h2>
 <h3 id="role-and-step-fields">Role and step fields</h3>
 <table>
@@ -633,10 +633,16 @@
           <td>Allowed tools include <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code>, <code>mcp</code>, <code>codemode</code>, and <code>mcp__workspace__read_file</code></td>
       </tr>
       <tr>
+          <td><code>roles[].resourceIds</code></td>
+          <td>No</td>
+          <td>Identifier list (<code>0..128</code>)</td>
+          <td>Optional subset of <code>trustedContext.resources[].id</code> injected for this role</td>
+      </tr>
+      <tr>
           <td><code>spec.steps</code></td>
           <td>Yes</td>
           <td>Object list (<code>1..256</code> nodes)</td>
-          <td>Acyclic execution graph (<code>&lt;= 2048</code> edges) of authoring and check steps</td>
+          <td>Acyclic execution graph (<code>&lt;= 2048</code> edges) of authoring and check steps (<code>&lt;= 256</code> checkpoints)</td>
       </tr>
       <tr>
           <td><code>steps[].id</code></td>
@@ -667,6 +673,12 @@
           <td>Yes</td>
           <td>Identifier list</td>
           <td>Upstream <code>steps[].id</code> nodes that must succeed first (pass <code>[]</code> for roots)</td>
+      </tr>
+      <tr>
+          <td><code>steps[].onRework</code></td>
+          <td>No</td>
+          <td><code>{ rejectTo, maxReworks }</code></td>
+          <td>Optional bounded subgraph reset targeting an ancestor step (<code>maxReworks</code>: <code>1..8</code>)</td>
       </tr>
   </tbody>
 </table>
@@ -761,6 +773,12 @@ For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the gener
           <td>All 7 dimension keys</td>
           <td>Enforcement mode for <code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code></td>
       </tr>
+      <tr>
+          <td><code>budgets.overlay</code></td>
+          <td>No</td>
+          <td><code>{ maxFiles, maxBytes }</code></td>
+          <td>Optional overlay caps (<code>maxFiles</code>: <code>1..4096</code>, <code>maxBytes</code>: <code>1024..67108864</code>; default <code>128</code>, <code>4 MiB</code>)</td>
+      </tr>
   </tbody>
 </table>
 <h3 id="enforcement-modes">Enforcement modes</h3>
@@ -792,9 +810,8 @@ For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the gener
 Classic <code>{ entries }</code> supports up to 256 entries.
 Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
-<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code>.
-The baseline supports up to 65,536 regular files.
-The overlay supports up to 128 added or modified entries, 128 deleted paths, and 4 MiB of aggregate entry bytes.</p>
+<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>4096</code> / <code>64 MiB</code>).</p>
+<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence</code> and <code>EvaluatedCheck</code> accept optional <code>metrics</code> (finite numbers, strings, or booleans), <code>findings</code>, and <code>detail</code> even on <code>passed</code> (<code>Evidence.spec.reason</code> stays <code>null</code>).</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>
   <thead>

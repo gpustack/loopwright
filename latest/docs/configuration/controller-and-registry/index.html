@@ -624,7 +624,7 @@
 </div>
 <h2 id="handlers-and-profiles">Handlers and profiles</h2>
 <h3 id="handler-implementations">Handler implementations</h3>
-<p>Each <code>TrustedRegistry.spec.handlers[]</code> entry pins <code>id</code>, <code>version: 1</code>, <code>digest</code> (installed file SHA-256 from <code>installedHandlerDigests()</code>), <code>kind</code>, <code>implementation</code>, <code>parameters</code>, and exact <code>capabilities</code>:</p>
+<p>Each <code>TrustedRegistry.spec.handlers[]</code> entry pins <code>id</code>, <code>version: 1</code>, <code>digest</code> (installed file SHA-256 from <code>installedHandlerDigests()</code>), <code>kind</code>, <code>implementation</code>, <code>parameters</code>, and exact <code>capabilities</code> (<code>&lt;= 256</code> checkpoints; roles bind <code>resourceIds</code>, steps set <code>onRework</code>, and <code>Evidence</code> carries <code>metrics</code>, <code>findings</code>, <code>detail</code>):</p>
 <table>
   <thead>
       <tr>
@@ -660,6 +660,18 @@
           <td><code>checkId</code>, <code>path</code>, <code>required</code> (key list), <code>equals</code> (scalar map)</td>
       </tr>
       <tr>
+          <td><code>json-keys-guard.v1</code></td>
+          <td><code>check</code></td>
+          <td><code>['inert_bytes', 'read_only']</code></td>
+          <td><code>checkId</code>, <code>path</code>, <code>allowedPointers</code> (JSON pointer list)</td>
+      </tr>
+      <tr>
+          <td><code>line-section-guard.v1</code></td>
+          <td><code>check</code></td>
+          <td><code>['inert_bytes', 'read_only']</code></td>
+          <td><code>checkId</code>, <code>path</code>, <code>startMarker</code>, <code>endMarker</code></td>
+      </tr>
+      <tr>
           <td><code>no-change.v1</code></td>
           <td><code>check</code></td>
           <td><code>['inert_bytes', 'read_only']</code></td>
@@ -674,8 +686,7 @@
   </tbody>
 </table>
 <h3 id="role-and-runtime-profiles">Role and runtime profiles</h3>
-<p>A role profile accepts <code>adapter: pi</code> or <code>adapter: delegated</code>. For secret-free delegated profiles, set <code>runtimeRef: null</code>, <code>providerCredentialRef: null</code>, and <code>mcp: null</code>. <code>providerCredentialRef</code> must be null. Their optional <code>context</code> defaults to <code>DEFAULT_DELEGATED_CONTEXT</code>. Delegated selections accept valid labels without Docker or provider secrets. <code>pi.compact.v1</code> cannot target delegated roles. Unattended <code>run</code> and <code>resume</code> refuse active or parked delegated roles with <code>CAPABILITY_UNSUPPORTED</code>.</p>
-<p><code>ControllerConfig.spec.profiles.roles[]</code> accepts optional <code>selection</code> with <code>provider</code>, <code>model</code>, and optional <code>thinking</code>. The per-role <code>--role-model</code> override takes precedence and persists in <code>run.json</code> for recovery.</p>
+<p>A role profile accepts <code>adapter: pi</code> or <code>adapter: delegated</code>. Secret-free delegated profiles set <code>runtimeRef: null</code>, <code>providerCredentialRef: null</code>, and <code>mcp: null</code>, defaulting <code>context</code> to <code>DEFAULT_DELEGATED_CONTEXT</code>. <code>pi.compact.v1</code> cannot target delegated roles, and unattended <code>run</code>/<code>resume</code> refuse active or parked delegated roles (<code>CAPABILITY_UNSUPPORTED</code>). <code>ControllerConfig.spec.profiles.roles[]</code> accepts optional <code>selection</code> (<code>provider</code>, <code>model</code>, <code>thinking</code>); <code>--role-model</code> overrides take precedence and persist in <code>run.json</code>.</p>
 <p>Top-level <code>TrustedRegistry</code> requires <code>metadata.name</code> (<code>1..64</code> chars) and <code>spec</code> (<code>version: 1</code>, <code>resourceVersion</code>, <code>handlers</code>, <code>roleProfiles</code>, <code>resources</code>, <code>runtimeProfiles</code>, <code>credentialBindings</code>, <code>environmentBindings</code>; <code>gateEndpoints</code> and <code>publicationEndpoints</code> are optional keys):</p>
 <table>
   <thead>
@@ -814,7 +825,7 @@
   </tbody>
 </table>
 <h3 id="mcp-configuration">MCP configuration</h3>
-<p><code>roleProfiles[].mcp</code> (<code>serverId: 'workspace'</code>) is <strong>required</strong> on every <code>roleProfiles[]</code> entry and supports two modes (<code>names: ['mcp__workspace__read_file']</code> and <code>effects: ['read_only']</code> when <code>mcp__workspace__read_file</code> is in <code>tools</code>, or <code>[]</code> when unused; <code>idleTimeoutSeconds: 1..2</code>, <code>absoluteTimeoutSeconds: idle..10</code>):</p>
+<p><code>roleProfiles[].mcp</code> (<code>serverId: 'workspace'</code>) is required on every <code>roleProfiles[]</code> entry (<code>names: ['mcp__workspace__read_file']</code>, <code>effects: ['read_only']</code>, or <code>[]</code> when unused; <code>idleTimeoutSeconds: 1..2</code>, <code>absoluteTimeoutSeconds: idle..10</code>):</p>
 <table>
   <thead>
       <tr>
@@ -904,10 +915,10 @@
 <ul>
 <li><strong>Escape and non-execution</strong>: Write <code>$$</code> for a literal <code>$</code> (<code>$${NAME}</code> stays <code>${NAME}</code>). Shell command substitution <code>$(...)</code>, <code>!command</code> resolvers, and <code>${NAME:-default}</code> fallbacks never execute (<code>CONFIG_ENV_SYNTAX</code>).</li>
 <li><strong>JSON Pointer allowlist</strong>: Every <code>${NAME}</code> must match <code>TrustedRegistry.spec.environmentBindings[]</code> at that exact JSON Pointer (<code>CONFIG_ENV_DENIED</code> if unlisted, <code>CONFIG_ENV_MISSING</code> if unset): <code>credential</code> is restricted to <code>/spec/credentials/&lt;n&gt;/template</code>, whereas <code>nonsecret</code> injects non-credential values such as <code>/spec/task/spec/target/sourceRevision</code>.</li>
-<li><strong>Untrusted manifests</strong>: In-repo <code>.loopwright/taskpack.yaml</code> (<code>kind: Taskpack</code>) rejects <code>${...}</code> (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>) and binds host variables by name via <code>spec.models[].apiKeyEnv</code>.</li>
+<li><strong>Untrusted manifests</strong>: In-repo <code>.loopwright/taskpack.yaml</code> (<code>kind: Taskpack</code>) permits declared non-secret <code>spec.vars</code> <code>${VAR}</code> interpolation in allowlisted fields, while undeclared or secret <code>${...}</code> still refuses (<code>TASKPACK_UNTRUSTED_INTERPOLATION</code>), and binds host variables by name via <code>spec.models[].apiKeyEnv</code>.</li>
 </ul>
 <h3 id="gate-and-publication-endpoints">Gate and publication endpoints</h3>
-<p><code>spec.gateEndpoints</code> and <code>spec.publicationEndpoints</code> are optional top-level keys in <code>TrustedRegistry</code> (<code>0..16</code> items). When an item is declared, all keys below are required (<code>https://</code> or loopback <code>http://127.0.0.1:&lt;port&gt;</code> / <code>http://[::1]:&lt;port&gt;</code> with zero URL credentials, query strings, or <code>#</code> fragments):</p>
+<p><code>spec.gateEndpoints</code> and <code>spec.publicationEndpoints</code> are optional top-level keys (<code>0..16</code> items). Declared items require all keys below (<code>https://</code> or loopback <code>http://127.0.0.1:&lt;port&gt;</code> / <code>http://[::1]:&lt;port&gt;</code>, no credentials, queries, or <code>#</code>):</p>
 <table>
   <thead>
       <tr>
@@ -945,7 +956,7 @@
       <tr>
           <td><code>gateEndpoints[].timeoutMs</code> / <code>maxPollMs</code></td>
           <td>Conditional</td>
-          <td><code>1000 .. 60000</code> ms / <code>1000 .. 600000</code> ms</td>
+          <td><code>1000 .. 3600000</code> ms / <code>1000 .. 3600000</code> ms</td>
           <td><strong>Required</strong> per gate item; per-request and total polling timeouts</td>
       </tr>
       <tr>
@@ -975,7 +986,7 @@
       <tr>
           <td><code>publicationEndpoints[].timeoutMs</code></td>
           <td>Conditional</td>
-          <td><code>1000 .. 60000</code> ms</td>
+          <td><code>1000 .. 300000</code> ms</td>
           <td><strong>Required</strong> per publication item; HTTP timeout for PR requests</td>
       </tr>
   </tbody>
@@ -1024,13 +1035,13 @@
       <tr>
           <td><code>controls.drainReserveMs</code></td>
           <td>Yes</td>
-          <td><code>120000 .. 300000</code> ms (<code>&lt; budgets.wallTimeMs</code>)</td>
+          <td><code>5000 .. 600000</code> ms (<code>&lt; budgets.wallTimeMs</code>)</td>
           <td>Time reserved before <code>wallTimeMs</code> to drain processes and persist state</td>
       </tr>
       <tr>
           <td><code>controls.maxAttempts</code></td>
           <td>Yes</td>
-          <td><code>1 .. 16</code></td>
+          <td><code>1 .. 64</code></td>
           <td>Total execution and repair attempts allowed across the cycle</td>
       </tr>
       <tr>
@@ -1055,7 +1066,7 @@
 </table>
 <h2 id="recovery">Recovery</h2>
 <h3 id="gates-and-reconciliation">Gates and reconciliation</h3>
-<p>Run <code>loopwright check</code> or <code>loopwright run --dry-run</code> before execution. When an external gate or pull request call terminates in an uncertain state (<code>unknown</code>), never replay the side effect blindly; verify the remote state and settle the run with <code>loopwright reconcile</code> and an authenticated receipt.</p>
+<p>Run <code>loopwright check</code> or <code>loopwright run --dry-run</code> before execution. When an external gate or pull request call terminates in <code>unknown</code>, never replay blindly; settle with <code>loopwright reconcile</code> and an authenticated receipt.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>

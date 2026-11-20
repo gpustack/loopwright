@@ -351,7 +351,7 @@
       <article>
         
   <h1 id="decision-routing">Decision Routing</h1>
-<p>System-One decision routing uses fast, calibrated models to classify bounded triage questions (such as retry classification, scope pre-screening, or review routing). Routing is strictly <strong>advisory</strong>: deterministic controller gates and <code>TrustedRegistry</code> rules retain full authority over execution, verification, and publication.</p>
+<p>System-One decision routing uses fast, calibrated models to classify bounded triage questions (such as capability tier selection, cycle alignment, soft compaction, or candidate diff triage). Routing is strictly <strong>advisory</strong>: deterministic controller gates and <code>TrustedRegistry</code> rules retain full authority over execution, verification, and publication.</p>
 <h2 id="contents">Contents</h2>
 <ul>
 <li><a href="#decisionpolicy">DecisionPolicy</a>
@@ -360,7 +360,7 @@
 </li>
 <li><a href="#policy-reference">Policy reference</a>
 </li>
-<li><a href="#fallback-and-authority">Fallback and authority</a>
+<li><a href="#live-wiring-and-fallback">Live wiring and fallback</a>
 </li>
 </ul>
 <h2 id="decisionpolicy">DecisionPolicy</h2>
@@ -370,7 +370,7 @@
 -->
 <ul>
 <li><strong>Standalone host policy (<code>decisions.yaml</code>)</strong>: Load a <code>DecisionPolicy</code> document via <code>loadDecisionPolicyFile('decisions.yaml')</code> in custom controller or App integrations.</li>
-<li><strong>Declarative Taskpack (<code>spec.decisions</code>)</strong>: Embed the same fields under <code>spec.decisions</code> in <code>.loopwright/taskpack.yaml</code> (<code>Taskpack</code> validates the block and exposes it to host callers; <code>runGitHubActionEntrypoint</code> does not instantiate a live provider automatically).</li>
+<li><strong>Declarative Taskpack (<code>spec.decisions</code>)</strong>: Embed the policy under <code>spec.decisions</code> in <code>.loopwright/taskpack.yaml</code>. Taskpack 2.0 wires <code>spec.decisions</code> live through <code>ControllerPorts.decisions</code> in both GitHub Action and CLI runs.</li>
 </ul>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -385,6 +385,28 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">hardDeadlineMs</span><span class="p">:</span><span class="w"> </span><span class="m">5000</span><span class="w"> </span><span class="c"># Optional (defaults to 5000)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional (defaults to 1)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">allowImages</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span></span></span></code></pre></div>
+</div>
+<p>For declarative <code>Taskpack</code> triage, declare <code>spec.decisions</code> with optional <code>triageRules</code>:</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">docs-sync</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="c"># Other Taskpack sections omitted; see Taskpack.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">disclosurePolicy</span><span class="p">:</span><span class="w"> </span><span class="l">public-metadata-only</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">confirmThreshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">triageRules</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional pre-publication candidate diff rules (0..100)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs-only-risk</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l">Flag risky config edits outside expected doc files.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l">important</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">noul</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.7</span><span class="w"> </span><span class="c"># Optional finite score in 0.0..1.0</span></span></span></code></pre></div>
 </div>
 <ul>
 <li><strong>Taskpack nesting</strong>: Inside <code>.loopwright/taskpack.yaml</code> (<code>kind: Taskpack</code>), place the <code>spec.*</code> fields under <code>spec.decisions</code> rather than repeating a nested <code>DecisionPolicy</code> header.</li>
@@ -420,7 +442,7 @@
 </table>
 <h2 id="policy-reference">Policy reference</h2>
 <h3 id="policy-fields">Policy fields</h3>
-<p>In a standalone <code>DecisionPolicy</code> document (<code>decisions.yaml</code>), <code>apiVersion</code>, <code>kind</code>, and <code>spec</code> are required while all <code>spec.*</code> keys default cleanly; when nested under <code>Taskpack</code> <code>spec.decisions</code>, <code>decisions.enabled</code> is <strong>required</strong> and the remaining 7 shared fields are optional:</p>
+<p>In a standalone <code>DecisionPolicy</code> document (<code>decisions.yaml</code>), <code>apiVersion</code>, <code>kind</code>, and <code>spec</code> are required while all <code>spec.*</code> keys default cleanly; when nested under <code>Taskpack</code> <code>spec.decisions</code>, <code>decisions.enabled</code> is <strong>required</strong> and the shared fields plus <code>triageRules</code> are optional:</p>
 <table>
   <thead>
       <tr>
@@ -446,7 +468,7 @@
       <tr>
           <td><code>spec.disclosurePolicy</code></td>
           <td>No</td>
-          <td><code>'disabled'</code></td>
+          <td><code>'disabled'</code> (standalone) / <code>'public-metadata-only'</code> (<code>Taskpack</code>)</td>
           <td>Outbound payload redaction tier (<code>disabled</code>, <code>public-metadata-only</code>, <code>repo-approved-redacted-evidence</code>)</td>
       </tr>
       <tr>
@@ -484,6 +506,12 @@
           <td>No</td>
           <td><code>false</code></td>
           <td>Permits image inputs and <code>box</code> bounding-box questions when <code>true</code></td>
+      </tr>
+      <tr>
+          <td><code>spec.triageRules</code></td>
+          <td>No</td>
+          <td>Unset</td>
+          <td><code>Taskpack</code> <code>spec.decisions</code>: <code>0..100</code> rules (<code>{ id, description, severity, kind, threshold? }</code>)</td>
       </tr>
       <tr>
           <td><code>spec.endpoint</code> / <code>spec.model</code></td>
@@ -626,8 +654,43 @@
       </tr>
   </tbody>
 </table>
-<h2 id="fallback-and-authority">Fallback and authority</h2>
-<p>Six safety-critical intents (such as bypassing verification receipts, expanding <code>writable</code> scope, or overriding lease fences) are permanently <strong>non-delegable</strong> and never sent to a decision model. When a provider is disabled, unreachable, or returns low confidence, Loopwright falls back to deterministic rules and retains any uncertain provider consumption in run observations.</p>
+<h2 id="live-wiring-and-fallback">Live wiring and fallback</h2>
+<p><code>ControllerPorts.decisions</code> exposes the zero-dependency <code>AdvisoryDecisionPort</code> interface so <code>@loopwright/github-app</code> and <code>@loopwright/cli</code> inject live <code>@loopwright/decisions</code> adapters without creating package cycles. Standalone <code>kind: DecisionPolicy</code> defaults <code>disclosurePolicy</code> to <code>disabled</code>, whereas omitting <code>spec.decisions.disclosurePolicy</code> when <code>spec.decisions.enabled: true</code> in <code>kind: Taskpack</code> defaults to <code>public-metadata-only</code>.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Port hook</th>
+          <th>Lifecycle point</th>
+          <th>Safety guarantee</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>routeCapabilityTier</code></td>
+          <td>Role preparation</td>
+          <td>Preserves pinned role models (<code>userOverridePreserved: true</code>)</td>
+      </tr>
+      <tr>
+          <td><code>evaluateCycleAlignment</code></td>
+          <td>Before repair or <code>rejectTo</code> rework</td>
+          <td>Advisory route (<code>continue</code>, <code>revise</code>, <code>needs_review</code>, <code>blocked</code>)</td>
+      </tr>
+      <tr>
+          <td><code>adviseSoftCompaction</code></td>
+          <td>Prior to <code>pi.compact.v1</code> steps</td>
+          <td>Cannot veto active hard-compaction triggers</td>
+      </tr>
+      <tr>
+          <td><code>triageCandidateDiff</code></td>
+          <td>Post-capture pre-publication</td>
+          <td>Skips cleanly when <code>triageRules</code> is empty; sets <code>verificationCertified: false</code></td>
+      </tr>
+  </tbody>
+</table>
+<ul>
+<li><strong>Deterministic fallback</strong>: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (<code>source: 'deterministic_fallback'</code>) without blocking or certifying runs.</li>
+<li><strong>Non-delegable authority</strong>: All six <code>DECISION_FORBIDDEN_AUTHORITY_INTENTS</code> (such as certifying verification receipts, bypassing required gates, overriding pinned models, expanding <code>writable</code> scope, or granting execution authority) are permanently refused and never sent to a decision model. Recorded entries appear in run observations (<code>advisoryDecisions</code>) with <code>verificationCertified: false</code>.</li>
+</ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -658,7 +721,7 @@
         <li><a href="#question-primitives">Question primitives</a></li>
       </ul>
     </li>
-    <li><a href="#fallback-and-authority">Fallback and authority</a></li>
+    <li><a href="#live-wiring-and-fallback">Live wiring and fallback</a></li>
   </ul>
 </nav>
         
