@@ -432,7 +432,7 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
 
     const files = new Map<string, Buffer>();
     for (const art of input.candidate.artifacts) {
-      files.set(art.name, Buffer.from(art.bytes));
+      files.set(art.name, 'bytes' in art ? Buffer.from(art.bytes) : await readFile(art.blobPath));
     }
     const deleted = new Set<string>(input.candidate.manifest.spec.deleted ?? []);
     const sessionEntries: SessionJsonlEntry[] = [];
@@ -464,10 +464,20 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
         const name = isPlainObject(ref) && typeof ref['name'] === 'string' ? ref['name'] : '';
         idx += 1;
         const chunks: Buffer[] = [];
-        while (idx < wsRows.length && wsRows[idx]?.['type'] === 'chunk') {
-          const data = wsRows[idx]?.['data'];
-          if (typeof data === 'string') chunks.push(Buffer.from(data, 'base64'));
+        if (idx < wsRows.length && wsRows[idx]?.['type'] === 'blob_ref') {
+          const blobRefObj = wsRows[idx]?.['blobRef'];
+          const digestObj = isPlainObject(blobRefObj) ? blobRefObj['digest'] : null;
+          const hex = isPlainObject(digestObj) && typeof digestObj['hex'] === 'string' ? digestObj['hex'] : '';
+          if (hex.length === 64) {
+            chunks.push(await readFile(join(host.artifactsDirectory, 'blobs', 'sha256', hex)));
+          }
           idx += 1;
+        } else {
+          while (idx < wsRows.length && wsRows[idx]?.['type'] === 'chunk') {
+            const data = wsRows[idx]?.['data'];
+            if (typeof data === 'string') chunks.push(Buffer.from(data, 'base64'));
+            idx += 1;
+          }
         }
         if (idx < wsRows.length && wsRows[idx]?.['type'] === 'file_end') {
           idx += 1;

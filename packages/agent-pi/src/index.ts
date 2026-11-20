@@ -13,7 +13,8 @@ export type {
   ExternalMcpToolSchema,
 } from './external-mcp.js';
 export type {
-  AdapterPolicy, PiAdapter, PiBaselineEntry, PiCandidateBaseline, PiCapabilities, PiCapture, PiCommand, PiCustomModelCompat, PiCustomProviderConfig,
+  AdapterPolicy, PiAdapter, PiBaselineEntry, PiCandidateArtifactInput, PiCandidateBaseline, PiCandidateBlobArtifact,
+  PiCapabilities, PiCapture, PiCommand, PiCustomModelCompat, PiCustomProviderConfig,
   PiError, PiErrorCode, PiEvent, PiContextRecord, PiContextAssessment, PiHost, PiLimits, PiModelCost, PiModelSelection,
   PiOpenInput, PiOutcome, PiResult, PiSamplingParams, PiThinkingLevel, PiWireApi, ResourceIdentity, RuntimeIdentity,
 } from './types.js';

@@ -866,7 +866,14 @@ test('reconcileCycle(input, ports) threads allowWorkflowWrites: true, decisions,
 
     let turnSeq = 0;
     const openAdapter: import('../src/controller.js').ControllerPorts['openAdapter'] = async (host, openInput) => {
-      const files = new Map<string, Uint8Array>(openInput.candidate.artifacts.map(a => [a.name, new Uint8Array(a.bytes)]));
+      const files = new Map<string, Uint8Array>(
+        await Promise.all(
+          openInput.candidate.artifacts.map(async a => [
+            a.name,
+            'bytes' in a ? new Uint8Array(a.bytes) : new Uint8Array(await readFile(a.blobPath)),
+          ] as const),
+        ),
+      );
       let lastPrompt = '';
       let subText = '';
       const adapter: import('@loopwright/agent-pi').PiAdapterV2 = {

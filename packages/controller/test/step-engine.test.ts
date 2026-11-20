@@ -872,7 +872,10 @@ test('mixed adapter: pi + adapter: delegated two-role pipeline hands off cleanly
             const bytes =
               ref.name === 'packages/result.json'
                 ? updatedBytes
-                : Buffer.from(input.candidate.artifacts.find(a => a.name === ref.name)!.bytes);
+                : await (async () => {
+                    const found = input.candidate.artifacts.find(a => a.name === ref.name)!;
+                    return 'bytes' in found ? Buffer.from(found.bytes) : await readFile(found.blobPath);
+                  })();
             fileChunks.push(line({ type: 'file', ref }));
             fileChunks.push(line({ type: 'chunk', index: 0, data: bytes.toString('base64') }));
             fileChunks.push(line({ type: 'file_end', byteLength: bytes.byteLength, digest: hash(bytes).hex }));
@@ -2017,7 +2020,10 @@ test('mixed delegated -> pi pipeline enforces post-capture maxModelCalls when pi
             const bytes =
               ref.name === 'packages/result.json'
                 ? updatedBytes
-                : Buffer.from(input.candidate.artifacts.find(a => a.name === ref.name)!.bytes);
+                : await (async () => {
+                    const found = input.candidate.artifacts.find(a => a.name === ref.name)!;
+                    return 'bytes' in found ? Buffer.from(found.bytes) : await readFile(found.blobPath);
+                  })();
             fileChunks.push(line({ type: 'file', ref }));
             fileChunks.push(line({ type: 'chunk', index: 0, data: bytes.toString('base64') }));
             fileChunks.push(line({ type: 'file_end', byteLength: bytes.byteLength, digest: hash(bytes).hex }));

@@ -66,7 +66,14 @@ function buildPiAdapterPort(options: {
   };
 
   return async (host: PiHostV2, input: PiOpenInputV2) => {
-    let files = new Map<string, Uint8Array>(input.candidate.artifacts.map(a => [a.name, new Uint8Array(a.bytes)]));
+    let files = new Map<string, Uint8Array>(
+      await Promise.all(
+        input.candidate.artifacts.map(async a => [
+          a.name,
+          'bytes' in a ? new Uint8Array(a.bytes) : new Uint8Array(await readFile(a.blobPath)),
+        ] as const),
+      ),
+    );
     let lastText = '';
     let responseText = JSON.stringify({ version: 1, status: 'completed', checks: [], reason: null });
     let lastWasCompaction = false;

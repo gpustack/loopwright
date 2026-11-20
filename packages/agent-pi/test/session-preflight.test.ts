@@ -57,8 +57,11 @@ test('strict default and hard-token routes refuse before model/container startup
 });
 test('owned input cannot be mutated and artifact bytes have no caller aliases', () => {
   const source = sessionInput(), result = prepareInput(source);
-  source.candidate.artifacts[0]!.bytes[0] = 0;
-  assert.notEqual(result.candidate.artifacts[0]!.bytes[0], 0);
+  const srcFirst = source.candidate.artifacts[0]!;
+  const resFirst = result.candidate.artifacts[0]!;
+  assert.ok('bytes' in srcFirst && 'bytes' in resFirst);
+  srcFirst.bytes[0] = 0;
+  assert.notEqual(resFirst.bytes[0], 0);
   assert.ok(Object.isFrozen(result.policy));
 });
 test('accessors and proxies are rejected without running caller code', () => {
@@ -69,7 +72,9 @@ test('accessors and proxies are rejected without running caller code', () => {
 });
 test('typed artifact views reject shared memory and ignore caller byte getters', () => {
   const source = sessionInput(); let touched = 0;
-  Object.defineProperty(source.candidate.artifacts[0]!.bytes, 'byteLength', { get: () => { touched++; throw new Error('caller byte getter'); } });
+  const srcFirst = source.candidate.artifacts[0]!;
+  assert.ok('bytes' in srcFirst);
+  Object.defineProperty(srcFirst.bytes, 'byteLength', { get: () => { touched++; throw new Error('caller byte getter'); } });
   assert.ok(prepareInput(source)); assert.equal(touched, 0);
   const shared = sessionInput(); const candidate = { ...shared.candidate, artifacts: [{ name: shared.candidate.artifacts[0]!.name, bytes: new Uint8Array(new SharedArrayBuffer(4)) }] };
   assert.throws(() => prepareInput({ ...shared, candidate }), PiFailure);
@@ -87,7 +92,9 @@ test('unauthorized plugins, tools, destination fields and widened limits refuse'
 test('candidate revision, inventory and content digests bind the owned bytes', () => {
   const source = sessionInput();
   assert.throws(() => prepareInput({ ...source, candidate: { ...source.candidate, baseRevision: 'other' } }), PiFailure);
-  source.candidate.artifacts[0]!.bytes[0] = 0; assert.throws(() => prepareInput(source), PiFailure);
+  const srcFirst = source.candidate.artifacts[0]!;
+  assert.ok('bytes' in srcFirst);
+  srcFirst.bytes[0] = 0; assert.throws(() => prepareInput(source), PiFailure);
 });
 
 test('unsupported smaller fixed transport caps fail before startup instead of being ignored', () => {

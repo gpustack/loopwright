@@ -2,6 +2,7 @@ import { createReadTool, createBashTool, createLocalBashOperations } from '@eare
 import { constants } from 'node:fs';
 import { open, lstat } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { LIMITS, OVERLAY_LIMITS } from '@loopwright/core';
 import { Channel, type ChannelMessage } from './protocol.js';
 import { parseBoundedJson } from './context.js';
 import { canonical, digest, integer } from './boundary.js';
@@ -21,7 +22,8 @@ export function runToolWorker(nonce: string): void {
     if (message.kind === 'close') { stop(); return; }
     if (message.kind !== 'execute-tool' || used) throw new Error('Unsupported tool command'); used = true;
     const envelope = message.body as { metadata: { name: string; path: string | null; fileDigest: string | null; fileBytes: number; resultBytes: number; wallMs: number }; bytes: Uint8Array }, meta = envelope.metadata;
-    integer(meta.fileBytes, 1, 67108864); integer(meta.resultBytes, 1, 4194304); integer(meta.wallMs, 1, 1800000);
+    integer(meta.fileBytes, 1, OVERLAY_LIMITS.maxMaxBytes); integer(meta.resultBytes, 1, 4194304); integer(meta.wallMs, 1, 1800000);
+    const readFileMaxBytes = Math.min(meta.fileBytes, LIMITS.artifactBytes);
     if (envelope.bytes.length > 4194304) refuse('OUTPUT_LIMIT');
     const args = parseBoundedJson(new TextDecoder('utf-8', { fatal: true }).decode(envelope.bytes), { nodes: 262144, array: 4096 }) as Record<string, unknown>;
     let result: ToolResult, produced = 0, overflow = false, code: string | null = null;
@@ -29,10 +31,10 @@ export function runToolWorker(nonce: string): void {
       if (meta.name === 'read') {
         if (typeof meta.path !== 'string' || !meta.path || !/^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(meta.path) || meta.path.split('/').some(part => part === '.' || part === '..')) refuse('TOOL_DENIED');
         const expected = '/workspace/candidate/' + meta.path;
-        const check = async (path: string) => { if (path !== expected) refuse('TOOL_DENIED'); const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > meta.fileBytes) refuse('TOOL_DENIED'); };
+        const check = async (path: string) => { if (path !== expected) refuse('TOOL_DENIED'); const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > readFileMaxBytes) refuse('TOOL_DENIED'); };
         const read = createReadTool('/workspace/candidate', { autoResizeImages: false, operations: { access: check, detectImageMimeType: async () => null, readFile: async path => {
           await check(path); const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-          try { const info = await fd.stat(); if (!info.isFile() || info.nlink !== 1 || info.size > meta.fileBytes) refuse('TOOL_DENIED'); const bytes = Buffer.alloc(info.size + 1); let offset = 0;
+          try { const info = await fd.stat(); if (!info.isFile() || info.nlink !== 1 || info.size > readFileMaxBytes) refuse('TOOL_DENIED'); const bytes = Buffer.alloc(info.size + 1); let offset = 0;
             while (offset < bytes.length) { const next = await fd.read(bytes, offset, bytes.length - offset, offset); if (!next.bytesRead) break; offset += next.bytesRead; }
             const data = bytes.subarray(0, offset); if (offset !== info.size || digest(data).hex !== meta.fileDigest) refuse('RECOVERY_REQUIRED'); new TextDecoder('utf-8', { fatal: true }).decode(data); return data;
           } finally { await fd.close(); }

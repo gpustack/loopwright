@@ -228,7 +228,7 @@ test('prepareInput, captureCheckpoint, and decodePiCapture support 512-file / >4
       directory: join(f.directory, 'state'),
       storeId: 'store-ov-1',
       lock: prepared.lock,
-      policy: { version: 1, leaseMs: 10_000, cost: 'observe_only' },
+      policy: { version: 1, leaseMs: 60_000, cost: 'observe_only' },
       binding: {
         coreApiVersion: 'loopwright.dev/v1alpha1',
         hostVersion: 'test',
@@ -332,6 +332,7 @@ test('prepareInput, captureCheckpoint, and decodePiCapture support 512-file / >4
         workspace: { ref: capture.workspace, bytes: workspaceBytes },
         session: { ref: capture.session, bytes: sessionBytes },
         command: null,
+        artifactsDirectory: artifactsDir,
       });
       assert.equal(decoded.ok, true, JSON.stringify(decoded));
       if (!decoded.ok) throw new Error('decodePiCapture failed');
@@ -490,7 +491,7 @@ test('Candidate and captureCheckpoint enforce Math.min(overlay.maxFiles, policy.
       directory: join(f.directory, 'state-tight'),
       storeId: 'store-tight-cap',
       lock: tightPolicyInput.lock,
-      policy: { version: 1, leaseMs: 10_000, cost: 'observe_only' },
+      policy: { version: 1, leaseMs: 60_000, cost: 'observe_only' },
       binding: {
         coreApiVersion: 'loopwright.dev/v1alpha1',
         hostVersion: 'test',

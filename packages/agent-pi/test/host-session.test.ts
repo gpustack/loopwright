@@ -90,6 +90,7 @@ async function createHostSessionFixture(options: {
   readonly mcpNames?: readonly 'mcp__workspace__read_file'[];
   readonly candidate?: PiOpenInput['candidate'];
   readonly maxImplementationRepairs?: number;
+  readonly fileBytes?: number;
 }) {
   const filesRes = await describePiAdapterFiles();
   assert.equal(filesRes.ok, true);
@@ -220,7 +221,7 @@ async function createHostSessionFixture(options: {
       retry: 'sender_only',
       extensions: [],
       privateArtifacts: true,
-      limits: MAX_LIMITS,
+      limits: options.fileBytes === undefined ? MAX_LIMITS : { ...MAX_LIMITS, fileBytes: options.fileBytes },
     },
     candidate: options.candidate ?? {
       manifest: {
@@ -898,6 +899,7 @@ test('HostRuntimeSession tree_overlay materializes 100755 baseline, gates delete
         bytes: readFileSync(join(fixture.artifactsDir, captured.value.session.name)),
       },
       command: null,
+      artifactsDirectory: fixture.artifactsDir,
     });
     assert.equal(decoded.ok, true, JSON.stringify(decoded));
     if (!decoded.ok) return;
@@ -978,7 +980,8 @@ test('HostRuntimeSession tree_overlay refuses wrong-mode, extra-file, or hardlin
 });
 
 test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> fileBytes), refuses read with TOOL_DENIED, and captures sibling edits/deletes', { skip: !isSupportedHostSessionPlatform() }, async () => {
-  const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 1024, 0x41);
+  const fileBytesLimit = 65_536;
+  const oversizeBytes = Buffer.alloc(fileBytesLimit + 1024, 0x41);
   const keepBytes = Buffer.from('export const keep = 1;\n');
   const toDeleteBytes = Buffer.from('delete me\n');
 
@@ -1021,6 +1024,7 @@ test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> file
     const fixture = await createHostSessionFixture({
       baseUrl: `http://127.0.0.1:${addr.port}/v1`,
       tools: ['read', 'write', 'edit', 'delete'],
+      fileBytes: fileBytesLimit,
       candidate: {
         manifest: {
           apiVersion: 'loopwright.dev/v1alpha1',
@@ -1074,6 +1078,7 @@ test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> file
           bytes: readFileSync(join(fixture.artifactsDir, captured.value.session.name)),
         },
         command: null,
+        artifactsDirectory: fixture.artifactsDir,
       });
       assert.equal(decoded.ok, true, JSON.stringify(decoded));
       if (!decoded.ok) return;
@@ -1106,6 +1111,7 @@ test('HostRuntimeSession tree_overlay allows untouched oversize baseline (> file
     const fixture = await createHostSessionFixture({
       baseUrl: `http://127.0.0.1:${addr.port}/v1`,
       tools: ['read', 'write', 'edit', 'delete'],
+      fileBytes: fileBytesLimit,
       candidate: {
         manifest: {
           apiVersion: 'loopwright.dev/v1alpha1',

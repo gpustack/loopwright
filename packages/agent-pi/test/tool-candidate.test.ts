@@ -8,7 +8,6 @@ import { digestArtifact } from '@loopwright/core';
 import { Candidate, gitBlobOid, materializeCandidateDirectory, pruneEmptyDirectories, setDirectoryTreeMode } from '../src/candidate.js';
 import { PiFailure } from '../src/errors.js';
 import { canonical } from '../src/boundary.js';
-import { MAX_LIMITS } from '../src/policy.js';
 import { sessionInput } from './session-fixtures.js';
 async function fixture() {
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-candidate-')), root = join(directory, 'candidate'), input = sessionInput();
@@ -104,11 +103,15 @@ test('classic delete unlinks writable file, prunes empty subdirectories, and ref
 async function overlayFixture(options: {
   objectFormat?: 'sha1' | 'sha256';
   extraFiles?: readonly { name: string; content: string; mode?: '100644' | '100755' }[];
+  fileBytes?: number;
 } = {}) {
   const objectFormat = options.objectFormat ?? 'sha1';
   const directory = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-overlay-cand-'));
   const root = join(directory, 'candidate');
-  const input = sessionInput();
+  const baseInput = sessionInput();
+  const input = options.fileBytes === undefined
+    ? baseInput
+    : { ...baseInput, policy: { ...baseInput.policy, limits: { ...baseInput.policy.limits, fileBytes: options.fileBytes } } };
   const baseFiles = [
     { name: 'packages/README.md', content: '# Readme\n', mode: '100644' as const },
     { name: 'packages/nested/deep/old.ts', content: 'export const old = 1;\n', mode: '100644' as const },
@@ -481,9 +484,11 @@ test('candidate relocks unlocked ancestors on midway unlock refusal and locks cr
 });
 
 test('tree_overlay allows untouched oversize baseline entry (> policy.limits.fileBytes) while refusing read/edit with TOOL_DENIED before reading', async () => {
-  const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 1024, 0x41);
+  const fileBytesLimit = 65_536;
+  const oversizeBytes = Buffer.alloc(fileBytesLimit + 1024, 0x41);
   const f = await overlayFixture({
     objectFormat: 'sha256',
+    fileBytes: fileBytesLimit,
     extraFiles: [{ name: 'packages/large.bin', content: oversizeBytes as unknown as string }],
   });
   try {
@@ -554,7 +559,7 @@ test('candidate normalizes bash-visible path aliases, preserves real top-level c
       const sdkRoot = join(hostLayoutDir, `sdk-${sdkInput.sessionId}`, 'candidate');
       for (const file of sdkInput.candidate.artifacts) {
         await mkdir(join(sdkRoot, file.name, '..'), { recursive: true });
-        await writeFile(join(sdkRoot, file.name), file.bytes, { mode: 0o444 });
+        if ('bytes' in file) await writeFile(join(sdkRoot, file.name), file.bytes, { mode: 0o444 });
       }
       const sdkCandidate = new Candidate(sdkRoot, sdkInput);
       assert.equal(
@@ -810,13 +815,15 @@ test('classifySoftToolPath returns soft_outside_candidate for clean non-candidat
 test('tree_overlay heals harmless Landlock-style utimes and chmod metadata drift on untouched files and directories while rejecting content/link/inode tampering', async () => {
   // 1. Positive: utimes + chmod on untouched 100644/100755 baseline files and 0o555 directories heal cleanly across edit/read/manifest
   {
-    const input = sessionInput();
+    const fileBytesLimit = 65_536;
+    const baseInput = sessionInput();
+    const input = { ...baseInput, policy: { ...baseInput.policy, limits: { ...baseInput.policy.limits, fileBytes: fileBytesLimit } } };
     const dir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-landlock-ok-'));
     const staging = join(dir, 'staging');
     const candidateDir = join(dir, 'candidate');
     const readmeBytes = Buffer.from('# Readme\n');
     const scriptBytes = Buffer.from('#!/bin/sh\necho ok\n');
-    const oversizeBytes = Buffer.alloc(MAX_LIMITS.fileBytes + 512, 0x42);
+    const oversizeBytes = Buffer.alloc(fileBytesLimit + 512, 0x42);
     const overlayInput = {
       ...input,
       candidate: {

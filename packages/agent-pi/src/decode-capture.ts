@@ -1,10 +1,12 @@
-import { types } from 'node:util';
 import { createHash } from 'node:crypto';
-import { bindSubject, digestArtifact, validateDocument, type ArtifactManifest, type ArtifactRef, type Digest, type TaskLock } from '@loopwright/core';
+import { isAbsolute, join } from 'node:path';
+import { types } from 'node:util';
+import { bindSubject, digestArtifact, digestArtifactFromMetadata, validateDocument, type ArtifactManifest, type ArtifactRef, type Digest, type TaskLock } from '@loopwright/core';
 import type { CheckpointRecord } from '@loopwright/state';
-import type { AdapterPolicy, PiResult } from './types.js';
-import { canonical, digest, freeze, id, integer, object, snapshot } from './boundary.js';
+import type { AdapterPolicy, PiCandidateBlobArtifact, PiResult } from './types.js';
+import { canonical, digest, freeze, id, integer, object, snapshot, text } from './boundary.js';
 import { DEFAULT_OVERLAY_MANIFEST_MAX_BYTES, resolveCandidateOverlayLimits } from './candidate.js';
+import { RAW_AGGREGATE_MAX_BYTES, RAW_ARTIFACT_MAX_BYTES, verifyCasBlobAsync, verifyCasSha256Dir } from './cas.js';
 import { result, refuse } from './errors.js';
 import { sameIdentity, validateDigest, validatePolicy } from './policy.js';
 import { NativeSnapshot, snapshotRow } from './snapshot.js';
@@ -22,12 +24,32 @@ export interface PiCaptureDecodeInput {
   readonly workspace: { readonly ref: ArtifactRef; readonly bytes: Uint8Array };
   readonly session: { readonly ref: ArtifactRef; readonly bytes: Uint8Array };
   readonly command: null | { readonly textDigest: Digest; readonly requestIds: readonly string[] };
+  readonly artifactsDirectory?: string | undefined;
+  readonly includeArtifactBytes?: boolean | undefined;
 }
 export interface PiDecodedCapture {
   readonly candidate: ArtifactManifest;
   readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly blobArtifacts: readonly PiCandidateBlobArtifact[];
   readonly submission: Uint8Array | null;
   readonly nativeLeafId: string | null;
+}
+
+const REQUIRED_DECODE_KEYS = ['version', 'lock', 'policy', 'checkpoint', 'sessionId', 'roleId', 'stepId', 'workspace', 'session', 'command'] as const;
+const ALLOWED_DECODE_KEYS = [...REQUIRED_DECODE_KEYS, 'artifactsDirectory', 'includeArtifactBytes'] as const;
+
+function parseDecodeInputObject(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || types.isProxy(input)) refuse('INPUT_INVALID');
+  const proto: unknown = Object.getPrototypeOf(input);
+  if (proto !== Object.prototype && proto !== null) refuse('INPUT_INVALID');
+  const rawKeys = Reflect.ownKeys(input);
+  if (rawKeys.some(key => typeof key !== 'string' || !(ALLOWED_DECODE_KEYS as readonly string[]).includes(key))) {
+    refuse('INPUT_INVALID');
+  }
+  for (const required of REQUIRED_DECODE_KEYS) {
+    if (!rawKeys.includes(required)) refuse('INPUT_INVALID');
+  }
+  return object(input, rawKeys as string[]);
 }
 
 function bytes(input: unknown, ref: ArtifactRef, max: number): Buffer {
@@ -59,15 +81,27 @@ function rows(input: Buffer): Record<string, unknown>[] {
 /** Passive bytes only. The caller obtains the checkpoint and expected command from current trusted state. */
 export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<PiDecodedCapture>> {
   return result(async () => {
-    const top = object(input, ['version', 'lock', 'policy', 'checkpoint', 'sessionId', 'roleId', 'stepId', 'workspace', 'session', 'command']);
+    const top = parseDecodeInputObject(input);
     if (top.version !== 1) refuse('INPUT_INVALID');
+    let artifactsDirectory: string | undefined;
+    if (top.artifactsDirectory !== undefined) {
+      const dir = text(top.artifactsDirectory, '/artifactsDirectory', 4096);
+      if (!isAbsolute(dir) || /[\0\r\n]/.test(dir)) refuse('INPUT_INVALID', '/artifactsDirectory');
+      artifactsDirectory = dir;
+    }
+    let includeArtifactBytes: boolean | undefined;
+    if (top.includeArtifactBytes !== undefined) {
+      if (typeof top.includeArtifactBytes !== 'boolean') refuse('INPUT_INVALID', '/includeArtifactBytes');
+      includeArtifactBytes = top.includeArtifactBytes;
+    }
+
     const checked = validateDocument(snapshot(top.lock), 'TaskLock');
     if (!checked.ok) refuse('INPUT_INVALID', '/lock');
     const lock = checked.value;
     const rawPolicy = snapshot(top.policy) as unknown as AdapterPolicy | AdapterPolicyV2;
     const rawWorkspace = object(top.workspace, ['ref', 'bytes']), rawSession = object(top.session, ['ref', 'bytes']);
-    const ownedWorkspace = bytes(rawWorkspace.bytes, snapshot(rawWorkspace.ref) as unknown as ArtifactRef, 67108864);
-    const ownedSession = bytes(rawSession.bytes, snapshot(rawSession.ref) as unknown as ArtifactRef, 67108864);
+    const ownedWorkspace = bytes(rawWorkspace.bytes, snapshot(rawWorkspace.ref) as unknown as ArtifactRef, RAW_ARTIFACT_MAX_BYTES);
+    const ownedSession = bytes(rawSession.bytes, snapshot(rawSession.ref) as unknown as ArtifactRef, RAW_ARTIFACT_MAX_BYTES);
     const policy = rawPolicy.version === 2 ? (await effectivePolicyV2(rawPolicy)).native : validatePolicy(snapshot(rawPolicy));
     const checkpoint = snapshot(top.checkpoint) as unknown as CheckpointRecord;
     const sessionId = id(top.sessionId), roleId = id(top.roleId), stepId = id(top.stepId);
@@ -108,28 +142,90 @@ export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<P
     if (manifest.value.spec.baseTree !== undefined && manifest.value.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) > overlayLimits.maxBytes) refuse('OUTPUT_LIMIT');
     const subject = bindSubject(lock, manifest.value, overlayOptions);
     if (!subject.ok || !sameIdentity(subject.value, checkpoint.subject)) refuse('BINDING_MISMATCH');
+
+    const manifestEntries = manifest.value.spec.entries;
+    const shouldMaterializeBlobBytes =
+      includeArtifactBytes !== false
+      && manifestEntries.every(entry => entry.byteLength <= RAW_ARTIFACT_MAX_BYTES)
+      && manifestEntries.reduce((sum, entry) => sum + entry.byteLength, 0) <= RAW_AGGREGATE_MAX_BYTES;
+
     const artifacts: { name: string; bytes: Uint8Array }[] = [];
+    const blobArtifacts: PiCandidateBlobArtifact[] = [];
+    let snapshotMode: 'unset' | 'chunk' | 'blob_ref' = 'unset';
+    let verifiedSha256Dir: string | null = null;
     let index = 1, total = workspaceBytes.length + sessionBytes.length;
-    for (const ref of manifest.value.spec.entries) {
+
+    for (const ref of manifestEntries) {
       const start = object(workspaceRows[index++], ['type', 'ref']);
       if (start.type !== 'file' || !sameIdentity(start.ref, ref) || ref.byteLength > policy.limits.fileBytes) refuse('RECOVERY_REQUIRED');
       total += ref.byteLength;
       if (total > policy.limits.artifactBytes) refuse('OUTPUT_LIMIT');
-      const chunks: Buffer[] = [], hash = createHash('sha256');
-      let chunkIndex = 0, length = 0;
-      while (workspaceRows[index]?.type === 'chunk') {
-        const chunk = object(workspaceRows[index++], ['type', 'index', 'data']);
-        if (chunk.index !== chunkIndex++ || typeof chunk.data !== 'string' || chunk.data.length > 43692) refuse('RECOVERY_REQUIRED');
-        const part = Buffer.from(chunk.data, 'base64');
-        if (!part.length || part.length > 32768 || part.toString('base64') !== chunk.data || (length += part.length) > ref.byteLength) refuse('RESOURCE_MISMATCH');
-        chunks.push(part); hash.update(part);
+
+      const nextRow = workspaceRows[index];
+      if (nextRow?.type === 'blob_ref') {
+        if (snapshotMode === 'chunk') refuse('RECOVERY_REQUIRED');
+        snapshotMode = 'blob_ref';
+        const row = object(workspaceRows[index++], ['type', 'ref', 'blobRef']);
+        if (!sameIdentity(row.ref, ref)) refuse('RECOVERY_REQUIRED');
+        const expectedBlobRef = digestArtifactFromMetadata(ref.name, {
+          digest: ref.digest,
+          byteLength: ref.byteLength,
+          uri: 'cas://sha256/' + ref.digest.hex,
+        });
+        if (!expectedBlobRef.ok || !sameIdentity(row.blobRef, expectedBlobRef.value)) refuse('RECOVERY_REQUIRED');
+        if (workspaceRows[index]?.type !== 'file_end') refuse('RECOVERY_REQUIRED');
+        const end = object(workspaceRows[index++], ['type', 'byteLength', 'digest']);
+        if (end.type !== 'file_end' || end.byteLength !== ref.byteLength || end.digest !== ref.digest.hex) refuse('RESOURCE_MISMATCH');
+
+        if (!artifactsDirectory) refuse('INPUT_INVALID', '/artifactsDirectory');
+        if (verifiedSha256Dir === null) {
+          verifiedSha256Dir = await verifyCasSha256Dir(artifactsDirectory, '/artifactsDirectory');
+        }
+        const blobPath = join(verifiedSha256Dir, ref.digest.hex);
+        const collected = await verifyCasBlobAsync(
+          blobPath,
+          { byteLength: ref.byteLength, sha256Hex: ref.digest.hex, collectBytes: shouldMaterializeBlobBytes },
+          '/workspace',
+        );
+        blobArtifacts.push({
+          name: ref.name,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+          blobPath,
+        });
+        if (collected !== null) {
+          artifacts.push({ name: ref.name, bytes: collected });
+        }
+      } else if (nextRow?.type === 'chunk') {
+        if (snapshotMode === 'blob_ref') refuse('RECOVERY_REQUIRED');
+        snapshotMode = 'chunk';
+        const chunks: Buffer[] = [], hash = createHash('sha256');
+        let chunkIndex = 0, length = 0;
+        while (workspaceRows[index]?.type === 'chunk') {
+          const chunk = object(workspaceRows[index++], ['type', 'index', 'data']);
+          if (chunk.index !== chunkIndex++ || typeof chunk.data !== 'string' || chunk.data.length > 43692) refuse('RECOVERY_REQUIRED');
+          const part = Buffer.from(chunk.data, 'base64');
+          if (!part.length || part.length > 32768 || part.toString('base64') !== chunk.data || (length += part.length) > ref.byteLength) refuse('RESOURCE_MISMATCH');
+          chunks.push(part); hash.update(part);
+        }
+        if (workspaceRows[index]?.type !== 'file_end') refuse('RECOVERY_REQUIRED');
+        const end = object(workspaceRows[index++], ['type', 'byteLength', 'digest']);
+        if (end.type !== 'file_end' || end.byteLength !== length || length !== ref.byteLength || end.digest !== hash.digest('hex') || end.digest !== ref.digest.hex) refuse('RESOURCE_MISMATCH');
+        artifacts.push({ name: ref.name, bytes: Buffer.concat(chunks, length) });
+      } else if (nextRow?.type === 'file_end') {
+        if (snapshotMode === 'blob_ref' || ref.byteLength > 0) refuse('RECOVERY_REQUIRED');
+        snapshotMode = 'chunk';
+        const emptyHash = createHash('sha256').digest('hex');
+        const end = object(workspaceRows[index++], ['type', 'byteLength', 'digest']);
+        if (end.type !== 'file_end' || end.byteLength !== 0 || end.digest !== emptyHash || end.digest !== ref.digest.hex) refuse('RESOURCE_MISMATCH');
+        artifacts.push({ name: ref.name, bytes: Buffer.alloc(0) });
+      } else {
+        refuse('RECOVERY_REQUIRED');
       }
-      const end = object(workspaceRows[index++], ['type', 'byteLength', 'digest']);
-      if (end.type !== 'file_end' || end.byteLength !== length || length !== ref.byteLength || end.digest !== hash.digest('hex') || end.digest !== ref.digest.hex) refuse('RESOURCE_MISMATCH');
-      artifacts.push({ name: ref.name, bytes: Buffer.concat(chunks, length) });
     }
+
     const end = object(workspaceRows[index++], ['type', 'files']);
-    if (end.type !== 'end' || end.files !== artifacts.length || index !== workspaceRows.length) refuse('RECOVERY_REQUIRED');
+    if (end.type !== 'end' || end.files !== manifestEntries.length || index !== workspaceRows.length) refuse('RECOVERY_REQUIRED');
     let leaf: string | null = null, user: Record<string, unknown> | null = null, assistant: Record<string, unknown> | null = null;
     for (const raw of entries) {
       const entry = raw as unknown as Record<string, unknown>;
@@ -149,12 +245,12 @@ export function decodePiCapture(input: PiCaptureDecodeInput): Promise<PiResult<P
         || command.requestIds.length > checkpoint.counts.observedRequests || new Set(command.requestIds).size !== command.requestIds.length) refuse('BINDING_MISMATCH');
       for (const requestId of command.requestIds) id(requestId);
       if (!user || !assistant || assistant.stopReason !== 'stop') refuse('RECOVERY_REQUIRED', '/command');
-      const text = typeof user.content === 'string' ? user.content : textBlocks(user.content, true);
-      if (!sameIdentity(digest(Buffer.from(text)), command.textDigest)) refuse('BINDING_MISMATCH', '/command');
+      const userText = typeof user.content === 'string' ? user.content : textBlocks(user.content, true);
+      if (!sameIdentity(digest(Buffer.from(userText)), command.textDigest)) refuse('BINDING_MISMATCH', '/command');
       submission = Buffer.from(textBlocks(assistant.content, false));
       if (submission.length > policy.limits.responseBytes) refuse('OUTPUT_LIMIT');
     }
-    return freeze({ candidate: manifest.value, artifacts, submission, nativeLeafId: leaf });
+    return freeze({ candidate: manifest.value, artifacts, blobArtifacts, submission, nativeLeafId: leaf });
   });
 }
 
