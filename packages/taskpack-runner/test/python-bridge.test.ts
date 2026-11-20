@@ -270,7 +270,21 @@ except Exception as error:
       join(root, 'nested-home'),
     );
     assert.equal(profileWithNestedHome.includes('(deny file-read*'), false);
-    assert.equal(profileWithNestedHome.includes('.claude")'), true);
+    assert.equal(profileWithNestedHome.includes('/.git")'), true);
+    assert.equal(profileWithNestedHome.includes('/.loopwright")'), true);
+    assert.equal(profileWithNestedHome.includes('.claude")'), false);
+    assert.equal(profileWithNestedHome.includes('CLAUDE.md")'), false);
+    assert.equal(profileWithNestedHome.includes('AGENTS.md")'), false);
     assert.equal(profileWithNestedHome.includes('.agents")'), false);
+    assert.equal(profileWithNestedHome.includes('.github")'), false);
+
+    const profileWithExplicitProtected = buildPythonSeatbeltProfile(
+      root,
+      root,
+      { enabled: true, writablePaths: [docsDir], protectedPaths: ['.claude', 'AGENTS.md'], networkMode: 'none' },
+      join(root, 'nested-home'),
+    );
+    assert.equal(profileWithExplicitProtected.includes('/.claude")'), true);
+    assert.equal(profileWithExplicitProtected.includes('/AGENTS.md")'), true);
   });
 });

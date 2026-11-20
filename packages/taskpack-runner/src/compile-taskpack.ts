@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles } from '@loopwright/agent-pi';
 import {
+  OVERLAY_LIMITS,
   matchesScopePattern,
   resolveOverlayLimits,
   validateDocument,
@@ -15,10 +16,10 @@ import { RunnerTaskpackError } from './types.js';
 
 /** Runner's candidate patch surface using explicit Taskpack 2.0 directory (`/**`) and exact-file syntax. */
 export const RUNNER_WRITABLE_PATHS = ['pack/**', 'docs/supported-runners.md', 'docs/support-records.md', 'runtime_runner/runner.py.json', '.autosync/proposal.json'] as const;
-/** Runner's protected automation surface (`.agents/**` is opt-in; `.github/**` respects dual-key `allowWorkflowWrites`). */
-export const RUNNER_PROTECTED_PATHS = ['.github/**', 'tools/**', 'tests/**', '.claude/**', 'AGENTS.md', 'CLAUDE.md'] as const;
-/** Built-in automation paths that always stay write-protected regardless of custom scope configuration. */
-export const RUNNER_ALWAYS_PROTECTED_PATHS = ['.claude/**', 'AGENTS.md', 'CLAUDE.md'] as const;
+/** Runner's default repository-level protected surface when `options.scope` is omitted. */
+export const RUNNER_PROTECTED_PATHS = ['.github/**', 'tools/**', 'tests/**'] as const;
+/** Neutral built-in paths that always stay write-protected regardless of custom scope configuration. */
+export const RUNNER_ALWAYS_PROTECTED_PATHS = ['.git/**'] as const;
 export const RUNNER_WORKFLOW_PROTECTED_PATH = '.github/workflows/**' as const;
 /** Runner research stage budget mapped onto controller pre-admitted caps: tokens soft, everything else hard. */
 export const RUNNER_BUDGETS = {
@@ -82,6 +83,7 @@ export interface RunnerExecutionOptions {
 
 export interface RunnerHostPolicy {
   readonly allowWorkflowWrites?: boolean;
+  readonly policyProfile?: 'local' | 'github';
 }
 
 export interface RunnerProposalOptions {
@@ -224,14 +226,51 @@ function digestOf(bytes: Buffer) {
   return { algorithm: 'sha256' as const, hex: createHash('sha256').update(bytes).digest('hex') };
 }
 
+function controlRootCarveOutPattern(
+  proposalPath: string,
+  writablePatterns: readonly string[],
+  protectedPatterns: readonly string[],
+  mandatoryProtected: readonly string[],
+): string | null {
+  if (!/\.(?:json|ya?ml)$/i.test(proposalPath)) return null;
+  const segments = proposalPath.split('/');
+  if (segments.length < 2) return null;
+  const root = segments[0]!;
+  if (!root.startsWith('.') || root === '.git' || root === '.github') return null;
+  const rootPattern = `${root}/**`;
+  if (!protectedPatterns.includes(rootPattern)) return null;
+  if (mandatoryProtected.some(pattern => {
+    const matched = matchesScopePattern(pattern, proposalPath);
+    return matched.ok && matched.value;
+  })) {
+    return null;
+  }
+  for (const pattern of protectedPatterns) {
+    if (pattern === rootPattern) continue;
+    const matched = matchesScopePattern(pattern, proposalPath);
+    if (matched.ok && matched.value) return null;
+  }
+  if (!writablePatterns.includes(proposalPath)) return null;
+  for (const entry of writablePatterns) {
+    if (entry === proposalPath) continue;
+    if (scopePatternsOverlap(entry, rootPattern)) return null;
+  }
+  return rootPattern;
+}
+
 /**
  * Compile a Runner trigger into Loopwright documents accepted by `loadTrustedConfiguration` and `compilePlan`.
  * Signing secrets appear only inside credential and environment bindings, never in handlers, steps, or the task.
  */
 export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOptions): Promise<CompiledRunnerTaskpack> {
+  const policyProfile = options.hostPolicy?.policyProfile ?? 'github';
+  if (policyProfile !== 'local' && policyProfile !== 'github') {
+    throw new RunnerTaskpackError('CONFIG_INVALID', `invalid hostPolicy.policyProfile "${String(policyProfile)}"`);
+  }
+  const enforceGitHubWorkflowProtection = policyProfile !== 'local';
   const requestedWorkflowWrites = options.execution?.capabilities?.allowWorkflowWrites === true;
   const hostWorkflowWrites = options.hostPolicy?.allowWorkflowWrites === true;
-  if (requestedWorkflowWrites && !hostWorkflowWrites) {
+  if (enforceGitHubWorkflowProtection && requestedWorkflowWrites && !hostWorkflowWrites) {
     throw new RunnerTaskpackError('CONFIG_INVALID', 'allowWorkflowWrites requires explicit hostPolicy.allowWorkflowWrites authorization');
   }
   const allowWorkflowWrites = requestedWorkflowWrites && hostWorkflowWrites;
@@ -239,8 +278,8 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   let overlayLimits: { readonly maxFiles: number; readonly maxBytes: number } | undefined;
   if (options.limits?.overlay !== undefined) {
     const resolvedOverlay = resolveOverlayLimits(options.limits.overlay);
-    if (!resolvedOverlay.ok) {
-      throw new RunnerTaskpackError('CONFIG_INVALID', `invalid overlay limits: ${resolvedOverlay.errors[0]?.code ?? 'VALUE_RANGE'}`);
+    if (!resolvedOverlay.ok || resolvedOverlay.value.maxFiles > OVERLAY_LIMITS.maxMaxFiles) {
+      throw new RunnerTaskpackError('CONFIG_INVALID', `invalid overlay limits: ${!resolvedOverlay.ok ? (resolvedOverlay.errors[0]?.code ?? 'VALUE_RANGE') : 'VALUE_RANGE'}`);
     }
     overlayLimits = { maxFiles: resolvedOverlay.value.maxFiles, maxBytes: resolvedOverlay.value.maxBytes };
   }
@@ -265,7 +304,7 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
 
   const mandatoryProtected = [
     ...RUNNER_ALWAYS_PROTECTED_PATHS,
-    ...(allowWorkflowWrites ? [] : [RUNNER_WORKFLOW_PROTECTED_PATH]),
+    ...(enforceGitHubWorkflowProtection && !allowWorkflowWrites ? ['.github/**', RUNNER_WORKFLOW_PROTECTED_PATH] : []),
   ];
   const baseProtected = options.scope !== undefined
     ? [...(options.scope.protected ?? []), ...mandatoryProtected]
@@ -273,12 +312,26 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
         ...(allowWorkflowWrites ? RUNNER_PROTECTED_PATHS.filter(entry => entry !== '.github/**') : RUNNER_PROTECTED_PATHS),
         ...mandatoryProtected,
       ];
-  const protectedPatterns = validateAndDedupeScopePatterns(baseProtected, 'protected');
+  let protectedPatterns = validateAndDedupeScopePatterns(baseProtected, 'protected');
 
   for (const writableEntry of writablePatterns) {
-    const overlappingMandatory = mandatoryProtected.find(protectedEntry => scopePatternsOverlap(writableEntry, protectedEntry));
+    const overlappingMandatory = mandatoryProtected.find(protectedEntry =>
+      scopePatternsOverlap(writableEntry.toLowerCase(), protectedEntry.toLowerCase()),
+    );
     if (overlappingMandatory !== undefined) {
       throw new RunnerTaskpackError('CONFIG_INVALID', `writable path "${writableEntry}" overlaps protected path "${overlappingMandatory}"`);
+    }
+    if (
+      enforceGitHubWorkflowProtection
+      && allowWorkflowWrites
+      && scopePatternsOverlap(writableEntry.toLowerCase(), '.github/**')
+      && writableEntry !== RUNNER_WORKFLOW_PROTECTED_PATH
+      && !writableEntry.startsWith('.github/workflows/')
+    ) {
+      throw new RunnerTaskpackError(
+        'CONFIG_INVALID',
+        `writable path "${writableEntry}" overlaps protected non-workflow .github/** surface; only .github/workflows/** may be unlocked via allowWorkflowWrites`,
+      );
     }
     if (protectedPatterns.includes(writableEntry)) {
       throw new RunnerTaskpackError('CONFIG_INVALID', `writable path "${writableEntry}" is listed in scope.protected`);
@@ -296,15 +349,25 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
         `proposal.path "${proposalConfig.path}" must be covered by scope.writable`,
       );
     }
-    const proposalProtectedBy = protectedPatterns.find(pattern => {
-      const matched = matchesScopePattern(pattern, proposalConfig.path);
-      return matched.ok && matched.value;
-    });
-    if (proposalProtectedBy !== undefined) {
-      throw new RunnerTaskpackError(
-        'CONFIG_INVALID',
-        `proposal.path "${proposalConfig.path}" is covered by protected pattern "${proposalProtectedBy}"`,
-      );
+    const carvedOutPattern = controlRootCarveOutPattern(
+      proposalConfig.path,
+      writablePatterns,
+      protectedPatterns,
+      mandatoryProtected,
+    );
+    if (carvedOutPattern !== null) {
+      protectedPatterns = protectedPatterns.filter(pattern => pattern !== carvedOutPattern);
+    } else {
+      const proposalProtectedBy = protectedPatterns.find(pattern => {
+        const matched = matchesScopePattern(pattern, proposalConfig.path);
+        return matched.ok && matched.value;
+      });
+      if (proposalProtectedBy !== undefined) {
+        throw new RunnerTaskpackError(
+          'CONFIG_INVALID',
+          `proposal.path "${proposalConfig.path}" is covered by protected pattern "${proposalProtectedBy}"`,
+        );
+      }
     }
   }
 

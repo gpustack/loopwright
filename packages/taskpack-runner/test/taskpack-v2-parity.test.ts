@@ -7,8 +7,9 @@ import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { promisify } from 'node:util';
 import { compilePlan, loadTrustedConfiguration, runCycleWithPorts } from '@loopwright/controller';
-import { isWritablePath } from '@loopwright/core';
+import { isWritablePath, OVERLAY_LIMITS } from '@loopwright/core';
 import {
+  RUNNER_ALWAYS_PROTECTED_PATHS,
   RUNNER_PROTECTED_PATHS,
   RUNNER_WRITABLE_PATHS,
   compileRunnerTaskpack,
@@ -120,14 +121,16 @@ describe('Taskpack 2.0 runner parity alignment', () => {
     for (const root of cleanupRoots) await rm(root, { recursive: true, force: true }).catch(() => undefined);
   });
 
-  it('aligns default scope constants with explicit /** syntax and removes .agents from protected paths', async () => {
+  it('aligns default scope constants with explicit /** syntax and keeps built-in protected paths neutral', async () => {
     assert.ok((RUNNER_WRITABLE_PATHS as readonly string[]).includes('pack/**'));
     assert.equal((RUNNER_WRITABLE_PATHS as readonly string[]).includes('pack'), false);
     assert.ok((RUNNER_WRITABLE_PATHS as readonly string[]).includes('docs/support-records.md'));
-    assert.equal((RUNNER_PROTECTED_PATHS as readonly string[]).includes('.agents'), false);
-    assert.equal((RUNNER_PROTECTED_PATHS as readonly string[]).includes('.agents/**'), false);
-    assert.ok((RUNNER_PROTECTED_PATHS as readonly string[]).includes('.claude/**'));
-    assert.ok((RUNNER_PROTECTED_PATHS as readonly string[]).includes('.github/**'));
+    assert.deepEqual([...RUNNER_ALWAYS_PROTECTED_PATHS], ['.git/**']);
+    assert.deepEqual([...RUNNER_PROTECTED_PATHS], ['.github/**', 'tools/**', 'tests/**']);
+    for (const forbidden of ['.agents', '.agents/**', '.claude/**', 'CLAUDE.md', 'AGENTS.md']) {
+      assert.equal((RUNNER_PROTECTED_PATHS as readonly string[]).includes(forbidden), false);
+      assert.equal((RUNNER_ALWAYS_PROTECTED_PATHS as readonly string[]).includes(forbidden), false);
+    }
 
     await withEnvAndDirs(async paths => {
       const bundle = await compileRunnerTaskpack({
@@ -143,16 +146,20 @@ describe('Taskpack 2.0 runner parity alignment', () => {
       assert.equal(task.spec.scope.writable.includes('pack/**'), true);
       assert.equal(task.spec.scope.writable.includes('docs/support-records.md'), true);
       assert.equal(task.spec.scope.writable.includes('docs/support-records.md/**'), false);
+      assert.equal(task.spec.scope.protected.includes('.git/**'), true);
+      assert.equal(task.spec.scope.protected.includes('.claude/**'), false);
+      assert.equal(task.spec.scope.protected.includes('CLAUDE.md'), false);
+      assert.equal(task.spec.scope.protected.includes('AGENTS.md'), false);
 
       assert.equal(writable(task, 'pack/cuda/Dockerfile.vllm'), true);
       assert.equal(writable(task, 'docs/support-records.md'), true);
       assert.equal(writable(task, 'docs/support-records.md/nested'), false);
       assert.equal(writable(task, '.github/workflows/ci.yml'), false);
-      assert.equal(writable(task, '.claude/settings.json'), false);
+      assert.equal(writable(task, '.git/config'), false);
     });
   });
 
-  it('supports explicit /** and bounded */? globs, opt-in .agents/**, and dual-key allowWorkflowWrites', async () => {
+  it('supports explicit /** and bounded */? globs, neutral tool paths, and policyProfile local vs github workflow protection', async () => {
     await withEnvAndDirs(async paths => {
       const bundle = await compileRunnerTaskpack({
         mode: 'candidate',
@@ -163,6 +170,7 @@ describe('Taskpack 2.0 runner parity alignment', () => {
         proposal: null,
         scope: {
           writable: ['package.json', 'packages/*/package.json', 'docs/v?.md', 'docs/**', '.agents/**'],
+          protected: ['.claude/**'],
         },
         localChecks: [
           { id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } },
@@ -174,6 +182,7 @@ describe('Taskpack 2.0 runner parity alignment', () => {
       assert.equal(task.spec.scope.writable.includes('package.json'), true);
       assert.equal(task.spec.scope.writable.includes('package.json/**'), false);
       assert.equal(task.spec.scope.writable.includes('.agents/**'), true);
+      assert.equal(task.spec.scope.protected.includes('.git/**'), true);
       assert.equal(task.spec.scope.protected.includes('.claude/**'), true);
       assert.equal(task.spec.scope.protected.includes('.github/workflows/**'), true);
 
@@ -186,7 +195,7 @@ describe('Taskpack 2.0 runner parity alignment', () => {
       assert.equal(writable(task, '.claude/skills/my-skill/SKILL.md'), false);
       assert.equal(writable(task, '.github/workflows/ci.yml'), false);
 
-      // Invalid scope patterns and protected overlaps must fail closed.
+      // Invalid scope patterns and mandatory protected overlaps must fail closed.
       await assert.rejects(
         () => compileRunnerTaskpack({
           mode: 'candidate',
@@ -208,7 +217,7 @@ describe('Taskpack 2.0 runner parity alignment', () => {
           sourceRevision: 'c'.repeat(40),
           publication: { mode: 'disabled' },
           proposal: null,
-          scope: { writable: ['.claude/**'] },
+          scope: { writable: ['.git/**'] },
           localChecks: [{ id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } }],
         }),
         (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID',
@@ -228,7 +237,27 @@ describe('Taskpack 2.0 runner parity alignment', () => {
         (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID',
       );
 
-      // Dual-key allowWorkflowWrites unlocks .github/workflows/** while keeping .claude/** protected.
+      // policyProfile: 'local' disables implicit .github/workflows/** injection while keeping .git/** protected.
+      const localBundle = await compileRunnerTaskpack({
+        mode: 'candidate',
+        repository: 'example-org/runtime-runner',
+        baseRevision: 'b'.repeat(40),
+        sourceRevision: 'c'.repeat(40),
+        publication: { mode: 'disabled' },
+        proposal: null,
+        hostPolicy: { policyProfile: 'local' },
+        scope: { writable: ['.github/workflows/**', '.claude/**', 'AGENTS.md'] },
+        localChecks: [{ id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } }],
+      });
+      await loadAndCompile(localBundle, paths);
+      assert.equal(localBundle.config.spec.task.spec.scope.protected.includes('.github/workflows/**'), false);
+      assert.equal(localBundle.config.spec.task.spec.scope.protected.includes('.git/**'), true);
+      assert.equal(writable(localBundle.config.spec.task, '.github/workflows/ci.yml'), true);
+      assert.equal(writable(localBundle.config.spec.task, '.claude/settings.json'), true);
+      assert.equal(writable(localBundle.config.spec.task, 'AGENTS.md'), true);
+      assert.equal(writable(localBundle.config.spec.task, '.git/HEAD'), false);
+
+      // Dual-key allowWorkflowWrites unlocks .github/workflows/** in github profile while keeping .git/** and non-workflow .github/** protected.
       const workflowBundle = await compileRunnerTaskpack({
         mode: 'candidate',
         repository: 'example-org/runtime-runner',
@@ -237,13 +266,55 @@ describe('Taskpack 2.0 runner parity alignment', () => {
         publication: { mode: 'disabled' },
         proposal: null,
         execution: { capabilities: { allowWorkflowWrites: true } },
-        hostPolicy: { allowWorkflowWrites: true },
-        scope: { writable: ['.github/workflows/**'] },
+        hostPolicy: { policyProfile: 'github', allowWorkflowWrites: true },
+        scope: { writable: ['.github/workflows/**'], protected: ['.claude/**'] },
         localChecks: [{ id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } }],
       });
       await loadAndCompile(workflowBundle, paths);
       assert.equal(writable(workflowBundle.config.spec.task, '.github/workflows/ci.yml'), true);
+      assert.equal(writable(workflowBundle.config.spec.task, '.github/CODEOWNERS'), false);
       assert.equal(writable(workflowBundle.config.spec.task, '.claude/settings.json'), false);
+      assert.equal(writable(workflowBundle.config.spec.task, '.git/config'), false);
+
+      // policyProfile: 'github' rejects non-workflow .github/** writes regardless of custom scope or allowWorkflowWrites.
+      for (const badCase of [
+        { writable: ['.github/CODEOWNERS'], allowWorkflowWrites: false },
+        { writable: ['.github/CODEOWNERS'], allowWorkflowWrites: true },
+        { writable: ['.github/**'], allowWorkflowWrites: true },
+        { writable: ['**'], allowWorkflowWrites: true },
+      ]) {
+        await assert.rejects(
+          () => compileRunnerTaskpack({
+            mode: 'candidate',
+            repository: 'example-org/runtime-runner',
+            baseRevision: 'b'.repeat(40),
+            sourceRevision: 'c'.repeat(40),
+            publication: { mode: 'disabled' },
+            proposal: null,
+            ...(badCase.allowWorkflowWrites ? { execution: { capabilities: { allowWorkflowWrites: true } } } : {}),
+            hostPolicy: { policyProfile: 'github', allowWorkflowWrites: badCase.allowWorkflowWrites },
+            scope: { writable: badCase.writable },
+            localChecks: [{ id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } }],
+          }),
+          (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID',
+          `expected CONFIG_INVALID for writable=${JSON.stringify(badCase.writable)} allowWorkflowWrites=${badCase.allowWorkflowWrites}`,
+        );
+      }
+
+      // policyProfile: 'local' still allows custom .github/CODEOWNERS without GitHub path injection.
+      const localCustomGithub = await compileRunnerTaskpack({
+        mode: 'candidate',
+        repository: 'example-org/runtime-runner',
+        baseRevision: 'b'.repeat(40),
+        sourceRevision: 'c'.repeat(40),
+        publication: { mode: 'disabled' },
+        proposal: null,
+        hostPolicy: { policyProfile: 'local' },
+        scope: { writable: ['.github/CODEOWNERS', '.github/workflows/**'] },
+        localChecks: [{ id: 'pkg-keys', implementation: 'json-keys-guard.v1', parameters: { path: 'package.json', allowedPointers: ['/version'] } }],
+      });
+      assert.equal(writable(localCustomGithub.config.spec.task, '.github/CODEOWNERS'), true);
+      assert.equal(writable(localCustomGithub.config.spec.task, '.github/workflows/ci.yml'), true);
     });
   });
 
@@ -564,6 +635,63 @@ describe('Taskpack 2.0 runner parity alignment', () => {
         proposal: { path: 'docs/proposal.json' },
       }),
       (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID' && /protected pattern/.test(err.message),
+    );
+
+    // Exact-file control-root proposal carve-out succeeds when controlRoot/** is protected, while keeping siblings unwritable.
+    const carvedOut = await compileRunnerTaskpack({
+      mode: 'candidate',
+      repository: 'example-org/runtime-runner',
+      baseRevision: '1'.repeat(40),
+      sourceRevision: '1'.repeat(40),
+      publication: { mode: 'disabled' },
+      localChecks: [{ id: 'ok', implementation: 'json-artifact.v1', parameters: { path: 'docs/out.json', required: ['ok'], equals: { ok: true } } }],
+      scope: { writable: ['docs/**', '.autosync/proposal.json'], protected: ['.autosync/**'] },
+      proposal: { path: '.autosync/proposal.json' },
+    });
+    assert.equal(writable(carvedOut.config.spec.task, '.autosync/proposal.json'), true);
+    assert.equal(writable(carvedOut.config.spec.task, '.autosync/taskpack.yaml'), false);
+
+    // Sibling writable under protected controlRoot/** still fails closed.
+    await assert.rejects(
+      () => compileRunnerTaskpack({
+        mode: 'candidate',
+        repository: 'example-org/runtime-runner',
+        baseRevision: '1'.repeat(40),
+        sourceRevision: '1'.repeat(40),
+        publication: { mode: 'disabled' },
+        localChecks: [{ id: 'ok', implementation: 'json-artifact.v1', parameters: { path: 'docs/out.json', required: ['ok'], equals: { ok: true } } }],
+        scope: { writable: ['docs/**', '.autosync/proposal.json', '.autosync/extra.txt'], protected: ['.autosync/**'] },
+        proposal: { path: '.autosync/proposal.json' },
+      }),
+      (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID' && /protected pattern/.test(err.message),
+    );
+
+    // Overlay limits respect OVERLAY_LIMITS.maxMaxFiles (16_384).
+    const maxOverlayBundle = await compileRunnerTaskpack({
+      mode: 'candidate',
+      repository: 'example-org/runtime-runner',
+      baseRevision: '1'.repeat(40),
+      sourceRevision: '1'.repeat(40),
+      publication: { mode: 'disabled' },
+      proposal: null,
+      limits: { overlay: { maxFiles: OVERLAY_LIMITS.maxMaxFiles, maxBytes: 16_777_216 } },
+      scope: { writable: ['docs/**'] },
+      localChecks: [{ id: 'ok', implementation: 'json-artifact.v1', parameters: { path: 'docs/out.json', required: ['ok'], equals: { ok: true } } }],
+    });
+    assert.equal(maxOverlayBundle.config.spec.task.spec.budgets.overlay?.maxFiles, 16_384);
+    await assert.rejects(
+      () => compileRunnerTaskpack({
+        mode: 'candidate',
+        repository: 'example-org/runtime-runner',
+        baseRevision: '1'.repeat(40),
+        sourceRevision: '1'.repeat(40),
+        publication: { mode: 'disabled' },
+        proposal: null,
+        limits: { overlay: { maxFiles: OVERLAY_LIMITS.maxMaxFiles + 1, maxBytes: 16_777_216 } },
+        scope: { writable: ['docs/**'] },
+        localChecks: [{ id: 'ok', implementation: 'json-artifact.v1', parameters: { path: 'docs/out.json', required: ['ok'], equals: { ok: true } } }],
+      }),
+      (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID',
     );
   });
 });
