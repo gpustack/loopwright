@@ -2,11 +2,24 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bindSubject, validateDocument, type Digest, type Evidence, type Subject, type TaskLock } from '@loopwright/core';
+import { types } from 'node:util';
+import {
+  LIMITS,
+  bindSubject,
+  validateDocument,
+  validateRelativePath,
+  type Digest,
+  type Evidence,
+  type MetricsMap,
+  type MetricValue,
+  type StructuredFinding,
+  type Subject,
+  type TaskLock,
+} from '@loopwright/core';
 import type { Authority, DispatchPermit, LocalRunStore, OperationReceipt, RunView, OperationRecord } from '@loopwright/state';
 import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
-import { canonical, freeze, hash, integer, record, same, text } from './schema.js';
+import { canonical, freeze, hash, integer, isRecord, list, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 import { verifierOperationId } from './progress.js';
@@ -45,6 +58,130 @@ export function verifySignedPayload(secret: string, payload: Uint8Array | string
   return expected.length === observed.length && timingSafeEqual(expected, observed);
 }
 export function signPayload(secret: string, payload: Uint8Array | string): string { return createHmac('sha256', secret).update(payload).digest('hex'); }
+const LONE_SURROGATE_PATTERN = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      const entry = (value as Record<string, unknown>)[key];
+      if (entry === undefined) continue;
+      out[key] = stripUndefined(entry);
+    }
+    return out;
+  }
+  return value;
+}
+export function stripVerdictSignature(verdict: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  const body: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.keys(verdict)) {
+    if (key === 'signature' || verdict[key] === undefined) continue;
+    body[key] = stripUndefined(verdict[key]);
+  }
+  return body;
+}
+export function signGateVerdict(secret: string, verdict: Readonly<Record<string, unknown>>): string {
+  return signPayload(secret, canonical(stripVerdictSignature(verdict)));
+}
+export function verifyGateSignature(secret: string, verdict: Readonly<Record<string, unknown>>, expectedHex: string): boolean {
+  let serialized: string;
+  try {
+    serialized = canonical(stripVerdictSignature(verdict));
+  } catch {
+    return false;
+  }
+  return verifySignedPayload(secret, serialized, expectedHex);
+}
+const FORBIDDEN_METRIC_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export function checkedMetrics(raw: unknown): MetricsMap {
+  if (raw === null || typeof raw !== 'object' || types.isProxy(raw) || Array.isArray(raw) || ![Object.prototype, null].includes(Object.getPrototypeOf(raw))) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(raw);
+  const keys = Object.keys(descriptors).sort();
+  if (Reflect.ownKeys(descriptors).length !== keys.length || keys.length > LIMITS.metricEntries) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  const output: Record<string, MetricValue> = Object.create(null) as Record<string, MetricValue>;
+  for (const key of keys) {
+    const desc = descriptors[key];
+    if (
+      !desc ||
+      !('value' in desc) ||
+      key.length < 1 ||
+      key.length > LIMITS.metricKey ||
+      FORBIDDEN_METRIC_KEYS.has(key) ||
+      !/^[A-Za-z_][A-Za-z0-9._-]*$/.test(key)
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    const val = desc.value;
+    if (typeof val === 'number') {
+      if (!Number.isFinite(val)) refuse('ARTIFACT_INVALID', '', 'verification');
+      output[key] = Object.is(val, -0) ? 0 : val;
+    } else if (typeof val === 'string') {
+      if (val.length > LIMITS.metricStringValue || LONE_SURROGATE_PATTERN.test(val)) refuse('ARTIFACT_INVALID', '', 'verification');
+      output[key] = val;
+    } else if (typeof val === 'boolean') {
+      output[key] = val;
+    } else {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+  }
+  return freeze(output);
+}
+export function checkedFindings(raw: unknown): readonly StructuredFinding[] {
+  const items = list(raw, '', LIMITS.findings);
+  const out: StructuredFinding[] = [];
+  for (const item of items) {
+    if (!isRecord(item)) refuse('ARTIFACT_INVALID', '', 'verification');
+    const hasPath = Object.hasOwn(item, 'path') && item.path !== undefined;
+    const hasLine = Object.hasOwn(item, 'line') && item.line !== undefined;
+    const fields = record(item, [
+      'title',
+      'severity',
+      'evidence',
+      ...(hasPath ? ['path' as const] : []),
+      ...(hasLine ? ['line' as const] : []),
+    ]);
+    const title = text(fields.title, '', LIMITS.findingTitle);
+    if (title.length < 1 || LONE_SURROGATE_PATTERN.test(title)) refuse('ARTIFACT_INVALID', '', 'verification');
+    const severity = text(fields.severity, '', 16);
+    if (!['critical', 'high', 'medium', 'low'].includes(severity)) refuse('ARTIFACT_INVALID', '', 'verification');
+    const evidence = text(fields.evidence, '', LIMITS.findingEvidence);
+    if (evidence.length < 1 || LONE_SURROGATE_PATTERN.test(evidence)) refuse('ARTIFACT_INVALID', '', 'verification');
+    let findingPath: string | null | undefined;
+    if (hasPath) {
+      if (fields.path === null) findingPath = null;
+      else {
+        const p = text(fields.path, '', LIMITS.path);
+        if (LONE_SURROGATE_PATTERN.test(p)) refuse('ARTIFACT_INVALID', '', 'verification');
+        const v = validateRelativePath(p);
+        if (!v.ok) refuse('ARTIFACT_INVALID', '', 'verification');
+        findingPath = v.value;
+      }
+    }
+    let findingLine: number | null | undefined;
+    if (hasLine) {
+      if (fields.line === null) findingLine = null;
+      else findingLine = integer(fields.line, 1, Number.MAX_SAFE_INTEGER);
+    }
+    const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    copy.title = title;
+    copy.severity = severity;
+    if (hasPath) copy.path = findingPath;
+    if (hasLine) copy.line = findingLine;
+    copy.evidence = evidence;
+    out.push(freeze(copy as unknown as StructuredFinding));
+  }
+  return freeze(out);
+}
+export function checkedDetail(raw: unknown): string | null {
+  if (raw === null) return null;
+  const s = text(raw, '', LIMITS.string);
+  if (s.length < 1 || LONE_SURROGATE_PATTERN.test(s)) refuse('ARTIFACT_INVALID', '', 'verification');
+  return s;
+}
 export interface GateWaitDetail { readonly operationId: string; readonly gateId: string; readonly elapsedMs: number; readonly nextPollMs: number; readonly deadlineMs: number }
 export interface PreparedGate { readonly version: 1; readonly slotId: string; readonly generation: number; readonly operationId: string; readonly producerNonce: string; readonly requestDigest: Digest }
 interface GatePreparation { readonly slot: VerifierSlot; readonly endpoint: GateEndpoint; readonly subject: Subject; readonly candidateDigest: Digest; readonly candidateBytes: number }
@@ -54,29 +191,78 @@ interface GateObservation { readonly evidence: Evidence; readonly subject: Subje
 const observations = new WeakMap<VerifiedCheck, GateObservation>();
 export function authenticatedGate(value: VerifiedCheck): GateObservation { const trusted = observations.get(value); if (!trusted) refuse('EVIDENCE_UNAVAILABLE', '', 'verification'); return trusted; }
 const verdictStatuses = ['pending', 'approved', 'denied', 'expired'] as const;
-type Verdict = { readonly status: (typeof verdictStatuses)[number]; readonly reason: string | null; readonly expiresAtMs: string };
+export interface GateVerdict {
+  readonly status: (typeof verdictStatuses)[number];
+  readonly reason: string | null;
+  readonly expiresAtMs: string;
+  readonly detail?: string | null;
+  readonly metrics?: MetricsMap;
+  readonly findings?: readonly StructuredFinding[];
+  readonly retryablePreemption?: boolean;
+}
+type Verdict = GateVerdict;
 type RoundTrip = { readonly kind: 'verdict'; readonly verdict: Verdict; readonly responseBytes: Uint8Array; readonly signature: string } | { readonly kind: 'invalid' } | { readonly kind: 'network' };
-type Disposition = { readonly status: VerifiedCheck['status']; readonly reason: string | null; readonly method: string };
-const RESPONSE_BYTES = 16384;
+type Disposition = { readonly status: VerifiedCheck['status']; readonly reason: string | null; readonly method: string; readonly retryablePreemption?: boolean };
+export const RESPONSE_BYTES = 65536;
+export const GATE_OUTPUT_BYTES = 262_144;
 function expectedRequest(slot: VerifierSlot, endpoint: GateEndpoint, subject: Subject): Record<string, unknown> {
   const parameters = record(slot.handler.parameters, ['checkId', 'endpointRef', 'gateId']);
   if (parameters.endpointRef !== endpoint.id) refuse('ARTIFACT_INVALID', '', 'verification');
   return { version: 1, kind: 'gate_request', gateId: text(parameters.gateId, '', 128), checkId: slot.checkId, candidateDigest: subject.candidateDigest.hex, subject };
 }
-function checkedVerdict(raw: unknown, expected: Record<string, unknown>): Verdict {
-  const value = record(raw, ['version', 'kind', 'storeId', 'runId', 'lockHash', 'operationId', 'dispatchId', 'dispatchGeneration', 'gateId', 'checkId', 'candidateDigest', 'status', 'reason', 'expiresAtMs']);
+export function checkedGateVerdict(raw: unknown, expected: Record<string, unknown>): Verdict {
+  if (!isRecord(raw)) refuse('ARTIFACT_INVALID', '', 'verification');
+  const hasDetail = Object.hasOwn(raw, 'detail') && raw.detail !== undefined;
+  const hasMetrics = Object.hasOwn(raw, 'metrics') && raw.metrics !== undefined;
+  const hasFindings = Object.hasOwn(raw, 'findings') && raw.findings !== undefined;
+  const hasPreemption = Object.hasOwn(raw, 'retryablePreemption') && raw.retryablePreemption !== undefined;
+  const value = record(raw, [
+    'version', 'kind', 'storeId', 'runId', 'lockHash', 'operationId', 'dispatchId', 'dispatchGeneration',
+    'gateId', 'checkId', 'candidateDigest', 'status', 'reason', 'expiresAtMs',
+    ...(hasDetail ? ['detail' as const] : []),
+    ...(hasMetrics ? ['metrics' as const] : []),
+    ...(hasFindings ? ['findings' as const] : []),
+    ...(hasPreemption ? ['retryablePreemption' as const] : []),
+  ]);
   const binding = { version: 1, kind: 'gate_verdict', storeId: expected.storeId, runId: expected.runId, lockHash: expected.lockHash, operationId: expected.operationId, dispatchId: expected.dispatchId, dispatchGeneration: expected.dispatchGeneration, gateId: expected.gateId, checkId: expected.checkId, candidateDigest: expected.candidateDigest };
-  if (!same(value, { ...binding, status: value.status, reason: value.reason, expiresAtMs: value.expiresAtMs }) || !verdictStatuses.includes(value.status as never)) refuse('ARTIFACT_INVALID', '', 'verification');
-  if (value.reason !== null && (value.status === 'pending' || typeof value.reason !== 'string' || value.reason.length > 256)) refuse('ARTIFACT_INVALID', '', 'verification');
-  if (value.status === 'pending' && value.reason !== null) refuse('ARTIFACT_INVALID', '', 'verification');
+  const stripped = {
+    version: value.version, kind: value.kind, storeId: value.storeId, runId: value.runId, lockHash: value.lockHash,
+    operationId: value.operationId, dispatchId: value.dispatchId, dispatchGeneration: value.dispatchGeneration,
+    gateId: value.gateId, checkId: value.checkId, candidateDigest: value.candidateDigest,
+  };
+  if (!same(stripped, binding) || !verdictStatuses.includes(value.status as never)) refuse('ARTIFACT_INVALID', '', 'verification');
+  if (value.reason !== null && (value.status === 'pending' || typeof value.reason !== 'string' || value.reason.length > 256 || LONE_SURROGATE_PATTERN.test(value.reason))) refuse('ARTIFACT_INVALID', '', 'verification');
   if (!/^(?:0|[1-9][0-9]{0,17})$/.test(text(value.expiresAtMs, '', 19))) refuse('ARTIFACT_INVALID', '', 'verification');
-  return { status: value.status as Verdict['status'], reason: value.reason as string | null, expiresAtMs: value.expiresAtMs as string };
+  const detail = hasDetail ? checkedDetail(value.detail) : undefined;
+  const metrics = hasMetrics ? checkedMetrics(value.metrics) : undefined;
+  const findings = hasFindings ? checkedFindings(value.findings) : undefined;
+  let retryablePreemption: boolean | undefined;
+  if (hasPreemption) {
+    if (
+      typeof value.retryablePreemption !== 'boolean' ||
+      value.status === 'pending' ||
+      (value.retryablePreemption === true && value.status === 'approved')
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    retryablePreemption = value.retryablePreemption;
+  }
+  return freeze({
+    status: value.status as Verdict['status'],
+    reason: value.reason as string | null,
+    expiresAtMs: value.expiresAtMs as string,
+    ...(detail !== undefined ? { detail } : {}),
+    ...(metrics !== undefined ? { metrics } : {}),
+    ...(findings !== undefined ? { findings } : {}),
+    ...(retryablePreemption !== undefined ? { retryablePreemption } : {}),
+  });
 }
 function disposition(verdict: Verdict | null, timeout: boolean): Disposition {
   if (!verdict) return timeout ? { status: 'blocked', reason: 'GATE_TIMEOUT', method: 'gate_transport' } : { status: 'blocked', reason: 'EVIDENCE_UNAVAILABLE', method: 'gate_transport' };
-  if (verdict.status === 'approved') return { status: 'passed', reason: null, method: 'verify_external_gate' };
-  if (verdict.status === 'denied') return { status: 'failed', reason: 'gate_denied', method: 'verify_external_gate' };
-  return { status: 'blocked', reason: 'EVIDENCE_UNAVAILABLE', method: 'verify_external_gate' };
+  const preemptionField = verdict.retryablePreemption !== undefined ? { retryablePreemption: verdict.retryablePreemption } : {};
+  if (verdict.status === 'approved') return { status: 'passed', reason: null, method: 'verify_external_gate', ...preemptionField };
+  if (verdict.status === 'denied') return { status: 'failed', reason: 'gate_denied', method: 'verify_external_gate', ...preemptionField };
+  return { status: 'blocked', reason: 'EVIDENCE_UNAVAILABLE', method: 'verify_external_gate', ...preemptionField };
 }
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -128,7 +314,7 @@ export class Gate {
     } catch { return { kind: 'network' }; }
     if (bytes.byteLength > RESPONSE_BYTES || !verifySignedPayload(secret, bytes, signature)) return { kind: 'invalid' };
     try {
-      const verdict = checkedVerdict(parsePrivateJson(Buffer.from(bytes), RESPONSE_BYTES), binding);
+      const verdict = checkedGateVerdict(parsePrivateJson(Buffer.from(bytes), RESPONSE_BYTES), binding);
       return { kind: 'verdict', verdict, responseBytes: bytes, signature };
     } catch { return { kind: 'invalid' }; }
   }
@@ -177,8 +363,21 @@ export class Gate {
       const dispositioned = disposition(verdict, timedOut), view = stateValue(this.store.inspect()), suffix = hash(job.operationId + '\0' + job.producerNonce).hex.slice(0, 40);
       const retained = outcome.kind === 'verdict' && verdict !== null ? outcome : null;
       const output = await this.artifacts.json('gate-output', { version: 1, binding: { planDigest: this.plan.planDigest, operationId: job.operationId, producerNonce: job.producerNonce, generation: job.generation, endpoint: data.endpoint.id, subject: data.subject, requestBytesDigest },
-        observation: { attempts, elapsedMs: Math.ceil(performance.now() - started), transport: timedOut ? 'deadline' : 'completed' }, verdict, responseBytes: retained ? Buffer.from(retained.responseBytes).toString('base64') : null, responseSignature: retained?.signature ?? null, disposition: dispositioned }, 65536);
-      const evidenceResult = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: { checkId: data.slot.checkId, observedStatus: dispositioned.status, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method, level: 'external_service', subject: data.subject, artifacts: [output], reason: dispositioned.reason } }, 'Evidence');
+        observation: { attempts, elapsedMs: Math.ceil(performance.now() - started), transport: timedOut ? 'deadline' : 'completed' }, verdict, responseBytes: retained ? Buffer.from(retained.responseBytes).toString('base64') : null, responseSignature: retained?.signature ?? null, disposition: dispositioned }, GATE_OUTPUT_BYTES);
+      const evidenceSpec = {
+        checkId: data.slot.checkId,
+        observedStatus: dispositioned.status,
+        producerId: 'loopwright.gate-verifier.v1',
+        method: dispositioned.method,
+        level: 'external_service' as const,
+        subject: data.subject,
+        artifacts: [output],
+        reason: dispositioned.reason,
+        ...(verdict && Object.hasOwn(verdict, 'detail') ? { detail: verdict.detail } : {}),
+        ...(verdict?.metrics !== undefined ? { metrics: verdict.metrics } : {}),
+        ...(verdict?.findings !== undefined ? { findings: verdict.findings } : {}),
+      };
+      const evidenceResult = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec }, 'Evidence');
       if (!evidenceResult.ok) refuse('RECOVERY_REQUIRED', '', 'verification');
       const receipt: OperationReceipt = { receiptId: 'receipt.' + suffix, outcome: dispositioned.method === 'verify_external_gate' ? 'succeeded' : 'failed',
         evidence: { evidenceId: 'receipt-evidence.' + suffix, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method,
@@ -187,7 +386,7 @@ export class Gate {
       await this.#marker(job.operationId, job.producerNonce, 'proof', { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value });
       this.#permit(permit, data.subject, target); stateValue(this.store.recordOperationReceipt(this.authority, job.operationId, receipt));
       const value: VerifiedCheck = freeze({ slotId: job.slotId, checkId: data.slot.checkId, generation: job.generation, operationId: job.operationId, producerNonce: job.producerNonce, status: dispositioned.status, reason: dispositioned.reason, output, receipt: receiptRef });
-      observations.set(value, { evidence: freeze(evidenceResult.value), subject: data.subject, outputBytes: await this.artifacts.read(output, 65536), receipt: freeze(receipt), planDigest: this.plan.planDigest, requestDigest: job.requestDigest,
+      observations.set(value, { evidence: freeze(evidenceResult.value), subject: data.subject, outputBytes: await this.artifacts.read(output, GATE_OUTPUT_BYTES), receipt: freeze(receipt), planDigest: this.plan.planDigest, requestDigest: job.requestDigest,
         header: { handlerDigest: data.slot.handler.digest, handler: 'gate.v1', candidate: { ref: { digest: data.candidateDigest, byteLength: data.candidateBytes } } } }); return value;
     } finally { done(); }
   }
@@ -220,8 +419,8 @@ export class Gate {
       || !same(binding.subject, data.subject) || !same(binding.requestDigest, job.requestDigest) || !same(binding.intentDigest, operation.intentDigest) || binding.endpoint !== data.endpoint.id
       || !same(binding.requestBytesDigest, requestBytesDigest) || !same(binding.dispatchReceipt, { generation: dispatch.generation, dispatchId: dispatch.dispatchId, revision: dispatch.revision, clockEpoch: view.clock.basis.clockEpoch })) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const proof = record(parsePrivateJson(proofBytes, 1048576), ['version', 'output', 'receipt', 'evidence']);
-    const output = checkedRef(proof.output), receiptRef = checkedRef(proof.receipt), outputBytes = await this.artifacts.read(output, 65536);
-    const saved = record(parsePrivateJson(Buffer.from(outputBytes), 65536), ['version', 'binding', 'observation', 'verdict', 'responseBytes', 'responseSignature', 'disposition']);
+    const output = checkedRef(proof.output), receiptRef = checkedRef(proof.receipt), outputBytes = await this.artifacts.read(output, GATE_OUTPUT_BYTES);
+    const saved = record(parsePrivateJson(Buffer.from(outputBytes), GATE_OUTPUT_BYTES), ['version', 'binding', 'observation', 'verdict', 'responseBytes', 'responseSignature', 'disposition']);
     const savedBinding = record(saved.binding, ['planDigest', 'operationId', 'producerNonce', 'generation', 'endpoint', 'subject', 'requestBytesDigest']);
     if (saved.version !== 1 || !same(savedBinding, { planDigest: this.plan.planDigest, operationId: job.operationId, producerNonce: job.producerNonce, generation: job.generation, endpoint: data.endpoint.id, subject: data.subject, requestBytesDigest })) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const observation = record(saved.observation, ['attempts', 'elapsedMs', 'transport']); integer(observation.attempts, 1, 65536); integer(observation.elapsedMs, 0, Number.MAX_SAFE_INTEGER);
@@ -232,14 +431,27 @@ export class Gate {
       const secret = this.resolveCredential(data.endpoint.signingCredentialRef);
       if (!verifySignedPayload(secret, responseBytes, saved.responseSignature)) refuse('EVIDENCE_UNAVAILABLE', '', 'recovery');
       const expected = { storeId: view.storeId, runId: view.runId, lockHash: view.lockHash, operationId: job.operationId, dispatchId: dispatch.dispatchId, dispatchGeneration: dispatch.generation, gateId: String(request.gateId), checkId: String(request.checkId), candidateDigest: String(request.candidateDigest) };
-      const parsed = checkedVerdict(parsePrivateJson(responseBytes, RESPONSE_BYTES), expected);
-      if (!same(saved.verdict, { status: parsed.status, reason: parsed.reason, expiresAtMs: parsed.expiresAtMs })) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      const parsed = checkedGateVerdict(parsePrivateJson(responseBytes, RESPONSE_BYTES), expected);
+      if (!same(saved.verdict, parsed)) refuse('RECOVERY_REQUIRED', '', 'recovery');
       verdict = parsed;
     }
     const dispositioned = disposition(verdict, observation.transport === 'deadline');
     if (!same(saved.disposition, dispositioned)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const suffix = hash(job.operationId + '\0' + job.producerNonce).hex.slice(0, 40);
-    const evidence = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: { checkId: data.slot.checkId, observedStatus: dispositioned.status, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method, level: 'external_service', subject: data.subject, artifacts: [output], reason: dispositioned.reason } }, 'Evidence');
+    const evidenceSpec = {
+      checkId: data.slot.checkId,
+      observedStatus: dispositioned.status,
+      producerId: 'loopwright.gate-verifier.v1',
+      method: dispositioned.method,
+      level: 'external_service' as const,
+      subject: data.subject,
+      artifacts: [output],
+      reason: dispositioned.reason,
+      ...(verdict && Object.hasOwn(verdict, 'detail') ? { detail: verdict.detail } : {}),
+      ...(verdict?.metrics !== undefined ? { metrics: verdict.metrics } : {}),
+      ...(verdict?.findings !== undefined ? { findings: verdict.findings } : {}),
+    };
+    const evidence = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec }, 'Evidence');
     if (!evidence.ok || !same(evidence.value, proof.evidence)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const receipt: OperationReceipt = { receiptId: 'receipt.' + suffix, outcome: dispositioned.method === 'verify_external_gate' ? 'succeeded' : 'failed',
       evidence: { evidenceId: 'receipt-evidence.' + suffix, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method,
@@ -282,7 +494,8 @@ export class Gate {
 export function prepareGate(plan: CompiledPlan, lock: TaskLock, slotId: string, candidate: ByteInventory, generation: number, producerNonce: string, gateEndpoints: readonly GateEndpoint[]): PreparedGate {
   if (!same(plan.task, lock.spec.contract) || !/^[a-f0-9]{32}$/.test(producerNonce)) refuse('ARTIFACT_INVALID', '', 'verification'); integer(generation, 0, plan.capacity.V - 1);
   const slot = plan.verifierSlots.find(item => item.id === slotId); if (!slot || slot.handler.implementation !== 'gate.v1' || slot.handler.kind !== 'check') refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
-  const subject = bindSubject(lock, candidate.manifest); if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'verification');
+  const overlayOpts = lock.spec.contract.spec.budgets.overlay ? { overlay: lock.spec.contract.spec.budgets.overlay } : undefined;
+  const subject = bindSubject(lock, candidate.manifest, overlayOpts); if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'verification');
   const endpoint = gateEndpoints.find(item => item.id === slot.handler.parameters.endpointRef);
   if (!endpoint) refuse('CONFIG_REFERENCE', '/registry/spec/gateEndpoints', 'verification');
   const parameters = record(slot.handler.parameters, ['checkId', 'endpointRef', 'gateId']);

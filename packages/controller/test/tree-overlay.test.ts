@@ -741,13 +741,17 @@ test('T3 json-artifact.v1: Merkle proof verification, tamper detection, deleted/
           subject,
           source: { metadataId: frozen.manifest.metadata.id, ref: srcRef, entryCount: 0 },
           candidate: { metadataId: frozen.manifest.metadata.id, ref: srcRef, entryCount: 0 },
-          parameters: { path: 'a/b/config.json', expected: expectedObj, required: ['ok'], equals: { ok: true }, sourceManifest: frozen.manifest, candidateManifest: frozen.manifest } as unknown as VerifierHeader['parameters'],
+          parameters: { path: 'a/b/config.json', expected: expectedObj, required: ['ok'], equals: { ok: true } } as unknown as VerifierHeader['parameters'],
           payloadKind: 'json',
         };
+        const srcInvBytes = encodeInventory(frozen.manifest);
+        const candInvBytes = encodeInventory(frozen.manifest);
         const treesLen = trees.reduce((s, t) => s + 4 + t.byteLength, 0);
-        const payload = new Uint8Array(4 + blob.byteLength + 4 + treesLen);
+        const payload = new Uint8Array(srcInvBytes.byteLength + candInvBytes.byteLength + 4 + blob.byteLength + 4 + treesLen);
         const view = new DataView(payload.buffer);
         let off = 0;
+        payload.set(srcInvBytes, off); off += srcInvBytes.byteLength;
+        payload.set(candInvBytes, off); off += candInvBytes.byteLength;
         view.setUint32(off, blob.byteLength); off += 4;
         payload.set(blob, off); off += blob.byteLength;
         view.setUint32(off, trees.length); off += 4;

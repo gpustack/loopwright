@@ -1,24 +1,30 @@
 import { fileURLToPath } from 'node:url';
 import { describePiAdapterFiles, type AdapterPolicy } from '@loopwright/agent-pi';
 import { resolveBuiltInPiCatalogModel, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
-import { approvedState } from './config.js';
+import { approvedState, selectRoleResources } from './config.js';
 import { validatePiSelectionOrRefuse } from './registry.js';
 import { readBoundedFile } from './files.js';
 import { installedHandlerDigests } from './handlers.js';
 import { freeze, canonical, hash, same } from './schema.js';
 import { refuse, result } from './errors.js';
-import { compactionTarget } from './scheduler.js';
+import { compactionTarget, descendants, reworkSubgraph } from './scheduler.js';
 import type { CheckpointCapacity, CompiledPlan, LoadedConfiguration, PlannedRole, RuntimeProfile, VerifierSlot } from './types.js';
-export function checkpointCapacity(A: number, N: number, I: number, C: number, publication: boolean): CheckpointCapacity {
-  if (![A, N, I, C].every(Number.isSafeInteger) || A < 1 || A > 16 || N < 0 || I < 0 || C < 2 || C > 16 || typeof publication !== 'boolean') refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
-  const V = 1 + Math.min(A, N + I), J = C * V, D = 4 + 3 * A + 2 * J + (publication ? 3 : 0);
-  if (D > 64) refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
+export function checkpointCapacity(A: number, N: number, I: number, C: number, publication: boolean, R = 0, K = 0): CheckpointCapacity {
+  if (![A, N, I, C, R, K].every(Number.isSafeInteger) || A < 1 || A > 64 || N < 0 || I < 0 || R < 0 || K < 0 || C < 2 || C > 34 || typeof publication !== 'boolean') refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
+  const V = 1 + Math.min(A + K, N + I + R), J = C * V, D = 4 + 3 * A + 2 * J + (publication ? 3 : 0);
+  if (D > 256) refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
   return { A, N, I, C, V, J, D, publication, additionalRefs: 4, requiredRefs: 6, checkpointBytes: 40960 };
 }
 export function compilePlan(loaded: LoadedConfiguration) {
   return result(async (): Promise<CompiledPlan> => {
     const state = approvedState(loaded), config = loaded.configuration, task = config.spec.task, registry = loaded.registry.spec;
-    if (task.spec.steps.length > 16 || task.spec.roles.length > 16 || task.spec.target.matrix !== null) refuse('CAPABILITY_UNSUPPORTED', '/spec/task', 'compile');
+    if (
+      task.spec.steps.length > 16 ||
+      task.spec.roles.length > 16 ||
+      task.spec.acceptance.checks.some(check => check.allowedEvidenceLevels.includes('hardware_execution'))
+    ) {
+      refuse('CAPABILITY_UNSUPPORTED', '/spec/task', 'compile');
+    }
     if (registry.resourceVersion !== task.spec.trustedContext.revision) refuse('CONFIG_REFERENCE', '/spec/task/spec/trustedContext', 'compile');
     if (config.spec.profiles.roles.length !== task.spec.roles.length || config.spec.profiles.steps.length !== task.spec.steps.length) refuse('CONFIG_REFERENCE', '/spec/profiles', 'compile');
     const installed = await installedHandlerDigests();
@@ -29,9 +35,33 @@ export function compilePlan(loaded: LoadedConfiguration) {
       if (!ready) refuse('CONFIG_REFERENCE', '/spec/task/spec/steps', 'compile');
       const selected = config.spec.profiles.steps.find(item => item.stepId === ready.id), handler = registry.handlers.find(item => item.id === selected?.handlerRef);
       if (!handler || handler.id !== ready.uses || handler.kind !== ready.kind) refuse('CONFIG_REFERENCE', '/spec/profiles/steps', 'compile');
-      orderedDAG.push({ id: ready.id, kind: ready.kind, dependsOn: [...ready.dependsOn].sort(), roleId: ready.roleId, handler: handler.implementation === 'pi.agent.v1' ? { ...handler, parameters: { ...handler.parameters, prompt: '[private command sha256:' + hash(String(handler.parameters.prompt)).hex + ']' } } : handler }); done.add(ready.id); pending.splice(pending.indexOf(ready), 1);
+      orderedDAG.push({
+        id: ready.id,
+        kind: ready.kind,
+        dependsOn: [...ready.dependsOn].sort(),
+        roleId: ready.roleId,
+        handler: handler.implementation === 'pi.agent.v1' ? { ...handler, parameters: { ...handler.parameters, prompt: '[private command sha256:' + hash(String(handler.parameters.prompt)).hex + ']' } } : handler,
+        ...(ready.onRework !== undefined ? { onRework: { rejectTo: ready.onRework.rejectTo, maxReworks: ready.onRework.maxReworks } } : {}),
+      });
+      done.add(ready.id);
+      pending.splice(pending.indexOf(ready), 1);
     }
     for (const node of orderedDAG) {
+      if (node.onRework !== undefined) {
+        if (!Number.isSafeInteger(node.onRework.maxReworks) || node.onRework.maxReworks < 1 || node.onRework.maxReworks > 8) {
+          refuse('CONFIG_SCHEMA', '/spec/task/spec/steps', 'compile');
+        }
+        if (node.handler.implementation === 'pi.compact.v1') {
+          refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+        }
+        if (node.onRework.rejectTo === node.id || !descendants({ orderedDAG }, node.onRework.rejectTo).includes(node.id)) {
+          refuse('CONFIG_REFERENCE', '/spec/task/spec/steps', 'compile');
+        }
+        const rejectTarget = orderedDAG.find(item => item.id === node.onRework!.rejectTo);
+        if (rejectTarget?.handler.implementation === 'pi.compact.v1') {
+          refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+        }
+      }
       if (node.handler.implementation === 'pi.compact.v1') {
         const compactRole = task.spec.roles.find(item => item.id === node.roleId);
         const compactSelected = config.spec.profiles.roles.find(item => item.roleId === node.roleId);
@@ -76,7 +106,31 @@ export function compilePlan(loaded: LoadedConfiguration) {
       networkCredential(endpoint.signingCredentialRef, 'publisher', '/spec/publication');
       if (endpoint.authCredentialRef !== null) networkCredential(endpoint.authCredentialRef, 'publisher', '/spec/publication');
     }
-    const capacity = checkpointCapacity(config.spec.controls.maxAttempts, orderedDAG.filter(node => node.kind === 'agent' && node.handler.implementation !== 'pi.compact.v1').length, task.spec.budgets.maxImplementationRepairs, verifierSlots.length, publication.mode === 'pull_request');
+    const isMutatingRoleId = (roleId: string | null): boolean => {
+      const declared = task.spec.roles.find(item => item.id === roleId);
+      return Boolean(declared?.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash'));
+    };
+    let reworkGenerations = 0;
+    let checkReworkGenerations = 0;
+    for (const node of orderedDAG) {
+      if (node.onRework !== undefined) {
+        const subIds = reworkSubgraph({ orderedDAG }, node.onRework.rejectTo);
+        const mutatingSubSteps = orderedDAG.filter(
+          item => subIds.includes(item.id) && item.kind === 'agent' && item.handler.implementation !== 'pi.compact.v1' && isMutatingRoleId(item.roleId),
+        ).length;
+        reworkGenerations += node.onRework.maxReworks * (1 + mutatingSubSteps);
+        if (node.kind === 'check') checkReworkGenerations += node.onRework.maxReworks;
+      }
+    }
+    const capacity = checkpointCapacity(
+      config.spec.controls.maxAttempts,
+      orderedDAG.filter(node => node.kind === 'agent' && node.handler.implementation !== 'pi.compact.v1').length,
+      task.spec.budgets.maxImplementationRepairs,
+      verifierSlots.length,
+      publication.mode === 'pull_request',
+      reworkGenerations,
+      checkReworkGenerations,
+    );
     const description = await describePiAdapterFiles(); if (!description.ok) refuse('CAPABILITY_UNSUPPORTED', '', 'compile', { piCode: description.error.code });
     const files = description.value, publicationOps = publication.mode === 'pull_request' ? 1 : 0;
     const storeMaxRequests = Math.min(files.limits.requests, 1024);
@@ -134,6 +188,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
         operations: Math.min(profile.limits?.operations ?? maxAvailableOps, maxAvailableOps),
       };
       if (active && task.spec.budgets.maxModelCalls > roleLimits.requests) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
+      const roleResources = selectRoleResources(task.spec.trustedContext.resources, role.resourceIds, 'compile');
       if (adapter === 'delegated') {
         if (profile.providerCredentialRef !== null) refuse('CONFIG_SCHEMA', '/registry/spec/roleProfiles', 'compile');
         let runtime: RuntimeProfile;
@@ -171,7 +226,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
             adapterVersion: '0.0.0',
             runtime: runtime.identity,
             selection: { provider: role.provider, model: role.model, thinking: role.thinking, api: 'openai-responses' },
-            resources: [files.preamble, ...task.spec.trustedContext.resources],
+            resources: [files.preamble, ...roleResources],
             tools: role.tools,
             mcp,
             context: profile.context,
@@ -231,7 +286,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
       }
       roles.push({ roleId: role.id, adapter: 'pi', profileRef: profile.id, providerCredentialRef: profile.providerCredentialRef, runtime,
         policy: { version: 2, policyId: 'controller.' + loaded.registryDigest.hex.slice(0, 32), resourceVersion: registry.resourceVersion, adapterId: 'pi', adapterVersion: '0.0.0', runtime: runtime.identity,
-          selection: effectiveSelection, resources: [files.preamble, ...task.spec.trustedContext.resources], tools: role.tools, mcp,
+          selection: effectiveSelection, resources: [files.preamble, ...roleResources], tools: role.tools, mcp,
           context: profile.context, accounting: 'soft_only', retry: 'sender_only', extensions: [], privateArtifacts: true,
           limits: roleLimits } });
     }

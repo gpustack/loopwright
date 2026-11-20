@@ -33,7 +33,13 @@ export function digestValue(value: unknown, path = ''): Digest {
 }
 export function hash(bytes: Uint8Array | string): Digest { return { algorithm: 'sha256', hex: createHash('sha256').update(bytes).digest('hex') }; }
 export function canonical(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) refuse('CONFIG_SCHEMA');
+      return JSON.stringify(Object.is(value, -0) ? 0 : value);
+    }
+    return JSON.stringify(value);
+  }
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical((value as Record<string, unknown>)[key])).join(',') + '}';
 }

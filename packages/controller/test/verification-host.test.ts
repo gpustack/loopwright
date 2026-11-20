@@ -11,9 +11,9 @@ import { canonical, hash } from '../src/schema.js';
 import { HEADER_BYTES, JSON_FILE_BYTES } from '../src/verifier-protocol.js';
 import { reopenLocalRun } from '@loopwright/state';
 import { stateValue } from '../src/storage.js';
-async function verifierFixture(files = [{ name: 'result.json', bytes: Buffer.from('{"ok":true}') }]) {
+async function verifierFixture(files = [{ name: 'result.json', bytes: Buffer.from('{"ok":true}') }], manifestMaxBytes = 32768) {
   const f = await retainedFixture(), entries = files.map(file => { const result = digestArtifact(file.name, file.bytes); assert.equal(result.ok, true); if (!result.ok) throw new Error('fixture'); return result.value; });
-  const manifest: ArtifactManifest = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } }, ref = await f.artifacts.json('manifest', manifest, 32768);
+  const manifest: ArtifactManifest = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } }, ref = await f.artifacts.json('manifest', manifest, manifestMaxBytes);
   await retainInventoryInputs(f.artifacts, manifest, ref, files);
   const inventory = { manifest, ref, files }, bound = bindSubject(f.lock, manifest); assert.equal(bound.ok, true); if (!bound.ok) throw new Error('fixture');
   return { ...f, inventory, subject: bound.value, job: () => prepareVerification(f.plan, f.lock, 'check.tests', inventory, inventory, 0, 'c'.repeat(32)) };
@@ -56,11 +56,28 @@ test('a coherently substituted packet cannot authenticate itself against the ret
     await assert.rejects(verifier.run(f.job(), new AbortController().signal)); assert.equal(journal(f.store).operations[0]!.state, 'dispatch_uncertain');
   } finally { await f.close(); }
 });
-test('file/header overflow and pre-dispatch cancellation create zero verifier intents or Workers', async () => {
+test('file/header overflow and pre-dispatch cancellation create zero verifier intents or Workers, while 80-file manifests fit without header overflow', async () => {
   const large = await verifierFixture([{ name: 'result.json', bytes: Buffer.alloc(JSON_FILE_BYTES + 1, 32) }]);
   try { const before = journal(large.store); assert.throws(large.job); assert.deepEqual(journal(large.store).view.counts, before.view.counts); } finally { await large.close(); }
+  // Decoupled manifest framing allows 80-file manifests without overflowing HEADER_BYTES
   const many = await verifierFixture([{ name: 'result.json', bytes: Buffer.from('{"ok":true}') }, ...Array.from({ length: 79 }, (_, index) => ({ name: 'packages/file-' + index, bytes: Buffer.from('x') }))]);
-  try { const before = journal(many.store); assert.throws(many.job); assert.deepEqual(journal(many.store).view.counts, before.view.counts); } finally { await many.close(); }
+  try {
+    const verifier = new Verifier(many.store, many.authority, many.artifacts, many.plan, many.lock, () => many.subject);
+    const checked = await verifier.run(many.job(), new AbortController().signal);
+    assert.equal(checked.status, 'passed');
+  } finally { await many.close(); }
+  // Classic manifests exceeding 256 files still refuse before creating any intent or Worker
+  const tooManyFiles = [{ name: 'result.json', bytes: Buffer.from('{"ok":true}') }, ...Array.from({ length: 256 }, (_, index) => ({ name: 'packages/f' + String(index).padStart(3, '0'), bytes: Buffer.from('x') }))];
+  const tooMany = await retainedFixture();
+  try {
+    const entries = tooManyFiles.map(file => { const r = digestArtifact(file.name, file.bytes); assert.equal(r.ok, true); if (!r.ok) throw new Error('fixture'); return r.value; });
+    const overManifest: ArtifactManifest = { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } };
+    const overRef = await tooMany.artifacts.json('manifest', overManifest, 65536);
+    const overInv = { manifest: overManifest, ref: overRef, files: tooManyFiles };
+    const before = journal(tooMany.store);
+    assert.throws(() => prepareVerification(tooMany.plan, tooMany.lock, 'check.tests', overInv, overInv, 0, 'c'.repeat(32)));
+    assert.deepEqual(journal(tooMany.store).view.counts, before.view.counts);
+  } finally { await tooMany.close(); }
   const f = await verifierFixture();
   try {
     const aborted = new AbortController(); aborted.abort(); const before = journal(f.store), verifier = new Verifier(f.store, f.authority, f.artifacts, f.plan, f.lock, () => f.subject);

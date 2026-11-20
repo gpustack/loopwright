@@ -1,9 +1,159 @@
-import type { ArtifactRef, Digest, TaskContract, Subject } from '@loopwright/core';
+import type { ArtifactRef, Digest, FindingSeverity, OverlayLimits, ReworkPolicy, RunResult, StructuredFinding, TaskContract, Subject } from '@loopwright/core';
 import type { AdapterPolicyV2, AdapterPolicy, RuntimeIdentity } from '@loopwright/agent-pi';
+import type { ControllerDiagnostic } from './errors.js';
+import type { ControllerIncident } from './finalize.js';
 import type { Json, Scalar } from './schema.js';
+export type { FindingSeverity, OverlayLimits, ReworkPolicy, StructuredFinding };
 export const CONTROLLER_API_VERSION = 'loopwright.dev/v1alpha1' as const;
-export type Implementation = 'pi.agent.v1' | 'pi.compact.v1' | 'scope.v1' | 'json-artifact.v1' | 'no-change.v1' | 'gate.v1';
+export type Implementation =
+  | 'pi.agent.v1'
+  | 'pi.compact.v1'
+  | 'scope.v1'
+  | 'json-artifact.v1'
+  | 'json-keys-guard.v1'
+  | 'line-section-guard.v1'
+  | 'no-change.v1'
+  | 'gate.v1';
 export type RoleAdapterKind = 'pi' | 'delegated';
+export type StepVerdictDisposition = 'pass' | 'rework' | 'fail' | 'human';
+export interface StepVerdict {
+  readonly verdict: StepVerdictDisposition;
+  readonly summary: string;
+  readonly findings: readonly StructuredFinding[];
+}
+export interface RecordedStepVerdict {
+  readonly attemptId: string | null;
+  readonly stepId: string;
+  readonly roleId: string | null;
+  readonly reworkEpoch: number;
+  readonly generation: number;
+  readonly raw: ArtifactRef;
+  readonly verdict: StepVerdict;
+}
+export interface StoredStepVerdict {
+  readonly attemptId: string | null;
+  readonly stepId: string;
+  readonly roleId: string | null;
+  readonly reworkEpoch: number;
+  readonly generation: number;
+  readonly raw: ArtifactRef;
+  readonly verdict: StepVerdictDisposition;
+  readonly summaryPreview: string;
+  readonly findingCount: number;
+}
+export interface StepReworkContext {
+  readonly epoch: number;
+  readonly count: number;
+  readonly maxReworks: number;
+  readonly fromStepId: string;
+  readonly summary: string;
+  readonly findings: readonly StructuredFinding[];
+}
+export interface StepMcpServerMetadata {
+  readonly id: string;
+  readonly transport: 'stdio' | 'http';
+  readonly toolNames: readonly string[];
+}
+export type AdvisoryDecisionSource = 'jev' | 'deterministic_fallback' | 'deterministic_heuristic' | 'user_override';
+export type AdvisoryDecisionZone = 'high' | 'medium' | 'low';
+export type AdvisoryCapabilityTier = 'fast' | 'balanced' | 'strongest';
+export interface CapabilityRoutingDecisionInput {
+  readonly runId: string;
+  readonly stepId: string;
+  readonly roleId: string;
+  readonly taskKind: string;
+  readonly estimatedFilesCount: number;
+  readonly hasFailingTests: boolean;
+  readonly requiresArchitectureChange: boolean;
+  readonly candidateSkills: readonly string[];
+  readonly pinnedModel: { readonly provider: string; readonly model: string; readonly thinking: string };
+}
+export interface CapabilityRoutingDecisionOutput {
+  readonly tier: AdvisoryCapabilityTier;
+  readonly skills?: readonly string[];
+  readonly source: AdvisoryDecisionSource;
+  readonly zone?: AdvisoryDecisionZone | null;
+}
+export type CycleAlignmentRoute = 'continue' | 'revise' | 'needs_review' | 'blocked';
+export interface CycleAlignmentDecisionInput {
+  readonly runId: string;
+  readonly trigger: 'implementation_repair' | 'rework';
+  readonly targetStepId: string;
+  readonly contractHash: Digest;
+  readonly baseRevision: string;
+  readonly candidateDigest: Digest;
+  readonly reworkEpoch: number;
+  readonly remainingAttempts: number;
+  readonly contextUtilization: number;
+  readonly failedVerificationLoops: number;
+}
+export interface CycleAlignmentDecisionOutput {
+  readonly route: CycleAlignmentRoute;
+  readonly precheckPassed: boolean;
+  readonly source: AdvisoryDecisionSource;
+  readonly zone?: AdvisoryDecisionZone | null;
+}
+export interface SoftCompactionDecisionInput {
+  readonly runId: string;
+  readonly stepId: string;
+  readonly roleId: string;
+  readonly contextUtilization: number;
+  readonly failedVerificationLoops: number;
+}
+export interface SoftCompactionDecisionOutput {
+  readonly advisoryDecision: 'compact' | 'defer' | null;
+  readonly hardTriggerActive?: boolean;
+  readonly hardTriggerVetoRefused?: boolean;
+  readonly source: AdvisoryDecisionSource;
+  readonly zone?: AdvisoryDecisionZone | null;
+}
+export type CandidateDiffTriageSeverity = 'blocking' | 'important' | 'nit';
+export interface CandidateDiffSummary {
+  readonly changedFiles: readonly string[];
+  readonly addedLines: number;
+  readonly deletedLines: number;
+  readonly touchedPackages: readonly string[];
+  readonly redactedHunkSummaries: readonly string[];
+}
+export interface CandidateDiffTriageEscalation {
+  readonly ruleId: string;
+  readonly severity: CandidateDiffTriageSeverity;
+  readonly source: AdvisoryDecisionSource;
+  readonly zone?: AdvisoryDecisionZone | null;
+  readonly advisoryOnly: true;
+}
+export interface CandidateDiffTriageInput {
+  readonly runId: string;
+  readonly stepId: string;
+  readonly attemptId: string;
+  readonly candidateDigest: Digest;
+  readonly summary: CandidateDiffSummary;
+}
+export interface CandidateDiffTriageOutput {
+  readonly escalated: readonly CandidateDiffTriageEscalation[];
+  readonly verificationCertified: false;
+  readonly source: AdvisoryDecisionSource;
+  readonly zone?: AdvisoryDecisionZone | null;
+}
+/** Zero-dependency advisory decision port matching the four non-authoritative intents in `@loopwright/decisions`. */
+export interface AdvisoryDecisionPort {
+  readonly routeCapabilityTier?: (input: CapabilityRoutingDecisionInput) => Promise<CapabilityRoutingDecisionOutput | null>;
+  readonly evaluateCycleAlignment?: (input: CycleAlignmentDecisionInput) => Promise<CycleAlignmentDecisionOutput | null>;
+  readonly adviseSoftCompaction?: (input: SoftCompactionDecisionInput) => Promise<SoftCompactionDecisionOutput | null>;
+  readonly triageCandidateDiff?: (input: CandidateDiffTriageInput) => Promise<CandidateDiffTriageOutput | null>;
+}
+export type CycleExecution =
+  | {
+      readonly kind: 'result';
+      readonly version: 1;
+      readonly runId: string;
+      readonly result: RunResult;
+      readonly observations: ArtifactRef | null;
+      readonly secondary: readonly ControllerDiagnostic['code'][];
+      readonly findings?: readonly StructuredFinding[];
+      readonly stepVerdicts?: readonly RecordedStepVerdict[];
+    }
+  | { readonly kind: 'incident'; readonly version: 1; readonly incident: ControllerIncident };
 export interface DelegatedSelection { readonly provider: string; readonly model: string; readonly thinking: string; readonly api?: AdapterPolicy['selection']['api']; readonly customProvider?: AdapterPolicy['selection']['customProvider'] }
 export interface RoleSelectionOverride { readonly provider: string; readonly model: string; readonly thinking?: string }
 export interface RoleModelOverride extends RoleSelectionOverride { readonly roleId: string }
@@ -65,7 +215,7 @@ export interface PlannedRole { readonly roleId: string; readonly adapter: RoleAd
 export interface CompiledPlan {
   readonly version: 1; readonly runId: null; readonly lock: null; readonly admission: 'not_performed'; readonly effectfulReadiness: 'not_checked';
   readonly sourceDocumentDigest: Digest; readonly taskByteDigest: Digest; readonly registryDigest: Digest; readonly planDigest: Digest;
-  readonly task: TaskContract; readonly orderedDAG: readonly { readonly id: string; readonly kind: 'agent' | 'check'; readonly dependsOn: readonly string[]; readonly roleId: string | null; readonly handler: Handler }[];
+  readonly task: TaskContract; readonly orderedDAG: readonly { readonly id: string; readonly kind: 'agent' | 'check'; readonly dependsOn: readonly string[]; readonly roleId: string | null; readonly handler: Handler; readonly onRework?: ReworkPolicy }[];
   readonly scope: TaskContract['spec']['scope']; readonly budgets: TaskContract['spec']['budgets']; readonly controls: Controls;
   readonly roles: readonly PlannedRole[]; readonly resources: readonly { readonly id: string; readonly kind: RegistryResource['kind']; readonly ref: ArtifactRef }[];
   readonly credentialReferences: readonly { readonly ref: string; readonly consumer: CredentialBinding['consumer']; readonly destinationRef: string }[];
@@ -84,6 +234,7 @@ export interface ControllerAttempt {
   readonly ordinal: number; readonly id: string; readonly nodeId: string; readonly nativeStepId: string; readonly sessionId: string; readonly purpose: 'task' | 'reviewer' | 'compaction';
   readonly repair: 'none' | 'format' | 'implementation'; readonly command: ArtifactRef; readonly before: Watermarks;
   readonly finished: null | { readonly after: Watermarks; readonly outcome: ArtifactRef; readonly nativeCheckpointId: string | null };
+  readonly reworkEpoch?: number;
 }
 export interface VerifierRefusalRow { readonly slot: string; readonly generation: number; readonly prospectiveOperationId: string; readonly producerNonce: string; readonly subject: Subject; readonly record: ArtifactRef }
 export interface ControllerProgress {
@@ -96,9 +247,13 @@ export interface ControllerProgress {
   readonly publication: { readonly status: 'idle' | 'pending' | 'confirmed' | 'failed' | 'unresolved'; readonly operationId: string | null; readonly receipt: ArtifactRef | null };
   readonly candidate: { readonly manifest: ArtifactRef; readonly digest: Digest; readonly generation: number; readonly workspace: ArtifactRef; readonly privateSession: ArtifactRef | null };
   readonly failures: readonly { readonly signature: Digest; readonly count: number; readonly generation: number; readonly evidence: ArtifactRef | null }[];
-  readonly verifierReceipts: readonly { readonly slot: string; readonly generation: number; readonly operationId: string; readonly producerNonce: string; readonly output: ArtifactRef | null; readonly receipt: ArtifactRef | null }[];
+  readonly verifierReceipts: readonly { readonly slot: string; readonly generation: number; readonly operationId: string; readonly producerNonce: string; readonly output: ArtifactRef | null; readonly receipt: ArtifactRef | null; readonly reworkEpoch?: number }[];
   readonly verifierRefusals: readonly VerifierRefusalRow[];
   readonly eventSequence: number; readonly terminalIntent: null | { readonly primary: string; readonly result: ArtifactRef | null; readonly observations: ArtifactRef | null };
+  readonly reworkEpoch?: number;
+  readonly reworkCounts?: Readonly<Record<string, number>>;
+  readonly nodeSubmissions?: Readonly<Record<string, ArtifactRef>>;
+  readonly stepVerdicts?: readonly StoredStepVerdict[];
 }
 export interface ReceiptIndex {
   readonly version: 1; readonly runId: string;
@@ -115,10 +270,15 @@ export interface StepYield {
   readonly repair: 'none' | 'format' | 'implementation';
   readonly selection: DelegatedSelection;
   readonly allowedTools: readonly string[];
+  readonly allowedMcpServers: readonly string[];
+  readonly mcpServers: readonly StepMcpServerMetadata[];
   readonly scope: TaskContract['spec']['scope'];
+  readonly allowWorkflowWrites: boolean;
   readonly candidateDir: string;
   readonly contextFiles: readonly string[];
   readonly prompt: string;
+  readonly reworkEpoch: number;
+  readonly rework: StepReworkContext | null;
   readonly submissionMode: 'artifact_or_assistant';
   readonly submissionPath: string | null;
   readonly leaseToken: string;

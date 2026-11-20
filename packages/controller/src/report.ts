@@ -1,4 +1,4 @@
-import type { UsageSummary } from '@loopwright/core';
+import type { StructuredFinding, UsageSummary } from '@loopwright/core';
 
 export const REPORT_OUTPUT_FORMATS = Object.freeze(['json', 'github-step-summary', 'markdown', 'text'] as const);
 export type ReportOutputFormat = (typeof REPORT_OUTPUT_FORMATS)[number];
@@ -45,6 +45,7 @@ export interface RunReportInput {
   readonly detail?: string | null | undefined;
   readonly discovery?: ReportDiscoveryInfo | null | undefined;
   readonly checks?: readonly ReportCheckItem[] | undefined;
+  readonly findings?: readonly StructuredFinding[] | undefined;
   readonly model?: ReportModelInfo | null | undefined;
   readonly mcpServers?: readonly ReportMcpServerInfo[] | undefined;
   readonly usage?: UsageSummary | null | undefined;
@@ -305,6 +306,17 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
         code: check.code != null ? clean(check.code) : null,
         detail: check.detail != null ? clean(check.detail) : null,
       })),
+      ...(input.findings !== undefined
+        ? {
+            findings: input.findings.map(finding => ({
+              title: clean(finding.title),
+              severity: clean(finding.severity),
+              ...(finding.path !== undefined ? { path: finding.path !== null ? clean(finding.path) : null } : {}),
+              ...(finding.line !== undefined ? { line: finding.line } : {}),
+              evidence: clean(finding.evidence),
+            })),
+          }
+        : {}),
       model: input.model
         ? {
             provider: clean(input.model.provider),
@@ -408,6 +420,18 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
         lines.push(`| ${cell(check.checkId)} | ${cell(check.status)} | ${codeCell} | ${detailCell} |`);
       }
     }
+    if (input.findings && input.findings.length > 0) {
+      lines.push('', '### Findings', '', '| Severity | Location | Title | Evidence |', '| --- | --- | --- | --- |');
+      for (const finding of input.findings) {
+        const loc =
+          finding.path != null && finding.path.length > 0
+            ? finding.line != null
+              ? `${finding.path}:${finding.line}`
+              : finding.path
+            : '-';
+        lines.push(`| ${cell(finding.severity)} | ${loc === '-' ? '-' : cell(loc)} | ${cell(finding.title)} | ${cell(finding.evidence)} |`);
+      }
+    }
     return lines.join('\n');
   }
 
@@ -446,6 +470,18 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
         if (check.code != null && check.code.length > 0) checkLine += ` (${cleanLine(check.code)})`;
         if (check.detail != null && check.detail.length > 0) checkLine += ` - ${cleanLine(check.detail)}`;
         lines.push(checkLine);
+      }
+    }
+    if (input.findings && input.findings.length > 0) {
+      lines.push('Findings:');
+      for (const finding of input.findings) {
+        const loc =
+          finding.path != null && finding.path.length > 0
+            ? finding.line != null
+              ? `${cleanLine(finding.path)}:${finding.line} `
+              : `${cleanLine(finding.path)} `
+            : '';
+        lines.push(`- [${cleanLine(finding.severity)}] ${loc}${cleanLine(finding.title)} - ${cleanLine(finding.evidence)}`);
       }
     }
     if (input.externalUrl != null && input.externalUrl.length > 0) lines.push(`External URL: ${cleanLine(input.externalUrl)}`);

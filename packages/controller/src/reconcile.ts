@@ -14,36 +14,36 @@ import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
 import { ProgressStore } from './progress.js';
 import { parsePrivateJson } from './parser.js';
-import { canonical, freeze, hash, record, same, text } from './schema.js';
+import { canonical, freeze, hash, isRecord, record, same, text } from './schema.js';
+import type { ControllerPorts } from './controller.js';
 import { preparePublication, verifyPublicationReceipt } from './publication.js';
-import { verifySignedPayload } from './gate.js';
+import { checkedGateVerdict, GATE_OUTPUT_BYTES, RESPONSE_BYTES, stripVerdictSignature, validateGateUrlOverrides, verifyGateSignature, verifySignedPayload, type GateVerdict } from './gate.js';
 import type { LoadedConfiguration } from './types.js';
 export interface ReconcileCycleInput { readonly configuration: LoadedConfiguration; readonly runRoot: string; readonly runId: string; readonly receipt: string; readonly signal?: AbortSignal }
 export type ReconcileExecution =
   | { readonly kind: 'settled'; readonly version: 1; readonly runId: string; readonly status: 'completed' | 'failed' | 'blocked'; readonly outcome: 'succeeded' | 'not_executed'; readonly externalEffects: 'confirmed' | 'none'; readonly receipt: OperationReceipt }
   | { readonly kind: 'unresolved'; readonly version: 1; readonly runId: string; readonly reason: string };
+const RECEIPT_BYTES = RESPONSE_BYTES + 256;
 /** Operator receipt files may live anywhere private enough for the operator; ancestor symlinks such as /tmp -> /private/tmp canonicalize, the file itself never links. */
 async function readReceiptFile(path: string): Promise<Buffer> {
   const rawTarget = resolve(text(path));
   let target: string;
   try {
     const stats = await lstat(rawTarget);
-    if (!stats.isFile() || stats.isSymbolicLink() || stats.size > 65536) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    if (!stats.isFile() || stats.isSymbolicLink() || stats.size > RECEIPT_BYTES) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
     target = join(await realpath(dirname(rawTarget)), basename(rawTarget));
   } catch (error) { if (error instanceof ControllerFailure) throw error; refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
-  try { return await readBoundedFile(target, 65536, false); }
+  try { return await readBoundedFile(target, RECEIPT_BYTES, false); }
   catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
 }
-function signedBodyOf(file: Record<string, unknown>): Record<string, unknown> {
-  const body = { ...file }; delete body.signature; return body;
-}
 /** Explicit operator reconciliation for interrupted or unproven external effects; never re-dispatches the external request. */
-export function reconcileCycle(input: ReconcileCycleInput) {
+export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPorts = {}) {
   return result(async (): Promise<ReconcileExecution> => {
     const fields = Object.keys(input); record(input, fields);
     if (fields.some(key => !['configuration', 'runRoot', 'runId', 'receipt', 'signal'].includes(key)) || input.signal !== undefined && !(input.signal instanceof AbortSignal)) refuse('CONFIG_SCHEMA', '', 'recovery');
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery');
     const receiptBytes = await readReceiptFile(input.receipt);
-    let raw: unknown; try { raw = parsePrivateJson(receiptBytes, 65536); } catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
+    let raw: unknown; try { raw = parsePrivateJson(receiptBytes, RECEIPT_BYTES); } catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
     const kind = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).kind : null;
     if (kind !== 'publication_receipt' && kind !== 'gate_verdict') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
     let effectiveConfig = input.configuration;
@@ -55,12 +55,13 @@ export function reconcileCycle(input: ReconcileCycleInput) {
         if (reloaded.ok) { effectiveConfig = reloaded.value; state = approvedState(effectiveConfig); }
       }
     } catch { /* admit() below will validate retained run and report the canonical diagnostic */ }
+    validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery', effectiveConfig.registry.spec.gateEndpoints);
     const compiled = await compilePlan(effectiveConfig);
     if (!compiled.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const plan = compiled.value;
-    if (kind === 'gate_verdict') return await reconcileGate({ ...input, configuration: effectiveConfig }, state, plan, receiptBytes);
+    if (kind === 'gate_verdict') return await reconcileGate({ ...input, configuration: effectiveConfig }, state, plan, receiptBytes, ports);
     if (plan.publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
-    return await reconcilePublication({ ...input, configuration: effectiveConfig }, state, plan, raw);
+    return await reconcilePublication({ ...input, configuration: effectiveConfig }, state, plan, raw, ports);
   }, 'recovery');
 }
 /** Shared retained-run admission for both reconciliation paths. */
@@ -69,7 +70,7 @@ async function admit(input: ReconcileCycleInput, plan: import('./types.js').Comp
   if (!same(plan, admitted.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   return admitted;
 }
-async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, receiptBytes: Buffer) {
+async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, receiptBytes: Buffer, ports: ControllerPorts) {
   const { directory, descriptor, lock } = await admit(input, plan);
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
   try {
@@ -79,7 +80,21 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source), head = await progress.read();
-    const file = record(parsePrivateJson(receiptBytes, 65536), ['version', 'kind', 'storeId', 'runId', 'lockHash', 'operationId', 'dispatchId', 'dispatchGeneration', 'gateId', 'checkId', 'candidateDigest', 'status', 'reason', 'expiresAtMs', 'signature']);
+    const rawReceipt = parsePrivateJson(receiptBytes, 65_792);
+    if (!isRecord(rawReceipt)) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    const optionalVerdictKeys = (['detail', 'metrics', 'findings', 'retryablePreemption'] as const).filter(
+      key => Object.hasOwn(rawReceipt, key) && rawReceipt[key] !== undefined,
+    );
+    let file: Record<string, unknown>;
+    try {
+      file = record(rawReceipt, [
+        'version', 'kind', 'storeId', 'runId', 'lockHash', 'operationId', 'dispatchId', 'dispatchGeneration',
+        'gateId', 'checkId', 'candidateDigest', 'status', 'reason', 'expiresAtMs', 'signature',
+        ...optionalVerdictKeys,
+      ], '/receipt');
+    } catch {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
     // The active verifier_pre row is checked first, so a tampered operationId while parked fails at /receipt; after
     // resume (or a prior reconcile) the receipt locates its reconciled gate row for idempotent replay.
     const activeRow = head?.progress.stage.kind === 'verifier_pre'
@@ -93,24 +108,47 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     const operation = stateValue(store.getOperation(row.operationId)), dispatch = operation.dispatch;
     if (!dispatch || operation.state !== 'dispatch_uncertain' && operation.state !== 'confirmed') refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
     const subject = head.checkpoint.subject;
-    const body = signedBodyOf(file);
-    if (file.version !== 1 || !same(body, { version: 1, kind: 'gate_verdict', storeId: original.storeId, runId: lock.spec.runId, lockHash: lock.spec.lockHash, operationId: row.operationId, dispatchId: dispatch.dispatchId, dispatchGeneration: dispatch.generation, gateId: (slot.handler.parameters as Record<string, unknown>).gateId, checkId: slot.checkId, candidateDigest: subject.candidateDigest.hex, status: file.status, reason: file.reason, expiresAtMs: file.expiresAtMs })
-      || !['approved', 'denied', 'expired'].includes(text(file.status))
-      || file.reason !== null && (typeof file.reason !== 'string' || (file.reason as string).length > 256)
-      || !/^(?:0|[1-9][0-9]{0,17})$/.test(text(file.expiresAtMs))
-      || text(file.status) === 'approved' && (BigInt(text(file.expiresAtMs)) < BigInt(original.clock.sampledNow.wallMs) || BigInt(text(file.expiresAtMs)) > BigInt(original.clock.sampledNow.wallMs) + 86400000n)
-      || Buffer.byteLength(canonical(body)) > 16384
-      || !verifySignedPayload(state.vault.resolveNetworkCredential(endpoint.signingCredentialRef), canonical(body), text(file.signature))) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
-    const status = text(file.status) as 'approved' | 'denied' | 'expired';
-    const dispositioned = status === 'approved' ? { status: 'passed', reason: null, method: 'verify_external_gate' } : status === 'denied' ? { status: 'failed', reason: 'gate_denied', method: 'verify_external_gate' } : { status: 'blocked', reason: 'EVIDENCE_UNAVAILABLE', method: 'verify_external_gate' };
+    const body = stripVerdictSignature(file);
+    let parsedVerdict: GateVerdict;
+    try {
+      parsedVerdict = checkedGateVerdict(body, {
+        storeId: original.storeId,
+        runId: lock.spec.runId,
+        lockHash: lock.spec.lockHash,
+        operationId: row.operationId,
+        dispatchId: dispatch.dispatchId,
+        dispatchGeneration: dispatch.generation,
+        gateId: (slot.handler.parameters as Record<string, unknown>).gateId,
+        checkId: slot.checkId,
+        candidateDigest: subject.candidateDigest.hex,
+      });
+    } catch {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+    if (
+      parsedVerdict.status === 'pending'
+      || parsedVerdict.status === 'approved' && (BigInt(parsedVerdict.expiresAtMs) < BigInt(original.clock.sampledNow.wallMs) || BigInt(parsedVerdict.expiresAtMs) > BigInt(original.clock.sampledNow.wallMs) + 86400000n)
+      || Buffer.byteLength(canonical(body)) > RESPONSE_BYTES
+      || typeof file.signature !== 'string'
+      || !verifyGateSignature(state.vault.resolveNetworkCredential(endpoint.signingCredentialRef), file, file.signature)
+    ) {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+    const status = parsedVerdict.status;
+    const preemptionField = parsedVerdict.retryablePreemption !== undefined ? { retryablePreemption: parsedVerdict.retryablePreemption } : {};
+    const dispositioned = status === 'approved'
+      ? { status: 'passed' as const, reason: null, method: 'verify_external_gate', ...preemptionField }
+      : status === 'denied'
+        ? { status: 'failed' as const, reason: 'gate_denied', method: 'verify_external_gate', ...preemptionField }
+        : { status: 'blocked' as const, reason: 'EVIDENCE_UNAVAILABLE', method: 'verify_external_gate', ...preemptionField };
     const nonce = row.producerNonce, prefix = join(artifacts.directory, 'gate-producer-' + hash(row.operationId + '\0' + nonce).hex);
     let settledReceipt: OperationReceipt | null = null;
     if (operation.state === 'confirmed') {
       settledReceipt = operation.reconciliation ?? operation.initialReceipt;
       if (!settledReceipt) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
-      const savedOutput = record(parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, 65536), 65536), ['version', 'binding', 'observation', 'verdict', 'responseBytes', 'responseSignature', 'disposition']);
+      const savedOutput = record(parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, GATE_OUTPUT_BYTES), GATE_OUTPUT_BYTES), ['version', 'binding', 'observation', 'verdict', 'responseBytes', 'responseSignature', 'disposition']);
       if (savedOutput.verdict === null) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
-      if (!same(savedOutput.verdict, { status, reason: file.reason, expiresAtMs: file.expiresAtMs })) refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
+      if (!same(savedOutput.verdict, parsedVerdict)) refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
       if (head.progress.stage.kind.startsWith('terminal') && head.progress.terminalIntent?.result) {
         let raw: unknown; try { raw = parsePrivateJson(await artifacts.read(head.progress.terminalIntent.result, 1048576), 1048576); } catch { refuse('RECOVERY_REQUIRED', '', 'recovery'); }
         const terminalResult = validateDocument(raw, 'RunResult'); if (!terminalResult.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -123,12 +161,25 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
       const requestBytesDigest = hash(Buffer.from(canonical(request))).hex;
       const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
       const output = await artifacts.json('gate-output', { version: 1, binding: { planDigest: plan.planDigest, operationId: row.operationId, producerNonce: nonce, generation: row.generation, endpoint: endpoint.id, subject, requestBytesDigest },
-        observation: { attempts: 1, elapsedMs: 0, transport: 'completed' }, verdict: { status, reason: file.reason, expiresAtMs: file.expiresAtMs }, responseBytes: Buffer.from(canonical(body)).toString('base64'), responseSignature: text(file.signature), disposition: dispositioned }, 65536);
-      const evidenceResult = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: { checkId: slot.checkId, observedStatus: dispositioned.status, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method, level: 'external_service', subject, artifacts: [output], reason: dispositioned.reason } }, 'Evidence');
+        observation: { attempts: 1, elapsedMs: 0, transport: 'completed' }, verdict: parsedVerdict, responseBytes: Buffer.from(canonical(body)).toString('base64'), responseSignature: text(file.signature), disposition: dispositioned }, GATE_OUTPUT_BYTES);
+      const evidenceSpec = {
+        checkId: slot.checkId,
+        observedStatus: dispositioned.status,
+        producerId: 'loopwright.gate-verifier.v1',
+        method: dispositioned.method,
+        level: 'external_service' as const,
+        subject,
+        artifacts: [output],
+        reason: dispositioned.reason,
+        ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
+        ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
+        ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
+      };
+      const evidenceResult = validateDocument({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec }, 'Evidence');
       if (!evidenceResult.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
       settledReceipt = { receiptId: 'receipt.' + suffix, outcome: dispositioned.method === 'verify_external_gate' ? 'succeeded' : 'failed',
         evidence: { evidenceId: 'receipt-evidence.' + suffix, producerId: 'loopwright.gate-verifier.v1', method: dispositioned.method,
-          subject: { storeId: original.storeId, runId: lock.spec.runId, lockHash: lock.spec.lockHash, operationId: row.operationId, requestId: null, intentDigest: operation.intentDigest, dispatchGeneration: dispatch.generation, dispatchId: dispatch.dispatchId }, artifact: output } };
+           subject: { storeId: original.storeId, runId: lock.spec.runId, lockHash: lock.spec.lockHash, operationId: row.operationId, requestId: null, intentDigest: operation.intentDigest, dispatchGeneration: dispatch.generation, dispatchId: dispatch.dispatchId }, artifact: output } };
       const receiptRef = await artifacts.json('gate-receipt', settledReceipt, 65536);
       await writeMarker(prefix + '.proof.json', { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value }, state.vault);
       stateValue(store.reconcileOperation(authority, row.operationId, settledReceipt));
@@ -137,7 +188,7 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     stateValue(store.release(authority)); authority = null;
     stateValue(store.close()); store = null;
     await owner.release(); owner = null;
-    const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId });
+    const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, ports);
     if (!execution.ok && execution.error.code === 'CAPABILITY_UNSUPPORTED') {
       return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'delegated_step_required' }) as ReconcileExecution;
     }
@@ -173,7 +224,7 @@ async function replaceMarker(path: string, value: unknown, vault: { assertClean:
   try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
   await rename(temp, path);
 }
-async function reconcilePublication(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, raw: unknown) {
+async function reconcilePublication(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, raw: unknown, ports: ControllerPorts) {
   const publication = plan.publication;
   if (publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
   const { directory, descriptor, lock } = await admit(input, plan);
@@ -195,7 +246,7 @@ async function reconcilePublication(input: ReconcileCycleInput, state: ReturnTyp
     if (operation.intent.attemptId !== prepared.idempotencyKey || !same(operation.intent.requestDigest, prepared.requestDigest) || operation.intent.nodeId !== plan.orderedDAG[0]!.id || !operation.dispatch) refuse('RECOVERY_REQUIRED', '/publication', 'recovery');
     const hasCandidate = typeof raw === 'object' && raw !== null && Object.hasOwn(raw, 'candidateDigest');
     const file = record(raw, ['version', 'kind', 'storeId', 'runId', 'lockHash', 'operationId', 'dispatchId', 'dispatchGeneration', 'idempotencyKey', 'outcome', 'externalUrl', 'reason', 'signature', ...(hasCandidate ? ['candidateDigest' as const] : [])]);
-    const body = signedBodyOf(file);
+    const body = stripVerdictSignature(file);
     const checked = verifyPublicationReceipt(body, { storeId: original.storeId, runId: lock.spec.runId, lockHash: lock.spec.lockHash, operationId: pending.operationId, dispatchId: operation.dispatch.dispatchId, dispatchGeneration: operation.dispatch.generation, idempotencyKey: prepared.idempotencyKey, candidateDigest: subject.candidateDigest.hex });
     if (!checked || checked.outcome === 'failed'
       || !verifySignedPayload(state.vault.resolveNetworkCredential(endpoint.signingCredentialRef), canonical(body), text(file.signature))) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
@@ -252,7 +303,7 @@ async function reconcilePublication(input: ReconcileCycleInput, state: ReturnTyp
       stateValue(store.release(authority)); authority = null;
       stateValue(store.close()); store = null;
       await owner.release(); owner = null;
-      const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId });
+      const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, ports);
       if (!execution.ok || execution.value.kind !== 'result') refuse('RECOVERY_REQUIRED', '', 'recovery');
       const status = execution.value.result.spec.status;
       if (status === 'reconcile_required') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;

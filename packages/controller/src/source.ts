@@ -4,6 +4,9 @@ import {
   LIMITS,
   digestArtifact,
   identifyManifest,
+  matchesScopePattern as coreMatchesScopePattern,
+  resolveOverlayLimits,
+  validateScopePattern,
   type ArtifactManifest,
   type ArtifactRef,
   type BaseTreeAnchor,
@@ -60,12 +63,73 @@ const decoded = (value: Buffer): string => {
   }
 };
 
-// Must stay in lockstep with `matches()` in `@loopwright/core` (`packages/core/src/scope.ts`).
+// Delegates directly to `@loopwright/core` (`packages/core/src/scope.ts`) to eliminate glob drift.
 export function matchesScopePattern(pattern: string, name: string): boolean {
-  if (pattern === '**') return true;
-  if (!pattern.endsWith('/**')) return pattern === name;
-  const prefix = pattern.slice(0, -3);
-  return name === prefix || name.startsWith(`${prefix}/`);
+  if (!validateScopePattern(pattern).ok) return false;
+  const matched = coreMatchesScopePattern(pattern, name);
+  return matched.ok ? matched.value : false;
+}
+
+const HOST_ALWAYS_PROTECTED_PATTERNS: readonly string[] = [
+  '.claude/**',
+  'AGENTS.md',
+  'CLAUDE.md',
+];
+const HOST_WORKFLOW_PROTECTED_PATTERN = '.github/workflows/**';
+
+for (const pattern of [...HOST_ALWAYS_PROTECTED_PATTERNS, HOST_WORKFLOW_PROTECTED_PATTERN]) {
+  if (!validateScopePattern(pattern).ok) {
+    throw new Error(`Invalid built-in host protected pattern: ${pattern}`);
+  }
+}
+
+function matchesHostProtectedPattern(pattern: string, name: string): boolean {
+  const matched = coreMatchesScopePattern(pattern, name);
+  return !matched.ok || matched.value;
+}
+
+export function isHostProtectedPath(name: string, allowWorkflowWrites: boolean): boolean {
+  if (HOST_ALWAYS_PROTECTED_PATTERNS.some(pattern => matchesHostProtectedPattern(pattern, name))) return true;
+  if (!allowWorkflowWrites && matchesHostProtectedPattern(HOST_WORKFLOW_PROTECTED_PATTERN, name)) return true;
+  return false;
+}
+
+export interface OverlayManifestBounds {
+  readonly maxFiles: number;
+  readonly maxBytes: number;
+  readonly perFileMaxBytes: number;
+  readonly manifestMaxBytes: number;
+  readonly collectionLimit: number;
+  readonly workspaceMaxBytes: number;
+  readonly checkpointInputMaxBytes: number;
+  readonly options: { readonly overlay: { readonly maxFiles: number; readonly maxBytes: number } } | undefined;
+}
+
+export function overlayManifestBounds(overlay?: TaskContract['spec']['budgets']['overlay']): OverlayManifestBounds {
+  const resolved = resolveOverlayLimits(overlay);
+  if (!resolved.ok) refuse('CONFIG_SCHEMA', '/spec/task/spec/budgets/overlay', 'admission');
+  const { maxFiles, maxBytes } = resolved.value;
+  const perFileMaxBytes = overlay === undefined ? 1_048_576 : Math.min(maxBytes, 33_554_432);
+  const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(20_971_520, 32_768 + (maxFiles - 128) * 4_608);
+  const collectionLimit = Math.max(256, maxFiles);
+  const workspaceMaxBytes =
+    maxFiles <= 128 && maxBytes <= 4_194_304
+      ? 8_388_608
+      : Math.ceil((maxBytes * 4) / 3) + maxFiles * 256 + 1_114_112;
+  const checkpointInputMaxBytes =
+    overlay === undefined || maxFiles <= 128
+      ? 40_960
+      : Math.min(2_097_152, 65_536 + (Math.min(maxFiles, 4096) - 128) * 4608);
+  return {
+    maxFiles,
+    maxBytes,
+    perFileMaxBytes,
+    manifestMaxBytes,
+    collectionLimit,
+    workspaceMaxBytes,
+    checkpointInputMaxBytes,
+    options: overlay !== undefined ? { overlay: { maxFiles, maxBytes } } : undefined,
+  };
 }
 
 function isProtectedByScope(name: string, protectedPatterns: readonly string[]): boolean {
@@ -542,15 +606,16 @@ export async function freezeSource(
   if (sourceTreeBytes.byteLength > 8_388_608) refuse('CONFIG_LIMIT', '', 'admission');
   const sourceTreeRef = await store.put('source-tree', sourceTreeBytes, 8_388_608);
 
+  const overlayBounds = overlayManifestBounds(task.spec.budgets.overlay);
   const identified = identifyManifest({
     apiVersion: 'loopwright.dev/v1alpha1',
     kind: 'ArtifactManifest',
     metadata: { id: 'candidate' },
     spec: { baseTree, entries: [], deleted: [] },
-  });
+  }, overlayBounds.options);
   if (!identified.ok) refuse('ARTIFACT_INVALID', '', 'admission');
   const manifest = identified.value.manifest;
-  const manifestRef = await store.json('manifest', manifest, 32_768);
+  const manifestRef = await store.json('manifest', manifest, overlayBounds.manifestMaxBytes);
   const inventory = await store.json('source', {
     version: 2,
     repository: task.spec.target.repository,
@@ -626,8 +691,12 @@ export async function restoreSource(
     if (!info.isDirectory() || info.uid !== process.getuid?.() || await realpath(directory) !== directory) {
       refuse('TARGET_MISMATCH', '', 'recovery');
     }
+    const overlayBounds = overlayManifestBounds(task.spec.budgets.overlay);
     const manifestRef = checkedRef(value.manifest);
-    const identified = identifyManifest(parsePrivateJson(await reader.read(manifestRef, 32_768), 32_768));
+    const identified = identifyManifest(
+      parsePrivateJson(await reader.read(manifestRef, overlayBounds.manifestMaxBytes), overlayBounds.manifestMaxBytes, overlayBounds.collectionLimit),
+      overlayBounds.options,
+    );
     if (!identified.ok || identified.value.manifest.metadata.id !== 'candidate' || identified.value.manifest.spec.baseTree !== undefined) {
       refuse('ARTIFACT_INVALID', '', 'recovery');
     }
@@ -691,8 +760,12 @@ export async function restoreSource(
     if (!info.isDirectory() || info.uid !== process.getuid?.() || await realpath(directory) !== directory) {
       refuse('TARGET_MISMATCH', '', 'recovery');
     }
+    const overlayBounds = overlayManifestBounds(task.spec.budgets.overlay);
     const manifestRef = checkedRef(value.manifest);
-    const identified = identifyManifest(parsePrivateJson(await reader.read(manifestRef, 32_768), 32_768));
+    const identified = identifyManifest(
+      parsePrivateJson(await reader.read(manifestRef, overlayBounds.manifestMaxBytes), overlayBounds.manifestMaxBytes, overlayBounds.collectionLimit),
+      overlayBounds.options,
+    );
     if (
       !identified.ok
       || identified.value.manifest.metadata.id !== 'candidate'

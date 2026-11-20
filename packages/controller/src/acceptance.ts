@@ -19,7 +19,8 @@ const tree = (input: unknown): unknown => JSON.parse(canonical(input));
 export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock, candidate: ArtifactManifest, candidateFiles: readonly ResolvedArtifact[], generation: number,
   checks: readonly VerifiedCheck[], submission: Submission | null, store: LocalRunStore, forced: 'reconcile_required' | 'expired' | 'cancelled' | 'exhausted' | 'blocked' | 'failed' | null = null, graphComplete = true, refusals: readonly PreflightRefusal[] = [], forcedDiagnostic: ControllerDiagnostic['code'] | null = null): AcceptanceObservation {
   if (!same(plan.task, lock.spec.contract)) refuse('ARTIFACT_INVALID', '', 'verification');
-  const bound = bindSubject(lock, candidate); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); const subject = bound.value, records = journal(store);
+  const overlayOpts = lock.spec.contract.spec.budgets.overlay ? { overlay: lock.spec.contract.spec.budgets.overlay } : undefined;
+  const bound = bindSubject(lock, candidate, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); const subject = bound.value, records = journal(store);
   const eligible: Evidence[] = [], artifacts: ResolvedArtifact[] = [...candidateFiles], bySlot = new Map<string, VerifiedCheck>();
   for (const checked of checks) {
     const original = plan.verifierSlots.find(slot => slot.id === checked.slotId)?.handler.implementation === 'gate.v1' ? authenticatedGate(checked) : authenticatedCheck(checked), slot = plan.verifierSlots.find(slot => slot.id === checked.slotId), operation = records.operations.find(item => item.intent.operationId === checked.operationId);
@@ -45,10 +46,19 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
     const slot = plan.verifierSlots.find(slot => slot.implicit === null && slot.checkId === check.id)!, verified = bySlot.get(slot.id);
     const negative = negativeBySlot.get(slot.id); if (negative) return { checkId: check.id, status: 'blocked', evidenceId: null, reason: negative.reason };
     if (!verified) return { checkId: check.id, status: 'not_run', evidenceId: null, reason: 'verifier_not_run' };
-    const evidence = slot.handler.implementation === 'gate.v1' ? authenticatedGate(verified).evidence : authenticatedCheck(verified).evidence; return { checkId: check.id, status: verified.status, evidenceId: evidence.metadata.id, reason: verified.reason };
+    const evidence = slot.handler.implementation === 'gate.v1' ? authenticatedGate(verified).evidence : authenticatedCheck(verified).evidence;
+    return {
+      checkId: check.id,
+      status: verified.status,
+      evidenceId: evidence.metadata.id,
+      reason: verified.reason,
+      ...(Object.hasOwn(evidence.spec, 'detail') && evidence.spec.detail !== undefined ? { detail: evidence.spec.detail } : {}),
+      ...(evidence.spec.metrics !== undefined ? { metrics: evidence.spec.metrics } : {}),
+      ...(evidence.spec.findings !== undefined ? { findings: evidence.spec.findings } : {}),
+    };
   });
   const contradictions = (submission?.checks ?? []).filter(claim => claim.status === 'passed' && claims.some(actual => actual.checkId === claim.checkId && actual.status === 'failed')).map(claim => claim.checkId);
-  const input = { trusted: { expectedLock: lock, candidateManifest: candidate, eligibleEvidence: eligible }, claims }, evaluated = evaluateAcceptance(tree(input), artifacts);
+  const input = { trusted: { expectedLock: lock, candidateManifest: candidate, eligibleEvidence: eligible }, claims }, evaluated = evaluateAcceptance(tree(input), artifacts, overlayOpts);
   if (!evaluated.ok) refuse('RECOVERY_REQUIRED', '', 'verification');
   const selected = [...plan.task.spec.acceptance.required].sort().find(id => plan.task.spec.acceptance.checks.find(check => check.id === id)!.allowedEvidenceLevels.includes('local_execution')
     && plan.verifierSlots.some(slot => slot.implicit === null && slot.checkId === id && slot.handler.implementation === 'no-change.v1')) ?? null;
@@ -84,6 +94,6 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
   else if (publicationNotExecuted) status = 'failed';
   const draft = { trusted: { ...input.trusted, usage, externalEffects, noChange: status === 'no_change' ? { checkId: selected!, evidenceId: noChangeProof!.metadata.id, reason: 'candidate_equals_source' } : null },
     candidate: { status, checks: claims, memory: { status: 'not_requested', reason: null } } };
-  const result = constructRunResult(tree(draft), artifacts); if (!result.ok) refuse('RECOVERY_REQUIRED', '', 'verification');
+  const result = constructRunResult(tree(draft), artifacts, overlayOpts); if (!result.ok) refuse('RECOVERY_REQUIRED', '', 'verification');
   return freeze({ result: result.value, verification: evaluated.value, requestedStatus: submission?.status ?? null, diagnostic: forcedDiagnostic ?? (missingNoChange ? 'EVIDENCE_UNAVAILABLE' : null), selectedNoChangeCheck: selected, contradictions, verifierMatrix: matrix, preflightRefusals: negativeObservations });
 }

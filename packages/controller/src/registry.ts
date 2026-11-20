@@ -7,7 +7,8 @@ import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Ha
 import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
 import { refuse, type ControllerDiagnostic } from './errors.js';
-const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'no-change.v1', 'gate.v1'];
+import { RFC6901_POINTER_PATTERN } from './verifier-protocol.js';
+const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'no-change.v1', 'gate.v1'];
 function unique(value: readonly { readonly id: string }[], path: string): void { if (new Set(value.map(item => item.id)).size !== value.length) refuse('CONFIG_SCHEMA', path); }
 function enumValue(value: unknown, values: readonly string[], path: string): void { if (typeof value !== 'string' || !values.includes(value)) refuse('CONFIG_SCHEMA', path); }
 export function labelValue(value: unknown, path: string): string {
@@ -39,6 +40,27 @@ export function validateHandler(raw: unknown, path: string): Handler {
   else if (implementation === 'gate.v1') {
     const parameters = record(value.parameters, ['checkId', 'endpointRef', 'gateId'], path + '/parameters');
     id(parameters.checkId, path + '/parameters/checkId'); id(parameters.endpointRef, path + '/parameters/endpointRef'); text(parameters.gateId, path + '/parameters/gateId', 128);
+  } else if (implementation === 'json-keys-guard.v1') {
+    const parameters = record(value.parameters, ['checkId', 'path', 'allowedPointers'], path + '/parameters');
+    id(parameters.checkId, path + '/parameters/checkId');
+    if (!digestArtifact(text(parameters.path, path + '/parameters/path', 1024), new Uint8Array()).ok) refuse('CONFIG_SCHEMA', path + '/parameters/path');
+    const pointers = list(parameters.allowedPointers, path + '/parameters/allowedPointers', 128).map((item, idx) => text(item, `${path}/parameters/allowedPointers/${idx}`, 256));
+    if (pointers.length < 1 || pointers.some(ptr => !RFC6901_POINTER_PATTERN.test(ptr))) refuse('CONFIG_SCHEMA', path + '/parameters/allowedPointers');
+  } else if (implementation === 'line-section-guard.v1') {
+    const parameters = record(value.parameters, ['checkId', 'path', 'startMarker', 'endMarker'], path + '/parameters');
+    id(parameters.checkId, path + '/parameters/checkId');
+    if (!digestArtifact(text(parameters.path, path + '/parameters/path', 1024), new Uint8Array()).ok) refuse('CONFIG_SCHEMA', path + '/parameters/path');
+    const startMarker = text(parameters.startMarker, path + '/parameters/startMarker', 256);
+    const endMarker = text(parameters.endMarker, path + '/parameters/endMarker', 256);
+    if (
+      startMarker.length < 1 ||
+      endMarker.length < 1 ||
+      startMarker === endMarker ||
+      /[\r\n]/.test(startMarker) ||
+      /[\r\n]/.test(endMarker)
+    ) {
+      refuse('CONFIG_SCHEMA', path + '/parameters');
+    }
   } else {
     const fields = implementation === 'json-artifact.v1' ? ['checkId', 'path', 'required', 'equals'] : ['checkId'];
     const parameters = record(value.parameters, fields, path + '/parameters');

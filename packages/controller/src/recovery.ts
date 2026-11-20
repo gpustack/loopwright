@@ -6,26 +6,26 @@ import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner } from './ownership.js';
 import { admitRetainedRun } from './retained.js';
 import { ArtifactStore, stateValue } from './storage.js';
-import { assertCanonicalMinimalOverlay, restoreSource } from './source.js';
+import { assertCanonicalMinimalOverlay, overlayManifestBounds, restoreSource } from './source.js';
 import { ProgressStore, journal, type ProgressHead } from './progress.js';
 import { decodeCandidateCapture } from './capture.js';
 import { ControllerEvents } from './events.js';
-import { Finalizer } from './finalize.js';
+import { Finalizer, type ControllerIncident } from './finalize.js';
 import { parsePrivateJson } from './parser.js';
-import { normalizeSubmission, type RetainedSubmission } from './submission.js';
+import { boundFindingsForObservations, hydrateStepVerdicts, normalizeSubmission, type RetainedSubmission } from './submission.js';
 import { freeze, record, same, text } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
-import { Gate, prepareGate, validateGateUrlOverrides } from './gate.js';
+import { Gate, GATE_OUTPUT_BYTES, prepareGate, validateGateUrlOverrides } from './gate.js';
 import { Publication, preparePublication } from './publication.js';
 import { countDelegatedBudgets } from './budget-observations.js';
-import { executeCycleContext, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
-import type { CycleExecution, ControllerIncident } from './finalize.js';
-import type { PlannedRole } from './types.js';
+import { executeCycleContext, isHaltedByVerdict, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
+import type { CycleExecution, PlannedRole } from './types.js';
 
 export async function restoredCandidate(context: CycleContext, head: ProgressHead | null): Promise<ByteInventory> {
   if (!head || same(head.progress.candidate.workspace, context.source.workspace)) {
     if (head && (!same(head.manifest, context.source.manifest) || !same(head.progress.candidate.workspace, context.source.workspace) || head.progress.candidate.privateSession !== null)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    return { manifest: context.source.manifest, ref: head?.progress.candidate.manifest ?? await context.artifacts.json('manifest', context.source.manifest, 32768), files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
+    const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+    return { manifest: context.source.manifest, ref: head?.progress.candidate.manifest ?? await context.artifacts.json('manifest', context.source.manifest, bounds.manifestMaxBytes), files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
   }
   const attempt = [...head.progress.attempts].reverse().find(item => item.finished?.nativeCheckpointId && same(journal(context.store).checkpoints.find(cp => cp.checkpointId === item.finished!.nativeCheckpointId)?.workspace, head.progress.candidate.workspace));
   if (!attempt) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -50,6 +50,9 @@ export async function retainedPrimary(context: CycleContext, head: ProgressHead)
   let complete = head.progress.stage.kind === 'terminal_observations' || head.progress.stage.kind === 'reconcile_result', observations = intent.observations;
   if (observations) await context.artifacts.read(observations, 1048576);
   const checked = validateDocument(raw, 'RunResult');
+  const storedVerdicts = head.progress.stepVerdicts ?? [];
+  const finalVerdicts = checked.ok ? await hydrateStepVerdicts(context.artifacts, storedVerdicts).catch(() => []) : [];
+  const finalFindings = finalVerdicts.flatMap(item => item.verdict.findings);
   if (!complete && checked.ok) {
     const finalizer = new Finalizer(context.artifacts, Math.max(stateValue(context.store.inspect()).clock.remainingTaskMs.safeValue ?? 0, 15000));
     let events: ControllerEvents | null = null;
@@ -62,9 +65,13 @@ export async function retainedPrimary(context: CycleContext, head: ProgressHead)
         current = await context.progress.publish({ ...current.progress, eventSequence: events.sequence, stage: { ...current.progress.stage, kind: 'terminal_result' } }, 'terminal.result');
       }
       const eventsRef = await events.close(); finalizer.check();
+      const boundedFindings = boundFindingsForObservations(finalFindings);
       observations = await finalizer.put('observations', { version: 1, primary: intent.result, requestedStatus: null, diagnostic: null, requestedStatusSource: 'unavailable', selectedNoChangeCheck: context.plan.noChangeEligibility.checkId,
         contradictions: [], verifierMatrix: null, verification: checked.value.spec.verification, preflightRefusals: null, events: eventsRef, cleanup: 'complete', memory: { status: 'not_requested', reason: null },
         publication: head.progress.publication.status === 'confirmed' ? { status: 'confirmed', reason: null, receipt: head.progress.publication.receipt } : head.progress.publication.status === 'failed' ? { status: 'failed', reason: 'not_executed', receipt: head.progress.publication.receipt } : head.progress.publication.status === 'unresolved' || head.progress.publication.status === 'pending' ? { status: 'unresolved', reason: 'unresolved', receipt: null } : { status: 'not_run', reason: 'disabled', receipt: null },
+        ...(storedVerdicts.length > 0 ? { stepVerdicts: storedVerdicts } : {}),
+        ...(boundedFindings.findings.length > 0 ? { findings: boundedFindings.findings } : {}),
+        ...(boundedFindings.findingsTruncated ? { findingsTruncated: true, totalFindingsCount: boundedFindings.totalFindingsCount } : {}),
         unavailable: ['requestedStatus', 'contradictions', 'verifierMatrix', 'preflightRefusals'], recoveredOriginalPrimary: true });
       finalizer.reserve(65536 + 65536 + 40960);
       await context.progress.publish({ ...current.progress, eventSequence: events.sequence, stage: { ...current.progress.stage, kind: 'terminal_observations' }, terminalIntent: { ...intent, observations } }, 'terminal.observations'); complete = true;
@@ -73,7 +80,16 @@ export async function retainedPrimary(context: CycleContext, head: ProgressHead)
   }
   if (checked.ok) {
     if (!same(checked.value.spec.subject.lockHash, context.lock.spec.lockHash) || checked.value.spec.status !== intent.primary) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    return freeze({ kind: 'result', version: 1, runId: context.lock.spec.runId, result: checked.value, observations, secondary: complete ? [] : ['RECOVERY_REQUIRED'] });
+    return freeze({
+      kind: 'result',
+      version: 1,
+      runId: context.lock.spec.runId,
+      result: checked.value,
+      observations,
+      secondary: complete ? [] : ['RECOVERY_REQUIRED'],
+      ...(finalFindings.length > 0 ? { findings: freeze(finalFindings) } : {}),
+      ...(finalVerdicts.length > 0 ? { stepVerdicts: freeze([...finalVerdicts]) } : {}),
+    });
   }
   const incident = record(raw, ['version', 'code', 'runId', 'lockHash', 'stage', 'knownReferences', 'unavailable', 'cleanup']);
   if (incident.version !== 1 || incident.runId !== context.lock.spec.runId || !same(incident.lockHash, context.lock.spec.lockHash) || incident.code !== intent.primary) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -91,7 +107,8 @@ export async function reconcileInterruptedOperations(context: CycleContext, head
           const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, loaded.registry.spec.gateEndpoints);
           await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(loaded).vault.resolveNetworkCredential(ref), () => subject, null, ports.gateUrlOverrides).restore(prepared);
         } else {
-          const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, 32768), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
+          const bounds = overlayManifestBounds(plan.budgets.overlay);
+          const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, bounds.manifestMaxBytes), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
           await new Verifier(store, authority, artifacts, plan, lock, () => subject).restore(prepared);
         }
       }
@@ -129,7 +146,7 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
       authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
       const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
-      const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path)))];
+      const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
       const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
       let context: CycleContext = { loaded: effectiveConfig, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
@@ -155,7 +172,7 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       const unfinishedDelegated = lastAttempt !== undefined && lastAttempt.finished === null && isDelegatedNode(lastAttempt.nodeId);
       const reachableDelegated = activeNodes.some(node => (node.state === 'pending' || node.state === 'running') && isDelegatedNode(node.id));
       const formatRepairDelegated = Boolean(lastAttempt?.finished?.nativeCheckpointId)
-        && submission === null
+        && !isHaltedByVerdict(head?.progress)
         && lastAttempt!.purpose !== 'compaction'
         && activeNodes.find(node => node.id === lastAttempt!.nodeId)?.state === 'failed'
         && isDelegatedNode(lastAttempt!.nodeId);
@@ -199,7 +216,8 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
               break;
             }
             try {
-              const rawOut = parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, 65536), 65536) as Record<string, unknown>;
+              const outCap = slot.handler.implementation === 'gate.v1' ? GATE_OUTPUT_BYTES : 65536;
+              const rawOut = parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, outCap), outCap) as Record<string, unknown>;
               const status = slot.handler.implementation === 'gate.v1'
                 ? (rawOut.disposition as Record<string, unknown> | undefined)?.status
                 : (rawOut.response as Record<string, unknown> | undefined)?.status;

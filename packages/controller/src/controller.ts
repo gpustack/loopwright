@@ -3,43 +3,103 @@ import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { openPiAdapterV2, type PiAdapterV2, type PiHostV2, type PiOpenInputV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
-import { admitTask, bindSubject, identifyManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
+import { admitTask, bindSubject, identifyManifest, type ArtifactRef, type Digest, type StructuredFinding, type TaskLock } from '@loopwright/core';
 import { createLocalRun, type Authority, type LocalRunIdentity, type LocalRunStore } from '@loopwright/state';
-import { approvedState } from './config.js';
+import { approvedState, selectRoleResources } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result, safeDiagnostic, type ControllerDiagnostic } from './errors.js';
 import { privateDirectory, ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { ControllerOwner, bootIdentity } from './ownership.js';
 import { resolveStoreLeaseMs } from './retained.js';
 export { resolveStoreLeaseMs };
-import { freezeSource, materializeBaseline, verifySource, type FrozenSource } from './source.js';
+import { freezeSource, materializeBaseline, overlayManifestBounds, verifySource, type FrozenSource } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
 import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
-import { retainSubmission, normalizeSubmission, type Submission, type RetainedSubmission } from './submission.js';
+import {
+  boundFindingsForObservations,
+  hydrateStepVerdicts,
+  isVerdictStep,
+  normalizeSubmission,
+  parseStepVerdict,
+  retainStepOutput,
+  summarizeStepVerdictPreview,
+  type CapturedStepOutput,
+  type Submission,
+  type RetainedSubmission,
+} from './submission.js';
 import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
 import { prepareGate, Gate, authenticatedGate, validateGateUrlOverrides, type PreparedGate } from './gate.js';
 import { preparePublication, Publication, headRevision, type PreparedPublication } from './publication.js';
 import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
-import { nextNode, descendants, compactionTarget } from './scheduler.js';
-import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt } from './repair.js';
+import { nextNode, descendants, compactionTarget, resetSubgraphNodes, reworkSubgraph } from './scheduler.js';
+import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt, reworkPrompt, verdictFormatPrompt } from './repair.js';
 import { WorkDeadline } from './deadlines.js';
 import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isBudgetRefusal, isNoEffectBudgetRefusal, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { ControllerEvents, type ControllerEvent } from './events.js';
-import { Finalizer, incident, type ControllerIncident, type CycleExecution } from './finalize.js';
+import { Finalizer, incident, type ControllerIncident } from './finalize.js';
 import { canonical, freeze, hash, id, isRecord, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
-import type { CompiledPlan, ControllerAttempt, ControllerProgress, LoadedConfiguration, PlannedRole, RoleModelOverride } from './types.js';
+import type {
+  AdvisoryCapabilityTier,
+  AdvisoryDecisionPort,
+  AdvisoryDecisionSource,
+  CandidateDiffSummary,
+  CompiledPlan,
+  ControllerAttempt,
+  ControllerProgress,
+  CycleAlignmentRoute,
+  CycleExecution,
+  LoadedConfiguration,
+  PlannedRole,
+  RoleModelOverride,
+  StepMcpServerMetadata,
+  StepReworkContext,
+  StepVerdict,
+  StoredStepVerdict,
+} from './types.js';
+
+const VALID_ADVISORY_SOURCES: ReadonlySet<string> = new Set<AdvisoryDecisionSource>([
+  'jev',
+  'deterministic_fallback',
+  'deterministic_heuristic',
+  'user_override',
+]);
+const VALID_ALIGNMENT_ROUTES: ReadonlySet<string> = new Set<CycleAlignmentRoute>(['continue', 'revise', 'needs_review', 'blocked']);
+const VALID_CAPABILITY_TIERS: ReadonlySet<string> = new Set<AdvisoryCapabilityTier>(['fast', 'balanced', 'strongest']);
+const VALID_SOFT_COMPACTION_DECISIONS: ReadonlySet<string> = new Set(['compact', 'defer']);
+
+export function isHaltedByVerdict(progress: ControllerProgress | null | undefined): 'blocked' | 'failed' | null {
+  const verdicts = progress?.stepVerdicts;
+  if (!verdicts || verdicts.length === 0) return null;
+  const epoch = progress?.reworkEpoch ?? 0;
+  for (let i = verdicts.length - 1; i >= 0; i -= 1) {
+    const entry = verdicts[i]!;
+    if (entry.reworkEpoch !== epoch) continue;
+    if (entry.verdict === 'fail') return 'failed';
+    if (entry.verdict === 'human' || entry.verdict === 'rework') return 'blocked';
+  }
+  return null;
+}
 
 export interface RunCycleInput { readonly configuration: LoadedConfiguration; readonly repository: string; readonly runRoot: string; readonly runId: string; readonly signal?: AbortSignal; readonly onEvent?: (event: ControllerEvent) => Promise<void> }
 export interface RunDescriptor {
   readonly version: 1; readonly identity: LocalRunIdentity; readonly plan: ArtifactRef; readonly source: ArtifactRef; readonly sourceWorkspace: ArtifactRef;
   readonly configuration: { readonly configPath: string; readonly registryPath: string; readonly registrySha256: string; readonly roleModelOverrides?: readonly RoleModelOverride[] }; readonly repository: string;
 }
-/** Trusted local observations only, absent from root exports and all configuration/CLI fields. */
+/** Trusted local observations and optional non-authoritative advisory hooks. */
 export interface ControllerPorts {
   readonly openAdapter?: (host: PiHostV2, input: PiOpenInputV2) => ReturnType<typeof openPiAdapterV2>;
   readonly afterCheckpoint?: (phase: string, head: ProgressHead) => Promise<void>;
   readonly gateUrlOverrides?: Readonly<Record<string, string>>;
+  readonly decisions?: AdvisoryDecisionPort;
+  readonly allowWorkflowWrites?: boolean;
+  readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
+  readonly mcpServers?: readonly StepMcpServerMetadata[];
+}
+export function roleResourcesFor(loaded: LoadedConfiguration, plan: CompiledPlan, roleId: string) {
+  const all = approvedState(loaded).resources;
+  const declared = plan.task.spec.roles.find(item => item.id === roleId);
+  return selectRoleResources(all, declared?.resourceIds, 'execution');
 }
 export interface CycleContext {
   readonly loaded: LoadedConfiguration; readonly plan: CompiledPlan; readonly lock: TaskLock; readonly directory: string; readonly source: FrozenSource;
@@ -63,10 +123,11 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
   try {
     owner = await ControllerOwner.acquire(directory, runId, plan.planDigest); const artifactDirectory = join(directory, 'artifacts'); await privateDirectory(artifactDirectory);
     const artifacts = new ArtifactStore(artifactDirectory, owner, state.vault);
-    const jsonPaths = plan.verifierSlots.filter(slot => slot.handler.implementation === 'json-artifact.v1').map(slot => text(slot.handler.parameters.path));
+    const jsonPaths = plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path));
     const source = await freezeSource(repository, plan.task, owner, artifacts, jsonPaths);
+    const overlayBounds = overlayManifestBounds(plan.budgets.overlay);
     const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId });
-    if (!admitted.ok) refuse('CONFIG_SCHEMA', '/spec/task', 'admission'); const lock = admitted.value, manifest = await artifacts.json('manifest', source.manifest, 32768);
+    if (!admitted.ok) refuse('CONFIG_SCHEMA', '/spec/task', 'admission'); const lock = admitted.value, manifest = await artifacts.json('manifest', source.manifest, overlayBounds.manifestMaxBytes);
     const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
     for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
@@ -88,6 +149,7 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
 export class Cycle {
   head: ProgressHead | null; candidate: ByteInventory; submission: RetainedSubmission | null = null; readonly checks = new Map<string, VerifiedCheck>(); readonly refusals = new Map<string, PreflightRefusal>();
   readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier; readonly gate: Gate; readonly publisher: Publication;
+  readonly advisoryObservations: Record<string, unknown>[] = [];
   #activeAdapter: PiAdapterV2 | null = null; #candidateKnown = true; #cleanup: ControllerIncident['cleanup'] = 'complete';
   #publicationObservation: { readonly status: 'not_run' | 'confirmed' | 'failed' | 'unresolved'; readonly reason: string | null; readonly receipt: ArtifactRef | null } = { status: 'not_run', reason: 'disabled', receipt: null };
   constructor(readonly context: CycleContext, head: ProgressHead | null = null, candidate?: ByteInventory, readonly resumeAdoption?: boolean) {
@@ -95,12 +157,13 @@ export class Cycle {
     this.deadline = new WorkDeadline(context.store, context.authority, context.plan.controls.drainReserveMs, context.signal);
     this.events = new ControllerEvents(context.store, context.artifacts, context.onEvent, () => this.deadline.stop('OUTPUT_LIMIT'), head?.progress.eventSequence ?? 0);
     if (head) this.events.setDelegatedBudget(countDelegatedBudgets(context.plan, head.progress.attempts));
-    this.verifier = new Verifier(context.store, context.authority, context.artifacts, context.plan, context.lock, () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; });
+    const overlayOpts = overlayManifestBounds(context.plan.budgets.overlay).options;
+    this.verifier = new Verifier(context.store, context.authority, context.artifacts, context.plan, context.lock, () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; });
     this.gate = new Gate(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
-      () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
+      () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
       detail => this.events.push('gate_waiting', null, null, null, [], detail), context.ports.gateUrlOverrides);
     this.publisher = new Publication(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
-      () => { const bound = bindSubject(context.lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; }, context.descriptor.repository);
+      () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; }, context.descriptor.repository);
     if (head && head.progress.publication.status !== 'idle') {
       const prior = head.progress.publication;
       this.#publicationObservation = prior.status === 'confirmed' ? { status: 'confirmed', reason: null, receipt: prior.receipt }
@@ -108,8 +171,225 @@ export class Cycle {
     }
   }
   get generation(): number { return this.head?.progress.candidate.generation ?? 0; }
+  get reworkEpoch(): number { return this.head?.progress.reworkEpoch ?? 0; }
   get candidateKnown(): boolean { return this.#candidateKnown; }
   markCandidateUnknown(): void { this.#candidateKnown = false; }
+  #overlayBounds() { return overlayManifestBounds(this.context.plan.budgets.overlay); }
+  #contextUtilization(): number {
+    const view = stateValue(this.context.store.inspect());
+    const charged = Number(view.ledger.chargedTokens.safeValue ?? 0);
+    const total = this.context.lock.spec.contract.spec.budgets.totalTokens;
+    return total > 0 ? Math.min(1, Math.max(0, charged / total)) : 0;
+  }
+  #failedVerificationLoops(): number {
+    return (this.head?.progress.attempts.filter(a => a.repair === 'implementation').length ?? 0) + this.reworkEpoch;
+  }
+  haltedVerdictStatus(): 'blocked' | 'failed' | null {
+    return isHaltedByVerdict(this.head?.progress);
+  }
+  async activeReworkForNode(nodeId: string): Promise<StepReworkContext | null> {
+    const epoch = this.reworkEpoch;
+    if (epoch === 0) return null;
+    const verdicts = this.head?.progress.stepVerdicts ?? [];
+    const triggering = [...verdicts].reverse().find(item => item.reworkEpoch === epoch - 1 && item.verdict === 'rework');
+    if (!triggering) return null;
+    const fromNode = this.context.plan.orderedDAG.find(item => item.id === triggering.stepId);
+    if (!fromNode?.onRework) return null;
+    const targetNode = this.context.plan.orderedDAG.find(item => item.id === nodeId);
+    if (!targetNode || targetNode.kind !== 'agent' || targetNode.handler.implementation === 'pi.compact.v1' || targetNode.handler.parameters.purpose === 'review') {
+      return null;
+    }
+    if (!reworkSubgraph(this.context.plan, fromNode.onRework.rejectTo).includes(nodeId)) return null;
+    let hydrated: StepVerdict;
+    try {
+      hydrated = parseStepVerdict(await this.context.artifacts.read(triggering.raw, 1_048_576));
+    } catch {
+      refuse('RECOVERY_REQUIRED', '', 'recovery');
+    }
+    return freeze({
+      epoch,
+      count: this.head?.progress.reworkCounts?.[fromNode.id] ?? 1,
+      maxReworks: fromNode.onRework.maxReworks,
+      fromStepId: fromNode.id,
+      summary: hydrated.summary,
+      findings: hydrated.findings,
+    });
+  }
+  async adviseCapabilityRouting(
+    nodeId: string,
+    role: PlannedRole,
+    purpose: 'task' | 'reviewer',
+    roleResources: readonly { readonly id: string; readonly kind: string }[],
+  ): Promise<void> {
+    const hook = this.context.ports.decisions?.routeCapabilityTier;
+    if (!hook) return;
+    const candidateSkills = roleResources.filter(item => item.kind === 'skill').map(item => item.id);
+    try {
+      const routed = await hook({
+        runId: this.context.lock.spec.runId,
+        stepId: nodeId,
+        roleId: role.roleId,
+        taskKind: purpose,
+        estimatedFilesCount: this.candidate.files.length,
+        hasFailingTests: this.currentChecks().some(c => c.status === 'failed'),
+        requiresArchitectureChange: false,
+        candidateSkills,
+        pinnedModel: { provider: role.policy.selection.provider, model: role.policy.selection.model, thinking: role.policy.selection.thinking },
+      });
+      if (routed === null || routed === undefined) return;
+      if (
+        !isRecord(routed) ||
+        typeof routed.tier !== 'string' ||
+        !VALID_CAPABILITY_TIERS.has(routed.tier) ||
+        typeof routed.source !== 'string' ||
+        !VALID_ADVISORY_SOURCES.has(routed.source)
+      ) {
+        throw new Error('invalid_capability_routing_output');
+      }
+      this.advisoryObservations.push({
+        intent: 'route_capability_tier',
+        stepId: nodeId,
+        tier: routed.tier,
+        pinnedModelPreserved: true,
+        source: routed.source,
+      });
+    } catch {
+      this.advisoryObservations.push({
+        intent: 'route_capability_tier',
+        stepId: nodeId,
+        pinnedModelPreserved: true,
+        source: 'deterministic_fallback',
+      });
+    }
+  }
+  async evaluateAlignment(trigger: 'implementation_repair' | 'rework', targetStepId: string, candidateDigest: Digest): Promise<boolean> {
+    const hook = this.context.ports.decisions?.evaluateCycleAlignment;
+    if (!hook) return true;
+    try {
+      const output = await hook({
+        runId: this.context.lock.spec.runId,
+        trigger,
+        targetStepId,
+        contractHash: this.context.lock.spec.contractHash,
+        baseRevision: this.context.lock.spec.contract.spec.target.baseRevision,
+        candidateDigest,
+        reworkEpoch: this.reworkEpoch,
+        remainingAttempts: Math.max(0, this.context.plan.capacity.A - (this.head?.progress.attempts.length ?? 0)),
+        contextUtilization: this.#contextUtilization(),
+        failedVerificationLoops: this.#failedVerificationLoops(),
+      });
+      if (output === null || output === undefined) return true;
+      if (
+        !isRecord(output) ||
+        typeof output.route !== 'string' ||
+        !VALID_ALIGNMENT_ROUTES.has(output.route) ||
+        typeof output.precheckPassed !== 'boolean' ||
+        typeof output.source !== 'string' ||
+        !VALID_ADVISORY_SOURCES.has(output.source)
+      ) {
+        throw new Error('invalid_alignment_output');
+      }
+      this.advisoryObservations.push({
+        intent: 'evaluate_cycle_alignment',
+        trigger,
+        targetStepId,
+        route: output.route,
+        precheckPassed: output.precheckPassed,
+        source: output.source,
+      });
+      return output.route !== 'blocked' && output.route !== 'needs_review';
+    } catch {
+      this.advisoryObservations.push({
+        intent: 'evaluate_cycle_alignment',
+        trigger,
+        targetStepId,
+        route: 'continue',
+        precheckPassed: true,
+        source: 'deterministic_fallback',
+      });
+      return true;
+    }
+  }
+  async triageCandidateDiffAdvisory(
+    stepId: string,
+    attemptId: string,
+    candidateDigest: Digest,
+    files: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+    deleted: readonly string[],
+  ): Promise<void> {
+    const hook = this.context.ports.decisions?.triageCandidateDiff;
+    if (!hook) return;
+    let modifiedFiles = files;
+    const effectiveDeleted = [...deleted];
+    if (this.context.source.version === 1) {
+      const baseByPath = new Map(this.context.source.artifacts.map(item => [item.name, item.bytes]));
+      const present = new Set(files.map(item => item.name));
+      modifiedFiles = files.filter(file => {
+        const baseBytes = baseByPath.get(file.name);
+        return baseBytes === undefined || !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
+      });
+      for (const base of this.context.source.artifacts) {
+        if (!present.has(base.name)) effectiveDeleted.push(base.name);
+      }
+    }
+    const changedFiles = [...new Set([...modifiedFiles.map(f => f.name), ...effectiveDeleted])].sort();
+    const touchedPackages = [
+      ...new Set(
+        changedFiles
+          .map(path => (/^packages\/([^/]+)\//.exec(path)?.[1] ?? null))
+          .filter((pkg): pkg is string => pkg !== null),
+      ),
+    ].sort();
+    let addedLines = 0;
+    for (const file of modifiedFiles) {
+      let count = 0;
+      for (let i = 0; i < file.bytes.byteLength; i++) if (file.bytes[i] === 10) count++;
+      addedLines += file.bytes.byteLength > 0 ? Math.max(1, count) : 0;
+    }
+    const summary: CandidateDiffSummary = freeze({
+      changedFiles,
+      addedLines,
+      deletedLines: effectiveDeleted.length,
+      touchedPackages,
+      redactedHunkSummaries: changedFiles.slice(0, 16).map(f => 'modified ' + f),
+    });
+    try {
+      const output = await hook({
+        runId: this.context.lock.spec.runId,
+        stepId,
+        attemptId,
+        candidateDigest,
+        summary,
+      });
+      if (output === null || output === undefined) return;
+      if (
+        !isRecord(output) ||
+        !Array.isArray(output.escalated) ||
+        typeof output.source !== 'string' ||
+        !VALID_ADVISORY_SOURCES.has(output.source)
+      ) {
+        throw new Error('invalid_triage_output');
+      }
+      // Non-delegable authority invariant: triage escalations are strictly advisory; verificationCertified is forced false.
+      this.advisoryObservations.push({
+        intent: 'triage_candidate_diff',
+        stepId,
+        attemptId,
+        escalatedCount: output.escalated.length,
+        verificationCertified: false,
+        source: output.source,
+      });
+    } catch {
+      this.advisoryObservations.push({
+        intent: 'triage_candidate_diff',
+        stepId,
+        attemptId,
+        escalatedCount: 0,
+        verificationCertified: false,
+        source: 'deterministic_fallback',
+      });
+    }
+  }
   get draft(): Draft {
     if (!this.head) refuse('RECOVERY_REQUIRED', '', 'execution'); return { ...this.head.progress, eventSequence: this.events.sequence };
   }
@@ -119,21 +399,138 @@ export class Cycle {
     await this.context.ports.afterCheckpoint?.(phase, this.head);
   }
   async bootstrap(): Promise<void> {
-    const { plan, lock, source, artifacts } = this.context;
-    const manifest = await artifacts.json('manifest', source.manifest, 32768); this.candidate = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
-    const bound = bindSubject(lock, source.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'admission');
+    const { plan, lock, source, artifacts } = this.context, bounds = this.#overlayBounds();
+    const manifest = await artifacts.json('manifest', source.manifest, bounds.manifestMaxBytes); this.candidate = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
+    const bound = bindSubject(lock, source.manifest, bounds.options); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'admission');
     await this.events.push('admission', null);
     await this.publish({ version: 2, runId: lock.spec.runId, lockHash: lock.spec.lockHash, stage: { kind: 'bootstrap', phase: 'bootstrap', capacity: plan.capacity },
       nodes: plan.orderedDAG.map(node => ({ id: node.id, state: 'pending' })), attempts: [], nativeCheckpoints: [], submission: null, publication: { status: 'idle', operationId: null, receipt: null },
       candidate: { manifest, digest: bound.value.candidateDigest, generation: 0, workspace: source.workspace, privateSession: null }, failures: [], verifierReceipts: [], verifierRefusals: [], eventSequence: this.events.sequence, terminalIntent: null }, 'bootstrap');
   }
   async guard(): Promise<void> { this.deadline.assert(); await this.context.owner.assertCurrent(); await verifySource(this.context.source, this.context.plan.task, this.context.owner); this.deadline.assert(); }
+  async #finalizeVerifierPost(slotId: string, checked: VerifiedCheck, ordinal: number, phase: string): Promise<void> {
+    const { plan, artifacts } = this.context;
+    const slot = plan.verifierSlots[ordinal]!;
+    const gateSlot = slot.handler.implementation === 'gate.v1';
+    let draft: Draft = {
+      ...this.draft,
+      stage: { ...this.draft.stage, kind: 'verifier_post' as const },
+      verifierReceipts: this.draft.verifierReceipts.map(item =>
+        item.slot === slotId && item.generation === this.generation ? { ...item, output: checked.output, receipt: checked.receipt } : item,
+      ),
+    };
+    if (checked.status === 'failed') {
+      const trusted = gateSlot ? authenticatedGate(checked) : authenticatedCheck(checked);
+      const stable = hash(
+        canonical({
+          slot: slot.id,
+          handler: slot.handler.digest,
+          reason: checked.reason,
+          method: trusted.evidence.spec.method,
+          parameters: slot.handler.parameters,
+        }),
+      );
+      const signature = failureSignature({
+        category: 'implementation',
+        codes: [checked.reason!],
+        handler: slot.handler.implementation,
+        handlerVersion: 1,
+        target: typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : slot.id,
+        candidate: trusted.subject.candidateDigest,
+        evidence: [stable],
+      });
+      draft = { ...draft, failures: rememberFailure(draft.failures, signature, this.generation, checked.output) };
+    }
+    const reworkCheckNode =
+      checked.status === 'failed'
+        ? plan.orderedDAG.find(node => {
+            if (node.kind !== 'check' || !node.onRework || node.handler.id !== slot.handler.id) return false;
+            if (!same(node.handler.parameters, slot.handler.parameters)) return false;
+            const state = draft.nodes.find(item => item.id === node.id)?.state;
+            if (state !== 'pending' && state !== 'running') return false;
+            return node.dependsOn.every(parent => draft.nodes.find(item => item.id === parent)?.state === 'completed');
+          })
+        : undefined;
+    if (reworkCheckNode?.onRework) {
+      let detail: string | undefined;
+      if (gateSlot) {
+        const trusted = authenticatedGate(checked);
+        try {
+          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), 65536);
+          const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
+          if (verdict && typeof verdict.reason === 'string' && verdict.reason.length > 0) {
+            detail = Array.from(verdict.reason).slice(0, 256).join('');
+          }
+        } catch {
+          // Malformed gate payload falls back to checked.reason.
+        }
+      }
+      const reasonText = checked.reason ?? 'check_failed';
+      const summary = detail
+        ? `Check ${reworkCheckNode.id} (${checked.checkId}) failed: ${reasonText} — ${detail}`
+        : `Check ${reworkCheckNode.id} (${checked.checkId}) failed: ${reasonText}`;
+      const findingPath = typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : undefined;
+      const finding: StructuredFinding = freeze({
+        title: Array.from(`Check ${checked.checkId} failed (${reasonText})`).slice(0, 256).join(''),
+        severity: 'high',
+        ...(findingPath !== undefined ? { path: findingPath } : {}),
+        evidence: detail ? `${reasonText}: ${detail}` : reasonText,
+      });
+      const verdictPayload: StepVerdict = freeze({
+        verdict: 'rework',
+        summary,
+        findings: freeze([finding]),
+      });
+      const raw = await artifacts.put('step-verdict', Buffer.from(canonical(verdictPayload), 'utf8'), 1_048_576);
+      const currentEpoch = draft.reworkEpoch ?? 0;
+      const usedReworks = draft.reworkCounts?.[reworkCheckNode.id] ?? 0;
+      const canRework = usedReworks < reworkCheckNode.onRework.maxReworks && this.generation + 1 < plan.capacity.V;
+      const alignmentOk = canRework ? await this.evaluateAlignment('rework', reworkCheckNode.onRework.rejectTo, draft.candidate.digest) : false;
+      const reworked = canRework && alignmentOk;
+      const nextGen = this.generation + (reworked ? 1 : 0);
+      const storedVerdict: StoredStepVerdict = freeze({
+        attemptId: null,
+        stepId: reworkCheckNode.id,
+        roleId: null,
+        reworkEpoch: currentEpoch,
+        generation: nextGen,
+        raw,
+        verdict: 'rework',
+        summaryPreview: summarizeStepVerdictPreview(verdictPayload.summary),
+        findingCount: verdictPayload.findings.length,
+      });
+      const nextStepVerdicts = freeze([...(draft.stepVerdicts ?? []), storedVerdict]);
+      if (reworked) {
+        const markedDone = draft.nodes.map(item => (item.id === reworkCheckNode.id ? { ...item, state: 'completed' as const } : item));
+        draft = {
+          ...draft,
+          candidate: { ...draft.candidate, generation: nextGen },
+          nodes: [...resetSubgraphNodes(plan, markedDone, reworkCheckNode.onRework.rejectTo)],
+          reworkEpoch: currentEpoch + 1,
+          reworkCounts: freeze({ ...(draft.reworkCounts ?? {}), [reworkCheckNode.id]: usedReworks + 1 }),
+          stepVerdicts: nextStepVerdicts,
+        };
+      } else {
+        draft = {
+          ...draft,
+          nodes: draft.nodes.map(item =>
+            item.id === reworkCheckNode.id ? { ...item, state: 'blocked' as const } : item.state === 'pending' ? { ...item, state: 'not_run' as const } : item,
+          ),
+          stepVerdicts: nextStepVerdicts,
+        };
+      }
+    } else {
+      draft = { ...draft, nodes: this.nodeDispositions(draft.nodes, this.generation) };
+    }
+    await this.publish(draft, phase + '.post');
+  }
   async runVerifier(slotId: string): Promise<VerifiedCheck | PreflightRefusal> {
-    const { plan, lock, artifacts } = this.context, existing = this.head!.progress.verifierReceipts.find(item => item.slot === slotId && item.generation === this.generation);
+    const { plan, lock, artifacts } = this.context, bounds = this.#overlayBounds();
+    const existing = this.head!.progress.verifierReceipts.find(item => item.slot === slotId && item.generation === this.generation);
     const negative = this.head!.progress.verifierRefusals.find(item => item.slot === slotId && item.generation === this.generation);
     if (negative) {
       const known = this.refusals.get(slotId + ':' + this.generation); if (known) return known;
-      const source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
+      const source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
       const prepared = preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, negative.producerNonce); if (prepared.kind !== 'refused') refuse('RECOVERY_REQUIRED', '', 'recovery');
       await this.verifier.validateStoredRefusal(prepared.prepared, negative);
       const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId), phase = 'verify.' + this.generation + '.' + ordinal;
@@ -148,7 +545,7 @@ export class Cycle {
       const gateSlot = plan.verifierSlots.find(item => item.id === slotId)!.handler.implementation === 'gate.v1';
       const job = gateSlot
         ? prepareGate(plan, lock, slotId, this.candidate, this.generation, existing.producerNonce, this.context.loaded.registry.spec.gateEndpoints)
-        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs }, this.candidate, this.generation, existing.producerNonce);
+        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs }, this.candidate, this.generation, existing.producerNonce);
       const operation = this.context.store.getOperation(job.operationId);
       const restored = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND' && existing.receipt === null
         ? await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal))
@@ -158,20 +555,13 @@ export class Cycle {
       const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId), phase = 'verify.' + this.generation + '.' + ordinal;
       if (!this.head!.progress.stage.consumed.includes(phase + '.post')) {
         if (this.draft.stage.phase !== phase + '.pre') refuse('RECOVERY_REQUIRED', '', 'recovery');
-        let failures = this.draft.failures;
-        if (restored.status === 'failed') {
-          const slot = plan.verifierSlots[ordinal]!, trusted = gateSlot ? authenticatedGate(restored) : authenticatedCheck(restored), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: restored.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
-          failures = rememberFailure(failures, failureSignature({ category: 'implementation', codes: [restored.reason!], handler: slot.handler.implementation, handlerVersion: 1, target: typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : slot.id, candidate: trusted.subject.candidateDigest, evidence: [stable] }), this.generation, restored.output);
-        }
-        await this.publish({ ...this.draft, failures, stage: { ...this.draft.stage, kind: 'verifier_post' },
-          verifierReceipts: this.draft.verifierReceipts.map(item => item.slot === slotId && item.generation === this.generation ? { ...item, output: restored.output, receipt: restored.receipt } : item),
-          nodes: this.nodeDispositions(this.draft.nodes, this.generation) }, phase + '.post');
+        await this.#finalizeVerifierPost(slotId, restored, ordinal, phase);
       }
       return restored;
     }
     if (this.draft.failures.length >= 16) refuse('OUTPUT_LIMIT', '', 'verification');
     await this.guard(); const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId); if (ordinal < 0) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-    const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, 32768), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
+    const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
     const gateSlot = plan.verifierSlots[ordinal]!.handler.implementation === 'gate.v1';
     const sized = gateSlot ? null : preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
     if (sized && sized.kind === 'refused') {
@@ -184,16 +574,11 @@ export class Cycle {
       ? prepareGate(plan, lock, slotId, this.candidate, this.generation, nonce, this.context.loaded.registry.spec.gateEndpoints)
       : sized!.job;
     await this.events.push('verification', null);
-    await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierReceipts: [...this.draft.verifierReceipts, { slot: slotId, generation: this.generation, operationId: job.operationId, producerNonce: nonce, output: null, receipt: null }] }, phase + '.pre');
+    const epochTag = this.reworkEpoch > 0 ? { reworkEpoch: this.reworkEpoch } : {};
+    await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierReceipts: [...this.draft.verifierReceipts, { slot: slotId, generation: this.generation, operationId: job.operationId, producerNonce: nonce, output: null, receipt: null, ...epochTag }] }, phase + '.pre');
     this.deadline.assert(); const checked = await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal)); this.checks.set(slotId + ':' + this.generation, checked);
-    let draft: Draft = { ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_post' as const }, verifierReceipts: this.draft.verifierReceipts.map(item => item.slot === slotId && item.generation === this.generation ? { ...item, output: checked.output, receipt: checked.receipt } : item) };
-    if (checked.status === 'failed') {
-      const slot = plan.verifierSlots[ordinal]!, trusted = gateSlot ? authenticatedGate(checked) : authenticatedCheck(checked), stable = hash(canonical({ slot: slot.id, handler: slot.handler.digest, reason: checked.reason, method: trusted.evidence.spec.method, parameters: slot.handler.parameters }));
-      const signature = failureSignature({ category: 'implementation', codes: [checked.reason!], handler: slot.handler.implementation, handlerVersion: 1, target: typeof slot.handler.parameters.path === 'string' ? slot.handler.parameters.path : slot.id, candidate: trusted.subject.candidateDigest, evidence: [stable] });
-      draft = { ...draft, failures: rememberFailure(draft.failures, signature, this.generation, checked.output) };
-    }
-    draft = { ...draft, nodes: this.nodeDispositions(draft.nodes, this.generation) };
-    await this.publish(draft, phase + '.post'); return checked;
+    await this.#finalizeVerifierPost(slotId, checked, ordinal, phase);
+    return checked;
   }
   nodeDispositions(input: ControllerProgress['nodes'], generation: number, pendingRefusal?: { readonly slotId: string; readonly status: 'blocked' }): ControllerProgress['nodes'] {
     const nodes = input.map(item => ({ ...item })), { plan } = this.context;
@@ -206,60 +591,188 @@ export class Cycle {
     }
     return nodes;
   }
-  async captureSubmission(captured: CapturedRole, repair: ControllerAttempt['repair'], originalSubmission: ArtifactRef | null, ignoreArtifactPath = false): Promise<RetainedSubmission | null> {
+  async captureStepOutput(
+    captured: CapturedRole,
+    repair: ControllerAttempt['repair'],
+    originalInvalidRaw: ArtifactRef | null,
+    ignoreArtifactPath: boolean,
+    previousFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+    expectedKind: 'submission' | 'verdict',
+  ): Promise<CapturedStepOutput> {
     const { artifacts, plan } = this.context;
     if (repair === 'format') {
-      if (!captured.submission || !originalSubmission) refuse('RECOVERY_REQUIRED', '', 'execution');
-      const rawBytes = await artifacts.read(captured.submission, 1048576), raw = await artifacts.put('submission', rawBytes, 1048576);
-      await artifacts.json('format-lineage', { version: 1, original: originalSubmission, repaired: raw, candidate: captured.digest, attemptId: this.draft.attempts.at(-1)!.id }, 65536);
-      return { version: 1, origin: 'assistant', raw, value: normalizeSubmission(rawBytes, plan.task) };
+      if (!captured.submission || !originalInvalidRaw) refuse('RECOVERY_REQUIRED', '', 'execution');
+      const rawBytes = await artifacts.read(captured.submission, 1048576);
+      if (expectedKind === 'verdict') {
+        const value = parseStepVerdict(rawBytes);
+        const raw = await artifacts.put('step-verdict', rawBytes, 1048576);
+        await artifacts.json('format-lineage', { version: 1, original: originalInvalidRaw, repaired: raw, candidate: captured.digest, attemptId: this.draft.attempts.at(-1)!.id }, 65536);
+        return { kind: 'verdict', retained: freeze({ version: 1, origin: 'assistant', raw, value }) };
+      }
+      const value = normalizeSubmission(rawBytes, plan.task);
+      const raw = await artifacts.put('submission', rawBytes, 1048576);
+      await artifacts.json('format-lineage', { version: 1, original: originalInvalidRaw, repaired: raw, candidate: captured.digest, attemptId: this.draft.attempts.at(-1)!.id }, 65536);
+      return { kind: 'submission', retained: freeze({ version: 1, origin: 'assistant', raw, value }) };
     }
-    const submissionControls = ignoreArtifactPath ? { ...plan.controls.submission, path: null } : plan.controls.submission;
-    return retainSubmission(captured, submissionControls, plan.task, artifacts);
+    return retainStepOutput(captured, plan.controls.submission, plan.task, artifacts, { ignoreArtifactPath, previousFiles, expectedKind });
   }
   async completeCapture(attempt: ControllerAttempt, captured: CapturedRole, options?: { readonly ignoreArtifactPath?: boolean }): Promise<ControllerDiagnostic['code'] | null> {
     const { plan, store, artifacts } = this.context, { nodeId, repair, purpose, ordinal, id: commandId } = attempt;
-    const oldDigest = this.draft.candidate.digest, originalSubmission = this.draft.submission;
-    const manifest = await this.context.progress.manifest(captured.manifest), changed = !same(captured.digest, oldDigest), generation = this.generation + (changed ? 1 : 0);
-      if (generation >= plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
-      this.candidate = { manifest, ref: captured.manifest, files: captured.artifacts }; this.#candidateKnown = true;
-      let submission = this.submission, failure: ControllerDiagnostic['code'] | null = null, failedRaw: ArtifactRef | null = null;
-      try { if (purpose !== 'compaction') submission = await this.captureSubmission(captured, repair, originalSubmission, options?.ignoreArtifactPath === true); }
-      catch (error) { if (error instanceof ControllerFailure && ['SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS'].includes(error.diagnostic.code)) failure = error.diagnostic.code; else throw error; }
-      if (failure) {
-        submission = null; const selected = options?.ignoreArtifactPath === true || plan.controls.submission.path === null ? undefined : captured.artifacts.find(file => file.name === plan.controls.submission.path)?.bytes;
-        failedRaw = repair === 'format' || selected === undefined ? captured.submission : await artifacts.put('submission', selected, 1048576);
+    const dagNode = plan.orderedDAG.find(item => item.id === nodeId)!;
+    const role = plan.roles.find(item => item.roleId === dagNode.roleId)!;
+    const expectedKind: 'submission' | 'verdict' = isVerdictStep(dagNode) ? 'verdict' : 'submission';
+    const disallowMutations = repair === 'format' || !role.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
+    const ignoreArtifactPath = options?.ignoreArtifactPath === true || disallowMutations;
+    const previousFiles = this.candidate.files;
+    const oldDigest = this.draft.candidate.digest;
+    const originalInvalidRaw = this.draft.failures.at(-1)?.evidence ?? this.draft.submission;
+    const manifest = await this.context.progress.manifest(captured.manifest), changed = !same(captured.digest, oldDigest);
+    if (changed && this.generation + 1 >= plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
+    this.candidate = { manifest, ref: captured.manifest, files: captured.artifacts, baselineProofs: this.context.source.baselineProofs };
+    this.#candidateKnown = true;
+    if (changed) {
+      await this.triageCandidateDiffAdvisory(nodeId, commandId, captured.digest, captured.artifacts, manifest.spec.deleted ?? []);
+    }
+    let stepOutput: CapturedStepOutput | null = null, failure: ControllerDiagnostic['code'] | null = null, failedRaw: ArtifactRef | null = null;
+    try {
+      if (purpose !== 'compaction') {
+        stepOutput = await this.captureStepOutput(captured, repair, originalInvalidRaw, ignoreArtifactPath, previousFiles, expectedKind);
       }
-      this.submission = submission;
-      const after = stateValue(store.inspect()).counts;
-      let draft: Draft = { ...this.draft, stage: { ...this.draft.stage, kind: 'role_post' }, attempts: this.draft.attempts.map(item => item.id === commandId ? { ...item, finished: { after: { requests: after.requests, operations: after.operations }, outcome: captured.outcome, nativeCheckpointId: captured.checkpointId } } : item),
-        nativeCheckpoints: [...this.draft.nativeCheckpoints, { attemptId: commandId, checkpointId: captured.checkpointId, outcome: captured.outcome }], submission: failure ? failedRaw : submission?.raw ?? null,
-        candidate: { manifest: captured.manifest, digest: captured.digest, generation, workspace: captured.workspace, privateSession: captured.session }, nodes: this.draft.nodes.map(item => item.id === nodeId ? { ...item, state: failure ? 'failed' : 'completed' } : item) };
-      if (failure) {
-        const signature = failureSignature({ category: 'format', codes: [failure], handler: 'submission.v1', handlerVersion: 1, target: nodeId, candidate: captured.digest, evidence: [failedRaw?.digest ?? hash('missing_submission')] });
-        draft = { ...draft, failures: rememberFailure(draft.failures, signature, generation, failedRaw) };
+    } catch (error) {
+      if (error instanceof ControllerFailure && ['SUBMISSION_INVALID', 'SUBMISSION_AMBIGUOUS'].includes(error.diagnostic.code)) failure = error.diagnostic.code;
+      else throw error;
+    }
+    if (failure) {
+      const selected = ignoreArtifactPath || plan.controls.submission.path === null ? undefined : captured.artifacts.find(file => file.name === plan.controls.submission.path)?.bytes;
+      failedRaw = repair === 'format' || selected === undefined ? captured.submission : await artifacts.put('submission', selected, 1048576);
+    }
+
+    const currentEpoch = this.draft.reworkEpoch ?? 0;
+    let nextReworkEpoch = currentEpoch;
+    let nextReworkCounts = this.draft.reworkCounts;
+    let nextNodeSubmissions = this.draft.nodeSubmissions;
+    let nextStepVerdicts = this.draft.stepVerdicts;
+    let reworked = false;
+    let verdictHalted = false;
+    let nextSubmissionRef = this.draft.submission;
+    let nextNodes = this.draft.nodes.map(item => ({ ...item }));
+
+    if (failure) {
+      if (this.submission === null) nextSubmissionRef = failedRaw;
+      nextNodes = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'failed' as const } : item));
+    } else if (stepOutput?.kind === 'verdict') {
+      const verdictVal = stepOutput.retained.value;
+      if (verdictVal.verdict === 'rework') {
+        const usedReworks = this.draft.reworkCounts?.[nodeId] ?? 0;
+        const canRework = dagNode.onRework !== undefined && usedReworks < dagNode.onRework.maxReworks && this.generation + 1 < plan.capacity.V;
+        const alignmentOk = canRework ? await this.evaluateAlignment('rework', dagNode.onRework!.rejectTo, captured.digest) : false;
+        if (canRework && alignmentOk) {
+          reworked = true;
+          nextReworkEpoch = currentEpoch + 1;
+          nextReworkCounts = freeze({ ...(this.draft.reworkCounts ?? {}), [nodeId]: usedReworks + 1 });
+        } else {
+          verdictHalted = true;
+        }
+      } else if (verdictVal.verdict === 'human' || verdictVal.verdict === 'fail') {
+        verdictHalted = true;
       }
-      if (repair === 'implementation' && !changed) {
-        const requiredOutputs = this.currentChecks().filter(check => check.status === 'failed' && plan.task.spec.acceptance.required.includes(check.checkId)).map(check => check.output);
-        draft = { ...draft, failures: draft.failures.map(item => item.evidence && requiredOutputs.some(output => same(item.evidence, output)) ? { ...item, count: Math.min(2, item.count + 1) } : item) };
+      nextSubmissionRef = this.submission?.raw ?? null;
+      const nextGenForVerdict = this.generation + (changed || reworked ? 1 : 0);
+      const storedVerdict: StoredStepVerdict = freeze({
+        attemptId: commandId,
+        stepId: nodeId,
+        roleId: role.roleId,
+        reworkEpoch: currentEpoch,
+        generation: nextGenForVerdict,
+        raw: stepOutput.retained.raw,
+        verdict: verdictVal.verdict,
+        summaryPreview: summarizeStepVerdictPreview(verdictVal.summary),
+        findingCount: verdictVal.findings.length,
+      });
+      nextStepVerdicts = freeze([...(this.draft.stepVerdicts ?? []), storedVerdict]);
+      if (verdictVal.verdict === 'pass') {
+        nextNodes = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
+      } else if (reworked) {
+        const markedDone = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
+        const resetNodes = resetSubgraphNodes(plan, markedDone, dagNode.onRework!.rejectTo);
+        nextNodes = resetNodes.map(item => {
+          if (item.state !== 'completed') return item;
+          const itemDagNode = plan.orderedDAG.find(node => node.id === item.id);
+          return itemDagNode?.kind === 'check' ? { ...item, state: 'pending' as const } : item;
+        });
+      } else if (verdictVal.verdict === 'fail') {
+        nextNodes = nextNodes.map(item =>
+          item.id === nodeId ? { ...item, state: 'failed' as const } : item.state === 'pending' ? { ...item, state: 'not_run' as const } : item,
+        );
+      } else {
+        nextNodes = nextNodes.map(item =>
+          item.id === nodeId ? { ...item, state: 'blocked' as const } : item.state === 'pending' ? { ...item, state: 'not_run' as const } : item,
+        );
       }
-      if (changed) {
-        const downstreamSet = repair === 'implementation' ? new Set(descendants(plan, nodeId)) : null;
-        draft = {
-          ...draft,
-          nodes: draft.nodes.map(item => {
-            const dagNode = plan.orderedDAG.find(node => node.id === item.id)!;
-            if (dagNode.kind === 'check' && (repair === 'implementation' || item.state !== 'not_run')) return { ...item, state: 'pending' };
-            if (downstreamSet && downstreamSet.has(item.id) && dagNode.kind === 'agent' && dagNode.handler.parameters.purpose === 'review') return { ...item, state: 'pending' };
-            return item;
-          }),
-        };
+    } else {
+      if (stepOutput?.kind === 'submission') {
+        const retained = stepOutput.retained;
+        const priorNodeSub = this.draft.nodeSubmissions?.[nodeId];
+        nextNodeSubmissions = freeze({ ...(this.draft.nodeSubmissions ?? {}), [nodeId]: retained.raw });
+        const keepPriorRicherAuthorClaims =
+          this.submission !== null &&
+          !(priorNodeSub !== undefined && same(priorNodeSub, this.submission.raw)) &&
+          this.submission.value.status === 'completed' &&
+          this.submission.value.checks.length > 0 &&
+          retained.value.status === 'completed' &&
+          retained.value.checks.length === 0;
+        if (!keepPriorRicherAuthorClaims) {
+          this.submission = retained;
+        }
+        nextSubmissionRef = this.submission!.raw;
       }
-      draft = { ...draft, nodes: this.nodeDispositions(draft.nodes, generation) };
-      await this.publish(draft, 'role.' + ordinal + '.post'); return failure;
+      nextNodes = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
+    }
+
+    const generation = this.generation + (changed || reworked ? 1 : 0);
+    if (generation >= plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
+    const after = stateValue(store.inspect()).counts;
+    let draft: Draft = {
+      ...this.draft,
+      stage: { ...this.draft.stage, kind: 'role_post' },
+      attempts: this.draft.attempts.map(item =>
+        item.id === commandId ? { ...item, finished: { after: { requests: after.requests, operations: after.operations }, outcome: captured.outcome, nativeCheckpointId: captured.checkpointId } } : item,
+      ),
+      nativeCheckpoints: [...this.draft.nativeCheckpoints, { attemptId: commandId, checkpointId: captured.checkpointId, outcome: captured.outcome }],
+      submission: nextSubmissionRef,
+      candidate: { manifest: captured.manifest, digest: captured.digest, generation, workspace: captured.workspace, privateSession: captured.session },
+      nodes: nextNodes,
+      ...(nextReworkEpoch > 0 ? { reworkEpoch: nextReworkEpoch } : {}),
+      ...(nextReworkCounts !== undefined && Object.keys(nextReworkCounts).length > 0 ? { reworkCounts: nextReworkCounts } : {}),
+      ...(nextNodeSubmissions !== undefined && Object.keys(nextNodeSubmissions).length > 0 ? { nodeSubmissions: nextNodeSubmissions } : {}),
+      ...(nextStepVerdicts !== undefined && nextStepVerdicts.length > 0 ? { stepVerdicts: nextStepVerdicts } : {}),
+    };
+    if (failure) {
+      const signature = failureSignature({ category: 'format', codes: [failure], handler: expectedKind === 'verdict' ? 'step-verdict.v1' : 'submission.v1', handlerVersion: 1, target: nodeId, candidate: captured.digest, evidence: [failedRaw?.digest ?? hash('missing_submission')] });
+      draft = { ...draft, failures: rememberFailure(draft.failures, signature, generation, failedRaw) };
+    }
+    if (repair === 'implementation' && !changed) {
+      const requiredOutputs = this.currentChecks().filter(check => check.status === 'failed' && plan.task.spec.acceptance.required.includes(check.checkId)).map(check => check.output);
+      draft = { ...draft, failures: draft.failures.map(item => item.evidence && requiredOutputs.some(output => same(item.evidence, output)) ? { ...item, count: Math.min(2, item.count + 1) } : item) };
+    }
+    if (changed && !reworked && !verdictHalted) {
+      const downstreamSet = repair === 'implementation' ? new Set(descendants(plan, nodeId)) : null;
+      draft = {
+        ...draft,
+        nodes: draft.nodes.map(item => {
+          const itemDagNode = plan.orderedDAG.find(node => node.id === item.id)!;
+          if (itemDagNode.kind === 'check' && (repair === 'implementation' || item.state !== 'not_run')) return { ...item, state: 'pending' };
+          if (downstreamSet && downstreamSet.has(item.id) && itemDagNode.kind === 'agent' && itemDagNode.handler.parameters.purpose === 'review') return { ...item, state: 'pending' };
+          return item;
+        }),
+      };
+    }
+    draft = { ...draft, nodes: this.nodeDispositions(draft.nodes, generation) };
+    await this.publish(draft, 'role.' + ordinal + '.post');
+    return failure;
   }
   async role(nodeId: string, repair: ControllerAttempt['repair'] = 'none', prompt?: string, retained?: ControllerAttempt): Promise<void> {
-    await this.guard(); const { plan, lock, store, artifacts, authority, loaded, directory } = this.context;
+    await this.guard(); const { plan, lock, store, artifacts, authority, loaded, directory } = this.context, bounds = this.#overlayBounds();
     const delegatedCounts = countDelegatedBudgets(plan, this.draft.attempts);
     observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
     const node = plan.orderedDAG.find(node => node.id === nodeId); if (!node || node.kind !== 'agent') refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
@@ -268,22 +781,76 @@ export class Cycle {
     if (originalRole.adapter === 'delegated') refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'execution');
     const role: PlannedRole = repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
     const purpose = node.handler.implementation === 'pi.compact.v1' ? 'compaction' : node.handler.parameters.purpose === 'review' ? 'reviewer' : 'task';
+    const roleResources = roleResourcesFor(loaded, plan, role.roleId);
+    if (!retained && purpose === 'compaction' && this.context.ports.decisions?.adviseSoftCompaction) {
+      const contextUtilization = this.#contextUtilization();
+      const failedVerificationLoops = this.#failedVerificationLoops();
+      const hardTrigger = contextUtilization >= 0.8 || failedVerificationLoops >= 2;
+      try {
+        const advisory = await this.context.ports.decisions.adviseSoftCompaction({
+          runId: lock.spec.runId,
+          stepId: nodeId,
+          roleId: role.roleId,
+          contextUtilization,
+          failedVerificationLoops,
+        });
+        if (advisory !== null && advisory !== undefined) {
+          if (
+            !isRecord(advisory) ||
+            (advisory.advisoryDecision !== null &&
+              (typeof advisory.advisoryDecision !== 'string' || !VALID_SOFT_COMPACTION_DECISIONS.has(advisory.advisoryDecision))) ||
+            typeof advisory.source !== 'string' ||
+            !VALID_ADVISORY_SOURCES.has(advisory.source)
+          ) {
+            throw new Error('invalid_soft_compaction_output');
+          }
+        }
+        const vetoAttempted = hardTrigger && advisory?.advisoryDecision === 'defer';
+        this.advisoryObservations.push({
+          intent: 'advise_soft_compaction',
+          stepId: nodeId,
+          advisoryDecision: hardTrigger ? 'compact' : (advisory?.advisoryDecision ?? 'compact'),
+          hardTriggerActive: hardTrigger,
+          hardTriggerVetoRefused: vetoAttempted,
+          source: advisory?.source ?? 'deterministic_heuristic',
+        });
+      } catch {
+        this.advisoryObservations.push({
+          intent: 'advise_soft_compaction',
+          stepId: nodeId,
+          advisoryDecision: 'compact',
+          hardTriggerActive: hardTrigger,
+          hardTriggerVetoRefused: false,
+          source: 'deterministic_fallback',
+        });
+      }
+    }
+    if (!retained && purpose !== 'compaction') {
+      await this.adviseCapabilityRouting(nodeId, role, purpose, roleResources);
+    }
+    const attemptEpoch = retained ? (retained.reworkEpoch ?? 0) : this.reworkEpoch;
     const nativeStepId = purpose === 'compaction' ? compactionTarget(plan, nodeId) : nodeId, ordinal = retained?.ordinal ?? this.draft.attempts.length + 1;
-    const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal), sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy);
+    const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal), sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy, attemptEpoch);
     const configured = purpose === 'compaction' ? '' : text(loaded.registry.spec.handlers.find(handler => handler.id === node.handler.id)?.parameters.prompt);
     if (purpose !== 'compaction' && node.handler.parameters.prompt !== '[private command sha256:' + hash(configured).hex + ']') refuse('RECOVERY_REQUIRED', '', 'execution');
-    const commandText = retained ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, 1048576)) : prompt ?? configured;
+    const reworkCtx = repair === 'none' && prompt === undefined ? await this.activeReworkForNode(nodeId) : null;
+    const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(65_536, role.policy.limits.promptBytes)) : configured;
+    const commandText = retained ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, 1048576)) : prompt ?? defaultPrompt;
     const command = await artifacts.put('command', Buffer.from(commandText), Math.min(1048576, role.policy.limits.promptBytes));
-    const originalSubmission = this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
+    const originalSubmission = this.draft.failures.at(-1)?.evidence ?? this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
     const originalState = await schedulingSnapshot(store, authority, lock, artifacts, this.candidate, this.draft.candidate);
     observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
-    const attempt: ControllerAttempt = retained ?? { ordinal, id: commandId, nodeId, nativeStepId, sessionId, purpose, repair, command, before: { requests: before.requests, operations: before.operations }, finished: null };
+    const attempt: ControllerAttempt = retained ?? {
+      ordinal, id: commandId, nodeId, nativeStepId, sessionId, purpose, repair, command,
+      before: { requests: before.requests, operations: before.operations }, finished: null,
+      ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}),
+    };
     if (retained) {
-      if (!same(retained, { ...attempt, command, id: commandId, sessionId, nativeStepId, nodeId, purpose, repair }) || !same(this.draft.attempts.at(-1), retained) || retained.finished !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      if (!same(retained, { ...attempt, command, id: commandId, sessionId, nativeStepId, nodeId, purpose, repair, ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}) }) || !same(this.draft.attempts.at(-1), retained) || retained.finished !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
     } else {
-    if (repair === 'format') await artifacts.json('format-intent', { version: 1, attemptId: commandId, original: originalSubmission, schema: 'submission.v1', candidate: oldDigest, output: 'new_assistant_representation' }, 65536);
-    await this.events.push(repair === 'none' ? 'role' : 'repair', null, nodeId, commandId);
-    await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'role_pre' }, attempts: [...this.draft.attempts, attempt], nodes: this.draft.nodes.map(item => item.id === nodeId ? { ...item, state: 'running' } : item) }, 'role.' + ordinal + '.pre');
+      if (repair === 'format') await artifacts.json('format-intent', { version: 1, attemptId: commandId, original: originalSubmission, schema: isVerdictStep(node) ? 'step-verdict.v1' : 'submission.v1', candidate: oldDigest, output: 'new_assistant_representation' }, 65536);
+      await this.events.push(repair === 'none' ? 'role' : 'repair', null, nodeId, commandId);
+      await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'role_pre' }, attempts: [...this.draft.attempts, attempt], nodes: this.draft.nodes.map(item => item.id === nodeId ? { ...item, state: 'running' } : item) }, 'role.' + ordinal + '.pre');
     }
     let restore: PiOpenInputV2['restore'] = null, nativeManifest = this.candidate.manifest;
     if (purpose === 'compaction' || repair === 'implementation') {
@@ -292,8 +859,8 @@ export class Cycle {
         const wrapper = parsePrivateJson(await artifacts.read(prior.finished!.outcome, 4194304), 4194304, 16384) as Record<string, unknown>;
         const checkpoint = stateValue(store.getCheckpoint(prior.finished!.nativeCheckpointId!));
         if (same(checkpoint.subject.candidateDigest, this.draft.candidate.digest)) {
-          const identified = identifyManifest(parsePrivateJson(await artifacts.read(checkedRef(wrapper.originalManifest), 32768), 32768)); if (!identified.ok) refuse('RECOVERY_REQUIRED', '', 'recovery'); nativeManifest = identified.value.manifest;
-          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 67108864) } };
+          const identified = identifyManifest(parsePrivateJson(await artifacts.read(checkedRef(wrapper.originalManifest), bounds.manifestMaxBytes), bounds.manifestMaxBytes, bounds.collectionLimit), bounds.options); if (!identified.ok) refuse('RECOVERY_REQUIRED', '', 'recovery'); nativeManifest = identified.value.manifest;
+          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes)) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 67108864) } };
         }
       }
       if (purpose === 'compaction' && restore === null) refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
@@ -307,7 +874,7 @@ export class Cycle {
     }
     const host: PiHostV2 = { store, authority, directory: hostDirectory, artifactsDirectory: artifacts.directory, dockerExecutable: role.runtime.dockerExecutable, dockerSocket: role.runtime.dockerSocket, runtime: role.runtime.identity,
       ...approvedState(loaded).vault.bind({ runId: lock.spec.runId, roleId: role.roleId, stepId: nativeStepId, providerCredentialRef: role.providerCredentialRef, selection: role.policy.selection, mcp: role.policy.mcp }) };
-    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: this.candidate.files, ...(baseline ? { baseline } : {}) }, resources: approvedState(loaded).resources, restore };
+    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: this.candidate.files, ...(baseline ? { baseline } : {}) }, resources: roleResources, restore };
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;
@@ -338,12 +905,12 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       noEffectMcpAuth = outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.error?.effect === 'none' && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       if (outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
-        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
+        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, this.context.ports.allowWorkflowWrites === true); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
       if (!noEffectBudget && outcome.status === 'failed' && outcome.error !== null && isBudgetRefusal(outcome.error) && outcome.error.effect === 'confirmed' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
         midSessionBudget = { piCode: outcome.error.code, stateCode: outcome.error.stateErrorCode };
       }
       if (outcome.status !== 'execution_settled' || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: outcome.error?.code ?? null, effect: outcome.error?.effect ?? 'possible' });
-      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source);
+      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, this.context.ports.allowWorkflowWrites === true);
       if ((repair === 'format' || purpose === 'compaction') && !same(captured.digest, oldDigest)) refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'confirmed' });
       structureFailure = await this.completeCapture(attempt, captured);
       if (stateValue(store.inspect()).ledger.admittedCalls + delegatedCounts.modelCalls > lock.spec.contract.spec.budgets.maxModelCalls) {
@@ -393,7 +960,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (!adopt) { await this.role(attempt.nodeId, attempt.repair, undefined, attempt); return; }
     const original = this.context.plan.roles.find(role => role.roleId === this.context.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
     const role = attempt.repair === 'format' ? { ...original, policy: formatPolicy(original.policy) } : original;
-    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt, undefined, this.context.source);
+    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt, undefined, this.context.source, this.context.ports.allowWorkflowWrites === true);
     const failure = await this.completeCapture(attempt, captured);
     if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
     if (failure === 'SUBMISSION_INVALID') await this.repairFormat(attempt.nodeId);
@@ -405,14 +972,22 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       repeats: repeats ?? latest?.count ?? 0, actionable, uncertain: !storeFactsCertain(view) });
     if (refusal) refuse(refusal, '', 'execution');
   }
-  async repairFormat(nodeId: string): Promise<void> {
-    const raw = this.draft.submission; this.repairBound('format', raw !== null);
+  async formatRepairPrompt(nodeId: string): Promise<string> {
+    const raw = this.draft.failures.at(-1)?.evidence ?? this.draft.submission;
+    this.repairBound('format', raw !== null);
     if (!raw) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
     const node = this.context.plan.orderedDAG.find(item => item.id === nodeId);
     const role = this.context.plan.roles.find(item => item.roleId === node?.roleId);
     const maxPromptBytes = role ? Math.min(16384, role.policy.limits.promptBytes) : 16384;
+    const bytes = await this.context.artifacts.read(raw, 1048576);
+    if (isVerdictStep(node)) {
+      return verdictFormatPrompt(bytes, maxPromptBytes);
+    }
     const allowedCheckIds = this.context.plan.task.spec.acceptance.checks.map(item => item.id);
-    const prompt = formatPrompt(await this.context.artifacts.read(raw, 1048576), allowedCheckIds, maxPromptBytes);
+    return formatPrompt(bytes, allowedCheckIds, maxPromptBytes);
+  }
+  async repairFormat(nodeId: string): Promise<void> {
+    const prompt = await this.formatRepairPrompt(nodeId);
     await this.role(nodeId, 'format', prompt);
   }
   currentChecks(): readonly VerifiedCheck[] { return [...this.checks.values()].filter(check => check.generation === this.generation); }
@@ -431,14 +1006,21 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       if (node.kind === 'agent') await this.role(node.id);
       else {
         const slot = plan.verifierSlots.find(slot => slot.handler.id === node.handler.id); if (!slot) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+        const epochBefore = this.reworkEpoch;
         const checked = await this.runVerifier(slot.id), state = checked.status === 'passed' ? 'completed' : checked.status;
+        const actualState = this.draft.nodes.find(item => item.id === node.id)!.state;
+        const validCheckRework =
+          node.onRework !== undefined &&
+          checked.status === 'failed' &&
+          ((this.reworkEpoch === epochBefore + 1 && actualState === 'pending') ||
+            (this.haltedVerdictStatus() === 'blocked' && actualState === 'blocked'));
         // Node disposition is part of the same predefined post-job boundary, never an extra checkpoint.
-        if (this.draft.nodes.find(item => item.id === node.id)!.state !== state) refuse('RECOVERY_REQUIRED', '', 'execution');
+        if (actualState !== state && !validCheckRework) refuse('RECOVERY_REQUIRED', '', 'execution');
       }
     }
     await this.verifyEligible();
   }
-  prepareImplementationRepair(): { readonly targetNodeId: string; readonly role: PlannedRole; readonly prompt: string } | null {
+  async prepareImplementationRepair(): Promise<{ readonly targetNodeId: string; readonly role: PlannedRole; readonly prompt: string } | null> {
     const { plan } = this.context; if (plan.budgets.maxImplementationRepairs === 0) return null;
     const checks = this.currentChecks(), required = plan.verifierSlots.filter(slot => slot.implicit === null && plan.task.spec.acceptance.required.includes(slot.checkId));
     const failed = checks.filter(check => check.status === 'failed' && required.some(slot => slot.id === check.slotId));
@@ -446,11 +1028,15 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     const allAvailable = required.every(slot => checks.some(check => check.slotId === slot.id && check.status !== 'blocked'));
     if (!allAvailable || checks.some(check => plan.verifierSlots.find(slot => slot.id === check.slotId)!.implicit === 'scope' && check.status !== 'passed')) return null;
     const isMutating = (role: PlannedRole) => role.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
-    const prior = this.draft.attempts.filter(attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && isMutating(plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!)).at(-1);
+    const mutatingTasks = this.draft.attempts.filter(
+      attempt => attempt.purpose === 'task' && attempt.repair !== 'format' && attempt.finished?.nativeCheckpointId && isMutating(plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!),
+    );
+    const prior = mutatingTasks.filter(attempt => (attempt.reworkEpoch ?? 0) === this.reworkEpoch).at(-1) ?? mutatingTasks.at(-1);
     const target = prior?.nodeId, node = plan.orderedDAG.find(node => node.id === target), role = plan.roles.find(role => role.roleId === node?.roleId);
     if (!node || !role || !isMutating(role)) return null;
     this.repairBound('implementation', true, Math.max(0, ...this.draft.failures.filter(item => failed.some(check => same(check.output, item.evidence))).map(item => item.count)));
     const candidateDigest = this.draft.candidate.digest;
+    if (!(await this.evaluateAlignment('implementation_repair', target!, candidateDigest))) return null;
     const findings: {
       checkId: string;
       handler: typeof plan.verifierSlots[number]['handler']['implementation'];
@@ -500,10 +1086,25 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     return { targetNodeId: target!, role, prompt };
   }
   async implementationRepair(): Promise<boolean> {
-    const spec = this.prepareImplementationRepair();
+    const spec = await this.prepareImplementationRepair();
     if (!spec) return false;
     await this.role(spec.targetNodeId, 'implementation', spec.prompt);
     return true;
+  }
+  async ensureSubmissionForAcceptance(): Promise<void> {
+    if (this.submission) return;
+    if ((this.draft.stepVerdicts?.length ?? 0) > 0) {
+      const forced = this.haltedVerdictStatus();
+      const status: Submission['status'] = forced === 'failed' ? 'failed' : forced === 'blocked' ? 'blocked' : 'completed';
+      const value: Submission = { version: 1, status, checks: [], reason: status === 'completed' ? null : 'step_verdict_' + status };
+      const raw = await this.context.artifacts.json('submission', value, 1048576);
+      this.submission = { version: 1, origin: 'controller', raw, value };
+      return;
+    }
+    if (this.context.plan.orderedDAG.some(node => node.kind === 'agent')) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+    const value: Submission = { version: 1, status: 'completed', checks: [], reason: null };
+    const raw = await this.context.artifacts.json('submission', value, 1048576);
+    this.submission = { version: 1, origin: 'controller', raw, value };
   }
   async execute(): Promise<AcceptanceObservation> {
     if (!this.head) await this.bootstrap();
@@ -515,28 +1116,40 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       if (attempt?.finished?.nativeCheckpointId === null) {
         await refuseFromRoleOutcome(this.context.artifacts, attempt.finished.outcome, this.draft.candidate.manifest, () => { this.#candidateKnown = false; });
       }
-      if (attempt?.finished?.nativeCheckpointId && this.submission === null && attempt.purpose !== 'compaction' && this.draft.nodes.find(node => node.id === attempt.nodeId)?.state === 'failed') await this.repairFormat(attempt.nodeId);
+      if (attempt?.finished?.nativeCheckpointId && attempt.purpose !== 'compaction' && !this.haltedVerdictStatus() && this.draft.nodes.find(node => node.id === attempt.nodeId)?.state === 'failed') {
+        await this.repairFormat(attempt.nodeId);
+      }
     }
     await this.graph();
     for (;;) {
-      if (!this.submission) {
-        // Check-only graphs have no model submission. This is an explicitly trusted requested completed evaluation,
-        // with zero submitted claims; every pass still requires independently dispatched eligible evidence.
-        if (this.context.plan.orderedDAG.some(node => node.kind === 'agent')) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-        const value: Submission = { version: 1, status: 'completed', checks: [], reason: null }, raw = await this.context.artifacts.json('submission', value, 1048576);
-        this.submission = { version: 1, origin: 'controller', raw, value };
+      await this.ensureSubmissionForAcceptance();
+      const verdictHalt = this.haltedVerdictStatus();
+      const acceptance = evaluateControllerAcceptance(
+        this.context.plan,
+        this.context.lock,
+        this.candidate.manifest,
+        this.candidate.files,
+        this.generation,
+        this.currentChecks(),
+        this.submission!.value,
+        this.context.store,
+        verdictHalt,
+        this.draft.nodes.every(node => node.state === 'completed'),
+        this.currentRefusals(),
+      );
+      if (verdictHalt === null && acceptance.result.spec.status === 'failed' && await this.implementationRepair()) {
+        await this.graph();
+        continue;
       }
-      const acceptance = evaluateControllerAcceptance(this.context.plan, this.context.lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission.value, this.context.store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals());
-      if (acceptance.result.spec.status === 'failed' && await this.implementationRepair()) { await this.graph(); continue; }
       return acceptance.result.spec.status === 'completed' ? await this.publishBoundary(acceptance) : acceptance;
     }
   }
   async publishBoundary(acceptance: AcceptanceObservation): Promise<AcceptanceObservation> {
-    const { plan, lock, store, loaded } = this.context, publication = plan.publication;
+    const { plan, lock, store, loaded } = this.context, publication = plan.publication, overlayOpts = this.#overlayBounds().options;
     if (publication.mode !== 'pull_request' || ['confirmed', 'failed', 'unresolved'].includes(this.draft.publication.status)) return acceptance;
     const view = stateValue(store.inspect()), endpoint = loaded.registry.spec.publicationEndpoints.find(item => item.id === publication.endpointRef);
     if (!endpoint) refuse('CONFIG_REFERENCE', '/spec/publication', 'execution');
-    const subject = (() => { const bound = bindSubject(lock, this.candidate.manifest); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'execution'); return bound.value; })();
+    const subject = (() => { const bound = bindSubject(lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'execution'); return bound.value; })();
     const scope = acceptance.verifierMatrix.find(row => row.implicit === 'scope');
     const head = headRevision(this.context.descriptor.repository);
     if (![plan.task.spec.target.baseRevision, plan.task.spec.target.sourceRevision].includes(head)) refuse('TARGET_MISMATCH', '', 'execution');
@@ -584,14 +1197,47 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       await checkpoint('terminal_result', 'terminal.result');
       // Event bytes were already synced during work. Sealing is no-overwrite metadata, not a final body rewrite.
       const eventsRef = await this.events.close(); finalizer.check();
-      observations = await finalizer.put('observations', { version: 1, primary: primaryRef, requestedStatus: accepted ? primary.requestedStatus : null, diagnostic: accepted ? primary.diagnostic : primary.code,
-        requestedStatusSource: this.submission === null ? 'unavailable' : this.submission.origin === 'controller' ? 'controller_check_only' : 'captured_submission', selectedNoChangeCheck: accepted ? primary.selectedNoChangeCheck : this.context.plan.noChangeEligibility.checkId, contradictions: accepted ? primary.contradictions : [], verifierMatrix: accepted ? primary.verifierMatrix : null,
-        verification: accepted ? primary.verification : null, preflightRefusals: accepted ? primary.preflightRefusals : null, events: eventsRef, cleanup: this.#cleanup, memory: { status: 'not_requested', reason: null }, publication: this.#publicationObservation });
+      const storedVerdicts = this.head?.progress.stepVerdicts ?? [];
+      const hydratedVerdicts = await hydrateStepVerdicts(artifacts, storedVerdicts);
+      const boundedFindings = boundFindingsForObservations(hydratedVerdicts.flatMap(item => item.verdict.findings));
+      observations = await finalizer.put('observations', {
+        version: 1,
+        primary: primaryRef,
+        requestedStatus: accepted ? primary.requestedStatus : null,
+        diagnostic: accepted ? primary.diagnostic : primary.code,
+        requestedStatusSource: this.submission === null ? 'unavailable' : this.submission.origin === 'controller' ? 'controller_check_only' : 'captured_submission',
+        selectedNoChangeCheck: accepted ? primary.selectedNoChangeCheck : this.context.plan.noChangeEligibility.checkId,
+        contradictions: accepted ? primary.contradictions : [],
+        verifierMatrix: accepted ? primary.verifierMatrix : null,
+        verification: accepted ? primary.verification : null,
+        preflightRefusals: accepted ? primary.preflightRefusals : null,
+        events: eventsRef,
+        cleanup: this.#cleanup,
+        memory: { status: 'not_requested', reason: null },
+        publication: this.#publicationObservation,
+        ...(storedVerdicts.length > 0 ? { stepVerdicts: storedVerdicts } : {}),
+        ...(boundedFindings.findings.length > 0 ? { findings: boundedFindings.findings } : {}),
+        ...(boundedFindings.findingsTruncated ? { findingsTruncated: true, totalFindingsCount: boundedFindings.totalFindingsCount } : {}),
+        ...(this.advisoryObservations.length > 0 ? { advisoryDecisions: this.advisoryObservations } : {}),
+      });
       await checkpoint('terminal_observations', 'terminal.observations');
     } catch (error) { secondary.push(safeDiagnostic(error, 'finalization').code); }
     finally { try { await this.events.close(); } catch { secondary.push('CLEANUP_FAILED'); this.#cleanup = 'pending'; } }
+    const finalVerdicts = await hydrateStepVerdicts(artifacts, this.head?.progress.stepVerdicts).catch(() => []);
+    const finalFindings: StructuredFinding[] = finalVerdicts.flatMap(item => item.verdict.findings);
     if (!admitted) return freeze({ kind: 'incident', version: 1, incident: incident({ version: 1, code: 'RECOVERY_REQUIRED', phase: 'finalization', path: '', stateCode: null, piCode: null, effect: 'possible', retryable: false }, lock.spec.runId, lock.spec.lockHash, [this.context.descriptor.plan, this.context.source.inventory, ...(primaryRef ? [primaryRef] : [])], ['terminal_admission'], this.#cleanup) });
-    if (accepted) return freeze({ kind: 'result', version: 1, runId: lock.spec.runId, result: primary.result, observations, secondary });
+    if (accepted) {
+      return freeze({
+        kind: 'result',
+        version: 1,
+        runId: lock.spec.runId,
+        result: primary.result,
+        observations,
+        secondary,
+        ...(finalFindings.length > 0 ? { findings: freeze(finalFindings) } : {}),
+        ...(finalVerdicts.length > 0 ? { stepVerdicts: freeze([...finalVerdicts]) } : {}),
+      });
+    }
     return freeze({ kind: 'incident', version: 1, incident: primary });
   }
   async finish(): Promise<CycleExecution> {

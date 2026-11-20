@@ -5,7 +5,7 @@ import { appendFile, readFile, writeFile, lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TaskContract } from '@loopwright/core';
 import { retainedFixture } from './progress-fixtures.js';
-import { freezeSource, verifySource, restoreSource } from '../src/source.js';
+import { freezeSource, isHostProtectedPath, verifySource, restoreSource } from '../src/source.js';
 import { GIT_ENVIRONMENT } from '../src/git-reader.js';
 import { canonical, hash } from '../src/schema.js';
 import { ControllerFailure } from '../src/errors.js';
@@ -93,4 +93,15 @@ test('source inventory switches to version 2 tree_overlay beyond the 128-file or
     assert.deepEqual(largeFrozen.baselineEntries?.map(item => item.name), ['large']);
     assert.equal(largeFrozen.artifacts.length, 0);
   } finally { await f.close(); }
+});
+
+test('isHostProtectedPath fails closed on malformed paths and honors allowWorkflowWrites', () => {
+  assert.equal(isHostProtectedPath('../etc/passwd', false), true);
+  assert.equal(isHostProtectedPath('/etc/passwd', false), true);
+  assert.equal(isHostProtectedPath('', false), true);
+  assert.equal(isHostProtectedPath('docs//guide.md', false), true);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml', false), true);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml', true), false);
+  assert.equal(isHostProtectedPath('.claude/settings.json', true), true);
+  assert.equal(isHostProtectedPath('docs/readme.md', false), false);
 });

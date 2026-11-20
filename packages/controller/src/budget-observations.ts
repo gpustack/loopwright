@@ -1,12 +1,13 @@
-import { bindSubject, type ArtifactRef, type TaskLock } from '@loopwright/core';
+import { bindSubject, identifyManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
 import type { Authority, LocalRunStore, RunView } from '@loopwright/state';
 import type { PiErrorV2 } from '@loopwright/agent-pi';
 import { descriptor, fileHash, ownedBytes } from './verifier-protocol.js';
-import { canonical, record, same } from './schema.js';
+import { canonical, hash, record, same } from './schema.js';
 import { journal } from './progress.js';
 import { refuse, type ControllerDiagnostic } from './errors.js';
 import { parsePrivateJson } from './parser.js';
-import type { ArtifactStore } from './storage.js';
+import { checkedRef, type ArtifactStore } from './storage.js';
+import { overlayManifestBounds } from './source.js';
 import type { ByteInventory } from './verification.js';
 import type { CompiledPlan, ControllerProgress } from './types.js';
 
@@ -91,17 +92,32 @@ export async function schedulingSnapshot(store: LocalRunStore, authority: Author
       owner: { id: view.owner.ownerId, generation: view.owner.generation, mode: view.owner.mode }, ledger: view.ledger, requests: records.requests, operations: records.operations,
       nativeCheckpoints: records.checkpoints.filter(cp => cp.additionalArtifacts.length === 0) });
   };
-  await artifacts.owner.assertCurrent(); const records = facts(), subject = bindSubject(lock, candidate.manifest);
-  descriptor(candidate.manifest, candidate.ref);
+  const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
+  await artifacts.owner.assertCurrent(); const records = facts(), subject = bindSubject(lock, candidate.manifest, bounds.options);
+  if (bounds.options === undefined) {
+    descriptor(candidate.manifest, candidate.ref);
+  } else {
+    const identified = identifyManifest(candidate.manifest, bounds.options);
+    const encoded = canonical(candidate.manifest);
+    if (
+      !identified.ok ||
+      Buffer.byteLength(encoded) > bounds.manifestMaxBytes ||
+      candidate.ref.byteLength !== Buffer.byteLength(encoded) ||
+      !same(candidate.ref.digest, hash(encoded))
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'execution');
+    }
+    checkedRef(candidate.ref);
+  }
   if (!subject.ok || !same(retained.manifest, candidate.ref) || !same(retained.digest, subject.value.candidateDigest)
     || candidate.files.length !== candidate.manifest.spec.entries.length || new Set(candidate.files.map(file => file.name)).size !== candidate.files.length
-    || !Buffer.from(await artifacts.read(candidate.ref, 32768)).equals(Buffer.from(canonical(candidate.manifest)))) refuse('ARTIFACT_INVALID', '', 'execution');
+    || !Buffer.from(await artifacts.read(candidate.ref, bounds.manifestMaxBytes)).equals(Buffer.from(canonical(candidate.manifest)))) refuse('ARTIFACT_INVALID', '', 'execution');
   let total = 0;
   for (const entry of candidate.manifest.spec.entries) {
     const file = candidate.files.find(file => file.name === entry.name); if (!file || (total += entry.byteLength) > 268435456) refuse('ARTIFACT_INVALID', '', 'execution');
     const bytes = ownedBytes(file.bytes, 67108864); if (bytes.length !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'execution');
   }
-  await artifacts.read(retained.workspace); if (retained.privateSession) await artifacts.read(retained.privateSession, 67108864);
+  await artifacts.read(retained.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes)); if (retained.privateSession) await artifacts.read(retained.privateSession, 67108864);
   await artifacts.owner.assertCurrent(); if (facts() !== records) refuse('RECOVERY_REQUIRED', '', 'execution');
   return Object.freeze({ records, candidate: canonical({ retained, manifest: candidate.manifest, subject: subject.value }) });
 }

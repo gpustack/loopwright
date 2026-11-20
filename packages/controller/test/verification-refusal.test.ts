@@ -17,10 +17,11 @@ import type { ControllerAttempt } from '../src/types.js';
 async function refusalFixture(kind: 'file' | 'header' = 'file') {
   const initial = kind === 'file' ? Buffer.concat([Buffer.from('{"ok":true}'), Buffer.alloc(JSON_FILE_BYTES - 11, 32)]) : Buffer.from('{"ok":true}');
   const sourceFiles = [{ name: 'packages/result.json', bytes: initial }], candidateFiles = kind === 'file' ? [{ name: sourceFiles[0]!.name, bytes: Buffer.concat([initial, Buffer.from(' ')]) }]
-    : [...sourceFiles, ...Array.from({ length: 100 }, (_, index) => ({ name: 'packages/file-' + String(index).padStart(3, '0') + '-' + 'x'.repeat(40), bytes: Buffer.from('x') }))];
+    : [{ name: 'packages/result.json', bytes: Buffer.from('{"ok":true,"rev":2}') }];
   const f = await retainedFixture(1, 3, 2, 60000, fixture => {
     const handler = fixture.registry.spec.handlers.find(handler => handler.implementation === 'json-artifact.v1')!;
-    setFixture(fixture.registry, ['spec', 'handlers'], fixture.registry.spec.handlers.map(item => item === handler ? { ...item, parameters: { ...item.parameters, path: 'packages/result.json' } } : item));
+    const equals = kind === 'header' ? { ok: true, padA: 'x'.repeat(9000), padB: 'y'.repeat(8000) } : handler.parameters.equals;
+    setFixture(fixture.registry, ['spec', 'handlers'], fixture.registry.spec.handlers.map(item => item === handler ? { ...item, parameters: { ...item.parameters, path: 'packages/result.json', equals } } : item));
   });
   const inventory = async (files: typeof sourceFiles): Promise<ByteInventory> => {
     const sorted = [...files].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);

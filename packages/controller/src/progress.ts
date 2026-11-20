@@ -1,12 +1,13 @@
-import { bindSubject, identifyManifest, type ArtifactManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
+import { LIMITS, bindSubject, identifyManifest, type ArtifactManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
 import type { Authority, CheckpointRecord, LocalRunStore, OperationRecord, Page, PageCursor, RequestRecord } from '@loopwright/state';
-import { canonical, freeze, hash, id, integer, list, record, same, text, digestValue } from './schema.js';
+import { canonical, freeze, hash, id, integer, isRecord, list, record, same, text, digestValue } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
 import { stateValue, checkedRef, ArtifactStore, type ArtifactReader } from './storage.js';
 import { checkedRefusalRecord, checkedRefusalSubject, refusalSubject } from './refusal-record.js';
-import { canonicalizeCandidateManifest, compareUtf16 } from './source.js';
-import type { CheckpointCapacity, CompiledPlan, ControllerProgress, ReceiptIndex } from './types.js';
+import { canonicalizeCandidateManifest, compareUtf16, overlayManifestBounds } from './source.js';
+import { checkedVerdictText } from './submission.js';
+import type { CheckpointCapacity, CompiledPlan, ControllerProgress, ReceiptIndex, StoredStepVerdict } from './types.js';
 
 export function phaseCheckpointId(runId: string, phase: string): string {
   return (phase.endsWith('.native') ? 'pi.' : 'controller.') + hash('loopwright.dev/controller/checkpoint/v1\0' + canonical({ runId, phase })).hex.slice(0, 40);
@@ -42,9 +43,46 @@ export function journal(store: LocalRunStore) {
 }
 function watermarks(raw: unknown): void { const value = record(raw, ['requests', 'operations']); integer(value.requests, 0, 4096); integer(value.operations, 0, 16384); }
 function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
-  const hasPublication = Object.hasOwn(raw as object, 'publication'), value = record(raw, ['version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints', 'submission', 'publication', 'candidate', 'failures', 'verifierReceipts', 'verifierRefusals', 'eventSequence', 'terminalIntent']);
+  if (!isRecord(raw)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const hasPublication = Object.hasOwn(raw, 'publication');
+  const hasReworkEpoch = Object.hasOwn(raw, 'reworkEpoch');
+  const hasReworkCounts = Object.hasOwn(raw, 'reworkCounts');
+  const hasNodeSubmissions = Object.hasOwn(raw, 'nodeSubmissions');
+  const hasStepVerdicts = Object.hasOwn(raw, 'stepVerdicts');
+  const value = record(raw, [
+    'version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints',
+    'submission', 'publication', 'candidate', 'failures', 'verifierReceipts', 'verifierRefusals', 'eventSequence', 'terminalIntent',
+    ...(hasReworkEpoch ? ['reworkEpoch' as const] : []),
+    ...(hasReworkCounts ? ['reworkCounts' as const] : []),
+    ...(hasNodeSubmissions ? ['nodeSubmissions' as const] : []),
+    ...(hasStepVerdicts ? ['stepVerdicts' as const] : []),
+  ]);
   if (value.version !== 2 || value.runId !== lock.spec.runId || !same(value.lockHash, lock.spec.lockHash)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  integer(value.sequence, 1, 64); integer(value.eventSequence, 0, Number.MAX_SAFE_INTEGER); if (value.previous !== null) checkedRef(value.previous); if (value.submission !== null) checkedRef(value.submission);
+  integer(value.sequence, 1, 256); integer(value.eventSequence, 0, Number.MAX_SAFE_INTEGER); if (value.previous !== null) checkedRef(value.previous); if (value.submission !== null) checkedRef(value.submission);
+  const currentReworkEpoch = hasReworkEpoch ? integer(value.reworkEpoch, 0, 128) : 0;
+  if (hasReworkCounts) {
+    if (!isRecord(value.reworkCounts)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const countKeys = Object.keys(value.reworkCounts);
+    if (countKeys.length > 16) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    let sumReworks = 0;
+    for (const key of countKeys) {
+      const dagNode = plan.orderedDAG.find(item => item.id === key);
+      if (!dagNode?.onRework) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      sumReworks += integer(value.reworkCounts[key], 0, dagNode.onRework.maxReworks);
+    }
+    if (sumReworks !== currentReworkEpoch) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  } else if (currentReworkEpoch !== 0) {
+    refuse('RECOVERY_REQUIRED', '', 'recovery');
+  }
+  if (hasNodeSubmissions) {
+    if (!isRecord(value.nodeSubmissions)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const subKeys = Object.keys(value.nodeSubmissions);
+    if (subKeys.length > 16) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    for (const key of subKeys) {
+      if (!plan.orderedDAG.some(item => item.id === key && item.kind === 'agent')) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      checkedRef(value.nodeSubmissions[key]);
+    }
+  }
   let publication: ControllerProgress['publication'] = { status: 'idle', operationId: null, receipt: null };
   if (hasPublication) {
     const item = record(value.publication, ['status', 'operationId', 'receipt']);
@@ -56,17 +94,19 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
   const stage = record(value.stage, ['kind', 'phase', 'capacity', 'consumed', 'watermarks']);
   const kinds = ['bootstrap', 'role_pre', 'role_post', 'verifier_pre', 'verifier_post', 'publication_pre', 'publication_post', 'terminal_intent', 'terminal_result', 'terminal_observations', 'reconcile_result'];
   if (!kinds.includes(text(stage.kind)) || !same(stage.capacity, plan.capacity)) refuse('RECOVERY_REQUIRED', '', 'recovery'); watermarks(stage.watermarks);
-  const schedule = phaseSchedule(plan.capacity), consumed = list(stage.consumed, '', 64).map(item => text(item, '', 64));
+  const schedule = phaseSchedule(plan.capacity), consumed = list(stage.consumed, '', 256).map(item => text(item, '', 64));
   if (!schedule.includes(text(stage.phase)) || consumed.at(-1) !== stage.phase || consumed.length !== value.sequence || new Set(consumed).size !== consumed.length || consumed.some(phase => !schedule.includes(phase))) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const phase = text(stage.phase), expectedKind = phase === 'bootstrap' ? 'bootstrap' : phase.startsWith('role.') ? phase.endsWith('.pre') ? 'role_pre' : 'role_post'
     : phase.startsWith('verify.') ? phase.endsWith('.pre') ? 'verifier_pre' : 'verifier_post' : phase.replace('.', '_');
   if (phase.endsWith('.native') || stage.kind !== expectedKind || consumed[0] !== 'bootstrap') refuse('RECOVERY_REQUIRED', '', 'recovery');
   const nodes = list(value.nodes, '', 16).map(node => record(node, ['id', 'state']));
   if (nodes.length !== plan.orderedDAG.length || new Set(nodes.map(node => node.id)).size !== nodes.length || nodes.some(node => !plan.orderedDAG.some(item => item.id === node.id) || !['pending', 'running', 'completed', 'failed', 'blocked', 'not_run'].includes(text(node.state)))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const attempts = list(value.attempts, '', 16);
+  const attempts = list(value.attempts, '', 64);
   if (attempts.length > plan.capacity.A) refuse('ATTEMPT_LIMIT', '', 'recovery');
   for (const [index, rawAttempt] of attempts.entries()) {
-    const attempt = record(rawAttempt, ['ordinal', 'id', 'nodeId', 'nativeStepId', 'sessionId', 'purpose', 'repair', 'command', 'before', 'finished']);
+    const hasAttemptEpoch = isRecord(rawAttempt) && Object.hasOwn(rawAttempt, 'reworkEpoch');
+    const attempt = record(rawAttempt, ['ordinal', 'id', 'nodeId', 'nativeStepId', 'sessionId', 'purpose', 'repair', 'command', 'before', 'finished', ...(hasAttemptEpoch ? ['reworkEpoch' as const] : [])]);
+    if (hasAttemptEpoch) integer(attempt.reworkEpoch, 0, currentReworkEpoch);
     if (attempt.ordinal !== index + 1 || !plan.orderedDAG.some(node => node.id === attempt.nodeId && node.kind === 'agent') || !['task', 'reviewer', 'compaction'].includes(text(attempt.purpose)) || !['none', 'format', 'implementation'].includes(text(attempt.repair))
       || attempt.id !== stableId(lock.spec.runId, text(attempt.nodeId), text(attempt.purpose), text(attempt.repair), index + 1)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const node = plan.orderedDAG.find(node => node.id === attempt.nodeId)!, nativeStep = plan.orderedDAG.find(node => node.id === attempt.nativeStepId);
@@ -81,7 +121,14 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
   const reviewerCounts = new Map<string, number>();
   const awaitingRepairBeforeNextReview = new Set<string>();
   let invalidReviewerSequence = false;
+  let seenEpoch = 0;
   for (const attempt of typedAttempts) {
+    const attemptEpoch = attempt.reworkEpoch ?? 0;
+    if (attemptEpoch < seenEpoch || attemptEpoch > currentReworkEpoch) invalidReviewerSequence = true;
+    if (attemptEpoch > seenEpoch) {
+      seenEpoch = attemptEpoch;
+      awaitingRepairBeforeNextReview.clear();
+    }
     if (attempt.repair === 'implementation') awaitingRepairBeforeNextReview.clear();
     else if (attempt.repair === 'none' && attempt.purpose === 'reviewer') {
       if (awaitingRepairBeforeNextReview.has(attempt.nodeId)) invalidReviewerSequence = true;
@@ -89,8 +136,8 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
       reviewerCounts.set(attempt.nodeId, (reviewerCounts.get(attempt.nodeId) ?? 0) + 1);
     }
   }
-  if (new Set(taskOrdinary.map(attempt => attempt.nodeId)).size !== taskOrdinary.length || invalidReviewerSequence
-    || [...reviewerCounts.values()].some(count => count > 1 + implCount)
+  if (new Set(taskOrdinary.map(attempt => String(attempt.reworkEpoch ?? 0) + ':' + attempt.nodeId)).size !== taskOrdinary.length || invalidReviewerSequence
+    || [...reviewerCounts.values()].some(count => count > 1 + implCount + currentReworkEpoch)
     || implCount > plan.budgets.maxImplementationRepairs
     || typedAttempts.filter(attempt => attempt.repair === 'format').length > plan.budgets.maxFormatRepairs) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (phase.startsWith('role.')) {
@@ -108,12 +155,63 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
   const failures = list(value.failures, '', 16).map(rawFailure => record(rawFailure, ['signature', 'count', 'generation', 'evidence']));
   for (const failure of failures) { digestValue(failure.signature); integer(failure.count, 1, 2); integer(failure.generation, 0, plan.capacity.V - 1); if (failure.evidence !== null) checkedRef(failure.evidence); }
   if (new Set(failures.map(failure => canonical(failure.signature))).size !== failures.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const receipts = list(value.verifierReceipts, '', plan.capacity.J).map(item => record(item, ['slot', 'generation', 'operationId', 'producerNonce', 'output', 'receipt']));
+  const receipts = list(value.verifierReceipts, '', plan.capacity.J).map(item => {
+    const hasReceiptEpoch = isRecord(item) && Object.hasOwn(item, 'reworkEpoch');
+    const row = record(item, ['slot', 'generation', 'operationId', 'producerNonce', 'output', 'receipt', ...(hasReceiptEpoch ? ['reworkEpoch' as const] : [])]);
+    if (hasReceiptEpoch) integer(row.reworkEpoch, 0, currentReworkEpoch);
+    return row;
+  });
   if (new Set(receipts.map(item => item.slot + ':' + item.generation)).size !== receipts.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
   for (const item of receipts) {
     if (!plan.verifierSlots.some(slot => slot.id === item.slot)) refuse('RECOVERY_REQUIRED', '', 'recovery'); integer(item.generation, 0, plan.capacity.V - 1);
     if (item.operationId !== verifierOperationId(lock.spec.runId, text(item.slot), item.generation as number) || !/^[a-f0-9]{32}$/.test(text(item.producerNonce)) || (item.output === null) !== (item.receipt === null)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     if (item.output !== null) checkedRef(item.output); if (item.receipt !== null) checkedRef(item.receipt);
+  }
+  const typedStepVerdicts: StoredStepVerdict[] = [];
+  if (hasStepVerdicts) {
+    const rawVerdicts = list(value.stepVerdicts, '', 64);
+    const seenKeys = new Set<string>();
+    for (const rawVerdict of rawVerdicts) {
+      const entry = record(rawVerdict, ['attemptId', 'stepId', 'roleId', 'reworkEpoch', 'generation', 'raw', 'verdict', 'summaryPreview', 'findingCount']);
+      const stepId = text(entry.stepId, '', 64);
+      const dagNode = plan.orderedDAG.find(item => item.id === stepId);
+      if (!dagNode) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      const entryEpoch = integer(entry.reworkEpoch, 0, currentReworkEpoch);
+      const entryGen = integer(entry.generation, 0, plan.capacity.V - 1);
+      checkedRef(entry.raw);
+      const verdictDisposition = text(entry.verdict, '', 16);
+      if (!['pass', 'rework', 'fail', 'human'].includes(verdictDisposition)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      checkedVerdictText(entry.summaryPreview, 256, false, 'RECOVERY_REQUIRED', 'recovery');
+      integer(entry.findingCount, 0, LIMITS.findings);
+      if (dagNode.kind === 'agent') {
+        const matchedAttempt = typedAttempts.find(item => item.id === entry.attemptId);
+        if (
+          !matchedAttempt ||
+          matchedAttempt.finished === null ||
+          matchedAttempt.nodeId !== stepId ||
+          (matchedAttempt.reworkEpoch ?? 0) !== entryEpoch ||
+          dagNode.roleId !== entry.roleId
+        ) {
+          refuse('RECOVERY_REQUIRED', '', 'recovery');
+        }
+        const key = 'attempt:' + matchedAttempt.id;
+        if (seenKeys.has(key)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        seenKeys.add(key);
+      } else {
+        if (!dagNode.onRework || entry.attemptId !== null || entry.roleId !== null || verdictDisposition !== 'rework') {
+          refuse('RECOVERY_REQUIRED', '', 'recovery');
+        }
+        const slot = plan.verifierSlots.find(item => item.handler.id === dagNode.handler.id);
+        const matchedReceipt = slot
+          ? receipts.find(item => item.slot === slot.id && item.receipt !== null && (item.generation === entryGen || (item.generation as number) + 1 === entryGen))
+          : undefined;
+        if (!matchedReceipt) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        const key = 'check:' + stepId + ':' + entryEpoch + ':' + entryGen;
+        if (seenKeys.has(key)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        seenKeys.add(key);
+      }
+      typedStepVerdicts.push(entry as unknown as StoredStepVerdict);
+    }
   }
   const refusals = list(value.verifierRefusals, '', plan.capacity.J).map(item => record(item, ['slot', 'generation', 'prospectiveOperationId', 'producerNonce', 'subject', 'record']));
   if (receipts.length + refusals.length > plan.capacity.J || new Set([...receipts, ...refusals].map(item => item.slot + ':' + item.generation)).size !== receipts.length + refusals.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -124,13 +222,24 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
   }
   if (phase.startsWith('verify.')) {
     const [, generation, ordinal] = phase.split('.'), slot = plan.verifierSlots[Number(ordinal)]!;
-    const receipt = receipts.find(item => item.slot === slot.id && item.generation === Number(generation)), refusal = refusals.find(item => item.slot === slot.id && item.generation === Number(generation));
-    if (Number(generation) !== candidate.generation || !receipt && !refusal || phase.endsWith('.post') && (receipt?.receipt === null || !consumed.includes('verify.' + generation + '.' + ordinal + '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const gen = Number(generation);
+    const receipt = receipts.find(item => item.slot === slot.id && item.generation === gen), refusal = refusals.find(item => item.slot === slot.id && item.generation === gen);
+    const checkReworkAdvanced =
+      phase.endsWith('.post') &&
+      gen + 1 === candidate.generation &&
+      typedStepVerdicts.some(
+        item =>
+          item.attemptId === null &&
+          item.generation === candidate.generation &&
+          item.verdict === 'rework' &&
+          plan.orderedDAG.some(node => node.id === item.stepId && node.kind === 'check' && node.handler.id === slot.handler.id),
+      );
+    if ((gen !== candidate.generation && !checkReworkAdvanced) || !receipt && !refusal || phase.endsWith('.post') && (receipt?.receipt === null || !consumed.includes('verify.' + generation + '.' + ordinal + '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
   if (value.terminalIntent !== null) { const terminal = record(value.terminalIntent, ['primary', 'result', 'observations']); text(terminal.primary, '', 64); if (terminal.result !== null) checkedRef(terminal.result); if (terminal.observations !== null) checkedRef(terminal.observations); }
   if (consumed.includes('publication.pre') && publication.status === 'idle') refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (consumed.includes('publication.post') && ['idle', 'pending'].includes(publication.status)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return { ...(raw as ControllerProgress), publication };
+  return { ...(raw as unknown as ControllerProgress), publication };
 }
 export function validateProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
   try { return checkedProgress(raw, plan, lock); }
@@ -140,15 +249,45 @@ export function validateProgress(raw: unknown, plan: CompiledPlan, lock: TaskLoc
   }
 }
 function extension(previous: ControllerProgress | null, current: ControllerProgress, plan: CompiledPlan): void {
-  if (!previous) { if (current.stage.phase !== 'bootstrap' || current.previous !== null || current.attempts.length || current.verifierRefusals.length || current.candidate.generation !== 0) refuse('RECOVERY_REQUIRED', '', 'recovery'); return; }
+  if (!previous) {
+    if (
+      current.stage.phase !== 'bootstrap' ||
+      current.previous !== null ||
+      current.attempts.length ||
+      current.verifierRefusals.length ||
+      current.candidate.generation !== 0 ||
+      (current.reworkEpoch ?? 0) !== 0 ||
+      (current.stepVerdicts?.length ?? 0) !== 0
+    ) {
+      refuse('RECOVERY_REQUIRED', '', 'recovery');
+    }
+    return;
+  }
   if (current.sequence <= previous.sequence || current.attempts.length < previous.attempts.length || current.eventSequence < previous.eventSequence || !same(current.stage.consumed.slice(0, previous.stage.consumed.length), previous.stage.consumed)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   for (const [index, prior] of previous.attempts.entries()) {
     const next = current.attempts[index]!;
     if (!same({ ...prior, finished: null }, { ...next, finished: null }) || prior.finished !== null && !same(prior, next)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
+  const prevEpoch = previous.reworkEpoch ?? 0;
+  const currEpoch = current.reworkEpoch ?? 0;
+  if (currEpoch < prevEpoch || currEpoch > prevEpoch + 1) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const reworked = currEpoch === prevEpoch + 1;
   const changed = !same(previous.candidate.digest, current.candidate.digest);
-  if (current.candidate.generation !== previous.candidate.generation + (changed ? 1 : 0)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  if (current.candidate.generation !== previous.candidate.generation + (changed || reworked ? 1 : 0)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (changed && (current.stage.kind !== 'role_post' || current.attempts.at(-1)?.repair === 'format' || current.attempts.at(-1)?.purpose === 'compaction')) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  if (reworked) {
+    const validRoleRework = current.stage.kind === 'role_post' && current.attempts.at(-1)?.repair !== 'format' && current.attempts.at(-1)?.purpose !== 'compaction';
+    const validCheckRework = current.stage.kind === 'verifier_post' && !changed;
+    if (!validRoleRework && !validCheckRework) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  }
+  const prevCounts = previous.reworkCounts ?? {};
+  const currCounts = current.reworkCounts ?? {};
+  for (const [key, count] of Object.entries(prevCounts)) {
+    if ((currCounts[key] ?? 0) < count) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  }
+  const prevVerdicts: readonly StoredStepVerdict[] = previous.stepVerdicts ?? [];
+  const currVerdicts: readonly StoredStepVerdict[] = current.stepVerdicts ?? [];
+  if (currVerdicts.length < prevVerdicts.length || !same(currVerdicts.slice(0, prevVerdicts.length), prevVerdicts)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (current.verifierReceipts.length < previous.verifierReceipts.length || !same(current.nativeCheckpoints.slice(0, previous.nativeCheckpoints.length), previous.nativeCheckpoints)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   for (const [index, prior] of previous.verifierReceipts.entries()) {
     const next = current.verifierReceipts[index]!;
@@ -170,8 +309,17 @@ function extension(previous: ControllerProgress | null, current: ControllerProgr
 export interface ProgressHead { readonly checkpoint: CheckpointRecord; readonly ref: ArtifactRef; readonly progress: ControllerProgress; readonly index: ReceiptIndex; readonly manifest: ArtifactManifest }
 export class ProgressStore {
   constructor(readonly store: LocalRunStore, readonly authority: Authority | null, readonly artifacts: ArtifactReader, readonly plan: CompiledPlan, readonly lock: TaskLock, readonly planRef: ArtifactRef, readonly sourceRef: ArtifactRef) {}
+  #overlayBounds() { return overlayManifestBounds(this.plan.budgets.overlay); }
+  #progressBounds() {
+    const wide = this.plan.capacity.D > 64;
+    return { maxBytes: wide ? 262_144 : 65_536, collectionLimit: wide ? 1024 : 256 };
+  }
   async manifest(ref: ArtifactRef): Promise<ArtifactManifest> {
-    const identified = identifyManifest(parsePrivateJson(await this.artifacts.read(ref, 32768), 32768));
+    const bounds = this.#overlayBounds();
+    const identified = identifyManifest(
+      parsePrivateJson(await this.artifacts.read(ref, bounds.manifestMaxBytes), bounds.manifestMaxBytes, bounds.collectionLimit),
+      bounds.options,
+    );
     if (!identified.ok) refuse('ARTIFACT_INVALID', '', 'recovery');
     const manifest = identified.value.manifest;
     if (manifest.metadata.id !== 'candidate'
@@ -183,6 +331,7 @@ export class ProgressStore {
   }
   async read(): Promise<ProgressHead | null> {
     if (!same(parsePrivateJson(await this.artifacts.read(this.planRef, 4194304), 4194304), this.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const bounds = this.#overlayBounds(), pBounds = this.#progressBounds();
     const verified = new Set<string>(), wrappers = new Set<string>(), manifests = new Map<string, ArtifactManifest>(), negativeAnchors = new Set<string>();
     const verify = async (ref: ArtifactRef, maximum = 67108864): Promise<void> => {
       if (ref.byteLength > maximum) refuse('ARTIFACT_INVALID', '', 'recovery');
@@ -194,13 +343,13 @@ export class ProgressStore {
       if (!phase || emitted.includes(phase) || !same(checkpoint.clockBasis, before.view.clock.basis)) refuse('RECOVERY_REQUIRED', '', 'recovery'); emitted.push(phase);
       if (phase.endsWith('.native')) {
         if (checkpoint.additionalArtifacts.length !== 0 || !emitted.includes(phase.replace('.native', '.pre'))) refuse('RECOVERY_REQUIRED', '', 'recovery');
-        await verify(checkpoint.workspace); if (checkpoint.privateSession !== null) await verify(checkpoint.privateSession, 67108864); continue;
+        await verify(checkpoint.workspace, Math.max(67_108_864, bounds.workspaceMaxBytes)); if (checkpoint.privateSession !== null) await verify(checkpoint.privateSession, 67108864); continue;
       }
       if (checkpoint.additionalArtifacts.length !== 4 || !same(checkpoint.additionalArtifacts.slice(2), [this.planRef, this.sourceRef])) refuse('RECOVERY_REQUIRED', '', 'recovery');
-      const ref = checkpoint.additionalArtifacts[0]!, progress = validateProgress(parsePrivateJson(await this.artifacts.read(ref, 65536), 65536), this.plan, this.lock);
+      const ref = checkpoint.additionalArtifacts[0]!, progress = validateProgress(parsePrivateJson(await this.artifacts.read(ref, pBounds.maxBytes), pBounds.maxBytes, pBounds.collectionLimit), this.plan, this.lock);
       const manifestKey = canonical(progress.candidate.manifest);
       let manifest = manifests.get(manifestKey); if (!manifest) { manifest = await this.manifest(progress.candidate.manifest); manifests.set(manifestKey, manifest); }
-      const subject = bindSubject(this.lock, manifest);
+      const subject = bindSubject(this.lock, manifest, bounds.options);
       if (!subject.ok || !same(subject.value, checkpoint.subject) || !same(progress.candidate.digest, subject.value.candidateDigest) || progress.sequence !== checkpoint.sequence
         || !same(progress.stage.consumed, emitted) || !same(progress.stage.watermarks, { requests: checkpoint.counts.requests, operations: checkpoint.counts.operations })
         || !same(progress.candidate.workspace, checkpoint.workspace) || !same(progress.candidate.privateSession, checkpoint.privateSession) || !same(progress.previous, head?.ref ?? null)) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -216,9 +365,9 @@ export class ProgressStore {
         if (absent.ok || absent.error.code !== 'RECORD_NOT_FOUND') refuse('RECOVERY_REQUIRED', '', 'recovery'); negativeAnchors.add(key);
       }
       const index = await this.index(progress);
-      const actualIndex = parsePrivateJson(await this.artifacts.read(checkpoint.additionalArtifacts[1]!, 65536), 65536);
+      const actualIndex = parsePrivateJson(await this.artifacts.read(checkpoint.additionalArtifacts[1]!, pBounds.maxBytes), pBounds.maxBytes, pBounds.collectionLimit);
       if (!same(index, actualIndex)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-      await verify(checkpoint.workspace); if (checkpoint.privateSession) await verify(checkpoint.privateSession, 67108864);
+      await verify(checkpoint.workspace, Math.max(67_108_864, bounds.workspaceMaxBytes)); if (checkpoint.privateSession) await verify(checkpoint.privateSession, 67108864);
       for (const entry of index.entries) await verify(entry.ref);
       for (const attempt of progress.attempts) {
         await verify(attempt.command, 1048576); if (!attempt.finished) continue;
@@ -230,8 +379,12 @@ export class ProgressStore {
           || wrapper.stepId !== attempt.nativeStepId || wrapper.sessionId !== attempt.sessionId || wrapper.checkpointId !== native.checkpointId || !same(wrapper.command, attempt.command)
           || !same(wrapper.workspace, native.workspace) || !same(wrapper.session, native.privateSession)) refuse('RECOVERY_REQUIRED', '', 'recovery');
         const originalRef = checkedRef(wrapper.originalManifest), manifestRef = checkedRef(wrapper.manifest);
-        const original = identifyManifest(parsePrivateJson(await this.artifacts.read(originalRef, 32768), 32768)), canonicalManifest = await this.manifest(manifestRef);
-        if (!original.ok) refuse('ARTIFACT_INVALID', '', 'recovery'); const originalSubject = bindSubject(this.lock, original.value.manifest);
+        const original = identifyManifest(
+          parsePrivateJson(await this.artifacts.read(originalRef, bounds.manifestMaxBytes), bounds.manifestMaxBytes, bounds.collectionLimit),
+          bounds.options,
+        );
+        const canonicalManifest = await this.manifest(manifestRef);
+        if (!original.ok) refuse('ARTIFACT_INVALID', '', 'recovery'); const originalSubject = bindSubject(this.lock, original.value.manifest, bounds.options);
         if (!originalSubject.ok || !same(originalSubject.value, native.subject) || !same(canonicalManifest, canonicalizeCandidateManifest(original.value.manifest))) refuse('RECOVERY_REQUIRED', '', 'recovery');
         if (wrapper.submission !== null) await verify(checkedRef(wrapper.submission), 1048576);
         const interval = record(wrapper.journal, ['requestIds', 'operationIds']);
@@ -240,6 +393,12 @@ export class ProgressStore {
         wrappers.add(wrapperKey);
       }
       if (progress.submission) await verify(progress.submission, 1048576);
+      if (progress.nodeSubmissions) {
+        for (const subRef of Object.values(progress.nodeSubmissions)) await verify(subRef, 1048576);
+      }
+      if (progress.stepVerdicts) {
+        for (const verdictItem of progress.stepVerdicts) await verify(verdictItem.raw, 1048576);
+      }
       head = { checkpoint, ref, progress, index, manifest };
     }
     const after = journal(this.store);
@@ -262,6 +421,7 @@ export class ProgressStore {
     const artifacts = this.artifacts, authority = this.authority;
     if (!(artifacts instanceof ArtifactStore) || authority === null) refuse('AUTHORITY_REFUSED', '', 'execution');
     await artifacts.owner.assertCurrent(); stateValue(this.store.renew(authority));
+    const bounds = this.#overlayBounds(), pBounds = this.#progressBounds();
     const known = await this.read(), records = journal(this.store), schedule = phaseSchedule(this.plan.capacity), checkpointId = phaseCheckpointId(this.lock.spec.runId, phase);
     if (!schedule.includes(phase) || phase.endsWith('.native')) refuse('RECOVERY_REQUIRED', '', 'execution');
     const existing = records.checkpoints.find(item => item.checkpointId === checkpointId);
@@ -273,9 +433,9 @@ export class ProgressStore {
     const progress = freeze({ ...draft, sequence: records.view.counts.checkpoints + 1, previous: known?.ref ?? null,
       stage: { ...draft.stage, phase, consumed: [...consumed, phase], watermarks: { requests: records.view.counts.requests, operations: records.view.counts.operations } } });
     validateProgress(progress, this.plan, this.lock); extension(known?.progress ?? null, progress, this.plan);
-    const manifest = await this.manifest(progress.candidate.manifest), index = await this.index(progress), ref = await artifacts.json('progress', progress, 65536), indexRef = await artifacts.json('index', index, 65536);
+    const manifest = await this.manifest(progress.candidate.manifest), index = await this.index(progress), ref = await artifacts.json('progress', progress, pBounds.maxBytes), indexRef = await artifacts.json('index', index, pBounds.maxBytes);
     const input = { checkpointId, candidateManifest: manifest, workspace: progress.candidate.workspace, privateSession: progress.candidate.privateSession, additionalArtifacts: [ref, indexRef, this.planRef, this.sourceRef] };
-    if (Buffer.byteLength(canonical(input)) + 1024 > 40960) refuse('OUTPUT_LIMIT', '', 'execution');
+    if (Buffer.byteLength(canonical(input)) + 1024 > bounds.checkpointInputMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
     const current = stateValue(this.store.inspect());
     if (current.counts.checkpoints !== records.view.counts.checkpoints || current.counts.requests !== records.view.counts.requests || current.counts.operations !== records.view.counts.operations) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const committed = stateValue(this.store.writeCheckpoint(authority, { ...input, expectedRevision: current.revision })).record;

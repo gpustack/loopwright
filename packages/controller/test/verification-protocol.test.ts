@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { evaluatePacket, encodePacket, HEADER_BYTES, JSON_FILE_BYTES, packetSize, AllocationQuota, type VerifierHeader } from '../src/verifier-protocol.js';
+import { evaluatePacket, encodeInventory, encodePacket, HEADER_BYTES, JSON_FILE_BYTES, maxPacketBytes, packetSize, AllocationQuota, type VerifierHeader } from '../src/verifier-protocol.js';
 import { canonical, hash, type Json } from '../src/schema.js';
 import { packetFixture } from './verification-fixtures.js';
 test('fixed actual Worker validates complete multi-file JSON membership and complete candidate bytes', async () => {
@@ -36,11 +36,22 @@ test('manifest document, entry count/order and selected membership substitutions
     { ...f.header, candidate: { ...f.header.candidate, metadataId: 'wrong' } },
     { ...f.header, candidate: { ...f.header.candidate, ref: { ...f.header.candidate.ref, byteLength: f.header.candidate.ref.byteLength + 1 } } },
     { ...f.header, parameters: { ...f.header.parameters, expected: f.candidate.spec.entries[0]! as unknown as Json } },
-    { ...f.header, parameters: { ...f.header.parameters, candidateManifest: { ...f.candidate, spec: { entries: f.candidate.spec.entries.slice(1) } } as unknown as Json } },
-    { ...f.header, parameters: { ...f.header.parameters, candidateManifest: { ...f.candidate, spec: { entries: [...f.candidate.spec.entries].reverse() } } as unknown as Json } },
-    { ...f.header, parameters: { ...f.header.parameters, candidateManifest: { ...f.candidate, spec: { entries: [f.candidate.spec.entries[0]!, f.candidate.spec.entries[0]!] } } as unknown as Json } },
     { ...f.header, subject: { ...f.header.subject, candidateDigest: hash('wrong core domain') } },
   ]) assert.throws(() => evaluatePacket(encodePacket(header, f.payload)));
+  const srcInv = encodeInventory(f.source);
+  for (const forgedCandManifest of [
+    { ...f.candidate, spec: { entries: f.candidate.spec.entries.slice(1) } },
+    { ...f.candidate, spec: { entries: [...f.candidate.spec.entries].reverse() } },
+    { ...f.candidate, spec: { entries: [f.candidate.spec.entries[0]!, f.candidate.spec.entries[0]!] } },
+  ]) {
+    const forgedInv = encodeInventory(forgedCandManifest);
+    const jsonPart = f.payload.subarray(srcInv.byteLength + encodeInventory(f.candidate).byteLength);
+    const forgedPayload = new Uint8Array(srcInv.byteLength + forgedInv.byteLength + jsonPart.byteLength);
+    forgedPayload.set(srcInv, 0);
+    forgedPayload.set(forgedInv, srcInv.byteLength);
+    forgedPayload.set(jsonPart, srcInv.byteLength + forgedInv.byteLength);
+    assert.throws(() => evaluatePacket(encodePacket(f.header, forgedPayload)));
+  }
   const corrupt = f.packet(); corrupt[corrupt.length - 1] = corrupt[corrupt.length - 1]! ^ 1; assert.throws(() => evaluatePacket(corrupt));
 });
 test('inventory omissions, duplicate paths, truncation, nonzero header padding and trailing data refuse', () => {
@@ -51,15 +62,16 @@ test('inventory omissions, duplicate paths, truncation, nonzero header padding a
 });
 test('the exact complete JSON packet succeeds and one-byte-over preflight refuses', () => {
   const body = Buffer.from('{"ok":true}' + ' '.repeat(JSON_FILE_BYTES - 11)), f = packetFixture('json-artifact.v1', [{ name: 'packages/result.json', bytes: body }]);
-  assert.equal(body.byteLength, JSON_FILE_BYTES); assert.equal(packetSize(f.header, f.payload.byteLength), 1048576); assert.equal(f.packet().byteLength, 1048576); assert.equal(evaluatePacket(f.packet()).status, 'passed');
-  const bigger = packetFixture('json-artifact.v1', [{ name: 'packages/result.json', bytes: Buffer.concat([body, Buffer.from(' ')]) }]); assert.throws(() => packetSize(bigger.header, bigger.payload.byteLength)); assert.throws(() => bigger.packet());
+  assert.equal(body.byteLength, JSON_FILE_BYTES); assert.equal(packetSize(f.header, f.payload.byteLength), f.packet().byteLength); assert.ok(f.packet().byteLength <= maxPacketBytes(f.header)); assert.equal(evaluatePacket(f.packet()).status, 'passed');
+  const bigger = packetFixture('json-artifact.v1', [{ name: 'packages/result.json', bytes: Buffer.concat([body, Buffer.from(' ')]) }]); assert.throws(() => evaluatePacket(bigger.packet()));
+  assert.throws(() => packetSize(f.header, maxPacketBytes(f.header) - 4 - HEADER_BYTES + 1));
 });
 function exactHeader(extra = 0) {
   let low = 0, high = 16000;
   while (low <= high) {
     const fill = Math.floor((low + high) / 2);
     const f = packetFixture('json-artifact.v1', [{ name: 'packages/result.json', bytes: Buffer.from(JSON.stringify({ padding: 'x'.repeat(fill) })) }]);
-    const header: VerifierHeader = { ...f.header, jobId: 'x'.repeat(64), operationId: 'x'.repeat(64), dispatchId: 'x'.repeat(64), generation: 16, parameters: { ...f.header.parameters, required: ['padding'], equals: { padding: 'x'.repeat(fill) } } };
+    const header: VerifierHeader = { ...f.header, jobId: 'x'.repeat(64), operationId: 'x'.repeat(64), dispatchId: 'x'.repeat(64), generation: 256, parameters: { ...f.header.parameters, required: ['padding'], equals: { padding: 'x'.repeat(fill) } } };
     const size = Buffer.byteLength(canonical(header)); if (size === HEADER_BYTES + extra) return { ...f, header }; if (size > HEADER_BYTES + extra) high = fill - 1; else low = fill + 1;
   }
   throw new Error('valid exact header fixture unavailable');

@@ -158,25 +158,28 @@ test('MCP credentials use a dedicated exact-destination binding and never enter 
     assert.ok(!JSON.stringify({ loaded, plan }).includes(mcpToken)); assert.ok(!JSON.stringify(plan).includes(hash(mcpToken).hex));
   } finally { await f.cleanup(); }
 });
-test('actual plan compilation accepts 64 scheduled records and refuses 65 before admission', async () => {
+test('actual plan compilation accepts 256 scheduled records and refuses 257 before admission', async () => {
   for (const exact of [true, false]) {
     const f = await configurationFixture();
     try {
       const prototype = f.registry.spec.handlers.find(handler => handler.implementation === 'json-artifact.v1')!;
-      const checkIds = Array.from({ length: exact ? 7 : 11 }, (_, index) => index ? 'tests-' + index : 'tests');
+      const checkIds = Array.from({ length: exact ? 1 : 3 }, (_, index) => index ? 'tests-' + index : 'tests');
       set(f.registry, ['spec', 'handlers'], [...f.registry.spec.handlers.filter(handler => handler !== prototype), ...checkIds.map(id => ({ ...prototype, id, parameters: { ...prototype.parameters, checkId: id } }))]);
       set(f.config, ['spec', 'task', 'spec', 'acceptance'], { required: checkIds, checks: checkIds.map(id => ({ id, allowedEvidenceLevels: ['local_execution'] })) });
-      set(f.config, ['spec', 'controls', 'maxAttempts'], exact ? 2 : 3); set(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], exact ? 1 : 0);
+      set(f.config, ['spec', 'controls', 'maxAttempts'], exact ? 46 : 41);
+      set(f.config, ['spec', 'task', 'spec', 'budgets', 'maxImplementationRepairs'], exact ? 17 : 11);
+      set(f.config, ['spec', 'task', 'spec', 'budgets', 'maxModelCalls'], 64);
       await f.save(); const compiled = await compilePlan(good(await f.load()));
-      if (exact) assert.equal(good(compiled).capacity.D, 64);
+      if (exact) assert.equal(good(compiled).capacity.D, 256);
       else { assert.equal(compiled.ok, false); if (!compiled.ok) assert.equal(compiled.error.code, 'CONFIG_LIMIT'); }
     } finally { await f.cleanup(); }
   }
 });
 test('the complete checkpoint calculation preserves the worked, exact-fit and one-over cases', () => {
   assert.equal(checkpointCapacity(3, 1, 2, 3, false).D, 37); assert.equal(checkpointCapacity(2, 1, 1, 9, false).D, 64);
-  assert.equal(checkpointCapacity(3, 1, 2, 3, true).D, 40); assert.throws(() => checkpointCapacity(2, 1, 1, 9, true));
-  assert.throws(() => checkpointCapacity(3, 1, 0, 13, false)); assert.throws(() => checkpointCapacity(16, 1, 2, 3, false));
+  assert.equal(checkpointCapacity(3, 1, 2, 3, true).D, 40); assert.equal(checkpointCapacity(46, 1, 17, 3, false).D, 256);
+  assert.throws(() => checkpointCapacity(41, 1, 11, 5, false)); assert.throws(() => checkpointCapacity(46, 1, 17, 3, true));
+  assert.throws(() => checkpointCapacity(65, 1, 0, 2, false));
 });
 test('credential rotation retains the same plan identity and resolver refuses a changed destination', async () => {
   const f = await configurationFixture();
@@ -289,4 +292,50 @@ test('the publication block requires pull_request credentials present in the con
     const loaded = good(await f.load()), result = await compilePlan(loaded);
     assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, 'CONFIG_REFERENCE');
   } finally { await f.cleanup(); }
+});
+test('registry validates json-keys-guard.v1 and line-section-guard.v1 parameters and capabilities', async () => {
+  const installed = await installedHandlerDigests();
+  const f = await configurationFixture();
+  try {
+    set(f.registry, ['spec', 'handlers'], [
+      ...f.registry.spec.handlers,
+      { id: 'pkg-keys', kind: 'check', implementation: 'json-keys-guard.v1', version: 1, digest: installed['json-keys-guard.v1'], parameters: { checkId: 'pkg-keys', path: 'packages/pkg.json', allowedPointers: ['/dependencies/@earendil-works~1pi-ai', '/devDependencies'] }, capabilities: ['inert_bytes', 'read_only'] },
+      { id: 'notes-sec', kind: 'check', implementation: 'line-section-guard.v1', version: 1, digest: installed['line-section-guard.v1'], parameters: { checkId: 'notes-sec', path: 'packages/notes.md', startMarker: '<!-- BEGIN -->', endMarker: '<!-- END -->' }, capabilities: ['inert_bytes', 'read_only'] },
+    ]);
+    set(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+      required: ['tests', 'pkg-keys', 'notes-sec'],
+      checks: [
+        { id: 'tests', allowedEvidenceLevels: ['local_execution'] },
+        { id: 'pkg-keys', allowedEvidenceLevels: ['local_execution'] },
+        { id: 'notes-sec', allowedEvidenceLevels: ['local_execution'] },
+      ],
+    });
+    await f.save();
+    const plan = good(await compilePlan(good(await f.load())));
+    assert.ok(plan.verifierSlots.some(slot => slot.handler.implementation === 'json-keys-guard.v1'));
+    assert.ok(plan.verifierSlots.some(slot => slot.handler.implementation === 'line-section-guard.v1'));
+  } finally { await f.cleanup(); }
+
+  const badCases = [
+    { impl: 'json-keys-guard.v1' as const, params: { checkId: 'g', path: 'packages/pkg.json', allowedPointers: [] }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'json-keys-guard.v1' as const, params: { checkId: 'g', path: 'packages/pkg.json', allowedPointers: ['missing-slash'] }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'json-keys-guard.v1' as const, params: { checkId: 'g', path: 'packages/pkg.json', allowedPointers: ['/bad~2escape'] }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'line-section-guard.v1' as const, params: { checkId: 'g', path: 'packages/notes.md', startMarker: '<!-- SAME -->', endMarker: '<!-- SAME -->' }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'line-section-guard.v1' as const, params: { checkId: 'g', path: 'packages/notes.md', startMarker: 'bad\nline', endMarker: '<!-- END -->' }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'line-section-guard.v1' as const, params: { checkId: 'g', path: '../escape.md', startMarker: '<!-- B -->', endMarker: '<!-- E -->' }, caps: ['inert_bytes', 'read_only'], code: 'CONFIG_SCHEMA' },
+    { impl: 'json-keys-guard.v1' as const, params: { checkId: 'g', path: 'packages/pkg.json', allowedPointers: ['/version'] }, caps: ['network'], code: 'CAPABILITY_UNSUPPORTED' },
+  ];
+  for (const badCase of badCases) {
+    const fBad = await configurationFixture();
+    try {
+      set(fBad.registry, ['spec', 'handlers'], [
+        ...fBad.registry.spec.handlers,
+        { id: 'bad-guard', kind: 'check', implementation: badCase.impl, version: 1, digest: installed[badCase.impl], parameters: badCase.params, capabilities: badCase.caps },
+      ]);
+      await fBad.save();
+      const loaded = await fBad.load();
+      assert.equal(loaded.ok, false);
+      if (!loaded.ok) assert.equal(loaded.error.code, badCase.code);
+    } finally { await fBad.cleanup(); }
+  }
 });
