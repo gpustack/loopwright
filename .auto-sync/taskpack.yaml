@@ -174,9 +174,6 @@ spec:
           script: .auto-sync/checks/verify.sh
           timeoutSeconds: 900
           allowReadOnlyGitHubToken: false
-          toolchainPaths:
-            - /usr/local/bin
-            - /usr/bin
           env:
             - GITHUB_ACTIONS
             - SELF_UPGRADE_RUN_ROOT
