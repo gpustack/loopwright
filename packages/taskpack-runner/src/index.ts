@@ -1,23 +1,25 @@
 export { defaultCorpusRoot, verifyFrozenCorpus } from './corpus.js';
 export {
   RUNNER_DISCOVERY_TABLES, RUNNER_PARITY_SCENARIOS, buildParityFixtureRepository, buildParityReport,
-  corpusDigestOf, legacyCase, normalizeLegacyStatus, runLegacyScenario, runRunnerParitySuite,
+  corpusDigestOf, deterministicFakeAdapter, legacyCase, normalizeLegacyStatus, runLegacyScenario, runRunnerParitySuite,
 } from './parity.js';
 export type {
-  LegacyScenarioContext, LegacyScenarioOutcome, RunnerParityCaseResult, RunnerParityReport,
-  RunnerParityScenario,
+  FakeAdapterAttempt, FakeAdapterPlan, LegacyScenarioContext, LegacyScenarioOutcome, RunnerParityCaseResult,
+  RunnerParityReport, RunnerParityScenario,
 } from './parity.js';
 export { startRunnerTaskpackService, computeRunnerCandidateDigest } from './service.js';
 export type {
-  OperatorReceiptInput, RunnerCandidateIdentity, RunnerCandidateRegistration, RunnerTaskpackService,
-  RunnerTaskpackServiceOptions,
+  ComputeRunnerCandidateDigestOptions, GateVerdictMetadata, OperatorReceiptInput, RunnerCandidateIdentity,
+  RunnerCandidateRegistration, RunnerTaskpackService, RunnerTaskpackServiceOptions,
 } from './service.js';
 export {
-  RUNNER_BUDGETS, RUNNER_PROPOSAL_PATH, RUNNER_PROPOSAL_REQUIRED_FIELDS, RUNNER_PROTECTED_PATHS,
-  RUNNER_WRITABLE_PATHS, compileRunnerTaskpack,
+  RUNNER_ALWAYS_PROTECTED_PATHS, RUNNER_BUDGETS, RUNNER_PROPOSAL_PATH, RUNNER_PROPOSAL_REQUIRED_FIELDS,
+  RUNNER_PROTECTED_PATHS, RUNNER_WORKFLOW_PROTECTED_PATH, RUNNER_WRITABLE_PATHS, compileRunnerTaskpack,
 } from './compile-taskpack.js';
 export type {
-  CompileRunnerTaskpackOptions, CompiledRunnerTaskpack, RunnerGateEndpointPlan, RunnerPublicationEndpointPlan,
+  CompileRunnerTaskpackOptions, CompiledRunnerTaskpack, RunnerExecutionOptions, RunnerGateEndpointPlan,
+  RunnerHostPolicy, RunnerLocalCheckPlan, RunnerProposalOptions, RunnerPublicationEndpointPlan,
+  RunnerScopeOptions,
 } from './compile-taskpack.js';
 export {
   AUTHORIZED_ASSOCIATIONS, GUIDANCE_CONTRACT_PREFIXES, GUIDANCE_MAX_BYTES, GUIDANCE_MAX_LINES,

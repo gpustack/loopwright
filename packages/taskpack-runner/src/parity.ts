@@ -403,7 +403,7 @@ import type { PiAdapterV2, PiHostV2, PiOpenInputV2, PiOutcomeV2 } from '@loopwri
 
 /** One deterministic adapter attempt: candidate edits plus the assistant's submission document. */
 export interface FakeAdapterAttempt {
-  readonly proposal: string;
+  readonly proposal?: string | null | undefined;
   readonly edits: readonly { readonly path: string; readonly content: string }[];
   readonly submission: { readonly status: 'completed' | 'no_change'; readonly reason: string | null };
 }
@@ -437,10 +437,16 @@ interface AdapterState {
 function manifestFor(state: AdapterState, attempt: FakeAdapterAttempt) {
   const files = new Map<string, Buffer>();
   for (const artifact of state.input.candidate.artifacts) files.set(artifact.name, Buffer.from(artifact.bytes));
-  if (attempt.proposal !== '') files.set('.autosync/proposal.json', Buffer.from(attempt.proposal, 'utf8'));
+  if (attempt.proposal != null && attempt.proposal !== '') files.set('.autosync/proposal.json', Buffer.from(attempt.proposal, 'utf8'));
   for (const edit of attempt.edits) files.set(edit.path, Buffer.from(edit.content, 'utf8'));
   const entries = [...files.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([name, bytes]) => ({ name, digest: sha256(bytes), byteLength: bytes.byteLength }));
-  const identified = identifyManifest({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+  const baseTree = state.input.candidate.manifest.spec.baseTree;
+  const overlay = state.input.lock.spec.contract.spec.budgets.overlay;
+  const overlayOpts = overlay !== undefined ? { overlay } : undefined;
+  const spec = baseTree !== undefined
+    ? { baseTree, entries, deleted: [...(state.input.candidate.manifest.spec.deleted ?? [])] }
+    : { entries };
+  const identified = identifyManifest({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec }, overlayOpts);
   if (!identified.ok) throw new Error(`fake adapter manifest rejected: ${JSON.stringify(identified.errors).slice(0, 200)}`);
   return { manifest: identified.value.manifest, files };
 }
@@ -480,7 +486,8 @@ async function produceCapture(state: AdapterState, attemptCount: number, checkpo
   const { manifest, files } = manifestFor(state, attempt);
   const current = host.store.inspect();
   if (!current.ok) throw new Error('store inspect refused');
-  const subject = bindSubject(input.lock, manifest);
+  const overlay = input.lock.spec.contract.spec.budgets.overlay;
+  const subject = bindSubject(input.lock, manifest, overlay !== undefined ? { overlay } : undefined);
   if (!subject.ok) throw new Error('bindSubject refused');
   const sourcePolicy = input.policy;
   const sourceDigest = sha256('loopwright.dev/pi-policy/v2\0' + canonical(sourcePolicy));
@@ -625,11 +632,12 @@ export async function runRunnerParitySuite(options: RunnerParitySuiteOptions = {
     const runCycle = async (scenario: RunnerParityScenario, fixture: { repo: string; headSha: string; proposal: string; root: string }, cycle: {
       readonly mode: 'candidate' | 'no-change';
       readonly submission?: 'completed' | 'no_change';
-      readonly attempts?: readonly { proposal: string; edits?: readonly { path: string; content: string }[]; submission?: { status: 'completed' | 'no_change'; reason: string | null } }[];
+      readonly attempts?: readonly { proposal?: string | null; edits?: readonly { path: string; content: string }[]; submission?: { status: 'completed' | 'no_change'; reason: string | null } }[];
       readonly runSuffix?: string;
       readonly service?: import('./service.js').RunnerTaskpackService;
       readonly chaos?: boolean;
       readonly mutateHead?: boolean;
+      readonly allowHostProtectedIncident?: boolean;
       readonly revise?: { prNumber: number; commandId: number; commandDigest: string; guidance: string; prHeadSha?: string | null };
       readonly operatorRoot?: string;
     }): Promise<SuiteCycleResult> => {
@@ -680,6 +688,9 @@ export async function runRunnerParitySuite(options: RunnerParitySuiteOptions = {
       if (!execution.ok) throw new RunnerTaskpackError('SERVICE_FAULT', `parity cycle ${runId} failed: ${JSON.stringify(execution.error).slice(0, 300)}`);
       if (execution.value.kind === 'incident') {
         if (execution.value.incident.code === 'TARGET_MISMATCH') return { status: 'blocked', externalEffects: 'none', pulls: await service.fakePullCount(), reason: 'controller TARGET_MISMATCH guard refused publication after the head moved', usageRequests: 0, service, operatorRoot: operator, runRoot: join(operator, 'runs'), configPath, registryPath, registrySha256: bundle.registrySha256 };
+        if (cycle.allowHostProtectedIncident === true && execution.value.incident.code === 'ARTIFACT_INVALID') {
+          return { status: 'blocked', externalEffects: 'none', pulls: await service.fakePullCount(), reason: 'controller host-protected path guard refused disallowed mutation (ARTIFACT_INVALID)', usageRequests: 0, service, operatorRoot: operator, runRoot: join(operator, 'runs'), configPath, registryPath, registrySha256: bundle.registrySha256 };
+        }
         throw new RunnerTaskpackError('SERVICE_FAULT', `parity cycle ${runId} incident: ${JSON.stringify(execution.value.incident).slice(0, 300)}`);
       }
       const specJsonSuite = JSON.stringify(execution.value.result.spec);
@@ -880,7 +891,7 @@ export async function runRunnerParitySuite(options: RunnerParitySuiteOptions = {
         const run = await runCycle(scenario, { ...fixture, proposal: JSON.stringify(mutated) }, { mode: 'candidate', attempts: [{ proposal: JSON.stringify(mutated), edits: [], submission: { status: 'completed', reason: null } }] });
         await run.service.close().catch(() => undefined);
         roots.push(fixture.root + '-scope');
-        const scopeRun = await runCycle(scenario, { ...fixture, proposal: fixture.proposal, root: fixture.root + '-scope' }, { mode: 'candidate', attempts: [{ proposal: fixture.proposal, edits: [{ path: '.github/workflows/ci.yml', content: 'on: [push]\n' }], submission: { status: 'completed', reason: null } }] });
+        const scopeRun = await runCycle(scenario, { ...fixture, proposal: fixture.proposal, root: fixture.root + '-scope' }, { mode: 'candidate', allowHostProtectedIncident: true, attempts: [{ proposal: fixture.proposal, edits: [{ path: '.github/workflows/ci.yml', content: 'on: [push]\n' }], submission: { status: 'completed', reason: null } }] });
         await scopeRun.service.close().catch(() => undefined);
         const loopwright = outcomeWord(run);
         const scopeLoopwright = outcomeWord(scopeRun);
