@@ -694,6 +694,13 @@ export async function computeUnifiedLockfilePatch(baselineLockPath, candidateLoc
   return `--- a/package-lock.json\n+++ b/package-lock.json\n${lines.slice(firstHunkIdx).join('\n')}`;
 }
 
+/**
+ * Split a unified diff into ordered UTF-8 slices (`<= maxChunkBytes` each, `<= maxTotalBytes` total),
+ * preferring `@@ ` hunk boundaries whenever individual hunks fit within `maxChunkBytes` and falling back
+ * to line boundaries for oversized contiguous hunks. Returned slices are ordered byte parts (not standalone
+ * patches) and MUST be concatenated in part order (`chunks.join('') === patchText`) before `git apply`,
+ * matching `.auto-sync/instructions.md`.
+ */
 export function splitPromptPatchChunks(
   patchText,
   maxChunkBytes = MAX_PROMPT_RESOURCE_BYTES,
@@ -787,8 +794,8 @@ export async function stageNoChangeBundle({ repoRoot, stageDir, targetVersions, 
   const preflightMetadataRaw = `${JSON.stringify({ schema_version: 1, force: false, disposition: 'no_change' }, null, 2)}\n`;
   const targetVersionsBytes = Buffer.byteLength(targetVersionsRaw, 'utf8');
   const preflightMetadataBytes = Buffer.byteLength(preflightMetadataRaw, 'utf8');
-  if (targetVersionsBytes + preflightMetadataBytes > MAX_WORKSPACE_RESOURCES_TOTAL_BYTES) {
-    throw new Error(`Staged no-change workspace resources exceed ${MAX_WORKSPACE_RESOURCES_TOTAL_BYTES} bytes`);
+  if (targetVersionsBytes > MAX_PROMPT_RESOURCE_BYTES || preflightMetadataBytes > MAX_PROMPT_RESOURCE_BYTES) {
+    throw new Error(`Staged no-change metadata exceeds ${MAX_PROMPT_RESOURCE_BYTES} bytes per-resource ceiling`);
   }
   await writeFile(targetVersionsPath, targetVersionsRaw, { mode: 0o644 });
   await writeFile(preflightMetadataPath, preflightMetadataRaw, { mode: 0o644 });
@@ -878,7 +885,7 @@ export async function stageCandidateBundle({
     const patchChunks = splitPromptPatchChunks(patchText, MAX_PROMPT_RESOURCE_BYTES, MAX_PROMPT_PATCH_TOTAL_BYTES);
     if (patchChunks.length === 0) {
       throw new Error(
-        `Computed package-lock.json unified diff (${patchBytes} bytes) contains a line exceeding ${MAX_PROMPT_RESOURCE_BYTES} bytes`,
+        `Computed package-lock.json unified diff (${patchBytes} bytes) exceeds ${MAX_PROMPT_PATCH_TOTAL_BYTES} bytes or contains a line exceeding ${MAX_PROMPT_RESOURCE_BYTES} bytes`,
       );
     }
     lockfilePatchBytes = patchBytes;

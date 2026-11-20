@@ -93,6 +93,9 @@ PYTHON_EXEC="$(resolve_executable \
   exit 1
 }
 
+VERIFY_CHECK_OUT_MAX_BYTES=60000
+export VERIFY_CHECK_OUT_MAX_BYTES
+
 VERIFY_WRITE_CHECK_OUT_PY="$(cat <<'PY'
 from __future__ import annotations
 import json
@@ -100,7 +103,7 @@ import os
 import stat
 import sys
 
-MAX_CHECK_OUT_BYTES = 60000
+MAX_CHECK_OUT_BYTES = int(os.environ.get("VERIFY_CHECK_OUT_MAX_BYTES", "60000"))
 out_path = os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip()
 mode = sys.argv[1] if len(sys.argv) > 1 else ""
 if out_path and mode in ("--shell-failure", "--json"):
@@ -323,8 +326,9 @@ def write_phase1_check_out(payload: dict[str, object]) -> None:
     if not helper_code or not os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip():
         return
     try:
+        max_bytes = int(os.environ.get("VERIFY_CHECK_OUT_MAX_BYTES", "60000"))
         encoded = (json.dumps(payload) + "\n").encode("utf-8")
-        if len(encoded) <= 60000:
+        if len(encoded) <= max_bytes:
             subprocess.run(
                 [sys.executable, "-c", helper_code, "--json"],
                 input=encoded,
@@ -1338,8 +1342,9 @@ def write_phase3_check_out(
     if metrics is not None:
         doc["metrics"] = metrics
     try:
+        max_bytes = int(os.environ.get("VERIFY_CHECK_OUT_MAX_BYTES", "60000"))
         encoded = (json.dumps(doc) + "\n").encode("utf-8")
-        if len(encoded) <= 60000:
+        if len(encoded) <= max_bytes:
             subprocess.run(
                 [python_exec, "-c", helper_code, "--json"],
                 input=encoded,
