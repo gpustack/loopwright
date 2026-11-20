@@ -15,10 +15,12 @@ import { stateValue } from './admission.js';
 import { canonical, digest, freeze, integer, list, object } from './boundary.js';
 import { receiveBrokerMessage } from './broker-channel.js';
 import { materializeCandidateDirectory, setDirectoryTreeMode } from './candidate.js';
+import { selectedCatalog } from './catalog.js';
 import type { ContainerExit } from './containers.js';
 import { parseBoundedJson } from './context.js';
 import { scheduleDeadline } from './deadline.js';
 import { PiFailure, refuse } from './errors.js';
+import { summarizeToolProgressArgs } from './progress-summary.js';
 import { Execution, type AdmittedToolIdentity, type ExecutionPorts } from './execution.js';
 import { verifyNativeCompletion } from './lifecycle.js';
 import type { McpProcessPort } from './mcp-process.js';
@@ -28,6 +30,7 @@ import type { RuntimeBroker } from './provider.js';
 import { recoverSnapshot } from './recovery.js';
 import { systemPrompt } from './resources.js';
 import { profileIdentity } from './runtime-profile.js';
+import { Sender } from './sender.js';
 import { canonicalDirectory } from './session-host.js';
 import { SnapshotTransfer } from './snapshot-transfer.js';
 import type { ToolProcessPort, ToolProcessReply } from './tool-process.js';
@@ -35,6 +38,7 @@ import { clampToolResultBytes, type ToolResult } from './tools.js';
 import {
   createRoleMcpAllowlist,
   createRoleScopedMcpExecutor,
+  isExternalMcpToolName,
   validateAllowedMcpServers,
   type CallExternalMcpToolOptions,
   type ConnectHostMcpOptions,
@@ -72,20 +76,179 @@ export type HostSessionProgressEvent =
       readonly elapsedMs: number;
       readonly toolCallNames: readonly string[];
     }
-  | { readonly kind: 'tool_start'; readonly name: string }
+  | { readonly kind: 'tool_start'; readonly name: string; readonly summary?: string | undefined }
   | {
       readonly kind: 'tool_end';
       readonly name: string;
       readonly isError: boolean;
       readonly elapsedMs: number;
+      readonly summary?: string | undefined;
       readonly errorCode?: string | undefined;
       readonly errorPath?: string | undefined;
+    }
+  | {
+      readonly kind: 'circuit_breaker';
+      readonly reason: 'max_turns' | 'consecutive_tool_errors' | 'no_progress';
+      readonly turn: number;
+      readonly message: string;
     };
+
+export interface HostSessionCircuitBreakerOptions {
+  readonly maxTurns?: number | undefined;
+  readonly maxRepairTurns?: number | undefined;
+  readonly maxConsecutiveErrorTurns?: number | undefined;
+  readonly maxRepairNoProgressTurns?: number | undefined;
+}
 
 export interface OpenPiHostSessionOptions {
   readonly mcpRegistry?: HostMcpRegistry | undefined;
   readonly allowedMcpServers?: readonly string[] | undefined;
   readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined;
+  readonly circuitBreaker?: HostSessionCircuitBreakerOptions | undefined;
+  readonly scrub?: ((text: string) => string) | undefined;
+}
+
+const DEFAULT_MAX_DISPATCH_TURNS = 40;
+const DEFAULT_MAX_REPAIR_DISPATCH_TURNS = 20;
+const DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS = 8;
+const DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS = 10;
+const MUTATING_TOOLS = new Set(['write', 'edit', 'delete']);
+
+interface CircuitBreakerTrip {
+  readonly reason: 'max_turns' | 'consecutive_tool_errors' | 'no_progress';
+  readonly turn: number;
+  readonly path: string;
+  readonly message: string;
+}
+
+function resolveBreakerLimit(value: number | undefined, fallback: number, path: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1) refuse('INPUT_INVALID', path);
+  return value;
+}
+
+class HostSessionCircuitBreaker {
+  #maxTurns = DEFAULT_MAX_DISPATCH_TURNS;
+  #maxRepairTurns = DEFAULT_MAX_REPAIR_DISPATCH_TURNS;
+  #maxConsecutiveErrorTurns = DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS;
+  #maxRepairNoProgressTurns = DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS;
+  #active = false;
+  #repair: 'none' | 'format' | 'implementation' = 'none';
+  #completedTurns = 0;
+  #consecutiveErrorTurns = 0;
+  #consecutiveNoMutationTurns = 0;
+  #turnHadToolCalls = false;
+  #turnToolCount = 0;
+  #turnToolErrorCount = 0;
+  #turnSucceededMutation = false;
+  #tripped: CircuitBreakerTrip | null = null;
+
+  configure(options?: HostSessionCircuitBreakerOptions): void {
+    this.#maxTurns = resolveBreakerLimit(options?.maxTurns, DEFAULT_MAX_DISPATCH_TURNS, '/circuitBreaker/maxTurns');
+    this.#maxRepairTurns = resolveBreakerLimit(options?.maxRepairTurns, DEFAULT_MAX_REPAIR_DISPATCH_TURNS, '/circuitBreaker/maxRepairTurns');
+    this.#maxConsecutiveErrorTurns = resolveBreakerLimit(
+      options?.maxConsecutiveErrorTurns,
+      DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS,
+      '/circuitBreaker/maxConsecutiveErrorTurns',
+    );
+    this.#maxRepairNoProgressTurns = resolveBreakerLimit(
+      options?.maxRepairNoProgressTurns,
+      DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS,
+      '/circuitBreaker/maxRepairNoProgressTurns',
+    );
+  }
+
+  get tripped(): CircuitBreakerTrip | null {
+    return this.#tripped;
+  }
+
+  beginDispatch(kind: 'execute' | 'compact', repair: 'none' | 'format' | 'implementation'): void {
+    this.#active = kind === 'execute';
+    this.#repair = repair;
+    this.#completedTurns = 0;
+    this.#consecutiveErrorTurns = 0;
+    this.#consecutiveNoMutationTurns = 0;
+    this.#turnHadToolCalls = false;
+    this.#turnToolCount = 0;
+    this.#turnToolErrorCount = 0;
+    this.#turnSucceededMutation = false;
+    this.#tripped = null;
+  }
+
+  onRequestSettled(hasToolCalls: boolean): void {
+    if (!this.#active || this.#tripped !== null) return;
+    this.#completedTurns += 1;
+    this.#turnHadToolCalls = hasToolCalls;
+    this.#turnToolCount = 0;
+    this.#turnToolErrorCount = 0;
+    this.#turnSucceededMutation = false;
+  }
+
+  recordToolEnd(toolName: string, isError: boolean): void {
+    if (!this.#active || this.#tripped !== null) return;
+    this.#turnToolCount += 1;
+    if (isError) {
+      this.#turnToolErrorCount += 1;
+    } else if (MUTATING_TOOLS.has(toolName) || (isExternalMcpToolName(toolName) && toolName !== 'mcp__workspace__read_file')) {
+      this.#turnSucceededMutation = true;
+    }
+  }
+
+  onBeforeInvoke(): CircuitBreakerTrip | null {
+    if (!this.#active) return null;
+    if (this.#tripped !== null) return this.#tripped;
+    if (this.#completedTurns === 0) return null;
+
+    if (this.#turnToolCount > 0) {
+      if (this.#turnToolErrorCount > 0 && this.#turnToolErrorCount === this.#turnToolCount) {
+        this.#consecutiveErrorTurns += 1;
+      } else {
+        this.#consecutiveErrorTurns = 0;
+      }
+    }
+    if (this.#repair === 'implementation' && (this.#turnHadToolCalls || this.#turnToolCount > 0)) {
+      if (!this.#turnSucceededMutation) {
+        this.#consecutiveNoMutationTurns += 1;
+      } else {
+        this.#consecutiveNoMutationTurns = 0;
+      }
+    }
+    this.#turnHadToolCalls = false;
+    this.#turnToolCount = 0;
+    this.#turnToolErrorCount = 0;
+    this.#turnSucceededMutation = false;
+
+    const turnLimit = this.#repair === 'implementation' ? this.#maxRepairTurns : this.#maxTurns;
+    if (this.#completedTurns >= turnLimit) {
+      this.#tripped = {
+        reason: 'max_turns',
+        turn: this.#completedTurns,
+        path: '/circuit-breaker/maxTurns',
+        message: `circuit breaker: stopped after ${this.#completedTurns} turns (limit=${turnLimit}${this.#repair === 'implementation' ? ', repair=implementation' : ''})`,
+      };
+    } else if (this.#consecutiveErrorTurns >= this.#maxConsecutiveErrorTurns) {
+      this.#tripped = {
+        reason: 'consecutive_tool_errors',
+        turn: this.#completedTurns,
+        path: '/circuit-breaker/consecutiveToolErrors',
+        message: `circuit breaker: stopped after ${this.#completedTurns} turns (${this.#consecutiveErrorTurns} consecutive tool-error turns)`,
+      };
+    } else if (this.#repair === 'implementation' && this.#consecutiveNoMutationTurns >= this.#maxRepairNoProgressTurns) {
+      this.#tripped = {
+        reason: 'no_progress',
+        turn: this.#completedTurns,
+        path: '/circuit-breaker/repairNoProgress',
+        message: `circuit breaker: stopped after ${this.#completedTurns} turns (${this.#consecutiveNoMutationTurns} consecutive implementation-repair turns without successful write/edit)`,
+      };
+    }
+    return this.#tripped;
+  }
+
+  assertBeforeSend(): void {
+    if (this.#tripped !== null) {
+      refuse('REQUEST_REFUSED', this.#tripped.path, { phase: 'admission', stateErrorCode: 'BUDGET_EXHAUSTED' });
+    }
+  }
 }
 
 function resolveSessionMcpAllowlist(input: PiOpenInput, options?: OpenPiHostSessionOptions): RoleMcpAllowlist {
@@ -1186,6 +1349,8 @@ class HostExecution extends Execution {
     readonly candidateDir: string,
     ports: ExecutionPorts,
     readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined,
+    readonly onToolEnd?: ((name: string, isError: boolean) => void) | undefined,
+    readonly onScrub?: ((text: string) => string) | undefined,
   ) {
     super(host, input, candidateDir, { ...ports, softScopeErrors: true, softArgumentErrors: true });
   }
@@ -1204,6 +1369,17 @@ class HostExecution extends Execution {
     }
   }
 
+  #summarizeToolArgs(identity: AdmittedToolIdentity, bytes: Uint8Array): string | undefined {
+    if (!this.onProgress) return undefined;
+    return summarizeToolProgressArgs(
+      identity.name,
+      bytes,
+      this.input.policy.limits.toolArgsBytes,
+      raw => this.candidate.enforceHardPathInvariants(raw, { allowRootAlias: identity.name === 'read' }),
+      this.onScrub,
+    );
+  }
+
   override invoke(
     identity: AdmittedToolIdentity,
     bytes: Uint8Array,
@@ -1217,26 +1393,32 @@ class HostExecution extends Execution {
         // Progress observers must never perturb session execution.
       }
     };
+    const summary = this.#summarizeToolArgs(identity, bytes);
     const wrapProgress = async (work: () => Promise<ToolResult>): Promise<ToolResult> => {
       const started = performance.now();
-      emitProgress({ kind: 'tool_start', name: identity.name });
+      emitProgress({ kind: 'tool_start', name: identity.name, ...(summary !== undefined ? { summary } : {}) });
       try {
         const res = await work();
+        const isError = res.isError === true;
+        this.onToolEnd?.(identity.name, isError);
         emitProgress({
           kind: 'tool_end',
           name: identity.name,
-          isError: res.isError === true,
+          isError,
           elapsedMs: Math.max(1, Math.round(performance.now() - started)),
+          ...(summary !== undefined ? { summary } : {}),
         });
         return res;
       } catch (error) {
         const errorCode = error instanceof PiFailure ? error.detail.code : undefined;
         const errorPath = error instanceof PiFailure && error.detail.path.length > 0 ? error.detail.path : undefined;
+        this.onToolEnd?.(identity.name, true);
         emitProgress({
           kind: 'tool_end',
           name: identity.name,
           isError: true,
           elapsedMs: Math.max(1, Math.round(performance.now() - started)),
+          ...(summary !== undefined ? { summary } : {}),
           ...(errorCode !== undefined ? { errorCode } : {}),
           ...(errorPath !== undefined ? { errorPath } : {}),
         });
@@ -1476,6 +1658,7 @@ class HostRuntimeSession {
     readonly broker: RuntimeBroker,
     readonly directory: string,
     readonly options?: OpenPiHostSessionOptions | undefined,
+    readonly breaker?: HostSessionCircuitBreaker | undefined,
   ) {}
 
   start(): Promise<PiCapabilities> {
@@ -1717,16 +1900,30 @@ class HostRuntimeSession {
     if (message.kind === 'invoke' && message.body && typeof message.body === 'object') {
       const inv = message.body as { invocation?: unknown; provider?: unknown; model?: unknown };
       if (typeof inv.invocation === 'number' && typeof inv.provider === 'string' && typeof inv.model === 'string') {
-        this.#invocationStartedMs.set(inv.invocation, performance.now());
-        try {
-          this.options?.onProgress?.({
-            kind: 'request_start',
-            turn: inv.invocation,
-            provider: inv.provider,
-            model: inv.model,
-          });
-        } catch {
-          // Ignore observer errors.
+        const tripped = this.breaker?.onBeforeInvoke() ?? null;
+        if (tripped !== null) {
+          try {
+            this.options?.onProgress?.({
+              kind: 'circuit_breaker',
+              reason: tripped.reason,
+              turn: tripped.turn,
+              message: tripped.message,
+            });
+          } catch {
+            // Ignore observer errors.
+          }
+        } else {
+          this.#invocationStartedMs.set(inv.invocation, performance.now());
+          try {
+            this.options?.onProgress?.({
+              kind: 'request_start',
+              turn: inv.invocation,
+              provider: inv.provider,
+              model: inv.model,
+            });
+          } catch {
+            // Ignore observer errors.
+          }
         }
       }
     }
@@ -1742,26 +1939,29 @@ class HostRuntimeSession {
         if (typeof parsed.invocation === 'number') {
           const startedAt = this.#invocationStartedMs.get(parsed.invocation);
           this.#invocationStartedMs.delete(parsed.invocation);
-          const inputTokens =
-            (typeof parsed.usage?.input === 'number' ? parsed.usage.input : 0)
-            + (typeof parsed.usage?.cacheRead === 'number' ? parsed.usage.cacheRead : 0)
-            + (typeof parsed.usage?.cacheWrite === 'number' ? parsed.usage.cacheWrite : 0);
-          const outputTokens = typeof parsed.usage?.output === 'number' ? parsed.usage.output : 0;
-          const toolCallNames = Array.isArray(parsed.toolCalls)
-            ? parsed.toolCalls.map(item => (typeof item?.name === 'string' ? item.name : '')).filter(Boolean)
-            : [];
-          try {
-            this.options?.onProgress?.({
-              kind: 'request_settled',
-              turn: parsed.invocation,
-              stopReason: typeof parsed.stopReason === 'string' ? parsed.stopReason : 'stop',
-              inputTokens,
-              outputTokens,
-              elapsedMs: Math.max(1, Math.round(performance.now() - (startedAt ?? performance.now()))),
-              toolCallNames,
-            });
-          } catch {
-            // Ignore observer errors.
+          if (!this.breaker?.tripped) {
+            const inputTokens =
+              (typeof parsed.usage?.input === 'number' ? parsed.usage.input : 0)
+              + (typeof parsed.usage?.cacheRead === 'number' ? parsed.usage.cacheRead : 0)
+              + (typeof parsed.usage?.cacheWrite === 'number' ? parsed.usage.cacheWrite : 0);
+            const outputTokens = typeof parsed.usage?.output === 'number' ? parsed.usage.output : 0;
+            const toolCallNames = Array.isArray(parsed.toolCalls)
+              ? parsed.toolCalls.map(item => (typeof item?.name === 'string' ? item.name : '')).filter(Boolean)
+              : [];
+            this.breaker?.onRequestSettled(toolCallNames.length > 0);
+            try {
+              this.options?.onProgress?.({
+                kind: 'request_settled',
+                turn: parsed.invocation,
+                stopReason: typeof parsed.stopReason === 'string' ? parsed.stopReason : 'stop',
+                inputTokens,
+                outputTokens,
+                elapsedMs: Math.max(1, Math.round(performance.now() - (startedAt ?? performance.now()))),
+                toolCallNames,
+              });
+            } catch {
+              // Ignore observer errors.
+            }
           }
         }
       }
@@ -1802,6 +2002,13 @@ class HostRuntimeSession {
     const view = stateValue(this.host.store.inspect(), 'session');
     const remaining = view.clock.remainingTaskMs.safeValue;
     if (remaining === null || remaining <= 0) refuse('DEADLINE', '', { phase: 'session' });
+    const rawRepair = kind === 'execute' && body && typeof body === 'object' && 'repair' in body
+      ? (body as { repair?: unknown }).repair
+      : 'none';
+    this.breaker?.beginDispatch(
+      kind,
+      rawRepair === 'format' || rawRepair === 'implementation' ? rawRepair : 'none',
+    );
     const pending = this.#wait('settled', undefined, () => {
       const current = this.host.store.inspect();
       return current.ok && current.value.clockStatus === 'trusted' ? current.value.clock.remainingTaskMs.safeValue : null;
@@ -1921,12 +2128,19 @@ async function environment(host: PiHost): Promise<void> {
 }
 
 function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPorts {
+  const breaker = new HostSessionCircuitBreaker();
   return Object.freeze<FactoryPorts>({
     environment: async host => {
       validateAllowedMcpServers(options?.allowedMcpServers);
+      breaker.configure(options?.circuitBreaker);
       await environment(host);
     },
     lease: (host, input) => HostExecutionLease.acquire(host, input),
+    sender: (host, owned) => new Sender(host, owned, {
+      fetch: globalThis.fetch,
+      catalog: selectedCatalog(owned),
+      beforeSend: () => breaker.assertBeforeSend(),
+    }),
     execution: (host, owned, candidateDir) => {
       const roleMcpAllowlist = resolveSessionMcpAllowlist(owned, options);
       return new HostExecution(
@@ -1947,23 +2161,23 @@ function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPort
             : {}),
         },
         options?.onProgress,
+        (name, isError) => breaker.recordToolEnd(name, isError),
+        options?.scrub,
       );
     },
     mcp: (_host, owned) => ({
       process: () => new HostMcpProcess(owned, join(_host.directory, 'sdk-' + owned.sessionId, 'candidate')),
     }),
-    session: (host, owned, sender, directory) => new HostRuntimeSession(host, owned, sender, directory, options),
+    session: (host, owned, sender, directory) => new HostRuntimeSession(host, owned, sender, directory, options, breaker),
   });
 }
-
-const defaultHostSessionPorts = createHostSessionPorts();
 
 export function openPiHostSessionAdapter(
   host: PiHost,
   input: unknown,
   options?: OpenPiHostSessionOptions,
 ): Promise<PiResult<PiAdapter>> {
-  return constructAdapter(host, input, options ? createHostSessionPorts(options) : defaultHostSessionPorts);
+  return constructAdapter(host, input, createHostSessionPorts(options));
 }
 
 export function openPiHostSessionAdapterV2(
@@ -1971,5 +2185,5 @@ export function openPiHostSessionAdapterV2(
   input: PiOpenInputV2,
   options?: OpenPiHostSessionOptions,
 ): Promise<PiResultV2<PiAdapterV2>> {
-  return constructAdapterV2(host, input, options ? createHostSessionPorts(options) : defaultHostSessionPorts);
+  return constructAdapterV2(host, input, createHostSessionPorts(options));
 }

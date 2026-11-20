@@ -7,7 +7,11 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
-import { openPiHostSessionAdapterV2, type HostSessionProgressEvent } from '@loopwright/agent-pi/host-session';
+import {
+  openPiHostSessionAdapterV2,
+  type HostSessionCircuitBreakerOptions,
+  type HostSessionProgressEvent,
+} from '@loopwright/agent-pi/host-session';
 import type { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import { DECISION_PROVIDER_API_KEY_ENV } from '@loopwright/decisions';
 import {
@@ -4185,6 +4189,52 @@ function formatPiErrorDetail(
   return `${prefix}${error.code} (${error.phase}${pathSuffix})`;
 }
 
+function parsePositiveIntEnv(env: NodeJS.ProcessEnv, name: string): number | undefined {
+  const raw = env[name]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : undefined;
+}
+
+/**
+ * Format a `HostSessionProgressEvent` into a single human-readable progress log line.
+ * Callers must pass the returned string through `SecretScrubber.scrub` before emitting.
+ */
+export function formatHostSessionProgressLog(
+  event: HostSessionProgressEvent,
+  context: { readonly cumulativeTokens: number; readonly totalTokenBudget: number },
+): string | null {
+  if (event.kind === 'request_start') {
+    return `turn #${event.turn}: dispatching request to ${event.provider}/${event.model}`;
+  }
+  if (event.kind === 'request_settled') {
+    const inTok = formatTokenCount(event.inputTokens);
+    const outTok = formatTokenCount(event.outputTokens);
+    const cumTok = formatTokenCount(context.cumulativeTokens);
+    const budgetTok = formatTokenCount(context.totalTokenBudget);
+    const suffix = event.toolCallNames.length > 0
+      ? `tools=[${event.toolCallNames.join(', ')}]`
+      : `stop=${event.stopReason}`;
+    return `turn #${event.turn}: settled in ${formatDurationMs(event.elapsedMs)} — in ${inTok} / out ${outTok} (cum ${cumTok}/${budgetTok}), ${suffix}`;
+  }
+  if (event.kind === 'tool_end') {
+    const summaryPart = event.summary !== undefined && event.summary.length > 0
+      ? ` (${event.summary})`
+      : '';
+    if (event.errorCode !== undefined) {
+      const detail = event.errorPath !== undefined && event.errorPath.length > 0
+        ? `${event.errorCode} ${event.errorPath}`
+        : event.errorCode;
+      return `tool ${event.name}${summaryPart}: denied (${detail}) — ${formatDurationMs(event.elapsedMs)}`;
+    }
+    return `tool ${event.name}${summaryPart}: ${event.isError ? 'error' : 'ok'} (${formatDurationMs(event.elapsedMs)})`;
+  }
+  if (event.kind === 'circuit_breaker') {
+    return event.message;
+  }
+  return null;
+}
+
 function isRetryablePiFailure(error: {
   readonly code?: string | null | undefined;
   readonly phase?: string | null | undefined;
@@ -4396,6 +4446,8 @@ export async function executeTurnkeyActionCycle(
   let roleAttemptSeq = 0;
   let formatRepairDispatches = 0;
   let implRepairDispatches = 0;
+  const totalTokenBudget = options.taskpack.config.spec.task.spec.budgets.totalTokens;
+  let cumulativeTokens = 0;
 
   const effectiveAllowWorkflowWrites = options.allowWorkflowWrites ?? options.taskpack.allowWorkflowWrites;
   const ports: ControllerPorts = {
@@ -4454,39 +4506,40 @@ export async function executeTurnkeyActionCycle(
       const progressHandler = options.onLog === undefined
         ? undefined
         : (event: HostSessionProgressEvent): void => {
-          if (event.kind === 'request_start') {
-            options.onLog!(scrubber.scrub(
-              `turn #${event.turn}: dispatching request to ${event.provider}/${event.model}`,
-            ));
-          } else if (event.kind === 'request_settled') {
-            const inTok = formatTokenCount(event.inputTokens);
-            const outTok = formatTokenCount(event.outputTokens);
-            const suffix = event.toolCallNames.length > 0
-              ? `tools=[${event.toolCallNames.join(', ')}]`
-              : `stop=${event.stopReason}`;
-            options.onLog!(scrubber.scrub(
-              `turn #${event.turn}: settled in ${formatDurationMs(event.elapsedMs)} — in ${inTok} / out ${outTok} tokens, ${suffix}`,
-            ));
-          } else if (event.kind === 'tool_end') {
-            if (event.errorCode !== undefined) {
-              const detail = event.errorPath !== undefined && event.errorPath.length > 0
-                ? `${event.errorCode} ${event.errorPath}`
-                : event.errorCode;
-              options.onLog!(scrubber.scrub(
-                `tool ${event.name}: denied (${detail}) — ${formatDurationMs(event.elapsedMs)}`,
-              ));
-            } else {
-              options.onLog!(scrubber.scrub(
-                `tool ${event.name}: ${event.isError ? 'error' : 'ok'} (${formatDurationMs(event.elapsedMs)})`,
-              ));
-            }
+          if (event.kind === 'request_settled') {
+            cumulativeTokens += Math.max(0, event.inputTokens) + Math.max(0, event.outputTokens);
+          }
+          const line = formatHostSessionProgressLog(event, { cumulativeTokens, totalTokenBudget });
+          if (line !== null) {
+            options.onLog!(scrubber.scrub(line));
           }
         };
+
+      const envSource = options.runtimeEnv ?? process.env;
+      const maxTurnsRaw = envSource['LOOPWRIGHT_MAX_TURNS']?.trim();
+      const maxTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_TURNS');
+      if (maxTurnsRaw && maxTurnsOverride === undefined) {
+        options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_TURNS=${maxTurnsRaw}; expected positive integer`));
+      }
+      const maxRepairTurnsRaw = envSource['LOOPWRIGHT_MAX_REPAIR_TURNS']?.trim();
+      const maxRepairTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_REPAIR_TURNS');
+      if (maxRepairTurnsRaw && maxRepairTurnsOverride === undefined) {
+        options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_REPAIR_TURNS=${maxRepairTurnsRaw}; expected positive integer`));
+      }
+      const circuitBreakerOptions: HostSessionCircuitBreakerOptions | undefined =
+        maxTurnsOverride !== undefined || maxRepairTurnsOverride !== undefined
+          ? {
+            ...(maxTurnsOverride !== undefined ? { maxTurns: maxTurnsOverride } : {}),
+            ...(maxRepairTurnsOverride !== undefined ? { maxRepairTurns: maxRepairTurnsOverride } : {}),
+          }
+          : undefined;
 
       const adapterFactory = options.openHostSessionAdapter ?? openPiHostSessionAdapterV2;
       const opened = await adapterFactory(wrappedHost, adapterInput, {
         ...(options.mcpRegistry !== undefined ? { mcpRegistry: options.mcpRegistry } : {}),
         ...(progressHandler !== undefined ? { onProgress: progressHandler } : {}),
+        ...(circuitBreakerOptions !== undefined ? { circuitBreaker: circuitBreakerOptions } : {}),
+        scrub: text => scrubber.scrub(text),
       });
       if (!opened.ok) {
         observedPiErrorDetail = formatPiErrorDetail(opened.error);

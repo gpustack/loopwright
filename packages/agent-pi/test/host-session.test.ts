@@ -16,6 +16,7 @@ import {
   openPiHostSessionAdapterV2,
   type HostSessionProgressEvent,
 } from '../src/host-session.js';
+import { summarizeToolProgressArgs } from '../src/progress-summary.js';
 import { MAX_LIMITS } from '../src/policy.js';
 import type { PiHostV2, PiOpenInputV2 } from '../src/types-v2.js';
 import type { PiHost, PiOpenInput } from '../src/types.js';
@@ -1735,5 +1736,153 @@ test('HostSession handles malformed tool args softly and strips null optional pa
     fixture.cleanup();
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('summarizeToolProgressArgs sanitizes paths, redacts and scrubs secrets before 80-char clamping', () => {
+  const enc = (value: unknown) => Buffer.from(JSON.stringify(value), 'utf8');
+  assert.equal(summarizeToolProgressArgs('write', enc({ path: './candidate/packages/example.ts\nignored' })), './candidate/packages/example.ts ignored');
+  assert.equal(summarizeToolProgressArgs('read', enc({ path: './candidate/packages/example.ts' }), 65536, () => 'packages/example.ts'), 'packages/example.ts');
+  assert.equal(
+    summarizeToolProgressArgs('bash', enc({ command: '\n  API_KEY=sk-secret TOKEN="a b" go test ./pkg/worker/...\n  echo tail' })),
+    'go test ./pkg/worker/...',
+  );
+  assert.equal(summarizeToolProgressArgs('bash', enc({ command: 'ONLY_SECRET=123' })), undefined);
+  assert.equal(
+    summarizeToolProgressArgs('bash', enc({ command: 'curl https://user:pass@api.example.com -H "Authorization: Bearer tok12345"' })),
+    'curl https://[scrubbed]@api.example.com -H "Authorization: [scrubbed]"',
+  );
+  assert.equal(
+    summarizeToolProgressArgs('bash', enc({ command: 'curl -H "token: ghp_abc123456" https://api.example.com' })),
+    'curl -H "token: [scrubbed]" https://api.example.com',
+  );
+  assert.equal(
+    summarizeToolProgressArgs('bash', enc({ command: 'echo ok && export SECRET=abc && TOKEN="x y"' })),
+    'echo ok && export SECRET=[scrubbed] && TOKEN=[scrubbed]',
+  );
+  const longSecret = 'sk_live_long_prefix_' + 'z'.repeat(100);
+  const preClamped = summarizeToolProgressArgs(
+    'bash',
+    enc({ command: `echo ${'a'.repeat(65)} ${longSecret}` }),
+    65536,
+    undefined,
+    text => text.replaceAll(longSecret, '[scrubbed]'),
+  );
+  assert.ok(preClamped !== undefined && !preClamped.includes('sk_live_long_prefix_'));
+  const longBash = summarizeToolProgressArgs('bash', enc({ command: 'echo ' + 'x'.repeat(120) }));
+  assert.ok(longBash !== undefined && longBash.length <= 80 && longBash.endsWith('...'));
+  assert.equal(summarizeToolProgressArgs('mcp__github__get_issue', enc({ owner: 'gpustack', repo: 'loopwright', token: 'secret' })), 'owner=gpustack repo=loopwright');
+  assert.equal(
+    summarizeToolProgressArgs('mcp__github__search', enc({ query: 'repos?access_token=abc123 GITHUB_TOKEN=xyz987' })),
+    'repos?access_token=[scrubbed] GITHUB_TOKEN=[scrubbed]',
+  );
+  assert.equal(summarizeToolProgressArgs('mcp__custom__secret', enc({ apiKey: 'sk-1234', payload: 'hidden' })), undefined);
+});
+
+test('openPiHostSessionAdapterV2 circuit breaker stops runaway turns and no-progress repair loops cleanly', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  const runBreakerCase = async (options: {
+    readonly repair: 'none' | 'implementation';
+    readonly toolName: 'read' | 'bash';
+    readonly toolArgs: Record<string, unknown>;
+    readonly circuitBreaker: { readonly maxTurns?: number; readonly maxRepairTurns?: number; readonly maxConsecutiveErrorTurns?: number; readonly maxRepairNoProgressTurns?: number };
+  }) => {
+    let requestCount = 0;
+    const server = http.createServer((_req, res) => {
+      requestCount += 1;
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sseToolCall('glm-5.3', `call-cb-${requestCount}`, options.toolName, options.toolArgs));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('listen failed');
+    const progressEvents: HostSessionProgressEvent[] = [];
+    const fixture = await createHostSessionFixture({ baseUrl: `http://127.0.0.1:${addr.port}/v1` });
+    try {
+      const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2, {
+        onProgress: event => progressEvents.push(event),
+        circuitBreaker: options.circuitBreaker,
+      });
+      assert.equal(opened.ok, true, JSON.stringify(opened));
+      if (!opened.ok) throw new Error('open failed');
+      try {
+        const executed = await opened.value.execute({
+          commandId: `cmd-cb-${options.repair}`,
+          text: 'Loop until breaker trips',
+          purpose: 'task',
+          repair: options.repair,
+        });
+        assert.equal(executed.ok, true, JSON.stringify(executed));
+        if (!executed.ok) throw new Error('execute failed');
+        return { outcome: executed.value, requestCount, progressEvents };
+      } finally {
+        await opened.value.close();
+      }
+    } finally {
+      fixture.cleanup();
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  };
+
+  // 1. Per-dispatch maxRepairTurns cap + tool summary emission
+  const maxTurnRes = await runBreakerCase({
+    repair: 'implementation',
+    toolName: 'read',
+    toolArgs: { path: 'packages/example.ts' },
+    circuitBreaker: { maxRepairTurns: 2, maxRepairNoProgressTurns: 10 },
+  });
+  assert.equal(maxTurnRes.requestCount, 2);
+  assert.equal(maxTurnRes.outcome.status, 'failed');
+  assert.equal(maxTurnRes.outcome.providerTermination, 'confirmed');
+  assert.equal(maxTurnRes.outcome.usage, 'complete');
+  assert.equal(maxTurnRes.outcome.localCleanup, 'complete');
+  assert.equal(maxTurnRes.outcome.error?.code, 'REQUEST_REFUSED');
+  assert.equal(maxTurnRes.outcome.error?.path, '/circuit-breaker/maxTurns');
+  assert.equal(maxTurnRes.outcome.error?.stateErrorCode, 'BUDGET_EXHAUSTED');
+  const cbEvent1 = maxTurnRes.progressEvents.find(e => e.kind === 'circuit_breaker');
+  assert.equal(cbEvent1?.kind, 'circuit_breaker');
+  assert.equal(cbEvent1?.reason, 'max_turns');
+  const readEnd = maxTurnRes.progressEvents.find(e => e.kind === 'tool_end');
+  assert.equal(readEnd?.kind, 'tool_end');
+  assert.equal(readEnd?.summary, 'packages/example.ts');
+
+  // 2. Consecutive tool-error turns breaker
+  const errRes = await runBreakerCase({
+    repair: 'none',
+    toolName: 'bash',
+    toolArgs: { command: 'TOKEN=supersecret exit 2' },
+    circuitBreaker: { maxTurns: 10, maxConsecutiveErrorTurns: 2 },
+  });
+  assert.equal(errRes.requestCount, 2);
+  assert.equal(errRes.outcome.error?.path, '/circuit-breaker/consecutiveToolErrors');
+  assert.equal(errRes.outcome.error?.stateErrorCode, 'BUDGET_EXHAUSTED');
+  const bashEnd = errRes.progressEvents.find(e => e.kind === 'tool_end');
+  assert.equal(bashEnd?.kind, 'tool_end');
+  assert.equal(bashEnd?.summary, 'exit 2');
+
+  // 3. Implementation repair no-progress breaker (read-only turns without write/edit)
+  const noProgRes = await runBreakerCase({
+    repair: 'implementation',
+    toolName: 'read',
+    toolArgs: { path: 'packages/example.ts' },
+    circuitBreaker: { maxRepairTurns: 10, maxRepairNoProgressTurns: 2 },
+  });
+  assert.equal(noProgRes.requestCount, 2);
+  assert.equal(noProgRes.outcome.error?.path, '/circuit-breaker/repairNoProgress');
+  assert.equal(noProgRes.outcome.error?.stateErrorCode, 'BUDGET_EXHAUSTED');
+
+  // 4. Invalid circuitBreaker options return PiResult error cleanly instead of throwing synchronously
+  const invalidFixture = await createHostSessionFixture({ baseUrl: 'http://127.0.0.1:1/v1' });
+  try {
+    const invalidRes = await openPiHostSessionAdapterV2(invalidFixture.hostV2, invalidFixture.inputV2, {
+      circuitBreaker: { maxTurns: 0 },
+    });
+    assert.equal(invalidRes.ok, false);
+    if (!invalidRes.ok) {
+      assert.equal(invalidRes.error.code, 'INPUT_INVALID');
+      assert.equal(invalidRes.error.path, '/circuitBreaker/maxTurns');
+    }
+  } finally {
+    invalidFixture.cleanup();
   }
 });

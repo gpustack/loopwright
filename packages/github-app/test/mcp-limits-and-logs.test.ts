@@ -810,8 +810,8 @@ spec:
       assert.match(fullStderr, /\[loopwright\] mcp: connected github \(stdio\) — 1 tools/);
       assert.match(fullStderr, /\[loopwright\] mcp: connected deepwiki \(http\) — 2 tools/);
       assert.match(fullStderr, /\[loopwright\] model: zai\/glm-5\.3 \(thinking=high\) — wallTime=1h, totalTokens=25M, maxOutputTokens=32\.77K, contextWindow=1M/);
-      assert.match(fullStderr, /\[loopwright\] turn #1: settled in .+ — in 5K \/ out 1\.2K tokens, tools=\[mcp__github__list_commits, mcp__deepwiki__ask_question, mcp__deepwiki__transient_probe\]/);
-      assert.match(fullStderr, /\[loopwright\] tool mcp__github__list_commits: ok/);
+      assert.match(fullStderr, /\[loopwright\] turn #1: settled in .+ — in 5K \/ out 1\.2K \(cum 6\.2K\/25M\), tools=\[mcp__github__list_commits, mcp__deepwiki__ask_question, mcp__deepwiki__transient_probe\]/);
+      assert.match(fullStderr, /\[loopwright\] tool mcp__github__list_commits \(owner=vllm-project repo=vllm\): ok/);
       assert.match(fullStderr, /\[loopwright\] tool mcp__deepwiki__transient_probe: error/);
       assert.match(fullStderr, /\[loopwright\] check verify-sync: passed/);
       assert.match(fullStderr, /Run ID: mcp-limits-e2e/);
@@ -1376,14 +1376,14 @@ spec:
 
       const recovered = await runWithCapture('run-alias-recover');
       assert.equal(recovered.code, 0, `expected soft scope error + ./candidate/ shorthand edit to succeed; stderr:\n${recovered.stderr}`);
-      assert.match(recovered.stderr, /\[loopwright\] tool edit: error \(/);
-      assert.match(recovered.stderr, /\[loopwright\] tool edit: ok \(/);
+      assert.match(recovered.stderr, /\[loopwright\] tool edit \(README\.md\): error \(/);
+      assert.match(recovered.stderr, /\[loopwright\] tool edit \(pack\/proposal\.json\): ok \(/);
 
       phase = 'hard_deny';
       llmTurn = 0;
       const denied = await runWithCapture('run-hard-deny');
       assert.notEqual(denied.code, 0, 'expected hard path traversal TOOL_DENIED to fail closed');
-      assert.match(denied.stderr, /\[loopwright\] tool edit: denied \(TOOL_DENIED \/path\) —/);
+      assert.match(denied.stderr, /\[loopwright\] tool edit \(\.\/candidate\/\.\.\/escape\.json\): denied \(TOOL_DENIED \/path\) —/);
       assert.match(denied.stderr, /TOOL_DENIED \(tool \/path\)/);
     } finally {
       await openAiServer?.close();

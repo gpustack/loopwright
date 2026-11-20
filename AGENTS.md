@@ -38,4 +38,4 @@ Preserve lease fencing and monotonic clock guards, secret scrubbing, least privi
 
 ### Testing conventions
 
-Exercise public boundaries, negative paths, limits and uncertainty. Distinguish fixture and local evidence from live provider, host, billing and production qualification.
+Keep tests lean, neutral, and focused on real public boundaries, invariants, negative paths, limits, and uncertainty. Do not add bloated, mock-heavy, text/version-scraping, or change-coupled ad-hoc tests that mirror one-off configuration tweaks. Distinguish fixture and local evidence from live provider, host, billing, and production qualification.

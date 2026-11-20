@@ -92,7 +92,7 @@ export {
 } from './output-format.js';
 export {
   buildNativePullRequestBody, createTurnkeyCycleDelegate, executeTurnkeyActionCycle,
-  isRetryablePerRequestTimeout, makeAttemptRunId,
+  formatHostSessionProgressLog, isRetryablePerRequestTimeout, makeAttemptRunId,
   normalizeControllerRunId, openStagedTaskpackStepGate, stageTaskpackForStep,
   startLocalCommandGateServer, startNativePullRequestPublisherServer,
   type ExecuteTurnkeyActionCycleOptions,

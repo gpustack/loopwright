@@ -30,7 +30,11 @@ interface Slot {
   readonly completion: Promise<void>; complete: () => void;
 }
 interface NativeParent { readonly slot: Slot; readonly identity: ToolIdentity; readonly timer: ReturnType<typeof setTimeout>; readonly nested: Map<string, string> }
-export interface SenderPorts { readonly fetch: typeof globalThis.fetch; readonly catalog?: CatalogIdentity }
+export interface SenderPorts {
+  readonly fetch: typeof globalThis.fetch;
+  readonly catalog?: CatalogIdentity;
+  readonly beforeSend?: (context: { readonly invocation: number; readonly kind: 'execute' | 'compact'; readonly command: PiCommand }) => void;
+}
 const unknown = (): Quantity => ({ provenance: 'unknown' });
 /** One active host command, original permits only, and no native/provider retry authority. */
 export class Sender implements RuntimeBroker {
@@ -105,6 +109,7 @@ export class Sender implements RuntimeBroker {
     const slot = this.#slot(identity.invocation, identity.slot), turn = slot.turn;
     if (slot.claimed || turn.failure || turn.abort.signal.aborted) refuse('REQUEST_REFUSED'); slot.claimed = true;
     try {
+      this.ports.beforeSend?.({ invocation: identity.invocation, kind: turn.kind, command: turn.command });
       const headers = semanticHeaders(identity, this.input.policy.selection), bytes = Buffer.from(input);
       const contextSelection = { modelId: this.input.policy.selection.model, effort: this.input.policy.selection.thinking, tools: this.input.policy.tools, contextWindow: this.#catalog.contextWindow, perCallOutputTokens: this.input.lock.spec.contract.spec.budgets.perCallOutputTokens, provider: this.input.policy.selection.provider, api: this.input.policy.selection.api };
       const assessment = assessFinalRequestContext(bytes, this.input.policy.context, contextSelection);
