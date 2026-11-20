@@ -610,12 +610,13 @@ function applyTaskpackRoleModelOverrides(
     const updatedRoles = declaredRoles.map(role => {
       const override = byId.get(role.id);
       if (override === undefined) return role;
+      const { models: _unusedModels, ...roleBase } = role;
+      void _unusedModels;
       return {
-        ...role,
+        ...roleBase,
         provider: override.provider,
         model: override.model,
         ...(override.thinking !== undefined ? { thinking: override.thinking } : {}),
-        models: undefined,
       };
     });
     return {
@@ -628,6 +629,7 @@ function applyTaskpackRoleModelOverrides(
       },
     };
   }
+  let seenAuthor = false;
   for (const override of overrides) {
     if (override.roleId !== 'author') {
       throw new TaskpackError(
@@ -636,6 +638,14 @@ function applyTaskpackRoleModelOverrides(
         '/roleModelOverrides',
       );
     }
+    if (seenAuthor) {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        'duplicate --role-model override for role "author"',
+        '/roleModelOverrides',
+      );
+    }
+    seenAuthor = true;
   }
   const authorOverride = overrides[0]!;
   return {
