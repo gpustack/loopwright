@@ -102,24 +102,29 @@ describe('macOS Seatbelt SBPL profile compiler (AC-1)', () => {
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
       );
       assert.throws(
-        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.github/workflows'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
+        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.github/workflows'], policyProfile: 'github' } as Parameters<typeof compileMacosSeatbeltProfile>[0], { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
       );
       assert.throws(
-        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
+        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex'], protectedPaths: ['.codex'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
       );
       assert.throws(
-        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex/config.toml'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
+        () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['.codex/config.toml'], protectedPaths: ['.codex'] }, { platform: 'darwin', arch: 'arm64', probeExecutables: false }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_POLICY_INVALID',
       );
-      const codexSeatbelt = compileMacosSeatbeltProfile(
-        { workspaceRoot, writablePaths: ['docs'] },
+      const githubSeatbelt = compileMacosSeatbeltProfile(
+        { workspaceRoot, writablePaths: ['docs'], policyProfile: 'github' } as Parameters<typeof compileMacosSeatbeltProfile>[0],
         { platform: 'darwin', arch: 'arm64', probeExecutables: false },
       );
       assert.ok(
-        codexSeatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, '.codex')),
-        'macOS Seatbelt profile must protect .codex by default',
+        githubSeatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, '.github')),
+        'macOS Seatbelt github profile must protect .github by default',
+      );
+      assert.equal(
+        githubSeatbelt.canonicalProtectedPaths.includes(join(workspaceRoot, '.codex')),
+        false,
+        'macOS Seatbelt profile must not hardcode .codex when omitted from protectedPaths',
       );
       assert.throws(
         () => compileMacosSeatbeltProfile({ workspaceRoot, writablePaths: ['docs'] }, { platform: 'darwin', arch: 'arm64', seatbeltExecutable: '/tmp/fake-sandbox-exec', probeExecutables: false }),
@@ -185,12 +190,13 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
           `missing built-in protected path ${builtIn}`,
         );
       }
-      assert.ok(
+      assert.equal(
         compiled.canonicalProtectedPaths.includes(join(workspaceRoot, '.codex')),
-        'linux-bwrap policy must protect .codex by default',
+        false,
+        'linux-bwrap local policy must not hardcode .codex by default',
       );
 
-      const seccomp = computeSandboxSeccompProfile();
+      const seccomp = computeSandboxSeccompProfile({ blockIpSockets: true });
       assert.equal(compiled.seccompProfileJson, seccomp.json);
       assert.deepEqual(compiled.seccompDigest, seccomp.digest);
       const parsedSeccomp = JSON.parse(seccomp.json) as { defaultAction: string; syscalls: { names: string[]; action: string }[] };
@@ -207,6 +213,7 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
         { env: { GIT_TERMINAL_PROMPT: '1', GIT_CONFIG_GLOBAL: '/tmp/custom' } },
       );
       assert.ok(outbound.args.includes('--share-net'));
+      assert.equal(outbound.seccompProfileJson, computeSandboxSeccompProfile().json);
       const promptIdx = outbound.args.findIndex((arg, idx) => arg === '--setenv' && outbound.args[idx + 1] === 'GIT_TERMINAL_PROMPT');
       assert.ok(promptIdx > 0 && outbound.args[promptIdx + 2] === '0', 'must pin GIT_TERMINAL_PROMPT=0 over caller env');
       const globalIdx = outbound.args.findIndex((arg, idx) => arg === '--setenv' && outbound.args[idx + 1] === 'GIT_CONFIG_GLOBAL');
@@ -380,8 +387,9 @@ describe('real OS kernel sandbox execution (AC-1)', () => {
 
       const policy = {
         workspaceRoot,
+        policyProfile: 'github' as const,
         writablePaths: ['docs'],
-        protectedPaths: ['docs/protected-notes.md'],
+        protectedPaths: ['docs/protected-notes.md', 'AGENTS.md'],
         deniedReadPaths: [secretDir, standaloneSecretFile],
         networkMode: 'none' as const,
         ...(preferredBackends !== undefined ? { preferredBackends } : {}),
@@ -469,12 +477,120 @@ describe('real OS kernel sandbox execution (AC-1)', () => {
     });
   }
 
-  it('enforces allowed workspace writes, blocks outside-workspace writes, blocks protected-path writes, and blocks denied credential reads', { skip: !canRunKernelSandbox }, async () => {
+  const canRunOverlappingProtectedSandbox =
+    (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) ||
+    canRunLinuxBwrap;
+
+  it('enforces allowed workspace writes, blocks outside-workspace writes, blocks protected-path writes, and blocks denied credential reads', { skip: !canRunOverlappingProtectedSandbox }, async () => {
     await verifyKernelSandboxContainment();
   });
 
   it('enforces containment explicitly under linux-landlock on Linux hosts', { skip: !canRunLinuxLandlock }, async () => {
-    await verifyKernelSandboxContainment(['linux-landlock']);
+    await withTempWorkspace(async (workspaceRoot, scratchDir) => {
+      const secretDir = join(scratchDir, 'denied-secrets');
+      await mkdir(secretDir, { recursive: true });
+      const secretFile = join(secretDir, 'id_rsa');
+      await writeFile(secretFile, 'TOP_SECRET_KEY', 'utf8');
+      const standaloneSecretFile = join(scratchDir, 'denied-token.txt');
+      await writeFile(standaloneSecretFile, 'TOP_SECRET_FILE_VALUE', 'utf8');
+
+      const policy = {
+        workspaceRoot,
+        policyProfile: 'github' as const,
+        writablePaths: ['docs'],
+        protectedPaths: ['AGENTS.md'],
+        deniedReadPaths: [secretDir, standaloneSecretFile],
+        networkMode: 'none' as const,
+        preferredBackends: ['linux-landlock'] as const,
+      };
+
+      // 1. Writing docs/allowed.txt and atomic sibling mv docs/tmp.txt docs/allowed.txt succeed.
+      const allowedTarget = join(workspaceRoot, 'docs', 'allowed.txt');
+      const allowedTmp = join(workspaceRoot, 'docs', 'tmp.txt');
+      const allowedRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/sh',
+        args: [
+          '-c',
+          'printf "ok-token-ghs_1234567890abcdefghijklmnop" > "$1" && cat "$1" && printf "atomic-updated" > "$2" && mv "$2" "$1"',
+          'sh',
+          allowedTarget,
+          allowedTmp,
+        ],
+        secretsToScrub: ['custom-secret-value'],
+      });
+      assert.equal(allowedRes.exitCode, 0, allowedRes.stderr);
+      assert.equal(allowedRes.backendId, 'linux-landlock');
+      assert.equal(allowedRes.stdout, 'ok-token-[scrubbed]');
+      assert.equal(await readFile(allowedTarget, 'utf8'), 'atomic-updated');
+      assert.equal(existsSync(allowedTmp), false);
+
+      // 2. Writing outside workspace, AGENTS.md, .git/config, and .github/workflows/ci.yml all fail.
+      const outsideTarget = join(scratchDir, 'escaped.txt');
+      const outsideRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/sh',
+        args: ['-c', 'echo "escaped" > "$1"', 'sh', outsideTarget],
+      });
+      assert.notEqual(outsideRes.exitCode, 0);
+      assert.equal(existsSync(outsideTarget), false);
+
+      const agentsTarget = join(workspaceRoot, 'AGENTS.md');
+      const agentsRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/sh',
+        args: ['-c', 'echo "tampered" > "$1"', 'sh', agentsTarget],
+      });
+      assert.notEqual(agentsRes.exitCode, 0);
+      assert.equal(await readFile(agentsTarget, 'utf8'), '# Agents\n');
+
+      const gitConfigTarget = join(workspaceRoot, '.git', 'config');
+      const gitBefore = await readFile(gitConfigTarget, 'utf8');
+      const gitRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/sh',
+        args: ['-c', 'echo "malicious" >> "$1"', 'sh', gitConfigTarget],
+      });
+      assert.notEqual(gitRes.exitCode, 0);
+      assert.equal(await readFile(gitConfigTarget, 'utf8'), gitBefore);
+
+      const workflowDir = join(workspaceRoot, '.github', 'workflows');
+      const workflowRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/sh',
+        args: ['-c', 'mkdir -p "$1" && echo "pwn" > "$1/ci.yml"', 'sh', workflowDir],
+      });
+      assert.notEqual(workflowRes.exitCode, 0);
+      assert.equal(existsSync(join(workflowDir, 'ci.yml')), false);
+
+      // 3. Reading denied credential directories and standalone secret files fails.
+      const readDeniedRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/cat',
+        args: [secretFile],
+      });
+      assert.notEqual(readDeniedRes.exitCode, 0);
+      assert.equal(readDeniedRes.stdout.includes('TOP_SECRET_KEY'), false);
+
+      const readDeniedFileRes = await executeSandboxedCommand({
+        policy,
+        command: '/bin/cat',
+        args: [standaloneSecretFile],
+      });
+      assert.notEqual(readDeniedFileRes.exitCode, 0);
+      assert.equal(readDeniedFileRes.stdout.includes('TOP_SECRET_FILE_VALUE'), false);
+
+      // 4. Overlapping protectedPaths inside writablePaths declines linux-landlock fail-closed.
+      assert.throws(
+        () => negotiateSandboxBackend({
+          workspaceRoot,
+          writablePaths: ['docs'],
+          protectedPaths: ['docs/protected-notes.md'],
+          preferredBackends: ['linux-landlock'],
+        }),
+        (err: unknown) => err instanceof GitHubAppError && err.code === 'SANDBOX_CAPABILITY_INSUFFICIENT',
+      );
+    });
   });
 
   it('enforces containment explicitly under linux-bwrap when user namespaces are permitted on Linux hosts', { skip: !canRunLinuxBwrap }, async () => {

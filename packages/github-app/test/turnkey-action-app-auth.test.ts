@@ -171,6 +171,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         GITHUB_REPOSITORY: 'gpustack/runner',
         GITHUB_SHA: headSha,
@@ -570,6 +571,7 @@ describe('GitHub App installation auto-discovery, token precedence, and DCO bot 
           const code = await runActionCli({
             PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
             GITHUB_ACTIONS: 'true',
+            RUNNER_ENVIRONMENT: 'github-hosted',
             GITHUB_WORKSPACE: fixture.repo,
             GITHUB_REPOSITORY: 'gpustack/runner',
             GITHUB_SHA: headSha,
@@ -874,6 +876,7 @@ spec:
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: repo,
         GITHUB_REPOSITORY: 'gpustack/runner',
         GITHUB_SHA: headSha,

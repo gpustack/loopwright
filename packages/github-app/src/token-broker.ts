@@ -1,17 +1,19 @@
 import { createPrivateKey, createSign, type KeyObject } from 'node:crypto';
+import { assertCleanArtifact, SecretScrubber } from '@loopwright/taskpack';
 import {
-  DEFAULT_TOKEN_REFRESH_MARGIN_MS, GitHubAppError, INSTALLATION_TOKEN_TTL_LIMIT_MS,
-  type CreateGitHubAppJwtInput, type InstallationTokenPermissions, type InstallationTokenProfile,
-  type InstallationTokenGrant, type InstallationTokenRequest, type InstallationTokenTransport, type TenantIdentity,
+  DEFAULT_TOKEN_REFRESH_MARGIN_MS,
+  GitHubAppError,
+  INSTALLATION_TOKEN_TTL_LIMIT_MS,
+  type CreateGitHubAppJwtInput,
+  type InstallationTokenGrant,
+  type InstallationTokenPermissions,
+  type InstallationTokenProfile,
+  type InstallationTokenRequest,
+  type InstallationTokenTransport,
+  type TenantIdentity,
 } from './types.js';
 
-const GENERIC_SECRET_PATTERNS: readonly RegExp[] = Object.freeze([
-  /ghs_[A-Za-z0-9]{20,}/g,
-  /ghu_[A-Za-z0-9]{20,}/g,
-  /github_pat_[A-Za-z0-9_]{20,}/g,
-  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
-]);
-const MIN_FORM_LENGTH = 8;
+export { assertCleanArtifact, SecretScrubber };
 
 function parsePrivateKey(privateKeyPem: string): KeyObject {
   try {
@@ -50,12 +52,19 @@ export const INSTALLATION_TOKEN_PROFILES: Readonly<Record<InstallationTokenProfi
  * permission outside the two fixed profiles. Wildcard, multi-repository, or broad requests are refused.
  */
 export function assertTokenScope(request: InstallationTokenRequest): void {
-  if (!Array.isArray(request.repositoryIds) || request.repositoryIds.length !== 1
-    || typeof request.repositoryIds[0] !== 'number' || !Number.isSafeInteger(request.repositoryIds[0]) || request.repositoryIds[0] <= 0) {
+  if (
+    !Array.isArray(request.repositoryIds)
+    || request.repositoryIds.length !== 1
+    || typeof request.repositoryIds[0] !== 'number'
+    || !Number.isSafeInteger(request.repositoryIds[0])
+    || request.repositoryIds[0] <= 0
+  ) {
     throw new GitHubAppError('TOKEN_SCOPE_VIOLATION', 'installation tokens must bind exactly one positive repository id');
   }
   const allowed: Readonly<Record<string, readonly string[]>> = {
-    contents: ['read', 'write'], metadata: ['read'], pull_requests: ['write', 'read'],
+    contents: ['read', 'write'],
+    metadata: ['read'],
+    pull_requests: ['write', 'read'],
   };
   for (const [permission, value] of Object.entries(request.permissions)) {
     const accepted = allowed[permission];
@@ -71,62 +80,6 @@ export function assertTokenScope(request: InstallationTokenRequest): void {
   }
   if (request.permissions['contents'] === 'write' && request.permissions['pull_requests'] !== 'write') {
     throw new GitHubAppError('TOKEN_SCOPE_VIOLATION', 'contents write is only valid with the publish_pull_request profile');
-  }
-}
-
-/** Tracks credential material in raw, JSON-escaped, URL-encoded, and base64 forms and scrubs every form. */
-export class SecretScrubber {
-  readonly #forms = new Set<string>();
-  readonly #rawSecrets = new Set<string>();
-
-  register(secret: string): void {
-    if (typeof secret !== 'string' || secret.length === 0) return;
-    if (secret.trim().length >= 4) {
-      this.#rawSecrets.add(secret);
-    }
-    const forms = [
-      secret,
-      JSON.stringify(secret).slice(1, -1),
-      encodeURIComponent(secret),
-      Buffer.from(secret, 'utf8').toString('base64'),
-    ];
-    for (const form of forms) {
-      if (form.length >= MIN_FORM_LENGTH) this.#forms.add(form);
-    }
-  }
-
-  /** Registered secret values and derived encoded forms for redaction verification gates. */
-  get secretValues(): readonly string[] {
-    return Object.freeze([...new Set([...this.#rawSecrets, ...this.#forms])]);
-  }
-
-  /** Replace every tracked credential form and generic token pattern with `[scrubbed]`. */
-  scrub(text: string): string {
-    let output = text;
-    for (const form of this.#forms) {
-      output = output.split(form).join('[scrubbed]');
-    }
-    for (const pattern of GENERIC_SECRET_PATTERNS) {
-      output = output.replace(new RegExp(pattern.source, 'g'), '[scrubbed]');
-    }
-    return output;
-  }
-
-  /** Throw `TOKEN_SECRET_LEAK_DETECTED` when any tracked form or generic pattern appears in a value. */
-  assertClean(value: string | Uint8Array | object, path = '/artifact'): void {
-    const serialized = value instanceof Uint8Array
-      ? Buffer.from(value).toString('utf8')
-      : typeof value === 'string' ? value : JSON.stringify(value);
-    for (const form of this.#forms) {
-      if (form.length >= MIN_FORM_LENGTH && serialized.includes(form)) {
-        throw new GitHubAppError('TOKEN_SECRET_LEAK_DETECTED', `artifact contains tracked credential material at ${path}`);
-      }
-    }
-    for (const pattern of GENERIC_SECRET_PATTERNS) {
-      if (new RegExp(pattern.source).test(serialized)) {
-        throw new GitHubAppError('TOKEN_SECRET_LEAK_DETECTED', `artifact contains a credential-shaped token at ${path}`);
-      }
-    }
   }
 }
 
@@ -189,8 +142,14 @@ export class InstallationTokenBroker {
     if (profile !== 'read_only' && profile !== 'publish_pull_request') {
       throw new GitHubAppError('TOKEN_SCOPE_VIOLATION', `unsupported token profile ${String(profile)}`);
     }
-    if (typeof tenant.repositoryId !== 'number' || !Number.isSafeInteger(tenant.repositoryId) || tenant.repositoryId <= 0
-      || typeof tenant.installationId !== 'number' || !Number.isSafeInteger(tenant.installationId) || tenant.installationId <= 0) {
+    if (
+      typeof tenant.repositoryId !== 'number'
+      || !Number.isSafeInteger(tenant.repositoryId)
+      || tenant.repositoryId <= 0
+      || typeof tenant.installationId !== 'number'
+      || !Number.isSafeInteger(tenant.installationId)
+      || tenant.installationId <= 0
+    ) {
       throw new GitHubAppError('TOKEN_SCOPE_VIOLATION', 'mint requires a tenant with positive installation and repository ids');
     }
     const nowMs = this.#nowSeconds() * 1000;
@@ -264,15 +223,6 @@ export class InstallationTokenBroker {
   assertCleanArtifact(value: string | Uint8Array | object, path?: string): void {
     this.#scrubber.assertClean(value, path);
   }
-}
-
-/** Stand-alone leak check against generic credential patterns plus an optional scrubber's tracked forms. */
-export function assertCleanArtifact(value: string | Uint8Array | object, scrubber?: SecretScrubber, path = '/artifact'): void {
-  if (scrubber === undefined) {
-    new SecretScrubber().assertClean(value, path);
-    return;
-  }
-  scrubber.assertClean(value, path);
 }
 
 export interface GitHubRestTokenTransportOptions {

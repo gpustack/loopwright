@@ -155,6 +155,7 @@ export function gitHubAppExitCode(code: GitHubAppErrorCode): number {
     case 'TASKPACK_UNTRUSTED_INTERPOLATION':
     case 'TASKPACK_SCOPE_VIOLATION':
     case 'TASKPACK_HOST_BINDING_INVALID':
+    case 'TASKPACK_TRIGGER_UNSUPPORTED':
     case 'SANDBOX_POLICY_INVALID':
     case 'GITHUB_APP_CONFIG_INVALID':
     case 'TOKEN_BROKER_CONFIG_INVALID':

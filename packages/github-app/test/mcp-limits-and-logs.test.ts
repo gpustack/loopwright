@@ -727,6 +727,7 @@ spec:
         exitCode = await runActionCli({
           PATH: `${binDir}${delimiter}${process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'}`,
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           GITHUB_WORKSPACE: repo,
           LOOPWRIGHT_REPOSITORY: 'acme/runner',
           GITHUB_SHA: headSha,
@@ -1178,6 +1179,7 @@ spec:
         exitCode = await runActionCli({
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           GITHUB_WORKSPACE: repo,
           LOOPWRIGHT_REPOSITORY: 'gpustack/runner',
           GITHUB_SHA: headSha,
@@ -1353,6 +1355,7 @@ spec:
           const code = await runActionCli({
             PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
             GITHUB_ACTIONS: 'true',
+            RUNNER_ENVIRONMENT: 'github-hosted',
             GITHUB_WORKSPACE: repo,
             LOOPWRIGHT_REPOSITORY: 'gpustack/runner',
             GITHUB_SHA: headSha,

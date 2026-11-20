@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { constants as fsConstants, existsSync } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink } from 'node:fs/promises';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
+import { chmod, link, lstat, mkdir, mkdtemp, open, opendir, readdir, readFile, realpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { tmpdir } from 'node:os';
+import { createServer as createNetServer, type Socket } from 'node:net';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
@@ -61,6 +62,14 @@ import {
   type RunTaskpackPreflightResult,
 } from './preflight.js';
 import { IDENTIFIER_PATTERN, normalizeRelativePath } from './schema.js';
+import {
+  compileLinuxSeccompBpfBinary,
+  DEFAULT_DENIED_HOME_SUBPATHS,
+  LANDLOCK_BOOTSTRAP_SCRIPT,
+  LANDLOCK_HOST_PROBE_SCRIPT,
+  TRUSTED_BWRAP_PATHS,
+  TRUSTED_PYTHON_PATHS,
+} from './sandbox.js';
 import { assertCleanArtifact, SecretScrubber } from './scrubber.js';
 import {
   buildDefaultAuthorPrompt,
@@ -87,6 +96,7 @@ import {
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
   type PolicyProfile,
+  type SandboxNetworkMode,
   type TaskpackUpstreamRecord,
   type TurnkeyMemorySummary,
   type WrittenCompiledTaskpack,
@@ -136,16 +146,6 @@ const DEFAULT_COPY_TREE_MAX_FILES = 32_768;
 const DEFAULT_COPY_TREE_MAX_BYTES = 1_073_741_824;
 const GIT_OBJECTS_MAX_FILES = 65_536;
 const GIT_OBJECTS_MAX_BYTES = 4 * 1024 * 1024 * 1024;
-
-const REFLINK_FALLBACK_CODES: ReadonlySet<string> = new Set([
-  'ENOTSUP',
-  'EOPNOTSUPP',
-  'EXDEV',
-  'EINVAL',
-  'ENOSYS',
-  'EACCES',
-  'EPERM',
-]);
 
 const FORBIDDEN_CHILD_ENV_NAMES: ReadonlySet<string> = new Set([
   'GH_TOKEN',
@@ -202,11 +202,6 @@ type ControllerOpenAdapter = NonNullable<ControllerPorts['openAdapter']>;
 type OpenAdapterHost = Parameters<ControllerOpenAdapter>[0];
 type OpenAdapterInput = Parameters<ControllerOpenAdapter>[1];
 
-function isReflinkFallbackError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException | null)?.code;
-  return typeof code === 'string' && REFLINK_FALLBACK_CODES.has(code);
-}
-
 function stripUndefinedFields(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stripUndefinedFields);
   if (value !== null && typeof value === 'object') {
@@ -241,6 +236,8 @@ export function truncateCodePoints(text: string, maxCodePoints: number): string 
   return chars.length <= maxCodePoints ? text : chars.slice(0, maxCodePoints).join('');
 }
 
+const ALLOWED_CHILD_RUNNER_ENV_NAMES: ReadonlySet<string> = new Set(['RUNNER_ENVIRONMENT']);
+
 function isForbiddenChildEnvName(key: string, forbiddenEnvNames?: ReadonlySet<string>): boolean {
   if (FORBIDDEN_CHILD_ENV_NAMES.has(key) || forbiddenEnvNames?.has(key) === true) return true;
   const poolMatch = /^(.+)_([1-9]|1[0-6])$/.exec(key);
@@ -250,6 +247,7 @@ function isForbiddenChildEnvName(key: string, forbiddenEnvNames?: ReadonlySet<st
   ) {
     return true;
   }
+  if (ALLOWED_CHILD_RUNNER_ENV_NAMES.has(key)) return false;
   for (const prefix of FORBIDDEN_CHILD_ENV_PREFIXES) {
     if (key.startsWith(prefix)) return true;
   }
@@ -558,19 +556,45 @@ export async function inspectAndVerifyCandidate(
 }
 
 export async function makeTreeReadOnly(rootDir: string): Promise<void> {
+  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   const entries = await readdir(rootDir, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     const childPath = join(rootDir, entry.name);
     const st = await lstat(childPath).catch(() => null);
-    if (st === null || st.isSymbolicLink()) continue;
+    if (st === null) continue;
+    if (st.isSymbolicLink()) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symlink "${childPath}" is forbidden inside read-only tree`);
+    }
     if (st.isDirectory()) {
       await makeTreeReadOnly(childPath);
     } else if (st.isFile()) {
-      const mode = (st.mode & 0o111) !== 0 ? 0o555 : 0o444;
-      await chmod(childPath, mode);
+      if (st.nlink !== 1 || (currentUid !== undefined && st.uid !== currentUid)) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `hardlinked or unowned file "${childPath}" is forbidden inside read-only tree`);
+      }
+      const fh = await open(childPath, fsConstants.O_RDONLY | noFollow);
+      try {
+        const fst = await fh.stat();
+        if (!fst.isFile() || fst.isSymbolicLink() || fst.nlink !== 1 || (currentUid !== undefined && fst.uid !== currentUid)) {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `file "${childPath}" failed O_NOFOLLOW check before fchmod`);
+        }
+        const mode = (fst.mode & 0o111) !== 0 ? 0o555 : 0o444;
+        await fh.chmod(mode);
+      } finally {
+        await fh.close();
+      }
     }
   }
-  await chmod(rootDir, 0o555);
+  const dirFh = await open(rootDir, fsConstants.O_RDONLY | noFollow);
+  try {
+    const dirSt = await dirFh.stat();
+    if (dirSt.isSymbolicLink() || !dirSt.isDirectory() || (currentUid !== undefined && dirSt.uid !== currentUid)) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `directory "${rootDir}" failed O_NOFOLLOW check before fchmod`);
+    }
+    await dirFh.chmod(0o555);
+  } finally {
+    await dirFh.close();
+  }
 }
 
 export async function makeTreeWritableForCleanup(rootDir: string): Promise<void> {
@@ -590,61 +614,121 @@ export async function makeTreeWritableForCleanup(rootDir: string): Promise<void>
   }
 }
 
-async function copySingleRegularFileReadOnly(
+export async function copySingleRegularFileReadOnly(
   srcPath: string,
   destPath: string,
   expectedSize: number,
   execBit: boolean,
-  disableReflink: boolean,
+  _disableReflink: boolean,
+  expectedParentId?: { readonly dev: number; readonly ino: number } | undefined,
 ): Promise<number> {
   const targetMode = execBit ? 0o555 : 0o444;
   const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
-  const canTryReflink = !disableReflink && typeof fsConstants.COPYFILE_FICLONE === 'number' && fsConstants.COPYFILE_FICLONE !== 0;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
 
-  if (canTryReflink) {
-    let reflinked = false;
-    try {
-      await copyFile(srcPath, destPath, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
-      reflinked = true;
-    } catch (error) {
-      await unlink(destPath).catch(() => undefined);
-      if (!isReflinkFallbackError(error)) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new TaskpackError('ACTION_INPUT_INVALID', `failed to copy mounted file "${srcPath}": ${detail}`);
-      }
+  let srcHandle: FileHandle;
+  try {
+    srcHandle = await open(srcPath, fsConstants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ELOOP' || code === 'EMLINK') {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symlink "${srcPath}" is forbidden during read-only file copy`);
     }
-    if (reflinked) {
-      await chmod(destPath, targetMode);
-      const destStat = await lstat(destPath);
-      if (destStat.isSymbolicLink() || !destStat.isFile() || destStat.nlink !== 1 || destStat.size !== expectedSize) {
-        await unlink(destPath).catch(() => undefined);
-        throw new TaskpackError('ACTION_INPUT_INVALID', `mounted file "${srcPath}" failed post-reflink nlink/size check`);
-      }
-      return expectedSize;
-    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new TaskpackError('ACTION_INPUT_INVALID', `failed to open mounted file "${srcPath}": ${detail}`);
   }
 
-  const srcHandle = await open(srcPath, fsConstants.O_RDONLY | noFollow);
-  let destHandle;
+  const destParentDir = dirname(destPath);
+  let parentFh: FileHandle | undefined;
+  let tmpDestPath: string | null = null;
+  let createdTmp = false;
+  let tmpHandle: FileHandle | undefined;
+  let finalHandle: FileHandle | undefined;
   try {
-    const fstat = await srcHandle.stat();
-    if (!fstat.isFile() || fstat.size !== expectedSize) {
-      throw new TaskpackError('ACTION_INPUT_INVALID', `mounted file "${srcPath}" changed during read`);
+    try {
+      parentFh = await open(destParentDir, fsConstants.O_RDONLY | noFollow);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ELOOP' || code === 'ENOTDIR') {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentDir}" failed O_NOFOLLOW check`);
+      }
+      throw error;
     }
-    destHandle = await open(
-      destPath,
-      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
+    const parentSt = await parentFh.stat();
+    if (parentSt.isSymbolicLink() || !parentSt.isDirectory() || (currentUid !== undefined && parentSt.uid !== currentUid)) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentDir}" failed O_NOFOLLOW ownership check`);
+    }
+    if (expectedParentId !== undefined && (parentSt.dev !== expectedParentId.dev || parentSt.ino !== expectedParentId.ino)) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentDir}" did not match expected directory identity`);
+    }
+    const beforeParentLstat = await lstat(destParentDir);
+    if (
+      beforeParentLstat.isSymbolicLink()
+      || !beforeParentLstat.isDirectory()
+      || beforeParentLstat.dev !== parentSt.dev
+      || beforeParentLstat.ino !== parentSt.ino
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentDir}" changed identity before copy`);
+    }
+
+    let existingDest: Stats | null = null;
+    try {
+      existingDest = await lstat(destPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+    if (existingDest !== null) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `destination file "${destPath}" already exists`);
+    }
+
+    const srcBefore = await srcHandle.stat();
+    if (
+      !srcBefore.isFile()
+      || srcBefore.isSymbolicLink()
+      || srcBefore.nlink !== 1
+      || srcBefore.size !== expectedSize
+    ) {
+      throw new TaskpackError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `mounted file "${srcPath}" failed regular single-link/size check (nlink=${srcBefore.nlink}, size=${srcBefore.size})`,
+      );
+    }
+
+    const streamTmpPath = join(destParentDir, `.lw-stage-${randomBytes(12).toString('hex')}`);
+    tmpHandle = await open(
+      streamTmpPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR | noFollow,
       0o600,
     );
+    tmpDestPath = streamTmpPath;
+    createdTmp = true;
+
+    const createdStat = await tmpHandle.stat();
+    if (
+      !createdStat.isFile()
+      || createdStat.isSymbolicLink()
+      || createdStat.nlink !== 1
+      || (currentUid !== undefined && createdStat.uid !== currentUid)
+      || createdStat.ino === srcBefore.ino
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${destPath}" failed temp identity/nlink/ownership check`);
+    }
+
+    const srcHash = createHash('sha256');
     const chunk = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, expectedSize)));
+    const probe = Buffer.allocUnsafe(1);
     let offset = 0;
     while (offset < expectedSize) {
       const toRead = Math.min(chunk.byteLength, expectedSize - offset);
       const { bytesRead } = await srcHandle.read(chunk, 0, toRead, offset);
       if (bytesRead <= 0) break;
+      const slice = chunk.subarray(0, bytesRead);
+      srcHash.update(slice);
       let written = 0;
       while (written < bytesRead) {
-        const { bytesWritten } = await destHandle.write(chunk, written, bytesRead - written);
+        const { bytesWritten } = await tmpHandle.write(slice, written, bytesRead - written, offset + written);
         if (bytesWritten <= 0) {
           throw new TaskpackError('ACTION_INPUT_INVALID', `short write copying mounted file "${srcPath}"`);
         }
@@ -652,33 +736,124 @@ async function copySingleRegularFileReadOnly(
       }
       offset += bytesRead;
     }
-    const probe = Buffer.allocUnsafe(1);
+    const srcSha256 = srcHash.digest('hex');
     const { bytesRead: extraRead } = await srcHandle.read(probe, 0, 1, offset);
-    const afterStat = await srcHandle.stat();
+    const srcAfter = await srcHandle.stat();
     if (
       offset !== expectedSize
       || extraRead !== 0
-      || afterStat.size !== fstat.size
-      || afterStat.mtimeMs !== fstat.mtimeMs
-      || afterStat.ctimeMs !== fstat.ctimeMs
+      || srcAfter.dev !== srcBefore.dev
+      || srcAfter.ino !== srcBefore.ino
+      || srcAfter.nlink !== 1
+      || srcAfter.size !== expectedSize
+      || srcAfter.mtimeMs !== srcBefore.mtimeMs
+      || srcAfter.ctimeMs !== srcBefore.ctimeMs
     ) {
-      throw new TaskpackError('ACTION_INPUT_INVALID', `mounted file "${srcPath}" changed during stream copy`);
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${srcPath}" changed during stream copy`);
     }
-    await destHandle.chmod(targetMode);
-    await destHandle.close();
-    destHandle = undefined;
-    const destStat = await lstat(destPath);
-    if (destStat.isSymbolicLink() || !destStat.isFile() || destStat.nlink !== 1 || destStat.size !== expectedSize) {
-      throw new TaskpackError('ACTION_INPUT_INVALID', `mounted file "${destPath}" failed nlink/size verification`);
+
+    await tmpHandle.sync();
+    const destHash = createHash('sha256');
+    let destOffset = 0;
+    while (destOffset < expectedSize) {
+      const toRead = Math.min(chunk.byteLength, expectedSize - destOffset);
+      const { bytesRead } = await tmpHandle.read(chunk, 0, toRead, destOffset);
+      if (bytesRead <= 0) break;
+      destHash.update(chunk.subarray(0, bytesRead));
+      destOffset += bytesRead;
+    }
+    const { bytesRead: destExtra } = await tmpHandle.read(probe, 0, 1, destOffset);
+    const verifiedTmpStat = await tmpHandle.stat();
+    const srcAfterVerify = await srcHandle.stat();
+    const destSha256 = destHash.digest('hex');
+    if (
+      destOffset !== expectedSize
+      || destExtra !== 0
+      || verifiedTmpStat.dev !== createdStat.dev
+      || verifiedTmpStat.ino !== createdStat.ino
+      || verifiedTmpStat.nlink !== 1
+      || (currentUid !== undefined && verifiedTmpStat.uid !== currentUid)
+      || verifiedTmpStat.size !== expectedSize
+      || srcAfterVerify.dev !== srcBefore.dev
+      || srcAfterVerify.ino !== srcBefore.ino
+      || srcAfterVerify.nlink !== 1
+      || srcAfterVerify.size !== expectedSize
+      || srcAfterVerify.mtimeMs !== srcBefore.mtimeMs
+      || srcAfterVerify.ctimeMs !== srcBefore.ctimeMs
+      || destSha256 !== srcSha256
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${destPath}" failed post-stream sha256/stability verification`);
+    }
+
+    await tmpHandle.chmod(targetMode);
+    await tmpHandle.sync();
+    const sealedStat = await tmpHandle.stat();
+    if (
+      !sealedStat.isFile()
+      || sealedStat.isSymbolicLink()
+      || sealedStat.nlink !== 1
+      || (currentUid !== undefined && sealedStat.uid !== currentUid)
+      || sealedStat.dev !== createdStat.dev
+      || sealedStat.ino !== createdStat.ino
+      || sealedStat.size !== expectedSize
+      || (sealedStat.mode & 0o777) !== targetMode
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${destPath}" failed post-fchmod verification`);
+    }
+
+    await link(streamTmpPath, destPath);
+    await unlink(streamTmpPath);
+    createdTmp = false;
+    tmpDestPath = null;
+
+    const afterParentLstat = await lstat(destParentDir);
+    if (
+      afterParentLstat.isSymbolicLink()
+      || !afterParentLstat.isDirectory()
+      || afterParentLstat.dev !== parentSt.dev
+      || afterParentLstat.ino !== parentSt.ino
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentDir}" changed identity during copy`);
+    }
+
+    finalHandle = await open(destPath, fsConstants.O_RDONLY | noFollow);
+    const destStat = await finalHandle.stat();
+    const tmpAfterPublishStat = await tmpHandle.stat();
+    await finalHandle.close();
+    finalHandle = undefined;
+    await tmpHandle.close();
+    tmpHandle = undefined;
+    if (
+      destStat.isSymbolicLink()
+      || !destStat.isFile()
+      || destStat.nlink !== 1
+      || tmpAfterPublishStat.nlink !== 1
+      || tmpAfterPublishStat.dev !== createdStat.dev
+      || tmpAfterPublishStat.ino !== createdStat.ino
+      || (currentUid !== undefined && destStat.uid !== currentUid)
+      || destStat.dev !== createdStat.dev
+      || destStat.ino !== createdStat.ino
+      || destStat.size !== expectedSize
+      || (destStat.mode & 0o777) !== targetMode
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${destPath}" failed post-publish nlink/size verification`);
     }
     return offset;
   } catch (error) {
-    if (destHandle !== undefined) {
-      await destHandle.close().catch(() => undefined);
+    if (finalHandle !== undefined) {
+      await finalHandle.close().catch(() => undefined);
     }
-    await unlink(destPath).catch(() => undefined);
+    if (tmpHandle !== undefined) {
+      await tmpHandle.close().catch(() => undefined);
+    }
+    if (createdTmp && tmpDestPath !== null) {
+      await unlink(tmpDestPath).catch(() => undefined);
+    }
     throw error;
   } finally {
+    if (parentFh !== undefined) {
+      await parentFh.close().catch(() => undefined);
+    }
     await srcHandle.close().catch(() => undefined);
   }
 }
@@ -688,58 +863,407 @@ export async function copyDirectoryTreeReadOnly(
   destDir: string,
   options?: {
     readonly maxFiles?: number | undefined;
+    readonly maxEntries?: number | undefined;
     readonly maxTotalBytes?: number | undefined;
+    readonly includeTopLevelLower?: ReadonlySet<string> | undefined;
     readonly excludeTopLevelLower?: ReadonlySet<string> | undefined;
+    readonly excludeAnyDepthLower?: ReadonlySet<string> | undefined;
     readonly skipFinalChmod?: boolean | undefined;
     readonly disableReflink?: boolean | undefined;
   },
 ): Promise<void> {
   const maxFiles = options?.maxFiles ?? DEFAULT_COPY_TREE_MAX_FILES;
+  const maxEntries = options?.maxEntries
+    ?? (options?.maxFiles !== undefined ? Math.max(options.maxFiles * 2, 16) : DEFAULT_COPY_TREE_MAX_FILES * 2);
+  if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', 'maxEntries must be a positive integer');
+  }
   const maxTotalBytes = options?.maxTotalBytes ?? DEFAULT_COPY_TREE_MAX_BYTES;
+  const includeTopLevelLower = options?.includeTopLevelLower;
   const excludeTopLevelLower = options?.excludeTopLevelLower;
+  const excludeAnyDepthLower = options?.excludeAnyDepthLower;
+  const skipFinalChmod = options?.skipFinalChmod === true;
   const disableReflink = options?.disableReflink === true;
+  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   let copiedFiles = 0;
   let copiedBytes = 0;
+  let visitedEntries = 0;
 
-  const walk = async (curSrc: string, curDest: string, depth: number): Promise<void> => {
+  const ensureValidAncestorDirectory = async (ancestorDir: string): Promise<void> => {
+    let st: Stats | null;
+    try {
+      st = await lstat(ancestorDir);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ENOENT') {
+        st = null;
+      } else if (code === 'ELOOP' || code === 'ENOTDIR') {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination path "${ancestorDir}" traverses a symlink or non-directory`);
+      } else {
+        throw error;
+      }
+    }
+    if (st === null) {
+      await mkdir(ancestorDir, { mode: 0o700 });
+      const fh = await open(ancestorDir, fsConstants.O_RDONLY | noFollow);
+      try {
+        const createdSt = await fh.stat();
+        if (createdSt.isSymbolicLink() || !createdSt.isDirectory() || (currentUid !== undefined && createdSt.uid !== currentUid)) {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `created destination ancestor "${ancestorDir}" failed O_NOFOLLOW verification`);
+        }
+      } finally {
+        await fh.close();
+      }
+      return;
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination ancestor "${ancestorDir}" must be a non-symlink directory`);
+    }
+  };
+
+  const resolvedDestRoot = resolve(destDir);
+  if (resolvedDestRoot === sep) {
+    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', 'copyDirectoryTreeReadOnly refuses root directory destination');
+  }
+  const destSegments = resolvedDestRoot.split(sep).filter(Boolean);
+  let destParentPath: string;
+  let canonDestRoot: string;
+  if (destSegments.length === 1) {
+    destParentPath = sep;
+    canonDestRoot = `${sep}${destSegments[0]!}`;
+  } else {
+    const firstSegPath = `${sep}${destSegments[0]!}`;
+    const firstSt = await lstat(firstSegPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    let cursor: string;
+    if (firstSt === null) {
+      cursor = firstSegPath;
+      await ensureValidAncestorDirectory(cursor);
+    } else if (firstSt.isSymbolicLink()) {
+      cursor = await realpath(firstSegPath);
+      const realTopSt = await lstat(cursor);
+      if (realTopSt.isSymbolicLink() || !realTopSt.isDirectory()) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination root ancestor "${firstSegPath}" is not a directory`);
+      }
+    } else if (firstSt.isDirectory()) {
+      cursor = firstSegPath;
+    } else {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination root ancestor "${firstSegPath}" is not a directory`);
+    }
+    for (let i = 1; i < destSegments.length - 1; i += 1) {
+      cursor = join(cursor, destSegments[i]!);
+      await ensureValidAncestorDirectory(cursor);
+    }
+    destParentPath = cursor;
+    canonDestRoot = join(destParentPath, destSegments[destSegments.length - 1]!);
+  }
+
+  let existingDestRootSt: Stats | null;
+  try {
+    existingDestRootSt = await lstat(canonDestRoot);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === 'ENOENT') {
+      existingDestRootSt = null;
+    } else if (code === 'ELOOP' || code === 'ENOTDIR') {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination "${canonDestRoot}" traverses a symlink or non-directory`);
+    } else {
+      throw error;
+    }
+  }
+  if (existingDestRootSt !== null && (existingDestRootSt.isSymbolicLink() || !existingDestRootSt.isDirectory())) {
+    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination "${canonDestRoot}" must be a non-symlink directory`);
+  }
+
+  const assertDirLstatMatches = async (
+    dirPath: string,
+    expectedId: { readonly dev: number; readonly ino: number },
+  ): Promise<void> => {
+    const curSt = await lstat(dirPath);
+    if (
+      curSt.isSymbolicLink()
+      || !curSt.isDirectory()
+      || curSt.dev !== expectedId.dev
+      || curSt.ino !== expectedId.ino
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination directory "${dirPath}" changed identity during copy`);
+    }
+  };
+
+  const enumerateFilteredSortedNames = async (curSrc: string, depth: number): Promise<readonly string[]> => {
+    const dir = await opendir(curSrc);
+    const names: string[] = [];
+    let rawCount = 0;
+    const rawLimit = Math.max(maxEntries * 4, 4_096);
+    for await (const dirent of dir) {
+      rawCount += 1;
+      if (rawCount > rawLimit) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds entry cap');
+      }
+      const lowerName = dirent.name.toLowerCase();
+      if (depth === 0 && includeTopLevelLower !== undefined && !includeTopLevelLower.has(lowerName)) {
+        continue;
+      }
+      if (depth === 0 && excludeTopLevelLower?.has(lowerName) === true) {
+        continue;
+      }
+      if (excludeAnyDepthLower?.has(lowerName) === true) {
+        continue;
+      }
+      names.push(dirent.name);
+      if (names.length > maxEntries - visitedEntries + 64) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds entry cap');
+      }
+    }
+    names.sort();
+    return names;
+  };
+
+  const walkHeldTree = async (
+    curSrc: string,
+    curDest: string,
+    depth: number,
+    sealSelfAtEnd: boolean,
+    preOpenedFh?: FileHandle | undefined,
+    preExpectedId?: { readonly dev: number; readonly ino: number } | undefined,
+  ): Promise<void> => {
     if (depth > 32) {
       throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds maximum depth 32');
+    }
+    visitedEntries += 1;
+    if (visitedEntries > maxEntries) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds entry cap');
     }
     const srcStat = await lstat(curSrc);
     if (srcStat.isSymbolicLink() || !srcStat.isDirectory()) {
       throw new TaskpackError('ACTION_INPUT_INVALID', `mounted directory "${curSrc}" must be a non-symlink directory`);
     }
-    await mkdir(curDest, { recursive: true, mode: 0o700 });
-    const names = (await readdir(curSrc)).sort();
-    for (const name of names) {
-      if (depth === 0 && excludeTopLevelLower?.has(name.toLowerCase()) === true) {
-        continue;
-      }
-      const childSrc = join(curSrc, name);
-      const childDest = join(curDest, name);
-      const st = await lstat(childSrc);
-      if (st.isSymbolicLink()) {
-        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symlink "${childSrc}" is forbidden inside mounted directory`);
-      }
-      if (st.isDirectory()) {
-        await walk(childSrc, childDest, depth + 1);
-      } else if (st.isFile()) {
-        copiedFiles += 1;
-        if (copiedFiles > maxFiles || copiedBytes + st.size > maxTotalBytes) {
-          throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds file or byte cap');
+
+    let curDestFh: FileHandle;
+    let shouldCloseCurDestFh = false;
+    let wasCreated = false;
+    let expectedDirId: { readonly dev: number; readonly ino: number };
+    if (preOpenedFh !== undefined && preExpectedId !== undefined) {
+      curDestFh = preOpenedFh;
+      expectedDirId = preExpectedId;
+    } else {
+      let existingSt: Stats | null;
+      try {
+        existingSt = await lstat(curDest);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT') {
+          existingSt = null;
+        } else if (code === 'ELOOP' || code === 'ENOTDIR') {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination path "${curDest}" traverses a symlink or non-directory`);
+        } else {
+          throw error;
         }
-        const execBit = (st.mode & 0o111) !== 0;
-        const written = await copySingleRegularFileReadOnly(childSrc, childDest, st.size, execBit, disableReflink);
-        copiedBytes += written;
+      }
+      if (existingSt === null) {
+        await mkdir(curDest, { mode: 0o700 });
+        wasCreated = true;
+      } else if (existingSt.isSymbolicLink() || !existingSt.isDirectory()) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination "${curDest}" must be a non-symlink directory`);
+      }
+      curDestFh = await open(curDest, fsConstants.O_RDONLY | noFollow);
+      shouldCloseCurDestFh = true;
+      const openedSt = await curDestFh.stat();
+      if (
+        openedSt.isSymbolicLink()
+        || !openedSt.isDirectory()
+        || (existingSt !== null && (openedSt.dev !== existingSt.dev || openedSt.ino !== existingSt.ino))
+        || (currentUid !== undefined && openedSt.uid !== currentUid)
+      ) {
+        await curDestFh.close().catch(() => undefined);
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination directory "${curDest}" failed O_NOFOLLOW ownership/identity check`);
+      }
+      expectedDirId = Object.freeze({ dev: openedSt.dev, ino: openedSt.ino });
+    }
+
+    try {
+      const names = await enumerateFilteredSortedNames(curSrc, depth);
+      for (const name of names) {
+        const childSrc = join(curSrc, name);
+        const childDest = join(curDest, name);
+        const st = await lstat(childSrc);
+        if (st.isSymbolicLink()) {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symlink "${childSrc}" is forbidden inside mounted directory`);
+        }
+        await assertDirLstatMatches(curDest, expectedDirId);
+        if (st.isDirectory()) {
+          await walkHeldTree(childSrc, childDest, depth + 1, !skipFinalChmod);
+          await assertDirLstatMatches(curDest, expectedDirId);
+        } else if (st.isFile()) {
+          visitedEntries += 1;
+          if (visitedEntries > maxEntries) {
+            throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds entry cap');
+          }
+          copiedFiles += 1;
+          if (copiedFiles > maxFiles || copiedBytes + st.size > maxTotalBytes) {
+            throw new TaskpackError('ACTION_INPUT_INVALID', 'mounted directory exceeds file or byte cap');
+          }
+          const execBit = (st.mode & 0o111) !== 0;
+          const written = await copySingleRegularFileReadOnly(
+            childSrc,
+            childDest,
+            st.size,
+            execBit,
+            disableReflink,
+            expectedDirId,
+          );
+          copiedBytes += written;
+          await assertDirLstatMatches(curDest, expectedDirId);
+        }
+      }
+      if (sealSelfAtEnd && wasCreated && !skipFinalChmod) {
+        const endSt = await curDestFh.stat();
+        if (
+          endSt.isSymbolicLink()
+          || !endSt.isDirectory()
+          || endSt.dev !== expectedDirId.dev
+          || endSt.ino !== expectedDirId.ino
+          || (currentUid !== undefined && endSt.uid !== currentUid)
+        ) {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination directory "${curDest}" failed O_NOFOLLOW identity check before fchmod`);
+        }
+        await curDestFh.chmod(0o555);
+      }
+    } finally {
+      if (shouldCloseCurDestFh) {
+        await curDestFh.close().catch(() => undefined);
       }
     }
   };
 
-  await walk(srcDir, destDir, 0);
-  if (options?.skipFinalChmod !== true) {
-    await makeTreeReadOnly(destDir);
+  if (existingDestRootSt === null) {
+    const destParentFh = await open(destParentPath, fsConstants.O_RDONLY | noFollow);
+    const stageRoot = join(destParentPath, `.lw-tree-${randomBytes(12).toString('hex')}`);
+    let stageCreated = false;
+    let stagePublished = false;
+    let stageRootFh: FileHandle | undefined;
+    try {
+      const destParentSt = await destParentFh.stat();
+      if (
+        destParentSt.isSymbolicLink()
+        || !destParentSt.isDirectory()
+        || (currentUid !== undefined && destParentSt.uid !== currentUid && destParentSt.uid !== 0)
+      ) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination parent "${destParentPath}" failed O_NOFOLLOW ownership check`);
+      }
+      await mkdir(stageRoot, { mode: 0o700 });
+      stageCreated = true;
+      stageRootFh = await open(stageRoot, fsConstants.O_RDONLY | noFollow);
+      const stageRootSt = await stageRootFh.stat();
+      if (
+        stageRootSt.isSymbolicLink()
+        || !stageRootSt.isDirectory()
+        || (currentUid !== undefined && stageRootSt.uid !== currentUid)
+      ) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `staging directory "${stageRoot}" failed O_NOFOLLOW verification`);
+      }
+      const stageRootId = Object.freeze({ dev: stageRootSt.dev, ino: stageRootSt.ino });
+
+      await walkHeldTree(srcDir, stageRoot, 0, false, stageRootFh, stageRootId);
+
+      await assertDirLstatMatches(destParentPath, { dev: destParentSt.dev, ino: destParentSt.ino });
+      let destCheckBeforeRename: Stats | null = null;
+      try {
+        destCheckBeforeRename = await lstat(canonDestRoot);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') {
+          throw err;
+        }
+      }
+      if (destCheckBeforeRename !== null) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination "${canonDestRoot}" appeared concurrently during tree staging`);
+      }
+
+      await rename(stageRoot, canonDestRoot);
+      stagePublished = true;
+
+      await assertDirLstatMatches(destParentPath, { dev: destParentSt.dev, ino: destParentSt.ino });
+      await assertDirLstatMatches(canonDestRoot, stageRootId);
+      if (!skipFinalChmod) {
+        const postRenameSt = await stageRootFh.stat();
+        if (
+          postRenameSt.isSymbolicLink()
+          || !postRenameSt.isDirectory()
+          || postRenameSt.dev !== stageRootId.dev
+          || postRenameSt.ino !== stageRootId.ino
+        ) {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `published directory "${canonDestRoot}" failed post-rename identity check`);
+        }
+        await stageRootFh.chmod(0o555);
+      }
+    } catch (error) {
+      if (stageRootFh !== undefined) {
+        await stageRootFh.close().catch(() => undefined);
+        stageRootFh = undefined;
+      }
+      if (stageCreated && !stagePublished) {
+        const restoreDirsOnly = async (dirTarget: string): Promise<void> => {
+          const st = await lstat(dirTarget).catch(() => null);
+          if (st === null || st.isSymbolicLink() || !st.isDirectory()) return;
+          await chmod(dirTarget, 0o700).catch(() => undefined);
+          const entries = await readdir(dirTarget, { withFileTypes: true }).catch(() => []);
+          for (const entry of entries) {
+            if (entry.isDirectory()) {
+              await restoreDirsOnly(join(dirTarget, entry.name));
+            }
+          }
+        };
+        await restoreDirsOnly(stageRoot).catch(() => undefined);
+        await rm(stageRoot, { recursive: true, force: true }).catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      if (stageRootFh !== undefined) {
+        await stageRootFh.close().catch(() => undefined);
+      }
+      await destParentFh.close().catch(() => undefined);
+    }
+    return;
+  }
+
+  const existingRootFh = await open(canonDestRoot, fsConstants.O_RDONLY | noFollow);
+  try {
+    const openedRootSt = await existingRootFh.stat();
+    if (
+      openedRootSt.isSymbolicLink()
+      || !openedRootSt.isDirectory()
+      || openedRootSt.dev !== existingDestRootSt.dev
+      || openedRootSt.ino !== existingDestRootSt.ino
+      || (currentUid !== undefined && openedRootSt.uid !== currentUid)
+    ) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `destination directory "${canonDestRoot}" failed O_NOFOLLOW ownership/identity check`);
+    }
+    const rootId = Object.freeze({ dev: openedRootSt.dev, ino: openedRootSt.ino });
+    await walkHeldTree(srcDir, canonDestRoot, 0, false, existingRootFh, rootId);
+  } finally {
+    await existingRootFh.close().catch(() => undefined);
   }
 }
+
+export const ALLOWED_READ_ONLY_GIT_TOP_LEVEL: ReadonlySet<string> = new Set([
+  'head',
+  'packed-refs',
+  'refs',
+  'info',
+  'index',
+  'shallow',
+]);
+
+export const FORBIDDEN_READ_ONLY_GIT_ANY_DEPTH: ReadonlySet<string> = new Set([
+  'config',
+  'config.worktree',
+  'credentials',
+  '.git-credentials',
+  'hooks',
+]);
 
 export const EXCLUDED_READ_ONLY_GIT_TOP_LEVEL: ReadonlySet<string> = new Set([
   'hooks',
@@ -826,7 +1350,8 @@ export async function stageSanitizedReadOnlyGitDir(
   options?: { readonly skipFinalChmod?: boolean | undefined; readonly disableReflink?: boolean | undefined },
 ): Promise<void> {
   await copyDirectoryTreeReadOnly(srcGitDir, destGitDir, {
-    excludeTopLevelLower: EXCLUDED_READ_ONLY_GIT_TOP_LEVEL,
+    includeTopLevelLower: ALLOWED_READ_ONLY_GIT_TOP_LEVEL,
+    excludeAnyDepthLower: FORBIDDEN_READ_ONLY_GIT_ANY_DEPTH,
     skipFinalChmod: true,
     disableReflink: options?.disableReflink,
   });
@@ -839,10 +1364,10 @@ export async function stageSanitizedReadOnlyGitDir(
   );
   try {
     await handle.writeFile(Buffer.from(SANITIZED_READ_ONLY_GIT_CONFIG, 'utf8'));
+    await handle.chmod(0o444);
   } finally {
     await handle.close();
   }
-  await chmod(configDest, 0o444);
   if (options?.skipFinalChmod !== true) {
     await makeTreeReadOnly(destGitDir);
   }
@@ -1030,10 +1555,10 @@ async function verifyAndStageCommandScriptDir(
   );
   try {
     await destHandle.writeFile(bytes);
+    await destHandle.chmod(0o555);
   } finally {
     await destHandle.close();
   }
-  await chmod(destPath, 0o555);
   await makeTreeReadOnly(checkDir);
   return destPath;
 }
@@ -1335,83 +1860,44 @@ async function projectVerifiedCasCandidateFile(options: {
   readonly targetMode: number;
   readonly disableReflink: boolean;
 }): Promise<void> {
-  const { canonicalBlobPath, destPath, fileName, expectedSha256, expectedByteLength, targetMode, disableReflink } = options;
+  const { canonicalBlobPath, destPath, fileName, expectedSha256, expectedByteLength, targetMode } = options;
   const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  const destParentDir = dirname(destPath);
   const before = await lstat(canonicalBlobPath);
   if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1 || before.size !== expectedByteLength) {
     throw new TaskpackError('ACTION_INPUT_INVALID', `CAS blob for "${fileName}" failed lstat/nlink verification`);
   }
 
-  const canTryReflink = !disableReflink && typeof fsConstants.COPYFILE_FICLONE === 'number' && fsConstants.COPYFILE_FICLONE !== 0;
-  if (canTryReflink) {
-    let reflinked = false;
-    try {
-      await copyFile(canonicalBlobPath, destPath, fsConstants.COPYFILE_FICLONE | fsConstants.COPYFILE_EXCL);
-      reflinked = true;
-    } catch (error) {
-      await unlink(destPath).catch(() => undefined);
-      if (!isReflinkFallbackError(error)) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new TaskpackError('ACTION_INPUT_INVALID', `failed to reflink CAS candidate "${fileName}": ${detail}`);
-      }
+  let existingDest: Stats | null = null;
+  try {
+    existingDest = await lstat(destPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code !== 'ENOENT') {
+      throw err;
     }
-    if (reflinked) {
-      try {
-        await chmod(destPath, targetMode);
-        const destHandle = await open(destPath, fsConstants.O_RDONLY | noFollow);
-        try {
-          const destInfo = await destHandle.stat();
-          if (!destInfo.isFile() || destInfo.nlink !== 1 || destInfo.size !== expectedByteLength) {
-            throw new TaskpackError('ACTION_INPUT_INVALID', `reflinked CAS candidate "${fileName}" failed nlink/size check`);
-          }
-          const hash = createHash('sha256');
-          const chunk = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, expectedByteLength)));
-          let offset = 0;
-          while (offset < expectedByteLength) {
-            const toRead = Math.min(chunk.byteLength, expectedByteLength - offset);
-            const { bytesRead } = await destHandle.read(chunk, 0, toRead, offset);
-            if (bytesRead <= 0) break;
-            hash.update(chunk.subarray(0, bytesRead));
-            offset += bytesRead;
-          }
-          const probe = Buffer.allocUnsafe(1);
-          const { bytesRead: extraRead } = await destHandle.read(probe, 0, 1, offset);
-          const destAfter = await destHandle.stat();
-          const srcAfter = await lstat(canonicalBlobPath);
-          if (
-            offset !== expectedByteLength
-            || extraRead !== 0
-            || destAfter.size !== expectedByteLength
-            || destAfter.nlink !== 1
-            || srcAfter.isSymbolicLink()
-            || !srcAfter.isFile()
-            || srcAfter.nlink !== 1
-            || srcAfter.dev !== before.dev
-            || srcAfter.ino !== before.ino
-            || srcAfter.size !== before.size
-            || srcAfter.mtimeMs !== before.mtimeMs
-            || srcAfter.ctimeMs !== before.ctimeMs
-            || hash.digest('hex') !== expectedSha256
-          ) {
-            throw new TaskpackError('ACTION_INPUT_INVALID', `CAS candidate "${fileName}" failed sha256/stability verification`);
-          }
-          return;
-        } finally {
-          await destHandle.close();
-        }
-      } catch (error) {
-        await unlink(destPath).catch(() => undefined);
-        throw error;
-      }
-    }
+  }
+  if (existingDest !== null) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `CAS candidate destination "${fileName}" already exists`);
   }
 
   const srcHandle = await open(canonicalBlobPath, fsConstants.O_RDONLY | noFollow);
-  let destHandle;
+  const streamTmpPath = join(destParentDir, `.lw-stage-${randomBytes(12).toString('hex')}`);
+  let createdStreamTmp = false;
+  let parentFh: FileHandle | undefined;
+  let tmpHandle: FileHandle | undefined;
+  let finalHandle: FileHandle | undefined;
   try {
+    parentFh = await open(destParentDir, fsConstants.O_RDONLY | noFollow);
+    const parentSt = await parentFh.stat();
+    if (parentSt.isSymbolicLink() || !parentSt.isDirectory() || (currentUid !== undefined && parentSt.uid !== currentUid)) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `candidate parent directory for "${fileName}" failed O_NOFOLLOW ownership check`);
+    }
+
     const srcInfo = await srcHandle.stat();
     if (
       !srcInfo.isFile()
+      || srcInfo.isSymbolicLink()
       || srcInfo.nlink !== 1
       || srcInfo.dev !== before.dev
       || srcInfo.ino !== before.ino
@@ -1419,13 +1905,26 @@ async function projectVerifiedCasCandidateFile(options: {
     ) {
       throw new TaskpackError('ACTION_INPUT_INVALID', `CAS blob for "${fileName}" changed before streaming`);
     }
-    destHandle = await open(
-      destPath,
-      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
-      targetMode,
+    tmpHandle = await open(
+      streamTmpPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_RDWR | noFollow,
+      0o600,
     );
+    createdStreamTmp = true;
+    const createdStat = await tmpHandle.stat();
+    if (
+      !createdStat.isFile()
+      || createdStat.isSymbolicLink()
+      || createdStat.nlink !== 1
+      || (currentUid !== undefined && createdStat.uid !== currentUid)
+      || createdStat.ino === srcInfo.ino
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed temp identity/nlink/ownership check`);
+    }
+
     const hash = createHash('sha256');
     const chunk = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, expectedByteLength)));
+    const probe = Buffer.allocUnsafe(1);
     let offset = 0;
     while (offset < expectedByteLength) {
       const toRead = Math.min(chunk.byteLength, expectedByteLength - offset);
@@ -1435,7 +1934,7 @@ async function projectVerifiedCasCandidateFile(options: {
       hash.update(slice);
       let written = 0;
       while (written < bytesRead) {
-        const { bytesWritten } = await destHandle.write(slice, written, bytesRead - written);
+        const { bytesWritten } = await tmpHandle.write(slice, written, bytesRead - written, offset + written);
         if (bytesWritten <= 0) {
           throw new TaskpackError('ACTION_INPUT_INVALID', `short write materializing CAS candidate "${fileName}"`);
         }
@@ -1443,12 +1942,13 @@ async function projectVerifiedCasCandidateFile(options: {
       }
       offset += bytesRead;
     }
-    const probe = Buffer.allocUnsafe(1);
     const { bytesRead: extraRead } = await srcHandle.read(probe, 0, 1, offset);
     const srcAfter = await srcHandle.stat();
     if (
       offset !== expectedByteLength
       || extraRead !== 0
+      || srcAfter.dev !== srcInfo.dev
+      || srcAfter.ino !== srcInfo.ino
       || srcAfter.nlink !== 1
       || srcAfter.size !== srcInfo.size
       || srcAfter.mtimeMs !== srcInfo.mtimeMs
@@ -1457,21 +1957,165 @@ async function projectVerifiedCasCandidateFile(options: {
     ) {
       throw new TaskpackError('ACTION_INPUT_INVALID', `CAS candidate "${fileName}" sha256 or stability mismatch`);
     }
-    await destHandle.chmod(targetMode);
-    await destHandle.close();
-    destHandle = undefined;
-    const destStat = await lstat(destPath);
-    if (destStat.isSymbolicLink() || !destStat.isFile() || destStat.nlink !== 1 || destStat.size !== expectedByteLength) {
-      throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed nlink check`);
+
+    await tmpHandle.sync();
+    const verifyHash = createHash('sha256');
+    let verifyOffset = 0;
+    while (verifyOffset < expectedByteLength) {
+      const toRead = Math.min(chunk.byteLength, expectedByteLength - verifyOffset);
+      const { bytesRead } = await tmpHandle.read(chunk, 0, toRead, verifyOffset);
+      if (bytesRead <= 0) break;
+      verifyHash.update(chunk.subarray(0, bytesRead));
+      verifyOffset += bytesRead;
+    }
+    const { bytesRead: verifyExtra } = await tmpHandle.read(probe, 0, 1, verifyOffset);
+    const verifiedTmpStat = await tmpHandle.stat();
+    const srcAfterVerify = await srcHandle.stat();
+    if (
+      verifyOffset !== expectedByteLength
+      || verifyExtra !== 0
+      || verifiedTmpStat.dev !== createdStat.dev
+      || verifiedTmpStat.ino !== createdStat.ino
+      || verifiedTmpStat.nlink !== 1
+      || (currentUid !== undefined && verifiedTmpStat.uid !== currentUid)
+      || verifiedTmpStat.size !== expectedByteLength
+      || srcAfterVerify.dev !== srcInfo.dev
+      || srcAfterVerify.ino !== srcInfo.ino
+      || srcAfterVerify.nlink !== 1
+      || verifyHash.digest('hex') !== expectedSha256
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed post-stream sha256 verification`);
+    }
+
+    await tmpHandle.chmod(targetMode);
+    await tmpHandle.sync();
+    const sealedStat = await tmpHandle.stat();
+    if (
+      !sealedStat.isFile()
+      || sealedStat.isSymbolicLink()
+      || sealedStat.nlink !== 1
+      || (currentUid !== undefined && sealedStat.uid !== currentUid)
+      || sealedStat.dev !== createdStat.dev
+      || sealedStat.ino !== createdStat.ino
+      || sealedStat.size !== expectedByteLength
+      || (sealedStat.mode & 0o777) !== targetMode
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed post-fchmod verification`);
+    }
+
+    await link(streamTmpPath, destPath);
+    await unlink(streamTmpPath);
+    createdStreamTmp = false;
+
+    const afterParentStat = await lstat(destParentDir);
+    if (
+      afterParentStat.isSymbolicLink()
+      || !afterParentStat.isDirectory()
+      || afterParentStat.dev !== parentSt.dev
+      || afterParentStat.ino !== parentSt.ino
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `candidate parent directory for "${fileName}" changed during publish`);
+    }
+
+    finalHandle = await open(destPath, fsConstants.O_RDONLY | noFollow);
+    const destStat = await finalHandle.stat();
+    const tmpAfterPublishStat = await tmpHandle.stat();
+    await finalHandle.close();
+    finalHandle = undefined;
+    await tmpHandle.close();
+    tmpHandle = undefined;
+    if (
+      destStat.isSymbolicLink()
+      || !destStat.isFile()
+      || destStat.nlink !== 1
+      || tmpAfterPublishStat.nlink !== 1
+      || tmpAfterPublishStat.dev !== createdStat.dev
+      || tmpAfterPublishStat.ino !== createdStat.ino
+      || (currentUid !== undefined && destStat.uid !== currentUid)
+      || destStat.dev !== createdStat.dev
+      || destStat.ino !== createdStat.ino
+      || destStat.size !== expectedByteLength
+      || (destStat.mode & 0o777) !== targetMode
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed post-publish nlink check`);
     }
   } catch (error) {
-    if (destHandle !== undefined) {
-      await destHandle.close().catch(() => undefined);
+    if (finalHandle !== undefined) {
+      await finalHandle.close().catch(() => undefined);
     }
-    await unlink(destPath).catch(() => undefined);
+    if (tmpHandle !== undefined) {
+      await tmpHandle.close().catch(() => undefined);
+    }
+    if (createdStreamTmp) {
+      await unlink(streamTmpPath).catch(() => undefined);
+    }
     throw error;
   } finally {
+    if (parentFh !== undefined) {
+      await parentFh.close().catch(() => undefined);
+    }
     await srcHandle.close().catch(() => undefined);
+  }
+}
+
+async function publishInlineCandidateFileAtomic(
+  destPath: string,
+  bytes: Buffer,
+  targetMode: number,
+  fileName: string,
+): Promise<void> {
+  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  const destParentDir = dirname(destPath);
+  const tmpPath = join(destParentDir, `.lw-stage-${randomBytes(12).toString('hex')}`);
+  let createdTmp = false;
+  let handle;
+  let finalHandle;
+  try {
+    handle = await open(
+      tmpPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
+      0o600,
+    );
+    createdTmp = true;
+    await handle.writeFile(bytes);
+    await handle.chmod(targetMode);
+    await handle.sync();
+    const sealed = await handle.stat();
+    await handle.close();
+    handle = undefined;
+
+    await link(tmpPath, destPath);
+    await unlink(tmpPath);
+    createdTmp = false;
+
+    finalHandle = await open(destPath, fsConstants.O_RDONLY | noFollow);
+    const finalStat = await finalHandle.stat();
+    await finalHandle.close();
+    finalHandle = undefined;
+    if (
+      finalStat.isSymbolicLink()
+      || !finalStat.isFile()
+      || finalStat.nlink !== 1
+      || (currentUid !== undefined && finalStat.uid !== currentUid)
+      || finalStat.dev !== sealed.dev
+      || finalStat.ino !== sealed.ino
+      || finalStat.size !== bytes.byteLength
+      || (finalStat.mode & 0o777) !== targetMode
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `inline candidate "${fileName}" failed post-publish verification`);
+    }
+  } catch (error) {
+    if (handle !== undefined) {
+      await handle.close().catch(() => undefined);
+    }
+    if (finalHandle !== undefined) {
+      await finalHandle.close().catch(() => undefined);
+    }
+    if (createdTmp) {
+      await unlink(tmpPath).catch(() => undefined);
+    }
+    throw error;
   }
 }
 
@@ -1480,7 +2124,6 @@ async function materializeCandidateFiles(
   files: readonly InspectedCandidateFile[],
   disableReflink = false,
 ): Promise<void> {
-  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
   for (const file of files) {
     const dest = resolve(targetDir, file.name);
     const parent = dirname(dest);
@@ -1499,17 +2142,7 @@ async function materializeCandidateFiles(
         disableReflink,
       });
     } else {
-      const handle = await open(
-        dest,
-        fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
-        targetMode,
-      );
-      try {
-        await handle.writeFile(file.bytes);
-        await handle.chmod(targetMode);
-      } finally {
-        await handle.close();
-      }
+      await publishInlineCandidateFileAtomic(dest, file.bytes, targetMode, file.name);
     }
   }
 }
@@ -2069,7 +2702,6 @@ async function materializeOverlayCandidateFiles(
   disableReflink = false,
 ): Promise<void> {
   const checkedDirs = new Set<string>(['']);
-  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
   for (const file of files) {
     const dest = resolve(targetDir, file.name);
     const slash = file.name.lastIndexOf('/');
@@ -2090,10 +2722,10 @@ async function materializeOverlayCandidateFiles(
     }
     const effectiveGitMode = file.mode ?? baselineModes.get(file.name) ?? '100644';
     const mode = effectiveGitMode === '100755' ? 0o755 : 0o600;
+    await unlink(dest).catch((err: NodeJS.ErrnoException) => {
+      if (err.code !== 'ENOENT') throw err;
+    });
     if (file.kind === 'cas') {
-      await unlink(dest).catch((err: NodeJS.ErrnoException) => {
-        if (err.code !== 'ENOENT') throw err;
-      });
       await projectVerifiedCasCandidateFile({
         canonicalBlobPath: file.canonicalBlobPath,
         destPath: dest,
@@ -2104,39 +2736,61 @@ async function materializeOverlayCandidateFiles(
         disableReflink,
       });
     } else {
-      const handle = await open(
-        dest,
-        fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_WRONLY | noFollow,
-        mode,
-      );
-      try {
-        await handle.writeFile(file.bytes);
-        await handle.chmod(mode);
-      } finally {
-        await handle.close();
-      }
+      await publishInlineCandidateFileAtomic(dest, file.bytes, mode, file.name);
     }
   }
 }
 
-async function assertDeletedPathsAbsent(
+export async function assertDeletedPathsAbsent(
   candidateDir: string,
   deletedPaths: readonly string[],
+  overlayFileNames: ReadonlySet<string> = new Set<string>(),
 ): Promise<void> {
+  const normalizedOverlayFiles = new Set<string>();
+  const overlayAncestorDirs = new Set<string>();
+  for (const rawOverlay of overlayFileNames) {
+    const normOverlay = normalizeCandidateRelativePath(rawOverlay);
+    normalizedOverlayFiles.add(normOverlay);
+    let slash = normOverlay.indexOf('/');
+    while (slash !== -1) {
+      overlayAncestorDirs.add(normOverlay.slice(0, slash));
+      slash = normOverlay.indexOf('/', slash + 1);
+    }
+  }
+
   for (const rawRelPath of deletedPaths) {
     const relPath = normalizeCandidateRelativePath(rawRelPath);
-    const target = resolve(candidateDir, relPath);
-    let exists = true;
-    try {
-      await lstat(target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        exists = false;
-      } else {
+    const segments = relPath.split('/');
+    for (let i = 0; i < segments.length; i += 1) {
+      const prefixRel = segments.slice(0, i + 1).join('/');
+      const currentPath = resolve(candidateDir, prefixRel);
+      let st: Stats;
+      try {
+        st = await lstat(currentPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          break;
+        }
         throw error;
       }
-    }
-    if (exists) {
+      if (st.isSymbolicLink()) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', `deleted candidate path "${relPath}" traverses a symbolic link`);
+      }
+      if (i < segments.length - 1) {
+        if (st.isDirectory()) {
+          continue;
+        }
+        if (st.isFile() && st.nlink === 1 && normalizedOverlayFiles.has(prefixRel)) {
+          break;
+        }
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `deleted candidate path "${relPath}" has unexpected non-directory ancestor "${prefixRel}"`,
+        );
+      }
+      if (st.isDirectory() && overlayAncestorDirs.has(relPath)) {
+        break;
+      }
       throw new TaskpackError('ACTION_INPUT_INVALID', `deleted candidate path "${relPath}" is still present`);
     }
   }
@@ -2183,7 +2837,12 @@ function buildSandboxedChildEnv(
 
   if (gate.envMap !== undefined) {
     for (const [envName, envValue] of Object.entries(gate.envMap)) {
-      if (isForbiddenChildEnvName(envName, forbiddenEnvNames) || isForbiddenPreflightEnvName(envName, forbiddenEnvNames)) {
+      if (
+        envName === 'RUNNER_ENVIRONMENT'
+        || envName === 'GITHUB_ACTIONS'
+        || isForbiddenChildEnvName(envName, forbiddenEnvNames)
+        || isForbiddenPreflightEnvName(envName, forbiddenEnvNames)
+      ) {
         throw new TaskpackError('ACTION_INPUT_INVALID', `forbidden envMap variable "${envName}" in command.v1 gate`);
       }
       childEnv[envName] = envValue;
@@ -2201,6 +2860,7 @@ function buildSandboxedChildEnv(
   childEnv['PATH'] = effectivePath;
   childEnv['HOME'] = scratchHome;
   childEnv['TMPDIR'] = scratchTmp;
+  childEnv['TMPPREFIX'] = join(scratchTmp, 'zsh');
   childEnv['LANG'] = 'C.UTF-8';
   childEnv['LC_ALL'] = 'C.UTF-8';
   childEnv['GIT_CONFIG_NOSYSTEM'] = '1';
@@ -2316,18 +2976,111 @@ function formatCommandFailureOutput(
   return `${stderrPart} | ${stdoutPart}${suffix}`;
 }
 
-const CHECK_NO_NET_SEATBELT_PROFILE = '(version 1)(allow default)(deny network*)';
+const COMMAND_DENIED_HOME_SUBPATHS: readonly string[] = Object.freeze([
+  ...DEFAULT_DENIED_HOME_SUBPATHS,
+  '.gitconfig',
+  '.git-credentials',
+]);
+
+export const LINUX_COMMAND_POSITIVE_READ_ROOTS: readonly string[] = Object.freeze([
+  '/usr',
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib64',
+  '/lib32',
+  '/etc/alternatives',
+  '/etc/ssl',
+  '/etc/ca-certificates',
+  '/etc/pki',
+  '/etc/ld.so.cache',
+  '/etc/ld.so.conf',
+  '/etc/ld.so.conf.d',
+  '/etc/localtime',
+  '/etc/passwd',
+  '/etc/group',
+  '/etc/hosts',
+  '/etc/resolv.conf',
+  '/etc/nsswitch.conf',
+  '/proc/cpuinfo',
+  '/proc/meminfo',
+  '/proc/stat',
+  '/proc/version',
+  '/proc/uptime',
+  '/proc/loadavg',
+  '/proc/sys/kernel/random',
+  '/dev',
+  '/sys/devices/system/cpu',
+]);
+
+const LINUX_BWRAP_TOP_SYMLINK_DIRS: readonly string[] = Object.freeze([
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib64',
+  '/lib32',
+]);
+
+const LINUX_BWRAP_ETC_SYS_READ_PATHS: readonly string[] = Object.freeze([
+  '/etc/alternatives',
+  '/etc/ssl',
+  '/etc/ca-certificates',
+  '/etc/pki',
+  '/etc/ld.so.cache',
+  '/etc/ld.so.conf',
+  '/etc/ld.so.conf.d',
+  '/etc/localtime',
+  '/etc/passwd',
+  '/etc/group',
+  '/etc/hosts',
+  '/etc/resolv.conf',
+  '/etc/nsswitch.conf',
+  '/sys/devices/system/cpu',
+]);
+
+export const DARWIN_COMMAND_POSITIVE_READ_ROOTS: readonly string[] = Object.freeze([
+  '/System',
+  '/usr',
+  '/bin',
+  '/sbin',
+  '/Library/Apple',
+  '/Library/Developer',
+  '/Library/Frameworks',
+  '/Library/Preferences',
+  '/Applications/Xcode.app',
+  '/opt/homebrew',
+  '/dev',
+  '/private/etc',
+  '/private/var/db',
+  '/private/var/select',
+]);
+
+export const BWRAP_LOOPBACK_UP_SCRIPT = [
+  'import fcntl, os, socket, struct, sys',
+  's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)',
+  'try:',
+  "    ifr = struct.pack('16sH14s', b'lo', 0, b'')",
+  '    res = fcntl.ioctl(s.fileno(), 0x8913, ifr)',
+  "    flags = struct.unpack('16sH14s', res)[1]",
+  '    if not (flags & 0x1):',
+  "        fcntl.ioctl(s.fileno(), 0x8914, struct.pack('16sH14s', b'lo', flags | 0x1, b''))",
+  'finally:',
+  '    s.close()',
+  'os.execv(sys.argv[1], sys.argv[1:])',
+].join('\n');
+
 let cachedLinuxBwrapNetPath: string | null | undefined;
 let cachedLinuxBwrapMountPath: string | null | undefined;
+let cachedLinuxLandlockInfo: { readonly executable: string; readonly abi: number; readonly seccompAvailable: boolean } | null | undefined;
 
 function resolveLinuxBwrapForNoNet(): string | null {
   if (process.platform !== 'linux') return null;
   if (cachedLinuxBwrapNetPath !== undefined) return cachedLinuxBwrapNetPath;
-  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap', '/usr/local/bin/bwrap']) {
+  for (const candidate of TRUSTED_BWRAP_PATHS) {
     if (!existsSync(candidate)) continue;
     const probe = spawnSync(
       candidate,
-      ['--unshare-net', '--die-with-parent', '--ro-bind', '/', '/', '--', '/bin/true'],
+      ['--unshare-pid', '--unshare-net', '--die-with-parent', '--ro-bind', '/', '/', '--', '/bin/true'],
       { stdio: 'ignore', timeout: 3_000 },
     );
     if (probe.status === 0 && probe.error === undefined) {
@@ -2342,11 +3095,11 @@ function resolveLinuxBwrapForNoNet(): string | null {
 function resolveLinuxBwrapForMountOnly(): string | null {
   if (process.platform !== 'linux') return null;
   if (cachedLinuxBwrapMountPath !== undefined) return cachedLinuxBwrapMountPath;
-  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap', '/usr/local/bin/bwrap']) {
+  for (const candidate of TRUSTED_BWRAP_PATHS) {
     if (!existsSync(candidate)) continue;
     const probe = spawnSync(
       candidate,
-      ['--die-with-parent', '--ro-bind', '/', '/', '--', '/bin/true'],
+      ['--unshare-pid', '--die-with-parent', '--ro-bind', '/', '/', '--', '/bin/true'],
       { stdio: 'ignore', timeout: 3_000 },
     );
     if (probe.status === 0 && probe.error === undefined) {
@@ -2358,20 +3111,134 @@ function resolveLinuxBwrapForMountOnly(): string | null {
   return null;
 }
 
+function resolveLinuxLandlockPython(): { readonly executable: string; readonly abi: number; readonly seccompAvailable: boolean } | null {
+  if (process.platform !== 'linux') return null;
+  if (cachedLinuxLandlockInfo !== undefined) return cachedLinuxLandlockInfo;
+  for (const candidate of TRUSTED_PYTHON_PATHS) {
+    if (!existsSync(candidate)) continue;
+    const probe = spawnSync(
+      candidate,
+      ['-I', '-S', '-B', '-c', LANDLOCK_HOST_PROBE_SCRIPT],
+      { cwd: '/', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000 },
+    );
+    if (probe.status === 0 && probe.error === undefined) {
+      const parts = (probe.stdout ?? '').trim().split(':');
+      const abi = Number.parseInt(parts[0] ?? '', 10);
+      const seccompAvailable = parts[1] === '1';
+      if (Number.isSafeInteger(abi) && abi >= 3 && seccompAvailable) {
+        cachedLinuxLandlockInfo = Object.freeze({ executable: candidate, abi, seccompAvailable });
+        return cachedLinuxLandlockInfo;
+      }
+    }
+  }
+  cachedLinuxLandlockInfo = null;
+  return null;
+}
+
+function canonicalizeCommandContainmentPath(rawPath: string, label: string): string {
+  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.length > 1024 || /[\0\r\n"\\]/.test(rawPath)) {
+    throw new TaskpackError('SANDBOX_POLICY_INVALID', `${label} is invalid or contains forbidden characters`, label);
+  }
+  if (!isAbsolute(rawPath)) {
+    throw new TaskpackError('SANDBOX_POLICY_INVALID', `${label} must be an absolute path`, label);
+  }
+  const resolved = resolve(rawPath);
+  const suffixSegments: string[] = [];
+  let cursor = resolved;
+  for (;;) {
+    if (existsSync(cursor)) {
+      try {
+        const realBase = realpathSync(cursor);
+        const joined = suffixSegments.length === 0 ? realBase : join(realBase, ...suffixSegments.reverse());
+        if (/[\0\r\n"\\]/.test(joined)) {
+          throw new TaskpackError('SANDBOX_POLICY_INVALID', `${label} resolved to forbidden characters`, label);
+        }
+        return joined;
+      } catch {
+        // Fall through to parent if cursor is a broken symlink.
+      }
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      return resolved;
+    }
+    const base = cursor.slice(parent === '/' ? 1 : parent.length + 1);
+    suffixSegments.push(base);
+    cursor = parent;
+  }
+}
+
+function isSameOrStrictChildPath(candidate: string, parent: string): boolean {
+  if (parent === '/') return true;
+  return candidate === parent || candidate.startsWith(`${parent}/`);
+}
+
+function isStrictChildPath(candidate: string, parent: string): boolean {
+  if (parent === '/') return candidate !== '/' && candidate.startsWith('/');
+  return candidate.startsWith(`${parent}/`);
+}
+
+function isSameOrStrictChildCaseInsensitive(candidate: string, parent: string): boolean {
+  return isSameOrStrictChildPath(candidate.normalize('NFC').toLowerCase(), parent.normalize('NFC').toLowerCase());
+}
+
+function sortPathsShortestFirst(paths: Iterable<string>): readonly string[] {
+  return Object.freeze(
+    [...new Set(paths)].sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0)),
+  );
+}
+
+function collectDefaultDeniedHomePaths(): ReadonlySet<string> {
+  const out = new Set<string>();
+  const rawHome = homedir();
+  if (typeof rawHome === 'string' && rawHome.length > 0 && isAbsolute(rawHome) && !/[\0\r\n"\\]/.test(rawHome)) {
+    const canonHome = canonicalizeCommandContainmentPath(rawHome, 'homedir');
+    if (canonHome !== '/') {
+      for (const sub of COMMAND_DENIED_HOME_SUBPATHS) {
+        out.add(canonicalizeCommandContainmentPath(join(canonHome, sub), `homedir/${sub}`));
+      }
+    }
+  }
+  return out;
+}
+
+function tryLstatSync(targetPath: string): Stats | null {
+  try {
+    return lstatSync(targetPath);
+  } catch {
+    return null;
+  }
+}
+
 export interface BuildCommandScriptInvocationOptions {
   readonly args?: readonly string[] | undefined;
   readonly allowCheckNetwork?: boolean | undefined;
+  readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
+  readonly writablePaths?: readonly string[] | undefined;
+  readonly deniedReadPaths?: readonly string[] | undefined;
+  readonly allowedReadOnlyPaths?: readonly string[] | undefined;
+  readonly cwd?: string | undefined;
+  readonly env?: Readonly<Record<string, string>> | undefined;
+  readonly requireFilesystemContainment?: boolean | undefined;
   readonly platform?: NodeJS.Platform | undefined;
+  readonly arch?: string | undefined;
   readonly shellExecutable?: string | undefined;
   readonly linuxBwrapExecutable?: string | null | undefined;
+  readonly linuxPythonExecutable?: string | null | undefined;
+  readonly linuxSeccompAvailable?: boolean | undefined;
   readonly darwinSeatbeltAvailable?: boolean | undefined;
+  readonly darwinSeatbeltHelperSocketPath?: string | undefined;
 }
 
 export interface CommandScriptInvocation {
   readonly command: string;
   readonly args: readonly string[];
   readonly networkIsolated: boolean;
+  readonly filesystemIsolated: boolean;
+  readonly processIsolated: boolean;
+  readonly spawnCwd?: string | undefined;
+  readonly seccompBpf?: Buffer | undefined;
 }
 
 export function buildCommandScriptInvocation(
@@ -2381,63 +3248,1283 @@ export function buildCommandScriptInvocation(
   const platform = options?.platform ?? process.platform;
   const shell = options?.shellExecutable ?? resolveShellExecutable();
   const baseArgs = [scriptFullPath, ...(options?.args ?? [])];
-  const allowNet = options?.allowCheckNetwork === true;
-  const gitBind = options?.readOnlyGitObjectsBind ?? null;
+  const networkMode: SandboxNetworkMode = options?.networkMode
+    ?? (options?.allowCheckNetwork === true ? 'allow-outbound' : 'none');
+  if (networkMode !== 'none' && networkMode !== 'loopback-only' && networkMode !== 'allow-outbound') {
+    throw new TaskpackError('SANDBOX_POLICY_INVALID', `unsupported command.v1 networkMode "${String(networkMode)}"`, 'networkMode');
+  }
+  const allowNet = networkMode === 'allow-outbound';
+  const rawGitBind = options?.readOnlyGitObjectsBind ?? null;
+  const gitBind = rawGitBind === null
+    ? null
+    : {
+        sourceObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.sourceObjectsDir, 'readOnlyGitObjectsBind.sourceObjectsDir'),
+        targetObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.targetObjectsDir, 'readOnlyGitObjectsBind.targetObjectsDir'),
+      };
+  const hasExplicitWritablePaths = options?.writablePaths !== undefined;
+  const requireFs = options?.requireFilesystemContainment ?? hasExplicitWritablePaths;
+  const canonicalCwd = options?.cwd !== undefined
+    ? canonicalizeCommandContainmentPath(options.cwd, 'cwd')
+    : undefined;
+  const homeDeniedSet = collectDefaultDeniedHomePaths();
+
+  const writableRawSet = new Set<string>();
+  for (const [idx, wp] of (options?.writablePaths ?? []).entries()) {
+    const canon = canonicalizeCommandContainmentPath(wp, `writablePaths/${idx}`);
+    if (canon === '/') {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', 'command.v1 writablePaths must not include "/"');
+    }
+    for (const hd of homeDeniedSet) {
+      if (isSameOrStrictChildPath(canon, hd) || isSameOrStrictChildCaseInsensitive(canon, hd)) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 writablePath "${wp}" overlaps denied home secret path "${hd}"`);
+      }
+    }
+    writableRawSet.add(canon);
+  }
+  const canonicalWritables = sortPathsShortestFirst(writableRawSet);
+
+  const allowedRoRawSet = new Set<string>();
+  for (const [idx, ro] of (options?.allowedReadOnlyPaths ?? []).entries()) {
+    const canon = canonicalizeCommandContainmentPath(ro, `allowedReadOnlyPaths/${idx}`);
+    if (canon === '/') continue;
+    for (const hd of homeDeniedSet) {
+      if (isSameOrStrictChildPath(canon, hd) || isSameOrStrictChildCaseInsensitive(canon, hd)) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 allowedReadOnlyPath "${ro}" overlaps denied home secret path "${hd}"`);
+      }
+    }
+    allowedRoRawSet.add(canon);
+  }
+  const canonicalAllowedRo = sortPathsShortestFirst(allowedRoRawSet);
+
+  const explicitReopenSet = new Set<string>([...canonicalAllowedRo, ...canonicalWritables]);
+  const deniedRawSet = new Set<string>();
+  for (const [idx, dp] of (options?.deniedReadPaths ?? []).entries()) {
+    const canon = canonicalizeCommandContainmentPath(dp, `deniedReadPaths/${idx}`);
+    if (canon === '/' || canon === canonicalCwd || explicitReopenSet.has(canon)) {
+      continue;
+    }
+    deniedRawSet.add(canon);
+  }
+  const canonicalDenied = sortPathsShortestFirst(deniedRawSet);
 
   if (platform === 'linux') {
+    const effectiveArch = options?.arch
+      ?? (platform === process.platform ? process.arch : (process.arch === 'arm64' ? 'arm64' : 'x64'));
     const bwrapBin = options?.linuxBwrapExecutable !== undefined
       ? options.linuxBwrapExecutable
-      : (allowNet ? resolveLinuxBwrapForMountOnly() : resolveLinuxBwrapForNoNet());
-    if (bwrapBin !== null && (!allowNet || gitBind !== null)) {
+      : (
+        allowNet
+          ? resolveLinuxBwrapForMountOnly()
+          : resolveLinuxBwrapForNoNet()
+      );
+    if (bwrapBin !== null) {
+      if (!TRUSTED_BWRAP_PATHS.includes(bwrapBin)) {
+        throw new TaskpackError('SANDBOX_BACKEND_UNAVAILABLE', `untrusted Linux bwrap executable "${bwrapBin}"`);
+      }
+      let seccompBpf: Buffer | undefined;
+      if (networkMode === 'none') {
+        if (effectiveArch !== 'x64' && effectiveArch !== 'arm64') {
+          throw new TaskpackError(
+            'SANDBOX_BACKEND_UNAVAILABLE',
+            `command.v1 Linux bwrap seccomp filter does not support architecture "${effectiveArch}"`,
+          );
+        }
+        seccompBpf = compileLinuxSeccompBpfBinary(effectiveArch, { blockIpSockets: true });
+      }
+      const probeHost = platform === process.platform && options?.linuxBwrapExecutable === undefined;
+      const bwrapNamespaceFlags: readonly string[] = allowNet
+        ? ['--unshare-pid']
+        : ['--unshare-pid', '--unshare-net'];
+      const bwrapExecTail: readonly string[] = seccompBpf !== undefined
+        ? ['--seccomp', '3', '--', shell, ...baseArgs]
+        : ['--', shell, ...baseArgs];
+      const enforcePositiveMounts = requireFs || hasExplicitWritablePaths;
+      const reopenedAll = [
+        ...canonicalAllowedRo,
+        ...canonicalWritables,
+        ...(gitBind !== null ? [gitBind.targetObjectsDir] : []),
+      ];
+
+      if (enforcePositiveMounts) {
+        const bwrapArgs: string[] = [
+          ...bwrapNamespaceFlags,
+          '--die-with-parent',
+          '--dev', '/dev',
+          '--proc', '/proc',
+          '--tmpfs', '/tmp',
+          '--ro-bind', '/usr', '/usr',
+        ];
+        for (const sysLinkOrDir of LINUX_BWRAP_TOP_SYMLINK_DIRS) {
+          if (probeHost) {
+            const st = tryLstatSync(sysLinkOrDir);
+            if (st !== null && st.isSymbolicLink()) {
+              bwrapArgs.push('--symlink', readlinkSync(sysLinkOrDir), sysLinkOrDir);
+            } else if (st !== null) {
+              bwrapArgs.push('--ro-bind', sysLinkOrDir, sysLinkOrDir);
+            }
+          } else {
+            bwrapArgs.push('--ro-bind-try', sysLinkOrDir, sysLinkOrDir);
+          }
+        }
+        for (const etcOrSysPath of LINUX_BWRAP_ETC_SYS_READ_PATHS) {
+          if (probeHost && !existsSync(etcOrSysPath)) continue;
+          bwrapArgs.push('--ro-bind-try', etcOrSysPath, etcOrSysPath);
+        }
+
+        const writableSet = new Set(canonicalWritables);
+        for (const roPath of canonicalAllowedRo) {
+          if (writableSet.has(roPath) || roPath === '/usr') continue;
+          if (probeHost && !existsSync(roPath)) continue;
+          bwrapArgs.push('--ro-bind', roPath, roPath);
+        }
+
+        if (gitBind !== null) {
+          bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
+        }
+
+        for (const wp of canonicalWritables) {
+          if (probeHost && !existsSync(wp)) continue;
+          bwrapArgs.push('--bind', wp, wp);
+        }
+
+        const mountedRoots = [
+          '/usr',
+          ...canonicalAllowedRo,
+          ...canonicalWritables,
+          ...(gitBind !== null ? [gitBind.targetObjectsDir] : []),
+        ];
+        const postMountDenied = sortPathsShortestFirst([...canonicalDenied, ...homeDeniedSet]).filter(
+          dp => !explicitReopenSet.has(dp)
+            && mountedRoots.some(mr => isStrictChildPath(dp, mr))
+            && !reopenedAll.some(rp => isStrictChildPath(rp, dp)),
+        );
+        const postMaskedDirs: string[] = [];
+        for (const deniedPath of postMountDenied) {
+          if (postMaskedDirs.some(m => isStrictChildPath(deniedPath, m))) continue;
+          const st = tryLstatSync(deniedPath);
+          if (probeHost && st === null) continue;
+          if (st !== null && !st.isDirectory()) {
+            bwrapArgs.push('--ro-bind', '/dev/null', deniedPath);
+          } else {
+            postMaskedDirs.push(deniedPath);
+            bwrapArgs.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
+          }
+        }
+
+        if (canonicalCwd !== undefined) {
+          bwrapArgs.push('--chdir', canonicalCwd);
+        }
+        bwrapArgs.push(...bwrapExecTail);
+        return {
+          command: bwrapBin,
+          args: bwrapArgs,
+          networkIsolated: !allowNet,
+          filesystemIsolated: true,
+          processIsolated: true,
+          ...(seccompBpf !== undefined ? { seccompBpf } : {}),
+        };
+      }
+
       const bwrapArgs: string[] = [
-        ...(allowNet ? [] : ['--unshare-net']),
+        ...bwrapNamespaceFlags,
         '--die-with-parent',
-        '--bind', '/', '/',
+        '--ro-bind', '/', '/',
         '--dev', '/dev',
         '--proc', '/proc',
-        ...(gitBind !== null ? ['--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir] : []),
-        '--',
-        shell,
-        ...baseArgs,
       ];
+
+      const preMountDenied = canonicalDenied.filter(
+        dp => !reopenedAll.some(rp => isStrictChildPath(dp, rp)),
+      );
+      const postMountDeniedSet = new Set<string>(
+        canonicalDenied.filter(dp => reopenedAll.some(rp => isStrictChildPath(dp, rp))),
+      );
+      for (const hd of homeDeniedSet) {
+        if (reopenedAll.some(rp => isStrictChildPath(hd, rp))) {
+          postMountDeniedSet.add(hd);
+        }
+      }
+
+      const maskedDirs: string[] = [];
+      const ancestorTmpfsDirs: string[] = [];
+      for (const deniedPath of preMountDenied) {
+        if (maskedDirs.some(m => isStrictChildPath(deniedPath, m))) {
+          continue;
+        }
+        const st = tryLstatSync(deniedPath);
+        if (probeHost && st === null) {
+          continue;
+        }
+        if (st !== null && !st.isDirectory()) {
+          bwrapArgs.push('--ro-bind', '/dev/null', deniedPath);
+        } else {
+          maskedDirs.push(deniedPath);
+          const hasReopenedChild = reopenedAll.some(rp => isStrictChildPath(rp, deniedPath));
+          if (hasReopenedChild) {
+            bwrapArgs.push('--tmpfs', deniedPath);
+            ancestorTmpfsDirs.push(deniedPath);
+          } else {
+            bwrapArgs.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
+          }
+        }
+      }
+
+      const writableSet = new Set(canonicalWritables);
+      for (const roPath of canonicalAllowedRo) {
+        if (writableSet.has(roPath)) continue;
+        if (probeHost && !existsSync(roPath)) continue;
+        bwrapArgs.push('--ro-bind', roPath, roPath);
+      }
+
+      if (gitBind !== null) {
+        bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
+      }
+
+      for (const wp of canonicalWritables) {
+        if (probeHost && !existsSync(wp)) continue;
+        bwrapArgs.push('--bind', wp, wp);
+      }
+
+      for (const deniedPath of sortPathsShortestFirst(postMountDeniedSet)) {
+        const st = tryLstatSync(deniedPath);
+        if (probeHost && st === null) continue;
+        if (st !== null && !st.isDirectory()) {
+          bwrapArgs.push('--ro-bind', '/dev/null', deniedPath);
+        } else {
+          bwrapArgs.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
+        }
+      }
+
+      for (const ancDir of [...ancestorTmpfsDirs].reverse()) {
+        bwrapArgs.push('--remount-ro', ancDir);
+      }
+
+      if (canonicalCwd !== undefined) {
+        bwrapArgs.push('--chdir', canonicalCwd);
+      }
+
+      bwrapArgs.push(...bwrapExecTail);
       return {
         command: bwrapBin,
         args: bwrapArgs,
         networkIsolated: !allowNet,
+        filesystemIsolated: true,
+        processIsolated: true,
+        ...(seccompBpf !== undefined ? { seccompBpf } : {}),
       };
     }
+
+    if (requireFs) {
+      if (gitBind !== null) {
+        throw new TaskpackError(
+          'SANDBOX_BACKEND_UNAVAILABLE',
+          'command.v1 readOnlyGitObjectsBind requires Linux bwrap mount namespaces',
+        );
+      }
+      if (networkMode === 'loopback-only') {
+        throw new TaskpackError(
+          'SANDBOX_BACKEND_UNAVAILABLE',
+          'command.v1 networkMode "loopback-only" on Linux requires bwrap network namespaces',
+        );
+      }
+      if (effectiveArch !== 'x64' && effectiveArch !== 'arm64') {
+        throw new TaskpackError(
+          'SANDBOX_BACKEND_UNAVAILABLE',
+          `command.v1 Linux Landlock seccomp filter does not support architecture "${effectiveArch}"`,
+        );
+      }
+      let pythonBin: string | null = null;
+      let seccompAvailable = options?.linuxSeccompAvailable ?? true;
+      if (options?.linuxPythonExecutable === null) {
+        pythonBin = null;
+      } else if (typeof options?.linuxPythonExecutable === 'string') {
+        if (!TRUSTED_PYTHON_PATHS.includes(options.linuxPythonExecutable)) {
+          throw new TaskpackError('SANDBOX_BACKEND_UNAVAILABLE', `untrusted Linux python3 executable "${options.linuxPythonExecutable}"`);
+        }
+        pythonBin = options.linuxPythonExecutable;
+      } else {
+        const probed = resolveLinuxLandlockPython();
+        if (probed !== null) {
+          pythonBin = probed.executable;
+          seccompAvailable = options?.linuxSeccompAvailable ?? probed.seccompAvailable;
+        }
+      }
+      if (pythonBin === null || !seccompAvailable) {
+        throw new TaskpackError(
+          'SANDBOX_BACKEND_UNAVAILABLE',
+          'command.v1 Linux containment unavailable: neither bwrap nor Landlock (ABI >= 3 with seccomp) is available',
+        );
+      }
+      const blockIpSockets = networkMode === 'none';
+      const landlockRo = sortPathsShortestFirst([...canonicalAllowedRo, ...canonicalWritables]);
+      const landlockDenied = sortPathsShortestFirst([...canonicalDenied, ...homeDeniedSet]).filter(
+        dp => !explicitReopenSet.has(dp),
+      );
+      const landlockConfig = JSON.stringify({
+        workspaceRoot: canonicalCwd ?? '/',
+        positiveReadRoots: [...LINUX_COMMAND_POSITIVE_READ_ROOTS],
+        writablePaths: [...canonicalWritables],
+        exactWritableFiles: [],
+        protectedPaths: [],
+        deniedReadPaths: [...landlockDenied],
+        allowedReadOnlyPaths: [...landlockRo],
+        networkMode,
+        ...(blockIpSockets ? { blockIpSockets: true } : {}),
+        ...(canonicalCwd !== undefined ? { cwd: canonicalCwd } : {}),
+      });
+      return {
+        command: pythonBin,
+        args: ['-I', '-S', '-B', '-c', LANDLOCK_BOOTSTRAP_SCRIPT, landlockConfig, shell, ...baseArgs],
+        networkIsolated: allowNet ? false : blockIpSockets,
+        filesystemIsolated: true,
+        processIsolated: false,
+        spawnCwd: '/',
+      };
+    }
+
+    if (!allowNet) {
+      throw new TaskpackError(
+        'SANDBOX_BACKEND_UNAVAILABLE',
+        `command.v1 Linux network isolation ("${networkMode}") requires bwrap`,
+      );
+    }
+
     return {
       command: shell,
       args: baseArgs,
       networkIsolated: allowNet,
+      filesystemIsolated: false,
+      processIsolated: false,
     };
   }
 
-  if (platform === 'darwin' && !allowNet) {
+  if (platform === 'darwin') {
     const hasSeatbelt = options?.darwinSeatbeltAvailable ?? existsSync('/usr/bin/sandbox-exec');
     if (hasSeatbelt) {
+      const effectiveReadablePaths = [...new Set([...canonicalAllowedRo, ...canonicalWritables])].sort();
+      const sortedDenied = [...canonicalDenied].sort();
+      const sortedWritables = [...canonicalWritables].sort();
+      const enforceWriteContainment = requireFs || hasExplicitWritablePaths;
+      const helperSockPath = options?.darwinSeatbeltHelperSocketPath !== undefined
+        ? canonicalizeCommandContainmentPath(options.darwinSeatbeltHelperSocketPath, 'darwinSeatbeltHelperSocketPath')
+        : undefined;
+
+      if (enforceWriteContainment) {
+        const ancestors = new Set<string>([
+          '/',
+          '/etc',
+          '/var',
+          '/tmp',
+          '/private',
+          '/private/tmp',
+          '/private/var',
+        ]);
+        if (helperSockPath !== undefined) {
+          ancestors.add(helperSockPath);
+          let curSock = dirname(helperSockPath);
+          while (curSock.length > 0 && curSock !== '/') {
+            ancestors.add(curSock);
+            const nextSock = dirname(curSock);
+            if (nextSock === curSock) break;
+            curSock = nextSock;
+          }
+        }
+        const positiveGrants = [...new Set([...DARWIN_COMMAND_POSITIVE_READ_ROOTS, ...effectiveReadablePaths])].sort();
+        for (const grantPath of positiveGrants) {
+          let cur = dirname(grantPath);
+          while (cur.length > 0 && cur !== '/') {
+            ancestors.add(cur);
+            const next = dirname(cur);
+            if (next === cur) break;
+            cur = next;
+          }
+        }
+
+        const lines: string[] = [
+          '(version 1)',
+          '(allow default)',
+          '(deny process-info*)',
+          '(allow process-info* (target same-sandbox))',
+          '(deny file-read*)',
+          '(allow file-read-metadata',
+        ];
+        for (const anc of [...ancestors].sort()) {
+          lines.push(`  (literal "${anc}")`);
+        }
+        lines.push(')');
+
+        lines.push('(allow file-read*');
+        lines.push('  (literal "/")');
+        lines.push('  (literal "/etc")');
+        lines.push('  (literal "/var")');
+        lines.push('  (literal "/tmp")');
+        for (const roPath of positiveGrants) {
+          const roSt = tryLstatSync(roPath);
+          if (roSt !== null && roSt.isFile()) {
+            lines.push(`  (literal "${roPath}")`);
+          } else {
+            lines.push(`  (subpath "${roPath}")`);
+          }
+        }
+        // Apple's /bin/bash and /bin/sh ignore $TMPDIR for <<EOF here-documents and use /private/tmp/sh-thd*.
+        lines.push('  (regex #"^/private/tmp/sh-thd[^/]*$")');
+        lines.push(')');
+
+        const effectiveReadableSet = new Set(effectiveReadablePaths);
+        const postRoDenied = [...new Set([...sortedDenied, ...homeDeniedSet])]
+          .filter(dp => !effectiveReadableSet.has(dp) && positiveGrants.some(gr => isStrictChildPath(dp, gr)))
+          .sort();
+        if (postRoDenied.length > 0) {
+          lines.push('(deny file-read*');
+          for (const dp of postRoDenied) {
+            lines.push(`  (subpath "${dp}")`);
+          }
+          lines.push(')');
+          const nestedReopen = effectiveReadablePaths
+            .filter(ro => postRoDenied.some(dp => isStrictChildPath(ro, dp)))
+            .sort();
+          if (nestedReopen.length > 0) {
+            lines.push('(allow file-read*');
+            for (const ro of nestedReopen) {
+              const roSt = tryLstatSync(ro);
+              if (roSt !== null && roSt.isFile()) {
+                lines.push(`  (literal "${ro}")`);
+              } else {
+                lines.push(`  (subpath "${ro}")`);
+              }
+            }
+            lines.push(')');
+            const finalDeniedHome = [...homeDeniedSet]
+              .filter(hd => nestedReopen.some(ro => isStrictChildPath(hd, ro)))
+              .sort();
+            if (finalDeniedHome.length > 0) {
+              lines.push('(deny file-read*');
+              for (const hd of finalDeniedHome) {
+                lines.push(`  (subpath "${hd}")`);
+              }
+              lines.push(')');
+            }
+          }
+        }
+
+        lines.push('(deny file-write*)');
+        lines.push('(allow file-write*');
+        lines.push('  (literal "/dev/null")');
+        lines.push('  (literal "/dev/zero")');
+        lines.push('  (literal "/dev/dtracehelper")');
+        lines.push('  (literal "/private/tmp")');
+        lines.push('  (regex #"^/private/tmp/sh-thd[^/]*$")');
+        for (const wp of sortedWritables) {
+          lines.push(`  (subpath "${wp}")`);
+        }
+        lines.push(')');
+
+        if (networkMode === 'none') {
+          lines.push('(deny network*)');
+        } else if (networkMode === 'loopback-only') {
+          lines.push('(deny network*)');
+          lines.push('(allow network-outbound (remote ip "localhost:*"))');
+          lines.push('(allow network-inbound (local ip "localhost:*"))');
+          lines.push('(allow network-bind (local ip "localhost:*"))');
+        }
+        if (helperSockPath !== undefined && networkMode !== 'allow-outbound') {
+          lines.push(`(allow network-outbound (remote unix-socket (path-literal "${helperSockPath}")))`);
+        }
+
+        return {
+          command: '/usr/bin/sandbox-exec',
+          args: ['-p', lines.join('\n'), shell, ...baseArgs],
+          networkIsolated: !allowNet,
+          filesystemIsolated: true,
+          processIsolated: true,
+        };
+      }
+
+      const ancestors = new Set<string>();
+      for (const reopenPath of effectiveReadablePaths) {
+        let cur = dirname(reopenPath);
+        while (cur.length > 0 && cur !== '/') {
+          ancestors.add(cur);
+          const next = dirname(cur);
+          if (next === cur) break;
+          cur = next;
+        }
+      }
+
+      const lines: string[] = [
+        '(version 1)',
+        '(allow default)',
+        '(deny process-info*)',
+        '(allow process-info* (target same-sandbox))',
+      ];
+      if (sortedDenied.length > 0) {
+        lines.push('(deny file-read*');
+        for (const deniedPath of sortedDenied) {
+          lines.push(`  (subpath "${deniedPath}")`);
+        }
+        lines.push(')');
+      }
+      if (ancestors.size > 0) {
+        lines.push('(allow file-read-metadata');
+        for (const anc of [...ancestors].sort()) {
+          lines.push(`  (literal "${anc}")`);
+        }
+        lines.push(')');
+      }
+      if (effectiveReadablePaths.length > 0) {
+        lines.push('(allow file-read*');
+        for (const roPath of effectiveReadablePaths) {
+          const roSt = tryLstatSync(roPath);
+          if (roSt !== null && roSt.isFile()) {
+            lines.push(`  (literal "${roPath}")`);
+          } else {
+            lines.push(`  (subpath "${roPath}")`);
+          }
+        }
+        lines.push(')');
+      }
+      const postRoDeniedHome = [...homeDeniedSet]
+        .filter(hd => effectiveReadablePaths.some(ro => isStrictChildPath(hd, ro)))
+        .sort();
+      if (postRoDeniedHome.length > 0) {
+        lines.push('(deny file-read*');
+        for (const hd of postRoDeniedHome) {
+          lines.push(`  (subpath "${hd}")`);
+        }
+        lines.push(')');
+      }
+      if (networkMode === 'none') {
+        lines.push('(deny network*)');
+      } else if (networkMode === 'loopback-only') {
+        lines.push('(deny network*)');
+        lines.push('(allow network-outbound (remote ip "localhost:*"))');
+        lines.push('(allow network-inbound (local ip "localhost:*"))');
+        lines.push('(allow network-bind (local ip "localhost:*"))');
+      }
       return {
         command: '/usr/bin/sandbox-exec',
-        args: ['-p', CHECK_NO_NET_SEATBELT_PROFILE, shell, ...baseArgs],
-        networkIsolated: true,
+        args: ['-p', lines.join('\n'), shell, ...baseArgs],
+        networkIsolated: !allowNet,
+        filesystemIsolated: false,
+        processIsolated: true,
       };
     }
+    if (requireFs) {
+      throw new TaskpackError(
+        'SANDBOX_BACKEND_UNAVAILABLE',
+        'command.v1 macOS containment unavailable: /usr/bin/sandbox-exec is missing',
+      );
+    }
+  }
+
+  if (requireFs) {
+    throw new TaskpackError(
+      'SANDBOX_BACKEND_UNAVAILABLE',
+      `command.v1 filesystem containment is unavailable on platform "${platform}"`,
+    );
   }
 
   return {
     command: shell,
     args: baseArgs,
     networkIsolated: allowNet,
+    filesystemIsolated: false,
+    processIsolated: false,
   };
 }
 
 interface RunCommandScriptOptions {
   readonly args?: readonly string[] | undefined;
   readonly allowCheckNetwork?: boolean | undefined;
+  readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
+  readonly writablePaths: readonly string[];
+  readonly deniedReadPaths: readonly string[];
+  readonly allowedReadOnlyPaths: readonly string[];
+  readonly darwinSeatbeltHelperSocketPath?: string | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly registerKiller?: ((kill: () => void) => () => void) | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
+}
+
+const BROAD_FORBIDDEN_TOOL_ROOTS: ReadonlySet<string> = new Set([
+  '/',
+  '/Users',
+  '/home',
+  '/tmp',
+  '/private',
+  '/private/tmp',
+  '/var',
+  '/private/var',
+  '/var/folders',
+  '/private/var/folders',
+  '/opt',
+]);
+
+export function collectPositiveRuntimeToolReadRoots(options: {
+  readonly childEnv: Readonly<Record<string, string>>;
+  readonly gate: CompiledLocalCommandGate;
+  readonly canonRepoRoot: string;
+  readonly canonRunRoot: string;
+  readonly canonScratchBase: string;
+  readonly canonTmpDir: string;
+  readonly homeDeniedSet: ReadonlySet<string>;
+}): readonly string[] {
+  const { childEnv, gate, canonRepoRoot, canonRunRoot, canonScratchBase, canonTmpDir, homeDeniedSet } = options;
+  const rawHome = homedir();
+  const canonHome = typeof rawHome === 'string' && rawHome.length > 0 && isAbsolute(rawHome) && !/[\0\r\n"\\]/.test(rawHome)
+    ? canonicalizeCommandContainmentPath(rawHome, 'homedir')
+    : null;
+  const out = new Set<string>();
+
+  const overlapsHomeDenied = (candidate: string): boolean => {
+    for (const hd of homeDeniedSet) {
+      if (isSameOrStrictChildPath(candidate, hd) || isSameOrStrictChildCaseInsensitive(candidate, hd)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const isSafeRuntimeToolDir = (realDir: string): boolean => {
+    if (realDir.length === 0 || realDir.length > 1024 || /[\0\r\n"\\]/.test(realDir) || !isAbsolute(realDir)) {
+      return false;
+    }
+    if (BROAD_FORBIDDEN_TOOL_ROOTS.has(realDir)) return false;
+    if (canonHome !== null && isSameOrStrictChildPath(canonHome, realDir)) return false;
+    if (isSameOrStrictChildPath(realDir, canonRepoRoot) || isSameOrStrictChildPath(canonRepoRoot, realDir)) return false;
+    if (isSameOrStrictChildPath(realDir, canonRunRoot) || isSameOrStrictChildPath(canonRunRoot, realDir)) return false;
+    if (isSameOrStrictChildPath(realDir, canonScratchBase) || isSameOrStrictChildPath(canonScratchBase, realDir)) return false;
+    if (
+      isSameOrStrictChildPath(realDir, canonTmpDir)
+      || isSameOrStrictChildPath(canonTmpDir, realDir)
+      || isSameOrStrictChildPath(realDir, '/tmp')
+      || isSameOrStrictChildPath(realDir, '/private/tmp')
+      || isSameOrStrictChildPath(realDir, '/var/folders')
+      || isSameOrStrictChildPath(realDir, '/private/var/folders')
+    ) {
+      return false;
+    }
+    if (overlapsHomeDenied(realDir)) return false;
+    const st = tryLstatSync(realDir);
+    return st !== null && !st.isSymbolicLink() && st.isDirectory();
+  };
+
+  const addToolEntry = (rawCandidate: string, isDirectoryCandidate: boolean): void => {
+    if (typeof rawCandidate !== 'string' || rawCandidate.length === 0 || !isAbsolute(rawCandidate)) return;
+    let realTarget: string;
+    try {
+      realTarget = realpathSync(rawCandidate);
+    } catch {
+      return;
+    }
+    if (!isDirectoryCandidate && realTarget.includes('/node_modules/npm/')) {
+      const npmPkgRoot = `${realTarget.split('/node_modules/npm/')[0]!}/node_modules/npm`;
+      if (isSafeRuntimeToolDir(npmPkgRoot)) {
+        out.add(npmPkgRoot);
+      }
+    }
+    const binDir = isDirectoryCandidate ? realTarget : dirname(realTarget);
+    if (isSafeRuntimeToolDir(binDir)) {
+      out.add(binDir);
+    }
+    if (basename(binDir) === 'bin') {
+      const parentDir = dirname(binDir);
+      if (canonHome !== null && parentDir === join(canonHome, '.local')) {
+        const dotLocalLib = join(parentDir, 'lib');
+        if (isSafeRuntimeToolDir(dotLocalLib)) {
+          out.add(dotLocalLib);
+        }
+      } else if (isSafeRuntimeToolDir(parentDir)) {
+        out.add(parentDir);
+      }
+    }
+  };
+
+  addToolEntry(process.execPath, false);
+  addToolEntry(dirname(process.execPath), true);
+
+  const pathValue = childEnv['PATH'] ?? '';
+  for (const rawDir of pathValue.split(':')) {
+    const trimmed = rawDir.trim();
+    if (trimmed.length === 0 || !isAbsolute(trimmed)) continue;
+    addToolEntry(trimmed, true);
+    for (const toolName of ['node', 'npm', 'python3', 'git']) {
+      const candidateTool = join(trimmed, toolName);
+      if (existsSync(candidateTool)) {
+        addToolEntry(candidateTool, false);
+      }
+    }
+  }
+
+  if (gate.allowPrivileged === true) {
+    const hugoBin = childEnv['HUGO_BIN']?.trim();
+    if (hugoBin !== undefined && hugoBin.length > 0 && isAbsolute(hugoBin) && existsSync(hugoBin)) {
+      try {
+        const realHugo = realpathSync(hugoBin);
+        const hugoSt = tryLstatSync(realHugo);
+        let hugoExecutable = false;
+        if (hugoSt !== null && !hugoSt.isSymbolicLink() && hugoSt.isFile() && (hugoSt.mode & 0o111) !== 0) {
+          try {
+            accessSync(realHugo, fsConstants.X_OK);
+            hugoExecutable = true;
+          } catch {
+            hugoExecutable = false;
+          }
+        }
+        if (
+          hugoExecutable
+          && hugoSt !== null
+          && hugoSt.nlink === 1
+          && realHugo !== '/'
+          && realHugo.length <= 1024
+          && !/[\0\r\n"\\]/.test(realHugo)
+          && !overlapsHomeDenied(realHugo)
+          && !isSameOrStrictChildPath(realHugo, canonRepoRoot)
+          && !isSameOrStrictChildPath(realHugo, canonRunRoot)
+          && !isSameOrStrictChildPath(realHugo, canonScratchBase)
+        ) {
+          out.add(realHugo);
+        }
+      } catch {
+        // Ignore broken HUGO_BIN.
+      }
+    }
+
+    if (childEnv['SELF_UPGRADE_ALLOW_TEST_FIXTURE'] === '1') {
+      const testNm = childEnv['SELF_UPGRADE_TEST_NODE_MODULES']?.trim();
+      if (testNm !== undefined && testNm.length > 0 && isAbsolute(testNm) && existsSync(testNm)) {
+        try {
+          const realTestNm = realpathSync(testNm);
+          const nmSt = tryLstatSync(realTestNm);
+          if (
+            nmSt !== null
+            && !nmSt.isSymbolicLink()
+            && nmSt.isDirectory()
+            && realTestNm !== '/'
+            && !/[\0\r\n"\\]/.test(realTestNm)
+            && (canonHome === null || realTestNm !== canonHome)
+            && !overlapsHomeDenied(realTestNm)
+          ) {
+            out.add(realTestNm);
+          }
+        } catch {
+          // Ignore broken test fixture path.
+        }
+      }
+    }
+  }
+
+  return [...out];
+}
+
+function networkModeRank(mode: SandboxNetworkMode): number {
+  if (mode === 'none') return 0;
+  if (mode === 'loopback-only') return 1;
+  return 2;
+}
+
+const MAX_MACOS_SB_HELPER_REQUEST_BYTES = 262_144;
+const DEFAULT_MACOS_SB_HELPER_IDLE_TIMEOUT_MS = 5_000;
+export const MAX_HELPER_CONNECTIONS = 4;
+export const MAX_HELPER_ACTIVE_STAGES = 2;
+
+export async function startMacosStageSeatbeltHelper(options: {
+  readonly outerNetworkMode: SandboxNetworkMode;
+  readonly outerWritablePaths: readonly string[];
+  readonly outerAllowedReadOnlyPaths: readonly string[];
+  readonly outerDeniedReadPaths: ReadonlySet<string>;
+  readonly homeDeniedSet: ReadonlySet<string>;
+  readonly forbiddenEnvNames?: ReadonlySet<string> | undefined;
+  readonly idleHeaderTimeoutMs?: number | undefined;
+  readonly signal: AbortSignal;
+  readonly registerKiller: (kill: () => void) => () => void;
+}): Promise<{ readonly socketPath: string; close(): Promise<void> }> {
+  const sockDir = await mkdtemp(join('/private/tmp', 'lw-sb-'));
+  await chmod(sockDir, 0o700);
+  const realSockDir = await realpath(sockDir);
+  const socketPath = join(realSockDir, 's');
+  const outerPositiveReadRoots = [
+    ...DARWIN_COMMAND_POSITIVE_READ_ROOTS,
+    ...options.outerAllowedReadOnlyPaths,
+  ];
+  const idleHeaderTimeoutMs = options.idleHeaderTimeoutMs ?? DEFAULT_MACOS_SB_HELPER_IDLE_TIMEOUT_MS;
+  const activeStagePromises = new Set<Promise<void>>();
+  const activeHelperSockets = new Set<Socket>();
+  let helperClosing = false;
+  let activeStageCount = 0;
+  const destroyActiveHelperSockets = (): void => {
+    helperClosing = true;
+    for (const sock of [...activeHelperSockets]) {
+      sock.destroy();
+    }
+  };
+  options.signal.addEventListener('abort', destroyActiveHelperSockets, { once: true });
+
+  const helperServer = createNetServer(conn => {
+    if (helperClosing || options.signal.aborted || activeHelperSockets.size >= MAX_HELPER_CONNECTIONS) {
+      conn.destroy();
+      return;
+    }
+    activeHelperSockets.add(conn);
+    const stagePromise = new Promise<void>(resolveStage => {
+      let buffer = '';
+      let handled = false;
+      let killChild: (() => void) | null = null;
+      const headerTimer = setTimeout(() => {
+        conn.destroy();
+      }, idleHeaderTimeoutMs);
+      headerTimer.unref?.();
+
+      const sendJsonAndEnd = (payload: Record<string, unknown>): void => {
+        clearTimeout(headerTimer);
+        try {
+          conn.end(`${JSON.stringify(payload)}\n`);
+        } catch {
+          conn.destroy();
+        }
+      };
+
+      conn.on('close', () => {
+        clearTimeout(headerTimer);
+        activeHelperSockets.delete(conn);
+        killChild?.();
+        resolveStage();
+      });
+      conn.on('error', () => {
+        clearTimeout(headerTimer);
+        activeHelperSockets.delete(conn);
+        killChild?.();
+        resolveStage();
+      });
+
+      conn.on('data', (chunk: Buffer) => {
+        if (handled) return;
+        buffer += chunk.toString('utf8');
+        if (Buffer.byteLength(buffer, 'utf8') > MAX_MACOS_SB_HELPER_REQUEST_BYTES) {
+          handled = true;
+          clearTimeout(headerTimer);
+          sendJsonAndEnd({ ok: false, error: 'stage containment request exceeded size limit' });
+          return;
+        }
+        const nl = buffer.indexOf('\n');
+        if (nl === -1) return;
+        handled = true;
+        clearTimeout(headerTimer);
+        const line = buffer.slice(0, nl);
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          sendJsonAndEnd({ ok: false, error: 'invalid stage containment JSON' });
+          return;
+        }
+        if (!isPlainRecord(parsed)) {
+          sendJsonAndEnd({ ok: false, error: 'stage containment request must be an object' });
+          return;
+        }
+        if (parsed['op'] === 'ping') {
+          sendJsonAndEnd({ ok: true });
+          return;
+        }
+        if (options.signal.aborted) {
+          sendJsonAndEnd({ ok: false, error: 'command gate server aborted' });
+          return;
+        }
+
+        try {
+          const rawArgv = parsed['argv'];
+          if (
+            !Array.isArray(rawArgv)
+            || rawArgv.length < 1
+            || rawArgv.length > 256
+            || rawArgv.some(a => typeof a !== 'string' || a.length > 8192 || a.includes('\0'))
+            || (rawArgv[0] as string).length === 0
+          ) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage argv' });
+            return;
+          }
+          const stageArgv = rawArgv as string[];
+
+          if (typeof parsed['cwd'] !== 'string') {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage cwd' });
+            return;
+          }
+          const stageCwd = canonicalizeCommandContainmentPath(parsed['cwd'], 'stage.cwd');
+          if (!outerPositiveReadRoots.some(r => isSameOrStrictChildPath(stageCwd, r))) {
+            sendJsonAndEnd({ ok: false, error: `stage cwd "${stageCwd}" is outside outer readable roots` });
+            return;
+          }
+
+          const rawNetMode = parsed['networkMode'];
+          if (rawNetMode !== 'none' && rawNetMode !== 'loopback-only') {
+            sendJsonAndEnd({ ok: false, error: 'stage networkMode must be "none" or "loopback-only"' });
+            return;
+          }
+          if (networkModeRank(rawNetMode) > networkModeRank(options.outerNetworkMode)) {
+            sendJsonAndEnd({
+              ok: false,
+              error: `stage networkMode "${rawNetMode}" exceeds outer gate networkMode "${options.outerNetworkMode}"`,
+            });
+            return;
+          }
+
+          const rawWritables = parsed['writablePaths'];
+          if (!Array.isArray(rawWritables) || rawWritables.length > 128 || rawWritables.some(p => typeof p !== 'string')) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage writablePaths' });
+            return;
+          }
+          const stageWritables: string[] = [];
+          for (const [idx, wp] of (rawWritables as string[]).entries()) {
+            const canonWp = canonicalizeCommandContainmentPath(wp, `stage.writablePaths/${idx}`);
+            if (!options.outerWritablePaths.some(outerWp => isSameOrStrictChildPath(canonWp, outerWp))) {
+              sendJsonAndEnd({ ok: false, error: `stage writablePath "${canonWp}" exceeds outer writablePaths` });
+              return;
+            }
+            for (const hd of options.homeDeniedSet) {
+              if (isSameOrStrictChildPath(canonWp, hd) || isSameOrStrictChildCaseInsensitive(canonWp, hd)) {
+                sendJsonAndEnd({ ok: false, error: `stage writablePath "${canonWp}" overlaps denied home path` });
+                return;
+              }
+            }
+            stageWritables.push(canonWp);
+          }
+
+          const rawAllowedReads = parsed['allowedReadRoots'];
+          if (!Array.isArray(rawAllowedReads) || rawAllowedReads.length < 1 || rawAllowedReads.length > 128 || rawAllowedReads.some(p => typeof p !== 'string')) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage allowedReadRoots' });
+            return;
+          }
+          const stageAllowedReads: string[] = [];
+          for (const [idx, ar] of (rawAllowedReads as string[]).entries()) {
+            const canonAr = canonicalizeCommandContainmentPath(ar, `stage.allowedReadRoots/${idx}`);
+            if (!outerPositiveReadRoots.some(outerRo => isSameOrStrictChildPath(canonAr, outerRo))) {
+              sendJsonAndEnd({ ok: false, error: `stage allowedReadRoot "${canonAr}" exceeds outer readable roots` });
+              return;
+            }
+            for (const hd of options.homeDeniedSet) {
+              if (isSameOrStrictChildPath(canonAr, hd) || isSameOrStrictChildCaseInsensitive(canonAr, hd)) {
+                sendJsonAndEnd({ ok: false, error: `stage allowedReadRoot "${canonAr}" overlaps denied home path` });
+                return;
+              }
+            }
+            const allowedViaExplicitOuter = options.outerAllowedReadOnlyPaths.some(outerRo => isSameOrStrictChildPath(canonAr, outerRo));
+            if (!allowedViaExplicitOuter) {
+              for (const dp of options.outerDeniedReadPaths) {
+                if (isSameOrStrictChildPath(canonAr, dp)) {
+                  sendJsonAndEnd({ ok: false, error: `stage allowedReadRoot "${canonAr}" overlaps outer deniedReadPaths` });
+                  return;
+                }
+              }
+            }
+            stageAllowedReads.push(canonAr);
+          }
+
+          const rawDeniedReads = parsed['deniedReadRoots'] ?? [];
+          if (!Array.isArray(rawDeniedReads) || rawDeniedReads.length > 128 || rawDeniedReads.some(p => typeof p !== 'string')) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage deniedReadRoots' });
+            return;
+          }
+          const stageDeniedReads = (rawDeniedReads as string[])
+            .map((dp, idx) => canonicalizeCommandContainmentPath(dp, `stage.deniedReadRoots/${idx}`))
+            .filter(dp => dp !== '/');
+
+          const rawRoMasks = parsed['readOnlyMasks'] ?? [];
+          if (!Array.isArray(rawRoMasks) || rawRoMasks.length > 128 || rawRoMasks.some(p => typeof p !== 'string')) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage readOnlyMasks' });
+            return;
+          }
+          const stageRoMasks = [...new Set(
+            (rawRoMasks as string[]).map((rmp, idx) => canonicalizeCommandContainmentPath(rmp, `stage.readOnlyMasks/${idx}`)),
+          )].sort();
+
+          const rawEnv = parsed['env'];
+          if (!isPlainRecord(rawEnv) || Object.keys(rawEnv).length > 128) {
+            sendJsonAndEnd({ ok: false, error: 'invalid stage env' });
+            return;
+          }
+          const stageEnv: Record<string, string> = {
+            PATH: '/usr/local/bin:/usr/bin:/bin',
+            HOME: options.outerWritablePaths[1] ?? options.outerWritablePaths[0] ?? stageCwd,
+            TMPDIR: options.outerWritablePaths[2] ?? options.outerWritablePaths[0] ?? stageCwd,
+            LANG: 'C.UTF-8',
+            LC_ALL: 'C.UTF-8',
+          };
+          for (const [k, v] of Object.entries(rawEnv)) {
+            if (typeof v !== 'string' || k.includes('\0') || v.includes('\0') || v.length > 16_384) {
+              sendJsonAndEnd({ ok: false, error: `invalid stage env entry "${k}"` });
+              return;
+            }
+            if (k === 'GIT_CONFIG_NOSYSTEM' || k === 'GIT_CONFIG_GLOBAL' || k === 'GIT_TERMINAL_PROMPT') {
+              continue;
+            }
+            if (k === 'HOME' || k === 'TMPDIR') {
+              const canonDir = canonicalizeCommandContainmentPath(v, `stage.env.${k}`);
+              if (!options.outerWritablePaths.some(outerWp => isSameOrStrictChildPath(canonDir, outerWp))) {
+                sendJsonAndEnd({ ok: false, error: `stage env "${k}" must reside inside outer writablePaths` });
+                return;
+              }
+              stageEnv[k] = canonDir;
+              continue;
+            }
+            if (k === 'PATH' || k === 'LANG' || k === 'LC_ALL') {
+              stageEnv[k] = v;
+              continue;
+            }
+            if (
+              k === 'RUNNER_ENVIRONMENT'
+              || k === 'GITHUB_ACTIONS'
+              || isForbiddenChildEnvName(k, options.forbiddenEnvNames)
+              || isForbiddenPreflightEnvName(k, options.forbiddenEnvNames)
+            ) {
+              sendJsonAndEnd({ ok: false, error: `forbidden stage env variable "${k}"` });
+              return;
+            }
+            stageEnv[k] = v;
+          }
+          stageEnv['GIT_CONFIG_NOSYSTEM'] = '1';
+          stageEnv['GIT_CONFIG_GLOBAL'] = '/dev/null';
+          stageEnv['GIT_TERMINAL_PROMPT'] = '0';
+
+          const effectiveStageReads = [...new Set([...stageAllowedReads, ...stageWritables])].sort();
+          const positiveGrants = [...new Set([...DARWIN_COMMAND_POSITIVE_READ_ROOTS, ...effectiveStageReads])].sort();
+          const ancestors = new Set<string>(['/', '/etc', '/var', '/tmp', '/private', '/private/tmp', '/private/var']);
+          for (const gp of positiveGrants) {
+            let cur = dirname(gp);
+            while (cur.length > 0 && cur !== '/') {
+              ancestors.add(cur);
+              const next = dirname(cur);
+              if (next === cur) break;
+              cur = next;
+            }
+          }
+
+          const profileLines: string[] = [
+            '(version 1)',
+            '(allow default)',
+            '(deny signal)',
+            '(allow signal (target same-sandbox))',
+            '(deny process-info*)',
+            '(allow process-info* (target same-sandbox))',
+            '(deny mach-priv-task-port)',
+            '(deny sysctl-read',
+            '  (sysctl-name "kern.procargs")',
+            '  (sysctl-name-prefix "kern.procargs.")',
+            '  (sysctl-name "kern.procargs2")',
+            '  (sysctl-name-prefix "kern.procargs2.")',
+            '  (sysctl-name "kern.proc")',
+            '  (sysctl-name-prefix "kern.proc.")',
+            ')',
+            '(deny file-read*)',
+            '(allow file-read-metadata',
+          ];
+          for (const anc of [...ancestors].sort()) {
+            profileLines.push(`  (literal "${anc}")`);
+          }
+          profileLines.push(')');
+
+          profileLines.push('(allow file-read*');
+          profileLines.push('  (literal "/")');
+          profileLines.push('  (literal "/etc")');
+          profileLines.push('  (literal "/var")');
+          profileLines.push('  (literal "/tmp")');
+          for (const gp of positiveGrants) {
+            const gpSt = tryLstatSync(gp);
+            if (gpSt !== null && gpSt.isFile()) {
+              profileLines.push(`  (literal "${gp}")`);
+            } else {
+              profileLines.push(`  (subpath "${gp}")`);
+            }
+          }
+          profileLines.push('  (regex #"^/private/tmp/sh-thd[^/]*$")');
+          profileLines.push(')');
+
+          const effectiveStageReadSet = new Set(effectiveStageReads);
+          const mergedDenied = [...new Set([
+            ...options.outerDeniedReadPaths,
+            ...options.homeDeniedSet,
+            ...stageDeniedReads,
+          ])]
+            .filter(dp => !effectiveStageReadSet.has(dp) && positiveGrants.some(gp => isStrictChildPath(dp, gp)))
+            .sort();
+          if (mergedDenied.length > 0) {
+            profileLines.push('(deny file-read*');
+            for (const dp of mergedDenied) {
+              profileLines.push(`  (subpath "${dp}")`);
+            }
+            profileLines.push(')');
+            const nestedStageReopen = effectiveStageReads
+              .filter(sr => mergedDenied.some(dp => isStrictChildPath(sr, dp)))
+              .sort();
+            if (nestedStageReopen.length > 0) {
+              profileLines.push('(allow file-read*');
+              for (const sr of nestedStageReopen) {
+                const srSt = tryLstatSync(sr);
+                if (srSt !== null && srSt.isFile()) {
+                  profileLines.push(`  (literal "${sr}")`);
+                } else {
+                  profileLines.push(`  (subpath "${sr}")`);
+                }
+              }
+              profileLines.push(')');
+              const finalDeniedHome = [...options.homeDeniedSet]
+                .filter(hd => nestedStageReopen.some(sr => isStrictChildPath(hd, sr)))
+                .sort();
+              if (finalDeniedHome.length > 0) {
+                profileLines.push('(deny file-read*');
+                for (const hd of finalDeniedHome) {
+                  profileLines.push(`  (subpath "${hd}")`);
+                }
+                profileLines.push(')');
+              }
+            }
+          }
+
+          profileLines.push('(deny file-write*)');
+          profileLines.push('(allow file-write*');
+          profileLines.push('  (literal "/dev/null")');
+          profileLines.push('  (literal "/dev/zero")');
+          profileLines.push('  (literal "/dev/dtracehelper")');
+          profileLines.push('  (literal "/private/tmp")');
+          profileLines.push('  (regex #"^/private/tmp/sh-thd[^/]*$")');
+          for (const wp of [...new Set(stageWritables)].sort()) {
+            profileLines.push(`  (subpath "${wp}")`);
+          }
+          profileLines.push(')');
+
+          if (stageRoMasks.length > 0) {
+            profileLines.push('(deny file-write*');
+            for (const rmp of stageRoMasks) {
+              profileLines.push(`  (subpath "${rmp}")`);
+            }
+            profileLines.push(')');
+          }
+
+          if (rawNetMode === 'none') {
+            profileLines.push('(deny network*)');
+          } else {
+            profileLines.push('(deny network*)');
+            profileLines.push('(allow network-outbound (remote ip "localhost:*"))');
+            profileLines.push('(allow network-inbound (local ip "localhost:*"))');
+            profileLines.push('(allow network-bind (local ip "localhost:*"))');
+          }
+
+          if (activeStageCount >= MAX_HELPER_ACTIVE_STAGES) {
+            sendJsonAndEnd({
+              ok: false,
+              error: `concurrent stage limit (${MAX_HELPER_ACTIVE_STAGES}) exceeded`,
+            });
+            return;
+          }
+          activeStageCount += 1;
+          let stageReleased = false;
+          const releaseActiveStage = (): void => {
+            if (stageReleased) return;
+            stageReleased = true;
+            activeStageCount = Math.max(0, activeStageCount - 1);
+          };
+
+          let stageChild;
+          try {
+            stageChild = spawn('/usr/bin/sandbox-exec', ['-p', `${profileLines.join('\n')}\n`, '--', ...stageArgv], {
+              cwd: stageCwd,
+              env: stageEnv,
+              detached: true,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+          } catch (spawnErr) {
+            releaseActiveStage();
+            throw spawnErr;
+          }
+
+          const doKillStage = (): void => {
+            if (stageChild.pid !== undefined) {
+              try {
+                process.kill(-stageChild.pid, 'SIGKILL');
+              } catch {
+                // Already exited.
+              }
+            }
+          };
+          const doForceAbortStage = (): void => {
+            doKillStage();
+            stageChild.stdout.destroy();
+            stageChild.stderr.destroy();
+          };
+          killChild = doForceAbortStage;
+          const unregister = options.registerKiller(doForceAbortStage);
+          const onAbort = (): void => doForceAbortStage();
+          options.signal.addEventListener('abort', onAbort, { once: true });
+          if (options.signal.aborted) doForceAbortStage();
+
+          let drainPending = false;
+          const writeBoundedFrame = (stream: 'stdout' | 'stderr', chunk: Buffer): void => {
+            if (conn.destroyed || !conn.writable) return;
+            const canContinue = conn.write(`${JSON.stringify({ stream, data: chunk.toString('base64') })}\n`);
+            if (!canContinue && !drainPending) {
+              drainPending = true;
+              stageChild.stdout.pause();
+              stageChild.stderr.pause();
+              conn.once('drain', () => {
+                drainPending = false;
+                if (!conn.destroyed) {
+                  stageChild.stdout.resume();
+                  stageChild.stderr.resume();
+                }
+              });
+            }
+          };
+
+          stageChild.stdout.on('data', (outChunk: Buffer) => {
+            writeBoundedFrame('stdout', outChunk);
+          });
+          stageChild.stderr.on('data', (errChunk: Buffer) => {
+            writeBoundedFrame('stderr', errChunk);
+          });
+          stageChild.on('error', err => {
+            releaseActiveStage();
+            options.signal.removeEventListener('abort', onAbort);
+            unregister();
+            killChild = null;
+            sendJsonAndEnd({ ok: false, error: `sandbox-exec spawn failed: ${err.message}` });
+          });
+          stageChild.on('close', code => {
+            doKillStage();
+            releaseActiveStage();
+            options.signal.removeEventListener('abort', onAbort);
+            unregister();
+            killChild = null;
+            sendJsonAndEnd({ ok: true, done: true, exitCode: code ?? 1 });
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          sendJsonAndEnd({ ok: false, error: msg });
+        }
+      });
+    });
+    activeStagePromises.add(stagePromise);
+    void stagePromise.finally(() => activeStagePromises.delete(stagePromise));
+  });
+
+  await new Promise<void>((resolveListen, rejectListen) => {
+    helperServer.once('error', rejectListen);
+    helperServer.listen(socketPath, () => resolveListen());
+  });
+  await chmod(socketPath, 0o600);
+
+  return {
+    socketPath,
+    close: async () => {
+      helperClosing = true;
+      options.signal.removeEventListener('abort', destroyActiveHelperSockets);
+      const serverClosePromise = new Promise<void>(resolveClose => helperServer.close(() => resolveClose()));
+      destroyActiveHelperSockets();
+      await Promise.allSettled([...activeStagePromises]);
+      await serverClosePromise;
+      await rm(realSockDir, { recursive: true, force: true }).catch(() => undefined);
+    },
+  };
 }
 
 async function runCommandScript(
@@ -2445,32 +4532,51 @@ async function runCommandScript(
   cwd: string,
   env: Record<string, string>,
   timeoutMs: number,
-  options?: RunCommandScriptOptions,
+  options: RunCommandScriptOptions,
 ): Promise<{ readonly exitCode: number | null; readonly timedOut: boolean; readonly output: string }> {
-  if (options?.signal?.aborted) {
+  if (options.signal?.aborted) {
     return {
       exitCode: null,
       timedOut: false,
       output: 'command aborted during server shutdown',
     };
   }
+  const effectiveNetworkMode: SandboxNetworkMode = options.networkMode
+    ?? (options.allowCheckNetwork === true ? 'allow-outbound' : 'none');
   const invocation = buildCommandScriptInvocation(scriptFullPath, {
-    args: options?.args,
-    allowCheckNetwork: options?.allowCheckNetwork,
-    readOnlyGitObjectsBind: options?.readOnlyGitObjectsBind,
+    args: options.args,
+    allowCheckNetwork: effectiveNetworkMode === 'allow-outbound',
+    networkMode: effectiveNetworkMode,
+    readOnlyGitObjectsBind: options.readOnlyGitObjectsBind,
+    writablePaths: options.writablePaths,
+    deniedReadPaths: options.deniedReadPaths,
+    allowedReadOnlyPaths: options.allowedReadOnlyPaths,
+    darwinSeatbeltHelperSocketPath: options.darwinSeatbeltHelperSocketPath,
+    cwd,
+    env,
+    requireFilesystemContainment: true,
   });
-  if (options?.allowCheckNetwork !== true && !invocation.networkIsolated) {
-    options?.onLog?.(
-      `warning: command.v1 network isolation unavailable on ${process.platform}; running check without OS network namespace`,
+  if (effectiveNetworkMode !== 'allow-outbound' && !invocation.networkIsolated) {
+    throw new TaskpackError(
+      'SANDBOX_BACKEND_UNAVAILABLE',
+      `command.v1 network isolation ("${effectiveNetworkMode}") is unavailable on ${process.platform}`,
     );
   }
   return await new Promise((resolvePromise, reject) => {
+    const hasSeccomp = invocation.seccompBpf !== undefined;
     const child = spawn(invocation.command, [...invocation.args], {
-      cwd,
+      cwd: invocation.spawnCwd ?? cwd,
       env,
       detached: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: hasSeccomp ? ['ignore', 'pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
     });
+    if (invocation.seccompBpf !== undefined) {
+      const seccompStream = child.stdio[3] as Writable | null | undefined;
+      if (seccompStream !== null && seccompStream !== undefined) {
+        seccompStream.on('error', () => undefined);
+        seccompStream.end(invocation.seccompBpf);
+      }
+    }
 
     const stdoutBuffer = new BoundedTailBuffer(MAX_STDIO_BYTES);
     const stderrBuffer = new BoundedTailBuffer(MAX_STDIO_BYTES);
@@ -2522,8 +4628,8 @@ async function runCommandScript(
       });
     };
 
-    child.stdout.on('data', (chunk: Buffer) => stdoutBuffer.append(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderrBuffer.append(chunk));
+    child.stdout?.on('data', (chunk: Buffer) => stdoutBuffer.append(chunk));
+    child.stderr?.on('data', (chunk: Buffer) => stderrBuffer.append(chunk));
     child.on('error', err => {
       cleanup();
       if (!settled) {
@@ -2592,6 +4698,60 @@ interface LocalCommandGateJob {
   } | null;
 }
 
+const DEFAULT_COMMAND_PATH_ENTRIES: ReadonlySet<string> = new Set(['/usr/local/bin', '/usr/bin', '/bin']);
+
+export async function validateGateToolchainPath(
+  tp: string,
+  gate: CompiledLocalCommandGate,
+  repositoryRoot: string,
+  realTmpRoot: string,
+): Promise<{ readonly kind: 'absolute'; readonly realPath: string } | { readonly kind: 'relative'; readonly fullPath: string }> {
+  if (tp.startsWith('/')) {
+    const tpStat = await lstat(tp).catch(() => null);
+    if (tpStat === null || tpStat.isSymbolicLink() || !tpStat.isDirectory()) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
+    }
+    const realTp = await realpath(tp);
+    if (gate.allowPrivileged !== true) {
+      if (
+        insideRoot(realTp, realTmpRoot)
+        || insideRoot(realTp, '/tmp')
+        || insideRoot(realTp, '/private/tmp')
+      ) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" under tmpdir is forbidden without allowPrivileged`,
+        );
+      }
+      if ((tpStat.mode & 0o022) !== 0) {
+        const defaultPathHint = DEFAULT_COMMAND_PATH_ENTRIES.has(tp)
+          ? ' (default command.v1 PATH already includes /usr/local/bin:/usr/bin:/bin)'
+          : '';
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" must not be group- or world-writable without allowPrivileged${defaultPathHint}`,
+        );
+      }
+      const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      if (currentUid !== undefined && tpStat.uid !== 0 && tpStat.uid !== currentUid) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `absolute toolchainPath "${tp}" must be owned by root or the current user without allowPrivileged`,
+        );
+      }
+    }
+    return { kind: 'absolute', realPath: realTp };
+  }
+  const cleanTp = normalizeCandidateRelativePath(tp);
+  const fullTp = resolve(repositoryRoot, cleanTp);
+  assertNoSymlinkSegments(repositoryRoot, fullTp);
+  const relStat = await lstat(fullTp).catch(() => null);
+  if (relStat === null || relStat.isSymbolicLink() || !relStat.isDirectory()) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
+  }
+  return { kind: 'relative', fullPath: fullTp };
+}
+
 /**
  * Start a loopback HTTP server implementing Loopwright's `gate.v1` protocol for
  * repository-declared `command.v1` checks against inspected CAS/inline candidate snapshots.
@@ -2603,6 +4763,13 @@ export async function startLocalCommandGateServer(
   const signingSecret = options.signingSecret ?? randomBytes(32).toString('hex');
   scrubber.register(signingSecret);
   if (options.readOnlyGitHubToken) scrubber.register(options.readOnlyGitHubToken);
+
+  const startupTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
+  for (const gate of options.gates) {
+    for (const tp of gate.toolchainPaths ?? []) {
+      await validateGateToolchainPath(tp, gate, options.repositoryRoot, startupTmpRoot);
+    }
+  }
 
   const ownedScratch = options.scratchRoot === undefined;
   const rawScratchBase = options.scratchRoot ?? await mkdtemp(join(tmpdir(), 'loopwright-gate-'));
@@ -2860,6 +5027,7 @@ export async function startLocalCommandGateServer(
       };
       const runPromise = (async () => {
         let workDir: string | undefined;
+        let macosSbHelper: { readonly socketPath: string; close(): Promise<void> } | null = null;
         try {
           if (closeController.signal.aborted) {
             recordSettled(newJob, 'denied', sanitizeFailureReason('command gate server closed'));
@@ -3036,7 +5204,7 @@ export async function startLocalCommandGateServer(
               Math.max(60_000, gate.timeoutSeconds * 1000),
             );
             await materializeOverlayCandidateFiles(candidateDir, overlayFilesToMaterialize, baselineModes, disableReflink);
-            await assertDeletedPathsAbsent(candidateDir, effectiveDeletedPaths);
+            await assertDeletedPathsAbsent(candidateDir, effectiveDeletedPaths, overlayNames);
           } else if (snapshot.manifest.spec.baseTree !== undefined) {
             const baselineEntries = await listBaselineRegularEntries(
               options.repositoryRoot,
@@ -3067,7 +5235,7 @@ export async function startLocalCommandGateServer(
               Math.max(60_000, gate.timeoutSeconds * 1000),
             );
             await materializeOverlayCandidateFiles(candidateDir, snapshot.files, baselineModes, disableReflink);
-            await assertDeletedPathsAbsent(candidateDir, deletedPaths);
+            await assertDeletedPathsAbsent(candidateDir, deletedPaths, overlayNames);
           } else {
             await materializeCandidateFiles(candidateDir, snapshot.files, disableReflink);
             if (existsSync(join(options.repositoryRoot, '.git')) && COMMIT_SHA_PATTERN.test(snapshot.baseRevision)) {
@@ -3096,8 +5264,10 @@ export async function startLocalCommandGateServer(
               if (gitStat.isSymbolicLink() || !gitStat.isDirectory()) {
                 throw new TaskpackError('ACTION_INPUT_INVALID', 'repository .git must be a non-symlink directory for mountReadOnlyGit');
               }
+              const gateNetworkMode: SandboxNetworkMode = gate.networkMode
+                ?? (gate.allowCheckNetwork === true ? 'allow-outbound' : 'none');
               const bwrapAvailable = process.platform === 'linux' && (
-                gate.allowCheckNetwork === true
+                gateNetworkMode === 'allow-outbound'
                   ? resolveLinuxBwrapForMountOnly() !== null
                   : resolveLinuxBwrapForNoNet() !== null
               );
@@ -3113,46 +5283,14 @@ export async function startLocalCommandGateServer(
           }
 
           const resolvedToolchainPaths: string[] = [];
-          const realTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
+          const requestTmpRoot = await realpath(tmpdir()).catch(() => resolve(tmpdir()));
           for (const [tpIndex, tp] of (gate.toolchainPaths ?? []).entries()) {
-            if (tp.startsWith('/')) {
-              const tpStat = await lstat(tp).catch(() => null);
-              if (tpStat === null || tpStat.isSymbolicLink() || !tpStat.isDirectory()) {
-                throw new TaskpackError('ACTION_INPUT_INVALID', `toolchainPath "${tp}" must be an existing non-symlink directory`);
-              }
-              const realTp = await realpath(tp);
-              if (gate.allowPrivileged !== true) {
-                if (
-                  insideRoot(realTp, realTmpRoot)
-                  || insideRoot(realTp, '/tmp')
-                  || insideRoot(realTp, '/private/tmp')
-                ) {
-                  throw new TaskpackError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" under tmpdir is forbidden without allowPrivileged`,
-                  );
-                }
-                if ((tpStat.mode & 0o022) !== 0) {
-                  throw new TaskpackError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" must not be group- or world-writable without allowPrivileged`,
-                  );
-                }
-                const currentUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-                if (currentUid !== undefined && tpStat.uid !== 0 && tpStat.uid !== currentUid) {
-                  throw new TaskpackError(
-                    'ACTION_INPUT_INVALID',
-                    `absolute toolchainPath "${tp}" must be owned by root or the current user without allowPrivileged`,
-                  );
-                }
-              }
-              resolvedToolchainPaths.push(realTp);
+            const validated = await validateGateToolchainPath(tp, gate, options.repositoryRoot, requestTmpRoot);
+            if (validated.kind === 'absolute') {
+              resolvedToolchainPaths.push(validated.realPath);
             } else {
-              const cleanTp = normalizeCandidateRelativePath(tp);
-              const fullTp = resolve(options.repositoryRoot, cleanTp);
-              assertNoSymlinkSegments(options.repositoryRoot, fullTp);
               const destTp = join(workDir, 'toolchains', String(tpIndex));
-              await copyDirectoryTreeReadOnly(fullTp, destTp, { disableReflink });
+              await copyDirectoryTreeReadOnly(validated.fullPath, destTp, { disableReflink });
               resolvedToolchainPaths.push(destTp);
             }
           }
@@ -3177,6 +5315,81 @@ export async function startLocalCommandGateServer(
             options.checkStagedDir,
           );
 
+          const canonCandidateDir = canonicalizeCommandContainmentPath(candidateDir, 'candidateDir');
+          const canonRepoRoot = canonicalizeCommandContainmentPath(options.repositoryRoot, 'repositoryRoot');
+          const canonRunRoot = canonicalizeCommandContainmentPath(options.runRoot, 'runRoot');
+          const canonScratchBase = canonicalizeCommandContainmentPath(scratchBase, 'scratchBase');
+          const canonTmpDir = canonicalizeCommandContainmentPath(tmpdir(), 'tmpdir');
+          const homeDeniedSet = collectDefaultDeniedHomePaths();
+          const writablePaths = [
+            canonicalizeCommandContainmentPath(outDir, 'outDir'),
+            canonicalizeCommandContainmentPath(scratchHome, 'scratchHome'),
+            canonicalizeCommandContainmentPath(scratchTmp, 'scratchTmp'),
+          ];
+          const hasCheckStaged = typeof options.checkStagedDir === 'string' && options.checkStagedDir.length > 0;
+          const canonCheckStagedDir = hasCheckStaged
+            ? canonicalizeCommandContainmentPath(options.checkStagedDir!, 'checkStagedDir')
+            : null;
+          const runtimeToolReadRoots = collectPositiveRuntimeToolReadRoots({
+            childEnv,
+            gate,
+            canonRepoRoot,
+            canonRunRoot,
+            canonScratchBase,
+            canonTmpDir,
+            homeDeniedSet,
+          });
+          const allowedReadOnlyPaths = [
+            ...new Set([
+              canonCandidateDir,
+              canonicalizeCommandContainmentPath(baseDir, 'baseDir'),
+              canonicalizeCommandContainmentPath(checkDir, 'checkDir'),
+              ...(canonCheckStagedDir !== null ? [canonCheckStagedDir] : []),
+              ...resolvedToolchainPaths.map((tp, idx) => canonicalizeCommandContainmentPath(tp, `toolchainPaths/${idx}`)),
+              ...runtimeToolReadRoots,
+              ...writablePaths,
+            ]),
+          ];
+          const deniedReadPathSet = new Set<string>([
+            canonRepoRoot,
+            canonRunRoot,
+            canonScratchBase,
+            canonTmpDir,
+            canonicalizeCommandContainmentPath('/tmp', '/tmp'),
+            canonicalizeCommandContainmentPath('/private/tmp', '/private/tmp'),
+            canonicalizeCommandContainmentPath('/var/folders', '/var/folders'),
+            canonicalizeCommandContainmentPath('/private/var/folders', '/private/var/folders'),
+            ...homeDeniedSet,
+          ]);
+          if (canonCheckStagedDir !== null) {
+            deniedReadPathSet.add(canonicalizeCommandContainmentPath(dirname(canonCheckStagedDir), 'checkStagedParent'));
+            deniedReadPathSet.add(canonicalizeCommandContainmentPath(dirname(resolve(options.checkStagedDir!)), 'checkStagedRawParent'));
+          }
+          deniedReadPathSet.delete('/');
+          deniedReadPathSet.delete(canonCandidateDir);
+
+          const effectiveGateNetworkMode: SandboxNetworkMode = gate.networkMode
+            ?? (gate.allowCheckNetwork === true ? 'allow-outbound' : 'none');
+          const registerKiller = (kill: () => void): (() => void) => {
+            activeKillers.add(kill);
+            return () => {
+              activeKillers.delete(kill);
+            };
+          };
+          if (process.platform === 'darwin' && gate.allowPrivileged === true && existsSync('/usr/bin/sandbox-exec')) {
+            macosSbHelper = await startMacosStageSeatbeltHelper({
+              outerNetworkMode: effectiveGateNetworkMode,
+              outerWritablePaths: writablePaths,
+              outerAllowedReadOnlyPaths: allowedReadOnlyPaths,
+              outerDeniedReadPaths: deniedReadPathSet,
+              homeDeniedSet,
+              forbiddenEnvNames: options.forbiddenEnvNames,
+              signal: closeController.signal,
+              registerKiller,
+            });
+            childEnv['LOOPWRIGHT_MACOS_SB_SOCK'] = macosSbHelper.socketPath;
+          }
+
           options.onLog?.(scrubber.scrub(
             `check ${gate.checkId}: running ${gate.script} (timeout ${formatDurationMs(gate.timeoutSeconds * 1000)})`,
           ));
@@ -3188,16 +5401,16 @@ export async function startLocalCommandGateServer(
             gate.timeoutSeconds * 1000,
             {
               args: gate.args,
-              allowCheckNetwork: gate.allowCheckNetwork === true,
+              allowCheckNetwork: effectiveGateNetworkMode === 'allow-outbound',
+              networkMode: effectiveGateNetworkMode,
               readOnlyGitObjectsBind,
+              writablePaths,
+              deniedReadPaths: [...deniedReadPathSet],
+              allowedReadOnlyPaths,
+              darwinSeatbeltHelperSocketPath: macosSbHelper?.socketPath,
               signal: closeController.signal,
               onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
-              registerKiller: kill => {
-                activeKillers.add(kill);
-                return () => {
-                  activeKillers.delete(kill);
-                };
-              },
+              registerKiller,
             },
           );
           const cmdElapsed = Math.max(1, Math.round(performance.now() - cmdStarted));
@@ -3220,6 +5433,9 @@ export async function startLocalCommandGateServer(
           options.onLog?.(scrubber.scrub(`check ${gate.checkId}: failed — ${sanitizedReason}`));
           recordSettled(newJob, 'denied', sanitizedReason);
         } finally {
+          if (macosSbHelper !== null) {
+            await macosSbHelper.close().catch(() => undefined);
+          }
           if (workDir !== undefined) {
             await makeTreeWritableForCleanup(workDir).catch(() => undefined);
             await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
@@ -4454,6 +6670,7 @@ const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'allowHostEnv',
   'allowHostPath',
   'allowCheckNetwork',
+  'networkMode',
   'allowPrivileged',
   'timeoutSeconds',
   'allowReadOnlyGitHubToken',
@@ -4672,6 +6889,15 @@ async function readAndValidateStagedTaskpackSecrets(
       }
       envMap = Object.freeze(cleanMap);
     }
+    const rawGateNetworkMode = gate['networkMode'];
+    if (
+      rawGateNetworkMode !== undefined
+      && rawGateNetworkMode !== 'none'
+      && rawGateNetworkMode !== 'loopback-only'
+      && rawGateNetworkMode !== 'allow-outbound'
+    ) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates networkMode is invalid');
+    }
     localCommandGates.push({
       checkId: gate['checkId'],
       gateId: gate['gateId'],
@@ -4688,6 +6914,7 @@ async function readAndValidateStagedTaskpackSecrets(
       ...(typeof gate['allowHostEnv'] === 'boolean' ? { allowHostEnv: gate['allowHostEnv'] } : {}),
       ...(typeof gate['allowHostPath'] === 'boolean' ? { allowHostPath: gate['allowHostPath'] } : {}),
       ...(typeof gate['allowCheckNetwork'] === 'boolean' ? { allowCheckNetwork: gate['allowCheckNetwork'] } : {}),
+      ...(rawGateNetworkMode !== undefined ? { networkMode: rawGateNetworkMode } : {}),
       ...(typeof gate['allowPrivileged'] === 'boolean' ? { allowPrivileged: gate['allowPrivileged'] } : {}),
       timeoutSeconds: gate['timeoutSeconds'],
       env: Object.freeze([...(gate['env'] as string[])]),

@@ -114,13 +114,13 @@ describe('Taskpack 2.0 schema: execution trust modes and dual-key authority', ()
 
     expectAppError(() => validateTaskpackV2Manifest(selfGrantedPriv), 'TASKPACK_HOST_BINDING_INVALID');
     expectAppError(() => validateTaskpackManifest(selfGrantedPriv), 'TASKPACK_HOST_BINDING_INVALID');
-    expectAppError(() => validateTaskpackV2Manifest(selfGrantedPriv, { hostPolicy: { allowPrivileged: true } }), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(selfGrantedPriv, { policyProfile: 'github', hostPolicy: { allowPrivileged: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]), 'TASKPACK_SCOPE_VIOLATION');
     assert.equal(validateTaskpackV2Manifest(selfGrantedPriv, { enforceHostAuthority: false }).spec.execution?.mode, 'privileged');
 
-    const dualKey = validateTaskpackV2Manifest(selfGrantedPriv, { hostPolicy: { allowPrivileged: true, allowWorkflowWrites: true } });
-    assert.doesNotThrow(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright', hostPolicy: { allowPrivileged: true, allowWorkflowWrites: true } }));
-    expectAppError(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright' }), 'TASKPACK_HOST_BINDING_INVALID');
-    expectAppError(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright', hostPolicy: { allowPrivileged: true } }), 'TASKPACK_SCOPE_VIOLATION');
+    const dualKey = validateTaskpackV2Manifest(selfGrantedPriv, { policyProfile: 'github', hostPolicy: { allowPrivileged: true, allowWorkflowWrites: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]);
+    assert.doesNotThrow(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright', policyProfile: 'github', hostPolicy: { allowPrivileged: true, allowWorkflowWrites: true } } as Parameters<typeof assertManifestScopeInvariants>[1]));
+    expectAppError(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright', policyProfile: 'github' } as Parameters<typeof assertManifestScopeInvariants>[1]), 'TASKPACK_HOST_BINDING_INVALID');
+    expectAppError(() => assertManifestScopeInvariants(dualKey, { controlRoot: '.loopwright', policyProfile: 'github', hostPolicy: { allowPrivileged: true } } as Parameters<typeof assertManifestScopeInvariants>[1]), 'TASKPACK_SCOPE_VIOLATION');
 
     // sandbox.networkMode: allow-outbound requires both allowAgentNetwork and hostPolicy.allowPrivileged
     expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict' }, sandbox: { networkMode: 'allow-outbound' } }) as Json), 'TASKPACK_SCOPE_VIOLATION', '/spec/sandbox/networkMode');
@@ -337,7 +337,7 @@ describe('Taskpack 2.0 schema: roles, steps DAG, rework, guards, upstreams, and 
       { mcp: { servers: [{ id: 'write-mcp', transport: 'stdio', command: 'npx' }] }, roles: [{ id: 'rev', purpose: 'review', provider: 'anthropic', model: 'claude-sonnet-4', mcpServers: ['write-mcp'] }] },
       { upstreamGroups: [{ id: 'g1', members: ['pkg-a'], policy: 'lockstep' }, { id: 'g2', members: ['pkg-a', 'pkg-b'], policy: 'lockstep' }] },
       { roles: [{ id: 'r1', provider: 'openai', model: 'gpt-5', mcpServers: ['undeclared-mcp'] }] },
-      { limits: { overlay: { maxFiles: 5000 } } },
+      { limits: { overlay: { maxFiles: 20_000 } } },
     ];
     for (const override of invalidSpecs) {
       expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest(override) as Json), 'TASKPACK_MANIFEST_INVALID');
@@ -409,24 +409,25 @@ describe('Taskpack 2.0 schema: roles, steps DAG, rework, guards, upstreams, and 
 });
 
 describe('Taskpack 2.0 schema: explicit /** and */? scope, protected invariants, and legacy compat', () => {
-  it('allows .agents/** opt-in, blocks .claude/** and non-workflow .github/**, and enforces dual-key .github/workflows/**', () => {
+  it('allows .agents/** opt-in, blocks declared .claude/** and non-workflow .github/**, and enforces dual-key .github/workflows/**', () => {
     assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.agents'), false);
-    assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.claude'), true);
+    assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.claude'), false);
+    assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.git'), true);
 
     assert.deepEqual(validateTaskpackV2Manifest(makeBaseV2Manifest({ scope: { writable: ['.agents/**', 'docs/**'], protected: [] } }) as Json).spec.scope.writable, ['.agents/**', 'docs/**']);
-    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ scope: { writable: ['.claude/**'], protected: [] } }) as Json), 'TASKPACK_SCOPE_VIOLATION');
-    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'privileged' }, scope: { writable: ['.github/workflows/**'], protected: [] } }) as Json, { hostPolicy: { allowPrivileged: true } }), 'TASKPACK_SCOPE_VIOLATION');
-    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/workflows/**', 'docs/**'], protected: [] } }) as Json), 'TASKPACK_SCOPE_VIOLATION');
-    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/**'], protected: [] } }) as Json, { hostPolicy: { allowWorkflowWrites: true } }), 'TASKPACK_SCOPE_VIOLATION');
-    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/workflows/**'], protected: ['.github/**'] } }) as Json, { hostPolicy: { allowWorkflowWrites: true } }), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ scope: { writable: ['.claude/**'], protected: ['.claude/**'] } }) as Json), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'privileged' }, scope: { writable: ['.github/workflows/**'], protected: [] } }) as Json, { policyProfile: 'github', hostPolicy: { allowPrivileged: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/workflows/**', 'docs/**'], protected: [] } }) as Json, { policyProfile: 'github' } as Parameters<typeof validateTaskpackV2Manifest>[1]), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/**'], protected: [] } }) as Json, { policyProfile: 'github', hostPolicy: { allowWorkflowWrites: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]), 'TASKPACK_SCOPE_VIOLATION');
+    expectAppError(() => validateTaskpackV2Manifest(makeBaseV2Manifest({ execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } }, scope: { writable: ['.github/workflows/**'], protected: ['.github/**'] } }) as Json, { policyProfile: 'github', hostPolicy: { allowWorkflowWrites: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]), 'TASKPACK_SCOPE_VIOLATION');
 
     const unlocked = validateTaskpackV2Manifest(makeBaseV2Manifest({
       execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } },
       scope: { writable: ['.github/workflows/**', 'docs/**'], protected: [] },
-    }) as Json, { hostPolicy: { allowWorkflowWrites: true } });
+    }) as Json, { policyProfile: 'github', hostPolicy: { allowWorkflowWrites: true } } as Parameters<typeof validateTaskpackV2Manifest>[1]);
     assert.deepEqual(unlocked.spec.scope.writable, ['.github/workflows/**', 'docs/**']);
 
-    const prot = effectiveProtectedPaths([], { controlRoot: '.loopwright', allowWorkflowWrites: true, githubSiblings: ['.github/CODEOWNERS', '.github/actions', '.github/workflows'] });
+    const prot = effectiveProtectedPaths([], { controlRoot: '.loopwright', policyProfile: 'github', allowWorkflowWrites: true, githubSiblings: ['.github/CODEOWNERS', '.github/actions', '.github/workflows'] } as Parameters<typeof effectiveProtectedPaths>[1]);
     assert.equal(prot.includes('.github'), false);
     assert.equal(prot.includes('.github/workflows'), false);
     assert.equal(prot.includes('.github/CODEOWNERS'), true);

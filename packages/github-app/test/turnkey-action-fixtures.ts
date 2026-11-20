@@ -234,6 +234,7 @@ spec:
       - 'docs/**'
     protected:
       - pack/dependencies.json
+      - '.claude/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:

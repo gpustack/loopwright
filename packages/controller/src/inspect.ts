@@ -219,17 +219,17 @@ async function candidateFilesDocument(saved: Snapshot, head: ProgressHead): Prom
   }
 
   // Legacy v1 capture (`delegated-capture.v1` or synthetic Pi `chunk` snapshot):
-  // If CAS blobs exist for every entry on disk, verify and emit v2; if no CAS blob exists for the legacy capture, emit v1 fallback.
+  // If CAS blobs exist for every entry on disk, verify and emit v2; if any entry lacks a CAS blob, emit v1 fallback.
   if (await hasCasSha256Dir(artifactsDir)) {
-    let anyCasBlobPresent = false;
+    let allCasBlobsPresent = head.manifest.spec.entries.length > 0;
     for (const entry of head.manifest.spec.entries) {
       const exists = await lstat(join(artifactsDir, 'blobs', 'sha256', entry.digest.hex)).then(() => true, () => false);
-      if (exists) {
-        anyCasBlobPresent = true;
+      if (!exists) {
+        allCasBlobsPresent = false;
         break;
       }
     }
-    if (anyCasBlobPresent) {
+    if (allCasBlobsPresent) {
       const v2Files = await verifyAndBuildV2Files(artifactsDir, head.manifest, baselineModes, overlayModes);
       return { version: 2, manifest: head.manifest, files: v2Files };
     }

@@ -1,40 +1,27 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';
-import { validateExecutionAuthority, validateTaskpackV2Manifest } from './schema.js';
+import {
+  assertManifestScopeInvariants,
+  assertMultiTenantManifestAuthority,
+  isGitHubTriggerDeclared,
+  MULTI_TENANT_HOST_POLICY,
+  validateTaskpackV2Manifest,
+} from '@loopwright/taskpack';
 import { InstallationTokenBroker, SecretScrubber } from './token-broker.js';
 import { intakeWebhookDelivery, WebhookDeliveryStore } from './webhook.js';
 import { TenantAdmissionQueue } from './tenant-queue.js';
 import {
   GitHubAppError,
-  type ClockSample, type ExecutionHostPolicy, type GitHubAppErrorCode, type QueueItem,
-  type TaskpackManifest, type TaskpackReviseCommand, type TaskpackV2Manifest, type WebhookIntakeOutcome,
+  type ClockSample,
+  type GitHubAppErrorCode,
+  type QueueItem,
+  type TaskpackManifest,
+  type TaskpackReviseCommand,
+  type TaskpackV2Manifest,
+  type WebhookIntakeOutcome,
 } from './types.js';
 
-export const MULTI_TENANT_HOST_POLICY: ExecutionHostPolicy = Object.freeze({
-  allowPrivileged: false,
-  allowWorkflowWrites: false,
-});
-
-export function assertMultiTenantManifestAuthority(manifest: TaskpackManifest | TaskpackV2Manifest): void {
-  validateExecutionAuthority(manifest.spec.execution, MULTI_TENANT_HOST_POLICY, {
-    localChecks: manifest.spec.verification.localChecks,
-  });
-  for (const [checkIdx, check] of manifest.spec.verification.localChecks.entries()) {
-    if (check.implementation !== 'command.v1') continue;
-    const rawToolchains = check.parameters?.['toolchainPaths'];
-    if (Array.isArray(rawToolchains)) {
-      for (const [tIdx, entry] of rawToolchains.entries()) {
-        if (typeof entry === 'string' && entry.startsWith('/')) {
-          throw new GitHubAppError(
-            'TASKPACK_HOST_BINDING_INVALID',
-            `multi-tenant control plane refuses absolute host toolchainPaths entry "${entry}"`,
-            `/spec/verification/localChecks/${checkIdx}/parameters/toolchainPaths/${tIdx}`,
-          );
-        }
-      }
-    }
-  }
-}
+export { assertMultiTenantManifestAuthority, MULTI_TENANT_HOST_POLICY };
 
 export interface ControlPlaneHandle {
   readonly host: string;
@@ -84,6 +71,7 @@ const STATUS_BY_CODE: Readonly<Partial<Record<GitHubAppErrorCode, number>>> = Ob
   TASKPACK_UNTRUSTED_INTERPOLATION: 400,
   TASKPACK_SCOPE_VIOLATION: 400,
   TASKPACK_HOST_BINDING_INVALID: 400,
+  TASKPACK_TRIGGER_UNSUPPORTED: 400,
   TENANT_IDENTITY_INVALID: 400,
   TENANT_BOUNDARY_VIOLATION: 403,
   QUEUE_CAPACITY_EXCEEDED: 429,
@@ -101,6 +89,7 @@ const STATUS_BY_CODE: Readonly<Partial<Record<GitHubAppErrorCode, number>>> = Ob
   STORAGE_PROFILE_INSUFFICIENT: 422,
   MCP_OAUTH_UNSUPPORTED: 422,
   MCP_AUTHENTICATION_REQUIRED: 422,
+  PROVIDER_OAUTH_UNSUPPORTED: 422,
 });
 
 function statusForError(code: GitHubAppErrorCode): number {
@@ -163,6 +152,13 @@ function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: str
 export async function startGitHubAppControlPlane(options: ControlPlaneOptions): Promise<ControlPlaneHandle> {
   if (options.manifest !== undefined) {
     assertMultiTenantManifestAuthority(options.manifest);
+    assertManifestScopeInvariants(options.manifest, {
+      controlRoot: options.manifest.controlRoot ?? '.loopwright',
+      manifestPath: options.manifest.manifestPath,
+      policyProfile: 'github',
+      hostPolicy: MULTI_TENANT_HOST_POLICY,
+      enforceHostAuthority: true,
+    });
   }
   const pinnedManifestCanonical = options.manifest !== undefined
     ? canonicalJson(options.manifest)
@@ -308,6 +304,33 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         // intakeWebhookDelivery re-dispatches redelivered failures internally; this shape never escapes it.
         return respond(response, 202, { kind: 'retry_failed', attemptCount: outcome.entry.attemptCount });
       }
+      // Unconfigured control planes without a pinned manifest must not admit actionable triggers into tenant queues.
+      if (options.manifest === undefined) {
+        if (deliveryStore.getDelivery(headerDeliveryId) !== undefined) {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        }
+        return respond(response, 200, {
+          kind: 'ignored',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: 'control plane has no pinned taskpack manifest to authorize actionable triggers',
+        });
+      }
+      // Enforce manifest spec.triggers eligibility strictly BEFORE admitting into the tenant queue.
+      if (
+        !isGitHubTriggerDeclared(options.manifest.spec.triggers, {
+          eventName: outcome.eventName,
+          commentCommand: outcome.command?.command,
+        })
+      ) {
+        if (deliveryStore.getDelivery(headerDeliveryId) !== undefined) {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        }
+        return respond(response, 200, {
+          kind: 'ignored',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: `trigger "${outcome.eventName}" is not enabled in spec.triggers`,
+        });
+      }
       // Accepted (including failed-redelivery retries): enqueue the actionable trigger for the tenant.
       const tenant = outcome.tenant;
       if (tenant === null) return respond(response, 400, { error: { code: 'TENANT_IDENTITY_INVALID', message: 'accepted webhook without tenant attribution' } });
@@ -358,6 +381,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             const tenantManifest = validateTaskpackV2Manifest(
               parsed.body['manifest'] as Parameters<typeof validateTaskpackV2Manifest>[0],
               {
+                policyProfile: 'github',
                 hostPolicy: MULTI_TENANT_HOST_POLICY,
                 enforceHostAuthority: true,
               },

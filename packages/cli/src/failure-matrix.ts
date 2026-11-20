@@ -539,7 +539,7 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
     ),
     format: 'yaml',
   });
-  r.expect(withDeclaredVars.spec.publication.titleTemplate, 'docs: sync stable', 'declared spec.vars interpolate safely in permitted fields');
+  r.expect(withDeclaredVars.spec.publication.titleTemplate ?? '', 'docs: sync stable', 'declared spec.vars interpolate safely in permitted fields');
   for (const oauthProvider of ['github-copilot', 'openai-codex', 'claude-code', 'gemini']) {
     const withOauthModel = structuredClone(manifest) as unknown as Record<string, unknown>;
     (withOauthModel.spec as Record<string, unknown>).models = [
