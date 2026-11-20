@@ -1085,6 +1085,8 @@ describe('negative and security regression tests', () => {
 
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         GITHUB_REPOSITORY: 'acme/sync-target',
         GITHUB_REPOSITORY_ID: '100',
@@ -1187,6 +1189,8 @@ describe('negative and security regression tests', () => {
 
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         GITHUB_REPOSITORY: 'acme/sync-target',
         GITHUB_REPOSITORY_ID: '100',
