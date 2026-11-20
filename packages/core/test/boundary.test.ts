@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateDocument, LIMITS, DIAGNOSTIC_CODES } from '../src/index.js';
+import { validateDocument, aggregateUsage, LIMITS, DIAGNOSTIC_CODES } from '../src/index.js';
+import { snapshot } from '../src/boundary.js';
+import { canonical, hashDomain } from '../src/identity.js';
 import { contract, code, value } from './fixtures.js';
 
 test('boundary owns and freezes ordinary and null-prototype data', () => {
@@ -97,4 +99,56 @@ test('review R1 diagnostic code export is immutable at runtime', () => {
   assert.throws(() => (DIAGNOSTIC_CODES as unknown as string[]).push('MUTATED'), TypeError);
   assert.equal(Reflect.defineProperty(DIAGNOSTIC_CODES, '0', { value: 'MUTATED' }), false);
   assert.equal(DIAGNOSTIC_CODES[0], 'INPUT_TYPE');
+});
+
+test('boundary snapshot admits finite floats, normalizes -0 to 0, and rejects non-finite numbers', () => {
+  const fromObj = snapshot({ latency: 42.5, delta: -0, negative: -3.14, tiny: 1e-9 }) as Record<string, number>;
+  assert.equal(fromObj.latency, 42.5);
+  assert.equal(Object.is(fromObj.delta, 0), true);
+  assert.equal(Object.is(fromObj.delta, -0), false);
+  assert.equal(fromObj.negative, -3.14);
+  assert.equal(fromObj.tiny, 1e-9);
+
+  const fromJson = snapshot('{"latency":42.5,"delta":-0,"negative":-3.14,"tiny":1e-9}') as Record<string, number>;
+  assert.equal(fromJson.latency, 42.5);
+  assert.equal(Object.is(fromJson.delta, 0), true);
+  assert.equal(canonical(fromObj), canonical(fromJson));
+  assert.equal(canonical({ delta: -0, latency: 42.5 }), canonical({ delta: 0, latency: 42.5 }));
+  assert.equal(
+    hashDomain('task-contract', { delta: -0, latency: 42.5 }).hex,
+    hashDomain('task-contract', { delta: 0, latency: 42.5 }).hex,
+  );
+
+  for (const bad of [{ x: NaN }, { x: Infinity }, { x: -Infinity }, '{"x":1e309}', '{"x":-1e309}']) {
+    assert.throws(() => snapshot(bad), (error: unknown) => {
+      return typeof error === 'object' && error !== null && 'diagnostic' in error
+        && (error as { diagnostic: { code: string } }).diagnostic.code === 'VALUE_RANGE';
+    });
+  }
+});
+
+test('integer schema fields stay strictly safe integers even after float admission in snapshot', () => {
+  const task = contract();
+  task.spec.budgets.maxFormatRepairs = 1.5;
+  assert.equal(code(validateDocument(task, 'TaskContract')), 'VALUE_RANGE');
+
+  const taskUnsafe = contract();
+  taskUnsafe.spec.budgets.maxFormatRepairs = Number.MAX_SAFE_INTEGER + 1;
+  assert.equal(code(validateDocument(taskUnsafe, 'TaskContract')), 'VALUE_RANGE');
+
+  const manifest = {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { entries: [{ name: 'a.txt', digest: { algorithm: 'sha256', hex: '0'.repeat(64) }, byteLength: 3.5 }] },
+  };
+  assert.equal(code(validateDocument(manifest, 'ArtifactManifest')), 'VALUE_RANGE');
+
+  const usageResult = aggregateUsage([{
+    requestId: 'req-1',
+    inputTokens: { provenance: 'reported', value: 12.25 },
+    outputTokens: { provenance: 'reported', value: 4 },
+    costMicrousd: { provenance: 'reported', value: 1 },
+  }]);
+  assert.equal(code(usageResult), 'VALUE_RANGE');
 });

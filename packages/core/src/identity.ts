@@ -1,12 +1,22 @@
 import { createHash } from 'node:crypto';
-import { snapshot, type Json } from './boundary.js';
-import { contractSchema, digestSchema, document, identifier, nullable, record, repository, revision, type Digest, type Infer, type TaskContract } from './contracts.js';
+import { overlaySnapshotBounds, snapshot, type Json } from './boundary.js';
+import {
+  contractSchema, digestSchema, document, identifier, nullable, record, repository,
+  resolveOverlayOptions, revision, type Digest, type Infer, type TaskContract,
+} from './contracts.js';
 import { manifestSchema, type ArtifactManifest } from './artifacts.js';
 import { attempt, fail, type Result } from './diagnostics.js';
+import type { OverlayLimitOptions } from './limits.js';
 
 // Only validated, owned values reach this serializer. It never sees caller objects.
 export function canonical(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (value === null || typeof value !== 'object') {
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) fail('VALUE_RANGE');
+      return JSON.stringify(Object.is(value, -0) ? 0 : value);
+    }
+    return JSON.stringify(value);
+  }
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   const record = value as Readonly<Record<string, unknown>>;
   return '{' + Object.keys(record).sort().map(key => JSON.stringify(key) + ':' + canonical(record[key])).join(',') + '}';
@@ -36,9 +46,13 @@ export function admitTask(input: unknown, admission: unknown): Result<TaskLock> 
     };
   });
 }
-export function identifyManifest(input: unknown): Result<{ readonly manifest: ArtifactManifest; readonly digest: Digest }> {
+export function identifyManifest(
+  input: unknown,
+  options?: OverlayLimitOptions,
+): Result<{ readonly manifest: ArtifactManifest; readonly digest: Digest }> {
   return attempt(() => {
-    const manifest = manifestSchema(snapshot(input));
+    const overlay = resolveOverlayOptions(options);
+    const manifest = manifestSchema(snapshot(input, overlaySnapshotBounds(overlay?.maxFiles)), '', overlay?.maxFiles);
     return { manifest, digest: hashDomain('artifact-manifest', manifest) };
   });
 }
@@ -55,8 +69,18 @@ export function deriveSubject(lock: TaskLock, manifest: ArtifactManifest): Subje
     targetMatrixDigest: target.matrix === null ? null : hashDomain('target-matrix', target.matrix),
   };
 }
-export function bindSubject(expectedLock: unknown, candidateManifest: unknown): Result<Subject> {
-  return attempt(() => deriveSubject(lockSchema(snapshot(expectedLock)), manifestSchema(snapshot(candidateManifest))));
+export function bindSubject(expectedLock: unknown, candidateManifest: unknown, options?: OverlayLimitOptions): Result<Subject> {
+  return attempt(() => {
+    const explicitOverlay = resolveOverlayOptions(options);
+    const lock = lockSchema(snapshot(expectedLock));
+    const effectiveOverlay = explicitOverlay ?? lock.spec.contract.spec.budgets.overlay;
+    const manifest = manifestSchema(
+      snapshot(candidateManifest, overlaySnapshotBounds(effectiveOverlay?.maxFiles)),
+      '',
+      effectiveOverlay?.maxFiles,
+    );
+    return deriveSubject(lock, manifest);
+  });
 }
 export function matchSubject(expected: Subject, observed: Subject, path: string, checkId: string | null = null): void {
   for (const field of ['lockHash', 'contractHash', 'repository', 'baseRevision', 'sourceRevision', 'candidateDigest', 'targetMatrixDigest'] as const) {

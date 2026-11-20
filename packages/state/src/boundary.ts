@@ -1,12 +1,29 @@
 import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { validateDocument, identifyManifest, type Digest, type ArtifactRef } from '@loopwright/core';
+import { validateDocument, identifyManifest, OVERLAY_LIMITS, type Digest, type ArtifactRef, type OverlayLimits } from '@loopwright/core';
 import { fail } from './errors.js';
 import type { CompatibilityBinding, ExactTotal, LocalRunIdentity, StatePolicy } from './types.js';
 
-export const STATE_LIMITS = Object.freeze({ requests:1024, operations:2048, checkpoints:64, callBytes:65536,
-  recordBytes:16384, checkpointBytes:65536, pageItems:100, pageBytes:131072, depth:32, nodes:8192,
+export const STATE_LIMITS = Object.freeze({ requests:1024, operations:2048, checkpoints:256, callBytes:65536,
+  recordBytes:16384, checkpointBytes:65536, wideCheckpointBytes:2097152, pageItems:100, pageBytes:131072, depth:32, nodes:8192,
   properties:128, collection:128, driftMs:1000, maxPages:65536 });
+export interface SnapshotBounds {
+  readonly maxBytes?: number;
+  readonly nodes?: number;
+  readonly collection?: number;
+}
+export function overlayCheckpointBounds(overlay?:OverlayLimits):{readonly maxBytes:number;readonly nodes:number;readonly collection:number} {
+  if(overlay===undefined||overlay.maxFiles<=STATE_LIMITS.collection){
+    return {maxBytes:STATE_LIMITS.checkpointBytes,nodes:STATE_LIMITS.nodes,collection:STATE_LIMITS.collection};
+  }
+  const capped=Math.min(overlay.maxFiles,OVERLAY_LIMITS.maxMaxFiles);
+  const extra=capped-STATE_LIMITS.collection;
+  return {
+    maxBytes:Math.min(STATE_LIMITS.wideCheckpointBytes,STATE_LIMITS.checkpointBytes+extra*4608),
+    nodes:STATE_LIMITS.nodes+extra*16,
+    collection:Math.max(STATE_LIMITS.collection,capped+1),
+  };
+}
 export type Json = null | boolean | number | string | Json[] | { [key:string]:Json };
 export function record(input: unknown, keys: readonly string[], path=''): Record<string,unknown> {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) fail('INVALID_INPUT',path);
@@ -63,17 +80,20 @@ export function freeze<T>(input:T):T {
   if(input!==null&&typeof input==='object'){for(const value of Object.values(input))freeze(value);Object.freeze(input);}return input;
 }
 /** Bound work before serialization; never call ordinary accessors or toJSON. */
-export function snapshot(input:unknown, maxBytes:number=STATE_LIMITS.callBytes):Json {
+export function snapshot(input:unknown, bounds:number|SnapshotBounds=STATE_LIMITS.callBytes):Json {
+  const maxBytes=typeof bounds==='number'?bounds:bounds.maxBytes??STATE_LIMITS.callBytes;
+  const maxNodes=typeof bounds==='number'?STATE_LIMITS.nodes:bounds.nodes??STATE_LIMITS.nodes;
+  const maxCollection=typeof bounds==='number'?STATE_LIMITS.collection:bounds.collection??STATE_LIMITS.collection;
   let nodes=0,bytes=0;const seen=new WeakSet<object>();
   function visit(value:unknown,depth:number):Json {
-    if(++nodes>STATE_LIMITS.nodes||depth>STATE_LIMITS.depth)fail('LIMIT_EXCEEDED');
+    if(++nodes>maxNodes||depth>STATE_LIMITS.depth)fail('LIMIT_EXCEEDED');
     if(value===null||typeof value==='boolean'||typeof value==='number'||typeof value==='string'){
       if(typeof value==='number')integer(value,'',-Number.MAX_SAFE_INTEGER);if(typeof value==='string')text(value||' ', '',Math.min(maxBytes,16384));
       bytes+=Buffer.byteLength(JSON.stringify(value));if(bytes>maxBytes)fail('LIMIT_EXCEEDED');return value;
     }
     if(typeof value!=='object'||seen.has(value))fail('INVALID_INPUT');seen.add(value);
     if(Array.isArray(value)){
-      if(value.length>STATE_LIMITS.collection)fail('LIMIT_EXCEEDED');
+      if(value.length>maxCollection)fail('LIMIT_EXCEEDED');
       const descriptors=Reflect.ownKeys(value);if(descriptors.length!==value.length+1)fail('INVALID_INPUT');
       bytes+=2+value.length;const out:Json[]=[];
       for(let i=0;i<value.length;i++){const d=Object.getOwnPropertyDescriptor(value,String(i));if(!d||!('value'in d)||!d.enumerable)fail('INVALID_INPUT');out.push(visit(d.value,depth+1));}return out;

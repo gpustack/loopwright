@@ -1,12 +1,15 @@
-import { snapshot, type Json } from './boundary.js';
-import { arrayOf, document, enumeration, identifier, nullable, record, text, type Infer } from './contracts.js';
+import { overlaySnapshotBounds, snapshotWithDeferredManifest, type Json, type SnapshotBounds } from './boundary.js';
+import {
+  arrayOf, document, enumeration, identifier, nullable, object,
+  record, resolveOverlayOptions, text, type Infer,
+} from './contracts.js';
 import { attempt, fail, type Result } from './diagnostics.js';
-import { manifestSchema, type ResolvedArtifact } from './artifacts.js';
+import { manifestSchema, type ArtifactManifest, type ResolvedArtifact } from './artifacts.js';
 import { evaluateValidated, verificationSchema } from './acceptance.js';
 import { claimSchema, evidenceSchema, type Evidence } from './evidence.js';
-import { lockSchema, matchSubject, subjectSchema } from './identity.js';
-import { LIMITS } from './limits.js';
-import { requestsSchema, summarizeRequests, usageSummarySchema } from './usage.js';
+import { lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
+import { LIMITS, type OverlayLimitOptions, type OverlayLimits } from './limits.js';
+import { requestsSchema, summarizeRequests, usageSummarySchema, type RequestUsage } from './usage.js';
 
 const runStatusSchema = enumeration('completed', 'no_change', 'blocked', 'exhausted', 'expired', 'cancelled', 'failed', 'reconcile_required');
 export type RunStatus = Infer<typeof runStatusSchema>;
@@ -20,12 +23,57 @@ function memorySchema(value: Json, path: string): MemoryObservation {
   if ((memory.status === 'pending' || memory.status === 'unavailable') && memory.reason === null) fail('VALUE_RANGE', `${path}/reason`);
   return memory;
 }
-const draftSchema = record({
-  trusted: record({ expectedLock: lockSchema, candidateManifest: manifestSchema,
-    eligibleEvidence: arrayOf(evidenceSchema, 0, LIMITS.evidence), usage: requestsSchema,
-    externalEffects: effectsSchema, noChange: nullable(noChangeSchema) }),
-  candidate: record({ status: runStatusSchema, checks: arrayOf(claimSchema, 0, LIMITS.checks), memory: memorySchema }),
-});
+const draftTrustedKeys = ['expectedLock', 'candidateManifest', 'eligibleEvidence', 'usage', 'externalEffects', 'noChange'] as const;
+interface DraftTrusted {
+  readonly expectedLock: TaskLock;
+  readonly candidateManifest: ArtifactManifest;
+  readonly eligibleEvidence: readonly Evidence[];
+  readonly usage: readonly RequestUsage[];
+  readonly externalEffects: RunResult['spec']['externalEffects'];
+  readonly noChange: NoChangeVerification | null;
+}
+function parseDraftTrusted(
+  value: Json,
+  path: string,
+  resolveManifest: (bounds?: SnapshotBounds) => Json,
+  explicitOverlay?: OverlayLimits,
+): DraftTrusted {
+  const input = object(value, path);
+  for (const key of draftTrustedKeys) {
+    if (!Object.hasOwn(input, key)) fail('FIELD_REQUIRED', `${path}/${key}`);
+  }
+  for (const key of Object.keys(input).sort()) {
+    if (!(draftTrustedKeys as readonly string[]).includes(key)) fail('FIELD_UNKNOWN', path);
+  }
+  const expectedLock = lockSchema(input.expectedLock!, `${path}/expectedLock`);
+  const effectiveOverlay = explicitOverlay ?? expectedLock.spec.contract.spec.budgets.overlay;
+  const manifestJson = resolveManifest(overlaySnapshotBounds(effectiveOverlay?.maxFiles));
+  const candidateManifest = manifestSchema(manifestJson, `${path}/candidateManifest`, effectiveOverlay?.maxFiles);
+  const eligibleEvidence = arrayOf(evidenceSchema, 0, LIMITS.evidence)(input.eligibleEvidence!, `${path}/eligibleEvidence`);
+  const usage = requestsSchema(input.usage!, `${path}/usage`);
+  const externalEffects = effectsSchema(input.externalEffects!, `${path}/externalEffects`);
+  const noChange = nullable(noChangeSchema)(input.noChange!, `${path}/noChange`);
+  const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  output.expectedLock = expectedLock;
+  output.candidateManifest = candidateManifest;
+  output.eligibleEvidence = eligibleEvidence;
+  output.usage = usage;
+  output.externalEffects = externalEffects;
+  output.noChange = noChange;
+  return output as unknown as DraftTrusted;
+}
+const candidateShape = record({ status: runStatusSchema, checks: arrayOf(claimSchema, 0, LIMITS.checks), memory: memorySchema });
+function parseDraft(
+  value: Json,
+  path: string,
+  resolveManifest: (bounds?: SnapshotBounds) => Json,
+  explicitOverlay?: OverlayLimits,
+) {
+  return record({
+    trusted: (trustedValue: Json, trustedPath: string) => parseDraftTrusted(trustedValue, trustedPath, resolveManifest, explicitOverlay),
+    candidate: candidateShape,
+  })(value, path);
+}
 const runShape = document('RunResult', record({ status: runStatusSchema, subject: subjectSchema,
   verification: verificationSchema, usage: usageSummarySchema, externalEffects: effectsSchema,
   noChange: nullable(noChangeSchema), memory: memorySchema }));
@@ -53,12 +101,23 @@ export function runSchema(input: Json, path = ''): RunResult {
   consistentStatus(spec.status, spec.externalEffects, spec.noChange, spec.verification, `${path}/spec/status`, null);
   return run;
 }
-export function constructRunResult(input: unknown, artifacts: readonly ResolvedArtifact[]): Result<RunResult> {
+export function constructRunResult(
+  input: unknown,
+  artifacts: readonly ResolvedArtifact[],
+  options?: OverlayLimitOptions,
+): Result<RunResult> {
   return attempt(() => {
-    const draft = draftSchema(snapshot(input), '');
+    const explicitOverlay = resolveOverlayOptions(options);
+    const deferred = snapshotWithDeferredManifest(input);
+    const draft = parseDraft(deferred.root, '', deferred.resolveManifest, explicitOverlay);
     const usage = summarizeRequests(draft.trusted.usage, '/trusted/usage');
     // Evaluate current trusted inputs, never a serialized matrix or type brand.
-    const verification = evaluateValidated({ trusted: draft.trusted, claims: draft.candidate.checks }, artifacts, '/candidate/checks');
+    const verification = evaluateValidated(
+      { trusted: draft.trusted, claims: draft.candidate.checks },
+      artifacts,
+      '/candidate/checks',
+      explicitOverlay ? { overlay: explicitOverlay } : undefined,
+    );
     const { status, memory } = draft.candidate;
     const { externalEffects, noChange } = draft.trusted;
     consistentStatus(status, externalEffects, noChange, verification, '/candidate/status', draft.trusted.eligibleEvidence);

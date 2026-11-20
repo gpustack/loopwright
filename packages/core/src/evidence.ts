@@ -1,13 +1,20 @@
-import { artifactRefSchema, arrayOf, checkStatus, document, evidenceLevel, identifier, nullable, record, text, type Infer } from './contracts.js';
+import {
+  artifactRefSchema, arrayOf, checkStatus, document, evidenceLevel, findingsSchema, identifier,
+  metricsSchema, nullable, optional, record, text, type Infer,
+} from './contracts.js';
 import { fail } from './diagnostics.js';
 import { unique } from './graph.js';
 import { subjectSchema } from './identity.js';
 import { LIMITS } from './limits.js';
 import type { Json } from './boundary.js';
 
-const evidenceShape = document('Evidence', record({ checkId: identifier, observedStatus: checkStatus,
+const evidenceShape = document('Evidence', record({
+  checkId: identifier, observedStatus: checkStatus,
   producerId: identifier, method: identifier, level: evidenceLevel, subject: subjectSchema,
   artifacts: arrayOf(artifactRefSchema, 0, LIMITS.manifest), reason: nullable(text()),
+  detail: optional(nullable(text())),
+  metrics: optional(metricsSchema),
+  findings: optional(findingsSchema),
 }));
 export type Evidence = Infer<typeof evidenceShape>;
 export function evidenceSchema(value: Json, path = ''): Evidence {
@@ -19,7 +26,12 @@ export function evidenceSchema(value: Json, path = ''): Evidence {
   unique(observation.artifacts.map(ref => ref.name), `${path}/spec/artifacts`);
   return evidence;
 }
-const claimShape = record({ checkId: identifier, status: checkStatus, evidenceId: nullable(identifier), reason: nullable(text()) });
+const claimShape = record({
+  checkId: identifier, status: checkStatus, evidenceId: nullable(identifier), reason: nullable(text()),
+  detail: optional(nullable(text())),
+  metrics: optional(metricsSchema),
+  findings: optional(findingsSchema),
+});
 export type SubmittedCheck = Infer<typeof claimShape>;
 export function claimSchema(value: Json, path: string): SubmittedCheck {
   const claim = claimShape(value, path);
