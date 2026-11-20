@@ -700,7 +700,7 @@ function turnkeySummaryExit(summary: TurnkeyCycleAttemptSummary, signal: string 
     case 'OUTPUT_LIMIT':
       return 8;
     default:
-      return summary.ok ? 0 : 4;
+      return 4;
   }
 }
 async function writeCompiledTaskpackDir(
@@ -718,18 +718,18 @@ async function writeCompiledTaskpackDir(
   const registryPath = join(registryDirectory, 'registry.yaml');
   const configPath = join(configDirectory, 'config.yaml');
   const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+  assertCleanArtifact(configBytes, scrubber, '/config');
+  for (const resource of compiled.instructionResources ?? []) {
+    assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+  }
   await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
   await writeFile(configPath, configBytes, { mode: 0o600 });
   await chmod(registryPath, 0o600);
   await chmod(configPath, 0o600);
   if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
     await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
-    for (const resource of compiled.instructionResources) {
-      assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
-    }
   }
-  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
-  assertCleanArtifact(configBytes, scrubber, '/config');
   return {
     ...compiled,
     configBytes,
