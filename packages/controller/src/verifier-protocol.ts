@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { types } from 'node:util';
 import {
   LIMITS,
+  OVERLAY_LIMITS,
   admitTask,
   identifyManifest,
   isWritablePath,
@@ -497,8 +498,8 @@ function checkedDescriptor(raw: unknown, maxEntries: number): ManifestDescriptor
 
 function checkedOverlayField(raw: unknown): OverlayLimits {
   const obj = record(raw, ['maxFiles', 'maxBytes']);
-  const maxFiles = integer(obj.maxFiles, 1, 4096);
-  const maxBytes = integer(obj.maxBytes, 1024, 67_108_864);
+  const maxFiles = integer(obj.maxFiles, OVERLAY_LIMITS.minMaxFiles, OVERLAY_LIMITS.maxMaxFiles);
+  const maxBytes = integer(obj.maxBytes, OVERLAY_LIMITS.minMaxBytes, OVERLAY_LIMITS.maxMaxBytes);
   return { maxFiles, maxBytes };
 }
 

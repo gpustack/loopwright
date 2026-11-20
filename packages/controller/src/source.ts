@@ -6,6 +6,7 @@ import {
   identifyManifest,
   matchesScopePattern as coreMatchesScopePattern,
   resolveOverlayLimits,
+  validateRelativePath,
   validateScopePattern,
   type ArtifactManifest,
   type ArtifactRef,
@@ -71,9 +72,7 @@ export function matchesScopePattern(pattern: string, name: string): boolean {
 }
 
 const HOST_ALWAYS_PROTECTED_PATTERNS: readonly string[] = [
-  '.claude/**',
-  'AGENTS.md',
-  'CLAUDE.md',
+  '.git/**',
 ];
 const HOST_WORKFLOW_PROTECTED_PATTERN = '.github/workflows/**';
 
@@ -88,9 +87,25 @@ function matchesHostProtectedPattern(pattern: string, name: string): boolean {
   return !matched.ok || matched.value;
 }
 
-export function isHostProtectedPath(name: string, allowWorkflowWrites: boolean): boolean {
+export interface HostPathProtectionOptions {
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly enforceGitHubWorkflowProtection?: boolean | undefined;
+}
+
+export function isHostProtectedPath(
+  name: string,
+  options: boolean | HostPathProtectionOptions = false,
+): boolean {
+  const allowWorkflowWrites = typeof options === 'boolean' ? options : options.allowWorkflowWrites === true;
+  const enforceGitHubWorkflowProtection =
+    typeof options === 'boolean' ? true : options.enforceGitHubWorkflowProtection !== false;
+  if (!validateRelativePath(name).ok || name.split('/').some(segment => segment.toLowerCase() === '.git')) {
+    return true;
+  }
   if (HOST_ALWAYS_PROTECTED_PATTERNS.some(pattern => matchesHostProtectedPattern(pattern, name))) return true;
-  if (!allowWorkflowWrites && matchesHostProtectedPattern(HOST_WORKFLOW_PROTECTED_PATTERN, name)) return true;
+  if (enforceGitHubWorkflowProtection && !allowWorkflowWrites && matchesHostProtectedPattern(HOST_WORKFLOW_PROTECTED_PATTERN, name)) {
+    return true;
+  }
   return false;
 }
 
@@ -101,6 +116,7 @@ export interface OverlayManifestBounds {
   readonly manifestMaxBytes: number;
   readonly collectionLimit: number;
   readonly workspaceMaxBytes: number;
+  readonly v2WorkspaceJsonMaxBytes: number;
   readonly checkpointInputMaxBytes: number;
   readonly options: { readonly overlay: { readonly maxFiles: number; readonly maxBytes: number } } | undefined;
 }
@@ -109,13 +125,15 @@ export function overlayManifestBounds(overlay?: TaskContract['spec']['budgets'][
   const resolved = resolveOverlayLimits(overlay);
   if (!resolved.ok) refuse('CONFIG_SCHEMA', '/spec/task/spec/budgets/overlay', 'admission');
   const { maxFiles, maxBytes } = resolved.value;
-  const perFileMaxBytes = overlay === undefined ? 1_048_576 : Math.min(maxBytes, 33_554_432);
+  const perFileMaxBytes = overlay === undefined ? 1_048_576 : maxBytes;
   const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(20_971_520, 32_768 + (maxFiles - 128) * 4_608);
   const collectionLimit = Math.max(256, maxFiles);
   const workspaceMaxBytes =
     maxFiles <= 128 && maxBytes <= 4_194_304
       ? 8_388_608
-      : Math.ceil((maxBytes * 4) / 3) + maxFiles * 256 + 1_114_112;
+      : Math.min(100_663_296, Math.ceil((maxBytes * 4) / 3) + maxFiles * 256 + 1_114_112);
+  const v2WorkspaceJsonMaxBytes =
+    maxFiles <= 128 ? 1_048_576 : Math.min(16_777_216, 1_048_576 + (maxFiles - 128) * 2_048);
   const checkpointInputMaxBytes =
     overlay === undefined || maxFiles <= 128
       ? 40_960
@@ -127,6 +145,7 @@ export function overlayManifestBounds(overlay?: TaskContract['spec']['budgets'][
     manifestMaxBytes,
     collectionLimit,
     workspaceMaxBytes,
+    v2WorkspaceJsonMaxBytes,
     checkpointInputMaxBytes,
     options: overlay !== undefined ? { overlay: { maxFiles, maxBytes } } : undefined,
   };

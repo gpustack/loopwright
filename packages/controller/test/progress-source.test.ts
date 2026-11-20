@@ -95,13 +95,55 @@ test('source inventory switches to version 2 tree_overlay beyond the 128-file or
   } finally { await f.close(); }
 });
 
-test('isHostProtectedPath fails closed on malformed paths and honors allowWorkflowWrites', () => {
+test('isHostProtectedPath fails closed on malformed paths, leaves tool paths neutral, and scopes GitHub workflow protection', () => {
   assert.equal(isHostProtectedPath('../etc/passwd', false), true);
+  assert.equal(isHostProtectedPath('../etc/passwd', { allowWorkflowWrites: true, enforceGitHubWorkflowProtection: false }), true);
   assert.equal(isHostProtectedPath('/etc/passwd', false), true);
   assert.equal(isHostProtectedPath('', false), true);
   assert.equal(isHostProtectedPath('docs//guide.md', false), true);
+  assert.equal(isHostProtectedPath('.git/config', true), true);
+  assert.equal(isHostProtectedPath('.git/hooks/pre-commit', { allowWorkflowWrites: true, enforceGitHubWorkflowProtection: false }), true);
+  assert.equal(isHostProtectedPath('sub/.git/config', { allowWorkflowWrites: true, enforceGitHubWorkflowProtection: false }), true);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml'), true);
   assert.equal(isHostProtectedPath('.github/workflows/ci.yml', false), true);
   assert.equal(isHostProtectedPath('.github/workflows/ci.yml', true), false);
-  assert.equal(isHostProtectedPath('.claude/settings.json', true), true);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: false }), true);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), false);
+  assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: false, allowWorkflowWrites: false }), false);
+  assert.equal(isHostProtectedPath('.claude/settings.json', false), false);
+  assert.equal(isHostProtectedPath('AGENTS.md', false), false);
+  assert.equal(isHostProtectedPath('CLAUDE.md', false), false);
   assert.equal(isHostProtectedPath('docs/readme.md', false), false);
+});
+
+test('freezeSource requires explicit scope.protected to skip tracked .claude symlinks and admits skipped symlinks when declared', async () => {
+  const f = await retainedFixture();
+  try {
+    const r = await repository(f);
+    const linkBlob = await r.blob(Buffer.from('../.agents/skills'));
+    const srcBlob = await r.blob(Buffer.from('export const neutral = true;\n'));
+    const claudeTree = await r.tree([{ mode: '120000', type: 'blob', oid: linkBlob, name: 'skills' }]);
+    const rootTree = await r.tree([
+      { mode: '040000', type: 'tree', oid: claudeTree, name: '.claude' },
+      { mode: '100644', type: 'blob', oid: srcBlob, name: 'index.ts' },
+    ]);
+    const oid = await r.commit(rootTree);
+    const unprotectedTask: TaskContract = {
+      ...r.task(oid),
+      spec: { ...r.task(oid).spec, scope: { ...r.task(oid).spec.scope, protected: ['packages/policy/**'] } },
+    };
+    await assert.rejects(
+      freezeSource(f.taskDirectory, unprotectedTask, f.owner, f.artifacts),
+      (error: unknown) => error instanceof ControllerFailure && error.diagnostic.code === 'CAPABILITY_UNSUPPORTED',
+    );
+
+    const protectedTask: TaskContract = {
+      ...r.task(oid),
+      spec: { ...r.task(oid).spec, scope: { ...r.task(oid).spec.scope, protected: ['.claude/**'] } },
+    };
+    const frozen = await freezeSource(f.taskDirectory, protectedTask, f.owner, f.artifacts);
+    assert.deepEqual(frozen.manifest.spec.entries.map(item => item.name), ['index.ts']);
+  } finally {
+    await f.close();
+  }
 });

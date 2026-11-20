@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { lstat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { OVERLAY_LIMITS } from '@loopwright/core';
 import { retainedFixture } from './progress-fixtures.js';
 import { cycleFixture } from './scheduling-fixtures.js';
 import { runCycleWithPorts } from '../src/controller.js';
+import { overlayManifestBounds } from '../src/source.js';
 import { JSON_FILE_BYTES } from '../src/verifier-protocol.js';
 import { canonical, hash } from '../src/schema.js';
 import type { ControllerProgress } from '../src/types.js';
@@ -46,4 +48,36 @@ test('v2 conservative refusal row envelopes fit unchanged progress/index/checkpo
     assert.ok(checkpointBound <= 40960); assert.equal(Math.max(...measurements.map(row => row.J)), 28); assert.ok(measurements.some(row => row.D === 64));
     await writeFile(join(f.directory, 'v2-codec-envelope-proof.json'), canonical({ version: 1, kind: 'conservative-codec-upper-envelope-only', authoritativeRows: false, checkpointBound, rows: measurements, maximumProgressBytes: Math.max(...measurements.map(row => row.progressBytes)), maximumIndexBytes: Math.max(...measurements.map(row => row.indexBytes)), checkpointCount: 0, modelCalls: 0 }), { mode: 0o600 });
   } finally { await f.close(); }
+});
+
+test('overlayManifestBounds lifts the 32 MiB perFileMaxBytes cap, bounds v2WorkspaceJsonMaxBytes by maxFiles <= 16 MiB, and caps workspaceMaxBytes at 96 MiB', async () => {
+  const f = await retainedFixture();
+  try {
+    const defBounds = overlayManifestBounds();
+    assert.equal(defBounds.perFileMaxBytes, 1_048_576);
+    assert.equal(defBounds.v2WorkspaceJsonMaxBytes, 1_048_576);
+    assert.equal(defBounds.workspaceMaxBytes, 8_388_608);
+
+    const bounds64M = overlayManifestBounds({ maxFiles: 512, maxBytes: 67_108_864 });
+    assert.equal(bounds64M.perFileMaxBytes, 67_108_864);
+    assert.ok(bounds64M.v2WorkspaceJsonMaxBytes > 1_048_576 && bounds64M.v2WorkspaceJsonMaxBytes <= 16_777_216);
+    assert.ok(bounds64M.workspaceMaxBytes <= 100_663_296);
+
+    const bounds256M = overlayManifestBounds({ maxFiles: 512, maxBytes: 268_435_456 });
+    assert.equal(bounds256M.perFileMaxBytes, 268_435_456);
+    assert.equal(bounds256M.v2WorkspaceJsonMaxBytes, bounds64M.v2WorkspaceJsonMaxBytes);
+    assert.equal(bounds256M.workspaceMaxBytes, 100_663_296);
+
+    const bounds16G = overlayManifestBounds({ maxFiles: OVERLAY_LIMITS.maxMaxFiles, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.equal(bounds16G.perFileMaxBytes, OVERLAY_LIMITS.maxMaxBytes);
+    assert.ok(bounds16G.v2WorkspaceJsonMaxBytes <= 16_777_216);
+    assert.equal(bounds16G.workspaceMaxBytes, 100_663_296);
+
+    const stored = await f.artifacts.json('workspace', { format: 'delegated-capture.v2', version: 2, overlay: [] }, bounds16G.v2WorkspaceJsonMaxBytes);
+    assert.ok(stored.byteLength > 0);
+    const legacyStored = await f.artifacts.json('workspace', { format: 'delegated-capture.v1', version: 1, overlay: [] }, bounds16G.workspaceMaxBytes);
+    assert.ok(legacyStored.byteLength > 0);
+  } finally {
+    await f.close();
+  }
 });

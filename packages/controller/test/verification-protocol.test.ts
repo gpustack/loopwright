@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { evaluatePacket, encodeInventory, encodePacket, HEADER_BYTES, JSON_FILE_BYTES, maxPacketBytes, packetSize, AllocationQuota, type VerifierHeader } from '../src/verifier-protocol.js';
+import { OVERLAY_LIMITS, admitTask, bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, validateDocument } from '@loopwright/core';
+import { contract } from '../../core/test/fixtures.js';
+import { evaluatePacket, checkedHeader, descriptor, encodeInventory, encodePacket, HEADER_BYTES, JSON_FILE_BYTES, maxPacketBytes, packetSize, AllocationQuota, type VerifierHeader } from '../src/verifier-protocol.js';
 import { canonical, hash, type Json } from '../src/schema.js';
 import { packetFixture } from './verification-fixtures.js';
 test('fixed actual Worker validates complete multi-file JSON membership and complete candidate bytes', async () => {
@@ -83,4 +85,95 @@ test('a valid maximal-framing exact header is accepted and one-byte-over complet
 });
 test('application-controlled buffer quota refuses overflow and is independent of an RSS claim', () => {
   const quota = new AllocationQuota(); quota.allocate(8388608); assert.throws(() => quota.allocate(1)); assert.equal(quota.used, 8388609);
+});
+
+test('verifier-protocol accepts 16 GiB overlay.maxBytes for metadata-backed entries while preserving JSON_FILE_BYTES on JSON targets', () => {
+  const wideOverlay = { maxFiles: 512, maxBytes: OVERLAY_LIMITS.maxMaxBytes };
+  const rawDoc = contract();
+  (rawDoc.spec.budgets as Record<string, unknown>).overlay = wideOverlay;
+  const taskRes = validateDocument(rawDoc, 'TaskContract');
+  assert.equal(taskRes.ok, true);
+  if (!taskRes.ok) return;
+  const rawTask = taskRes.value;
+  const lockRes = admitTask(rawTask, { admissionId: 'adm-wide', runId: 'run-wide' });
+  assert.equal(lockRes.ok, true);
+  if (!lockRes.ok) return;
+
+  const baseTree = { objectFormat: 'sha1' as const, commitOid: 'a'.repeat(40), treeOid: 'b'.repeat(40) };
+  const hugeBinRefRes = digestArtifactFromMetadata('packages/huge.bin', {
+    digest: hash('huge-8gib-binary'),
+    byteLength: 8_589_934_592,
+  });
+  const jsonBytes = Buffer.from('{"ok":true}');
+  const jsonRefRes = digestArtifact('packages/result.json', jsonBytes);
+  assert.ok(hugeBinRefRes.ok && jsonRefRes.ok);
+  if (!hugeBinRefRes.ok || !jsonRefRes.ok) return;
+
+  const sourceId = identifyManifest({
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'source' },
+    spec: { baseTree, entries: [], deleted: [] },
+  }, { overlay: wideOverlay });
+  const candId = identifyManifest({
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { baseTree, entries: [hugeBinRefRes.value, jsonRefRes.value], deleted: [] },
+  }, { overlay: wideOverlay });
+  assert.ok(sourceId.ok && candId.ok);
+  if (!sourceId.ok || !candId.ok) return;
+
+  const subjectRes = bindSubject(lockRes.value, candId.value.manifest, { overlay: wideOverlay });
+  assert.equal(subjectRes.ok, true);
+  if (!subjectRes.ok) return;
+
+  const srcManifest = sourceId.value.manifest;
+  const candManifest = candId.value.manifest;
+  const srcDesc = descriptor(srcManifest, { name: 'src.json', digest: hash(canonical(srcManifest)), byteLength: Buffer.byteLength(canonical(srcManifest)) }, wideOverlay);
+  const candDesc = descriptor(candManifest, { name: 'cand.json', digest: hash(canonical(candManifest)), byteLength: Buffer.byteLength(canonical(candManifest)) }, wideOverlay);
+  const srcInv = encodeInventory(srcManifest, wideOverlay);
+  const candInv = encodeInventory(candManifest, wideOverlay);
+
+  const scopeHeader: VerifierHeader = {
+    version: 1,
+    jobId: 'job.wide.scope',
+    handler: 'scope.v1',
+    handlerVersion: 1,
+    handlerDigest: hash('scope.v1'),
+    checkId: 'scope',
+    producerNonce: 'c'.repeat(32),
+    operationId: 'op.wide.scope',
+    dispatchId: 'disp.wide',
+    generation: 0,
+    subject: subjectRes.value,
+    source: srcDesc,
+    candidate: candDesc,
+    parameters: { contract: rawTask } as unknown as Record<string, Json>,
+    payloadKind: 'inventories',
+    overlay: wideOverlay,
+  };
+  const invPayload = new Uint8Array(srcInv.byteLength + candInv.byteLength);
+  invPayload.set(srcInv, 0);
+  invPayload.set(candInv, srcInv.byteLength);
+  assert.equal(evaluatePacket(encodePacket(scopeHeader, invPayload)).status, 'passed');
+
+  // json-artifact.v1 checks small packages/result.json cleanly alongside the 8 GiB binary entry
+  const jsonHeader: VerifierHeader = {
+    ...scopeHeader,
+    jobId: 'job.wide.json',
+    handler: 'json-artifact.v1',
+    handlerDigest: hash('json-artifact.v1'),
+    checkId: 'tests',
+    parameters: { path: 'packages/result.json', expected: jsonRefRes.value, required: ['ok'], equals: { ok: true } } as unknown as Record<string, Json>,
+    payloadKind: 'json',
+  };
+  const jsonPayload = new Uint8Array(invPayload.byteLength + 4 + jsonBytes.byteLength);
+  jsonPayload.set(invPayload, 0);
+  new DataView(jsonPayload.buffer).setUint32(invPayload.byteLength, jsonBytes.byteLength);
+  jsonPayload.set(jsonBytes, invPayload.byteLength + 4);
+  assert.equal(evaluatePacket(encodePacket(jsonHeader, jsonPayload)).status, 'passed');
+
+  // Header maxBytes > OVERLAY_LIMITS.maxMaxBytes refuses
+  assert.throws(() => checkedHeader({ ...scopeHeader, overlay: { maxFiles: 512, maxBytes: OVERLAY_LIMITS.maxMaxBytes + 1 } }));
 });
