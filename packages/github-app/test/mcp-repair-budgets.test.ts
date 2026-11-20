@@ -709,6 +709,11 @@ spec:
       assert.equal(callCount, 8);
       assert.ok(logs.some(l => l.includes('role dispatch #2: implementation repair')));
       assert.ok(logs.some(l => l.includes('role dispatch #3: implementation repair')));
+      const settledCumMatches = logs
+        .map(l => /turn #\d+: settled in .+ \(cum (\d+(?:\.\d+)?[KMB]?)\//.exec(l)?.[1])
+        .filter((v): v is string => v !== undefined);
+      assert.equal(settledCumMatches.length, 8);
+      assert.notEqual(settledCumMatches[0], settledCumMatches[7], 'cumulative tokens must accrue across repair dispatches');
 
       // Verify mid-session admission /budgets/maxImplementationRepairs refusal classifies as BUDGET_EXHAUSTED (not RECOVERY_REQUIRED)!
       callCount = 0;
