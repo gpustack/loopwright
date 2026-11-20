@@ -50,7 +50,7 @@ export async function captureCheckpoint(host: PiHost, input: PiOpenInput, candid
       digest: ref.digest,
       blobPath: join(casSha256Dir, ref.digest.hex),
     }));
-    recoverSnapshot(host, {
+    await recoverSnapshot(host, {
       ...input,
       candidate: {
         ...input.candidate,
@@ -68,48 +68,51 @@ export async function captureCheckpoint(host: PiHost, input: PiOpenInput, candid
   }
   if (existing.error.code !== 'RECORD_NOT_FOUND') stateValue(existing, 'restore');
   if (before.counts.checkpoints >= input.policy.limits.checkpoints) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-  const manifest = await candidate.manifest();
-  if (manifest.spec.entries.length > input.policy.limits.candidateEntries) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-  const overlayLimits = resolveCandidateOverlayLimits(input.lock.spec.contract.spec.budgets.overlay);
-  const binding = captureBinding(host, input, manifest, checkpointId, sequence, overlayLimits);
-  const manifestMaxBytes = manifest.spec.baseTree !== undefined ? overlayLimits.manifestMaxBytes : DEFAULT_OVERLAY_MANIFEST_MAX_BYTES;
-  // Total logical bytes (candidate entries + resources + session + metadata-only .workspace.ndjson) must stay <= artifactBytes.
-  const baseline = manifest.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) + input.resources.reduce((sum, resource) => sum + resource.bytes.byteLength, 0);
-  const remaining = input.policy.limits.artifactBytes - baseline; if (remaining <= 0 || Buffer.byteLength(canonical(manifest)) > manifestMaxBytes) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-  const sha256Dir = await ensureCasSha256Dir(host.artifactsDirectory);
-  const session = new ArtifactWriter(host.artifactsDirectory, 'pi-checkpoints/' + checkpointId + '.session.ndjson', Math.min(input.policy.limits.sessionBytes, input.policy.limits.fileBytes, remaining), signal);
-  let workspace: ArtifactWriter | null = null;
-  try {
-    await session.start(); await session.append(rowBytes({ type: 'session_snapshot', version: 1, binding }));
-    const native = new NativeSnapshot(input.policy, input.policy.limits.sessionBytes, false);
-    await source.capture(async bytes => { native.push(bytes); await session.append(bytes); }); native.finish(); const sessionRef = await session.finish();
-    const workspaceMax = Math.min(WORKSPACE_NDJSON_MAX_BYTES, input.policy.limits.fileBytes, remaining - sessionRef.byteLength); if (workspaceMax <= 0) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
-    workspace = new ArtifactWriter(host.artifactsDirectory, 'pi-checkpoints/' + checkpointId + '.workspace.ndjson', workspaceMax, signal); await workspace.start();
-    await workspace.append(rowBytes({ type: 'workspace_snapshot', version: 1, binding, manifest }));
-    for (const ref of manifest.spec.entries) {
-      const checked = await candidate.checkRead(ref.name); if (!sameIdentity(checked.ref, ref)) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
-      await publishCandidateFileToCas(
-        join(candidate.root, ref.name),
-        sha256Dir,
-        { byteLength: ref.byteLength, sha256Hex: ref.digest.hex },
-        signal,
-      );
-      const blobRefResult = digestArtifactFromMetadata(ref.name, {
-        digest: ref.digest,
-        byteLength: ref.byteLength,
-        uri: 'cas://sha256/' + ref.digest.hex,
-      });
-      if (!blobRefResult.ok) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
-      await workspace.append(rowBytes({ type: 'file', ref }));
-      await workspace.append(rowBytes({ type: 'blob_ref', ref, blobRef: blobRefResult.value }));
-      await workspace.append(rowBytes({ type: 'file_end', byteLength: ref.byteLength, digest: ref.digest.hex }));
-    }
-    await fsyncDir(sha256Dir);
-    await workspace.append(rowBytes({ type: 'end', files: manifest.spec.entries.length })); const workspaceRef = await workspace.finish();
-    if (signal.aborted) refuse('CANCELLED', '', { phase: 'restore' }); stateValue(host.store.renew(host.authority), 'restore'); const now = stateValue(host.store.inspect(), 'restore');
-    if ((now.clock.remainingTaskMs.safeValue ?? 0) <= 0) refuse('DEADLINE', '', { phase: 'restore' });
-    if (now.clockStatus !== 'trusted' || !sameIdentity(digest(Buffer.from(canonical({ ledger: now.ledger, requests: now.counts.requests, operations: now.counts.operations }))), binding.accountingDigest) || now.counts.dispatchedRequests || now.counts.unresolvedRequests || now.counts.unresolvedOperations || now.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
-    stateValue(host.store.writeCheckpoint(host.authority, { checkpointId, expectedRevision: now.revision, candidateManifest: manifest, workspace: workspaceRef, privateSession: sessionRef, additionalArtifacts: [] }), 'restore');
-    return { checkpointId, candidate: manifest, workspace: workspaceRef, session: sessionRef };
-  } finally { await session.close(); await workspace?.close(); }
+  return await candidate.withCapturePassCache(async () => {
+    const manifest = await candidate.manifest();
+    if (manifest.spec.entries.length > input.policy.limits.candidateEntries) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+    const overlayLimits = resolveCandidateOverlayLimits(input.lock.spec.contract.spec.budgets.overlay);
+    const binding = captureBinding(host, input, manifest, checkpointId, sequence, overlayLimits);
+    const manifestMaxBytes = manifest.spec.baseTree !== undefined ? overlayLimits.manifestMaxBytes : DEFAULT_OVERLAY_MANIFEST_MAX_BYTES;
+    // Total logical bytes (candidate entries + resources + session + metadata-only .workspace.ndjson) must stay <= artifactBytes.
+    const baseline = manifest.spec.entries.reduce((sum, entry) => sum + entry.byteLength, 0) + input.resources.reduce((sum, resource) => sum + resource.bytes.byteLength, 0);
+    const remaining = input.policy.limits.artifactBytes - baseline; if (remaining <= 0 || Buffer.byteLength(canonical(manifest)) > manifestMaxBytes) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+    const sha256Dir = await ensureCasSha256Dir(host.artifactsDirectory);
+    const session = new ArtifactWriter(host.artifactsDirectory, 'pi-checkpoints/' + checkpointId + '.session.ndjson', Math.min(input.policy.limits.sessionBytes, input.policy.limits.fileBytes, remaining), signal);
+    let workspace: ArtifactWriter | null = null;
+    try {
+      await session.start(); await session.append(rowBytes({ type: 'session_snapshot', version: 1, binding }));
+      const native = new NativeSnapshot(input.policy, input.policy.limits.sessionBytes, false);
+      await source.capture(async bytes => { native.push(bytes); await session.append(bytes); }); native.finish(); const sessionRef = await session.finish();
+      const workspaceMax = Math.min(WORKSPACE_NDJSON_MAX_BYTES, input.policy.limits.fileBytes, remaining - sessionRef.byteLength); if (workspaceMax <= 0) refuse('OUTPUT_LIMIT', '', { phase: 'restore' });
+      workspace = new ArtifactWriter(host.artifactsDirectory, 'pi-checkpoints/' + checkpointId + '.workspace.ndjson', workspaceMax, signal); await workspace.start();
+      await workspace.append(rowBytes({ type: 'workspace_snapshot', version: 1, binding, manifest }));
+      for (const ref of manifest.spec.entries) {
+        const checked = await candidate.checkRead(ref.name); if (!sameIdentity(checked.ref, ref)) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
+        await publishCandidateFileToCas(
+          join(candidate.root, ref.name),
+          sha256Dir,
+          { byteLength: ref.byteLength, sha256Hex: ref.digest.hex },
+          signal,
+          host.createCandidateStreamChecker,
+        );
+        const blobRefResult = digestArtifactFromMetadata(ref.name, {
+          digest: ref.digest,
+          byteLength: ref.byteLength,
+          uri: 'cas://sha256/' + ref.digest.hex,
+        });
+        if (!blobRefResult.ok) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
+        await workspace.append(rowBytes({ type: 'file', ref }));
+        await workspace.append(rowBytes({ type: 'blob_ref', ref, blobRef: blobRefResult.value }));
+        await workspace.append(rowBytes({ type: 'file_end', byteLength: ref.byteLength, digest: ref.digest.hex }));
+      }
+      await fsyncDir(sha256Dir);
+      await workspace.append(rowBytes({ type: 'end', files: manifest.spec.entries.length })); const workspaceRef = await workspace.finish();
+      if (signal.aborted) refuse('CANCELLED', '', { phase: 'restore' }); stateValue(host.store.renew(host.authority), 'restore'); const now = stateValue(host.store.inspect(), 'restore');
+      if ((now.clock.remainingTaskMs.safeValue ?? 0) <= 0) refuse('DEADLINE', '', { phase: 'restore' });
+      if (now.clockStatus !== 'trusted' || !sameIdentity(digest(Buffer.from(canonical({ ledger: now.ledger, requests: now.counts.requests, operations: now.counts.operations }))), binding.accountingDigest) || now.counts.dispatchedRequests || now.counts.unresolvedRequests || now.counts.unresolvedOperations || now.ledger.violations.length) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
+      stateValue(host.store.writeCheckpoint(host.authority, { checkpointId, expectedRevision: now.revision, candidateManifest: manifest, workspace: workspaceRef, privateSession: sessionRef, additionalArtifacts: [] }), 'restore');
+      return { checkpointId, candidate: manifest, workspace: workspaceRef, session: sessionRef };
+    } finally { await session.close(); await workspace?.close(); }
+  });
 }

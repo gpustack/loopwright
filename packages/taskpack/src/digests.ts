@@ -12,9 +12,9 @@ import {
   type TaskpackManifest,
   type TaskpackV2Manifest,
 } from './types.js';
-import { IDENTIFIER_PATTERN, normalizeRelativePath, parseJsonSubset } from './schema.js';
+import { IDENTIFIER_PATTERN, normalizeRelativePath, parseJsonSubset, tryNormalizeRelativePath } from './schema.js';
 
-export const DIGEST_STREAM_CHUNK_BYTES = 65_536;
+export const DIGEST_STREAM_CHUNK_BYTES = 1_048_576;
 export const DIGEST_MAX_FILE_BYTES = 16 * 1024 * 1024;
 export const DIGEST_MAX_TREE_FILES = 1_024;
 export const DIGEST_MAX_TREE_BYTES = 64 * 1024 * 1024;
@@ -147,7 +147,7 @@ async function hashStreamedRegularFile(
     }
 
     const hash = createHash('sha256');
-    const chunk = Buffer.allocUnsafe(DIGEST_STREAM_CHUNK_BYTES);
+    const chunk = Buffer.allocUnsafe(Math.min(DIGEST_STREAM_CHUNK_BYTES, Math.max(1, info.size)));
     let offset = 0;
     while (offset < info.size) {
       const toRead = Math.min(chunk.byteLength, info.size - offset);
@@ -642,6 +642,18 @@ export async function writeDigestLockfile(
   }
 }
 
+function formatDigestRemediationHint(taskpack: TaskpackManifest | TaskpackV2Manifest): string {
+  let manifestTarget = '<taskpack.yaml>';
+  if (typeof taskpack.manifestPath === 'string' && taskpack.manifestPath.trim().length > 0) {
+    const cleaned = taskpack.manifestPath.trim().replaceAll('\\', '/').replace(/^(?:\.\/)+/, '');
+    const normalized = tryNormalizeRelativePath(cleaned);
+    if (normalized !== undefined) {
+      manifestTarget = normalized;
+    }
+  }
+  return `\nRun "loopwright digest sync --taskpack ${manifestTarget} --repo ." to refresh the lockfile.`;
+}
+
 /**
  * Verify that `digests.lock.json` matches every tracked file and mounted check directory for `taskpack`.
  * Fails closed with clear diagnostic details naming every drifted, missing, or extra file or directory.
@@ -656,6 +668,7 @@ export async function verifyDigestLockfile(
   const effectiveLockfilePath = lockfilePath !== undefined
     ? normalizeRelativePath(lockfilePath, lockfilePath)
     : resolveDigestLockfilePath(taskpack, controlRoot);
+  const remediationHint = formatDigestRemediationHint(taskpack);
 
   let expected: TaskpackDigestLockfile;
   try {
@@ -668,7 +681,7 @@ export async function verifyDigestLockfile(
     return Object.freeze({
       ok: false,
       lockfilePath: effectiveLockfilePath,
-      reason: `digest lockfile "${effectiveLockfilePath}" could not be loaded: ${detail}`,
+      reason: `digest lockfile "${effectiveLockfilePath}" could not be loaded: ${detail}${remediationHint}`,
       drifts: Object.freeze([]),
       computed: null,
       expected: null,
@@ -686,7 +699,7 @@ export async function verifyDigestLockfile(
     return Object.freeze({
       ok: false,
       lockfilePath: effectiveLockfilePath,
-      reason: `failed to compute runtime digests for "${taskpack.metadata.name}": ${detail}`,
+      reason: `failed to compute runtime digests for "${taskpack.metadata.name}": ${detail}${remediationHint}`,
       drifts: Object.freeze([]),
       computed: null,
       expected,
@@ -697,7 +710,7 @@ export async function verifyDigestLockfile(
     return Object.freeze({
       ok: false,
       lockfilePath: effectiveLockfilePath,
-      reason: `digest lockfile "${effectiveLockfilePath}" targets taskpack "${expected.taskpack}", expected "${computed.taskpack}"`,
+      reason: `digest lockfile "${effectiveLockfilePath}" targets taskpack "${expected.taskpack}", expected "${computed.taskpack}"${remediationHint}`,
       drifts: Object.freeze([]),
       computed,
       expected,
@@ -769,7 +782,7 @@ export async function verifyDigestLockfile(
   return Object.freeze({
     ok: false,
     lockfilePath: effectiveLockfilePath,
-    reason: `digest lockfile "${effectiveLockfilePath}" failed verification: ${summaryParts.join('; ')}`,
+    reason: `digest lockfile "${effectiveLockfilePath}" failed verification: ${summaryParts.join('; ')}${remediationHint}`,
     drifts: Object.freeze(drifts),
     computed,
     expected,

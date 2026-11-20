@@ -1,46 +1,20 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
 import { bindSubject, digestArtifactFromMetadata } from '@loopwright/core';
 import { stateValue } from './admission.js';
 import { canonical, digest, integer, object } from './boundary.js';
 import { resolveCandidateOverlayLimits } from './candidate.js';
-import { verifyCasSha256DirSync, verifyRegularFileSync } from './cas.js';
+import { readBlobChunkAsync, verifyCasSha256DirAsync, verifyRegularFileAsync } from './cas.js';
 import { sameIdentity } from './policy.js';
 import { snapshotRow, NativeSnapshot } from './snapshot.js';
 import { PiFailure, refuse } from './errors.js';
 import type { PiCandidateArtifactInput, PiHost, PiOpenInput } from './types.js';
 /** Return a view of verified private native bytes, never an executable path or an SDK auto-resume request. */
-export function recoverSnapshot(host: PiHost, input: PiOpenInput): { native: Uint8Array; sequence: number } | null {
-  try { return verifySnapshot(host, input); } catch (error) { if (error instanceof PiFailure) throw new PiFailure({ ...error.detail, phase: 'restore' }); refuse('RECOVERY_REQUIRED', '/restore', { phase: 'restore' }); }
+export async function recoverSnapshot(host: PiHost, input: PiOpenInput): Promise<{ native: Uint8Array; sequence: number } | null> {
+  try { return await verifySnapshot(host, input); } catch (error) { if (error instanceof PiFailure) throw new PiFailure({ ...error.detail, phase: 'restore' }); refuse('RECOVERY_REQUIRED', '/restore', { phase: 'restore' }); }
 }
 
-function readBlobChunkSync(blobPath: string, expectedLength: number, offset: number, length: number): Buffer {
-  let fd: number;
-  try {
-    fd = openSync(blobPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-  } catch {
-    refuse('RECOVERY_REQUIRED', '/restore/workspace');
-  }
-  try {
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.nlink !== 1 || info.size !== expectedLength) {
-      refuse('RECOVERY_REQUIRED', '/restore/workspace');
-    }
-    const buf = Buffer.allocUnsafe(length);
-    let readTotal = 0;
-    while (readTotal < length) {
-      const n = readSync(fd, buf, readTotal, length - readTotal, offset + readTotal);
-      if (n === 0) refuse('RESOURCE_MISMATCH', '/restore/workspace');
-      readTotal += n;
-    }
-    return buf;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function verifySnapshot(host: PiHost, input: PiOpenInput): { native: Uint8Array; sequence: number } | null {
+async function verifySnapshot(host: PiHost, input: PiOpenInput): Promise<{ native: Uint8Array; sequence: number } | null> {
   if (!input.restore) return null;
   const restore = input.restore, recovered = stateValue(host.store.recoveryView(host.authority, { checkpointId: restore.checkpointId, availableArtifacts: [restore.workspace.ref, restore.session.ref] }), 'restore');
   const checkpoint = recovered.checkpoint, current = recovered.current;
@@ -103,10 +77,10 @@ function verifySnapshot(host: PiHost, input: PiOpenInput): { native: Uint8Array;
         }
       }
       if (verifiedSha256Dir === null) {
-        verifiedSha256Dir = verifyCasSha256DirSync(host.artifactsDirectory, '/restore/workspace');
+        verifiedSha256Dir = await verifyCasSha256DirAsync(host.artifactsDirectory, '/restore/workspace');
       }
       const canonicalBlobPath = join(verifiedSha256Dir, ref.digest.hex);
-      verifyRegularFileSync(canonicalBlobPath, {
+      await verifyRegularFileAsync(canonicalBlobPath, {
         byteLength: ref.byteLength,
         sha256Hex: ref.digest.hex,
         requireReadOnly: true,
@@ -134,7 +108,7 @@ function verifySnapshot(host: PiHost, input: PiOpenInput): { native: Uint8Array;
         }
       } else {
         if (fileBytes + part.length > artifact.byteLength) refuse('RESOURCE_MISMATCH');
-        const expectedPart = readBlobChunkSync(artifact.blobPath, artifact.byteLength, fileBytes, part.length);
+        const expectedPart = await readBlobChunkAsync(artifact.blobPath, artifact.byteLength, fileBytes, part.length);
         if (!part.equals(expectedPart)) refuse('RESOURCE_MISMATCH');
       }
       fileBytes += part.length;

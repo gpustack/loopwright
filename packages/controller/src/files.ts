@@ -1,10 +1,10 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, lstat, realpath, unlink } from 'node:fs/promises';
-import { dirname, isAbsolute, resolve, sep } from 'node:path';
+import { link, lstat, open, realpath, unlink } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 
-export const STREAM_CHUNK_BYTES = 65_536;
+export const STREAM_CHUNK_BYTES = 1_048_576;
 
 export function inside(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
@@ -65,12 +65,17 @@ export interface StreamRegularFileOptions {
   readonly limitCode?: ControllerDiagnostic['code'] | undefined;
   readonly path?: string | undefined;
   readonly phase?: ControllerDiagnostic['phase'] | undefined;
+  readonly onOpen?: ((info: { readonly byteLength: number }) => void) | undefined;
 }
 
 export interface StreamedFileSummary {
   readonly byteLength: number;
   readonly mode: '100644' | '100755';
   readonly rawMode: number;
+  readonly dev: number;
+  readonly ino: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
 }
 
 export async function streamRegularFile(
@@ -134,6 +139,7 @@ export async function streamRegularFile(
     if (options.requireReadOnly && (info.mode & 0o222) !== 0) return fail();
     if (options.maxBytes !== undefined && info.size > options.maxBytes) return fail(limitCode);
     if (options.expectedBytes !== undefined && info.size !== options.expectedBytes) return fail();
+    options.onOpen?.({ byteLength: info.size });
 
     const buffer = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, info.size)));
     let offset = 0;
@@ -164,17 +170,25 @@ export async function streamRegularFile(
     if (
       extraBytesRead !== 0
       || offset !== info.size
+      || !after.isFile()
       || after.nlink !== 1
+      || after.dev !== info.dev
+      || after.ino !== info.ino
       || after.size !== info.size
       || after.mtimeMs !== info.mtimeMs
       || after.ctimeMs !== info.ctimeMs
+      || (options.requireReadOnly && (after.mode & 0o222) !== 0)
     ) {
       return fail();
     }
     return {
-      byteLength: info.size,
-      mode: (info.mode & 0o111) !== 0 ? '100755' : '100644',
-      rawMode: info.mode,
+      byteLength: after.size,
+      mode: (after.mode & 0o111) !== 0 ? '100755' : '100644',
+      rawMode: after.mode,
+      dev: after.dev,
+      ino: after.ino,
+      mtimeMs: after.mtimeMs,
+      ctimeMs: after.ctimeMs,
     };
   } finally {
     await handle.close();
@@ -189,6 +203,7 @@ export interface CopyVerifiedFileOptions {
   readonly ownedSource?: boolean | undefined;
   readonly requireReadOnlySource?: boolean | undefined;
   readonly verifyCanonicalSource?: boolean | undefined;
+  readonly disableReflink?: boolean | undefined;
   readonly code?: ControllerDiagnostic['code'] | undefined;
   readonly limitCode?: ControllerDiagnostic['code'] | undefined;
   readonly path?: string | undefined;
@@ -209,73 +224,198 @@ export async function copyVerifiedFileReadOnly(
   const phase = options.phase ?? 'execution';
   const diagPath = options.path ?? '';
   const code = options.code ?? 'ARTIFACT_INVALID';
-  const fail = (): never => refuse(code, diagPath, phase);
+  const limitCode = options.limitCode ?? 'OUTPUT_LIMIT';
+  const targetMode = options.mode ?? 0o400;
+  const fail = (overrideCode: ControllerDiagnostic['code'] = code): never => refuse(overrideCode, diagPath, phase);
 
-  if (typeof destPath !== 'string' || !isAbsolute(destPath) || destPath.length > 4096 || /[\0\r\n]/.test(destPath)) {
+  if (
+    typeof srcPath !== 'string'
+    || !isAbsolute(srcPath)
+    || srcPath.length > 4096
+    || /[\0\r\n]/.test(srcPath)
+    || typeof destPath !== 'string'
+    || !isAbsolute(destPath)
+    || destPath.length > 4096
+    || /[\0\r\n]/.test(destPath)
+  ) {
     return fail();
   }
 
-  let destHandle: Awaited<ReturnType<typeof open>>;
+  let destExists = false;
   try {
-    destHandle = await open(
-      destPath,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    await lstat(destPath);
+    destExists = true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code !== 'ENOENT') return fail();
+  }
+  if (destExists) return fail();
+
+  const tmpPath = join(dirname(destPath), `.lw-stage-${randomBytes(12).toString('hex')}`);
+  let srcHandle: Awaited<ReturnType<typeof open>> | null = null;
+  let tmpHandle: Awaited<ReturnType<typeof open>> | null = null;
+  let destVerify: Awaited<ReturnType<typeof open>> | null = null;
+  let tmpCreated = false;
+  let tmpUnlinked = false;
+
+  try {
+    if (options.verifyCanonicalSource) {
+      await canonicalComponents(srcPath, options.ownedSource ?? true);
+    }
+
+    srcHandle = await open(srcPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const srcBefore = await srcHandle.stat();
+    if (srcBefore.isSymbolicLink() || !srcBefore.isFile() || srcBefore.nlink !== 1) return fail();
+    if (options.ownedSource && srcBefore.uid !== process.getuid?.()) return fail();
+    if (options.requireReadOnlySource && (srcBefore.mode & 0o222) !== 0) return fail();
+    if (options.maxBytes !== undefined && srcBefore.size > options.maxBytes) return fail(limitCode);
+    if (options.expectedBytes !== undefined && srcBefore.size !== options.expectedBytes) return fail();
+    const sourceMode: '100644' | '100755' = (srcBefore.mode & 0o111) !== 0 ? '100755' : '100644';
+
+    tmpHandle = await open(
+      tmpPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
       0o600,
     );
-  } catch {
-    return fail();
-  }
+    tmpCreated = true;
+    const createdStat = await tmpHandle.stat();
+    if (
+      !createdStat.isFile()
+      || createdStat.isSymbolicLink()
+      || createdStat.nlink !== 1
+      || createdStat.ino === srcBefore.ino
+    ) {
+      return fail();
+    }
 
-  let closed = false;
-  let committed = false;
-  try {
-    const sha = createHash('sha256');
-    const summary = await streamRegularFile(
-      srcPath,
-      {
-        maxBytes: options.maxBytes,
-        expectedBytes: options.expectedBytes,
-        owned: options.ownedSource,
-        requireReadOnly: options.requireReadOnlySource,
-        verifyCanonicalPath: options.verifyCanonicalSource,
-        code,
-        limitCode: options.limitCode,
-        path: diagPath,
-        phase,
-      },
-      async chunk => {
-        sha.update(chunk);
-        try {
-          await writeAllToHandle(destHandle, chunk);
-        } catch {
-          return fail();
-        }
-      },
-    );
-    const sha256 = sha.digest('hex');
-    if (options.expectedSha256 !== undefined && sha256 !== options.expectedSha256) {
+    const buf = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, srcBefore.size)));
+    const writeSha = createHash('sha256');
+    let writtenBytes = 0;
+    while (writtenBytes < srcBefore.size) {
+      const toRead = Math.min(buf.byteLength, srcBefore.size - writtenBytes);
+      const { bytesRead } = await srcHandle.read(buf, 0, toRead, writtenBytes);
+      if (bytesRead <= 0) break;
+      const slice = buf.subarray(0, bytesRead);
+      writtenBytes += bytesRead;
+      if (options.maxBytes !== undefined && writtenBytes > options.maxBytes) {
+        return fail(limitCode);
+      }
+      writeSha.update(slice);
+      await writeAllToHandle(tmpHandle, slice);
+    }
+
+    const probe = Buffer.allocUnsafe(1);
+    const extraSrcRead = (await srcHandle.read(probe, 0, 1, writtenBytes)).bytesRead;
+    const srcAfter = await srcHandle.stat();
+    const writeShaHex = writeSha.digest('hex');
+    if (
+      extraSrcRead !== 0
+      || !srcAfter.isFile()
+      || srcAfter.isSymbolicLink()
+      || srcAfter.nlink !== 1
+      || srcAfter.dev !== srcBefore.dev
+      || srcAfter.ino !== srcBefore.ino
+      || srcAfter.size !== srcBefore.size
+      || srcAfter.mtimeMs !== srcBefore.mtimeMs
+      || srcAfter.ctimeMs !== srcBefore.ctimeMs
+      || (options.requireReadOnlySource && (srcAfter.mode & 0o222) !== 0)
+      || writtenBytes !== srcBefore.size
+    ) {
       return fail();
     }
-    try {
-      await destHandle.chmod(options.mode ?? 0o400);
-      await destHandle.sync();
-      await destHandle.close();
-      closed = true;
-    } catch {
+    if (options.expectedSha256 !== undefined && writeShaHex !== options.expectedSha256) {
       return fail();
     }
-    committed = true;
+
+    const storedSha = createHash('sha256');
+    let readOffset = 0;
+    while (readOffset < writtenBytes) {
+      const toRead = Math.min(buf.byteLength, writtenBytes - readOffset);
+      const { bytesRead } = await tmpHandle.read(buf, 0, toRead, readOffset);
+      if (bytesRead <= 0) break;
+      storedSha.update(buf.subarray(0, bytesRead));
+      readOffset += bytesRead;
+    }
+    const extraTmpRead = (await tmpHandle.read(probe, 0, 1, readOffset)).bytesRead;
+    const tmpAfterRead = await tmpHandle.stat();
+    if (
+      extraTmpRead !== 0
+      || readOffset !== writtenBytes
+      || storedSha.digest('hex') !== writeShaHex
+      || !tmpAfterRead.isFile()
+      || tmpAfterRead.isSymbolicLink()
+      || tmpAfterRead.dev !== createdStat.dev
+      || tmpAfterRead.ino !== createdStat.ino
+      || tmpAfterRead.nlink !== 1
+      || tmpAfterRead.size !== writtenBytes
+    ) {
+      return fail();
+    }
+
+    await tmpHandle.chmod(targetMode);
+    await tmpHandle.sync();
+    const sealedStat = await tmpHandle.stat();
+    if (
+      !sealedStat.isFile()
+      || sealedStat.isSymbolicLink()
+      || sealedStat.dev !== createdStat.dev
+      || sealedStat.ino !== createdStat.ino
+      || sealedStat.nlink !== 1
+      || sealedStat.size !== writtenBytes
+      || (sealedStat.mode & 0o777) !== (targetMode & 0o777)
+    ) {
+      return fail();
+    }
+
+    await link(tmpPath, destPath);
+    await unlink(tmpPath);
+    tmpUnlinked = true;
+
+    destVerify = await open(destPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const destStat = await destVerify.stat();
+    const pinnedStat = await tmpHandle.stat();
+    if (
+      !destStat.isFile()
+      || destStat.isSymbolicLink()
+      || destStat.nlink !== 1
+      || destStat.dev !== createdStat.dev
+      || destStat.ino !== createdStat.ino
+      || destStat.size !== writtenBytes
+      || (destStat.mode & 0o777) !== (targetMode & 0o777)
+      || pinnedStat.nlink !== 1
+    ) {
+      return fail();
+    }
+
+    await destVerify.close();
+    destVerify = null;
+    await tmpHandle.close();
+    tmpHandle = null;
+
     return {
-      byteLength: summary.byteLength,
-      sha256,
-      sourceMode: summary.mode,
+      byteLength: writtenBytes,
+      sha256: writeShaHex,
+      sourceMode,
     };
-  } finally {
-    if (!closed) {
-      await destHandle.close().catch(() => {});
+  } catch (error) {
+    if (error instanceof ControllerFailure && error.diagnostic.code === code && error.diagnostic.phase === phase) {
+      throw error;
     }
-    if (!committed) {
-      await unlink(destPath).catch(() => {});
+    if (error instanceof ControllerFailure && error.diagnostic.code === limitCode && error.diagnostic.phase === phase) {
+      throw error;
+    }
+    return fail();
+  } finally {
+    if (destVerify) {
+      await destVerify.close().catch(() => {});
+    }
+    if (tmpHandle) {
+      await tmpHandle.close().catch(() => {});
+    }
+    if (srcHandle) {
+      await srcHandle.close().catch(() => {});
+    }
+    if (tmpCreated && !tmpUnlinked) {
+      await unlink(tmpPath).catch(() => {});
     }
   }
 }

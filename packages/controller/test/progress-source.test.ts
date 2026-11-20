@@ -110,6 +110,12 @@ test('isHostProtectedPath fails closed on malformed paths, leaves tool paths neu
   assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: false }), true);
   assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), false);
   assert.equal(isHostProtectedPath('.github/workflows/ci.yml', { enforceGitHubWorkflowProtection: false, allowWorkflowWrites: false }), false);
+  assert.equal(isHostProtectedPath('.github/CODEOWNERS', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: false }), true);
+  assert.equal(isHostProtectedPath('.github/CODEOWNERS', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), true);
+  assert.equal(isHostProtectedPath('.GitHub/CODEOWNERS', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), true);
+  assert.equal(isHostProtectedPath('.github/dependabot.yml', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), true);
+  assert.equal(isHostProtectedPath('.github/workflows', { enforceGitHubWorkflowProtection: true, allowWorkflowWrites: true }), true);
+  assert.equal(isHostProtectedPath('.github/CODEOWNERS', { enforceGitHubWorkflowProtection: false, allowWorkflowWrites: false }), false);
   assert.equal(isHostProtectedPath('.claude/settings.json', false), false);
   assert.equal(isHostProtectedPath('AGENTS.md', false), false);
   assert.equal(isHostProtectedPath('CLAUDE.md', false), false);

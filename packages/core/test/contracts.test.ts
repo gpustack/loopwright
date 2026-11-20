@@ -174,7 +174,7 @@ test('contract supports at least 16 roles and 16 steps', () => {
 test('OVERLAY_LIMITS and resolveOverlayLimits validate configurable overlay ceilings', () => {
   assert.equal(OVERLAY_LIMITS.defaultMaxFiles, 128);
   assert.equal(OVERLAY_LIMITS.defaultMaxBytes, 4_194_304);
-  assert.equal(OVERLAY_LIMITS.maxMaxFiles, 4_096);
+  assert.equal(OVERLAY_LIMITS.maxMaxFiles, 16_384);
   assert.equal(OVERLAY_LIMITS.maxMaxBytes, 17_179_869_184);
   assert.equal(LIMITS.inputBytes, 1_048_576);
   assert.equal(LIMITS.artifactBytes, 67_108_864);
@@ -185,13 +185,13 @@ test('OVERLAY_LIMITS and resolveOverlayLimits validate configurable overlay ceil
   assert.deepEqual(value(resolveOverlayLimits({})), { maxFiles: 128, maxBytes: 4_194_304 });
   assert.deepEqual(value(resolveOverlayLimits({ maxFiles: 512, maxBytes: fiveGiB })), { maxFiles: 512, maxBytes: fiveGiB });
   assert.deepEqual(
-    value(resolveOverlayLimits(Object.assign(Object.create(null), { maxFiles: 4_096, maxBytes: 17_179_869_184 }))),
-    { maxFiles: 4_096, maxBytes: 17_179_869_184 },
+    value(resolveOverlayLimits(Object.assign(Object.create(null), { maxFiles: 16_384, maxBytes: 17_179_869_184 }))),
+    { maxFiles: 16_384, maxBytes: 17_179_869_184 },
   );
 
   for (const invalid of [
     { maxFiles: 0 },
-    { maxFiles: 4_097 },
+    { maxFiles: 16_385 },
     { maxFiles: 128.5 },
     { maxFiles: NaN },
     { maxBytes: 512 },
@@ -212,14 +212,14 @@ test('TaskContract.spec.budgets.overlay is optional, omitted when unset, and bou
   assert.equal(Object.hasOwn(baseLock.spec.contract.spec.budgets, 'overlay'), false);
 
   const widened = contract();
-  Object.assign(widened.spec.budgets, { overlay: { maxFiles: 512, maxBytes: 17_179_869_184 } });
+  Object.assign(widened.spec.budgets, { overlay: { maxFiles: 16_384, maxBytes: 17_179_869_184 } });
   const widenedLock = value(admitTask(widened, { admissionId: 'admission-1', runId: 'run-1' }));
-  assert.deepEqual({ ...widenedLock.spec.contract.spec.budgets.overlay }, { maxFiles: 512, maxBytes: 17_179_869_184 });
+  assert.deepEqual({ ...widenedLock.spec.contract.spec.budgets.overlay }, { maxFiles: 16_384, maxBytes: 17_179_869_184 });
   assert.notEqual(widenedLock.spec.contractHash.hex, baseLock.spec.contractHash.hex);
 
   for (const badOverlay of [
     { maxFiles: 0, maxBytes: 16_777_216 },
-    { maxFiles: 4_097, maxBytes: 16_777_216 },
+    { maxFiles: 16_385, maxBytes: 16_777_216 },
     { maxFiles: 512.5, maxBytes: 16_777_216 },
     { maxFiles: 512, maxBytes: 512 },
     { maxFiles: 512, maxBytes: 17_179_869_185 },

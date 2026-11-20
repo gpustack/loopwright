@@ -48,7 +48,7 @@ export async function restoredCandidate(context: CycleContext, head: ProgressHea
     requestIds: interval.map(row => row.admission.requestId),
     phase: 'recovery',
   });
-  assertCanonicalMinimalOverlay(head.manifest, decoded.artifacts, context.source, 'recovery');
+  await assertCanonicalMinimalOverlay(head.manifest, decoded.artifacts, context.source, 'recovery');
   const effectivePolicy = effectiveRunHostPolicy(context.descriptor);
   assertNoHostProtectedMutations(head.manifest, decoded.artifacts, context.source, hostProtectionFromPolicy(effectivePolicy), 'recovery');
   return { manifest: head.manifest, ref: head.progress.candidate.manifest, files: decoded.artifacts, baselineProofs: context.source.baselineProofs };

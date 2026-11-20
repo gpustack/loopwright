@@ -1855,7 +1855,7 @@ class HostRuntimeSession {
     const roleMcpAllowlist = resolveSessionMcpAllowlist(this.input, this.options);
     const permittedToolNames = roleMcpAllowlist.filterToolNames(this.input.policy.tools);
 
-    const restored = recoverSnapshot(this.host, this.input);
+    const restored = await recoverSnapshot(this.host, this.input);
     if (restored) {
       const accepted = this.#wait('restore-ready');
       await Promise.all([

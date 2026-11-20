@@ -1,8 +1,9 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { chmod, lstat, mkdir, open, readFile, rm, symlink, truncate, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -90,12 +91,12 @@ async function createFastGitRepo(
   return git(['rev-parse', 'HEAD']).trim();
 }
 
-test('PublicBundle scales entry limit to 16 MiB and total bundle to 32 MiB for 4,096-entry v2 candidate.files.json', () => {
+test('PublicBundle scales entry limit to 32 MiB and total bundle to 64 MiB for 16,384-entry v2 candidate.files.json', () => {
   const bundle = new PublicBundle('run-scale', hash('lock'));
-  const files = Array.from({ length: 4096 }, (_, idx) => {
+  const files = Array.from({ length: 16_384 }, (_, idx) => {
     const sha256 = hash(`entry-${idx}`).hex;
     return {
-      name: `packages/mod-${String(idx).padStart(4, '0')}/artifact-${String(idx).padStart(4, '0')}.bin`,
+      name: `packages/mod-${String(idx).padStart(5, '0')}/artifact-${String(idx).padStart(5, '0')}.bin`,
       mode: '100644' as const,
       sha256,
       byteLength: 1024 + idx,
@@ -108,9 +109,11 @@ test('PublicBundle scales entry limit to 16 MiB and total bundle to 32 MiB for 4
     manifest: { apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries: [] } },
     files,
   });
-  // > 8 MiB up to 16 MiB entry is accepted; 16 MiB + 1 byte is refused
-  bundle.add('nine-mib.bin', new Uint8Array(9 * 1024 * 1024));
-  assert.throws(() => bundle.add('too-large.bin', new Uint8Array(16_777_217)));
+  // > 16 MiB up to 32 MiB entry is accepted; 32 MiB + 1 byte is refused; > 64 MiB aggregate is refused
+  bundle.add('twenty-mib.bin', new Uint8Array(20 * 1024 * 1024));
+  assert.throws(() => bundle.add('too-large.bin', new Uint8Array(33_554_433)));
+  bundle.add('thirty-mib.bin', new Uint8Array(30 * 1024 * 1024));
+  assert.throws(() => bundle.add('overflow-total.bin', new Uint8Array(20 * 1024 * 1024)));
 });
 
 test('CAS-backed >1 MiB JSON target triggers pure preflightSizing refusal without reading file, and >1 MiB submission.path refuses SUBMISSION_INVALID', async () => {
@@ -1337,6 +1340,795 @@ test('durable hostPolicy enforces github vs local profiles across resumeCycle, r
   } finally {
     if (gateServer) await gateServer.close();
     if (pubServer) await pubServer.close();
+    await f.cleanup();
+  }
+});
+
+test('small baseline with budgets.overlay.maxFiles=512 selects v2 overlay for 260 files, enforces legacy allowWorkflowWrites fail-closed, early OUTPUT_LIMIT, and classic CAS reuse', async () => {
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repository');
+    const runRoot = join(f.root, 'runs');
+    const rev = await createFastGitRepo(repository, {
+      'packages/result.json': { content: JSON.stringify({ ok: true }) },
+      'README.md': { content: 'small baseline\n' },
+      '.github/CODEOWNERS': { content: '* @owners\n' },
+    });
+    const installed = await installedHandlerDigests();
+    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+    setFixture(f.registry, ['spec', 'credentialBindings'], []);
+    setFixture(f.registry, ['spec', 'environmentBindings'], []);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [
+      { id: 'author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write', 'delete'], mcp: null },
+      { id: 'reviewer', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
+    ]);
+    setFixture(f.registry, ['spec', 'handlers'], [
+      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Author.', purpose: 'task' }, capabilities: ['pi'] },
+      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
+      ...f.registry.spec.handlers.filter(h => h.id === 'tests' || h.id === 'scope' || h.id === 'no-change'),
+    ]);
+    setFixture(f.registry, ['spec', 'handlers', 2, 'parameters', 'path'], 'packages/result.json');
+    setFixture(f.config, ['spec', 'credentials'], []);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], {
+      writable: ['packages/**', '.github/**'],
+      protected: ['docs/**'],
+    });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write', 'delete'] },
+      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [
+      { roleId: 'author', profileRef: 'author' },
+      { roleId: 'reviewer', profileRef: 'reviewer' },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
+      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [
+      { stepId: 'author', handlerRef: 'author.h' },
+      { stepId: 'review', handlerRef: 'review.h' },
+    ]);
+    f.input.untrustedRoots = [f.taskDirectory, repository];
+
+    // 1. Classic mode (no wide overlay): verify legacy run.json without hostPolicy + step-meta allowWorkflowWrites:true fails closed,
+    //    early sparse file rejection returns OUTPUT_LIMIT without reading body, and unchanged baseline reuses frozen CAS blob!
+    await f.save();
+    const classicLoaded = assertOk(await f.load(), 'load classic fixture');
+
+    const runClassic = 'run-classic-checks';
+    const c1 = assertStepYield(
+      assertOk(await stepNext({ configuration: classicLoaded, repository, runRoot, runId: runClassic, policyProfile: 'github', allowWorkflowWrites: true }), 'stepNext classic'),
+    );
+    // .github/CODEOWNERS must be materialized read-only (0o400) and blocked on submit even when allowWorkflowWrites: true under github profile!
+    const codeownersPath = join(c1.candidateDir, '.github', 'CODEOWNERS');
+    assert.equal((await lstat(codeownersPath)).mode & 0o777, 0o400);
+    await chmod(codeownersPath, 0o600);
+    await writeFile(codeownersPath, '* @tampered\n', { mode: 0o600 });
+    const blockedCodeowners = await stepSubmit({ runRoot, runId: runClassic, leaseToken: c1.leaseToken });
+    assert.equal(blockedCodeowners.ok, false);
+    if (!blockedCodeowners.ok) assert.equal(blockedCodeowners.error.code, 'ARTIFACT_INVALID');
+    await writeFile(codeownersPath, '* @owners\n', { mode: 0o600 });
+    await chmod(codeownersPath, 0o400);
+
+    // Oversized sparse file (> perFileMaxBytes = 1 MiB) is rejected immediately with OUTPUT_LIMIT before reading body
+    const sparsePath = join(c1.candidateDir, 'packages', 'huge-sparse.bin');
+    await writeFile(sparsePath, '', { mode: 0o600 });
+    await truncate(sparsePath, 200 * 1024 * 1024);
+    const oversizedRefused = await stepSubmit({ runRoot, runId: runClassic, leaseToken: c1.leaseToken });
+    assert.equal(oversizedRefused.ok, false);
+    if (!oversizedRefused.ok) assert.equal(oversizedRefused.error.code, 'OUTPUT_LIMIT');
+    await unlink(sparsePath);
+
+    // Classic unchanged baseline file reuses its frozen CAS blob without replacing inode/mtime
+    const readmeSha = createHash('sha256').update('small baseline\n').digest('hex');
+    const readmeCasPath = join(runRoot, runClassic, 'artifacts', 'blobs', 'sha256', readmeSha);
+    const casBefore = await lstat(readmeCasPath);
+    const c2 = assertStepYield(
+      assertOk(await stepSubmit({ runRoot, runId: runClassic, leaseToken: c1.leaseToken }), 'stepSubmit classic unchanged'),
+    );
+    assert.equal(c2.stepId, 'review');
+    const casAfter = await lstat(readmeCasPath);
+    assert.equal(casAfter.ino, casBefore.ino);
+    assert.equal(casAfter.mtimeMs, casBefore.mtimeMs);
+
+    // Legacy run.json (without hostPolicy) + step-meta.json with { allowWorkflowWrites: true } (without hostPolicy) fails closed with RECOVERY_REQUIRED!
+    const runLegacyEscalation = 'run-legacy-meta-escalate';
+    assertStepYield(assertOk(await stepNext({ configuration: classicLoaded, repository, runRoot, runId: runLegacyEscalation }), 'stepNext legacy escalation'));
+    const runJsonPath = join(runRoot, runLegacyEscalation, 'run.json');
+    const rawRunJson = JSON.parse(await readFile(runJsonPath, 'utf8')) as Record<string, unknown>;
+    delete rawRunJson.hostPolicy;
+    await writeFile(runJsonPath, canonical(rawRunJson), { mode: 0o600 });
+    await writeFile(
+      join(runRoot, runLegacyEscalation, 'step-meta.json'),
+      canonical({ version: 1, mode: 'candidate', allowWorkflowWrites: true }),
+      { mode: 0o600 },
+    );
+    const escalatedReopen = await stepNext({ runRoot, runId: runLegacyEscalation, reissueLease: true });
+    assert.equal(escalatedReopen.ok, false);
+    if (!escalatedReopen.ok) {
+      assert.equal(escalatedReopen.error.code, 'RECOVERY_REQUIRED');
+    }
+
+    // 2. Small baseline (3 files <= 128) + budgets.overlay.maxFiles = 512 selects v2 overlay and admits 260 candidate files!
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'overlay'], { maxFiles: 512, maxBytes: 16_777_216 });
+    await f.save();
+    const wideLoaded = assertOk(await f.load(), 'load wide overlay on small baseline');
+    const runWide = 'run-small-base-260-files';
+    const w1 = assertStepYield(assertOk(await stepNext({ configuration: wideLoaded, repository, runRoot, runId: runWide }), 'stepNext wide'));
+    for (let i = 0; i < 260; i++) {
+      await writeFile(join(w1.candidateDir, 'packages', `gen-${String(i).padStart(3, '0')}.txt`), `generated-${i}\n`, { mode: 0o600 });
+    }
+    const w2 = assertStepYield(assertOk(await stepSubmit({ runRoot, runId: runWide, leaseToken: w1.leaseToken }), 'stepSubmit 260 files on small baseline'));
+    assert.equal(w2.stepId, 'review');
+    const settledWide = assertOk(
+      await stepSubmit({
+        runRoot,
+        runId: runWide,
+        leaseToken: w2.leaseToken,
+        verdict: { verdict: 'pass', summary: 'All 260 generated files verified.', findings: [] },
+      }),
+      'stepSubmit reviewer wide',
+    );
+    assert.equal(settledWide.kind, 'result');
+    if (settledWide.kind === 'result') {
+      assert.equal(settledWide.result.spec.status, 'completed');
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('native Pi host.createCandidateStreamChecker and adoptRoleCapture defense-in-depth reject registered and generic secrets in CAS blob_ref captures', async () => {
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repository');
+    const runRoot = join(f.root, 'runs');
+    const rev = await createFastGitRepo(repository, {
+      'packages/result.json': { content: JSON.stringify({ ok: false }) },
+    });
+    const installed = await installedHandlerDigests();
+    const registeredSecret = 'PiRegisteredSecret+Canary99887766==';
+    f.environment.PROVIDER_TOKEN = registeredSecret;
+    const origBuilder = structuredClone(f.registry.spec.roleProfiles[0]!);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [{ ...origBuilder, id: 'pi-author', tools: ['read', 'write'] }]);
+    setFixture(f.registry, ['spec', 'handlers'], [
+      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Author.', purpose: 'task' }, capabilities: ['pi'] },
+      ...f.registry.spec.handlers.filter(h => h.id === 'tests' || h.id === 'scope' || h.id === 'no-change'),
+    ]);
+    setFixture(f.registry, ['spec', 'handlers', 1, 'parameters', 'path'], 'packages/result.json');
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      { id: 'author', adapter: 'pi', provider: origBuilder.selection.provider, model: origBuilder.selection.model, thinking: origBuilder.selection.thinking, tools: ['read', 'write'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [{ roleId: 'author', profileRef: 'pi-author' }]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [{ stepId: 'author', handlerRef: 'author.h' }]);
+    f.input.untrustedRoots = [f.taskDirectory, repository];
+    await f.save();
+    const loaded = assertOk(await f.load(), 'load Pi secret scrub fixture');
+
+    let seq = 0;
+    const runSecretCase = async (runId: string, secretBody: Buffer, bypassHostChecker: boolean) => {
+      let hostSawChecker = false;
+      const openAdapter = async (host: PiHostV2, input: PiOpenInputV2) => {
+        hostSawChecker = typeof host.createCandidateStreamChecker === 'function';
+        let lastCmd = '';
+        const adapter: PiAdapterV2 = {
+          capabilities: () => { throw new Error('unused'); },
+          events: () => ({ async *[Symbol.asyncIterator]() { yield* []; } }),
+          cancel: async () => ({ ok: true, value: { status: 'cancelled', requestIds: [], operationIds: [], providerTermination: 'none', usage: 'none', localCleanup: 'complete', error: null, cleanupError: null } }),
+          compact: async () => { throw new Error('unused'); },
+          close: async () => ({ ok: true, value: { closed: true } }),
+          execute: async cmd => {
+            seq++;
+            lastCmd = cmd.text;
+            const reqId = `sec-req-${seq}`;
+            const opId = `sec-op-${seq}`;
+            stateValue(host.store.reserveRequest(host.authority, {
+              requestId: reqId, roleId: input.roleId, nodeId: input.stepId, attemptId: cmd.commandId,
+              purpose: cmd.purpose, repair: cmd.repair, transportRetryOf: null, requestDigest: hash(reqId),
+              inputUpperBound: 50, outputUpperBound: 50, totalUpperBound: 100,
+              capability: { adapterId: 'pi', adapterVersion: '0.0.0', provider: input.policy.selection.provider, model: input.policy.selection.model, kind: 'soft_only', coversAllBillableTokens: false, enforcesOutputBound: false },
+              operationId: opId, targetIdentity: 'fixture:sec',
+            }));
+            stateValue(host.store.authorizeRequestDispatch(host.authority, reqId));
+            const op = stateValue(host.store.getOperation(opId));
+            const view = stateValue(host.store.inspect());
+            const uBytes = Buffer.from(canonical({ seq }));
+            const uName = `sec-u-${hash(uBytes).hex}.bin`;
+            await writeFile(join(host.artifactsDirectory, uName), uBytes, { mode: 0o600 });
+            stateValue(host.store.observeRequest(host.authority, reqId, {
+              receiptId: `sec-rcpt-${seq}`, termination: 'confirmed', outcome: 'succeeded',
+              evidence: {
+                evidenceId: `sec-ev-${seq}`, producerId: 'sec-mock', method: 'synthetic',
+                artifact: { name: uName, byteLength: uBytes.byteLength, digest: hash(uBytes) },
+                subject: { storeId: view.storeId, runId: view.runId, lockHash: view.lockHash, operationId: opId, requestId: reqId, intentDigest: op.intentDigest, dispatchGeneration: op.dispatch!.generation, dispatchId: op.dispatch!.dispatchId },
+              },
+              usage: { requestId: reqId, inputTokens: { provenance: 'reported', value: 10 }, outputTokens: { provenance: 'reported', value: 10 }, costMicrousd: { provenance: 'reported', value: 10 } },
+            }));
+            return { ok: true, value: { status: 'execution_settled', requestIds: [reqId], operationIds: [opId], providerTermination: 'confirmed', usage: 'complete', localCleanup: 'complete', error: null, cleanupError: null } };
+          },
+          capture: async ({ checkpointId }) => {
+            if (!bypassHostChecker && host.createCandidateStreamChecker) {
+              const checker = host.createCandidateStreamChecker();
+              checker.push(secretBody);
+              checker.finish();
+            }
+            const sha = createHash('sha256').update(secretBody).digest('hex');
+            const shaDir = join(host.artifactsDirectory, 'blobs', 'sha256');
+            await mkdir(shaDir, { recursive: true, mode: 0o700 });
+            const blobTarget = join(shaDir, sha);
+            await writeFile(blobTarget, secretBody, { mode: 0o400 });
+            await chmod(blobTarget, 0o400);
+            const entryRes = digestArtifactFromMetadata('packages/result.json', { digest: { algorithm: 'sha256', hex: sha }, byteLength: secretBody.byteLength });
+            const blobRefRes = digestArtifactFromMetadata('packages/result.json', { digest: { algorithm: 'sha256', hex: sha }, byteLength: secretBody.byteLength, uri: `cas://sha256/${sha}` });
+            if (!entryRes.ok || !blobRefRes.ok) throw new Error('bad metadata');
+            const manifest: ArtifactManifest = {
+              apiVersion: 'loopwright.dev/v1alpha1',
+              kind: 'ArtifactManifest',
+              metadata: { id: 'candidate' },
+              spec: { entries: [entryRes.value] },
+            };
+            const current = stateValue(host.store.inspect());
+            const sourceDigest = hash('loopwright.dev/pi-policy/v2\0' + canonical(input.policy));
+            const nativePolicy = { ...input.policy, version: 1, policyId: 'v2.' + BigInt('0x' + sourceDigest.hex).toString(36) };
+            const bound = bindSubject(input.lock, manifest);
+            if (!bound.ok) throw new Error('bind');
+            const binding = {
+              version: 1, checkpointId, storeId: current.storeId, runId: current.runId, lockHash: current.lockHash,
+              sessionId: input.sessionId, roleId: input.roleId, stepId: input.stepId, runtime: input.policy.runtime,
+              policyDigest: hash(canonical(nativePolicy)), resourcesDigest: hash(canonical(input.policy.resources)),
+              candidateDigest: bound.value.candidateDigest, clockBasis: current.clock.basis,
+              accountingDigest: hash(canonical({ ledger: current.ledger, requests: current.counts.requests, operations: current.counts.operations })), sequence: 1,
+            };
+            const line = (v: unknown) => JSON.stringify(v) + '\n';
+            const wsBody =
+              line({ type: 'workspace_snapshot', version: 1, binding, manifest }) +
+              line({ type: 'file', ref: entryRes.value }) +
+              line({ type: 'blob_ref', ref: entryRes.value, blobRef: blobRefRes.value }) +
+              line({ type: 'file_end', byteLength: entryRes.value.byteLength, digest: sha }) +
+              line({ type: 'end', files: 1 });
+            const wsBytes = Buffer.from(wsBody, 'utf8');
+            const wsName = `sec-ws-${hash(wsBytes).hex}.bin`;
+            await writeFile(join(host.artifactsDirectory, wsName), wsBytes, { mode: 0o600 });
+            const wsRef = { name: wsName, byteLength: wsBytes.byteLength, digest: hash(wsBytes) };
+            const ts = '2026-11-20T00:00:00.000Z';
+            const subJson = JSON.stringify({ version: 1, status: 'completed', checks: [{ checkId: 'tests', status: 'passed', evidenceId: null, reason: null }], reason: null });
+            const sessBody =
+              line({ type: 'session_snapshot', version: 1, binding }) +
+              line({ type: 'session', version: 3, id: 's1', cwd: '/workspace/candidate', timestamp: ts }) +
+              line({ type: 'message', id: 'u1', parentId: null, timestamp: ts, message: { role: 'user', content: lastCmd } }) +
+              line({ type: 'message', id: 'a1', parentId: 'u1', timestamp: ts, message: { role: 'assistant', ...input.policy.selection, content: [{ type: 'text', text: subJson }], stopReason: 'stop' } });
+            const sessBytes = Buffer.from(sessBody, 'utf8');
+            const sessName = `sec-sess-${hash(sessBytes).hex}.bin`;
+            await writeFile(join(host.artifactsDirectory, sessName), sessBytes, { mode: 0o600 });
+            const sessRef = { name: sessName, byteLength: sessBytes.byteLength, digest: hash(sessBytes) };
+            stateValue(host.store.writeCheckpoint(host.authority, {
+              checkpointId, expectedRevision: stateValue(host.store.inspect()).revision,
+              candidateManifest: manifest, workspace: wsRef, privateSession: sessRef, additionalArtifacts: [],
+            }));
+            return { ok: true, value: { checkpointId, candidate: manifest, workspace: wsRef, session: sessRef } };
+          },
+        };
+        return { ok: true as const, value: adapter };
+      };
+      const outcome = assertOk(await runCycleWithPorts({ configuration: loaded, repository, runRoot, runId }, { openAdapter }), runId);
+      assert.equal(hostSawChecker, true);
+      assert.equal(outcome.kind, 'incident');
+      if (outcome.kind === 'incident') {
+        assert.equal(outcome.incident.code, 'CONFIG_CREDENTIAL_INVALID');
+      }
+    };
+
+    // 1. Registered secret rejected via host.createCandidateStreamChecker before CAS write
+    const regBody = Buffer.from(JSON.stringify({ ok: true, leak: registeredSecret }), 'utf8');
+    await runSecretCase('run-pi-scrub-registered', regBody, false);
+    const regSha = createHash('sha256').update(regBody).digest('hex');
+    await assert.rejects(
+      lstat(join(runRoot, 'run-pi-scrub-registered', 'artifacts', 'blobs', 'sha256', regSha)),
+      (err: NodeJS.ErrnoException) => err.code === 'ENOENT',
+    );
+
+    // 2. Generic GitHub token pre-populated directly into CAS still rejected by adoptRoleCapture defense-in-depth!
+    const genBody = Buffer.from(JSON.stringify({ ok: true, token: 'ghp_0123456789abcdefghij0123456789' }), 'utf8');
+    await runSecretCase('run-pi-scrub-generic-adopt', genBody, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('R2-8: read-only delegated role chmod mutation on overlay file is refused with ARTIFACT_INVALID and authorized mode is preserved', async () => {
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repository');
+    const runRoot = join(f.root, 'runs');
+    const rev = await createFastGitRepo(repository, {
+      'packages/result.json': { content: JSON.stringify({ ok: true }) },
+      'README.md': { content: 'mode guard test\n' },
+    });
+    const installed = await installedHandlerDigests();
+    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+    setFixture(f.registry, ['spec', 'credentialBindings'], []);
+    setFixture(f.registry, ['spec', 'environmentBindings'], []);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [
+      { id: 'implementer', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write', 'delete'], mcp: null },
+      { id: 'reviewer', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low' }, tools: ['read'], mcp: null },
+    ]);
+    setFixture(f.registry, ['spec', 'handlers'], [
+      { id: 'impl.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Implement.', purpose: 'task' }, capabilities: ['pi'] },
+      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
+      ...f.registry.spec.handlers.filter(h => h.id === 'tests' || h.id === 'scope' || h.id === 'no-change'),
+    ]);
+    setFixture(f.registry, ['spec', 'handlers', 2, 'parameters', 'path'], 'packages/result.json');
+    setFixture(f.config, ['spec', 'credentials'], []);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'overlay'], { maxFiles: 256, maxBytes: 16_777_216 });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      { id: 'implementer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write', 'delete'] },
+      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-argon', thinking: 'low', tools: ['read'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [
+      { roleId: 'implementer', profileRef: 'implementer' },
+      { roleId: 'reviewer', profileRef: 'reviewer' },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'implement', kind: 'agent', uses: 'impl.h', roleId: 'implementer', dependsOn: [] },
+      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['implement'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [
+      { stepId: 'implement', handlerRef: 'impl.h' },
+      { stepId: 'review', handlerRef: 'review.h' },
+    ]);
+    f.input.untrustedRoots = [f.taskDirectory, repository];
+    await f.save();
+    const loaded = assertOk(await f.load(), 'load mode guard fixture');
+
+    const runId = 'run-r2-8-mode-guard';
+    const y1 = assertStepYield(assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId }), 'stepNext implement'));
+    // Implementer adds packages/bin/run.sh as non-executable 0o644
+    await mkdir(join(y1.candidateDir, 'packages', 'bin'), { recursive: true, mode: 0o700 });
+    await writeFile(join(y1.candidateDir, 'packages', 'bin', 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o644 });
+    await chmod(join(y1.candidateDir, 'packages', 'bin', 'run.sh'), 0o644);
+    const y2 = assertStepYield(assertOk(await stepSubmit({ runRoot, runId, leaseToken: y1.leaseToken }), 'stepSubmit implement'));
+    assert.equal(y2.stepId, 'review');
+
+    // Read-only reviewer flips packages/bin/run.sh to 0o755 without changing bytes -> MUST be refused with ARTIFACT_INVALID
+    const reviewScript = join(y2.candidateDir, 'packages', 'bin', 'run.sh');
+    await chmod(reviewScript, 0o755);
+    const chmodRefused = await stepSubmit({
+      runRoot,
+      runId,
+      leaseToken: y2.leaseToken,
+      verdict: { verdict: 'pass', summary: 'Tried chmod +x.', findings: [] },
+    });
+    assert.equal(chmodRefused.ok, false);
+    if (!chmodRefused.ok) {
+      assert.equal(chmodRefused.error.code, 'ARTIFACT_INVALID');
+    }
+
+    // Restoring 0o400 (non-executable) allows reviewer submission to settle and inspectRun preserves mode 100644
+    await chmod(reviewScript, 0o400);
+    const settled = assertOk(
+      await stepSubmit({
+        runRoot,
+        runId,
+        leaseToken: y2.leaseToken,
+        verdict: { verdict: 'pass', summary: 'Clean review.', findings: [] },
+      }),
+      'stepSubmit review clean',
+    );
+    assert.equal(settled.kind, 'result');
+    if (settled.kind === 'result') {
+      assert.equal(settled.result.spec.status, 'completed');
+    }
+    const inspectDir = join(f.root, 'inspect-r2-8');
+    const inspected = assertOk(await inspectRun({ runRoot, runId, output: inspectDir }), 'inspectRun mode guard');
+    assert.ok(inspected.manifest !== null);
+    const exportedFiles = JSON.parse(await readFile(join(inspectDir, 'candidate.files.json'), 'utf8')) as {
+      version: number;
+      files: { name: string; mode: string }[];
+    };
+    assert.equal(exportedFiles.version, 2);
+    const runSh = exportedFiles.files.find(file => file.name === 'packages/bin/run.sh');
+    assert.equal(runSh?.mode, '100644');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('R2-10 & R2-13: async assertCanonicalMinimalOverlay reuses VERIFIED_CAS_SEAL and visit() charges same-size edits immediately before touching later files', async () => {
+  const { assertCanonicalMinimalOverlay, VERIFIED_CAS_SEAL, freezeSource } = await import('../src/source.js');
+  const { retainedFixture } = await import('./progress-fixtures.js');
+
+  // Part A (R2-10): assertCanonicalMinimalOverlay is async, attaches VERIFIED_CAS_SEAL, reuses it on repeat calls, and rejects tampered mode
+  const rf = await retainedFixture();
+  try {
+    const repoDir = join(rf.root, 'seal-repo');
+    const baselineFiles: Record<string, { content: string }> = {};
+    for (let i = 0; i < 135; i++) {
+      baselineFiles[`packages/base-${String(i).padStart(3, '0')}.txt`] = { content: `base-${i}\n` };
+    }
+    const rev = await createFastGitRepo(repoDir, baselineFiles);
+    const task = {
+      ...rf.plan.task,
+      spec: {
+        ...rf.plan.task.spec,
+        target: {
+          ...rf.plan.task.spec.target,
+          baseRevision: rev,
+          sourceRevision: rev,
+        },
+      },
+    };
+    const frozen = await freezeSource(repoDir, task, rf.owner, rf.artifacts);
+    assert.equal(frozen.version, 2);
+
+    const editedBytes = Buffer.from('edited-base-0\n', 'utf8');
+    const ptr = await rf.artifacts.putCasBlobFromBytes('packages/base-000.txt', editedBytes);
+    const entryRes = digestArtifactFromMetadata('packages/base-000.txt', {
+      digest: { algorithm: 'sha256', hex: ptr.sha256 },
+      byteLength: ptr.byteLength,
+    });
+    assert.equal(entryRes.ok, true);
+    if (!entryRes.ok) throw new Error('expected ok');
+    const manifest: ArtifactManifest = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'ArtifactManifest',
+      metadata: { id: 'candidate' },
+      spec: { baseTree: frozen.manifest.spec.baseTree!, entries: [entryRes.value], deleted: [] },
+    };
+    const casFile = {
+      name: 'packages/base-000.txt',
+      byteLength: ptr.byteLength,
+      digest: entryRes.value.digest,
+      blobPath: ptr.path,
+      mode: '100644' as const,
+    };
+    await assertCanonicalMinimalOverlay(manifest, [casFile], frozen, 'execution');
+    const attachedSeal = (casFile as typeof casFile & { [VERIFIED_CAS_SEAL]?: { sha256: string; gitOid: string | null } })[VERIFIED_CAS_SEAL];
+    assert.ok(attachedSeal !== undefined);
+    assert.equal(attachedSeal.sha256, ptr.sha256);
+    assert.ok(attachedSeal.gitOid !== null);
+    // Second verification hits the verified seal cleanly
+    await assertCanonicalMinimalOverlay(manifest, [casFile], frozen, 'execution');
+    // Flipping CAS blob writable invalidates the fast path and refuses RECOVERY_REQUIRED
+    await chmod(ptr.path, 0o600);
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(manifest, [casFile], frozen, 'execution'),
+      (err: unknown) => err instanceof Error && 'diagnostic' in err && (err as { diagnostic: { code: string } }).diagnostic.code === 'RECOVERY_REQUIRED',
+    );
+    await chmod(ptr.path, 0o400);
+  } finally {
+    await rf.close();
+  }
+
+  // Part B (R2-13): overlay.maxFiles=1 with two same-size modified files (a.txt, b.txt) refuses OUTPUT_LIMIT at b.txt BEFORE visiting z.txt
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repository-samesize');
+    const runRoot = join(f.root, 'runs-samesize');
+    const files: Record<string, { content: string }> = {
+      'packages/a.txt': { content: 'aaaa\n' },
+      'packages/b.txt': { content: 'bbbb\n' },
+      'packages/result.json': { content: JSON.stringify({ ok: true }) },
+      'packages/z.txt': { content: 'zzzz\n' },
+    };
+    for (let i = 0; i < 135; i++) {
+      files[`src/f-${String(i).padStart(3, '0')}.txt`] = { content: `src-${i}\n` };
+    }
+    const rev = await createFastGitRepo(repository, files);
+    const installed = await installedHandlerDigests();
+    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+    setFixture(f.registry, ['spec', 'credentialBindings'], []);
+    setFixture(f.registry, ['spec', 'environmentBindings'], []);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [
+      { id: 'author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write', 'delete'], mcp: null },
+    ]);
+    setFixture(f.registry, ['spec', 'handlers'], [
+      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Author.', purpose: 'task' }, capabilities: ['pi'] },
+      ...f.registry.spec.handlers.filter(h => h.id === 'tests' || h.id === 'scope' || h.id === 'no-change'),
+    ]);
+    setFixture(f.registry, ['spec', 'handlers', 1, 'parameters', 'path'], 'packages/result.json');
+    setFixture(f.config, ['spec', 'credentials'], []);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], { writable: ['packages/**'], protected: [] });
+    setFixture(f.config, ['spec', 'task', 'spec', 'budgets', 'overlay'], { maxFiles: 1, maxBytes: 1_048_576 });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write', 'delete'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [{ roleId: 'author', profileRef: 'author' }]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [{ stepId: 'author', handlerRef: 'author.h' }]);
+    f.input.untrustedRoots = [f.taskDirectory, repository];
+    await f.save();
+    const loaded = assertOk(await f.load(), 'load same-size charge fixture');
+
+    const runId = 'run-r2-13-samesize';
+    const y = assertStepYield(assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId }), 'stepNext same-size'));
+    // Modify a.txt and b.txt with the EXACT SAME byte length (5 bytes each)
+    await writeFile(join(y.candidateDir, 'packages', 'a.txt'), 'xxxx\n', { mode: 0o600 });
+    await writeFile(join(y.candidateDir, 'packages', 'b.txt'), 'yyyy\n', { mode: 0o600 });
+    // Replace z.txt with a symlink (which visit() would reject with ARTIFACT_INVALID if it ever reached z.txt!)
+    await unlink(join(y.candidateDir, 'packages', 'z.txt'));
+    await symlink(join(y.candidateDir, 'packages', 'a.txt'), join(y.candidateDir, 'packages', 'z.txt'));
+
+    const res = await stepSubmit({ runRoot, runId, leaseToken: y.leaseToken });
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.error.code, 'OUTPUT_LIMIT', `expected OUTPUT_LIMIT before visiting z.txt, got ${res.error.code}`);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('R3-10 & R4-6: fresh CAS winner omits unhashed seal while EEXIST/tryReuse mint descriptor seals, first overlay verification hashes finalized 0o400 descriptor, and second reuses seal without re-reading', async () => {
+  const { assertCanonicalMinimalOverlay, attachVerifiedCasSeal, VERIFIED_CAS_SEAL, freezeSource } = await import('../src/source.js');
+  const { retainedFixture } = await import('./progress-fixtures.js');
+
+  const rf = await retainedFixture();
+  try {
+    const repoDir = join(rf.root, 'r3-10-repo');
+    const baselineFiles: Record<string, { content: string }> = {};
+    for (let i = 0; i < 135; i++) {
+      baselineFiles[`packages/base-${String(i).padStart(3, '0')}.txt`] = { content: `base-${i}\n` };
+    }
+    const rev = await createFastGitRepo(repoDir, baselineFiles);
+    const task = {
+      ...rf.plan.task,
+      spec: {
+        ...rf.plan.task.spec,
+        target: { ...rf.plan.task.spec.target, baseRevision: rev, sourceRevision: rev },
+      },
+    };
+    const frozen = await freezeSource(repoDir, task, rf.owner, rf.artifacts);
+    assert.equal(frozen.version, 2);
+
+    const srcFile = join(rf.root, 'edited-r3-10.txt');
+    const editedBytes = Buffer.from('edited-base-0!\n', 'utf8');
+    await writeFile(srcFile, editedBytes, { mode: 0o600 });
+
+    // 1. Fresh-write winner branch MUST NOT mint verifiedSeal from the pre-chmod writable write stream (R4-6)
+    const winnerPtr = await rf.artifacts.putCasBlobFromFile('packages/base-000.txt', srcFile, undefined, {
+      gitObjectFormat: 'sha1',
+    });
+    assert.equal(winnerPtr.verifiedSeal, undefined);
+    const blobStat = await lstat(winnerPtr.path);
+
+    // 2. EEXIST dedup branch AND tryReuseCasBlob hash the finalized 0o400 nlink===1 descriptor and mint verifiedSeal
+    const dedupPtr = await rf.artifacts.putCasBlobFromFile('packages/base-000.txt', srcFile, undefined, {
+      gitObjectFormat: 'sha1',
+    });
+    assert.ok(dedupPtr.verifiedSeal !== undefined);
+    assert.equal(dedupPtr.verifiedSeal.sha256, winnerPtr.sha256);
+    assert.ok(dedupPtr.verifiedSeal.gitOid !== null);
+    assert.equal(dedupPtr.verifiedSeal.dev, blobStat.dev);
+    assert.equal(dedupPtr.verifiedSeal.ino, blobStat.ino);
+    assert.equal(dedupPtr.verifiedSeal.ctimeMs, blobStat.ctimeMs);
+
+    const reusedPtr = await rf.artifacts.tryReuseCasBlob(
+      'packages/base-000.txt',
+      winnerPtr.sha256,
+      winnerPtr.byteLength,
+      { gitObjectFormat: 'sha1' },
+    );
+    assert.ok(reusedPtr !== null);
+    assert.ok(reusedPtr.verifiedSeal !== undefined);
+    assert.equal(reusedPtr.verifiedSeal.ino, blobStat.ino);
+    assert.equal(reusedPtr.verifiedSeal.gitOid, dedupPtr.verifiedSeal.gitOid);
+
+    const entryRes = digestArtifactFromMetadata('packages/base-000.txt', {
+      digest: { algorithm: 'sha256', hex: winnerPtr.sha256 },
+      byteLength: winnerPtr.byteLength,
+    });
+    assert.equal(entryRes.ok, true);
+    if (!entryRes.ok) throw new Error('expected ok');
+    const manifest: ArtifactManifest = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'ArtifactManifest',
+      metadata: { id: 'candidate' },
+      spec: { baseTree: frozen.manifest.spec.baseTree!, entries: [entryRes.value], deleted: [] },
+    };
+
+    // 3. First assertCanonicalMinimalOverlay on fresh unsealed casFile hashes finalized 0o400 descriptor and attaches VERIFIED_CAS_SEAL;
+    //    second assertCanonicalMinimalOverlay reuses that descriptor-minted seal without reading bytes again.
+    const freshCasFile = {
+      name: 'packages/base-000.txt',
+      byteLength: winnerPtr.byteLength,
+      digest: entryRes.value.digest,
+      blobPath: winnerPtr.path,
+      mode: '100644' as const,
+    };
+    assert.equal((freshCasFile as typeof freshCasFile & { [VERIFIED_CAS_SEAL]?: unknown })[VERIFIED_CAS_SEAL], undefined);
+
+    const probeHandle = await open(winnerPtr.path, constants.O_RDONLY);
+    const fileHandleProto = Object.getPrototypeOf(probeHandle) as {
+      read: (...args: unknown[]) => Promise<unknown>;
+    };
+    await probeHandle.close();
+    const origRead = fileHandleProto.read;
+    let readCalls = 0;
+    const readSpy = mock.method(fileHandleProto, 'read', function (this: unknown, ...args: unknown[]) {
+      readCalls += 1;
+      return origRead.apply(this, args);
+    });
+    try {
+      await assertCanonicalMinimalOverlay(manifest, [freshCasFile], frozen, 'execution');
+      const readsAfterFirst = readCalls;
+      assert.ok(readsAfterFirst > 0, `expected first verification to hash finalized descriptor, got ${readsAfterFirst} reads`);
+      const mintedSeal = (freshCasFile as typeof freshCasFile & { [VERIFIED_CAS_SEAL]?: { sha256: string; gitOid: string | null; ino: number } })[VERIFIED_CAS_SEAL];
+      assert.ok(mintedSeal !== undefined);
+      assert.equal(mintedSeal.sha256, winnerPtr.sha256);
+      assert.equal(mintedSeal.gitOid, dedupPtr.verifiedSeal.gitOid);
+      assert.equal(mintedSeal.ino, blobStat.ino);
+
+      // Second verification reuses the descriptor-minted seal in O(1) without calling fh.read()
+      await assertCanonicalMinimalOverlay(manifest, [freshCasFile], frozen, 'execution');
+      assert.equal(readCalls, readsAfterFirst, 'expected second verification to reuse VERIFIED_CAS_SEAL without re-reading');
+    } finally {
+      readSpy.mock.restore();
+    }
+
+    // 4. Dedup-sealed casFile also validates cleanly
+    const dedupCasFile = attachVerifiedCasSeal(
+      {
+        name: 'packages/base-000.txt',
+        byteLength: dedupPtr.byteLength,
+        digest: entryRes.value.digest,
+        blobPath: dedupPtr.path,
+        mode: '100644' as const,
+      },
+      dedupPtr.verifiedSeal,
+    );
+    await assertCanonicalMinimalOverlay(manifest, [dedupCasFile], frozen, 'execution');
+
+    // 5. Replace <artifactsDir>/blobs/sha256/<hex> with a DIFFERENT same-size 0o400 single-link inode with wrong bytes
+    const wrongBytes = Buffer.from('TAMPER-base-0!\n', 'utf8');
+    assert.equal(wrongBytes.byteLength, editedBytes.byteLength);
+    await unlink(winnerPtr.path);
+    await writeFile(winnerPtr.path, wrongBytes, { mode: 0o400 });
+    await chmod(winnerPtr.path, 0o400);
+    const replacedStat = await lstat(winnerPtr.path);
+    assert.equal(replacedStat.nlink, 1);
+    assert.equal(replacedStat.size, editedBytes.byteLength);
+    assert.equal(replacedStat.mode & 0o222, 0);
+
+    // Both sealed and unsealed (fresh-winner) casFiles MUST detect the altered bytes and refuse RECOVERY_REQUIRED
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(manifest, [freshCasFile], frozen, 'execution'),
+      (err: unknown) =>
+        err instanceof Error && 'diagnostic' in err && (err as { diagnostic: { code: string } }).diagnostic.code === 'RECOVERY_REQUIRED',
+    );
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(manifest, [dedupCasFile], frozen, 'execution'),
+      (err: unknown) =>
+        err instanceof Error && 'diagnostic' in err && (err as { diagnostic: { code: string } }).diagnostic.code === 'RECOVERY_REQUIRED',
+    );
+    const unsealedCasFile = {
+      name: 'packages/base-000.txt',
+      byteLength: winnerPtr.byteLength,
+      digest: entryRes.value.digest,
+      blobPath: winnerPtr.path,
+      mode: '100644' as const,
+    };
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(manifest, [unsealedCasFile], frozen, 'execution'),
+      (err: unknown) =>
+        err instanceof Error && 'diagnostic' in err && (err as { diagnostic: { code: string } }).diagnostic.code === 'RECOVERY_REQUIRED',
+    );
+  } finally {
+    await rf.close();
+  }
+});
+
+test('R3-12: classic mode (source.version === 1) refuses mode-only chmod +x on host-protected and task-protected files even alongside a valid writable edit', async () => {
+  const f = await configurationFixture();
+  try {
+    const repository = join(f.root, 'repo-classic-mode-guard');
+    const runRoot = join(f.root, 'runs-classic-mode-guard');
+    const rev = await createFastGitRepo(repository, {
+      'packages/ok.md': { content: 'hello\n' },
+      'packages/result.json': { content: JSON.stringify({ ok: true }) },
+      '.github/CODEOWNERS': { content: '* @owners\n' },
+      '.claude/settings.json': { content: '{"safe":true}\n' },
+    });
+    const installed = await installedHandlerDigests();
+    setFixture(f.registry, ['spec', 'runtimeProfiles'], []);
+    setFixture(f.registry, ['spec', 'credentialBindings'], []);
+    setFixture(f.registry, ['spec', 'environmentBindings'], []);
+    setFixture(f.registry, ['spec', 'roleProfiles'], [
+      { id: 'author', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read', 'write', 'delete'], mcp: null },
+      { id: 'reviewer', adapter: 'delegated', runtimeRef: null, providerCredentialRef: null, selection: { provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high' }, tools: ['read'], mcp: null },
+    ]);
+    setFixture(f.registry, ['spec', 'handlers'], [
+      { id: 'author.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Author.', purpose: 'task' }, capabilities: ['pi'] },
+      { id: 'review.h', kind: 'agent', implementation: 'pi.agent.v1', version: 1, digest: installed['pi.agent.v1'], parameters: { prompt: 'Review.', purpose: 'review' }, capabilities: ['pi'] },
+      ...f.registry.spec.handlers.filter(h => h.id === 'tests' || h.id === 'scope' || h.id === 'no-change'),
+    ]);
+    setFixture(f.registry, ['spec', 'handlers', 2, 'parameters', 'path'], 'packages/result.json');
+    setFixture(f.config, ['spec', 'credentials'], []);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'baseRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'target', 'sourceRevision'], rev);
+    setFixture(f.config, ['spec', 'task', 'spec', 'scope'], {
+      writable: ['packages/**'],
+      protected: ['.claude/**'],
+    });
+    setFixture(f.config, ['spec', 'task', 'spec', 'roles'], [
+      { id: 'author', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read', 'write', 'delete'] },
+      { id: 'reviewer', adapter: 'delegated', provider: 'antigravity', model: 'gemini-4-carbon', thinking: 'high', tools: ['read'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'roles'], [
+      { roleId: 'author', profileRef: 'author' },
+      { roleId: 'reviewer', profileRef: 'reviewer' },
+    ]);
+    setFixture(f.config, ['spec', 'task', 'spec', 'steps'], [
+      { id: 'author', kind: 'agent', uses: 'author.h', roleId: 'author', dependsOn: [] },
+      { id: 'review', kind: 'agent', uses: 'review.h', roleId: 'reviewer', dependsOn: ['author'] },
+    ]);
+    setFixture(f.config, ['spec', 'profiles', 'steps'], [
+      { stepId: 'author', handlerRef: 'author.h' },
+      { stepId: 'review', handlerRef: 'review.h' },
+    ]);
+    f.input.untrustedRoots = [f.taskDirectory, repository];
+    await f.save();
+    const loaded = assertOk(await f.load(), 'load classic mode-guard fixture');
+
+    const runId = 'run-r3-12-classic-mode';
+    const y = assertStepYield(
+      assertOk(
+        await stepNext({
+          configuration: loaded,
+          repository,
+          runRoot,
+          runId,
+          policyProfile: 'github',
+          allowWorkflowWrites: false,
+        }),
+        'stepNext classic mode-guard',
+      ),
+    );
+
+    // Legitimate edit to writable file (so candidateDigest changes!)
+    await writeFile(join(y.candidateDir, 'packages', 'ok.md'), 'hello updated\n', { mode: 0o600 });
+
+    // Case 1: Mode-only chmod 0o755 on host-protected .github/CODEOWNERS must be refused with ARTIFACT_INVALID
+    const codeownersPath = join(y.candidateDir, '.github', 'CODEOWNERS');
+    await chmod(codeownersPath, 0o755);
+    const codeownersRefused = await stepSubmit({ runRoot, runId, leaseToken: y.leaseToken });
+    assert.equal(codeownersRefused.ok, false);
+    if (!codeownersRefused.ok) {
+      assert.equal(codeownersRefused.error.code, 'ARTIFACT_INVALID');
+    }
+    await chmod(codeownersPath, 0o400);
+
+    // Case 2: Mode-only chmod 0o755 on task-protected .claude/settings.json must also be refused with ARTIFACT_INVALID
+    const claudeSettingsPath = join(y.candidateDir, '.claude', 'settings.json');
+    await chmod(claudeSettingsPath, 0o755);
+    const taskProtectedRefused = await stepSubmit({ runRoot, runId, leaseToken: y.leaseToken });
+    assert.equal(taskProtectedRefused.ok, false);
+    if (!taskProtectedRefused.ok) {
+      assert.equal(taskProtectedRefused.error.code, 'ARTIFACT_INVALID');
+    }
+    await chmod(claudeSettingsPath, 0o400);
+
+    // Case 3: With protected files restored to 0o400 (100644), the valid writable edit submits cleanly
+    const reviewYield = assertStepYield(
+      assertOk(await stepSubmit({ runRoot, runId, leaseToken: y.leaseToken }), 'stepSubmit clean edit'),
+    );
+    assert.equal(reviewYield.stepId, 'review');
+  } finally {
     await f.cleanup();
   }
 });

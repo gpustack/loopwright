@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { OVERLAY_LIMITS } from '@loopwright/core';
 import {
   GITHUB_PROTECTED_AUTOMATION_PATHS,
@@ -287,6 +291,35 @@ spec:
       (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
     );
 
+    // candidateEntries and limits.overlay.maxFiles scale to OVERLAY_LIMITS.maxMaxFiles (16_384) and reject 16_385
+    assert.equal(OVERLAY_LIMITS.maxMaxFiles, 16_384);
+    const wideLimits = validateTaskpackLimitsDeclaration({
+      candidateEntries: 16_384,
+      maxTurns: 120,
+      maxRepairTurns: 40,
+      overlay: { maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes },
+    }, '/spec/limits');
+    assert.equal(wideLimits.candidateEntries, 16_384);
+    assert.equal(wideLimits.maxTurns, 120);
+    assert.equal(wideLimits.maxRepairTurns, 40);
+    assert.deepEqual(wideLimits.overlay, { maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ maxTurns: 0 }, '/spec/limits'),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/limits/maxTurns',
+    );
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ maxRepairTurns: 1_025 }, '/spec/limits'),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID' && err.path === '/spec/limits/maxRepairTurns',
+    );
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ candidateEntries: 16_385 }, '/spec/limits'),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ overlay: { maxFiles: 16_385, maxBytes: 16_777_216 } }, '/spec/limits'),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+
     // Oversized taskpack.yaml refused at TASKPACK_MANIFEST_BYTES + 1
     assert.throws(
       () => parseTaskpackDocument(new Uint8Array(TASKPACK_MANIFEST_BYTES + 1), 'yaml'),
@@ -345,5 +378,143 @@ spec:
     assert.equal(localPaths.includes('.github'), false);
     const githubPaths = effectiveProtectedPaths([], { controlRoot: '.ops', policyProfile: 'github' });
     assert.equal(githubPaths.includes('.github'), true);
+
+    // command.v1 parameters.networkMode accepts "none" and authorized "loopback-only", and fails closed otherwise
+    const loopbackAllowed = validateTaskpackV2Manifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'netmode-check' },
+      spec: {
+        execution: { mode: 'strict', capabilities: { allowCheckNetwork: true } },
+        goal: { candidate: 'Check netmode.', noChange: 'Verify.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        verification: {
+          localChecks: [
+            { id: 'verify', implementation: 'command.v1', parameters: { script: '.loopwright/checks/v.sh', networkMode: 'loopback-only' } },
+          ],
+          externalGates: [],
+        },
+      },
+    }, { hostPolicy: { allowPrivileged: true } });
+    assert.equal(loopbackAllowed.spec.verification.localChecks[0]?.parameters?.['networkMode'], 'loopback-only');
+
+    assert.throws(
+      () => validateTaskpackV2Manifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'netmode-unauth' },
+        spec: {
+          goal: { candidate: 'Check netmode.', noChange: 'Verify.' },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: {
+            localChecks: [
+              { id: 'verify', implementation: 'command.v1', parameters: { script: '.loopwright/checks/v.sh', networkMode: 'loopback-only' } },
+            ],
+            externalGates: [],
+          },
+        },
+      }, { hostPolicy: { allowPrivileged: true } }),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+    );
+    assert.throws(
+      () => validateTaskpackV2Manifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'netmode-bad-enum' },
+        spec: {
+          execution: { mode: 'strict', capabilities: { allowCheckNetwork: true } },
+          goal: { candidate: 'Check netmode.', noChange: 'Verify.' },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: {
+            localChecks: [
+              { id: 'verify', implementation: 'command.v1', parameters: { script: '.loopwright/checks/v.sh', networkMode: 'allow-outbound' } },
+            ],
+            externalGates: [],
+          },
+        },
+      }, { hostPolicy: { allowPrivileged: true } }),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+
+    // R3-7: .auto-sync/taskpack.yaml declares RUNNER_ENVIRONMENT cleanly while other RUNNER_* names remain reserved
+    const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
+    const selfUpgradeYaml = readFileSync(resolve(repoRoot, '.auto-sync/taskpack.yaml'), 'utf8');
+    const selfUpgradeManifest = parseTaskpackManifest(selfUpgradeYaml, {
+      controlRoot: '.auto-sync',
+      hostPolicy: { allowPrivileged: true },
+    });
+    const verifyCheck = selfUpgradeManifest.spec.verification.localChecks.find(c => c.id === 'self-upgrade-verify');
+    assert.ok(verifyCheck !== undefined);
+    const verifyEnvList = verifyCheck.parameters?.['env'];
+    assert.ok(Array.isArray(verifyEnvList) && verifyEnvList.includes('RUNNER_ENVIRONMENT'));
+
+    assert.throws(
+      () => validateTaskpackV2Manifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'runner-temp-blocked' },
+        spec: {
+          goal: { candidate: 'Check env.', noChange: 'Verify.' },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: {
+            localChecks: [
+              { id: 'verify', implementation: 'command.v1', parameters: { script: '.loopwright/checks/v.sh', env: ['RUNNER_TEMP'] } },
+            ],
+            externalGates: [],
+          },
+        },
+      }),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+
+    // R4-5: literal env map (envMap) and spec.vars MUST reject RUNNER_ENVIRONMENT and GITHUB_ACTIONS
+    for (const forgedEnv of [
+      { RUNNER_ENVIRONMENT: 'github-hosted' },
+      { GITHUB_ACTIONS: 'true' },
+    ]) {
+      assert.throws(
+        () => validateTaskpackV2Manifest({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'Taskpack',
+          metadata: { name: 'forged-runner-env' },
+          spec: {
+            goal: { candidate: 'Check env.', noChange: 'Verify.' },
+            scope: { writable: ['docs/**'], protected: [] },
+            verification: {
+              localChecks: [
+                { id: 'verify', implementation: 'command.v1', parameters: { script: '.loopwright/checks/v.sh', env: forgedEnv } },
+              ],
+              externalGates: [],
+            },
+          },
+        }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+    }
+    assert.throws(
+      () => validateTaskpackV2Manifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'forged-vars-runner-env' },
+        spec: {
+          vars: { RUNNER_ENVIRONMENT: 'github-hosted' },
+          goal: { candidate: 'Check env.', noChange: 'Verify.' },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: { localChecks: [], externalGates: [] },
+        },
+      }),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+    );
+
+    const verifyShPath = resolve(repoRoot, '.auto-sync/checks/verify.sh');
+    const bashCheck = spawnSync('bash', ['-n', verifyShPath], { encoding: 'utf8' });
+    assert.equal(bashCheck.status, 0, bashCheck.stderr);
+    const verifyShText = readFileSync(verifyShPath, 'utf8');
+    assert.ok(verifyShText.includes('runner_env = os.environ.get("RUNNER_ENVIRONMENT", "").strip()'));
+    assert.equal(verifyShText.includes('os.environ.get("RUNNER_ENVIRONMENT", "github-hosted")'), false);
+    assert.ok(verifyShText.includes('and runner_env == "github-hosted"'));
+    assert.ok(verifyShText.includes('and not has_macos_sb_helper'));
+    assert.ok(verifyShText.includes('def build_no_ip_seccomp_bpf('));
+    assert.ok(verifyShText.includes('cmd.extend(["--seccomp", str(seccomp_r)])'));
   });
 });

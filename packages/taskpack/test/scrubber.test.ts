@@ -32,7 +32,7 @@ describe('scrubber.ts: derived-form scrubbing and 64 KiB boundary sliding-window
     );
   });
 
-  it('detects raw, JSON-escaped, URL-encoded, base64, and multi-byte UTF-8 secrets spanning a 64 KiB chunk boundary', async () => {
+  it('detects raw, JSON-escaped, URL-encoded, base64, and multi-byte UTF-8 secrets spanning a 1 MiB chunk boundary', async () => {
     const secret = 'sec/边界+"val&1234567890';
     const scrubber = new SecretScrubber();
     scrubber.register(secret);
@@ -47,16 +47,16 @@ describe('scrubber.ts: derived-form scrubbing and 64 KiB boundary sliding-window
 
     for (const form of forms) {
       const formBuf = Buffer.from(form, 'utf8');
-      const splitPoint = Math.floor(formBuf.byteLength / 2);
+      const splitPoint = Math.min(10, Math.floor(formBuf.byteLength / 2));
       const chunk1 = Buffer.concat([
-        Buffer.alloc(65_536 - splitPoint, 0x61), // 'a' padding up to exact 64 KiB chunk boundary
+        Buffer.alloc(1_048_576 - splitPoint, 0x61), // 'a' padding up to exact 1 MiB chunk boundary
         formBuf.subarray(0, splitPoint),
       ]);
       const chunk2 = Buffer.concat([
         formBuf.subarray(splitPoint),
         Buffer.alloc(1024, 0x62),
       ]);
-      assert.equal(chunk1.byteLength, 65_536);
+      assert.equal(chunk1.byteLength, 1_048_576);
 
       await assert.rejects(
         assertStreamClean([chunk1, chunk2], scrubber, '/stream-test'),
@@ -70,10 +70,11 @@ describe('scrubber.ts: derived-form scrubbing and 64 KiB boundary sliding-window
       assert.ok(out.includes('[scrubbed]'));
     }
 
-    // Multi-byte UTF-8 character split mid-codepoint across clean 64 KiB chunks survives intact
+    // Multi-byte UTF-8 character split mid-codepoint across clean 1 MiB chunks survives intact
     const emojiBuf = Buffer.from('🚀', 'utf8'); // 4-byte UTF-8 sequence
-    const cleanChunk1 = Buffer.concat([Buffer.alloc(65_534, 0x63), emojiBuf.subarray(0, 2)]);
+    const cleanChunk1 = Buffer.concat([Buffer.alloc(1_048_576 - 2, 0x63), emojiBuf.subarray(0, 2)]);
     const cleanChunk2 = Buffer.concat([emojiBuf.subarray(2), Buffer.from('-done', 'utf8')]);
+    assert.equal(cleanChunk1.byteLength, 1_048_576);
     await assert.doesNotReject(assertStreamClean([cleanChunk1, cleanChunk2], scrubber));
     const cleanStream = createStreamScrubber(scrubber);
     const cleanOut = scrubStreamChunk(cleanStream, cleanChunk1) + scrubStreamChunk(cleanStream, cleanChunk2) + cleanStream.flushScrub();

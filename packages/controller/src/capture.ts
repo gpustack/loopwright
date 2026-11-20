@@ -5,8 +5,10 @@ import {
   digestArtifact,
   digestArtifactFromMetadata,
   identifyManifest,
+  isWritablePath,
   type ArtifactManifest,
   type ArtifactRef,
+  type TaskContract,
   type TaskLock,
 } from '@loopwright/core';
 import type { Authority, CheckpointRecord, LocalRunStore } from '@loopwright/state';
@@ -190,7 +192,7 @@ export async function decodeDelegatedWorkspace(
   ) {
     return fail();
   }
-  const deleted = list(doc.deleted, '', 4096).map(item => text(item, '', 4096));
+  const deleted = list(doc.deleted, '', bounds.maxFiles).map(item => text(item, '', 4096));
   if (!same([...deleted].sort(compareUtf16), deleted) || new Set(deleted).size !== deleted.length) return fail();
 
   if (doc.format === 'delegated-capture.v2' && doc.version === 2) {
@@ -312,6 +314,39 @@ export async function decodeDelegatedWorkspace(
   };
 }
 
+async function assertCandidateArtifactsClean(
+  artifacts: ArtifactStore,
+  entries: readonly CandidateFileEntry[],
+  phase: ControllerDiagnostic['phase'],
+): Promise<void> {
+  for (const entry of entries) {
+    if ('bytes' in entry) {
+      artifacts.vault.assertClean(entry.bytes);
+    } else {
+      const checker = artifacts.vault.createStreamChecker();
+      try {
+        await streamVerifiedCasBlob(
+          artifacts.directory,
+          {
+            name: entry.name,
+            sha256: entry.digest.hex,
+            byteLength: entry.byteLength,
+            uri: 'cas://sha256/' + entry.digest.hex,
+            path: entry.blobPath,
+          },
+          chunk => {
+            checker.push(chunk);
+          },
+          phase,
+        );
+        checker.finish();
+      } finally {
+        checker.finish();
+      }
+    }
+  }
+}
+
 export async function decodeCandidateCapture(input: {
   readonly artifacts: ArtifactReader;
   readonly artifactsDirectory?: string;
@@ -342,6 +377,9 @@ export async function decodeCandidateCapture(input: {
     (peek.format === 'delegated-capture.v1' || peek.format === 'delegated-capture.v2')
   ) {
     const decoded = await decodeDelegatedWorkspace(workspaceBytes, expectedManifest, lock, phase, effectiveArtifactsDir);
+    if (artifacts instanceof ArtifactStore) {
+      await assertCandidateArtifactsClean(artifacts, decoded.artifacts, phase);
+    }
     return {
       candidate: decoded.candidate,
       artifacts: decoded.artifacts,
@@ -371,11 +409,45 @@ export async function decodeCandidateCapture(input: {
   }
   const candidateArtifacts: readonly CandidateFileEntry[] =
     decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
+  if (artifacts instanceof ArtifactStore) {
+    await assertCandidateArtifactsClean(artifacts, candidateArtifacts, phase);
+  }
   return {
     candidate: decoded.value.candidate,
     artifacts: candidateArtifacts,
     submission: decoded.value.submission,
   };
+}
+
+function assertNoUnauthorizedModeMutations(
+  candidateFiles: readonly CandidateFileEntry[],
+  overlayEntries: readonly { readonly name: string; readonly mode: '100644' | '100755' }[],
+  source: FrozenSource,
+  task: TaskContract,
+  hostProtection: boolean | HostPathProtectionOptions,
+  phase: ControllerDiagnostic['phase'],
+): void {
+  const baselineModeByPath = new Map<string, '100644' | '100755'>(
+    source.version === 2
+      ? (source.baselineEntries ?? []).map(entry => [entry.name, entry.mode])
+      : source.artifacts.map(entry => [entry.name, entry.mode ?? '100644']),
+  );
+  const overlayModeByPath = new Map<string, '100644' | '100755'>(
+    overlayEntries.map(entry => [entry.name, entry.mode]),
+  );
+  for (const file of candidateFiles) {
+    const fileMode = (!('bytes' in file) ? file.mode : undefined) ?? overlayModeByPath.get(file.name);
+    const baselineMode = baselineModeByPath.get(file.name);
+    if (fileMode !== undefined && baselineMode !== undefined && fileMode !== baselineMode) {
+      if (isHostProtectedPath(file.name, hostProtection)) {
+        refuse('ARTIFACT_INVALID', '', phase);
+      }
+      const writable = isWritablePath(task, file.name);
+      if (!writable.ok || !writable.value) {
+        refuse('ARTIFACT_INVALID', '', phase);
+      }
+    }
+  }
 }
 
 export async function captureDelegatedRole(
@@ -392,12 +464,15 @@ export async function captureDelegatedRole(
     readonly payload: DelegatedCapturePayload;
     readonly submissionBytes: Uint8Array | null;
   },
+  hostProtection: boolean | HostPathProtectionOptions = false,
 ): Promise<CapturedRole> {
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
   const checkpointId = phaseCheckpointId(lock.spec.runId, 'role.' + attempt.ordinal + '.native');
   const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(input.candidateManifest), bounds.options);
   if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest)) > bounds.manifestMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, input.candidateFiles, source, 'execution');
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, input.candidateFiles, source, 'execution');
+  assertNoHostProtectedMutations(canonicalManifest.value.manifest, input.candidateFiles, source, hostProtection, 'execution');
+  assertNoUnauthorizedModeMutations(input.candidateFiles, input.payload.overlay, source, lock.spec.contract, hostProtection, 'execution');
   const wsMaxBytes = input.payload.version === 2 ? bounds.v2WorkspaceJsonMaxBytes : bounds.workspaceMaxBytes;
   const workspace = await artifacts.json('workspace', input.payload, wsMaxBytes);
   const current = stateValue(store.inspect());
@@ -486,7 +561,7 @@ export async function adoptDelegatedCapture(
   } else {
     refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
-  const deleted = list(doc.deleted, '', 4096).map(item => text(item, '', 4096));
+  const deleted = list(doc.deleted, '', bounds.maxFiles).map(item => text(item, '', 4096));
   const draftManifest = source.version === 2
     ? { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { baseTree: source.manifest.spec.baseTree!, entries, deleted } }
     : { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { entries } };
@@ -497,8 +572,10 @@ export async function adoptDelegatedCapture(
   const bound = bindSubject(lock, canonicalManifest.value.manifest, bounds.options);
   if (!bound.ok || !same(bound.value, checkpoint.subject)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const decoded = await decodeDelegatedWorkspace(workspaceBytes, canonicalManifest.value.manifest, lock, 'recovery', artifacts.directory);
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, decoded.artifacts, source, 'recovery');
-  assertNoHostProtectedMutations(canonicalManifest.value.manifest, decoded.artifacts, source, hostProtection);
+  await assertCandidateArtifactsClean(artifacts, decoded.artifacts, 'recovery');
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, decoded.artifacts, source, 'recovery');
+  assertNoHostProtectedMutations(canonicalManifest.value.manifest, decoded.artifacts, source, hostProtection, 'recovery');
+  assertNoUnauthorizedModeMutations(decoded.artifacts, decoded.payload.overlay, source, lock.spec.contract, hostProtection, 'recovery');
   const originalManifest = await artifacts.json('native-manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const manifest = await artifacts.json('manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const submission = decoded.submission === null ? null : await artifacts.put('submission', decoded.submission, 1_048_576);
@@ -552,18 +629,22 @@ export function assertNoHostProtectedMutations(
     }
     return;
   }
-  const baselineByPath = new Map(source.artifacts.map(item => [item.name, item.bytes]));
+  const baselineByPath = new Map(
+    source.artifacts.map(item => [item.name, { bytes: item.bytes, mode: item.mode ?? ('100644' as const) }]),
+  );
   const present = new Set<string>();
   for (const file of files) {
     present.add(file.name);
-    const baseBytes = baselineByPath.get(file.name);
-    const modifiedOrAdded =
-      baseBytes === undefined
+    const baseEntry = baselineByPath.get(file.name);
+    const bytesChangedOrAdded =
+      baseEntry === undefined
         ? true
         : 'bytes' in file
-          ? !Buffer.from(baseBytes).equals(Buffer.from(file.bytes))
-          : baseBytes.byteLength !== file.byteLength || hash(baseBytes).hex !== file.digest.hex;
-    if (modifiedOrAdded && isHostProtectedPath(file.name, hostProtection)) {
+          ? !Buffer.from(baseEntry.bytes).equals(Buffer.from(file.bytes))
+          : baseEntry.bytes.byteLength !== file.byteLength || hash(baseEntry.bytes).hex !== file.digest.hex;
+    const modeChanged =
+      baseEntry !== undefined && !('bytes' in file) && file.mode !== undefined && file.mode !== baseEntry.mode;
+    if ((bytesChangedOrAdded || modeChanged) && isHostProtectedPath(file.name, hostProtection)) {
       refuse(code, '', phase);
     }
   }
@@ -645,7 +726,8 @@ export async function adoptRoleCapture(
   if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest)) > bounds.manifestMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
   const candidateArtifacts: readonly CandidateFileEntry[] =
     decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, candidateArtifacts, source, 'execution');
+  await assertCandidateArtifactsClean(artifacts, candidateArtifacts, 'execution');
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, candidateArtifacts, source, 'execution');
   assertNoHostProtectedMutations(canonicalManifest.value.manifest, candidateArtifacts, source, hostProtection);
   const originalManifest = await artifacts.json('native-manifest', decoded.value.candidate, bounds.manifestMaxBytes), manifest = await artifacts.json('manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const submission = decoded.value.submission === null ? null : await artifacts.put('submission', decoded.value.submission, 1048576);

@@ -3,7 +3,7 @@ import type { PiCustomModelCompat, PiCustomProviderConfig, PiLimits, PiModelCost
 import { isExternalMcpToolName } from './external-mcp.js';
 export const MAX_LIMITS: PiLimits = Object.freeze({ promptBytes: 1048576, diagnosticBytes: 65536, responseBytes: 67108864,
   frameBytes: 65536, eventBytes: 65536, pendingResponseBytes: 262144, eventQueue: 1024, eventQueueBytes: 8388608,
-  toolArgsBytes: 4194304, toolResultBytes: 4194304, sessionBytes: 67108864, artifactBytes: OVERLAY_LIMITS.maxMaxBytes, candidateEntries: 4096,
+  toolArgsBytes: 4194304, toolResultBytes: 4194304, sessionBytes: 67108864, artifactBytes: OVERLAY_LIMITS.maxMaxBytes, candidateEntries: OVERLAY_LIMITS.maxMaxFiles,
   fileBytes: OVERLAY_LIMITS.maxMaxBytes, toolWallMs: 1800000, requests: 4096, operations: 16384, checkpoints: 256 });
 import { canonical, freeze, id, integer, object, text, type Json } from './boundary.js';
 import { PI_THINKING_LEVELS, PI_WIRE_APIS, resolveCatalogModel, validateProviderBaseUrl } from './catalog.js';

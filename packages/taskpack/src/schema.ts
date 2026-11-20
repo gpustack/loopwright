@@ -232,7 +232,10 @@ export function validateExecutionAuthority(
   const perCheckMountReadOnlyGitIdx = extra?.localChecks?.findIndex(
     check => check.implementation === 'command.v1' && check.parameters?.['mountReadOnlyGit'] === true,
   ) ?? -1;
-  if (execution === undefined && perCheckMountReadOnlyGitIdx === -1) return;
+  const perCheckLoopbackNetIdx = extra?.localChecks?.findIndex(
+    check => check.implementation === 'command.v1' && check.parameters?.['networkMode'] === 'loopback-only',
+  ) ?? -1;
+  if (execution === undefined && perCheckMountReadOnlyGitIdx === -1 && perCheckLoopbackNetIdx === -1) return;
   const caps = execution?.capabilities;
   const requiresPrivileged = (
     execution?.mode === 'privileged'
@@ -242,6 +245,7 @@ export function validateExecutionAuthority(
     || caps?.allowCheckNetwork === true
     || caps?.allowAgentNetwork === true
     || perCheckMountReadOnlyGitIdx !== -1
+    || perCheckLoopbackNetIdx !== -1
   );
   if (requiresPrivileged && hostPolicy.allowPrivileged !== true) {
     const diagPath = execution?.mode === 'privileged'
@@ -253,7 +257,14 @@ export function validateExecutionAuthority(
         && caps?.allowCheckNetwork !== true
         && caps?.allowAgentNetwork !== true
         ? `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`
-        : '/spec/execution/capabilities';
+        : perCheckLoopbackNetIdx !== -1
+          && caps?.allowHostEnv !== true
+          && caps?.allowHostPath !== true
+          && caps?.mountReadOnlyGit !== true
+          && caps?.allowCheckNetwork !== true
+          && caps?.allowAgentNetwork !== true
+          ? `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`
+          : '/spec/execution/capabilities';
     throw new TaskpackError(
       'TASKPACK_HOST_BINDING_INVALID',
       'manifest requests privileged execution capabilities without operator host authorization (allowPrivileged)',
@@ -403,7 +414,7 @@ function validateSpecVarsRecord(raw: unknown, path: string): Readonly<Record<str
     if (FORBIDDEN_KEYS.has(key) || !COMMAND_ENV_NAME_PATTERN.test(key)) {
       manifestInvalid(`spec.vars key "${key}" must match ^[A-Z][A-Z0-9_]{0,63}$`, entryPath);
     }
-    if (isReservedCommandEnvName(key) || SECRET_VAR_KEY_PATTERN.test(key)) {
+    if (isReservedCommandEnvName(key) || FORBIDDEN_LITERAL_COMMAND_ENV_NAMES.has(key) || SECRET_VAR_KEY_PATTERN.test(key)) {
       manifestInvalid(`spec.vars key "${key}" must not declare reserved or secret-like variable names`, entryPath);
     }
     if (typeof val !== 'string' || val.length > MAX_SPEC_VAR_VALUE_LENGTH || /[\0\r\n]/.test(val)) {
@@ -1382,7 +1393,11 @@ function pathInsideWritable(
   }
 }
 
+const ALLOWED_COMMAND_RUNNER_ENV_NAMES = new Set(['RUNNER_ENVIRONMENT']);
+const FORBIDDEN_LITERAL_COMMAND_ENV_NAMES = new Set(['RUNNER_ENVIRONMENT', 'GITHUB_ACTIONS']);
+
 function isReservedCommandEnvName(name: string): boolean {
+  if (ALLOWED_COMMAND_RUNNER_ENV_NAMES.has(name)) return false;
   if (RESERVED_COMMAND_ENV_NAMES.has(name)) return true;
   return RESERVED_COMMAND_ENV_PREFIXES.some(prefix => name.startsWith(prefix));
 }
@@ -1397,7 +1412,7 @@ function requireSafeIntInRange(value: unknown, path: string, min: number, max: n
 export function validateTaskpackLimitsDeclaration(value: unknown, path: string): TaskpackLimitsDeclaration {
   const raw = requireObject(value, path, [
     'wallTimeSeconds', 'totalTokens', 'contextWindow', 'maxOutputTokens',
-    'maxModelCalls', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
+    'maxModelCalls', 'maxTurns', 'maxRepairTurns', 'maxAttempts', 'maxFormatRepairs', 'maxImplementationRepairs', 'maxTransportRetries',
     'toolTimeoutSeconds', 'commandTimeoutSeconds', 'responseBytes', 'toolResultBytes',
     'toolArgsBytes', 'promptBytes', 'maxRequestBytes', 'workingWindowBytes', 'fileBytes',
     'sessionBytes', 'candidateEntries', 'overlay',
@@ -1413,6 +1428,8 @@ export function validateTaskpackLimitsDeclaration(value: unknown, path: string):
   setOpt('contextWindow', 1_024, 10_000_000);
   setOpt('maxOutputTokens', 256, 262_144);
   setOpt('maxModelCalls', 1, 1_024);
+  setOpt('maxTurns', 1, 1_024);
+  setOpt('maxRepairTurns', 1, 1_024);
   setOpt('maxAttempts', 1, 16);
   setOpt('maxFormatRepairs', 0, 1_024);
   setOpt('maxImplementationRepairs', 0, 1_024);
@@ -1427,7 +1444,7 @@ export function validateTaskpackLimitsDeclaration(value: unknown, path: string):
   setOpt('workingWindowBytes', 131_072, 16_777_216);
   setOpt('fileBytes', 65_536, OVERLAY_LIMITS.maxMaxBytes);
   setOpt('sessionBytes', 524_288, 67_108_864);
-  setOpt('candidateEntries', 16, 4_096);
+  setOpt('candidateEntries', 16, OVERLAY_LIMITS.maxMaxFiles);
   if (raw['overlay'] !== undefined) {
     requireObject(raw['overlay'], `${path}/overlay`, ['maxFiles', 'maxBytes']);
     const resolved = resolveOverlayLimits(raw['overlay']);
@@ -2307,7 +2324,7 @@ function validateTaskpackManifestInternal(
       const paramPath = `/spec/verification/localChecks/${index}/parameters`;
       const params = requireObject(check['parameters'], paramPath, [
         'script', 'args', 'timeoutSeconds', 'allowReadOnlyGitHubToken', 'env',
-        'toolchainPaths', 'preserveRepoDirName', 'mountReadOnlyGit',
+        'toolchainPaths', 'preserveRepoDirName', 'mountReadOnlyGit', 'networkMode',
       ]);
       const script = normalizeRelativePath(params['script'], `${paramPath}/script`);
       if (!scriptPlacementProtected.some(protectedPath => scopePatternsMayIntersect(script, asProtectedSubtreePattern(protectedPath), false))) {
@@ -2350,7 +2367,7 @@ function validateTaskpackManifestInternal(
             if (FORBIDDEN_KEYS.has(k) || !COMMAND_ENV_NAME_PATTERN.test(k)) {
               manifestInvalid(`command.v1 env "${k}" must match ^[A-Z][A-Z0-9_]{0,63}$`, `${paramPath}/env/${k}`);
             }
-            if (isReservedCommandEnvName(k)) {
+            if (isReservedCommandEnvName(k) || FORBIDDEN_LITERAL_COMMAND_ENV_NAMES.has(k)) {
               manifestInvalid(`command.v1 env "${k}" is reserved`, `${paramPath}/env/${k}`);
             }
             envMap[k] = requireString(v, `${paramPath}/env/${k}`, 0, 1024);
@@ -2403,6 +2420,30 @@ function validateTaskpackManifestInternal(
           `${paramPath}/mountReadOnlyGit`,
         );
       }
+      let checkNetworkMode: 'none' | 'loopback-only' | undefined;
+      if (params['networkMode'] !== undefined) {
+        const nm = requireString(params['networkMode'], `${paramPath}/networkMode`, 1, 32);
+        if (nm !== 'none' && nm !== 'loopback-only') {
+          manifestInvalid('command.v1 networkMode must be "none" or "loopback-only"', `${paramPath}/networkMode`);
+        }
+        if (nm === 'loopback-only') {
+          if (!resolvedExecution.capabilities.allowCheckNetwork) {
+            throw new TaskpackError(
+              'TASKPACK_SCOPE_VIOLATION',
+              'command.v1 parameters.networkMode: "loopback-only" requires spec.execution.capabilities.allowCheckNetwork: true',
+              `${paramPath}/networkMode`,
+            );
+          }
+          if (options.enforceHostAuthority !== false && options.hostPolicy?.allowPrivileged !== true) {
+            throw new TaskpackError(
+              'TASKPACK_HOST_BINDING_INVALID',
+              'command.v1 parameters.networkMode: "loopback-only" requires operator host authorization (allowPrivileged)',
+              `${paramPath}/networkMode`,
+            );
+          }
+        }
+        checkNetworkMode = nm;
+      }
 
       const compiledParams: Record<string, TaskpackCheckParameterValue> = {
         script,
@@ -2413,6 +2454,7 @@ function validateTaskpackManifestInternal(
         ...(toolchainPaths !== undefined ? { toolchainPaths } : {}),
         ...(preserveRepoDirName !== undefined ? { preserveRepoDirName } : {}),
         ...(mountReadOnlyGit !== undefined ? { mountReadOnlyGit } : {}),
+        ...(checkNetworkMode !== undefined ? { networkMode: checkNetworkMode } : {}),
       };
       return Object.freeze({
         id: checkId,

@@ -941,6 +941,7 @@ export class Cycle {
       baseline = { directory: baselineDirectory, entries: this.context.source.baselineEntries ?? [] };
     }
     const host: PiHostV2 = { store, authority, directory: hostDirectory, artifactsDirectory: artifacts.directory, dockerExecutable: role.runtime.dockerExecutable, dockerSocket: role.runtime.dockerSocket, runtime: role.runtime.identity,
+      createCandidateStreamChecker: () => approvedState(loaded).vault.createStreamChecker(),
       ...approvedState(loaded).vault.bind({ runId: lock.spec.runId, roleId: role.roleId, stepId: nativeStepId, providerCredentialRef: role.providerCredentialRef, selection: role.policy.selection, mcp: role.policy.mcp }) };
     const piCandidateArtifacts: readonly PiCandidateArtifactInput[] = this.candidate.files.map(file =>
       'bytes' in file

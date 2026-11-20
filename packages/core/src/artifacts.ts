@@ -127,7 +127,7 @@ export function digestArtifact(name: unknown, bytes: Uint8Array, options?: Artif
 export function digestArtifactFromMetadata(name: unknown, metadata: ArtifactMetadataInput): Result<ArtifactRef> {
   return attempt(() => {
     const validName = nameSchema(object(snapshot({ name }), '').name!, '/name');
-    return parseArtifactMetadataFields(validName, metadata, '/metadata', OVERLAY_LIMITS.maxMaxBytes);
+    return parseArtifactMetadataFields(validName, metadata, '/metadata', Number.MAX_SAFE_INTEGER);
   });
 }
 export interface BaseTreeAnchor {
@@ -254,7 +254,7 @@ export function resolveInventory(
   if (Reflect.ownKeys(input).length !== count + 1) fail('INPUT_UNSUPPORTED', '/artifacts');
   const names = new Set<string>(), entries: PendingInventoryEntry[] = [];
   let rawTotal = 0;
-  let totalBytes = 0;
+  let verifiedTotal = 0;
   for (let index = 0; index < count; index++) {
     const path = `/artifacts/${index}`;
     const itemDescriptor = Object.getOwnPropertyDescriptor(input, String(index));
@@ -276,10 +276,8 @@ export function resolveInventory(
       if (names.has(name.toLowerCase())) fail('ARTIFACT_DUPLICATE', `${path}/name`);
       names.add(name.toLowerCase());
       const view = byteView(bytesDescriptor.value, `${path}/bytes`);
+      if (view.byteLength > LIMITS.resolvedBytes - rawTotal) fail('LIMIT_RESOLVED_BYTES', path);
       rawTotal += view.byteLength;
-      if (rawTotal > LIMITS.resolvedBytes) fail('LIMIT_RESOLVED_BYTES', path);
-      if (view.byteLength > OVERLAY_LIMITS.maxMaxBytes - totalBytes) fail('LIMIT_RESOLVED_BYTES', path);
-      totalBytes += view.byteLength;
       entries.push({ kind: 'raw', name, view });
     } else {
       const byteLengthDescriptor = Object.getOwnPropertyDescriptor(item, 'byteLength')!;
@@ -297,8 +295,8 @@ export function resolveInventory(
       metadataObj.digest = digestDescriptor.value;
       metadataObj.byteLength = byteLengthDescriptor.value;
       const verified = parseArtifactMetadataFields(name, metadataObj, path, OVERLAY_LIMITS.maxMaxBytes);
-      if (verified.byteLength > OVERLAY_LIMITS.maxMaxBytes - totalBytes) fail('LIMIT_RESOLVED_BYTES', path);
-      totalBytes += verified.byteLength;
+      if (verified.byteLength > OVERLAY_LIMITS.maxMaxBytes - verifiedTotal) fail('LIMIT_RESOLVED_BYTES', path);
+      verifiedTotal += verified.byteLength;
       entries.push({
         kind: 'verified',
         name: verified.name,

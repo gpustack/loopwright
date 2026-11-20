@@ -567,14 +567,19 @@ test('digestArtifactFromMetadata validates bounds, empty-hash invariant, null-pr
   assert.equal(code(digestArtifactFromMetadata('empty.txt', { digest: nonEmptyDigest, byteLength: 0 })), 'ARTIFACT_DIGEST_MISMATCH');
   assert.equal(code(digestArtifactFromMetadata('non-empty.txt', { digest: emptyDigest, byteLength: 1 })), 'ARTIFACT_DIGEST_MISMATCH');
 
-  // > 4 GiB safe integers and exact 16 GiB ceiling succeed; > 16 GiB refuses with LIMIT_ARTIFACT_BYTES
+  // > 4 GiB, > 16 GiB, and up to Number.MAX_SAFE_INTEGER succeed (including null-prototype metadata)
   const ref5GiB = value(digestArtifactFromMetadata('large/model.bin', { digest: nonEmptyDigest, byteLength: fiveGiB }));
   assert.equal(ref5GiB.byteLength, fiveGiB);
   assert.equal(value(digestArtifactFromMetadata('large/max.bin', { digest: nonEmptyDigest, byteLength: OVERLAY_LIMITS.maxMaxBytes })).byteLength, 17_179_869_184);
-  assert.equal(code(digestArtifactFromMetadata('large/over.bin', { digest: nonEmptyDigest, byteLength: OVERLAY_LIMITS.maxMaxBytes + 1 })), 'LIMIT_ARTIFACT_BYTES');
+  assert.equal(value(digestArtifactFromMetadata('large/over16gib.bin', { digest: nonEmptyDigest, byteLength: OVERLAY_LIMITS.maxMaxBytes + 1 })).byteLength, 17_179_869_185);
+  const nullMaxSafeMeta = Object.assign(Object.create(null) as Record<string, unknown>, {
+    digest: Object.assign(Object.create(null) as Record<string, unknown>, nonEmptyDigest),
+    byteLength: Number.MAX_SAFE_INTEGER,
+  });
+  assert.equal(value(digestArtifactFromMetadata('large/max-safe.bin', nullMaxSafeMeta as unknown as ArtifactMetadataInput)).byteLength, Number.MAX_SAFE_INTEGER);
 
-  // Negative, float, NaN, Infinity fail with VALUE_RANGE
-  for (const badLen of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+  // Number.MAX_SAFE_INTEGER + 1, negative, float, NaN, Infinity fail with VALUE_RANGE
+  for (const badLen of [Number.MAX_SAFE_INTEGER + 1, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
     assert.equal(code(digestArtifactFromMetadata('a.bin', { digest: nonEmptyDigest, byteLength: badLen })), 'VALUE_RANGE', String(badLen));
   }
 
@@ -635,14 +640,43 @@ test('resolveInventory accepts VerifiedArtifactDescriptor up to 16 GiB while pre
   assert.equal(resolved.get('weights/shard-2.bin')?.digest.hex, d2.hex);
   assert.equal(resolved.get('test.log')?.byteLength, 3);
 
-  // 5 GiB + 11 GiB === 16 GiB succeeds; + 1 byte fails with LIMIT_RESOLVED_BYTES
+  // 5 GiB + 11 GiB === 16 GiB verified total + raw evidence succeeds because raw and verified totals are tracked separately
   const exact16GiB: readonly ResolvedArtifactInput[] = [
     { name: 'a.bin', byteLength: fiveGiB, digest: d1 },
     { name: 'b.bin', byteLength: OVERLAY_LIMITS.maxMaxBytes - fiveGiB, digest: d2 },
   ];
   assert.equal(resolveInventory(exact16GiB).size, 2);
+  const withRawEvidence = resolveInventory([...exact16GiB, { name: 'c.bin', bytes: new Uint8Array([1]) }]);
+  assert.equal(withRawEvidence.size, 3);
+  assert.equal(withRawEvidence.get('c.bin')?.byteLength, 1);
+
+  // Single 16 GiB VerifiedArtifactDescriptor + 1-byte raw Uint8Array succeeds; > 16 GiB single descriptor fails with LIMIT_ARTIFACT_BYTES
+  assert.equal(
+    resolveInventory([
+      { name: 'full16g.bin', byteLength: OVERLAY_LIMITS.maxMaxBytes, digest: d1 },
+      { name: 'evidence.bin', bytes: new Uint8Array([1]) },
+    ]).size,
+    2,
+  );
   assert.throws(
-    () => resolveInventory([...exact16GiB, { name: 'c.bin', bytes: new Uint8Array(1) }]),
+    () => resolveInventory([{ name: 'over16g.bin', byteLength: OVERLAY_LIMITS.maxMaxBytes + 1, digest: d1 }]),
+    (err: unknown) => err instanceof Error && err.message === 'LIMIT_ARTIFACT_BYTES',
+  );
+
+  // Verified descriptors exceeding 16 GiB aggregate fail with LIMIT_RESOLVED_BYTES
+  assert.throws(
+    () => resolveInventory([...exact16GiB, { name: 'c-verified.bin', byteLength: 1, digest: d1 }]),
+    (err: unknown) => err instanceof Error && err.message === 'LIMIT_RESOLVED_BYTES',
+  );
+
+  // Raw Uint8Array items exceeding 128 MiB aggregate (LIMITS.resolvedBytes = 2 * LIMITS.artifactBytes) still fail with LIMIT_RESOLVED_BYTES
+  const rawMaxChunks: ResolvedArtifactInput[] = Array.from({ length: 2 }, (_, idx) => ({
+    name: `raw-${idx}.bin`,
+    bytes: new Uint8Array(LIMITS.artifactBytes),
+  }));
+  assert.equal(resolveInventory(rawMaxChunks).size, 2);
+  assert.throws(
+    () => resolveInventory([...rawMaxChunks, { name: 'raw-over.bin', bytes: new Uint8Array([1]) }]),
     (err: unknown) => err instanceof Error && err.message === 'LIMIT_RESOLVED_BYTES',
   );
 
@@ -659,4 +693,41 @@ test('resolveInventory accepts VerifiedArtifactDescriptor up to 16 GiB while pre
     () => resolveInventory([{ name: 'dup.bin', byteLength: 10, digest: d1 }, { name: 'DUP.bin', bytes: new Uint8Array(1) }]),
     (err: unknown) => err instanceof Error && err.message === 'ARTIFACT_DUPLICATE',
   );
+});
+
+test('overlaySnapshotBounds and identifyManifest scale cleanly to 16_384 entries and reject 16_385', async () => {
+  const { overlaySnapshotBounds } = await import('../src/boundary.js');
+  const maxBounds = overlaySnapshotBounds(OVERLAY_LIMITS.maxMaxFiles);
+  assert.deepEqual(maxBounds, {
+    collection: 16_385,
+    nodes: 325_632,
+    inputBytes: 75_956_224,
+  });
+
+  const anchor = sha256Anchor();
+  const sampleDigest: Digest = { algorithm: 'sha256', hex: 'a'.repeat(64) };
+  const entries16384 = Array.from({ length: 16_384 }, (_, idx) =>
+    value(digestArtifactFromMetadata(`src/f-${String(idx).padStart(5, '0')}.ts`, {
+      digest: sampleDigest,
+      byteLength: 64,
+    })),
+  );
+  const opts16384 = { overlay: { maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes } } as const;
+  const manifest16384 = {
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'ArtifactManifest',
+    metadata: { id: 'candidate' },
+    spec: { baseTree: anchor, entries: entries16384, deleted: [] },
+  };
+  assert.equal(value(identifyManifest(manifest16384, opts16384)).manifest.spec.entries.length, 16_384);
+
+  const extraEntry = value(digestArtifactFromMetadata('src/f-16384.ts', {
+    digest: sampleDigest,
+    byteLength: 64,
+  }));
+  const manifest16385 = {
+    ...manifest16384,
+    spec: { baseTree: anchor, entries: [...entries16384, extraEntry], deleted: [] },
+  };
+  assert.equal(code(identifyManifest(manifest16385, opts16384)), 'VALUE_RANGE');
 });

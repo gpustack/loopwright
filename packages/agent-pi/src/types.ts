@@ -25,6 +25,10 @@ export interface RuntimeIdentity {
   readonly sdkIntegrity: string; readonly graphDigest: Digest; readonly imageDigest: string;
   readonly configDigest: Digest; readonly profile: 'linux/arm64';
 }
+export interface PiCandidateStreamChecker {
+  readonly push: (chunk: Uint8Array) => void;
+  readonly finish: () => void;
+}
 /** Trusted construction only: these functions and paths are never accepted from model policy JSON. */
 export interface PiHost {
   readonly store: LocalRunStore; readonly authority: Authority;
@@ -32,6 +36,7 @@ export interface PiHost {
   readonly dockerExecutable: string; readonly dockerSocket: string;
   readonly runtime: RuntimeIdentity;
   readonly resolveCredential: (binding: { readonly provider: string; readonly model: string; readonly destination: string; readonly purpose: Purpose; readonly runId: string; readonly roleId: string; readonly stepId: string; readonly notAfterMonotonicMs: string; readonly signal: AbortSignal }) => Promise<{ readonly bearerToken: string }>;
+  readonly createCandidateStreamChecker?: () => PiCandidateStreamChecker;
 }
 export interface ResourceIdentity {
   readonly id: string; readonly kind: 'instruction' | 'skill' | 'document'; readonly path: string; readonly digest: Digest;

@@ -29,7 +29,7 @@ export const PACKET_BYTES = 1048576;
 export const JSON_FILE_BYTES = 1032184;
 export const ALLOCATION_BYTES = 8388608;
 export const OVERLAY_INVENTORY_MAGIC = 0x4c574f56;
-const MAX_ABSOLUTE_PACKET_BYTES = 41_943_040;
+const MAX_ABSOLUTE_PACKET_BYTES = 167_772_160;
 const URI_FLAG = 0x4000;
 const MEDIA_TYPE_FLAG = 0x8000;
 const NAME_LEN_MASK = 0x3fff;
@@ -137,8 +137,8 @@ export function overlayProtocolBounds(overlay?: OverlayLimitsInput): OverlayProt
   if (!resolved.ok) refuse('ARTIFACT_INVALID', '', 'verification');
   const { maxFiles, maxBytes } = resolved.value;
   const extraFiles = Math.max(0, maxFiles - 128);
-  const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(20_971_520, 32_768 + extraFiles * 4_608);
-  const inventoryMaxBytes = maxFiles <= 128 ? 32_772 : Math.min(20_971_520, 32_772 + extraFiles * 4_608);
+  const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(83_886_080, 32_768 + extraFiles * 4_608);
+  const inventoryMaxBytes = maxFiles <= 128 ? 32_772 : Math.min(83_886_080, 32_772 + extraFiles * 4_608);
   const maxWidePacketEstimate = Math.min(
     MAX_ABSOLUTE_PACKET_BYTES,
     4 + HEADER_BYTES + 2 * inventoryMaxBytes + 2 * (4 + JSON_FILE_BYTES) + 262_212,
@@ -210,7 +210,7 @@ export function ownedBytes(value: Uint8Array, maximum: number): Uint8Array<Array
 
 export function fileHash(bytes: Uint8Array) {
   const digest = createHash('sha256');
-  for (let offset = 0; offset < bytes.byteLength; offset += 65536) digest.update(bytes.subarray(offset, offset + 65536));
+  for (let offset = 0; offset < bytes.byteLength; offset += 1_048_576) digest.update(bytes.subarray(offset, offset + 1_048_576));
   return { algorithm: 'sha256' as const, hex: digest.digest('hex') };
 }
 

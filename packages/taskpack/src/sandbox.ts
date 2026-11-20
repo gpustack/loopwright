@@ -1,10 +1,11 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, statSync,
+  closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, rmdirSync, statSync, unlinkSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import type { Writable } from 'node:stream';
 import {
   assertManifestScopeInvariants, effectiveProtectedPaths, isControlRootProposalWritableAllowed,
   normalizeRelativePath, pathCoveredBy, resolveManifestControlRoot, tryNormalizeRelativePath,
@@ -17,7 +18,7 @@ import {
   type ExecutionHostPolicy, type NegotiatedSandboxBackend, type PolicyProfile,
   type SandboxBackendId, type SandboxCapability, type SandboxHostEnvironment,
   type SandboxedCommandInput, type SandboxedCommandResult, type SandboxNetworkMode,
-  type SandboxPolicyInput, type TaskpackManifest,
+  type SandboxPolicyInput, type SandboxReadOnlyBindMount, type TaskpackManifest,
 } from './types.js';
 
 export const TRUSTED_SEATBELT_PATHS: readonly string[] = Object.freeze(['/usr/bin/sandbox-exec']);
@@ -87,6 +88,7 @@ export const SECCOMP_BLOCKED_SYSCALLS: readonly string[] = Object.freeze([
 const DEFAULT_SANDBOX_TIMEOUT_MS = 30_000;
 const MAX_SANDBOX_TIMEOUT_MS = 300_000;
 const DEFAULT_SANDBOX_OUTPUT_BYTES = 1_048_576;
+export const MAX_LINUX_BWRAP_ARGS = 8_500;
 
 export interface ControlRootSiblingSet {
   readonly prioritySiblings: readonly string[];
@@ -419,8 +421,37 @@ function segmentGlobToSeatbeltRegex(segment: string): string {
   return expr;
 }
 
+function buildSeatbeltRegexForRelativeGlob(
+  canonicalWorkspaceRoot: string,
+  base: string,
+): string {
+  const rootPrefix = canonicalWorkspaceRoot === '/'
+    ? ''
+    : escapeSeatbeltRegexLiteral(canonicalWorkspaceRoot);
+  const segments = base.split('/');
+  let expr = `^${rootPrefix}/`;
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i]!;
+    const isLast = i === segments.length - 1;
+    if (!isLast) {
+      if (seg === '**') {
+        expr += '(?:[^/]+/)*';
+      } else {
+        expr += `${segmentGlobToSeatbeltRegex(seg)}/`;
+      }
+    } else if (seg === '**') {
+      expr += '.+';
+    } else {
+      expr += `${segmentGlobToSeatbeltRegex(seg)}(/.*)?`;
+    }
+  }
+  expr += '$';
+  return expr;
+}
+
 const MAX_GLOB_VISITED_DIRS = 2_048;
-const MAX_GLOB_EXPANDED_PATHS = 4_096;
+const MAX_GLOB_EXPANDED_PATHS = 16_384;
+const MAX_READ_ONLY_BIND_MOUNTS = 16;
 
 interface GlobExpansionBudget {
   visitedDirs: number;
@@ -535,16 +566,55 @@ function resolveHostEnvironment(host?: SandboxHostEnvironment): ResolvedHostEnvi
   };
 }
 
+interface ProtectedGlobPrefix {
+  readonly raw: string;
+  readonly staticPrefixDir: string;
+}
+
 interface NormalizedSandboxPaths {
   readonly canonicalWorkspaceRoot: string;
   readonly canonicalScratchDirectory: string | null;
   readonly canonicalWritablePaths: readonly string[];
   readonly canonicalExactWritableFiles: ReadonlySet<string>;
   readonly seatbeltExactFileRegexes: readonly string[];
+  readonly seatbeltProtectedGlobRegexes: readonly string[];
+  readonly protectedGlobPrefixes: readonly ProtectedGlobPrefix[];
   readonly canonicalProtectedPaths: readonly string[];
   readonly canonicalDeniedReadPaths: readonly string[];
   readonly canonicalAllowedReadOnlyPaths: readonly string[];
+  readonly canonicalReadOnlyBindMounts: readonly SandboxReadOnlyBindMount[];
   readonly networkMode: SandboxNetworkMode;
+}
+
+function findDynamicProtectedGlobOverlap(normalized: NormalizedSandboxPaths): string | null {
+  if (normalized.protectedGlobPrefixes.length === 0) return null;
+  const writableDirs = normalized.canonicalWritablePaths.filter(wp => !normalized.canonicalExactWritableFiles.has(wp));
+  for (const g of normalized.protectedGlobPrefixes) {
+    if (writableDirs.some(wp => isSameOrSubpath(g.staticPrefixDir, wp) || isSameOrSubpath(wp, g.staticPrefixDir))) {
+      return g.raw;
+    }
+  }
+  return null;
+}
+
+function findLandlockWritableOverlap(normalized: NormalizedSandboxPaths): string | null {
+  const globOverlap = findDynamicProtectedGlobOverlap(normalized);
+  if (globOverlap !== null) {
+    return `dynamic protected glob "${globOverlap}"`;
+  }
+  const writableDirs = normalized.canonicalWritablePaths.filter(wp => !normalized.canonicalExactWritableFiles.has(wp));
+  if (writableDirs.length === 0) return null;
+  for (const protectedPath of normalized.canonicalProtectedPaths) {
+    if (writableDirs.some(wp => isSameOrSubpath(protectedPath, wp))) {
+      return `protectedPath "${protectedPath}"`;
+    }
+  }
+  for (const deniedPath of normalized.canonicalDeniedReadPaths) {
+    if (writableDirs.some(wp => isSameOrSubpath(deniedPath, wp))) {
+      return `deniedReadPath "${deniedPath}"`;
+    }
+  }
+  return null;
 }
 
 function provisionSandboxExactWritablePaths(
@@ -621,6 +691,8 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
 
   const protectedGlobBudget: GlobExpansionBudget = { visitedDirs: 0, expandedPaths: 0 };
   const callerProtectedRelPaths: string[] = [];
+  const seatbeltProtectedGlobRegexSet = new Set<string>();
+  const protectedGlobPrefixesList: ProtectedGlobPrefix[] = [];
   if (policy.protectedPaths !== undefined) {
     if (!Array.isArray(policy.protectedPaths) || policy.protectedPaths.length > 128) {
       policyInvalid('protectedPaths must be an array of at most 128 paths', 'protectedPaths');
@@ -641,6 +713,15 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
           callerProtectedRelPaths.push(parsedProtected.base);
         } else {
           const segments = parsedProtected.base.split('/');
+          const firstGlobIdx = segments.findIndex(segmentHasGlob);
+          const staticPrefixSegments = firstGlobIdx > 0 ? segments.slice(0, firstGlobIdx) : [];
+          const staticPrefixDir = staticPrefixSegments.length === 0
+            ? canonicalWorkspaceRoot
+            : canonicalizeAbsolutePath(join(canonicalWorkspaceRoot, ...staticPrefixSegments), `protectedPaths/${index}`);
+          protectedGlobPrefixesList.push(Object.freeze({ raw: cleaned, staticPrefixDir }));
+          seatbeltProtectedGlobRegexSet.add(
+            buildSeatbeltRegexForRelativeGlob(canonicalWorkspaceRoot, parsedProtected.base),
+          );
           if (parsedProtected.subtree) {
             for (const dir of expandDirectorySegmentsSync(canonicalWorkspaceRoot, segments, `protectedPaths/${index}`, protectedGlobBudget)) {
               if (dir !== canonicalWorkspaceRoot && isSameOrSubpath(dir, canonicalWorkspaceRoot)) {
@@ -1071,6 +1152,101 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
   }
   const canonicalAllowedReadOnlyPaths = Object.freeze([...allowedReadOnlySet].sort());
 
+  const readOnlyBindMountList: SandboxReadOnlyBindMount[] = [];
+  const seenBindTargets = new Set<string>();
+  if (policy.readOnlyBindMounts !== undefined) {
+    if (!Array.isArray(policy.readOnlyBindMounts) || policy.readOnlyBindMounts.length > MAX_READ_ONLY_BIND_MOUNTS) {
+      policyInvalid(`readOnlyBindMounts must be an array of at most ${MAX_READ_ONLY_BIND_MOUNTS} mounts`, 'readOnlyBindMounts');
+    }
+    for (const [index, rawMount] of policy.readOnlyBindMounts.entries()) {
+      const mountLabel = `readOnlyBindMounts/${index}`;
+      if (rawMount === null || typeof rawMount !== 'object' || Array.isArray(rawMount)) {
+        policyInvalid('readOnlyBindMount entry must be an object', mountLabel);
+      }
+      const proto: unknown = Object.getPrototypeOf(rawMount);
+      if (proto !== Object.prototype && proto !== null) {
+        policyInvalid('readOnlyBindMount entry must be a plain object', mountLabel);
+      }
+      const sourceLabel = `${mountLabel}/sourcePath`;
+      const targetLabel = `${mountLabel}/targetPath`;
+      const cleanedSource = assertCleanPathString(rawMount.sourcePath, sourceLabel);
+      if (!isAbsolute(cleanedSource) || cleanedSource.split('/').some(seg => seg === '..')) {
+        policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" must be an absolute path without .. traversal`, sourceLabel);
+      }
+      const resolvedSource = resolve(cleanedSource);
+      let sourceStat: ReturnType<typeof lstatSync> | null;
+      try {
+        sourceStat = lstatSync(resolvedSource);
+      } catch {
+        sourceStat = null;
+      }
+      if (sourceStat === null || sourceStat.isSymbolicLink() || !sourceStat.isDirectory()) {
+        policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" must be an existing non-symlink directory`, sourceLabel);
+      }
+      let canonicalSource: string;
+      try {
+        canonicalSource = realpathSync(resolvedSource);
+      } catch {
+        policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" could not be canonicalized`, sourceLabel);
+      }
+      if (/[\0\r\n"\\]/.test(canonicalSource)) {
+        policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" resolved to a path with forbidden characters`, sourceLabel);
+      }
+      let realSourceStat: ReturnType<typeof lstatSync> | null;
+      try {
+        realSourceStat = lstatSync(canonicalSource);
+      } catch {
+        realSourceStat = null;
+      }
+      if (realSourceStat === null || realSourceStat.isSymbolicLink() || !realSourceStat.isDirectory()) {
+        policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" must resolve to a directory`, sourceLabel);
+      }
+      for (const homeDenied of defaultDeniedHomeSet) {
+        if (
+          isSameOrSubpath(canonicalSource, homeDenied)
+          || isSameOrSubpath(homeDenied, canonicalSource)
+          || isSameOrSubpathCaseInsensitive(canonicalSource, homeDenied)
+          || isSameOrSubpathCaseInsensitive(homeDenied, canonicalSource)
+        ) {
+          policyInvalid(`readOnlyBindMount sourcePath "${cleanedSource}" overlaps default denied secret path "${homeDenied}"`, sourceLabel);
+        }
+      }
+
+      const cleanedTarget = assertCleanPathString(rawMount.targetPath, targetLabel);
+      if (!isAbsolute(cleanedTarget) || cleanedTarget.split('/').some(seg => seg === '..')) {
+        policyInvalid(`readOnlyBindMount targetPath "${cleanedTarget}" must be an absolute path without .. traversal`, targetLabel);
+      }
+      const canonicalTarget = canonicalizeAbsolutePath(cleanedTarget, targetLabel);
+      if (!isSameOrSubpath(canonicalTarget, canonicalWorkspaceRoot) || canonicalTarget === canonicalWorkspaceRoot) {
+        policyInvalid(`readOnlyBindMount targetPath "${cleanedTarget}" must be strictly inside workspaceRoot`, targetLabel);
+      }
+      if (existsSync(canonicalWorkspaceRoot)) {
+        const relSegments = canonicalTarget.slice(canonicalWorkspaceRoot.length + 1).split(sep).filter(Boolean);
+        let cursor = canonicalWorkspaceRoot;
+        for (const seg of relSegments) {
+          cursor = join(cursor, seg);
+          let segStat: ReturnType<typeof lstatSync> | null;
+          try {
+            segStat = lstatSync(cursor);
+          } catch {
+            segStat = null;
+          }
+          if (segStat === null) break;
+          if (segStat.isSymbolicLink()) {
+            policyInvalid(`readOnlyBindMount targetPath "${cleanedTarget}" must not traverse or target symbolic links`, targetLabel);
+          }
+        }
+      }
+      if (seenBindTargets.has(canonicalTarget)) {
+        policyInvalid(`duplicate readOnlyBindMount targetPath "${canonicalTarget}"`, targetLabel);
+      }
+      seenBindTargets.add(canonicalTarget);
+      readOnlyBindMountList.push(Object.freeze({ sourcePath: canonicalSource, targetPath: canonicalTarget }));
+    }
+  }
+  readOnlyBindMountList.sort((a, b) => (a.targetPath < b.targetPath ? -1 : a.targetPath > b.targetPath ? 1 : 0));
+  const canonicalReadOnlyBindMounts = Object.freeze(readOnlyBindMountList);
+
   const filteredDenied = [...deniedSet].filter(deniedPath => {
     if (isSameOrSubpath(canonicalWorkspaceRoot, deniedPath) && deniedPath !== canonicalWorkspaceRoot) {
       return false;
@@ -1084,15 +1260,26 @@ function normalizeSandboxPolicy(policy: SandboxPolicyInput, host?: SandboxHostEn
     return true;
   }).sort();
 
+  for (const wp of canonicalWritablePaths) {
+    for (const dp of filteredDenied) {
+      if (isSameOrSubpath(wp, dp)) {
+        policyInvalid(`writablePath "${wp}" conflicts with deniedReadPath "${dp}"`, 'writablePaths');
+      }
+    }
+  }
+
   return {
     canonicalWorkspaceRoot,
     canonicalScratchDirectory,
     canonicalWritablePaths,
     canonicalExactWritableFiles,
     seatbeltExactFileRegexes,
+    seatbeltProtectedGlobRegexes: Object.freeze([...seatbeltProtectedGlobRegexSet].sort()),
+    protectedGlobPrefixes: Object.freeze(protectedGlobPrefixesList),
     canonicalProtectedPaths,
     canonicalDeniedReadPaths: Object.freeze(filteredDenied),
     canonicalAllowedReadOnlyPaths,
+    canonicalReadOnlyBindMounts,
     networkMode,
   };
 }
@@ -1182,10 +1369,13 @@ export function compileMacosSeatbeltProfile(
   }
   lines.push(')');
 
-  if (normalized.canonicalProtectedPaths.length > 0) {
+  if (normalized.canonicalProtectedPaths.length > 0 || normalized.seatbeltProtectedGlobRegexes.length > 0) {
     lines.push('(deny file-write*');
     for (const protectedPath of normalized.canonicalProtectedPaths) {
       lines.push(`  (subpath "${protectedPath}")`);
+    }
+    for (const rx of normalized.seatbeltProtectedGlobRegexes) {
+      lines.push(`  (regex #"${rx}")`);
     }
     lines.push(')');
   }
@@ -1215,10 +1405,97 @@ export function compileMacosSeatbeltProfile(
   });
 }
 
+const SECCOMP_BLOCKED_SYSCALL_NRS_X64: readonly number[] = Object.freeze([
+  101, 246, 320, 165, 166, 155, 321, 298, 323, 250, 248, 249, 425, 426, 427,
+]);
+
+const SECCOMP_BLOCKED_SYSCALL_NRS_ARM64: readonly number[] = Object.freeze([
+  117, 104, 294, 40, 39, 41, 280, 241, 282, 219, 217, 218, 425, 426, 427,
+]);
+
+export interface SeccompFilterOptions {
+  readonly blockIpSockets?: boolean | undefined;
+}
+
+/**
+ * Compile the deterministic classic BPF `struct sock_filter` binary (`bwrap --seccomp <fd>`)
+ * enforcing `SECCOMP_BLOCKED_SYSCALLS` (and optional non-`AF_UNIX` `SYS_socket` blocking)
+ * on `x64` (`AUDIT_ARCH_X86_64`) and `arm64` (`AUDIT_ARCH_AARCH64`).
+ */
+export function compileLinuxSeccompBpfBinary(arch: string, options?: SeccompFilterOptions): Buffer {
+  let auditArch: number;
+  let blockedNrs: readonly number[];
+  let sysSocketNr: number;
+  let blockX32Abi: boolean;
+  if (arch === 'x64') {
+    auditArch = 0xc000003e;
+    blockedNrs = SECCOMP_BLOCKED_SYSCALL_NRS_X64;
+    sysSocketNr = 41;
+    blockX32Abi = true;
+  } else if (arch === 'arm64') {
+    auditArch = 0xc00000b7;
+    blockedNrs = SECCOMP_BLOCKED_SYSCALL_NRS_ARM64;
+    sysSocketNr = 198;
+    blockX32Abi = false;
+  } else {
+    throw new TaskpackError(
+      'SANDBOX_CAPABILITY_INSUFFICIENT',
+      `unsupported Linux seccomp architecture "${arch}"`,
+      'arch',
+    );
+  }
+
+  const blockIpSockets = options?.blockIpSockets === true;
+  const extraSocketInsns = blockIpSockets ? 3 : 0;
+
+  const instructions: readonly (readonly [number, number, number, number])[] = [
+    // 1. Load seccomp_data.arch (offset 4)
+    [0x20, 0, 0, 4],
+    // 2. If arch == auditArch, skip unexpected-arch deny
+    [0x15, 1, 0, auditArch],
+    // 3. Deny unexpected architecture with SECCOMP_RET_ERRNO | EPERM (1)
+    [0x06, 0, 0, 0x00050001],
+    // 4. Load seccomp_data.nr (offset 0)
+    [0x20, 0, 0, 0],
+    // On x64, also deny x32 ABI syscalls (nr >= 0x40000000), jumping straight to final SECCOMP_RET_ERRNO | 1
+    ...(blockX32Abi ? ([[0x35, blockedNrs.length + extraSocketInsns + 1, 0, 0x40000000]] as const) : []),
+    // 5. Jump straight past remaining JEQs + optional socket check + RET_ALLOW to final SECCOMP_RET_ERRNO | 1
+    ...blockedNrs.map((nr, i): readonly [number, number, number, number] => [
+      0x15,
+      blockedNrs.length - i + extraSocketInsns,
+      0,
+      nr,
+    ]),
+    // 6. When blockIpSockets is enabled, inspect SYS_socket domain (args[0] low 32 bits at offset 16) and allow only AF_UNIX (1)
+    ...(blockIpSockets
+      ? ([
+        [0x15, 0, 2, sysSocketNr],
+        [0x20, 0, 0, 16],
+        [0x15, 0, 1, 1],
+      ] as const)
+      : []),
+    // 7. Default allow: SECCOMP_RET_ALLOW
+    [0x06, 0, 0, 0x7fff0000],
+    // 8. Deny matched syscall: SECCOMP_RET_ERRNO | EPERM (1)
+    [0x06, 0, 0, 0x00050001],
+  ];
+
+  const buf = Buffer.alloc(instructions.length * 8);
+  for (let idx = 0; idx < instructions.length; idx += 1) {
+    const [code, jt, jf, k] = instructions[idx]!;
+    const offset = idx * 8;
+    buf.writeUInt16LE(code, offset);
+    buf.writeUInt8(jt, offset + 2);
+    buf.writeUInt8(jf, offset + 3);
+    buf.writeUInt32LE(k >>> 0, offset + 4);
+  }
+  return buf;
+}
+
 /**
  * Compute the canonical Linux seccomp BPF syscall filter profile for sandboxed tool execution.
  */
-export function computeSandboxSeccompProfile(): { readonly json: string; readonly digest: Digest } {
+export function computeSandboxSeccompProfile(options?: SeccompFilterOptions): { readonly json: string; readonly digest: Digest } {
   const document = {
     defaultAction: 'SCMP_ACT_ALLOW',
     syscalls: [
@@ -1227,6 +1504,16 @@ export function computeSandboxSeccompProfile(): { readonly json: string; readonl
         action: 'SCMP_ACT_ERRNO',
         errnoRet: 1,
       },
+      ...(options?.blockIpSockets === true
+        ? [
+          {
+            names: ['socket'],
+            action: 'SCMP_ACT_ERRNO',
+            errnoRet: 1,
+            args: [{ index: 0, value: 1, op: 'SCMP_CMP_NE' }],
+          },
+        ]
+        : []),
     ],
   };
   const json = JSON.stringify(document);
@@ -1244,6 +1531,7 @@ export function compileLinuxBwrapCommand(
     readonly cwd?: string | undefined;
     readonly env?: Readonly<Record<string, string>> | undefined;
     readonly provisionExactFiles?: boolean | undefined;
+    readonly inheritSpawnEnv?: boolean | undefined;
   },
 ): CompiledLinuxBwrapCommand {
   const env = resolveHostEnvironment(host);
@@ -1252,6 +1540,14 @@ export function compileLinuxBwrapCommand(
     throw new TaskpackError('SANDBOX_BACKEND_UNAVAILABLE', `untrusted Linux bwrap executable "${executablePath}"`, 'bwrapExecutable');
   }
   const normalized = normalizeSandboxPolicy(policy, env);
+  const dynamicGlob = findDynamicProtectedGlobOverlap(normalized);
+  if (dynamicGlob !== null) {
+    throw new TaskpackError(
+      'SANDBOX_CAPABILITY_INSUFFICIENT',
+      `linux-bwrap cannot enforce dynamic protected glob "${dynamicGlob}" inside writable directory`,
+      'protectedPaths',
+    );
+  }
   if (options?.provisionExactFiles ?? env.probeExecutables) {
     provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
   }
@@ -1266,20 +1562,46 @@ export function compileLinuxBwrapCommand(
     '--proc', '/proc',
     '--dev', '/dev',
   );
+  if (normalized.networkMode === 'none' && (!env.probeExecutables || existsSync('/etc/hosts'))) {
+    args.push('--ro-bind-try', '/dev/null', '/etc/hosts');
+  }
 
-  for (const deniedPath of normalized.canonicalDeniedReadPaths) {
+  const appendDeniedMask = (deniedPath: string): void => {
     if (!env.probeExecutables) {
       args.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
-      continue;
+      return;
     }
-    if (!existsSync(deniedPath)) {
-      continue;
+    let st: ReturnType<typeof lstatSync> | null;
+    try {
+      st = existsSync(deniedPath) ? statSync(deniedPath) : null;
+    } catch {
+      st = null;
     }
-    if (statSync(deniedPath).isDirectory()) {
+    if (st === null) {
+      return;
+    }
+    if (st.isDirectory()) {
       args.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
     } else {
       args.push('--ro-bind', '/dev/null', deniedPath);
     }
+  };
+  const allLaterMountTargets = [
+    ...normalized.canonicalWritablePaths,
+    ...normalized.canonicalProtectedPaths,
+    ...normalized.canonicalAllowedReadOnlyPaths,
+    ...normalized.canonicalReadOnlyBindMounts.map(m => m.targetPath),
+  ];
+  const postMountDeniedPaths: string[] = [];
+  for (const deniedPath of normalized.canonicalDeniedReadPaths) {
+    const reopenedByAllowedRo = normalized.canonicalAllowedReadOnlyPaths.some(
+      ro => isSameOrSubpath(ro, deniedPath),
+    );
+    if (!reopenedByAllowedRo && allLaterMountTargets.some(m => isSameOrSubpath(deniedPath, m))) {
+      postMountDeniedPaths.push(deniedPath);
+      continue;
+    }
+    appendDeniedMask(deniedPath);
   }
   for (const writablePath of normalized.canonicalWritablePaths) {
     args.push('--bind', writablePath, writablePath);
@@ -1290,45 +1612,168 @@ export function compileLinuxBwrapCommand(
   for (const roPath of normalized.canonicalAllowedReadOnlyPaths) {
     args.push('--ro-bind-try', roPath, roPath);
   }
+  for (const mount of normalized.canonicalReadOnlyBindMounts) {
+    args.push('--ro-bind', mount.sourcePath, mount.targetPath);
+  }
+  for (const deniedPath of postMountDeniedPaths) {
+    appendDeniedMask(deniedPath);
+  }
 
   const targetCwd = options?.cwd === undefined
     ? normalized.canonicalWorkspaceRoot
     : canonicalizeAbsolutePath(options.cwd, 'cwd');
-  args.push('--chdir', targetCwd, '--clearenv');
-
-  const safeEnv: Record<string, string> = {
-    HOME: normalized.canonicalScratchDirectory ?? normalized.canonicalWorkspaceRoot,
-    PATH: '/usr/local/bin:/usr/bin:/bin',
-    LANG: 'C.UTF-8',
-    TERM: 'dumb',
-    ...(options?.env ?? {}),
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_TERMINAL_PROMPT: '0',
-  };
-  for (const key of Object.keys(safeEnv).sort()) {
-    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      args.push('--setenv', key, safeEnv[key]!);
+  if (options?.inheritSpawnEnv === true) {
+    args.push('--chdir', targetCwd);
+    const pinnedEnv: Record<string, string> = {
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_TERMINAL_PROMPT: '0',
+      HOME: normalized.canonicalScratchDirectory ?? normalized.canonicalWorkspaceRoot,
+      LANG: 'C.UTF-8',
+      TERM: 'dumb',
+    };
+    for (const key of Object.keys(pinnedEnv).sort()) {
+      args.push('--setenv', key, pinnedEnv[key]!);
+    }
+  } else {
+    args.push('--chdir', targetCwd, '--clearenv');
+    const safeEnv: Record<string, string> = {
+      HOME: normalized.canonicalScratchDirectory ?? normalized.canonicalWorkspaceRoot,
+      PATH: '/usr/local/bin:/usr/bin:/bin',
+      LANG: 'C.UTF-8',
+      TERM: 'dumb',
+      ...(options?.env ?? {}),
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0',
+    };
+    for (const key of Object.keys(safeEnv).sort()) {
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+        args.push('--setenv', key, safeEnv[key]!);
+      }
     }
   }
 
-  const seccomp = computeSandboxSeccompProfile();
-  const profilePayload = JSON.stringify({ executablePath, args, seccompDigest: seccomp.digest.hex, networkMode: normalized.networkMode });
+  if (args.length > MAX_LINUX_BWRAP_ARGS) {
+    throw new TaskpackError(
+      'SANDBOX_CAPABILITY_INSUFFICIENT',
+      `compiled linux-bwrap policy requires ${args.length} arguments, exceeding max ${MAX_LINUX_BWRAP_ARGS}`,
+      'writablePaths',
+    );
+  }
+
+  const effectiveSeccomp = normalized.networkMode === 'none'
+    ? computeSandboxSeccompProfile({ blockIpSockets: true })
+    : computeSandboxSeccompProfile();
+  const profilePayload = JSON.stringify({
+    executablePath,
+    args,
+    seccompDigest: effectiveSeccomp.digest.hex,
+    networkMode: normalized.networkMode,
+  });
   const profileDigest = sha256Digest('loopwright.dev/sandbox-bwrap/v1', profilePayload);
 
   return Object.freeze({
     backendId: 'linux-bwrap' as const,
     executablePath,
     args: Object.freeze(args),
-    seccompProfileJson: seccomp.json,
-    seccompDigest: seccomp.digest,
+    seccompProfileJson: effectiveSeccomp.json,
+    seccompDigest: effectiveSeccomp.digest,
     profileDigest,
     canonicalWorkspaceRoot: normalized.canonicalWorkspaceRoot,
     canonicalWritablePaths: normalized.canonicalWritablePaths,
     canonicalProtectedPaths: normalized.canonicalProtectedPaths,
     canonicalDeniedReadPaths: normalized.canonicalDeniedReadPaths,
+    canonicalReadOnlyBindMounts: normalized.canonicalReadOnlyBindMounts,
     networkMode: normalized.networkMode,
   });
+}
+
+export const LANDLOCK_HOST_PROBE_SCRIPT = [
+  'import ctypes, errno, os, socket, sys',
+  'libc = ctypes.CDLL(None, use_errno=True)',
+  'libc.prctl.restype = ctypes.c_int',
+  'abi = libc.syscall(444, None, 0, 1)',
+  'if abi < 3:',
+  '    sys.exit(1)',
+  'seccomp_ok = 0',
+  'machine = os.uname().machine',
+  'if machine in ("x86_64", "amd64", "aarch64", "arm64") and libc.prctl(38, 1, 0, 0, 0) == 0:',
+  '    if machine in ("x86_64", "amd64"):',
+  '        audit_arch = 0xc000003e',
+  '        blocked_nrs = [90, 91, 92, 93, 94, 260, 268, 425, 426, 427, 452]',
+  '        sys_socket = 41',
+  '        block_x32 = True',
+  '    else:',
+  '        audit_arch = 0xc00000b7',
+  '        blocked_nrs = [52, 53, 54, 55, 425, 426, 427, 452]',
+  '        sys_socket = 198',
+  '        block_x32 = False',
+  '    class SockFilter(ctypes.Structure):',
+  '        _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8), ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]',
+  '    class SockFprog(ctypes.Structure):',
+  '        _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(SockFilter))]',
+  '    n_blocked = len(blocked_nrs)',
+  '    raw_insns = [',
+  '        (0x20, 0, 0, 4), (0x15, 1, 0, audit_arch), (0x06, 0, 0, 0x00050001), (0x20, 0, 0, 0),',
+  '    ]',
+  '    if block_x32:',
+  '        raw_insns.append((0x35, n_blocked + 4, 0, 0x40000000))',
+  '    for idx_nr, nr in enumerate(blocked_nrs):',
+  '        raw_insns.append((0x15, (n_blocked - idx_nr) + 3, 0, nr))',
+  '    raw_insns.extend([',
+  '        (0x15, 0, 2, sys_socket), (0x20, 0, 0, 16), (0x15, 0, 1, 1),',
+  '        (0x06, 0, 0, 0x7fff0000), (0x06, 0, 0, 0x00050001),',
+  '    ])',
+  '    insns = (SockFilter * len(raw_insns))(*(SockFilter(*ins) for ins in raw_insns))',
+  '    prog = SockFprog(len(raw_insns), insns)',
+  '    if libc.prctl(22, 2, ctypes.byref(prog), 0, 0) == 0:',
+  '        try:',
+  '            us = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)',
+  '            us.close()',
+  '            chmod_blocked = False',
+  '            try:',
+  '                os.chmod("/", 0o755)',
+  '            except OSError as exc:',
+  '                chmod_blocked = (exc.errno == errno.EPERM)',
+  '            sock_blocked = False',
+  '            try:',
+  '                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)',
+  '                s.close()',
+  '            except OSError as exc:',
+  '                sock_blocked = (exc.errno == errno.EPERM)',
+  '            ctypes.set_errno(0)',
+  '            uring_blocked = (libc.syscall(425, 1, 0) == -1 and ctypes.get_errno() == errno.EPERM)',
+  '            if chmod_blocked and sock_blocked and uring_blocked:',
+  '                seccomp_ok = 1',
+  '        except OSError:',
+  '            pass',
+  'sys.stdout.write(f"{abi}:{seccomp_ok}")',
+].join('\n');
+
+const cachedLandlockProbesByExecutable = new Map<string, { readonly abi: number; readonly seccompAvailable: boolean } | null>();
+
+function probeLinuxLandlockExecutable(executable: string): { readonly abi: number; readonly seccompAvailable: boolean } | null {
+  if (cachedLandlockProbesByExecutable.has(executable)) {
+    return cachedLandlockProbesByExecutable.get(executable) ?? null;
+  }
+  const probe = spawnSync(
+    executable,
+    ['-I', '-S', '-B', '-c', LANDLOCK_HOST_PROBE_SCRIPT],
+    { cwd: '/', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000 },
+  );
+  if (probe.status === 0 && probe.error === undefined) {
+    const parts = (probe.stdout ?? '').trim().split(':');
+    const abi = Number.parseInt(parts[0] ?? '', 10);
+    const seccompAvailable = parts[1] === '1';
+    if (Number.isSafeInteger(abi) && abi >= 3 && seccompAvailable) {
+      const info = Object.freeze({ abi, seccompAvailable });
+      cachedLandlockProbesByExecutable.set(executable, info);
+      return info;
+    }
+  }
+  cachedLandlockProbesByExecutable.set(executable, null);
+  return null;
 }
 
 function defaultPreferredBackends(platform: string): readonly SandboxBackendId[] {
@@ -1414,6 +1859,14 @@ export function negotiateSandboxBackend(
         availabilityFailure ??= 'linux-bwrap requires platform linux';
         continue;
       }
+      if (env.arch !== 'x64' && env.arch !== 'arm64') {
+        if (requiredCapabilities.includes('syscallFiltering')) {
+          capabilityFailure ??= `linux-bwrap syscallFiltering is unsupported on architecture "${env.arch}"`;
+        } else {
+          availabilityFailure ??= `linux-bwrap seccomp filter compiler does not support architecture "${env.arch}"`;
+        }
+        continue;
+      }
       const executable = validateExecutableChoice(env.bwrapExecutable, TRUSTED_BWRAP_PATHS, env.probeExecutables);
       if (executable === null) {
         availabilityFailure ??= `linux-bwrap binary is missing or untrusted (${env.bwrapExecutable ?? TRUSTED_BWRAP_PATHS[0]})`;
@@ -1435,11 +1888,27 @@ export function negotiateSandboxBackend(
         capabilityFailure ??= `linux-bwrap lacks required capabilities: ${missing.join(', ')}`;
         continue;
       }
-      const compiled = compileLinuxBwrapCommand(
-        policy,
-        { ...env, bwrapExecutable: executable },
-        { provisionExactFiles: false },
-      );
+      if (requiredCapabilities.includes('protectedPathReadOnlyMask') || (policy.protectedPaths?.length ?? 0) > 0) {
+        const dynamicGlob = findDynamicProtectedGlobOverlap(normalized);
+        if (dynamicGlob !== null) {
+          capabilityFailure ??= `linux-bwrap cannot enforce dynamic protected glob "${dynamicGlob}" inside writable directory`;
+          continue;
+        }
+      }
+      let compiled: CompiledLinuxBwrapCommand;
+      try {
+        compiled = compileLinuxBwrapCommand(
+          policy,
+          { ...env, bwrapExecutable: executable },
+          { provisionExactFiles: false },
+        );
+      } catch (err) {
+        if (err instanceof TaskpackError && err.code === 'SANDBOX_CAPABILITY_INSUFFICIENT') {
+          capabilityFailure ??= err.message;
+          continue;
+        }
+        throw err;
+      }
       return Object.freeze({
         backendId: 'linux-bwrap',
         executablePath: executable,
@@ -1454,9 +1923,8 @@ export function negotiateSandboxBackend(
         availabilityFailure ??= 'linux-landlock requires platform linux';
         continue;
       }
-      const executable = validateExecutableChoice(env.pythonExecutable, TRUSTED_PYTHON_PATHS, env.probeExecutables);
-      if (executable === null) {
-        availabilityFailure ??= `linux-landlock helper binary is missing or untrusted (${env.pythonExecutable ?? TRUSTED_PYTHON_PATHS[0]})`;
+      if (env.arch !== 'x64' && env.arch !== 'arm64') {
+        availabilityFailure ??= `linux-landlock seccomp filter does not support architecture "${env.arch}"`;
         continue;
       }
       const supported = SANDBOX_CAPABILITIES_BY_BACKEND['linux-landlock'];
@@ -1464,6 +1932,37 @@ export function negotiateSandboxBackend(
       if (missing.length > 0) {
         capabilityFailure ??= `linux-landlock lacks required capabilities: ${missing.join(', ')}`;
         continue;
+      }
+      if (
+        normalized.networkMode === 'loopback-only'
+        && (requiredCapabilities.includes('networkIsolation') || policy.networkMode === 'loopback-only')
+      ) {
+        capabilityFailure ??= 'linux-landlock cannot enforce loopback-only network isolation without network namespaces';
+        continue;
+      }
+      if (
+        requiredCapabilities.includes('protectedPathReadOnlyMask')
+        || requiredCapabilities.includes('filesystemReadContainment')
+        || (policy.protectedPaths?.length ?? 0) > 0
+        || (policy.deniedReadPaths?.length ?? 0) > 0
+      ) {
+        const overlap = findLandlockWritableOverlap(normalized);
+        if (overlap !== null) {
+          capabilityFailure ??= `linux-landlock cannot enforce nested exclusion inside writable directory (${overlap})`;
+          continue;
+        }
+      }
+      const executable = validateExecutableChoice(env.pythonExecutable, TRUSTED_PYTHON_PATHS, env.probeExecutables);
+      if (executable === null) {
+        availabilityFailure ??= `linux-landlock helper binary is missing or untrusted (${env.pythonExecutable ?? TRUSTED_PYTHON_PATHS[0]})`;
+        continue;
+      }
+      if (env.probeExecutables && process.platform === 'linux') {
+        const probed = probeLinuxLandlockExecutable(executable);
+        if (probed === null || probed.abi < 3 || !probed.seccompAvailable) {
+          availabilityFailure ??= 'linux-landlock requires Linux kernel Landlock ABI >= 3 and seccomp filter support';
+          continue;
+        }
       }
       const profileDigest = sha256Digest(
         'loopwright.dev/sandbox-landlock/v1',
@@ -1510,6 +2009,9 @@ export function negotiateSandboxBackend(
           workspaceRoot: normalized.canonicalWorkspaceRoot,
           writablePaths: normalized.canonicalWritablePaths,
           protectedPaths: normalized.canonicalProtectedPaths,
+          ...(normalized.canonicalReadOnlyBindMounts.length > 0
+            ? { readOnlyBindMounts: normalized.canonicalReadOnlyBindMounts }
+            : {}),
           networkMode: normalized.networkMode,
         }),
       );
@@ -1553,11 +2055,14 @@ export function negotiateSandboxBackend(
   );
 }
 
-const LANDLOCK_BOOTSTRAP_SCRIPT = `import ctypes, json, os, signal, sys
+export const LANDLOCK_BOOTSTRAP_SCRIPT = `import ctypes, errno, json, os, signal, stat, sys
 
 libc = ctypes.CDLL(None, use_errno=True)
+libc.prctl.restype = ctypes.c_int
 PR_SET_PDEATHSIG = 1
+PR_SET_SECCOMP = 22
 PR_SET_NO_NEW_PRIVS = 38
+SECCOMP_MODE_FILTER = 2
 SYS_landlock_create_ruleset = 444
 SYS_landlock_add_rule = 445
 SYS_landlock_restrict_self = 446
@@ -1571,6 +2076,20 @@ class PathBeneathAttr(ctypes.Structure):
     _pack_ = 1
     _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
 
+class SockFilter(ctypes.Structure):
+    _fields_ = [
+        ("code", ctypes.c_uint16),
+        ("jt", ctypes.c_uint8),
+        ("jf", ctypes.c_uint8),
+        ("k", ctypes.c_uint32),
+    ]
+
+class SockFprog(ctypes.Structure):
+    _fields_ = [
+        ("len", ctypes.c_uint16),
+        ("filter", ctypes.POINTER(SockFilter)),
+    ]
+
 cfg = json.loads(sys.argv[1])
 cmd = sys.argv[2]
 args = sys.argv[3:]
@@ -1580,7 +2099,7 @@ if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
     sys.exit(126)
 
 abi = libc.syscall(SYS_landlock_create_ruleset, None, 0, LANDLOCK_CREATE_RULESET_VERSION)
-if abi < 1:
+if abi < 3:
     sys.exit(126)
 
 FS_EXECUTE = 1 << 0
@@ -1615,18 +2134,57 @@ if ruleset_fd < 0:
     sys.exit(126)
 
 O_PATH = getattr(os, "O_PATH", 0o10000000)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0o400000)
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0o200000)
 
-def add_path_rule(path, access):
+def open_nofollow_abs(abs_path, leaf_flags, fail_on_symlink_ancestor=False):
+    if not isinstance(abs_path, str) or not abs_path.startswith("/"):
+        if fail_on_symlink_ancestor:
+            sys.exit(126)
+        raise OSError(errno.EINVAL, "invalid path")
+    if abs_path == "/":
+        return os.open("/", leaf_flags | O_NOFOLLOW | os.O_CLOEXEC)
+    parts = [p for p in abs_path.split("/") if p]
+    cur_fd = os.open("/", os.O_RDONLY | O_NOFOLLOW | O_DIRECTORY | os.O_CLOEXEC)
     try:
-        fd = os.open(path, O_PATH | os.O_CLOEXEC)
+        for part in parts[:-1]:
+            try:
+                nxt_fd = os.open(part, os.O_RDONLY | O_NOFOLLOW | O_DIRECTORY | os.O_CLOEXEC, dir_fd=cur_fd)
+            except OSError as exc:
+                if fail_on_symlink_ancestor and exc.errno != errno.ENOENT:
+                    sys.exit(126)
+                raise
+            os.close(cur_fd)
+            cur_fd = nxt_fd
+        try:
+            return os.open(parts[-1], leaf_flags | O_NOFOLLOW | os.O_CLOEXEC, dir_fd=cur_fd)
+        except OSError as exc:
+            if fail_on_symlink_ancestor and exc.errno != errno.ENOENT:
+                sys.exit(126)
+            raise
+    finally:
+        os.close(cur_fd)
+
+def add_fd_rule(fd, is_dir, access):
+    actual = access if is_dir else (access & (FS_EXECUTE | FS_READ_FILE | WRITE_FILE_ACCESS))
+    if actual == 0:
+        return True
+    rule = PathBeneathAttr(actual, fd)
+    return libc.syscall(SYS_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(rule), 0) == 0
+
+def add_path_rule(path, access, dir_fd=None):
+    try:
+        if dir_fd is not None:
+            fd = os.open(path, O_PATH | O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        else:
+            fd = open_nofollow_abs(path, O_PATH, False)
     except OSError:
         return
     try:
-        actual = access if os.path.isdir(path) else (access & (FS_EXECUTE | FS_READ_FILE | WRITE_FILE_ACCESS))
-        if actual == 0:
+        st = os.fstat(fd)
+        if stat.S_ISLNK(st.st_mode):
             return
-        rule = PathBeneathAttr(actual, fd)
-        libc.syscall(SYS_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, ctypes.byref(rule), 0)
+        add_fd_rule(fd, stat.S_ISDIR(st.st_mode), access)
     finally:
         os.close(fd)
 
@@ -1635,44 +2193,137 @@ def is_same_or_child(candidate, parent):
         return True
     return candidate == parent or candidate.startswith(parent + "/")
 
-def grant_tree(current, excluded_set, access):
+def grant_tree(current, excluded_set, access, parent_dir_fd=None, rel_name=None):
     if current in excluded_set:
         return
+    target = rel_name if parent_dir_fd is not None else current
     needs_split = any(ex != current and is_same_or_child(ex, current) for ex in excluded_set)
-    if not needs_split or not os.path.isdir(current) or os.path.islink(current):
-        add_path_rule(current, access)
+    if not needs_split:
+        add_path_rule(target, access, dir_fd=parent_dir_fd)
         return
     try:
-        entries = os.listdir(current)
-    except OSError:
+        if parent_dir_fd is not None:
+            dir_fd = os.open(target, os.O_RDONLY | O_NOFOLLOW | O_DIRECTORY | os.O_CLOEXEC, dir_fd=parent_dir_fd)
+        else:
+            dir_fd = open_nofollow_abs(current, os.O_RDONLY | O_DIRECTORY, False)
+    except OSError as exc:
+        if exc.errno == errno.ENOTDIR:
+            add_path_rule(target, access, dir_fd=parent_dir_fd)
         return
-    for name in entries:
-        child = "/" + name if current == "/" else current + "/" + name
-        grant_tree(child, excluded_set, access)
+    try:
+        st = os.fstat(dir_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            return
+        entries = sorted(os.listdir(dir_fd))
+        for name in entries:
+            if name in (".", ".."):
+                continue
+            child = "/" + name if current == "/" else current + "/" + name
+            grant_tree(child, excluded_set, access, parent_dir_fd=dir_fd, rel_name=name)
+    finally:
+        os.close(dir_fd)
 
-denied_reads = {p for p in cfg.get("deniedReadPaths", []) if os.path.exists(p)}
-protected_writes = {p for p in cfg.get("protectedPaths", []) if os.path.exists(p)} | denied_reads
+raw_denied_reads = set(cfg.get("deniedReadPaths", []))
+denied_reads = {p for p in raw_denied_reads if os.path.lexists(p)}
+protected_writes = set(cfg.get("protectedPaths", [])) | raw_denied_reads
 writable_paths = cfg.get("writablePaths", [])
 exact_writable_files = set(cfg.get("exactWritableFiles", []))
+positive_read_roots = cfg.get("positiveReadRoots")
+allowed_ro_paths = cfg.get("allowedReadOnlyPaths", [])
 
-grant_tree("/", denied_reads, READ_ACCESS)
-for ro_path in cfg.get("allowedReadOnlyPaths", []):
-    if os.path.exists(ro_path):
+if isinstance(positive_read_roots, list):
+    ro_excluded = denied_reads - set(allowed_ro_paths)
+    for root_path in positive_read_roots:
+        grant_tree(root_path, ro_excluded, READ_ACCESS)
+    for ro_path in allowed_ro_paths:
+        grant_tree(ro_path, ro_excluded, READ_ACCESS)
+else:
+    grant_tree("/", denied_reads, READ_ACCESS)
+    for ro_path in allowed_ro_paths:
         add_path_rule(ro_path, READ_ACCESS)
 for dev in ("/dev/null", "/dev/zero"):
     add_path_rule(dev, READ_ACCESS | WRITE_FILE_ACCESS)
 for wp in writable_paths:
+    if any(is_same_or_child(ex, wp) for ex in protected_writes):
+        sys.exit(126)
     if wp in exact_writable_files:
-        if os.path.isfile(wp) and not os.path.islink(wp):
-            add_path_rule(wp, READ_ACCESS | WRITE_FILE_ACCESS)
-    elif os.path.exists(wp):
-        grant_tree(wp, protected_writes, READ_ACCESS | WRITE_DIR_ACCESS)
+        try:
+            wp_fd = open_nofollow_abs(wp, O_PATH, True)
+        except OSError:
+            sys.exit(126)
+        try:
+            wp_st = os.fstat(wp_fd)
+            if stat.S_ISLNK(wp_st.st_mode) or not stat.S_ISREG(wp_st.st_mode) or wp_st.st_nlink != 1:
+                sys.exit(126)
+            if not add_fd_rule(wp_fd, False, READ_ACCESS | WRITE_FILE_ACCESS):
+                sys.exit(126)
+        finally:
+            os.close(wp_fd)
+    else:
+        try:
+            wp_fd = open_nofollow_abs(wp, O_PATH, True)
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                continue
+            sys.exit(126)
+        try:
+            wp_st = os.fstat(wp_fd)
+            if stat.S_ISLNK(wp_st.st_mode):
+                sys.exit(126)
+            if stat.S_ISDIR(wp_st.st_mode):
+                if not add_fd_rule(wp_fd, True, READ_ACCESS | WRITE_DIR_ACCESS):
+                    sys.exit(126)
+            elif stat.S_ISREG(wp_st.st_mode) and wp_st.st_nlink == 1:
+                if not add_fd_rule(wp_fd, False, READ_ACCESS | WRITE_FILE_ACCESS):
+                    sys.exit(126)
+            else:
+                sys.exit(126)
+        finally:
+            os.close(wp_fd)
 
 if libc.syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0:
     os.close(ruleset_fd)
     sys.exit(126)
 os.close(ruleset_fd)
 
+machine = os.uname().machine
+if machine in ("x86_64", "amd64"):
+    audit_arch = 0xc000003e
+    blocked_nrs = [90, 91, 92, 93, 94, 260, 268, 425, 426, 427, 452]
+    sys_socket = 41
+    block_x32 = True
+elif machine in ("aarch64", "arm64"):
+    audit_arch = 0xc00000b7
+    blocked_nrs = [52, 53, 54, 55, 425, 426, 427, 452]
+    sys_socket = 198
+    block_x32 = False
+else:
+    sys.exit(126)
+block_ip = cfg.get("blockIpSockets") is True
+extra_sock = 3 if block_ip else 0
+n_blocked = len(blocked_nrs)
+raw_insns = [
+    (0x20, 0, 0, 4),
+    (0x15, 1, 0, audit_arch),
+    (0x06, 0, 0, 0x00050001),
+    (0x20, 0, 0, 0),
+]
+if block_x32:
+    raw_insns.append((0x35, n_blocked + extra_sock + 1, 0, 0x40000000))
+for idx_nr, nr in enumerate(blocked_nrs):
+    raw_insns.append((0x15, (n_blocked - idx_nr) + extra_sock, 0, nr))
+if block_ip:
+    raw_insns.extend([
+        (0x15, 0, 2, sys_socket),
+        (0x20, 0, 0, 16),
+        (0x15, 0, 1, 1),
+    ])
+raw_insns.append((0x06, 0, 0, 0x7fff0000))
+raw_insns.append((0x06, 0, 0, 0x00050001))
+insns = (SockFilter * len(raw_insns))(*(SockFilter(*ins) for ins in raw_insns))
+prog = SockFprog(len(raw_insns), insns)
+if libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:
+    sys.exit(126)
 cwd = cfg.get("cwd")
 if cwd:
     os.chdir(cwd)
@@ -1682,6 +2333,173 @@ if env is not None:
     os.environ.update(env)
 os.execvp(cmd, [cmd] + args)
 `;
+
+export interface ProvisionedAbsentProtectedPlaceholders {
+  readonly placeholderPaths: readonly string[];
+  cleanup(): void;
+}
+
+export function provisionAbsentProtectedPlaceholders(
+  normalized: Pick<
+    NormalizedSandboxPaths,
+    | 'canonicalWorkspaceRoot'
+    | 'canonicalWritablePaths'
+    | 'canonicalExactWritableFiles'
+    | 'canonicalProtectedPaths'
+  > & { readonly canonicalDeniedReadPaths?: readonly string[] | undefined },
+): ProvisionedAbsentProtectedPlaceholders {
+  const createdFiles: { readonly path: string; readonly dev: number; readonly ino: number }[] = [];
+  const createdDirs: { readonly path: string; readonly dev: number; readonly ino: number }[] = [];
+  const writableDirs = normalized.canonicalWritablePaths.filter(wp => !normalized.canonicalExactWritableFiles.has(wp));
+
+  const cleanupCreated = (): void => {
+    for (let i = createdFiles.length - 1; i >= 0; i -= 1) {
+      const item = createdFiles[i]!;
+      try {
+        const st = lstatSync(item.path);
+        if (!st.isSymbolicLink() && st.isFile() && st.dev === item.dev && st.ino === item.ino && st.size === 0) {
+          unlinkSync(item.path);
+        }
+      } catch {
+        // Ignore if already absent.
+      }
+    }
+    for (let i = createdDirs.length - 1; i >= 0; i -= 1) {
+      const item = createdDirs[i]!;
+      try {
+        const st = lstatSync(item.path);
+        if (!st.isSymbolicLink() && st.isDirectory() && st.dev === item.dev && st.ino === item.ino) {
+          rmdirSync(item.path);
+        }
+      } catch {
+        // Keep directory if non-empty (e.g., sibling allowed file created inside it).
+      }
+    }
+  };
+
+  try {
+    if (writableDirs.length > 0 && existsSync(normalized.canonicalWorkspaceRoot)) {
+      const sortedProtected = [...normalized.canonicalProtectedPaths].sort(
+        (a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0),
+      );
+      const coveredRoots: string[] = [];
+      for (const protectedPath of sortedProtected) {
+        const coveringWritable = writableDirs
+          .filter(wp => protectedPath !== wp && isSameOrSubpath(protectedPath, wp))
+          .sort((a, b) => b.length - a.length)[0];
+        if (coveringWritable === undefined) continue;
+        if (coveredRoots.some(r => isSameOrSubpath(protectedPath, r))) continue;
+
+        let cwStat: ReturnType<typeof lstatSync> | null = null;
+        try {
+          cwStat = lstatSync(coveringWritable);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+            continue;
+          }
+          throw err;
+        }
+        if (cwStat.isSymbolicLink()) {
+          policyInvalid(`writable directory "${coveringWritable}" must not be a symbolic link`, 'writablePaths');
+        }
+
+        const rel = protectedPath.slice(coveringWritable === '/' ? 1 : coveringWritable.length + 1);
+        const segments = rel.split(sep).filter(Boolean);
+        let cursor = coveringWritable;
+        let parentsValid = true;
+        let parentCreated = false;
+        for (let i = 0; i < segments.length - 1; i += 1) {
+          cursor = join(cursor, segments[i]!);
+          let pStat: ReturnType<typeof lstatSync> | null = null;
+          let pMissing = false;
+          try {
+            pStat = lstatSync(cursor);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+              pMissing = true;
+            } else {
+              parentsValid = false;
+              break;
+            }
+          }
+          if (pMissing) {
+            try {
+              mkdirSync(cursor, { mode: 0o755 });
+              const createdDirStat = lstatSync(cursor);
+              if (createdDirStat.isSymbolicLink()) {
+                policyInvalid(
+                  `protectedPath "${protectedPath}" traverses symbolic link "${cursor}" inside writable directory`,
+                  'protectedPaths',
+                );
+              }
+              if (createdDirStat.isDirectory()) {
+                createdDirs.push({ path: cursor, dev: createdDirStat.dev, ino: createdDirStat.ino });
+                parentCreated = true;
+              } else {
+                parentsValid = false;
+                break;
+              }
+            } catch (err) {
+              if (err instanceof TaskpackError) throw err;
+              parentsValid = false;
+              break;
+            }
+          } else if (pStat !== null && pStat.isSymbolicLink()) {
+            policyInvalid(
+              `protectedPath "${protectedPath}" traverses symbolic link "${cursor}" inside writable directory`,
+              'protectedPaths',
+            );
+          } else if (pStat === null || !pStat.isDirectory()) {
+            parentsValid = false;
+            break;
+          }
+        }
+        if (!parentsValid) continue;
+
+        let existingStat: ReturnType<typeof lstatSync> | null = null;
+        let missing = parentCreated;
+        if (!missing) {
+          try {
+            existingStat = lstatSync(protectedPath);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+              missing = true;
+            }
+          }
+        }
+
+        if (missing) {
+          const openFlags = fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0);
+          try {
+            const fd = openSync(protectedPath, openFlags, 0o000);
+            try {
+              const st = fstatSync(fd);
+              createdFiles.push({ path: protectedPath, dev: st.dev, ino: st.ino });
+              coveredRoots.push(protectedPath);
+            } finally {
+              closeSync(fd);
+            }
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException | null)?.code === 'ELOOP') {
+              policyInvalid(`protectedPath "${protectedPath}" targets a symbolic link`, 'protectedPaths');
+            }
+            // Skip if concurrently created or parent is non-writable.
+          }
+        } else if (existingStat !== null) {
+          coveredRoots.push(protectedPath);
+        }
+      }
+    }
+  } catch (err) {
+    cleanupCreated();
+    throw err;
+  }
+
+  return {
+    placeholderPaths: Object.freeze(createdFiles.map(f => f.path)),
+    cleanup: cleanupCreated,
+  };
+}
 
 /**
  * Execute a command inside the negotiated OS sandbox with sanitized environment, bounded streams,
@@ -1723,132 +2541,184 @@ export async function executeSandboxedCommand(input: SandboxedCommandInput): Pro
     ? normalized.canonicalWorkspaceRoot
     : canonicalizeAbsolutePath(input.cwd, 'cwd');
 
-  let spawnExecutable: string;
-  let spawnArgs: readonly string[];
+  let placeholderGuard: ProvisionedAbsentProtectedPlaceholders | null = null;
+  try {
+    let spawnExecutable: string;
+    let spawnArgs: readonly string[];
+    let spawnCwd = targetCwd;
+    let seccompBpf: Buffer | null = null;
 
-  if (negotiated.backendId === 'macos-seatbelt') {
-    provisionSandboxExactWritablePaths(normalized, { createTargetFile: false });
-    const compiled = compileMacosSeatbeltProfile(input.policy, env);
-    spawnExecutable = compiled.executablePath;
-    spawnArgs = ['-p', compiled.profileText, '--', input.command, ...(input.args ?? [])];
-  } else if (negotiated.backendId === 'linux-bwrap') {
-    const compiled = compileLinuxBwrapCommand(input.policy, env, {
-      cwd: targetCwd,
-      env: sanitizedEnv,
-      provisionExactFiles: true,
-    });
-    spawnExecutable = compiled.executablePath;
-    spawnArgs = [...compiled.args, '--', input.command, ...(input.args ?? [])];
-  } else if (negotiated.backendId === 'linux-landlock') {
-    provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
-    spawnExecutable = negotiated.executablePath!;
-    const landlockConfig = JSON.stringify({
-      workspaceRoot: normalized.canonicalWorkspaceRoot,
-      writablePaths: normalized.canonicalWritablePaths,
-      exactWritableFiles: [...normalized.canonicalExactWritableFiles],
-      protectedPaths: normalized.canonicalProtectedPaths,
-      deniedReadPaths: normalized.canonicalDeniedReadPaths,
-      allowedReadOnlyPaths: normalized.canonicalAllowedReadOnlyPaths,
-      networkMode: normalized.networkMode,
-      cwd: targetCwd,
-      env: sanitizedEnv,
-    });
-    spawnArgs = ['-B', '-c', LANDLOCK_BOOTSTRAP_SCRIPT, landlockConfig, input.command, ...(input.args ?? [])];
-  } else if (negotiated.backendId === 'direct-dedicated') {
-    spawnExecutable = input.command;
-    spawnArgs = [...(input.args ?? [])];
-  } else {
-    throw new TaskpackError('SANDBOX_BACKEND_UNAVAILABLE', `backend "${negotiated.backendId}" direct command spawn is not supported without container runtime adapter`, 'backendId');
-  }
-
-  const started = performance.now();
-  return await new Promise<SandboxedCommandResult>((resolvePromise, rejectPromise) => {
-    const child = spawn(spawnExecutable, [...spawnArgs], {
-      cwd: targetCwd,
-      env: sanitizedEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
-    });
-
-    const killGroup = (signal: NodeJS.Signals): void => {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, signal);
-      } catch {
-        child.kill(signal);
+    if (negotiated.backendId === 'macos-seatbelt') {
+      provisionSandboxExactWritablePaths(normalized, { createTargetFile: false });
+      const compiled = compileMacosSeatbeltProfile(input.policy, env);
+      spawnExecutable = compiled.executablePath;
+      spawnArgs = ['-p', compiled.profileText, '--', input.command, ...(input.args ?? [])];
+    } else if (negotiated.backendId === 'linux-bwrap') {
+      const dynamicGlob = findDynamicProtectedGlobOverlap(normalized);
+      if (dynamicGlob !== null) {
+        throw new TaskpackError(
+          'SANDBOX_CAPABILITY_INSUFFICIENT',
+          `linux-bwrap cannot enforce dynamic protected glob "${dynamicGlob}" inside writable directory`,
+          'protectedPaths',
+        );
       }
-    };
-
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let timedOut = false;
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup('SIGTERM');
-      setTimeout(() => {
-        if (!settled) killGroup('SIGKILL');
-      }, 200);
-    }, timeoutMs);
-
-    const finish = (exitCode: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error !== undefined) {
-        rejectPromise(error);
-        return;
+      placeholderGuard = provisionAbsentProtectedPlaceholders(normalized);
+      const compiled = compileLinuxBwrapCommand(input.policy, env, {
+        cwd: targetCwd,
+        env: sanitizedEnv,
+        provisionExactFiles: true,
+        inheritSpawnEnv: true,
+      });
+      seccompBpf = compileLinuxSeccompBpfBinary(env.arch, {
+        blockIpSockets: normalized.networkMode === 'none',
+      });
+      spawnExecutable = compiled.executablePath;
+      spawnArgs = [...compiled.args, '--seccomp', '3', '--', input.command, ...(input.args ?? [])];
+      if (spawnArgs.length > 8_999) {
+        throw new TaskpackError(
+          'SANDBOX_CAPABILITY_INSUFFICIENT',
+          `linux-bwrap invocation requires ${spawnArgs.length} arguments, exceeding max 8999`,
+          'args',
+        );
       }
-      const rawStdout = Buffer.concat(stdoutChunks).toString('utf8');
-      const rawStderr = Buffer.concat(stderrChunks).toString('utf8');
-      resolvePromise(Object.freeze({
-        backendId: negotiated.backendId,
-        profileDigest: negotiated.profileDigest,
-        exitCode,
-        signal,
-        stdout: scrubber.scrub(rawStdout),
-        stderr: scrubber.scrub(rawStderr),
-        timedOut,
-        durationMs: Math.max(1, Math.round(performance.now() - started)),
-      }));
-    };
-
-    child.on('error', err => {
-      finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command failed to spawn: ${err.message}`));
-    });
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdoutBytes += chunk.byteLength;
-      if (stdoutBytes > maxOutputBytes) {
-        killGroup('SIGKILL');
-        finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command stdout exceeded ${maxOutputBytes} bytes`));
-        return;
+    } else if (negotiated.backendId === 'linux-landlock') {
+      if (normalized.networkMode === 'loopback-only') {
+        throw new TaskpackError(
+          'SANDBOX_CAPABILITY_INSUFFICIENT',
+          'linux-landlock cannot enforce loopback-only network isolation without network namespaces',
+          'networkMode',
+        );
       }
-      stdoutChunks.push(chunk);
-    });
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderrBytes += chunk.byteLength;
-      if (stderrBytes > maxOutputBytes) {
-        killGroup('SIGKILL');
-        finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command stderr exceeded ${maxOutputBytes} bytes`));
-        return;
+      const overlap = findLandlockWritableOverlap(normalized);
+      if (overlap !== null) {
+        throw new TaskpackError(
+          'SANDBOX_CAPABILITY_INSUFFICIENT',
+          `linux-landlock cannot enforce nested exclusion inside writable directory (${overlap})`,
+          'protectedPaths',
+        );
       }
-      stderrChunks.push(chunk);
-    });
-
-    if (input.stdin !== undefined) {
-      child.stdin.end(input.stdin);
+      provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
+      spawnExecutable = negotiated.executablePath!;
+      spawnCwd = '/';
+      const landlockConfig = JSON.stringify({
+        workspaceRoot: normalized.canonicalWorkspaceRoot,
+        writablePaths: normalized.canonicalWritablePaths,
+        exactWritableFiles: [...normalized.canonicalExactWritableFiles],
+        protectedPaths: normalized.canonicalProtectedPaths,
+        deniedReadPaths: normalized.canonicalDeniedReadPaths,
+        allowedReadOnlyPaths: normalized.canonicalAllowedReadOnlyPaths,
+        networkMode: normalized.networkMode,
+        blockIpSockets: normalized.networkMode === 'none',
+        cwd: targetCwd,
+      });
+      spawnArgs = ['-I', '-S', '-B', '-c', LANDLOCK_BOOTSTRAP_SCRIPT, landlockConfig, input.command, ...(input.args ?? [])];
+    } else if (negotiated.backendId === 'direct-dedicated') {
+      spawnExecutable = input.command;
+      spawnArgs = [...(input.args ?? [])];
     } else {
-      child.stdin.end();
+      throw new TaskpackError('SANDBOX_BACKEND_UNAVAILABLE', `backend "${negotiated.backendId}" direct command spawn is not supported without container runtime adapter`, 'backendId');
     }
 
-    child.on('close', (code, signal) => {
-      finish(code, signal);
+    const started = performance.now();
+    return await new Promise<SandboxedCommandResult>((resolvePromise, rejectPromise) => {
+      const child = spawn(spawnExecutable, [...spawnArgs], {
+        cwd: spawnCwd,
+        env: sanitizedEnv,
+        stdio: seccompBpf !== null ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
+        detached: true,
+      });
+
+      if (seccompBpf !== null) {
+        const seccompStream = child.stdio[3] as Writable | null | undefined;
+        if (seccompStream !== null && seccompStream !== undefined) {
+          seccompStream.on('error', () => undefined);
+          seccompStream.end(seccompBpf);
+        }
+      }
+
+      const killGroup = (signal: NodeJS.Signals): void => {
+        try {
+          if (child.pid !== undefined) process.kill(-child.pid, signal);
+        } catch {
+          child.kill(signal);
+        }
+      };
+
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let timedOut = false;
+      let settled = false;
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup('SIGTERM');
+        setTimeout(() => {
+          if (!settled) killGroup('SIGKILL');
+        }, 200);
+      }, timeoutMs);
+
+      const finish = (exitCode: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error !== undefined) {
+          rejectPromise(error);
+          return;
+        }
+        const rawStdout = Buffer.concat(stdoutChunks).toString('utf8');
+        const rawStderr = Buffer.concat(stderrChunks).toString('utf8');
+        resolvePromise(Object.freeze({
+          backendId: negotiated.backendId,
+          profileDigest: negotiated.profileDigest,
+          exitCode,
+          signal,
+          stdout: scrubber.scrub(rawStdout),
+          stderr: scrubber.scrub(rawStderr),
+          timedOut,
+          durationMs: Math.max(1, Math.round(performance.now() - started)),
+        }));
+      };
+
+      child.on('error', err => {
+        finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command failed to spawn: ${err.message}`));
+      });
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutBytes += chunk.byteLength;
+        if (stdoutBytes > maxOutputBytes) {
+          killGroup('SIGKILL');
+          finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command stdout exceeded ${maxOutputBytes} bytes`));
+          return;
+        }
+        stdoutChunks.push(chunk);
+      });
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderrBytes += chunk.byteLength;
+        if (stderrBytes > maxOutputBytes) {
+          killGroup('SIGKILL');
+          finish(null, null, new TaskpackError('SANDBOX_EXECUTION_FAILED', `sandboxed command stderr exceeded ${maxOutputBytes} bytes`));
+          return;
+        }
+        stderrChunks.push(chunk);
+      });
+
+      if (input.stdin !== undefined) {
+        child.stdin.end(input.stdin);
+      } else {
+        child.stdin.end();
+      }
+
+      child.on('close', (code, signal) => {
+        killGroup('SIGKILL');
+        finish(code, signal);
+      });
     });
-  });
+  } finally {
+    placeholderGuard?.cleanup();
+  }
 }
 
 export interface ResolveTaskpackSandboxOptions {
@@ -1996,7 +2866,8 @@ export function resolveEffectiveTaskpackSandboxPolicy(
   }
 
   const runtimeEnv = options.env ?? process.env;
-  if (runtimeEnv['GITHUB_ACTIONS'] === 'true') {
+  const runnerEnv = (runtimeEnv['RUNNER_ENVIRONMENT'] ?? '').trim();
+  if (runtimeEnv['GITHUB_ACTIONS'] === 'true' && runnerEnv === 'github-hosted') {
     return {
       ...basePolicy,
       preferredBackends: ['direct-dedicated'],

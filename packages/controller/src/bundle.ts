@@ -11,7 +11,7 @@ export class PublicBundle {
   readonly entries: ExportEntry[] = []; readonly files = new Map<string, Uint8Array>(); #bytes = 0;
   constructor(readonly runId: string, readonly lockHash: Digest) {}
   add(name: string, bytes: Uint8Array): void {
-    const ref = digestArtifact(name, bytes); if (!ref.ok || bytes.byteLength > 16_777_216 || this.#bytes + bytes.byteLength > 33_554_432 || this.entries.length >= 253 || this.entries.some(row => row.name === name)) refuse('OUTPUT_LIMIT', '', 'inspection');
+    const ref = digestArtifact(name, bytes); if (!ref.ok || bytes.byteLength > 33_554_432 || this.#bytes + bytes.byteLength > 67_108_864 || this.entries.length >= 253 || this.entries.some(row => row.name === name)) refuse('OUTPUT_LIMIT', '', 'inspection');
     this.#bytes += bytes.byteLength; this.files.set(name, new Uint8Array(bytes)); this.entries.push({ name, presence: 'present', ref: ref.value, reason: null });
   }
   json(name: string, value: unknown): void { this.add(name, Buffer.from(canonical(value))); }

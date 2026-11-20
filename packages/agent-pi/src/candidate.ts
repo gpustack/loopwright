@@ -1,5 +1,5 @@
-import { constants, existsSync, type BigIntStats } from 'node:fs';
-import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
+import { constants, existsSync, promises as fsPromises, type BigIntStats } from 'node:fs';
+import { chmod, lstat, open, mkdir, realpath, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import {
@@ -216,7 +216,7 @@ async function scanOverlayTree(
     if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink() || Number(dirInfo.uid) !== (process.getuid?.() ?? Number(dirInfo.uid))) {
       refuse('RECOVERY_REQUIRED', '/candidate');
     }
-    const entries = await readdir(dir);
+    const entries = await fsPromises.readdir(dir);
     for (const entry of entries) {
       const name = prefix ? prefix + '/' + entry : entry;
       const fullPath = join(dir, entry);
@@ -278,7 +278,7 @@ export async function setDirectoryTreeMode(dir: string, mode: number): Promise<v
   if (mode & 0o200) {
     await chmod(dir, mode);
   }
-  const entries = await readdir(dir);
+  const entries = await fsPromises.readdir(dir);
   for (const entry of entries) {
     const childPath = join(dir, entry);
     const childInfo = await lstat(childPath);
@@ -379,6 +379,7 @@ export class Candidate {
   readonly #deleteChanges = new WeakSet<CandidateChange>();
   readonly #used = new WeakSet<CandidateChange>();
   #total: number;
+  #captureDirCache: Map<string, ReadonlyMap<string, string>> | null = null;
 
   constructor(readonly root: string, readonly input: PiOpenInput) {
     const baseTree = input.candidate.manifest.spec.baseTree;
@@ -712,7 +713,7 @@ export class Candidate {
         // exact entry presence blocks case-alias tricks, and callers immediately heal search
         // bits and re-verify realpath(path) === resolved.
         try {
-          return (await readdir(parent)).includes(basename(resolved));
+          return (await fsPromises.readdir(parent)).includes(basename(resolved));
         } catch (readdirError) {
           if ((readdirError as NodeJS.ErrnoException).code === 'EACCES') return false;
           throw readdirError;
@@ -808,10 +809,51 @@ export class Candidate {
     }
   }
 
-  async #entry(parent: string, segment: string): Promise<boolean> {
-    const entries = await readdir(parent);
+  async withCapturePassCache<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#captureDirCache !== null) {
+      return await fn();
+    }
+    this.#captureDirCache = new Map();
+    try {
+      return await fn();
+    } finally {
+      this.#captureDirCache = null;
+    }
+  }
+
+  #buildCaptureDirMap(entries: readonly string[]): ReadonlyMap<string, string> {
+    const dirMap = new Map<string, string>();
+    for (const value of entries) {
+      const lower = value.toLowerCase();
+      if (dirMap.has(lower)) {
+        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      }
+      dirMap.set(lower, value);
+    }
+    return dirMap;
+  }
+
+  async #readCaptureDirMap(parent: string): Promise<ReadonlyMap<string, string>> {
+    const key = resolve(parent);
+    const cached = this.#captureDirCache!.get(key);
+    if (cached !== undefined) return cached;
+    const entries = await fsPromises.readdir(parent);
     if (entries.length > this.#dirEntryLimit(true)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
-    const found = entries.find(value => value.toLowerCase() === segment.toLowerCase());
+    const dirMap = this.#buildCaptureDirMap(entries);
+    this.#captureDirCache!.set(key, dirMap);
+    return dirMap;
+  }
+
+  async #entry(parent: string, segment: string): Promise<boolean> {
+    let found: string | undefined;
+    if (this.#captureDirCache !== null) {
+      const dirMap = await this.#readCaptureDirMap(parent);
+      found = dirMap.get(segment.toLowerCase());
+    } else {
+      const entries = await fsPromises.readdir(parent);
+      if (entries.length > this.#dirEntryLimit(true)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
+      found = entries.find(value => value.toLowerCase() === segment.toLowerCase());
+    }
     if (found && found !== segment) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     if (found) return true;
     try { await lstat(join(parent, segment)); } catch (error) { if (absent(error)) return false; throw error; }
@@ -1099,7 +1141,7 @@ export class Candidate {
 
   async #listDirectoryEntries(dirPath: string): Promise<string> {
     await this.#directory(dirPath);
-    const entries = await readdir(dirPath);
+    const entries = await fsPromises.readdir(dirPath);
     if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
     const visible = entries.filter(entry => entry.toLowerCase() !== '.git').sort(compareUtf16);
     const shown = visible.slice(0, 200);
@@ -1699,70 +1741,75 @@ export class Candidate {
   }
 
   async manifest(): Promise<ArtifactManifest> {
-    let seenOverlay = 0;
-    let seenBaseline = 0;
-    const visit = async (parent: string, prefix: string): Promise<void> => {
-      await this.#directory(parent);
-      const entries = await readdir(parent);
-      if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate');
-      for (const entry of entries) {
-        const name = prefix ? prefix + '/' + entry : entry;
-        const fullPath = join(parent, entry);
-        const info = await lstat(fullPath, { bigint: true });
-        this.normalize(name);
-        if (info.isSymbolicLink()) refuse('RECOVERY_REQUIRED', '/candidate');
-        if (info.isDirectory()) {
-          await visit(fullPath, name);
-          continue;
+    return await this.withCapturePassCache(async () => {
+      let seenOverlay = 0;
+      let seenBaseline = 0;
+      const visit = async (parent: string, prefix: string): Promise<void> => {
+        await this.#directory(parent);
+        const entries = await fsPromises.readdir(parent);
+        if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate');
+        if (this.#captureDirCache !== null) {
+          this.#captureDirCache.set(resolve(parent), this.#buildCaptureDirMap(entries));
         }
-        if (this.#files.has(name)) {
-          await this.#verifyCurrentRef(name);
-          seenOverlay++;
-          continue;
-        }
-        if (this.#isOverlay && !this.#deleted.has(name)) {
-          const baseEntry = this.#baseline.get(name);
-          if (baseEntry) {
-            await this.#verifyAndHealBaselineFile(name, fullPath, baseEntry, info, 'admission', 'verify_only', true);
-            seenBaseline++;
+        for (const entry of entries) {
+          const name = prefix ? prefix + '/' + entry : entry;
+          const fullPath = join(parent, entry);
+          const info = await lstat(fullPath, { bigint: true });
+          this.normalize(name);
+          if (info.isSymbolicLink()) refuse('RECOVERY_REQUIRED', '/candidate');
+          if (info.isDirectory()) {
+            await visit(fullPath, name);
             continue;
           }
+          if (this.#files.has(name)) {
+            await this.#verifyCurrentRef(name);
+            seenOverlay++;
+            continue;
+          }
+          if (this.#isOverlay && !this.#deleted.has(name)) {
+            const baseEntry = this.#baseline.get(name);
+            if (baseEntry) {
+              await this.#verifyAndHealBaselineFile(name, fullPath, baseEntry, info, 'admission', 'verify_only', true);
+              seenBaseline++;
+              continue;
+            }
+          }
+          refuse('RECOVERY_REQUIRED', '/candidate');
         }
+      };
+      await visit(this.root, '');
+
+      let expectedBaseline = 0;
+      if (this.#isOverlay) {
+        for (const name of this.#baseline.keys()) {
+          if (!this.#files.has(name) && !this.#deleted.has(name)) expectedBaseline++;
+        }
+      }
+      if (seenOverlay !== this.#files.size || seenBaseline !== expectedBaseline) {
         refuse('RECOVERY_REQUIRED', '/candidate');
       }
-    };
-    await visit(this.root, '');
 
-    let expectedBaseline = 0;
-    if (this.#isOverlay) {
-      for (const name of this.#baseline.keys()) {
-        if (!this.#files.has(name) && !this.#deleted.has(name)) expectedBaseline++;
+      if (this.#isOverlay) {
+        const manifest = this.#buildOverlayManifest(this.#files, this.#deleted);
+        if (
+          manifest.spec.entries.length > this.#effectiveOverlayMaxEntries()
+          || (manifest.spec.deleted?.length ?? 0) > this.#overlayLimits.maxFiles
+          || this.#total > this.#overlayLimits.maxBytes
+          || Buffer.byteLength(canonical(manifest)) > this.#overlayLimits.manifestMaxBytes
+        ) {
+          refuse('OUTPUT_LIMIT', '/candidate');
+        }
+        const identified = identifyManifest(manifest, {
+          overlay: { maxFiles: this.#overlayLimits.maxFiles, maxBytes: this.#overlayLimits.maxBytes },
+        });
+        if (!identified.ok) {
+          refuse('OUTPUT_LIMIT', '/candidate');
+        }
+        return freeze(manifest);
       }
-    }
-    if (seenOverlay !== this.#files.size || seenBaseline !== expectedBaseline) {
-      refuse('RECOVERY_REQUIRED', '/candidate');
-    }
 
-    if (this.#isOverlay) {
-      const manifest = this.#buildOverlayManifest(this.#files, this.#deleted);
-      if (
-        manifest.spec.entries.length > this.#effectiveOverlayMaxEntries()
-        || (manifest.spec.deleted?.length ?? 0) > this.#overlayLimits.maxFiles
-        || this.#total > this.#overlayLimits.maxBytes
-        || Buffer.byteLength(canonical(manifest)) > this.#overlayLimits.manifestMaxBytes
-      ) {
-        refuse('OUTPUT_LIMIT', '/candidate');
-      }
-      const identified = identifyManifest(manifest, {
-        overlay: { maxFiles: this.#overlayLimits.maxFiles, maxBytes: this.#overlayLimits.maxBytes },
-      });
-      if (!identified.ok) {
-        refuse('OUTPUT_LIMIT', '/candidate');
-      }
-      return freeze(manifest);
-    }
-
-    const entries = [...this.#files.values()].sort((a, b) => compareUtf16(a.name, b.name));
-    return freeze({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+      const entries = [...this.#files.values()].sort((a, b) => compareUtf16(a.name, b.name));
+      return freeze({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+    });
   }
 }

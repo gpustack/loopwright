@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, type ArtifactManifest, type ArtifactRef, type Digest } from '@loopwright/core';
+import { bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, isWritablePath, type ArtifactManifest, type ArtifactRef, type Digest, type TaskContract } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
 import { compilePlan } from './compile.js';
@@ -15,6 +15,7 @@ import { ControllerOwner } from './ownership.js';
 import {
   admitRetainedRun,
   CONSERVATIVE_LEGACY_HOST_POLICY,
+  effectiveRunHostPolicy,
   hostProtectionFromPolicy,
   parsePersistedHostPolicy,
   validatePortPolicyFields,
@@ -25,13 +26,13 @@ import { ProgressStore, journal, stableId, type ProgressHead } from './progress.
 import {
   adoptDelegatedCapture,
   captureDelegatedRole,
-  decodeDelegatedWorkspace,
   nativeSessionId,
   type DelegatedCaptureOverlayEntryV2,
   type DelegatedCapturePayloadV2,
 } from './capture.js';
 import {
   assertCanonicalMinimalOverlay,
+  attachVerifiedCasSeal,
   canonicalizeCandidateManifest,
   compareUtf16,
   isHostProtectedPath,
@@ -191,14 +192,14 @@ function normalizeMcpServersMetadata(
 
 async function readStepMeta(
   directory: string,
-  explicitDescriptorPolicy?: PersistedHostPolicy,
+  expectedHostPolicy: PersistedHostPolicy = CONSERVATIVE_LEGACY_HOST_POLICY,
 ): Promise<StepMetaRecord> {
   const path = join(directory, 'step-meta.json');
   try {
     await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      const hostPolicy = explicitDescriptorPolicy ?? CONSERVATIVE_LEGACY_HOST_POLICY;
+      const hostPolicy = expectedHostPolicy;
       return freeze({
         version: 1,
         mode: 'candidate',
@@ -249,13 +250,13 @@ async function readStepMeta(
       allowWorkflowWrites: raw.allowWorkflowWrites === true,
     });
   } else {
-    // Legacy step-meta.json omitting hostPolicy/policyProfile defaults conservatively to 'github'!
-    hostPolicy = freeze({
-      policyProfile: 'github',
-      allowWorkflowWrites: raw.allowWorkflowWrites === true,
-    });
+    if (raw.allowWorkflowWrites === true) {
+      refuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', 'recovery');
+    }
+    // Legacy step-meta.json omitting hostPolicy/policyProfile defaults conservatively to 'github' with allowWorkflowWrites: false.
+    hostPolicy = CONSERVATIVE_LEGACY_HOST_POLICY;
   }
-  if (explicitDescriptorPolicy !== undefined && !same(explicitDescriptorPolicy, hostPolicy)) {
+  if (!same(expectedHostPolicy, hostPolicy)) {
     refuse('RECOVERY_REQUIRED', '/hostPolicy', 'recovery');
   }
   const roleMcpServers = normalizeRoleMcpServers(raw.roleMcpServers, 'recovery');
@@ -334,9 +335,12 @@ async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead
       const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
       const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
       const parsed = parsePrivateJson(Buffer.from(wsBytes), maxWsBytes, bounds.collectionLimit);
-      if (isRecord(parsed) && (parsed.format === 'delegated-capture.v1' || parsed.format === 'delegated-capture.v2')) {
-        const decoded = await decodeDelegatedWorkspace(wsBytes, head.manifest, context.lock, 'recovery', context.artifacts.directory);
-        for (const item of decoded.payload.overlay) modes.set(item.name, item.mode);
+      if (isRecord(parsed) && (parsed.format === 'delegated-capture.v1' || parsed.format === 'delegated-capture.v2') && Array.isArray(parsed.overlay)) {
+        for (const item of parsed.overlay) {
+          if (isRecord(item) && typeof item.name === 'string' && (item.mode === '100644' || item.mode === '100755')) {
+            modes.set(item.name, item.mode);
+          }
+        }
       }
     } catch {
       // Non-JSON workspace (e.g., pi capture) keeps baseline modes or defaults to 100644 for new overlay files.
@@ -649,6 +653,14 @@ async function advanceStepCycle(
             cycle.context.source,
             hostProtectionFromPolicy(meta.hostPolicy),
           );
+          if (disallowMutations) {
+            const priorModes = await resolveCurrentFileModes(cycle.context, cycle.head);
+            for (const entry of captured.artifacts) {
+              if (!('bytes' in entry) && entry.mode !== undefined && entry.mode !== (priorModes.get(entry.name) ?? '100644')) {
+                refuse('ARTIFACT_INVALID', '', 'recovery');
+              }
+            }
+          }
           const failure = await cycle.completeCapture(active, captured, { ignoreArtifactPath: disallowMutations });
           if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
           if (failure === 'SUBMISSION_INVALID') {
@@ -923,7 +935,7 @@ async function reopenStepContext(input: {
     ...(input.environment ? { environment: input.environment } : {}),
     phase: input.phase,
   });
-  const meta = await readStepMeta(directory, descriptor.hostPolicy);
+  const meta = await readStepMeta(directory, effectiveRunHostPolicy(descriptor));
   const effectivePorts = validatePortsAgainstHostPolicy(input.ports, meta.hostPolicy, input.phase);
   const effectiveDescriptor = descriptor.hostPolicy !== undefined ? descriptor : { ...descriptor, hostPolicy: meta.hostPolicy };
   validateGateUrlOverrides(effectivePorts.gateUrlOverrides, input.phase, effectiveConfig.registry.spec.gateEndpoints);
@@ -1128,7 +1140,9 @@ async function settleForcedStepRun(
 async function scanCandidateDirectory(
   candidateDir: string,
   source: FrozenSource,
+  task: TaskContract,
   previousDigest: Digest,
+  previousModes: ReadonlyMap<string, '100644' | '100755'>,
   disallowMutations: boolean,
   overlayConfig: CompiledPlan['budgets']['overlay'],
   artifacts: ArtifactStore,
@@ -1144,6 +1158,15 @@ async function scanCandidateDirectory(
   const v2BaselineByPath =
     source.version === 2
       ? new Map((source.baselineEntries ?? []).map(entry => [entry.name, entry]))
+      : undefined;
+  const v1BaselineByPath =
+    source.version === 1
+      ? new Map(
+          source.artifacts.map(artifact => [
+            artifact.name,
+            { byteLength: artifact.bytes.byteLength, mode: artifact.mode ?? ('100644' as const) },
+          ]),
+        )
       : undefined;
   let rootStat;
   try {
@@ -1167,12 +1190,16 @@ async function scanCandidateDirectory(
   const streamChunk = Buffer.allocUnsafe(STREAM_CHUNK_BYTES);
   const probeByte = Buffer.allocUnsafe(1);
   let entriesSeen = 0;
+  let knownOverlayFiles = 0;
+  let knownOverlayBytes = 0;
+  let knownClassicFiles = 0;
+  let knownClassicBytes = 0;
 
   const visit = async (absDir: string, relPrefix: string, depth: number): Promise<void> => {
     if (depth > 32) refuse('ARTIFACT_INVALID', '', 'execution');
     const dirEntries = await readdir(absDir, { withFileTypes: true });
     entriesSeen += dirEntries.length;
-    if (entriesSeen > 16_384) refuse('OUTPUT_LIMIT', '', 'execution');
+    if (entriesSeen > 131_072) refuse('OUTPUT_LIMIT', '', 'execution');
     dirEntries.sort((a, b) => compareUtf16(a.name, b.name));
     for (const d of dirEntries) {
       if (d.name.toLowerCase() === '.git' || Buffer.byteLength(d.name, 'utf8') > 255) refuse('ARTIFACT_INVALID', '', 'execution');
@@ -1192,10 +1219,47 @@ async function scanCandidateDirectory(
       let mode: '100644' | '100755';
       let sha256: string;
       let gitOid: string | undefined;
+      let sizeChangedOrAdded = false;
       try {
         const fst = await fh.stat();
         if (fst.dev !== st.dev || fst.ino !== st.ino || fst.nlink !== 1 || !fst.isFile() || fst.size !== st.size) {
           refuse('ARTIFACT_INVALID', '', 'execution');
+        }
+        if (source.version === 2) {
+          const baseEntry = v2BaselineByPath!.get(relPath);
+          sizeChangedOrAdded = baseEntry === undefined || baseEntry.byteLength !== fst.size;
+          if (sizeChangedOrAdded) {
+            if (isHostProtectedPath(relPath, hostProtection)) {
+              refuse('ARTIFACT_INVALID', '', 'execution');
+            }
+            if (
+              fst.size > bounds.perFileMaxBytes ||
+              knownOverlayFiles + 1 > bounds.maxFiles ||
+              knownOverlayBytes + fst.size > bounds.maxBytes
+            ) {
+              refuse('OUTPUT_LIMIT', '', 'execution');
+            }
+            knownOverlayFiles += 1;
+            knownOverlayBytes += fst.size;
+          }
+        } else {
+          const baseEntry = v1BaselineByPath!.get(relPath);
+          const observedMode: '100644' | '100755' = (fst.mode & 0o111) !== 0 ? '100755' : '100644';
+          if (
+            (baseEntry === undefined || baseEntry.byteLength !== fst.size || baseEntry.mode !== observedMode)
+            && isHostProtectedPath(relPath, hostProtection)
+          ) {
+            refuse('ARTIFACT_INVALID', '', 'execution');
+          }
+          if (
+            fst.size > bounds.perFileMaxBytes ||
+            knownClassicFiles + 1 > bounds.maxFiles ||
+            knownClassicBytes + fst.size > bounds.maxBytes
+          ) {
+            refuse('OUTPUT_LIMIT', '', 'execution');
+          }
+          knownClassicFiles += 1;
+          knownClassicBytes += fst.size;
         }
         const shaHasher = createHash('sha256');
         const gitHasher =
@@ -1234,6 +1298,23 @@ async function scanCandidateDirectory(
       } finally {
         await fh.close();
       }
+      if (source.version === 2 && !sizeChangedOrAdded) {
+        const baseEntry = v2BaselineByPath!.get(relPath);
+        if (baseEntry !== undefined && gitOid !== baseEntry.oid) {
+          if (isHostProtectedPath(relPath, hostProtection)) {
+            refuse('ARTIFACT_INVALID', '', 'execution');
+          }
+          if (
+            byteLength > bounds.perFileMaxBytes ||
+            knownOverlayFiles + 1 > bounds.maxFiles ||
+            knownOverlayBytes + byteLength > bounds.maxBytes
+          ) {
+            refuse('OUTPUT_LIMIT', '', 'execution');
+          }
+          knownOverlayFiles += 1;
+          knownOverlayBytes += byteLength;
+        }
+      }
       seenPaths.add(relPath);
       scannedFiles.push({ absPath, name: relPath, mode, byteLength, sha256, gitOid });
     }
@@ -1259,9 +1340,17 @@ async function scanCandidateDirectory(
     let totalOverlayBytes = 0;
     for (const file of scannedFiles) {
       const baseEntry = baselineByPath.get(file.name);
+      const expectedMode = previousModes.get(file.name) ?? baseEntry?.mode ?? '100644';
       if (baseEntry && file.gitOid === baseEntry.oid) {
+        if (file.mode !== expectedMode) {
+          refuse('ARTIFACT_INVALID', '', 'execution');
+        }
         continue;
       }
+      if (disallowMutations && file.mode !== expectedMode) {
+        refuse('ARTIFACT_INVALID', '', 'execution');
+      }
+      const effectiveMode = disallowMutations ? expectedMode : file.mode;
       if (isHostProtectedPath(file.name, hostProtection)) refuse('ARTIFACT_INVALID', '', 'execution');
       if (
         file.byteLength > bounds.perFileMaxBytes ||
@@ -1270,8 +1359,14 @@ async function scanCandidateDirectory(
       ) {
         refuse('OUTPUT_LIMIT', '', 'execution');
       }
-      const pointer = await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes);
-      if (pointer.sha256 !== file.sha256 || pointer.byteLength !== file.byteLength) {
+      const pointer = await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes, {
+        gitObjectFormat: baseTree.objectFormat,
+      });
+      if (
+        pointer.sha256 !== file.sha256
+        || pointer.byteLength !== file.byteLength
+        || (pointer.verifiedSeal !== undefined && file.gitOid !== undefined && pointer.verifiedSeal.gitOid !== file.gitOid)
+      ) {
         refuse('ARTIFACT_INVALID', '', 'execution');
       }
       const ref = digestArtifactFromMetadata(file.name, {
@@ -1281,18 +1376,22 @@ async function scanCandidateDirectory(
       if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');
       overlay.push({
         name: file.name,
-        mode: file.mode,
+        mode: effectiveMode,
         sha256: pointer.sha256,
         byteLength: pointer.byteLength,
         blobRef: pointer.blobRef,
       });
-      files.push({
+      const casFile: CasCandidateFile = {
         name: file.name,
         byteLength: pointer.byteLength,
         digest: ref.value.digest,
         blobPath: pointer.path,
-        mode: file.mode,
-      });
+        mode: effectiveMode,
+      };
+      if (pointer.verifiedSeal !== undefined) {
+        attachVerifiedCasSeal(casFile, pointer.verifiedSeal);
+      }
+      files.push(casFile);
       manifestEntries.push(ref.value);
     }
     const identified = identifyManifest(
@@ -1315,7 +1414,10 @@ async function scanCandidateDirectory(
   if (scannedFiles.length > bounds.maxFiles) refuse('OUTPUT_LIMIT', '', 'execution');
   let totalBytes = 0;
   const baselineByPath = new Map(
-    source.artifacts.map(item => [item.name, { byteLength: item.bytes.byteLength, sha256: hash(item.bytes).hex }]),
+    source.artifacts.map(item => [
+      item.name,
+      { byteLength: item.bytes.byteLength, sha256: hash(item.bytes).hex, mode: item.mode ?? ('100644' as const) },
+    ]),
   );
   const scannedNames = new Set(scannedFiles.map(item => item.name));
   const deleted: string[] = [];
@@ -1331,14 +1433,33 @@ async function scanCandidateDirectory(
   const manifestEntries: ArtifactRef[] = [];
   for (const file of scannedFiles) {
     const baseInfo = baselineByPath.get(file.name);
-    const modifiedOrAdded = baseInfo === undefined || baseInfo.byteLength !== file.byteLength || baseInfo.sha256 !== file.sha256;
+    const expectedMode = previousModes.get(file.name) ?? baseInfo?.mode ?? '100644';
+    if (disallowMutations && file.mode !== expectedMode) {
+      refuse('ARTIFACT_INVALID', '', 'execution');
+    }
+    const effectiveMode = disallowMutations ? expectedMode : file.mode;
+    const modeChangedFromBaseline = baseInfo !== undefined && baseInfo.mode !== effectiveMode;
+    const modifiedOrAdded =
+      baseInfo === undefined
+      || baseInfo.byteLength !== file.byteLength
+      || baseInfo.sha256 !== file.sha256
+      || modeChangedFromBaseline;
     if (modifiedOrAdded && isHostProtectedPath(file.name, hostProtection)) {
       refuse('ARTIFACT_INVALID', '', 'execution');
+    }
+    if (modeChangedFromBaseline) {
+      const writable = isWritablePath(task, file.name);
+      if (!writable.ok || !writable.value) {
+        refuse('ARTIFACT_INVALID', '', 'execution');
+      }
     }
     if (file.byteLength > bounds.perFileMaxBytes || (totalBytes += file.byteLength) > bounds.maxBytes) {
       refuse('OUTPUT_LIMIT', '', 'execution');
     }
-    const pointer = await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes);
+    const pointer = !modifiedOrAdded
+      ? (await artifacts.tryReuseCasBlob(file.name, file.sha256, file.byteLength))
+        ?? await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes)
+      : await artifacts.putCasBlobFromFile(file.name, file.absPath, bounds.perFileMaxBytes);
     if (pointer.sha256 !== file.sha256 || pointer.byteLength !== file.byteLength) {
       refuse('ARTIFACT_INVALID', '', 'execution');
     }
@@ -1349,7 +1470,7 @@ async function scanCandidateDirectory(
     if (!ref.ok) refuse('ARTIFACT_INVALID', '', 'execution');
     overlay.push({
       name: file.name,
-      mode: file.mode,
+      mode: effectiveMode,
       sha256: pointer.sha256,
       byteLength: pointer.byteLength,
       blobRef: pointer.blobRef,
@@ -1359,7 +1480,7 @@ async function scanCandidateDirectory(
       byteLength: pointer.byteLength,
       digest: ref.value.digest,
       blobPath: pointer.path,
-      mode: file.mode,
+      mode: effectiveMode,
     });
     manifestEntries.push(ref.value);
   }
@@ -1659,13 +1780,17 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       !role.policy.tools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
     const candidateDir = join(resolve(input.runRoot), 'workspaces', context.lock.spec.runId, active.id, 'candidate');
 
+    let previousModes: ReadonlyMap<string, '100644' | '100755'>;
     let scanned: Awaited<ReturnType<typeof scanCandidateDirectory>>;
     let explicitSubmissionBytes: Uint8Array | null = explicitVerdictBytes;
     try {
+      previousModes = await resolveCurrentFileModes(context, head);
       scanned = await scanCandidateDirectory(
         candidateDir,
         context.source,
+        context.plan.task,
         head.progress.candidate.digest,
+        previousModes,
         disallowMutations,
         context.plan.budgets.overlay,
         context.artifacts,
@@ -1747,10 +1872,13 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
       if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest), 'utf8') > bounds.manifestMaxBytes) {
         refuse('OUTPUT_LIMIT', '', 'execution');
       }
-      assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, scanned.files, context.source, 'execution');
+      await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, scanned.files, context.source, 'execution');
       const subject = bindSubject(context.lock, canonicalManifest.value.manifest, bounds.options);
       if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'execution');
       const changed = !same(subject.value.candidateDigest, head.progress.candidate.digest);
+      if (!changed && scanned.overlay.some(entry => (previousModes.get(entry.name) ?? '100644') !== entry.mode)) {
+        refuse('ARTIFACT_INVALID', '', 'execution');
+      }
       const nextGeneration = head.progress.candidate.generation + (changed ? 1 : 0);
       if (nextGeneration >= context.plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
       const payloadBytes = Buffer.from(canonical(payload), 'utf8');
@@ -1771,12 +1899,22 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     cycle.submission = submission;
     let structureFailure: ControllerDiagnostic['code'] | null;
     try {
-      const captured = await captureDelegatedRole(context.store, context.authority, context.artifacts, context.lock, role, active, context.source, {
-        candidateManifest: scanned.manifest,
-        candidateFiles: scanned.files,
-        payload,
-        submissionBytes,
-      });
+      const captured = await captureDelegatedRole(
+        context.store,
+        context.authority,
+        context.artifacts,
+        context.lock,
+        role,
+        active,
+        context.source,
+        {
+          candidateManifest: scanned.manifest,
+          candidateFiles: scanned.files,
+          payload,
+          submissionBytes,
+        },
+        hostProtection,
+      );
       structureFailure = await cycle.completeCapture(active, captured, { ignoreArtifactPath });
     } catch (error) {
       await cycle.deadline.dispose().catch(() => {});

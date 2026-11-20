@@ -50,17 +50,20 @@ test('v2 conservative refusal row envelopes fit unchanged progress/index/checkpo
   } finally { await f.close(); }
 });
 
-test('overlayManifestBounds lifts the 32 MiB perFileMaxBytes cap, bounds v2WorkspaceJsonMaxBytes by maxFiles <= 16 MiB, and caps workspaceMaxBytes at 96 MiB', async () => {
+test('overlayManifestBounds and parsePrivateJson scale to 16,384 maxMaxFiles (32 MiB v2WorkspaceJson, 80 MiB manifest, 8 MiB checkpointInput) and cap workspaceMaxBytes at 96 MiB', async () => {
+  const { parsePrivateJson } = await import('../src/parser.js');
+  const { maxPacketBytes, overlayProtocolBounds } = await import('../src/verifier-protocol.js');
   const f = await retainedFixture();
   try {
     const defBounds = overlayManifestBounds();
     assert.equal(defBounds.perFileMaxBytes, 1_048_576);
     assert.equal(defBounds.v2WorkspaceJsonMaxBytes, 1_048_576);
     assert.equal(defBounds.workspaceMaxBytes, 8_388_608);
+    assert.equal(defBounds.checkpointInputMaxBytes, 40_960);
 
     const bounds64M = overlayManifestBounds({ maxFiles: 512, maxBytes: 67_108_864 });
     assert.equal(bounds64M.perFileMaxBytes, 67_108_864);
-    assert.ok(bounds64M.v2WorkspaceJsonMaxBytes > 1_048_576 && bounds64M.v2WorkspaceJsonMaxBytes <= 16_777_216);
+    assert.ok(bounds64M.v2WorkspaceJsonMaxBytes > 1_048_576 && bounds64M.v2WorkspaceJsonMaxBytes <= 33_554_432);
     assert.ok(bounds64M.workspaceMaxBytes <= 100_663_296);
 
     const bounds256M = overlayManifestBounds({ maxFiles: 512, maxBytes: 268_435_456 });
@@ -68,10 +71,36 @@ test('overlayManifestBounds lifts the 32 MiB perFileMaxBytes cap, bounds v2Works
     assert.equal(bounds256M.v2WorkspaceJsonMaxBytes, bounds64M.v2WorkspaceJsonMaxBytes);
     assert.equal(bounds256M.workspaceMaxBytes, 100_663_296);
 
+    assert.equal(OVERLAY_LIMITS.maxMaxFiles, 16_384);
     const bounds16G = overlayManifestBounds({ maxFiles: OVERLAY_LIMITS.maxMaxFiles, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.equal(bounds16G.maxFiles, 16_384);
     assert.equal(bounds16G.perFileMaxBytes, OVERLAY_LIMITS.maxMaxBytes);
-    assert.ok(bounds16G.v2WorkspaceJsonMaxBytes <= 16_777_216);
+    assert.ok(bounds16G.manifestMaxBytes <= 83_886_080 && bounds16G.manifestMaxBytes > 20_971_520);
+    assert.equal(bounds16G.v2WorkspaceJsonMaxBytes, 33_554_432);
+    assert.equal(bounds16G.checkpointInputMaxBytes, 8_388_608);
     assert.equal(bounds16G.workspaceMaxBytes, 100_663_296);
+
+    const proto16k = overlayProtocolBounds({ maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.equal(proto16k.manifestMaxBytes, bounds16G.manifestMaxBytes);
+    assert.ok(proto16k.inventoryMaxBytes <= 83_886_080 && proto16k.inventoryMaxBytes > 20_971_520);
+    assert.ok(maxPacketBytes({ payloadKind: 'guard', overlay: { maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes } }) <= 167_772_160);
+
+    // parsePrivateJson scales collectionLimit up to 65,536 and dynamic nodeLimit for 16,384-entry manifests/v2 captures
+    const wideDoc = {
+      format: 'delegated-capture.v2',
+      version: 2,
+      overlay: Array.from({ length: 16_384 }, (_, idx) => ({
+        name: `src/f-${idx}.ts`,
+        mode: '100644',
+        sha256: 'a'.repeat(64),
+        byteLength: 16,
+        blobRef: { name: `src/f-${idx}.ts`, byteLength: 16, digest: { algorithm: 'sha256', hex: 'a'.repeat(64) }, uri: `cas://sha256/${'a'.repeat(64)}` },
+      })),
+    };
+    const wideBytes = Buffer.from(JSON.stringify(wideDoc), 'utf8');
+    const parsedWide = parsePrivateJson(wideBytes, bounds16G.v2WorkspaceJsonMaxBytes, bounds16G.collectionLimit) as { overlay: unknown[] };
+    assert.equal(parsedWide.overlay.length, 16_384);
+    assert.throws(() => parsePrivateJson(Buffer.from('[]'), 1024, 65_537));
 
     const stored = await f.artifacts.json('workspace', { format: 'delegated-capture.v2', version: 2, overlay: [] }, bounds16G.v2WorkspaceJsonMaxBytes);
     assert.ok(stored.byteLength > 0);

@@ -44,29 +44,68 @@ function deriveSecretFormBuffers(secrets: Iterable<string>): readonly Buffer[] {
   return Object.freeze([...formSet].map(form => Buffer.from(form, 'utf8')));
 }
 
+const UNBOUNDED_GENERIC_CREDENTIAL_PATTERNS: readonly RegExp[] = Object.freeze([
+  /gh[pousr]_[A-Za-z0-9]{20,}/,
+  /github_pat_[A-Za-z0-9_]{20,}/,
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----/,
+  /sk-(?:ant-|proj-)[A-Za-z0-9_-]{20,}/,
+]);
+
+const BOUNDED_GENERIC_CREDENTIAL_PATTERNS: readonly RegExp[] = Object.freeze([
+  /(?<![0-9A-Za-z])AKIA[0-9A-Z]{16}(?![0-9A-Za-z])/g,
+]);
+
+function hasGenericCredentialPattern(bytes: Buffer, isFinal: boolean, minMatchEnd = 0): boolean {
+  const textWindow = bytes.toString('latin1');
+  if (UNBOUNDED_GENERIC_CREDENTIAL_PATTERNS.some(pattern => pattern.test(textWindow))) {
+    return true;
+  }
+  for (const pattern of BOUNDED_GENERIC_CREDENTIAL_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(textWindow)) !== null) {
+      const matchEnd = match.index + match[0].length;
+      if (matchEnd < minMatchEnd) continue;
+      if (isFinal || matchEnd < textWindow.length) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function createCredentialStreamCheckerFromBuffers(formBuffers: readonly Buffer[]): CredentialStreamChecker {
   const maxDerivedFormByteLength = formBuffers.reduce((max, buf) => Math.max(max, buf.byteLength), 0);
   const overlap = Math.max(16_384, maxDerivedFormByteLength);
   let carryTail: Buffer = Buffer.alloc(0);
   return Object.freeze({
     push: (chunk: Uint8Array): void => {
-      if (chunk.byteLength === 0 || formBuffers.length === 0) return;
+      if (chunk.byteLength === 0) return;
       const view = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      const combined = carryTail.byteLength === 0 ? view : Buffer.concat([carryTail, view]);
-      for (const form of formBuffers) {
-        if (combined.includes(form)) {
-          if (carryTail.byteLength > 0) carryTail.fill(0);
-          carryTail = Buffer.alloc(0);
-          refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
-        }
+      const prevCarryLen = carryTail.byteLength;
+      const combined = prevCarryLen === 0 ? view : Buffer.concat([carryTail, view]);
+      if (formBuffers.some(form => combined.includes(form)) || hasGenericCredentialPattern(combined, false, prevCarryLen)) {
+        if (carryTail.byteLength > 0) carryTail.fill(0);
+        carryTail = Buffer.alloc(0);
+        refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
       }
       const keep = Math.min(overlap, combined.byteLength);
       if (carryTail.byteLength > 0) carryTail.fill(0);
       carryTail = Buffer.from(combined.subarray(combined.byteLength - keep));
     },
     finish: (): void => {
-      if (carryTail.byteLength > 0) carryTail.fill(0);
+      const tail = carryTail;
       carryTail = Buffer.alloc(0);
+      try {
+        if (
+          tail.byteLength > 0
+          && (formBuffers.some(form => tail.includes(form)) || hasGenericCredentialPattern(tail, true, tail.byteLength))
+        ) {
+          refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+        }
+      } finally {
+        if (tail.byteLength > 0) tail.fill(0);
+      }
     },
   });
 }
@@ -101,7 +140,9 @@ export function createVault(expanded: unknown, registry: TrustedRegistry): Crede
       const serialized = value instanceof Uint8Array
         ? Buffer.from(value.buffer, value.byteOffset, value.byteLength)
         : Buffer.from(typeof value === 'string' ? value : canonical(value));
-      if (formBuffers.some(form => serialized.includes(form))) refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+      if (formBuffers.some(form => serialized.includes(form)) || hasGenericCredentialPattern(serialized, true, 0)) {
+        refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+      }
     },
     createStreamChecker: (): CredentialStreamChecker => createCredentialStreamCheckerFromBuffers(formBuffers),
     resolveNetworkCredential: (ref: string): string => {

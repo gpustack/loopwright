@@ -5,7 +5,7 @@ import { fail } from './errors.js';
 import type { CompatibilityBinding, ExactTotal, LocalRunIdentity, StatePolicy } from './types.js';
 
 export const STATE_LIMITS = Object.freeze({ requests:1024, operations:2048, checkpoints:256, callBytes:65536,
-  recordBytes:16384, checkpointBytes:65536, wideCheckpointBytes:2097152, pageItems:100, pageBytes:131072, depth:32, nodes:8192,
+  recordBytes:16384, checkpointBytes:65536, wideCheckpointBytes:8388608, pageItems:100, pageBytes:131072, depth:32, nodes:8192,
   properties:128, collection:128, driftMs:1000, maxPages:65536 });
 export interface SnapshotBounds {
   readonly maxBytes?: number;

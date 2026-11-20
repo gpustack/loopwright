@@ -27,11 +27,28 @@ import type { CredentialVault } from './credentials.js';
 
 const EMPTY_SHA256_HEX = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
+export interface VerifiedCasSeal {
+  readonly blobPath: string;
+  readonly dev: number;
+  readonly ino: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+  readonly sha256: string;
+  readonly gitOid: string | null;
+  readonly objectFormat: 'sha1' | 'sha256';
+}
+
+export interface PutCasBlobOptions {
+  readonly gitObjectFormat?: 'sha1' | 'sha256' | undefined;
+}
+
 export interface CasBlobPointer {
   readonly path: string;
   readonly sha256: string;
   readonly byteLength: number;
   readonly blobRef: ArtifactRef;
+  readonly verifiedSeal?: VerifiedCasSeal | undefined;
 }
 
 export interface CasBlobVerificationTarget {
@@ -95,12 +112,17 @@ export async function resolveCanonicalCasBlobPath(
   return canonicalPath;
 }
 
-export async function streamVerifiedCasBlob(
+async function streamVerifiedCasBlobWithSummary(
   artifactsDir: string,
   pointer: CasBlobVerificationTarget,
   onChunk?: (chunk: Uint8Array) => Promise<void> | void,
   phase: ControllerDiagnostic['phase'] = 'verification',
-): Promise<void> {
+  gitObjectFormat?: 'sha1' | 'sha256' | undefined,
+): Promise<{
+  readonly canonicalBlobPath: string;
+  readonly summary: import('./files.js').StreamedFileSummary;
+  readonly gitOid: string | null;
+}> {
   if (
     !isRecord(pointer)
     || typeof pointer.sha256 !== 'string'
@@ -148,7 +170,11 @@ export async function streamVerifiedCasBlob(
 
   const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifactsDir, pointer.sha256, pointer.path, phase);
   const sha = createHash('sha256');
-  await streamRegularFile(
+  const gitHasher =
+    gitObjectFormat !== undefined
+      ? createHash(gitObjectFormat).update(`blob ${pointer.byteLength}\0`, 'utf8')
+      : null;
+  const summary = await streamRegularFile(
     canonicalBlobPath,
     {
       expectedBytes: pointer.byteLength,
@@ -161,6 +187,7 @@ export async function streamVerifiedCasBlob(
     },
     async slice => {
       sha.update(slice);
+      gitHasher?.update(slice);
       if (onChunk !== undefined) {
         await onChunk(slice);
       }
@@ -169,6 +196,20 @@ export async function streamVerifiedCasBlob(
   if (sha.digest('hex') !== pointer.sha256) {
     refuse('ARTIFACT_INVALID', '', phase);
   }
+  return {
+    canonicalBlobPath,
+    summary,
+    gitOid: gitHasher !== null ? gitHasher.digest('hex') : null,
+  };
+}
+
+export async function streamVerifiedCasBlob(
+  artifactsDir: string,
+  pointer: CasBlobVerificationTarget,
+  onChunk?: (chunk: Uint8Array) => Promise<void> | void,
+  phase: ControllerDiagnostic['phase'] = 'verification',
+): Promise<void> {
+  await streamVerifiedCasBlobWithSummary(artifactsDir, pointer, onChunk, phase);
 }
 
 async function syncDirectory(dirPath: string): Promise<void> {
@@ -264,6 +305,7 @@ export class ArtifactStore {
     logicalName: string,
     sourcePath: string,
     maxBytes: number = OVERLAY_LIMITS.maxMaxBytes,
+    options?: PutCasBlobOptions,
   ): Promise<CasBlobPointer> {
     return this.#ingestCasBlob(logicalName, maxBytes, async consumeChunk => {
       await streamRegularFile(
@@ -277,13 +319,14 @@ export class ArtifactStore {
         },
         consumeChunk,
       );
-    });
+    }, options);
   }
 
   async putCasBlobFromBytes(
     logicalName: string,
     bytes: Uint8Array,
     maxBytes: number = OVERLAY_LIMITS.maxMaxBytes,
+    options?: PutCasBlobOptions,
   ): Promise<CasBlobPointer> {
     if (
       !ArrayBuffer.isView(bytes)
@@ -299,6 +342,92 @@ export class ArtifactStore {
       for (let offset = 0; offset < view.byteLength; offset += STREAM_CHUNK_BYTES) {
         await consumeChunk(view.subarray(offset, Math.min(view.byteLength, offset + STREAM_CHUNK_BYTES)));
       }
+    }, options);
+  }
+
+  async tryReuseCasBlob(
+    logicalName: string,
+    sha256: string,
+    expectedByteLength: number,
+    options?: PutCasBlobOptions,
+  ): Promise<CasBlobPointer | null> {
+    await this.owner.assertCurrent();
+    if (
+      typeof sha256 !== 'string'
+      || !/^[0-9a-f]{64}$/.test(sha256)
+      || !Number.isSafeInteger(expectedByteLength)
+      || Object.is(expectedByteLength, -0)
+      || expectedByteLength < 0
+      || expectedByteLength > OVERLAY_LIMITS.maxMaxBytes
+      || (expectedByteLength === 0) !== (sha256 === EMPTY_SHA256_HEX)
+    ) {
+      refuse('ARTIFACT_INVALID', logicalName, 'execution');
+    }
+    const blobRefRes = digestArtifactFromMetadata(logicalName, {
+      digest: { algorithm: 'sha256', hex: sha256 },
+      byteLength: expectedByteLength,
+      uri: 'cas://sha256/' + sha256,
+    });
+    if (!blobRefRes.ok) {
+      refuse('ARTIFACT_INVALID', logicalName, 'execution');
+    }
+
+    const canonicalPath = join(this.directory, 'blobs', 'sha256', sha256);
+    if (!inside(canonicalPath, this.directory) || canonicalPath === this.directory) {
+      refuse('ARTIFACT_INVALID', logicalName, 'execution');
+    }
+    try {
+      await lstat(canonicalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      refuse('ARTIFACT_INVALID', logicalName, 'execution');
+    }
+
+    const gitObjectFormat = options?.gitObjectFormat;
+    const streamChecker = this.vault.createStreamChecker();
+    let verified: Awaited<ReturnType<typeof streamVerifiedCasBlobWithSummary>>;
+    try {
+      verified = await streamVerifiedCasBlobWithSummary(
+        this.directory,
+        {
+          name: logicalName,
+          sha256,
+          byteLength: expectedByteLength,
+          uri: blobRefRes.value.uri,
+          path: canonicalPath,
+          blobRef: blobRefRes.value,
+        },
+        chunk => {
+          streamChecker.push(chunk);
+        },
+        'execution',
+        gitObjectFormat,
+      );
+      streamChecker.finish();
+    } finally {
+      streamChecker.finish();
+    }
+
+    const verifiedSeal: VerifiedCasSeal | undefined = gitObjectFormat !== undefined
+      ? Object.freeze({
+          blobPath: verified.canonicalBlobPath,
+          dev: verified.summary.dev,
+          ino: verified.summary.ino,
+          size: verified.summary.byteLength,
+          mtimeMs: verified.summary.mtimeMs,
+          ctimeMs: verified.summary.ctimeMs,
+          sha256,
+          gitOid: verified.gitOid,
+          objectFormat: gitObjectFormat,
+        })
+      : undefined;
+
+    return Object.freeze({
+      path: canonicalPath,
+      sha256,
+      byteLength: expectedByteLength,
+      blobRef: blobRefRes.value,
+      ...(verifiedSeal !== undefined ? { verifiedSeal } : {}),
     });
   }
 
@@ -309,7 +438,10 @@ export class ArtifactStore {
   async #ingestCasBlob(
     logicalName: string,
     maxBytes: number,
-    streamSource: (consumeChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>,
+    streamSource: (
+      consumeChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => Promise<void>,
+    options?: PutCasBlobOptions,
   ): Promise<CasBlobPointer> {
     await this.owner.assertCurrent();
     if (!Number.isSafeInteger(maxBytes) || Object.is(maxBytes, -0) || maxBytes < 0 || maxBytes > OVERLAY_LIMITS.maxMaxBytes) {
@@ -337,6 +469,7 @@ export class ArtifactStore {
     );
     const streamChecker = this.vault.createStreamChecker();
     const sha = createHash('sha256');
+    const gitObjectFormat = options?.gitObjectFormat;
     let byteLength = 0;
     let tmpClosed = false;
     let tmpUnlinked = false;
@@ -354,8 +487,6 @@ export class ArtifactStore {
 
       await tmpHandle.chmod(0o400);
       await tmpHandle.sync();
-      await tmpHandle.close();
-      tmpClosed = true;
 
       await this.owner.assertCurrent();
 
@@ -368,26 +499,54 @@ export class ArtifactStore {
       });
       if (!blobRefRes.ok) refuse('ARTIFACT_INVALID', logicalName, 'execution');
 
+      let verifiedSeal: VerifiedCasSeal | undefined;
+      let linked = false;
       try {
         await link(tmpPath, finalHexPath);
-        await unlink(tmpPath);
-        tmpUnlinked = true;
+        linked = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+
+      if (linked) {
+        // Fresh-write winner: never mint verifiedSeal from the pre-chmod writable write stream.
+        // The first verifier (assertCanonicalMinimalOverlay) will hash the finalized 0o400
+        // nlink===1 descriptor and attach VERIFIED_CAS_SEAL for subsequent O(1) reuse.
+        await unlink(tmpPath);
+        tmpUnlinked = true;
+        await tmpHandle.close();
+        tmpClosed = true;
+      } else {
+        await tmpHandle.close();
+        tmpClosed = true;
         await unlink(tmpPath);
         tmpUnlinked = true;
         // Allow a racing writer's link()+unlink() pair to finish dropping nlink from 2 -> 1.
-        for (let attempt = 0; attempt < 10; attempt++) {
+        for (let attempt = 0; attempt < 20; attempt++) {
           const st = await lstat(finalHexPath).catch(() => null);
-          if (!st || st.nlink <= 1) break;
+          if (!st || st.isSymbolicLink() || !st.isFile() || st.nlink <= 1) break;
           await new Promise(resolveDelay => setTimeout(resolveDelay, 5));
         }
-        await streamVerifiedCasBlob(
+        const verified = await streamVerifiedCasBlobWithSummary(
           this.directory,
           { name: logicalName, sha256, byteLength, uri: blobRefRes.value.uri, path: finalHexPath },
           undefined,
           'execution',
+          gitObjectFormat,
         );
+        if (gitObjectFormat !== undefined) {
+          verifiedSeal = Object.freeze({
+            blobPath: verified.canonicalBlobPath,
+            dev: verified.summary.dev,
+            ino: verified.summary.ino,
+            size: verified.summary.byteLength,
+            mtimeMs: verified.summary.mtimeMs,
+            ctimeMs: verified.summary.ctimeMs,
+            sha256,
+            gitOid: verified.gitOid,
+            objectFormat: gitObjectFormat,
+          });
+        }
       }
 
       await syncDirectory(sha256Dir);
@@ -396,6 +555,7 @@ export class ArtifactStore {
         sha256,
         byteLength,
         blobRef: blobRefRes.value,
+        ...(verifiedSeal !== undefined ? { verifiedSeal } : {}),
       });
     } finally {
       streamChecker.finish();

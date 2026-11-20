@@ -30,13 +30,13 @@ async function withTempRepo(run: (repoRoot: string, outsideDir: string) => Promi
   }
 }
 
-describe('digests.ts: streaming 64 KiB SHA-256 hashing and lockfile verification', () => {
+describe('digests.ts: streaming 1 MiB SHA-256 hashing, lockfile verification, and sync remediation hints', () => {
   it('streams multi-chunk regular files and refuses symlinks, hardlinks (nlink > 1), escapes, and oversize files', async () => {
-    assert.equal(DIGEST_STREAM_CHUNK_BYTES, 65_536);
+    assert.equal(DIGEST_STREAM_CHUNK_BYTES, 1_048_576);
     await withTempRepo(async (repoRoot, outsideDir) => {
       await mkdir(join(repoRoot, '.ops', 'scripts'), { recursive: true });
-      // Multi-chunk buffer (> 3 * 64 KiB) to exercise streaming loop
-      const largeBuf = Buffer.alloc(DIGEST_STREAM_CHUNK_BYTES * 3 + 137, 0x5a);
+      // Multi-chunk buffer (> 2 * 1 MiB) to exercise 1 MiB streaming loop
+      const largeBuf = Buffer.alloc(DIGEST_STREAM_CHUNK_BYTES * 2 + 137, 0x5a);
       largeBuf[0] = 0x01;
       largeBuf[largeBuf.byteLength - 1] = 0xfe;
       const target = join(repoRoot, '.ops', 'scripts', 'bundle.bin');
@@ -108,15 +108,56 @@ describe('digests.ts: streaming 64 KiB SHA-256 hashing and lockfile verification
       const verified = await assertDigestLockfileVerified(repoRoot, manifest, '.ops');
       assert.equal(verified.entries.length, 2);
 
-      // Mutate file -> drift detected
+      // Mutate file -> drift detected with placeholder remediation hint when manifestPath is unset
       await writeFile(join(repoRoot, '.ops', 'instructions.md'), '# Tampered\n', 'utf8');
+      const placeholderHint = '\nRun "loopwright digest sync --taskpack <taskpack.yaml> --repo ." to refresh the lockfile.';
       const drifted = await verifyDigestLockfile(repoRoot, manifest, '.ops');
       assert.equal(drifted.ok, false);
       if (!drifted.ok) {
         assert.equal(drifted.drifts.length, 1);
         assert.equal(drifted.drifts[0]?.status, 'drifted');
         assert.equal(drifted.drifts[0]?.path, '.ops/instructions.md');
+        assert.equal(drifted.reason.endsWith(placeholderHint), true, drifted.reason);
       }
+      await assert.rejects(
+        assertDigestLockfileVerified(repoRoot, manifest, '.ops'),
+        (err: unknown) =>
+          err instanceof TaskpackError
+          && err.code === 'TASKPACK_MANIFEST_INVALID'
+          && err.message.endsWith(placeholderHint),
+      );
+
+      // Known manifestPath (e.g. .ops/taskpack.yaml) emits exact manifestPath in remediation command
+      const manifestWithPath = validateTaskpackV2Manifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'digest-local' },
+        spec: {
+          execution: { mode: 'strict', digests: { pinDigests: true } },
+          goal: { candidate: 'Sync', noChange: 'Verify' },
+          scope: { writable: ['docs/**'], protected: [] },
+          instructions: ['.ops/instructions.md'],
+          verification: {
+            localChecks: [
+              { id: 'verify', implementation: 'command.v1', parameters: { script: '.ops/checks/verify.sh' } },
+            ],
+            externalGates: [],
+          },
+        },
+      } as Json, { controlRoot: '.ops', manifestPath: '.ops/taskpack.yaml' });
+      const explicitHint = '\nRun "loopwright digest sync --taskpack .ops/taskpack.yaml --repo ." to refresh the lockfile.';
+      const driftedWithPath = await verifyDigestLockfile(repoRoot, manifestWithPath, '.ops');
+      assert.equal(driftedWithPath.ok, false);
+      if (!driftedWithPath.ok) {
+        assert.equal(driftedWithPath.reason.endsWith(explicitHint), true, driftedWithPath.reason);
+      }
+      await assert.rejects(
+        assertDigestLockfileVerified(repoRoot, manifestWithPath, '.ops'),
+        (err: unknown) =>
+          err instanceof TaskpackError
+          && err.code === 'TASKPACK_MANIFEST_INVALID'
+          && err.message.endsWith(explicitHint),
+      );
     });
   });
 });

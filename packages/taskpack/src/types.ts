@@ -240,6 +240,8 @@ export interface TaskpackLimitsDeclaration {
   readonly contextWindow?: number | undefined;
   readonly maxOutputTokens?: number | undefined;
   readonly maxModelCalls?: number | undefined;
+  readonly maxTurns?: number | undefined;
+  readonly maxRepairTurns?: number | undefined;
   readonly maxAttempts?: number | undefined;
   readonly maxFormatRepairs?: number | undefined;
   readonly maxImplementationRepairs?: number | undefined;
@@ -525,6 +527,11 @@ export interface TaskpackSandboxDeclaration {
   readonly deniedReadPaths?: readonly string[] | undefined;
 }
 
+export interface SandboxReadOnlyBindMount {
+  readonly sourcePath: string;
+  readonly targetPath: string;
+}
+
 export interface SandboxPolicyInput {
   readonly workspaceRoot: string;
   readonly writablePaths: readonly string[];
@@ -537,6 +544,7 @@ export interface SandboxPolicyInput {
   readonly strictExactFiles?: boolean | undefined;
   readonly deniedReadPaths?: readonly string[] | undefined;
   readonly allowedReadOnlyPaths?: readonly string[] | undefined;
+  readonly readOnlyBindMounts?: readonly SandboxReadOnlyBindMount[] | undefined;
   readonly scratchDirectory?: string | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly requiredCapabilities?: readonly SandboxCapability[] | undefined;
@@ -587,6 +595,7 @@ export interface CompiledLinuxBwrapCommand {
   readonly canonicalWritablePaths: readonly string[];
   readonly canonicalProtectedPaths: readonly string[];
   readonly canonicalDeniedReadPaths: readonly string[];
+  readonly canonicalReadOnlyBindMounts: readonly SandboxReadOnlyBindMount[];
   readonly networkMode: SandboxNetworkMode;
 }
 
@@ -698,6 +707,7 @@ export interface CompiledLocalCommandGate {
   readonly allowHostEnv?: boolean | undefined;
   readonly allowHostPath?: boolean | undefined;
   readonly allowCheckNetwork?: boolean | undefined;
+  readonly networkMode?: SandboxNetworkMode | undefined;
   readonly allowPrivileged?: boolean | undefined;
 }
 
@@ -775,6 +785,10 @@ export interface CompiledTaskpack {
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly policyProfile?: PolicyProfile | undefined;
+  readonly circuitBreakerLimits?: {
+    readonly maxTurns?: number | undefined;
+    readonly maxRepairTurns?: number | undefined;
+  } | undefined;
 }
 
 // ---------------------------------------------------------------------------

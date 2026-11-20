@@ -1,8 +1,14 @@
 import { readFile, stat } from 'node:fs/promises';
-import { join, isAbsolute } from 'node:path';
+import { join, isAbsolute, resolve } from 'node:path';
+import { types } from 'node:util';
 import { validateRuntime, sameIdentity } from './policy.js';
 import { snapshot, object, freeze, id, text, digest } from './boundary.js';
-import { prepareInput } from './preflight.js';
+import {
+  finalizePreparedInputAsync,
+  parseAndValidateStructuralInput,
+  type StructuralPreparedInput,
+} from './preflight.js';
+import { composeCandidateStreamCheckers, createBuiltInPiStreamChecker } from './cas.js';
 import { PiFailure, refuse, result } from './errors.js';
 import { canonicalDirectory, RuntimeSession } from './session-host.js';
 import { Sender } from './sender.js';
@@ -49,25 +55,20 @@ async function environment(host: PiHost): Promise<void> {
   } catch { refuse('CONTAINMENT_UNAVAILABLE'); }
 }
 /** Internal dependency injection only; absent from package exports. */
-export async function constructAdapter(unownedHost: PiHost, input: unknown, ports: FactoryPorts): Promise<PiResult<PiAdapter>> {
+export async function constructAdapterFromCaptured(
+  host: PiHost,
+  prepared: StructuralPreparedInput,
+  ports: FactoryPorts,
+): Promise<PiResult<PiAdapter>> {
   return result(async () => {
-    const owned = prepareInput(input);
-    const data = object(unownedHost, ['store', 'authority', 'directory', 'artifactsDirectory', 'dockerExecutable', 'dockerSocket', 'runtime', 'resolveCredential'], '/host');
-    if (typeof data.resolveCredential !== 'function') refuse('INPUT_INVALID', '/host/resolveCredential');
-    const runtime = validateRuntime(snapshot(data.runtime), '/host/runtime');
-    if (!sameIdentity(runtime, owned.policy.runtime)) refuse('RUNTIME_MISMATCH', '/policy/runtime');
-    for (const name of ['directory', 'artifactsDirectory'] as const) if (typeof data[name] !== 'string' || (/[,\r\n]/.test(data[name]) || data[name].includes('\0'))) refuse('INPUT_INVALID', '/host/' + name);
-    const host: PiHost = { store: data.store as PiHost['store'], authority: freeze(snapshot(data.authority)) as unknown as PiHost['authority'],
-      directory: text(data.directory, '/host/directory'), artifactsDirectory: text(data.artifactsDirectory, '/host/artifactsDirectory'),
-      dockerExecutable: text(data.dockerExecutable, '/host/dockerExecutable'), dockerSocket: text(data.dockerSocket, '/host/dockerSocket'), runtime: freeze(runtime),
-      resolveCredential: (data.resolveCredential as PiHost['resolveCredential']).bind(unownedHost) };
+    const owned = await finalizePreparedInputAsync(prepared, host.artifactsDirectory);
     const viewed = host.store.inspect(); if (!viewed.ok) stateFailure(viewed.error);
     const view = viewed.value;
     if (view.runId !== owned.lock.spec.runId || !sameIdentity(view.lockHash, owned.lock.spec.lockHash) || view.binding.resourceVersion !== owned.policy.resourceVersion || !view.binding.adapters.some(item => item.id === 'pi' && item.version === '0.0.0')) refuse('BINDING_MISMATCH', '/host/store');
     if (view.counts.dispatchedRequests || view.counts.unresolvedRequests || view.counts.unresolvedOperations || view.ledger.violations.length) refuse('RECOVERY_REQUIRED', '/host/store');
     if (view.clockStatus !== 'trusted' || view.owner.mode !== 'active') refuse('RECOVERY_REQUIRED', '/host/store');
     if ((view.clock.remainingTaskMs.safeValue ?? 0) <= 0) refuse('DEADLINE', '/host/store');
-    const restored = recoverSnapshot(host, owned);
+    const restored = await recoverSnapshot(host, owned);
     if (owned.policy.mcp.names.length && !sameIdentity(digest(await readFile(new URL('./workspace-mcp.js', import.meta.url))), owned.policy.mcp.scriptDigest)) refuse('RUNTIME_MISMATCH', '/policy/mcp/scriptDigest');
     const catalog = selectedCatalog(owned); await ports.environment(host);
     const lease = await (ports.lease ? ports.lease(host, owned) : ExecutionLease.acquire(host, owned));
@@ -167,6 +168,63 @@ export async function constructAdapter(unownedHost: PiHost, input: unknown, port
         try { return freeze(await captureCheckpoint(host, owned, execution.candidate, { capture: sink => session.capture!(sink) }, checkpointId, events.sequence, guard.signal)); }
         catch (error) { if (error instanceof PiFailure && ['RECOVERY_REQUIRED', 'BINDING_MISMATCH', 'RESOURCE_MISMATCH', 'CLEANUP_FAILED', 'OUTPUT_LIMIT'].includes(error.detail.code)) { safeCapture = false; await shutdown(); } throw error; }
       }), close });
+  });
+}
+export async function constructAdapter(unownedHost: PiHost, input: unknown, ports: FactoryPorts): Promise<PiResult<PiAdapter>> {
+  return result(async () => {
+    // Capture and validate BOTH caller-owned input (including baseline) and host synchronously
+    // BEFORE the first await so neither unownedHost nor input is ever read across an async boundary.
+    const prepared = parseAndValidateStructuralInput(input);
+    if (!unownedHost || typeof unownedHost !== 'object' || types.isProxy(unownedHost)) {
+      refuse('INPUT_INVALID', '/host');
+    }
+    const hasStreamChecker = Object.hasOwn(unownedHost, 'createCandidateStreamChecker');
+    const hostFields = [
+      'store', 'authority', 'directory', 'artifactsDirectory', 'dockerExecutable', 'dockerSocket', 'runtime', 'resolveCredential',
+      ...(hasStreamChecker ? ['createCandidateStreamChecker'] : []),
+    ];
+    const data = object(unownedHost, hostFields, '/host');
+    if (typeof data.resolveCredential !== 'function') refuse('INPUT_INVALID', '/host/resolveCredential');
+    if (hasStreamChecker && data.createCandidateStreamChecker !== undefined && typeof data.createCandidateStreamChecker !== 'function') {
+      refuse('INPUT_INVALID', '/host/createCandidateStreamChecker');
+    }
+    const runtime = validateRuntime(snapshot(data.runtime), '/host/runtime');
+    if (!sameIdentity(runtime, prepared.policy.runtime)) refuse('RUNTIME_MISMATCH', '/policy/runtime');
+    for (const name of ['directory', 'artifactsDirectory'] as const) {
+      if (typeof data[name] !== 'string' || /[,\r\n\0]/.test(data[name])) {
+        refuse('INPUT_INVALID', '/host/' + name);
+      }
+    }
+    const rawDirectory = text(data.directory, '/host/directory');
+    const rawArtifactsDirectory = text(data.artifactsDirectory, '/host/artifactsDirectory');
+    if (!isAbsolute(rawArtifactsDirectory)) refuse('INPUT_INVALID', '/host/artifactsDirectory');
+    const artifactsDirectory = resolve(rawArtifactsDirectory);
+    const resolvedSecrets = new Set<string>();
+    const rawResolveCredential = (data.resolveCredential as PiHost['resolveCredential']).bind(unownedHost);
+    const wrappedResolveCredential: PiHost['resolveCredential'] = async binding => {
+      const resolved = await rawResolveCredential(binding);
+      if (resolved && typeof resolved.bearerToken === 'string' && resolved.bearerToken.length > 0) {
+        resolvedSecrets.add(resolved.bearerToken);
+      }
+      return resolved;
+    };
+    const rawStreamChecker = typeof data.createCandidateStreamChecker === 'function'
+      ? (data.createCandidateStreamChecker as NonNullable<PiHost['createCandidateStreamChecker']>).bind(unownedHost)
+      : undefined;
+    const host: PiHost = Object.freeze({
+      store: data.store as PiHost['store'],
+      authority: freeze(snapshot(data.authority)) as unknown as PiHost['authority'],
+      directory: rawDirectory,
+      artifactsDirectory,
+      dockerExecutable: text(data.dockerExecutable, '/host/dockerExecutable'),
+      dockerSocket: text(data.dockerSocket, '/host/dockerSocket'),
+      runtime: freeze(runtime),
+      resolveCredential: wrappedResolveCredential,
+      createCandidateStreamChecker: () => composeCandidateStreamCheckers(rawStreamChecker?.(), createBuiltInPiStreamChecker(resolvedSecrets)),
+    });
+    const opened = await constructAdapterFromCaptured(host, prepared, ports);
+    if (!opened.ok) throw new PiFailure(opened.error);
+    return opened.value;
   });
 }
 export function openPiAdapter(host: PiHost, input: unknown): Promise<PiResult<PiAdapter>> {

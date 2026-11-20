@@ -1,32 +1,87 @@
-import { constructAdapter, runtimePorts, type FactoryPorts } from './adapter.js';
+import { isAbsolute, resolve } from 'node:path';
+import { types } from 'node:util';
+import { constructAdapterFromCaptured, runtimePorts, type FactoryPorts } from './adapter.js';
+import { composeCandidateStreamCheckers, createBuiltInPiStreamChecker } from './cas.js';
 import { effectivePolicyV2, isHttpMcp } from './policy-v2.js';
-import { object, freeze } from './boundary.js';
+import { object, freeze, snapshot, text, type Json } from './boundary.js';
+import { sameIdentity, validateRuntime } from './policy.js';
+import { snapshotOpenInputSync, validateStructuralInputWithPolicy } from './preflight.js';
 import { HttpMcpProcess, HttpMcpFailure, type HttpMcpPorts } from './http-mcp.js';
-import { PiFailure } from './errors.js';
-import type { PiHost, PiOpenInput, PiOutcome, PiResult } from './types.js';
+import { PiFailure, refuse } from './errors.js';
+import type { PiHost, PiOutcome, PiResult } from './types.js';
 import type { PiAdapterV2, PiErrorV2, PiHostV2, PiOpenInputV2, PiOutcomeV2, PiResultV2 } from './types-v2.js';
 
 /** Internal test ports remain outside package exports. */
 export interface FactoryPortsV2 extends FactoryPorts { readonly http?: HttpMcpPorts }
 export async function constructAdapterV2(unownedHost: PiHostV2, unownedInput: unknown, ports: FactoryPortsV2): Promise<PiResultV2<PiAdapterV2>> {
   try {
-    const top = object(unownedInput, ['version', 'lock', 'roleId', 'stepId', 'sessionId', 'policy', 'candidate', 'resources', 'restore']);
-    if (top.version !== 2) throw new PiFailure({ code: 'INPUT_INVALID', path: '/version', phase: 'preflight', retryable: false, effect: 'none', requestId: null, operationId: null, stateErrorCode: null });
-    const data = object(unownedHost, ['store', 'authority', 'directory', 'artifactsDirectory', 'dockerExecutable', 'dockerSocket', 'runtime', 'resolveCredential', 'resolveMcpCredential'], '/host');
+    // Capture and snapshot ALL caller-owned input and host fields synchronously BEFORE the first await.
+    const captured = snapshotOpenInputSync(unownedInput, 2);
+    if (!unownedHost || typeof unownedHost !== 'object' || types.isProxy(unownedHost)) {
+      refuse('INPUT_INVALID', '/host');
+    }
+    const hasStreamChecker = Object.hasOwn(unownedHost, 'createCandidateStreamChecker');
+    const hostFields = [
+      'store', 'authority', 'directory', 'artifactsDirectory', 'dockerExecutable', 'dockerSocket', 'runtime', 'resolveCredential', 'resolveMcpCredential',
+      ...(hasStreamChecker ? ['createCandidateStreamChecker'] : []),
+    ];
+    const data = object(unownedHost, hostFields, '/host');
     if (typeof data.resolveMcpCredential !== 'function' || typeof data.resolveCredential !== 'function') throw new TypeError('Host callback');
-    const policy = await effectivePolicyV2(top.policy);
+    if (hasStreamChecker && data.createCandidateStreamChecker !== undefined && typeof data.createCandidateStreamChecker !== 'function') {
+      throw new TypeError('Host callback');
+    }
+    const runtime = validateRuntime(snapshot(data.runtime), '/host/runtime');
+    for (const name of ['directory', 'artifactsDirectory'] as const) {
+      if (typeof data[name] !== 'string' || /[,\r\n\0]/.test(data[name])) {
+        refuse('INPUT_INVALID', '/host/' + name);
+      }
+    }
+    const rawDirectory = text(data.directory, '/host/directory');
+    const rawArtifactsDirectory = text(data.artifactsDirectory, '/host/artifactsDirectory');
+    if (!isAbsolute(rawArtifactsDirectory)) refuse('INPUT_INVALID', '/host/artifactsDirectory');
+    const artifactsDirectory = resolve(rawArtifactsDirectory);
     let lastFailure: PiErrorV2 | null = null;
-    const host: PiHost = { store: data.store as PiHost['store'], authority: data.authority as PiHost['authority'], directory: data.directory as string,
-      artifactsDirectory: data.artifactsDirectory as string, dockerExecutable: data.dockerExecutable as string, dockerSocket: data.dockerSocket as string,
-      runtime: data.runtime as PiHost['runtime'], resolveCredential: async binding => {
-        if (lastFailure) throw new PiFailure({ ...lastFailure, code: 'MCP_FAILED' });
-        return (data.resolveCredential as PiHost['resolveCredential']).call(unownedHost, binding);
-      } };
-    const input = { ...top, version: 1, policy: policy.native } as unknown as PiOpenInput;
+    const resolvedSecrets = new Set<string>();
+    const rawResolveCredential = (data.resolveCredential as PiHost['resolveCredential']).bind(unownedHost);
+    const rawResolveMcpCredential = (data.resolveMcpCredential as PiHostV2['resolveMcpCredential']).bind(unownedHost);
+    const wrappedResolveCredential: PiHost['resolveCredential'] = async binding => {
+      if (lastFailure) throw new PiFailure({ ...lastFailure, code: 'MCP_FAILED' });
+      const resolved = await rawResolveCredential(binding);
+      if (resolved && typeof resolved.bearerToken === 'string' && resolved.bearerToken.length > 0) {
+        resolvedSecrets.add(resolved.bearerToken);
+      }
+      return resolved;
+    };
+    const wrappedResolveMcpCredential: PiHostV2['resolveMcpCredential'] = async binding => {
+      const resolved = await rawResolveMcpCredential(binding);
+      if (resolved && typeof resolved.bearerToken === 'string' && resolved.bearerToken.length > 0) {
+        resolvedSecrets.add(resolved.bearerToken);
+      }
+      return resolved;
+    };
+    const rawStreamChecker = typeof data.createCandidateStreamChecker === 'function'
+      ? (data.createCandidateStreamChecker as NonNullable<PiHost['createCandidateStreamChecker']>).bind(unownedHost)
+      : undefined;
+    const host: PiHost = Object.freeze({
+      store: data.store as PiHost['store'],
+      authority: freeze(snapshot(data.authority)) as unknown as PiHost['authority'],
+      directory: rawDirectory,
+      artifactsDirectory,
+      dockerExecutable: text(data.dockerExecutable, '/host/dockerExecutable'),
+      dockerSocket: text(data.dockerSocket, '/host/dockerSocket'),
+      runtime: freeze(runtime),
+      resolveCredential: wrappedResolveCredential,
+      createCandidateStreamChecker: () => composeCandidateStreamCheckers(rawStreamChecker?.(), createBuiltInPiStreamChecker(resolvedSecrets)),
+    });
+
+    // Neither unownedHost nor unownedInput is ever read after this point.
+    const policy = await effectivePolicyV2(captured.rawPolicy);
+    const prepared = validateStructuralInputWithPolicy(captured, policy.native as unknown as Json);
+    if (!sameIdentity(host.runtime, prepared.policy.runtime)) refuse('RUNTIME_MISMATCH', '/policy/runtime');
     const originalMcp = policy.source.mcp;
     const selected: FactoryPorts = isHttpMcp(originalMcp) ? { ...ports, mcp: (owner, value) => ({ process: () => new HttpMcpProcess(owner, value, originalMcp,
-      (data.resolveMcpCredential as PiHostV2['resolveMcpCredential']).bind(unownedHost), error => { lastFailure ??= error; }, ports.http) }) } : ports;
-    const opened = await constructAdapter(host, input, selected);
+      wrappedResolveMcpCredential, error => { lastFailure ??= error; }, ports.http) }) } : ports;
+    const opened = await constructAdapterFromCaptured(host, prepared, selected);
     if (!opened.ok) return { ok: false, error: lastFailure ?? opened.error };
     const adapter = opened.value;
     if (lastFailure) { const closed = await adapter.close(); return { ok: false, error: closed.ok ? lastFailure : closed.error }; }

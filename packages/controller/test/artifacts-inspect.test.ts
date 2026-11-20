@@ -44,7 +44,7 @@ test('artifacts: unavailable run remains unknown without creating state or an ou
   assert.equal(await lstat(f.runRoot).then(() => true, () => false), false); assert.equal(await lstat(join(f.root, 'absent-export')).then(() => true, () => false), false);
 });
 test('artifacts: byte caps and symlink destinations refuse rather than truncate or overwrite', async () => {
-  const bundle = new PublicBundle('bundle', hash('lock')); assert.throws(() => bundle.add('large', Buffer.alloc(16_777_217)));
+  const bundle = new PublicBundle('bundle', hash('lock')); assert.throws(() => bundle.add('large', Buffer.alloc(33_554_433)));
   bundle.add('one', Buffer.from('one'));
   const f = await cycleFixture(true); await symlink(f.root, join(f.root, 'link'));
   await assert.rejects(bundle.write(join(f.root, 'link', 'export'), join(f.root, 'private')));
