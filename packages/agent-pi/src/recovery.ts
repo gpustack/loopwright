@@ -76,6 +76,9 @@ async function verifySnapshot(host: PiHost, input: PiOpenInput): Promise<{ nativ
           refuse('RESOURCE_MISMATCH');
         }
       }
+      if (!/^[0-9a-f]{64}$/.test(ref.digest.hex)) {
+        refuse('RECOVERY_REQUIRED', '/restore/workspace');
+      }
       if (verifiedSha256Dir === null) {
         verifiedSha256Dir = await verifyCasSha256DirAsync(host.artifactsDirectory, '/restore/workspace');
       }

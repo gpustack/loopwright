@@ -154,7 +154,7 @@ export async function fsyncDir(dirPath: string): Promise<void> {
   }
 }
 
-function checkOwnerAndMode(uid: number, mode: number, forbiddenBits: number): boolean {
+export function checkOwnerAndMode(uid: number, mode: number, forbiddenBits: number): boolean {
   const currentUid = process.getuid?.();
   if (currentUid !== undefined && uid !== currentUid) return false;
   return (mode & forbiddenBits) === 0;
@@ -304,7 +304,7 @@ export function verifyRegularFileSync(filePath: string, options: VerifyFileSyncO
       || before.nlink !== 1
       || before.dev !== linfo.dev
       || before.ino !== linfo.ino
-      || (options.requireReadOnly && (before.mode & 0o222) !== 0)
+      || !checkOwnerAndMode(before.uid, options.requireReadOnly ? before.mode : 0, options.requireReadOnly ? 0o222 : 0)
     ) {
       refuse(options.structuralCode, options.errorPath);
     }
@@ -387,7 +387,7 @@ export async function verifyRegularFileAsync(
       || before.nlink !== 1
       || before.dev !== linfo.dev
       || before.ino !== linfo.ino
-      || (options.requireReadOnly && (before.mode & 0o222) !== 0)
+      || !checkOwnerAndMode(before.uid, options.requireReadOnly ? before.mode : 0, options.requireReadOnly ? 0o222 : 0)
     ) {
       refuse(options.structuralCode, options.errorPath);
     }
@@ -504,7 +504,7 @@ export async function verifyCasBlobAsync(
   } catch {
     refuse('RECOVERY_REQUIRED', errorPath, { phase: 'restore' });
   }
-  if (linfo.isSymbolicLink() || !linfo.isFile() || linfo.nlink !== 1 || (linfo.mode & 0o222) !== 0) {
+  if (linfo.isSymbolicLink() || !linfo.isFile() || linfo.nlink !== 1 || !checkOwnerAndMode(linfo.uid, linfo.mode, 0o222)) {
     refuse('RECOVERY_REQUIRED', errorPath, { phase: 'restore' });
   }
   if (linfo.size !== expected.byteLength) {
@@ -522,7 +522,7 @@ export async function verifyCasBlobAsync(
     if (
       !before.isFile()
       || before.nlink !== 1
-      || (before.mode & 0o222) !== 0
+      || !checkOwnerAndMode(before.uid, before.mode, 0o222)
       || before.dev !== linfo.dev
       || before.ino !== linfo.ino
     ) {
@@ -698,7 +698,7 @@ export async function publishCandidateFileToCas(
           collectBytes: false,
           streamChecker: wrappedChecker,
         });
-      } catch (error) {
+      } catch {
         if (!dedupCheckerFinished) {
           try {
             dedupChecker.finish();
@@ -707,7 +707,6 @@ export async function publishCandidateFileToCas(
           }
         }
         if (dedupCheckerError !== null) throw dedupCheckerError;
-        if (error instanceof PiFailure) refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
         refuse('RECOVERY_REQUIRED', '', { phase: 'restore' });
       }
     }

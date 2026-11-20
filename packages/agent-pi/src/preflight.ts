@@ -5,7 +5,7 @@ import { types } from 'node:util';
 import { LIMITS, OVERLAY_LIMITS, validateDocument, digestArtifact, digestArtifactFromMetadata } from '@loopwright/core';
 import { canonical, freeze, id, integer, list, object, snapshot, text, type SnapshotBounds } from './boundary.js';
 import { gitBlobOid, resolveCandidateOverlayLimits } from './candidate.js';
-import { RAW_AGGREGATE_MAX_BYTES, RAW_ARTIFACT_MAX_BYTES, verifyRegularFileAsync, verifyRegularFileSync } from './cas.js';
+import { checkOwnerAndMode, RAW_AGGREGATE_MAX_BYTES, RAW_ARTIFACT_MAX_BYTES, verifyRegularFileAsync, verifyRegularFileSync } from './cas.js';
 import { PiFailure, refuse } from './errors.js';
 import { sameIdentity, validateDigest, validatePolicy } from './policy.js';
 import { PREAMBLE_IDENTITY, decodePromptResourceUtf8, systemPrompt } from './resources.js';
@@ -207,7 +207,7 @@ function resolveAuthoritativeCasSha256DirSync(hostArtifactsDirectory: string): s
     }
     rootCanonical = realpathSync(hostArtifactsDirectory);
     const canonicalStat = lstatSync(rootCanonical);
-    if (!canonicalStat.isDirectory() || canonicalStat.isSymbolicLink()) {
+    if (!canonicalStat.isDirectory() || canonicalStat.isSymbolicLink() || !checkOwnerAndMode(canonicalStat.uid, canonicalStat.mode, 0o022)) {
       refuse('CONTAINMENT_UNAVAILABLE', '/host/artifactsDirectory');
     }
   } catch (error) {
@@ -223,7 +223,7 @@ function resolveAuthoritativeCasSha256DirSync(hostArtifactsDirectory: string): s
     } catch {
       refuse('RESOURCE_MISMATCH', '/candidate/artifacts/blobPath');
     }
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || !checkOwnerAndMode(dirStat.uid, dirStat.mode, 0o077)) {
       refuse('RESOURCE_MISMATCH', '/candidate/artifacts/blobPath');
     }
   }
@@ -242,7 +242,7 @@ async function resolveAuthoritativeCasSha256DirAsync(hostArtifactsDirectory: str
     }
     rootCanonical = await realpath(hostArtifactsDirectory);
     const canonicalStat = await lstat(rootCanonical);
-    if (!canonicalStat.isDirectory() || canonicalStat.isSymbolicLink()) {
+    if (!canonicalStat.isDirectory() || canonicalStat.isSymbolicLink() || !checkOwnerAndMode(canonicalStat.uid, canonicalStat.mode, 0o022)) {
       refuse('CONTAINMENT_UNAVAILABLE', '/host/artifactsDirectory');
     }
   } catch (error) {
@@ -258,7 +258,7 @@ async function resolveAuthoritativeCasSha256DirAsync(hostArtifactsDirectory: str
     } catch {
       refuse('RESOURCE_MISMATCH', '/candidate/artifacts/blobPath');
     }
-    if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) {
+    if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || !checkOwnerAndMode(dirStat.uid, dirStat.mode, 0o077)) {
       refuse('RESOURCE_MISMATCH', '/candidate/artifacts/blobPath');
     }
   }
