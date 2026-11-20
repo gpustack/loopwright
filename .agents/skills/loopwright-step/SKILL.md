@@ -170,9 +170,10 @@ for (const file of files) {
   if (isV2) {
     if (!/^[0-9a-f]{64}$/.test(file.sha256) || file.uri !== `cas://sha256/${file.sha256}`) throw new Error(`Invalid CAS ref: ${file.name}`);
     if (!Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || typeof file.blobPath !== "string" || !path.isAbsolute(file.blobPath)) throw new Error(`Invalid blobPath: ${file.name}`);
+    if (file.mode !== "100644" && file.mode !== "100755") throw new Error(`Invalid mode: ${file.name}`);
     if (streamHash(file.blobPath, file.byteLength, null) !== file.sha256) throw new Error(`Digest mismatch: ${file.name}`);
   } else if (file.encoding !== "base64" || typeof file.body !== "string") {
-    throw new Error(`Unsupported encoding: ${file.encoding}`);
+    throw new Error(`Invalid v1 bundle entry: ${file.name}`);
   }
 }
 for (const del of deleted) {
