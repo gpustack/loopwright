@@ -3227,6 +3227,7 @@ export interface BuildCommandScriptInvocationOptions {
   readonly linuxBwrapExecutable?: string | null | undefined;
   readonly linuxPythonExecutable?: string | null | undefined;
   readonly linuxSeccompAvailable?: boolean | undefined;
+  readonly allowDedicatedRunnerLoopbackFallback?: boolean | undefined;
   readonly darwinSeatbeltAvailable?: boolean | undefined;
   readonly darwinSeatbeltHelperSocketPath?: string | undefined;
 }
@@ -3521,7 +3522,7 @@ export function buildCommandScriptInvocation(
           'command.v1 readOnlyGitObjectsBind requires Linux bwrap mount namespaces',
         );
       }
-      if (networkMode === 'loopback-only') {
+      if (networkMode === 'loopback-only' && options?.allowDedicatedRunnerLoopbackFallback !== true) {
         throw new TaskpackError(
           'SANDBOX_BACKEND_UNAVAILABLE',
           'command.v1 networkMode "loopback-only" on Linux requires bwrap network namespaces',
@@ -3560,6 +3561,7 @@ export function buildCommandScriptInvocation(
       const landlockDenied = sortPathsShortestFirst([...canonicalDenied, ...homeDeniedSet]).filter(
         dp => !explicitReopenSet.has(dp),
       );
+      const landlockNetMode: SandboxNetworkMode = networkMode === 'loopback-only' ? 'allow-outbound' : networkMode;
       const landlockConfig = JSON.stringify({
         workspaceRoot: canonicalCwd ?? '/',
         positiveReadRoots: [...LINUX_COMMAND_POSITIVE_READ_ROOTS],
@@ -3568,7 +3570,7 @@ export function buildCommandScriptInvocation(
         protectedPaths: [],
         deniedReadPaths: [...landlockDenied],
         allowedReadOnlyPaths: [...landlockRo],
-        networkMode,
+        networkMode: landlockNetMode,
         ...(blockIpSockets ? { blockIpSockets: true } : {}),
         ...(canonicalCwd !== undefined ? { cwd: canonicalCwd } : {}),
       });
@@ -3841,6 +3843,7 @@ interface RunCommandScriptOptions {
   readonly writablePaths: readonly string[];
   readonly deniedReadPaths: readonly string[];
   readonly allowedReadOnlyPaths: readonly string[];
+  readonly allowDedicatedRunnerLoopbackFallback?: boolean | undefined;
   readonly darwinSeatbeltHelperSocketPath?: string | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly registerKiller?: ((kill: () => void) => () => void) | undefined;
@@ -4551,12 +4554,16 @@ async function runCommandScript(
     writablePaths: options.writablePaths,
     deniedReadPaths: options.deniedReadPaths,
     allowedReadOnlyPaths: options.allowedReadOnlyPaths,
+    allowDedicatedRunnerLoopbackFallback: options.allowDedicatedRunnerLoopbackFallback,
     darwinSeatbeltHelperSocketPath: options.darwinSeatbeltHelperSocketPath,
     cwd,
     env,
     requireFilesystemContainment: true,
   });
-  if (effectiveNetworkMode !== 'allow-outbound' && !invocation.networkIsolated) {
+  const dedicatedLoopbackPermitted = effectiveNetworkMode === 'loopback-only'
+    && options.allowDedicatedRunnerLoopbackFallback === true
+    && invocation.filesystemIsolated;
+  if (effectiveNetworkMode !== 'allow-outbound' && !invocation.networkIsolated && !dedicatedLoopbackPermitted) {
     throw new TaskpackError(
       'SANDBOX_BACKEND_UNAVAILABLE',
       `command.v1 network isolation ("${effectiveNetworkMode}") is unavailable on ${process.platform}`,
@@ -5407,6 +5414,9 @@ export async function startLocalCommandGateServer(
               writablePaths,
               deniedReadPaths: [...deniedReadPathSet],
               allowedReadOnlyPaths,
+              allowDedicatedRunnerLoopbackFallback:
+                options.runtimeEnv?.['GITHUB_ACTIONS'] === 'true'
+                && options.runtimeEnv?.['RUNNER_ENVIRONMENT'] === 'github-hosted',
               darwinSeatbeltHelperSocketPath: macosSbHelper?.socketPath,
               signal: closeController.signal,
               onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),

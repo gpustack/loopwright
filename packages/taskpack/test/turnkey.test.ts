@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
@@ -805,6 +806,19 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         (err: unknown) => err instanceof TaskpackError && err.code === 'SANDBOX_BACKEND_UNAVAILABLE',
       );
 
+      const dedicatedLoopback = buildCommandScriptInvocation('/work/check-dir/check.sh', {
+        platform: 'linux',
+        arch: 'x64',
+        linuxBwrapExecutable: null,
+        linuxPythonExecutable: '/usr/bin/python3',
+        linuxSeccompAvailable: true,
+        networkMode: 'loopback-only',
+        allowDedicatedRunnerLoopbackFallback: true,
+        writablePaths: ['/work/out'],
+      });
+      assert.equal(dedicatedLoopback.command, '/usr/bin/python3');
+      assert.equal(dedicatedLoopback.filesystemIsolated, true);
+      assert.equal(dedicatedLoopback.networkIsolated, false);
       assert.throws(
         () => buildCommandScriptInvocation('/work/check-dir/check.sh', {
           platform: 'linux',
@@ -1480,6 +1494,14 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
           ].join('\n') + '\n',
           { mode: 0o755 },
         );
+        const canEnforceLoopbackNetns = process.platform === 'darwin'
+          || (
+            process.platform === 'linux'
+            && ['/usr/bin/bwrap', '/bin/bwrap', '/usr/local/bin/bwrap'].some(
+              candidate => existsSync(candidate)
+                && spawnSync(candidate, ['--unshare-pid', '--unshare-net', '--ro-bind', '/', '/', '--', '/bin/true'], { stdio: 'ignore' }).status === 0,
+            )
+          );
         await writeFile(
           join(repoRoot, '.loopwright', 'taskpack.yaml'),
           serializePrettyYaml({
@@ -1502,7 +1524,7 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
                     parameters: {
                       script: '.loopwright/checks/contain-check.sh',
                       timeoutSeconds: 20,
-                      networkMode: 'loopback-only',
+                      networkMode: canEnforceLoopbackNetns ? 'loopback-only' : 'none',
                       env: ['REPO_ROOT_PATH', 'AGENT_WS_FILE', 'UNGRANTED_HOME_FILE', 'LOOPBACK_PROBE_PORT'],
                     },
                   },
