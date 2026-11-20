@@ -3149,12 +3149,13 @@ function canonicalizeCommandContainmentPath(rawPath: string, label: string): str
     if (existsSync(cursor)) {
       try {
         const realBase = realpathSync(cursor);
-        const joined = suffixSegments.length === 0 ? realBase : join(realBase, ...suffixSegments.reverse());
+        const joined = suffixSegments.length === 0 ? realBase : join(realBase, ...[...suffixSegments].reverse());
         if (/[\0\r\n"\\]/.test(joined)) {
           throw new TaskpackError('SANDBOX_POLICY_INVALID', `${label} resolved to forbidden characters`, label);
         }
         return joined;
-      } catch {
+      } catch (error) {
+        if (error instanceof TaskpackError) throw error;
         // Fall through to parent if cursor is a broken symlink.
       }
     }
