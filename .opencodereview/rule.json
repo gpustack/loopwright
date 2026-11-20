@@ -50,6 +50,11 @@
       "rule": "Flag violations of three-zone routing and non-delegable authority; cite concrete scenarios and preserve package boundaries."
     },
     {
+      "path": "packages/taskpack/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of policy profile isolation, CAS blob verification, sandbox bounds and secret containment; cite concrete scenarios and preserve package boundaries."
+    },
+    {
       "path": "packages/github-app/**/*.ts",
       "merge_system_rule": true,
       "rule": "Flag violations of tenant isolation, webhook authentication and token scrubbing; cite concrete scenarios and preserve package boundaries."

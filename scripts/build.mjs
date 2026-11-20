@@ -19,6 +19,7 @@ const PACKAGES = [
   'taskpack-runner',
   'memory',
   'decisions',
+  'taskpack',
   'github-app',
   'cli',
 ];
@@ -175,7 +176,7 @@ if (ensureOnly && !inputsChanged && missingPackages.length === 0 && tscExtraArgs
 await new Promise((resolvePromise, rejectPromise) => {
   const child = spawn(
     process.execPath,
-    [TSC_BIN, '-b', join('packages', 'cli', 'tsconfig.json'), ...tscExtraArgs],
+    [TSC_BIN, '-b', join('packages', 'cli', 'tsconfig.json'), join('packages', 'taskpack', 'tsconfig.json'), ...tscExtraArgs],
     {
       cwd: REPO_ROOT,
       stdio: 'inherit',

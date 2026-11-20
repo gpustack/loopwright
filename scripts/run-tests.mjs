@@ -20,6 +20,7 @@ const PACKAGES = [
   'taskpack-runner',
   'memory',
   'decisions',
+  'taskpack',
   'github-app',
 ];
 
