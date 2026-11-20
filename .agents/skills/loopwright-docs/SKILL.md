@@ -80,8 +80,9 @@ npm run site                           # Build Hugo site, export Markdown/llms.t
 1. **`specs/` are engineering records, never user docs**:
    - Design rationale, rejected alternatives, benchmark methodology, and historical task breakdowns belong in `specs/`.
    - Never rewrite files under `specs/` as user documentation, and never copy raw specification walls of text into `docs/`. User guides state the active operational contract and link to `specs/` only from `docs/README.md` or contributor guides when needed.
-2. **Public site (`13` pages) vs. repository-only `Contribute` (`12` pages)**:
+2. **Public site (`13` pages) vs. repository-only `Contribute` (`12` pages) vs. static `llms.txt` references**:
    - `docs/development.md` and `docs/contribute/**/*.md` (including `docs/contribute/adr/*.md`) remain in repository `docs/` (and in `docs/README.md`) for contributors and coding agents, but are excluded from `site/` (`site/hugo.toml`, `site/data/navigation.yaml`, `site/public/llms.txt`).
+   - `docs/references/bootstrap-interview.md` is excluded from HTML site navigation (`site/data/navigation.yaml` stays at `13` public HTML pages across `4` groups) and exported as static Markdown at `/references/bootstrap-interview.md` alongside `llms.txt` (`scripts/site.mjs` rewrites its relative `docs/` links).
    - **Hard link boundary**: None of the 13 public `docs/` pages may link to `development.md` or `contribute/**` (directly or via relative path), because those targets do not exist on the published Hugo site. Repository-only pages may link to each other and to any public page.
 3. **Keep the front door small (`docs/getting-started/architecture.md <= 200` lines)**:
    - `docs/getting-started/architecture.md` introduces Loopwright's four-stage execution chain (**1. Admit**, **2. Execute**, **3. Verify**, **4. Publish & Remember**), the `architecture-flow.svg` diagram with its hidden Mermaid comment, core vocabulary, and links to deep public configuration pages.

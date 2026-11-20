@@ -8,6 +8,7 @@ Loopwright maintains **25** Markdown pages under `docs/` (plus the index `docs/R
 
 - **13 Public Pages (`Site Published: yes`)**: Built into the Hugo static site (`site/public/`) across 4 clean groups (`Getting Started`, `Operations`, `Walkthroughs`, `Configuration`), listed in `site/data/navigation.yaml`, and exported to `site/public/llms.txt`.
 - **12 Repository-Only Pages (`Site Published: no (repo-only)`)**: `docs/development.md`, `docs/contribute/{internals,identity,evidence,state,pi-adapter,runner-taskpack,memory,github-app-internals,closure-matrix}.md`, and `docs/contribute/adr/{0001-local-state-authority,0002-isolated-pi-sdk}.md` remain in repository `docs/` and in `docs/README.md` (`## All pages`) for repository contributors and coding agents, but are excluded from `site/hugo.toml`, `site/data/navigation.yaml`, and `site/public/llms.txt`.
+- **Static `llms.txt` Reference (`Site Published: static Markdown`)**: `docs/references/bootstrap-interview.md` is excluded from HTML site navigation (`site/data/navigation.yaml`) and exported directly to `/references/bootstrap-interview.md` alongside `llms.txt` with rewritten Markdown export links.
 - **Hard Link Boundary**: None of the 13 public pages may link to `development.md` or `contribute/**`.
 
 ## Canonical 25-Page Inventory

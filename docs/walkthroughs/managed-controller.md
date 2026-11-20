@@ -47,10 +47,10 @@ Managed controller mode coordinates an operator-owned authority store (`TrustedR
 
 ## Prompt bootstrap
 
-`loopwright init` writes generic `REVIEW_REQUIRED` placeholders. To assemble tailored `registry.yaml` and `controller.yaml` files interactively without looking up digests by hand, paste this prompt into your local coding agent:
+`loopwright init` writes generic `REVIEW_REQUIRED` placeholders. To assemble tailored `registry.yaml` and `controller.yaml` files through an interview-first workflow without looking up digests by hand, paste this prompt into your local coding agent:
 
 ```text
-Read https://docs.gpustack.ai/loopwright/llms.txt and fetch the Markdown guides for Managed Controller, Task Contract, and Controller and Registry. Inspect this target repository, confirm my writable/protected scope, budgets, and required checks, compute the installed Loopwright handler and graph SHA-256 digests on this machine, write out-of-repo registry.yaml and controller.yaml, and validate them with loopwright check.
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.
 ```
 
 ## Step 1: Generate drafts

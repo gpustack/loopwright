@@ -23,9 +23,20 @@ describe('gh-pages multi-version site archive (gpustack/mike alignment)', () => 
           gitSha: 'abcdef0',
         }), 'utf8');
         await writeFile(join(dir, 'llms.txt'), `# Loopwright (${ver})\n`, 'utf8');
+        await mkdir(join(dir, 'references'), { recursive: true });
+        await writeFile(
+          join(dir, 'references', 'bootstrap-interview.md'),
+          `# Ref (${ver})\n\nSee [Taskpack](../docs/configuration/taskpack/index.md).\n`,
+          'utf8',
+        );
       }
-      await mkdir(join(ghPagesDir, 'latest'), { recursive: true });
+      await mkdir(join(ghPagesDir, 'latest', 'references'), { recursive: true });
       await writeFile(join(ghPagesDir, 'latest', 'llms.txt'), '# Loopwright (0.2)\n', 'utf8');
+      await writeFile(
+        join(ghPagesDir, 'latest', 'references', 'bootstrap-interview.md'),
+        '# Ref (0.2)\n\nSee [Taskpack](../docs/configuration/taskpack/index.md).\n',
+        'utf8',
+      );
 
       await execFileAsync(process.execPath, [join(repoRoot, 'scripts', 'site.mjs'), 'sync-gh-pages', ghPagesDir]);
 
@@ -43,6 +54,15 @@ describe('gh-pages multi-version site archive (gpustack/mike alignment)', () => 
       assert.match(indexHtml, /window\.location\.replace\(\s*"latest\/"/);
       const llmsTxt = await readFile(join(ghPagesDir, 'llms.txt'), 'utf8');
       assert.equal(llmsTxt, '# Loopwright (0.2)\n');
+      const refMd = await readFile(join(ghPagesDir, 'references', 'bootstrap-interview.md'), 'utf8');
+      assert.equal(refMd, '# Ref (0.2)\n\nSee [Taskpack](../latest/docs/configuration/taskpack/index.md).\n');
+
+      // Fallback when latest/ is absent: falls back to highest release version (0.2)
+      await rm(join(ghPagesDir, 'latest'), { recursive: true, force: true });
+      await rm(join(ghPagesDir, 'references'), { recursive: true, force: true });
+      await execFileAsync(process.execPath, [join(repoRoot, 'scripts', 'site.mjs'), 'sync-gh-pages', ghPagesDir]);
+      const fallbackRefMd = await readFile(join(ghPagesDir, 'references', 'bootstrap-interview.md'), 'utf8');
+      assert.equal(fallbackRefMd, '# Ref (0.2)\n\nSee [Taskpack](../0.2/docs/configuration/taskpack/index.md).\n');
       const nojekyll = await readFile(join(ghPagesDir, '.nojekyll'), 'utf8');
       assert.equal(nojekyll, '');
     } finally {

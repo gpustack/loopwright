@@ -7,6 +7,7 @@
 - [Managed Controller](walkthroughs/managed-controller.md), [Task Contract](configuration/task-contract.md), and [Controller and Registry](configuration/controller-and-registry.md)
 - [GitHub App](operations/github-app.md), [CLI](operations/cli.md), and [Coding Agents](operations/coding-agents.md)
 - [Sandbox Backends](configuration/sandbox-backends.md) and [Decision Routing](configuration/decision-routing.md)
+- [Bootstrap Interview Reference](references/bootstrap-interview.md) for interactive agent onboarding
 - [Development](development.md) and [Internals](contribute/internals.md)
 
 ## Module map

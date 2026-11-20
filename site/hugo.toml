@@ -65,10 +65,13 @@ defaultContentLanguageInSubdir = false
   [[module.mounts]]
     source = "../docs"
     target = "content/docs"
-    excludeFiles = ["README.md", "assets/**", "development.md", "contribute/**"]
+    excludeFiles = ["README.md", "assets/**", "development.md", "contribute/**", "references/**"]
   [[module.mounts]]
     source = "../docs/assets"
     target = "static/docs/assets"
+  [[module.mounts]]
+    source = "../docs/references"
+    target = "static/references"
   [[module.mounts]]
     source = "layouts"
     target = "layouts"
