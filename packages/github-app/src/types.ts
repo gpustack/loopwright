@@ -224,6 +224,8 @@ export interface TaskpackLimitsDeclaration {
   readonly contextWindow?: number | undefined;
   readonly maxOutputTokens?: number | undefined;
   readonly maxModelCalls?: number | undefined;
+  readonly maxTurns?: number | undefined;
+  readonly maxRepairTurns?: number | undefined;
   readonly maxAttempts?: number | undefined;
   readonly maxFormatRepairs?: number | undefined;
   readonly maxImplementationRepairs?: number | undefined;
@@ -782,6 +784,10 @@ export interface CompiledTaskpack {
   readonly digests?: Readonly<Record<string, string>> | undefined;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly circuitBreakerLimits?: {
+    readonly maxTurns?: number | undefined;
+    readonly maxRepairTurns?: number | undefined;
+  } | undefined;
 }
 
 // ---------------------------------------------------------------------------

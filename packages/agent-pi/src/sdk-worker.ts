@@ -320,7 +320,7 @@ export function runSdkWorker(nonce: string, options: { customTools?: ToolDefinit
       const model = runtime.getModel(value.selection.provider, value.selection.model);
       if (!model || model.api !== value.selection.api) { await channel.send('refused', { code: 'MODEL_UNAVAILABLE' }); return; }
       const compiled = await compileTrustedFactories([{ name: 'loopwright-authorization', factory: authorization }, ...(value.toolNames.includes('codemode') || value.mcp.names.length ? nativeMcpFactories({ tools: value.toolNames, mcp: value.mcp }, mcp) : [])], value.systemPrompt);
-      const customTools = options.customTools ?? bridgedTools(value.toolNames, executeTool, value.externalMcpTools ?? []);
+      const customTools = options.customTools ?? bridgedTools(value.toolNames, executeTool, value.externalMcpTools ?? [], { isHostSession });
       const created = await createAgentSession({ cwd: '/workspace/candidate', agentDir: directory, modelRuntime: runtime, model, thinkingLevel: value.selection.thinking as never, tools: options.customTools ? customTools.map(tool => tool.name) : value.toolNames, customTools,
         resourceLoader: compiled.loader, settingsManager: compiled.settings, sessionManager: SessionManager.inMemory('/workspace/candidate', undefined, restoredEntries ?? undefined) });
       session = created.session; safeSnapshot = restoredEntries !== null; restoredEntries = null;

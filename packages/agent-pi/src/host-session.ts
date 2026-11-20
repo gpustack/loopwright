@@ -20,6 +20,11 @@ import type { ContainerExit } from './containers.js';
 import { parseBoundedJson } from './context.js';
 import { scheduleDeadline } from './deadline.js';
 import { PiFailure, refuse } from './errors.js';
+import {
+  DEFAULT_MAX_DISPATCH_TURNS,
+  DEFAULT_MAX_REPAIR_DISPATCH_TURNS,
+  deriveDefaultCircuitBreakerLimits,
+} from './circuit-breaker-limits.js';
 import { summarizeToolProgressArgs } from './progress-summary.js';
 import { Execution, type AdmittedToolIdentity, type ExecutionPorts } from './execution.js';
 import { verifyNativeCompletion } from './lifecycle.js';
@@ -108,10 +113,9 @@ export interface OpenPiHostSessionOptions {
   readonly scrub?: ((text: string) => string) | undefined;
 }
 
-const DEFAULT_MAX_DISPATCH_TURNS = 40;
-const DEFAULT_MAX_REPAIR_DISPATCH_TURNS = 20;
 const DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS = 8;
 const DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS = 10;
+const CONVERGENCE_WARNING_TURNS = 3;
 const SUMMARY_MAX_ARGS_BYTES = 65536;
 const MUTATING_TOOLS = new Set(['write', 'edit', 'delete']);
 const MUTATING_MCP_VERBS = new Set([
@@ -145,6 +149,8 @@ function resolveBreakerLimit(value: number | undefined, fallback: number, path: 
 }
 
 class HostSessionCircuitBreaker {
+  #explicitMaxTurns: number | undefined = undefined;
+  #explicitMaxRepairTurns: number | undefined = undefined;
   #maxTurns = DEFAULT_MAX_DISPATCH_TURNS;
   #maxRepairTurns = DEFAULT_MAX_REPAIR_DISPATCH_TURNS;
   #maxConsecutiveErrorTurns = DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS;
@@ -158,11 +164,18 @@ class HostSessionCircuitBreaker {
   #turnToolCount = 0;
   #turnToolErrorCount = 0;
   #turnSucceededMutation = false;
+  #lastWarnedTurn = 0;
   #tripped: CircuitBreakerTrip | null = null;
 
   configure(options?: HostSessionCircuitBreakerOptions): void {
-    this.#maxTurns = resolveBreakerLimit(options?.maxTurns, DEFAULT_MAX_DISPATCH_TURNS, '/circuitBreaker/maxTurns');
-    this.#maxRepairTurns = resolveBreakerLimit(options?.maxRepairTurns, DEFAULT_MAX_REPAIR_DISPATCH_TURNS, '/circuitBreaker/maxRepairTurns');
+    this.#explicitMaxTurns = options?.maxTurns === undefined
+      ? undefined
+      : resolveBreakerLimit(options.maxTurns, DEFAULT_MAX_DISPATCH_TURNS, '/circuitBreaker/maxTurns');
+    this.#explicitMaxRepairTurns = options?.maxRepairTurns === undefined
+      ? undefined
+      : resolveBreakerLimit(options.maxRepairTurns, DEFAULT_MAX_REPAIR_DISPATCH_TURNS, '/circuitBreaker/maxRepairTurns');
+    this.#maxTurns = this.#explicitMaxTurns ?? DEFAULT_MAX_DISPATCH_TURNS;
+    this.#maxRepairTurns = this.#explicitMaxRepairTurns ?? DEFAULT_MAX_REPAIR_DISPATCH_TURNS;
     this.#maxConsecutiveErrorTurns = resolveBreakerLimit(
       options?.maxConsecutiveErrorTurns,
       DEFAULT_MAX_CONSECUTIVE_ERROR_TURNS,
@@ -173,6 +186,19 @@ class HostSessionCircuitBreaker {
       DEFAULT_MAX_REPAIR_NO_PROGRESS_TURNS,
       '/circuitBreaker/maxRepairNoProgressTurns',
     );
+  }
+
+  bindBudgets(
+    budgets: { readonly maxModelCalls: number; readonly maxImplementationRepairs: number },
+    policyRequests: number,
+  ): void {
+    const derived = deriveDefaultCircuitBreakerLimits(budgets, policyRequests);
+    if (this.#explicitMaxTurns === undefined) {
+      this.#maxTurns = derived.maxTurns;
+    }
+    if (this.#explicitMaxRepairTurns === undefined) {
+      this.#maxRepairTurns = derived.maxRepairTurns;
+    }
   }
 
   get tripped(): CircuitBreakerTrip | null {
@@ -189,6 +215,7 @@ class HostSessionCircuitBreaker {
     this.#turnToolCount = 0;
     this.#turnToolErrorCount = 0;
     this.#turnSucceededMutation = false;
+    this.#lastWarnedTurn = 0;
     this.#tripped = null;
   }
 
@@ -206,6 +233,32 @@ class HostSessionCircuitBreaker {
     } else if (MUTATING_TOOLS.has(toolName) || isMutatingExternalMcpTool(toolName)) {
       this.#turnSucceededMutation = true;
     }
+  }
+
+  convergenceWarning(): string | null {
+    if (!this.#active || this.#tripped !== null || this.#completedTurns <= 0) return null;
+    if (this.#lastWarnedTurn === this.#completedTurns) return null;
+
+    const turnLimit = this.#repair === 'implementation' ? this.#maxRepairTurns : this.#maxTurns;
+    const repairSuffix = this.#repair === 'implementation' ? ', repair=implementation' : '';
+    const remaining = turnLimit - this.#completedTurns;
+    if (turnLimit >= 2 && remaining >= 1 && remaining <= CONVERGENCE_WARNING_TURNS) {
+      this.#lastWarnedTurn = this.#completedTurns;
+      if (remaining === 1) {
+        return `[loopwright budget notice: 1 turn remaining in this dispatch (turn ${this.#completedTurns}/${turnLimit}${repairSuffix}). Your next assistant response is the FINAL turn: do NOT issue any more tool calls; emit only your final structured submission JSON now so your workspace changes are captured and verified.]`;
+      }
+      return `[loopwright budget notice: ${remaining} turns remaining in this dispatch (turn ${this.#completedTurns}/${turnLimit}${repairSuffix}). Stop further exploration, finalize deterministic edits or mark blocked, and prepare your final structured submission JSON.]`;
+    }
+
+    if (this.#repair === 'implementation' && !this.#turnSucceededMutation && this.#maxRepairNoProgressTurns >= 2) {
+      const projectedNoMutation = this.#consecutiveNoMutationTurns + 1;
+      if (this.#maxRepairNoProgressTurns - projectedNoMutation === 1) {
+        this.#lastWarnedTurn = this.#completedTurns;
+        return `[loopwright budget notice: 1 implementation-repair turn remaining before no-progress stop (${projectedNoMutation}/${this.#maxRepairNoProgressTurns} turns without a successful write/edit/delete). Apply a concrete fix or emit your final structured submission JSON now.]`;
+      }
+    }
+
+    return null;
   }
 
   onBeforeInvoke(): CircuitBreakerTrip | null {
@@ -1365,6 +1418,7 @@ class HostExecution extends Execution {
     readonly onProgress?: ((event: HostSessionProgressEvent) => void) | undefined,
     readonly onToolEnd?: ((name: string, isError: boolean) => void) | undefined,
     readonly onScrub?: ((text: string) => string) | undefined,
+    readonly getConvergenceWarning?: (() => string | null) | undefined,
   ) {
     super(host, input, candidateDir, { ...ports, softScopeErrors: true, softArgumentErrors: true });
   }
@@ -1422,6 +1476,20 @@ class HostExecution extends Execution {
           elapsedMs: Math.max(1, Math.round(performance.now() - started)),
           ...(summary !== undefined ? { summary } : {}),
         });
+        const warning = this.getConvergenceWarning?.() ?? null;
+        if (warning !== null) {
+          const content = res.content.length > 0
+            ? res.content.map((item, idx) =>
+              idx === res.content.length - 1
+                ? { ...item, text: item.text.length > 0 ? `${item.text}\n\n${warning}` : warning }
+                : item,
+            )
+            : [{ type: 'text' as const, text: warning }];
+          const annotated: ToolResult = { ...res, content };
+          if (Buffer.byteLength(canonical(annotated)) <= this.input.policy.limits.toolResultBytes) {
+            return annotated;
+          }
+        }
         return res;
       } catch (error) {
         const errorCode = error instanceof PiFailure ? error.detail.code : undefined;
@@ -2150,11 +2218,14 @@ function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPort
       await environment(host);
     },
     lease: (host, input) => HostExecutionLease.acquire(host, input),
-    sender: (host, owned) => new Sender(host, owned, {
-      fetch: globalThis.fetch,
-      catalog: selectedCatalog(owned),
-      beforeSend: () => breaker.assertBeforeSend(),
-    }),
+    sender: (host, owned) => {
+      breaker.bindBudgets(owned.lock.spec.contract.spec.budgets, owned.policy.limits.requests);
+      return new Sender(host, owned, {
+        fetch: globalThis.fetch,
+        catalog: selectedCatalog(owned),
+        beforeSend: () => breaker.assertBeforeSend(),
+      });
+    },
     execution: (host, owned, candidateDir) => {
       const roleMcpAllowlist = resolveSessionMcpAllowlist(owned, options);
       return new HostExecution(
@@ -2177,6 +2248,7 @@ function createHostSessionPorts(options?: OpenPiHostSessionOptions): FactoryPort
         options?.onProgress,
         (name, isError) => breaker.recordToolEnd(name, isError),
         options?.scrub,
+        () => breaker.convergenceWarning(),
       );
     },
     mcp: (_host, owned) => ({

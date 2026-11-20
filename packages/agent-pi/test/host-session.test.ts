@@ -11,6 +11,7 @@ import { contract } from '../../core/test/fixtures.js';
 import { canonical, digest } from '../src/boundary.js';
 import { describePiAdapterFiles } from '../src/descriptor.js';
 import { HostMcpRegistry } from '../src/external-mcp.js';
+import { deriveDefaultCircuitBreakerLimits } from '../src/circuit-breaker-limits.js';
 import {
   isSupportedHostSessionPlatform,
   openPiHostSessionAdapter,
@@ -18,6 +19,7 @@ import {
   type HostSessionProgressEvent,
 } from '../src/host-session.js';
 import { summarizeToolProgressArgs } from '../src/progress-summary.js';
+import { bridgedTools } from '../src/tools.js';
 import { MAX_LIMITS } from '../src/policy.js';
 import type { PiHostV2, PiOpenInputV2 } from '../src/types-v2.js';
 import type { PiHost, PiOpenInput } from '../src/types.js';
@@ -1971,4 +1973,100 @@ test('openPiHostSessionAdapterV2 circuit breaker stops runaway turns and no-prog
   } finally {
     invalidFixture.cleanup();
   }
+});
+
+test('deriveDefaultCircuitBreakerLimits scales from maxModelCalls and host-session injects convergence notices and accurate tool paths', { skip: !isSupportedHostSessionPlatform() }, async () => {
+  // 1. Default turn caps scale with budgets.maxModelCalls instead of flat 40/20
+  assert.deepEqual(
+    deriveDefaultCircuitBreakerLimits({ maxModelCalls: 256, maxImplementationRepairs: 128 }, 256),
+    { maxTurns: 192, maxRepairTurns: 64 },
+  );
+  assert.deepEqual(
+    deriveDefaultCircuitBreakerLimits({ maxModelCalls: 256, maxImplementationRepairs: 0 }, 256),
+    { maxTurns: 256, maxRepairTurns: 64 },
+  );
+  assert.deepEqual(
+    deriveDefaultCircuitBreakerLimits({ maxModelCalls: 16, maxImplementationRepairs: 4 }, 256),
+    { maxTurns: 16, maxRepairTurns: 16 },
+  );
+  assert.deepEqual(
+    deriveDefaultCircuitBreakerLimits({ maxModelCalls: 512, maxImplementationRepairs: 4 }, 128),
+    { maxTurns: 96, maxRepairTurns: 32 },
+  );
+
+  // 2. bridgedTools emits host-session-accurate paths when isHostSession is true
+  const noop = async () => ({ content: [], details: null });
+  const hostBash = bridgedTools(['bash', 'delete'], noop, [], { isHostSession: true });
+  const hostBashDesc = hostBash.find(t => t.name === 'bash')?.description ?? '';
+  const hostDeleteDesc = hostBash.find(t => t.name === 'delete')?.description ?? '';
+  assert.match(hostBashDesc, /\.\/candidate/);
+  assert.match(hostBashDesc, /\/workspace\/candidate and \/scratch do not exist on disk/);
+  assert.equal(hostDeleteDesc.includes('/workspace/candidate'), false);
+
+  const containerBash = bridgedTools(['bash'], noop, [], { isHostSession: false });
+  assert.match(containerBash[0]?.description ?? '', /fresh \/scratch/);
+
+  // 3. Convergence warning appears in tool results before turnLimit so agent can settle and capture snapshot cleanly
+  const seenRequests: { tools?: readonly { function?: { name?: string; description?: string } }[]; messages?: readonly { role?: string; content?: unknown }[] }[] = [];
+  let turn = 0;
+  const server = http.createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      tools?: readonly { function?: { name?: string; description?: string } }[];
+      messages?: readonly { role?: string; content?: unknown }[];
+    };
+    seenRequests.push(body);
+    turn += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (turn <= 3) {
+      res.end(sseToolCall('glm-5.3', `call-conv-${turn}`, 'read', { path: 'packages/example.ts' }));
+    } else {
+      res.end(sseStop('glm-5.3', 'converged cleanly'));
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('listen failed');
+  const fixture = await createHostSessionFixture({ baseUrl: `http://127.0.0.1:${addr.port}/v1` });
+  try {
+    const opened = await openPiHostSessionAdapterV2(fixture.hostV2, fixture.inputV2, {
+      circuitBreaker: { maxTurns: 4 },
+    });
+    assert.equal(opened.ok, true, JSON.stringify(opened));
+    if (!opened.ok) throw new Error('open failed');
+    try {
+      const executed = await opened.value.execute({
+        commandId: 'cmd-conv-1',
+        text: 'Read then converge on final turn',
+        purpose: 'task',
+        repair: 'none',
+      });
+      assert.equal(executed.ok, true, JSON.stringify(executed));
+      if (!executed.ok) throw new Error('execute failed');
+      assert.equal(executed.value.status, 'execution_settled', JSON.stringify(executed.value));
+      const captured = await opened.value.capture({ checkpointId: 'cp-conv-1' });
+      assert.equal(captured.ok, true, JSON.stringify(captured));
+    } finally {
+      await opened.value.close();
+    }
+  } finally {
+    fixture.cleanup();
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+
+  // Verify host-session bash description sent to model has accurate paths
+  const sentBash = seenRequests[0]?.tools?.find(t => t.function?.name === 'bash')?.function?.description ?? '';
+  assert.match(sentBash, /\/workspace\/candidate and \/scratch do not exist on disk/);
+
+  // Verify graduated convergence warnings on turns 1..3 (remaining 3, 2, 1 of maxTurns=4)
+  const finalMessages = seenRequests.at(-1)?.messages ?? [];
+  const toolTexts = finalMessages
+    .filter(m => m.role === 'tool')
+    .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)));
+  assert.equal(toolTexts.length, 3);
+  assert.match(toolTexts[0]!, /3 turns remaining in this dispatch \(turn 1\/4\)/);
+  assert.match(toolTexts[1]!, /2 turns remaining in this dispatch \(turn 2\/4\)/);
+  assert.match(toolTexts[2]!, /1 turn remaining in this dispatch \(turn 3\/4\).*FINAL turn/);
 });

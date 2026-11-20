@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { formatHostSessionProgressLog, SecretScrubber } from '../src/index.js';
+import {
+  formatHostSessionProgressLog,
+  GitHubAppError,
+  SecretScrubber,
+  validateTaskpackLimitsDeclaration,
+} from '../src/index.js';
 
 describe('turnkey progress observability formatting and secret scrubbing', () => {
   it('formats cumulative tokens vs budget, scrubbed tool summaries, and circuit breaker events', () => {
@@ -58,5 +63,24 @@ describe('turnkey progress observability formatting and secret scrubbing', () =>
       { cumulativeTokens: 0, totalTokenBudget: 20_000_000 },
     );
     assert.equal(breakerLine, 'circuit breaker: stopped after 20 turns (limit=20, repair=implementation)');
+  });
+
+  it('validates optional spec.limits.maxTurns and maxRepairTurns bounds', () => {
+    const parsed = validateTaskpackLimitsDeclaration(
+      { maxModelCalls: 256, maxTurns: 120, maxRepairTurns: 40 },
+      '/spec/limits',
+    );
+    assert.equal(parsed.maxModelCalls, 256);
+    assert.equal(parsed.maxTurns, 120);
+    assert.equal(parsed.maxRepairTurns, 40);
+
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ maxTurns: 0 }, '/spec/limits'),
+      (error: unknown) => error instanceof GitHubAppError && error.path === '/spec/limits/maxTurns',
+    );
+    assert.throws(
+      () => validateTaskpackLimitsDeclaration({ maxRepairTurns: 1025 }, '/spec/limits'),
+      (error: unknown) => error instanceof GitHubAppError && error.path === '/spec/limits/maxRepairTurns',
+    );
   });
 });

@@ -4459,11 +4459,14 @@ export async function executeTurnkeyActionCycle(
   if (maxRepairTurnsRaw && maxRepairTurnsOverride === undefined) {
     options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_REPAIR_TURNS=${maxRepairTurnsRaw}; expected positive integer`));
   }
+  const compiledBreakerLimits = options.taskpack.circuitBreakerLimits;
+  const effectiveMaxTurns = maxTurnsOverride ?? compiledBreakerLimits?.maxTurns;
+  const effectiveMaxRepairTurns = maxRepairTurnsOverride ?? compiledBreakerLimits?.maxRepairTurns;
   const circuitBreakerOptions: HostSessionCircuitBreakerOptions | undefined =
-    maxTurnsOverride !== undefined || maxRepairTurnsOverride !== undefined
+    effectiveMaxTurns !== undefined || effectiveMaxRepairTurns !== undefined
       ? {
-        ...(maxTurnsOverride !== undefined ? { maxTurns: maxTurnsOverride } : {}),
-        ...(maxRepairTurnsOverride !== undefined ? { maxRepairTurns: maxRepairTurnsOverride } : {}),
+        ...(effectiveMaxTurns !== undefined ? { maxTurns: effectiveMaxTurns } : {}),
+        ...(effectiveMaxRepairTurns !== undefined ? { maxRepairTurns: effectiveMaxRepairTurns } : {}),
       }
       : undefined;
 
