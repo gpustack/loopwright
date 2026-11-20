@@ -144,6 +144,7 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.ok(rulePaths.has('packages/taskpack-runner/**/*.ts'), 'must cover taskpack-runner');
   assert.ok(rulePaths.has('packages/memory/**/*.ts'), 'must cover memory');
   assert.ok(rulePaths.has('packages/decisions/**/*.ts'), 'must cover decisions');
+  assert.ok(rulePaths.has('packages/taskpack/**/*.ts'), 'must cover taskpack');
   assert.ok(rulePaths.has('packages/github-app/**/*.ts'), 'must cover github-app');
   assert.ok(rulePaths.has('packages/cli/**/*.ts'), 'must cover cli');
   assert.ok(rulePaths.has('action.yml'), 'must cover action.yml');
@@ -402,7 +403,8 @@ test('coding-agents apply snippet: matches loopwright-step skill, handles inspec
         '  scope:',
         '    writable:',
         '      - docs/**',
-        '    protected: []',
+        '    protected:',
+        '      - .claude/**',
         '  upstreams:',
         '    - id: up',
         '      kind: github-release',
@@ -488,7 +490,17 @@ test('coding-agents apply snippet: matches loopwright-step skill, handles inspec
       assert.match(res.stderr, expectedStderr);
     };
     assert.equal(JSON.parse(readFileSync(join(inspectDir, 'result.json'), 'utf8')).spec?.status, 'completed');
-    assert.equal(JSON.parse(readFileSync(join(inspectDir, 'candidate.files.json'), 'utf8')).manifest?.spec?.baseTree, undefined);
+    const candidateBundle = JSON.parse(readFileSync(join(inspectDir, 'candidate.files.json'), 'utf8')) as {
+      version: number;
+      manifest?: { spec?: { baseTree?: unknown } };
+      files?: Array<{ name: string; uri?: string; blobPath?: string; sha256?: string }>;
+    };
+    assert.equal(candidateBundle.version, 2, 'inspect emits v2 CAS pointer candidate.files.json');
+    assert.equal(candidateBundle.manifest?.spec?.baseTree, undefined);
+    assert.ok(
+      candidateBundle.files?.every(f => typeof f.uri === 'string' && f.uri.startsWith('cas://sha256/') && typeof f.blobPath === 'string'),
+      'v2 files carry canonical cas://sha256 URI and blobPath',
+    );
 
     // Negative test 1: dirty working tree (tracked edit or untracked file) must be refused
     writeFileSync(join(repoDir, 'README.md'), '# Dirty\n');

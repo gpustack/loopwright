@@ -1,13 +1,13 @@
 # Agent Guide
 
-Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, verified repository work.
+Loopwright is a TypeScript harness and GitHub Action/App control plane for bounded, verified repository work.
 
 ## Project Structure
 
 - `packages/core`: contracts, identity, evidence; `packages/state`: fenced SQLite state.
 - `packages/agent-pi`: isolated runtime; `packages/controller`: orchestration and verification.
 - `packages/taskpack-runner`: runner parity; `packages/memory`: reviewed memory.
-- `packages/decisions`: advisory routing; `packages/github-app`: intake and App; `packages/cli`: local operations.
+- `packages/decisions`: advisory routing; `packages/taskpack`: declarative taskpacks; `packages/github-app`: intake and App; `packages/cli`: local operations.
 - `action.yml`: reusable Action; `docs/`: usage contracts; `site/`: generated documentation site; `specs/`: rationale; `scripts/`: automation.
 
 ## Architecture
@@ -23,7 +23,7 @@ Start with the [module map](docs/README.md#module-map). `docs/` owns usage contr
 Run `npm run build`, `npm run typecheck`, `npm run lint`, `npm run lint:docs`, and `npm run site`. Compile tests with `npx tsc -p tsconfig.test.json` and select the test strategy by package workload (see [development](docs/development.md)):
 
 - `core`, `decisions`, `memory`, `controller`, `cli`: `node scripts/run-tests.mjs --pkg <pkg>`
-- `github-app`, `taskpack-runner`: target `.test-build/packages/<pkg>/test/<file>.test.js` with `--test-name-pattern` during iteration, then `node scripts/run-tests.mjs --pkg <pkg>`
+- `github-app`, `taskpack`, `taskpack-runner`: target `.test-build/packages/<pkg>/test/<file>.test.js` with `--test-name-pattern` during iteration, then `node scripts/run-tests.mjs --pkg <pkg>`
 - `state`, `agent-pi`: `node scripts/run-tests.mjs --pkg <pkg>` (use `--concurrency 1` for sandbox, child-kill, or SQLite lock contention)
 
 Use `loopwright-overview` for architecture routing, `loopwright-docs` for documentation changes, `loopwright-code-review` for reviews, `loopwright-issue-pr` for issue or PR preparation, and `loopwright-release` for releases.

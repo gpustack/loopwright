@@ -21,17 +21,15 @@ Read each row as an evidence boundary. Local closure covers its stated criterion
 | `blocked_external` | External qualification remains blocked. |
 | `deferred_owned` | An owned external qualification remains deferred. |
 
-`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows with
-distinct ids, one primary owner per workspace package. Eighteen rows are `closed_local` with
-`verificationStatus: 'passed'`; they carry an `evidenceLevel` of `unit_and_integration`,
-`controlled_local_qualification`, or `frozen_offline_parity`. Five rows carry
-`evidenceLevel: 'unprovisioned_external'` and stay honestly blocked:
+`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows across all workspace packages (`@loopwright/taskpack` owns `qualified-host-clock-and-storage-profile` and `interactive-mcp-oauth-browser-flow`).
+
+Eighteen rows are `closed_local` with `verificationStatus: 'passed'` (`unit_and_integration`, `controlled_local_qualification`, or `frozen_offline_parity`). Five rows carry `evidenceLevel: 'unprovisioned_external'` and stay honestly blocked:
 
 | Capability | Owner | Disposition | Status |
 | --- | --- | --- | --- |
 | `external-build-and-accelerator-matrix` | `@loopwright/controller` | `blocked_external` | `blocked` |
 | `remote-host-loss-and-durable-wake` | `@loopwright/state` | `blocked_external` | `not_run` |
-| `interactive-mcp-oauth-browser-flow` | `@loopwright/github-app` | `deferred_owned` | `blocked` |
+| `interactive-mcp-oauth-browser-flow` | `@loopwright/taskpack` | `deferred_owned` | `blocked` |
 | `deployed-github-app-and-webhook-ingress` | `@loopwright/github-app` | `blocked_external` | `not_run` |
 | `live-provider-billing-and-effort-attestation` | `@loopwright/agent-pi` | `deferred_owned` | `not_run` |
 
@@ -56,7 +54,7 @@ When present, `.github/workflows` must be a real non-symlink directory containin
 
 ## Integrated failure matrix
 
-`runIntegratedFailureMatrix` executes 14 deterministic scenarios in-process against the real public APIs of `@loopwright/core`, `@loopwright/state`, `@loopwright/agent-pi` (`describePiAdapterFiles` adapter inventory and `decodePiCapture` binding refusal), `@loopwright/controller`, `@loopwright/taskpack-runner`, `@loopwright/memory`, `@loopwright/github-app`, and `@loopwright/decisions`.
+`runIntegratedFailureMatrix` executes 14 deterministic scenarios in-process against the real public APIs of `@loopwright/core`, `@loopwright/state`, `@loopwright/agent-pi` (`describePiAdapterFiles` adapter inventory and `decodePiCapture` binding refusal), `@loopwright/controller`, `@loopwright/taskpack-runner`, `@loopwright/memory`, `@loopwright/taskpack`, `@loopwright/github-app`, and `@loopwright/decisions`.
 
 Every scenario asserts the exact refusal code and the preserved invariant; `options.scenarioOverrides` lets negative tests force a single failure and prove the report and exit-code contract.
 

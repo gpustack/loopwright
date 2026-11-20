@@ -39,7 +39,7 @@ The App, Action, and CLI share bounded contracts and evidence. The [closure matr
 
 Loopwright offers **two operating modes** sharing one verification kernel:
 
-1. **Declarative Taskpack Mode (Simple Automation)**: Add `.loopwright/taskpack.yaml` + `uses: gpustack/loopwright@main` in your repository; Loopwright compiles contracts, handler SHA-256 digests, and secret bindings automatically. Follow [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md) and [Taskpack](./docs/configuration/taskpack.md).
+1. **Declarative Taskpack Mode (Simple Automation)**: Add `.loopwright/taskpack.yaml` and run it locally with `loopwright run --taskpack` / `loopwright step` (omitting `triggers`, `publication`, and `memory` when unused) or wire `uses: gpustack/loopwright@main` in GitHub Actions; Loopwright compiles contracts, handler SHA-256 digests, and secret bindings automatically. Follow [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md) and [Taskpack](./docs/configuration/taskpack.md).
 2. **Managed Controller Mode (Fine-Grained Governance)**: Maintain an out-of-repo `TrustedRegistry` (`registry.yaml`) and SHA-256-pinned `ControllerConfig` (`controller.yaml`) via the `@gpustack/loopwright` CLI. Follow [Managed Controller](./docs/walkthroughs/managed-controller.md).
 
 ### Bootstrap or Migrate in One Prompt (`llms.txt`)
@@ -57,6 +57,7 @@ To run Managed Controller cycles or repository audits locally (requires the [run
 ```sh
 npm install -g --ignore-scripts @gpustack/loopwright
 # or: pnpm add -g --ignore-scripts @gpustack/loopwright
+loopwright run --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo
 loopwright init --directory "$HOME/loopwright-config"
 loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST
 ```

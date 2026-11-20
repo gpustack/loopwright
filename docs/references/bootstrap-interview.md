@@ -88,12 +88,14 @@ Host Preflight (post-auth, $LOOPWRIGHT_PREFLIGHT_OUT, $LOOPWRIGHT_STAGING_DIR)
 Declare `spec.preflight` (`script` under a protected path such as `scripts/**` or `.auto-sync/**`) so Loopwright runs it post-auth and pre-compilation:
 
 - **Disposition and upstreams**: Emit `{ disposition: 'candidate' | 'no_change' | 'blocked', upstreams, stagedResources }` to `$LOOPWRIGHT_PREFLIGHT_OUT`, using native `held_back` status without smuggling paths in `reason`.
-- **Split staged resources**: Use `mount: 'prompt'` (`<= 64 KiB` UTF-8 per file, `<= 256 KiB` total) for `trustedContext.resources` text, and `mount: 'workspace'` (`<= 128 MiB`, `<= 256 MiB` total) plus `exposeToChecks: true` for large lockfiles or `.tgz` offline caches exposed via `$LOOPWRIGHT_STAGED_DIR` (single-link regular files only; pack directories such as `npm-cache` as `.tgz`).
+- **Split staged resources**: Use `mount: 'prompt'` (`<= 64 KiB` UTF-8 per file, `<= 256 KiB` total) for `trustedContext.resources` text, and `mount: 'workspace'` (`<= 128 MiB`, `<= 256 MiB` total, projected via single-descriptor `1 MiB` streaming) plus `exposeToChecks: true` for large lockfiles or `.tgz` offline caches exposed via `$LOOPWRIGHT_STAGED_DIR` (single-link regular files only; pack directories such as `npm-cache` as `.tgz`).
 - **Clean baselines**: Keep `repo_root` clean and hydrate LFS or vendor caches inside ephemeral verifier directories.
 
 ### Scope and verifier contract
 
-Use explicit `dir/**` for recursive directories, exact paths without `/**` for single files, and single-segment `*`/`?` globs (`packages/*/package.json`). Protected paths always override writable ancestors; `.agents/**` is opt-in, built-in agent-instruction directories and `digests.lock.json` stay protected, and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
+Use explicit `dir/**` for recursive directories, exact paths without `/**` for single files, and single-segment `*`/`?` globs (`packages/*/package.json`). Protected paths always override writable ancestors.
+
+Local runs protect only `.git` and `<controlRoot>` (preserving the exact-file `spec.proposal.path` carve-out) plus `digests.lock.json` without hardcoded tool directories; declare repo-specific paths (such as `.claude/**`, `CLAUDE.md`, `AGENTS.md`) explicitly in `spec.scope.protected`. GitHub entrypoints also protect `.github`, requiring dual-key `allowWorkflowWrites` for `.github/workflows/**`.
 
 Configure `verification.localChecks` with `json-artifact.v1`, `json-keys-guard.v1`, `line-section-guard.v1`, and directory-mounted `command.v1` scripts:
 
@@ -106,7 +108,9 @@ Standardize trust modes, model declarations, GitHub Actions inputs, slash comman
 
 ### Model and trust config
 
-Declare model pools exclusively inside `*taskpack.yaml` (`spec.models`) using unified `apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN`. Never generate model-specific helper scripts and never hardcode vendor names in workflows or scripts. Keep `spec.execution.mode: strict` unless host toolchains require dual-key privileged unlock (`allow-privileged-execution: 'true'` or `--allow-privileged`):
+Declare model pools exclusively inside `*taskpack.yaml` (`spec.models`) using unified `apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN`. Never generate model-specific helper scripts and never hardcode vendor names in workflows or scripts.
+
+For local CLI manifests (`loopwright run --taskpack` / `loopwright step`), `spec.triggers`, `spec.publication`, and `spec.memory` are optional; GitHub workflows require explicit `spec.triggers` (enforced pre-preflight) and PR `spec.publication` fields. Keep `spec.execution.mode: strict` unless host toolchains require dual-key privileged unlock (`allow-privileged-execution: 'true'` or `--allow-privileged`):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1

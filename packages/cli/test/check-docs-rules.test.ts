@@ -178,6 +178,7 @@ function buildMinimalRepoFixture(): string {
     'controller',
     'taskpack-runner',
     'memory',
+    'taskpack',
     'github-app',
     'decisions',
     'cli',

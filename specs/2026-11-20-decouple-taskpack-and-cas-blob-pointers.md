@@ -1,6 +1,6 @@
 # Spec: Decouple generic Taskpack execution and adopt content-addressable blob pointers
 
-Status: Building
+Status: Shipped
 Type: Feature
 
 ## Summary
@@ -438,14 +438,14 @@ Key conventions:
       Acceptance: `.auto-sync/taskpack.yaml` declares `.claude/**`, `CLAUDE.md`, and `AGENTS.md` explicitly in `spec.scope.protected` (preserving `.claude/skills -> ../.agents/skills` under `freezeSource` and exact-file `.auto-sync/proposal.json` carve-out) and adds `packages/taskpack/**` / `packages/taskpack/package.json` to `scope.writable` and `yaml` `watchedPaths`; `.auto-sync/checks/verify.sh` (`YAML_WORKSPACES`), `.auto-sync/instructions.md`, `scripts/prepare-self-upgrade.mjs` (`YAML_WORKSPACES`, `expectedPackagesMap`, and `@loopwright/taskpack` import), and `self-upgrade-fixtures.ts` include `packages/taskpack`; `.auto-sync/digests.lock.json` is re-synced via `loopwright digest sync --taskpack .auto-sync/taskpack.yaml --check`.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node --test .test-build/packages/github-app/test/self-upgrade-*.test.js`
 
-- [ ] **T12 · Connected documentation, repository skills, Hugo site rebuild, and full 10-package verification**
+- [x] **T12 · Connected documentation, repository skills, Hugo site rebuild, and full 10-package verification**
       Blocked by: T10, T11
-      Owns: `docs/**`, `site/**`, `README.md`, `AGENTS.md`, `.agents/skills/loopwright-overview/SKILL.md`, `packages/cli/test/{check-docs-rules,docs-and-site}.test.ts`
-      Acceptance: Updates `docs/README.md` (`taskpacks` code links + new spec entry), `docs/getting-started/architecture.md`, `docs/configuration/taskpack.md`, `docs/operations/cli.md`, `docs/operations/coding-agents.md` (migrating local `inspect` apply guidance to v2 `blobPath` with v1 `body` fallback), `docs/operations/github-action.md`, `docs/walkthroughs/declarative-taskpack.md`, `docs/contribute/github-app-internals.md`, `README.md`, `AGENTS.md` (updating nine -> ten packages while preserving lean-testing guidance), and `.agents/skills/loopwright-overview/SKILL.md` (preserving Stage 2/5/6 updates in `docs/references/bootstrap-interview.md`); rebuilds `site/`; passes all 10 package suites, `lint:docs`, `site`, and `closure --verify-failures`.
+      Owns: `docs/**`, `site/**`, `README.md`, `AGENTS.md`, `.agents/skills/**`, `packages/cli/test/{check-docs-rules,docs-and-site}.test.ts`
+      Acceptance: Updates `docs/README.md` (`taskpacks` code links + new spec entry), `docs/getting-started/architecture.md`, `docs/configuration/taskpack.md`, `docs/operations/cli.md`, `docs/operations/coding-agents.md` (migrating local `inspect` apply guidance to v2 `blobPath` with v1 `body` fallback), `docs/operations/github-action.md`, `docs/walkthroughs/declarative-taskpack.md`, `docs/contribute/github-app-internals.md`, `README.md`, `AGENTS.md` (adding `packages/taskpack` with count-free workspace wording while preserving lean-testing guidance), and `.agents/skills/**` (preserving Stage 2/5/6 updates in `docs/references/bootstrap-interview.md`); rebuilds `site/`; passes all workspace suites, `lint:docs`, `site`, and `closure --verify-failures`.
       Verify: `npm run build && npm run typecheck && npm run lint && npm run lint:docs && npm run site && npm test && node packages/cli/dist/main.js closure --verify-failures --json`
 
 ### Test Plan
-[ ] I/we understand the owners of the involved components may require updates to existing tests to make this
+[x] I/we understand the owners of the involved components may require updates to existing tests to make this
 code solid enough prior to committing the changes necessary to implement this enhancement.
 
 #### Prerequisite testing updates

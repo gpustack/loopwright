@@ -15,7 +15,7 @@ uses pinned Pi 1.5.2 packages. The root minimatch override applies to the resolv
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
-Build emits `dist` in core, state, agent-pi, controller and cli; test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
+Build emits `dist` across all workspace packages (`core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, and `cli`); test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
 
 Private constructor seams isolate clock/transaction faults over actual SQLite; they are absent from the public state factories. Test files run serially to bound owned children. The integration fixture runs authoring, admission, candidate identity, evidence evaluation, and honest run construction. Example outputs are checked against this flow.
 
@@ -44,9 +44,9 @@ node scripts/check-docs.mjs --report
 npm run site
 ```
 
-The report provides an audit summary; the strict lint command enforces the documentation contract. The site exports twelve public pages and excludes repository-only contributor pages. Configuration authoring uses `yaml@2.9.1` and the core schema.
+The report provides an audit summary; the strict lint command enforces the documentation contract. The site exports thirteen public pages and excludes repository-only contributor pages. Configuration authoring uses `yaml` with the strict 1.2 core schema.
 
-Repository issue and pull request templates live under `.github/`. The `.github/workflows/` directory contains `ci.yml`, `test.yml`, `docs.yml`, `code-review.yml`, `auto-sync.yml`, and `site.yml` for repository CI/CD. Use the five `.agents/skills/loopwright-*` guides for overview, docs, code review, issue and PR preparation, and release work.
+Repository issue and pull request templates live under `.github/`. The `.github/workflows/` directory contains `ci.yml`, `test.yml`, `docs.yml`, `code-review.yml`, `auto-sync.yml`, and `site.yml` for repository CI/CD. Use the six `.agents/skills/loopwright-*` guides for overview, docs, step driving, code review, issue and PR preparation, and release work.
 
 The state runtime profile is deliberately narrower than the core toolchain: darwin/arm64 Node v26.13.0 with
 bundled SQLite 3.54.1, one trusted host/boot and retained local disk. There is no separate SQLite installation or

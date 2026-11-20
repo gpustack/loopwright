@@ -79,7 +79,7 @@ configuration accepted by `loadTrustedConfiguration` and `compilePlan`:
 - `/gate` validates the complete request binding, runs frozen `assemble`, `validate_proposal`, and
 `validate_candidate` in a disposable clone, caches the verified checked artifact keyed by run and candidate digest, and returns signed `approved`/`denied` verdicts.
 
-Candidate bytes are never trusted on first contact: the gate reconstructs them from the run's checkpoint workspace snapshots (`candidateFilesFromRunArtifacts`) or from the registered snapshot plus proposal (`computeRunnerCandidateDigest`), identifies the reconstructed set with the controller's manifest discipline, and denies the request when the manifest digest does not match the request binding or when `registration.candidateDigest` pins a different candidate.
+Candidate bytes are never trusted on first contact: the gate decodes CAS `blob_ref` or legacy `chunk` checkpoint snapshots in `1 MiB` chunks (`candidateFilesFromRunArtifacts`) and passes a bounded pointer-index file path to `GATE_DRIVER` instead of inline base64 stdin, denying any digest mismatch against the request or `registration.candidateDigest`.
 
 Registrations bind strictly by `storeId|runId`; discover candidates validate on the registered snapshot head, and revise candidates validate on a local `pr-head` branch of the managed pull request inside the service double (only `.autosync/` candidate files are written, so baseline files cannot clobber the PR working tree).
 

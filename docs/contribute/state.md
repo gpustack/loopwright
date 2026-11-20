@@ -103,7 +103,7 @@ See [errors.ts](../../packages/state/src/errors.ts) for the full closed code voc
 | Limit | Bound |
 | --- | --- |
 | Retained requests / operations / checkpoints | 1,024 / 2,048 / 64 |
-| Mutation input / request or operation row / checkpoint JSON | 64 KiB / 16 KiB / 64 KiB |
+| Mutation input / request or operation row / checkpoint JSON | 64 KiB / 16 KiB / 64 KiB (8 MiB wide checkpoints for 16,384-entry overlays) |
 | Page | At most 100 items and 128 KiB |
 | Boundary depth / nodes / properties / array items | 32 / 8,192 / 128 / 128 |
 
