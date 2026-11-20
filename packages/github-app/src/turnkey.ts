@@ -1,5 +1,4 @@
 import {
-  createTurnkeyCycleDelegate as taskpackCreateTurnkeyCycleDelegate,
   executeTurnkeyCycle as taskpackExecuteTurnkeyCycle,
   type ActionDelegateOutcome,
   type ExecuteTurnkeyActionCycleOptions,
@@ -99,8 +98,14 @@ export async function executeTurnkeyActionCycle(
 export function createTurnkeyCycleDelegate(
   options: TurnkeyCycleDelegateOptions,
 ): (taskpack: WrittenCompiledTaskpack) => Promise<ActionDelegateOutcome> {
-  return taskpackCreateTurnkeyCycleDelegate({
-    ...options,
-    policyProfile: options.policyProfile ?? 'github',
-  });
+  let nextAttemptSeq = 0;
+  return async (taskpack: WrittenCompiledTaskpack): Promise<ActionDelegateOutcome> => {
+    const attemptSeq = nextAttemptSeq++;
+    const result = await executeTurnkeyActionCycle({
+      ...options,
+      taskpack,
+      attemptSeq,
+    });
+    return result.outcome;
+  };
 }

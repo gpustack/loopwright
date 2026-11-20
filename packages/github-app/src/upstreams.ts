@@ -142,7 +142,10 @@ export async function discoverTaskpackUpstreams(
 
 export async function discoverTaskpackUpstreamsV2(
   manifest: TaskpackManifest | TaskpackV2Manifest,
-  options: DiscoverTaskpackUpstreamsOptions = {},
+  options: DiscoverTaskpackUpstreamsOptions & {
+    readonly force?: boolean | undefined;
+    readonly managedPrMatchesDiscoveredState?: boolean | undefined;
+  } = {},
 ): Promise<DiscoverTaskpackUpstreamsV2Result> {
   return taskpackDiscoverTaskpackUpstreamsV2(manifest, {
     ...options,
