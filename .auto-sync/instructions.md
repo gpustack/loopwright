@@ -7,7 +7,7 @@ You are maintaining Loopwright's own runtime dependency Taskpack (`self-upgrade`
 1. **Lockstep `@earendil-works/pi-*` group (`packages/agent-pi/package.json`)**
    - Packages: `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, `@earendil-works/pi-codemode`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-mcp`, `@earendil-works/pi-tui`.
    - All six packages MUST share one exact canonical `X.Y.Z` SemVer string (no `^`, `~`, range operators, or prerelease suffixes).
-   - Never upgrade a subset of the six `@earendil-works/pi-*` packages. If `upstreamRecords` holds the Pi group `up_to_date` at baseline during partial publication, keep all six at their baseline version.
+   - Never upgrade a subset of the six `@earendil-works/pi-*` packages. When `upstreamGroups` (`pi-family`, `policy: lockstep`) holds the Pi group as `held_back` (or `up_to_date`) at baseline during partial publication, keep all six at their `currentVersion` baseline.
 
 2. **Uniform `yaml` group (`packages/{cli,controller,decisions,github-app}/package.json`)**
    - Direct `yaml` dependencies across `packages/cli/package.json`, `packages/controller/package.json`, `packages/decisions/package.json`, and `packages/github-app/package.json` MUST share one exact canonical `X.Y.Z` SemVer string.
@@ -16,19 +16,24 @@ You are maintaining Loopwright's own runtime dependency Taskpack (`self-upgrade`
 3. **Manifest & Scope Boundaries**
    - In `packages/*/package.json`, modify ONLY `dependencies["@earendil-works/pi-*"]` (in `packages/agent-pi/package.json`) and `dependencies["yaml"]` (in `packages/{cli,controller,decisions,github-app}/package.json`).
    - NEVER add, remove, or modify `scripts`, `bin`, `exports`, `devDependencies`, `peerDependencies`, `optionalDependencies`, or lifecycle hooks (`preinstall`, `install`, `postinstall`, `prepare`).
-   - Writable paths are strictly limited to `.auto-sync/proposal.json`, `package-lock.json`, `packages/agent-pi`, `packages/cli`, `packages/controller`, `packages/decisions`, `packages/github-app`, and `docs` (excluding `packages/agent-pi/qualification`, `packages/controller/qualification`, `packages/cli/src/closure.ts`, `packages/cli/src/failure-matrix.ts`, and `docs/contribute`).
-   - Root `package.json`, `scripts/**`, `tsconfig*.json`, `eslint.config.mjs`, `action.yml`, `.github/**`, `.auto-sync/taskpack.yaml`, `.auto-sync/instructions.md`, and `.auto-sync/checks/**` are non-writable.
+   - Writable paths are strictly limited to exact files `.auto-sync/proposal.json` and `package-lock.json`, plus explicit subtrees `packages/agent-pi/**`, `packages/cli/**`, `packages/controller/**`, `packages/decisions/**`, `packages/github-app/**`, and `docs/**` (excluding `packages/agent-pi/qualification/**`, `packages/controller/qualification/**`, `packages/cli/src/closure.ts`, `packages/cli/src/failure-matrix.ts`, `docs/contribute/**`, and `scripts/**`).
+   - Root `package.json`, `scripts/**`, `tsconfig*.json`, `eslint.config.mjs`, `action.yml`, `.github/**`, `.claude/**`, `.auto-sync/taskpack.yaml`, `.auto-sync/digests.lock.json`, `.auto-sync/instructions.md`, and `.auto-sync/checks/**` are non-writable.
 
-## Isolated Runner & Pre-Staged Bundle Workflow
+## Isolated Runner & Taskpack 2.0 Preflight Staged Resources
 
 In GitHub Actions Turnkey mode (`GITHUB_ACTIONS=true`), Loopwright runs in `direct-dedicated` isolation on the ephemeral runner VM with `CANDIDATE_DIR` mounted read-only; locally (`GITHUB_ACTIONS != true`), Loopwright enforces host OS containment (`macos-seatbelt` / `linux-bwrap`) with network disabled:
 
 - **Never run `npm install`, `npm ci`, or `npm update` inside `CANDIDATE_DIR`.** Creating `node_modules/` or running networked `npm` commands inside the candidate tree will fail or violate capture limits.
-- Read the host-staged bundle prepared by `scripts/prepare-self-upgrade.mjs`. The read-only stage directory defaults to `/tmp/loopwright-self-upgrade-stage` (`SELF_UPGRADE_STAGE_DIR`) and is also recorded as `stageDir=<path>` in the `reason` field of `available` entries in `upstreamRecords`:
-  - `<stageDir>/target-versions.json`: exact target `X.Y.Z` versions for every upstream and workspace manifest.
-  - `<stageDir>/package-lock.candidate.json`: pre-resolved clean lockfile (`<= 900 KiB`) matching `target-versions.json`.
-- **CRITICAL — Tool path confinement (`read`, `write`, `edit`, `delete`):** These tools ONLY accept repository-relative paths inside `candidateDir` (for example `"package-lock.json"` or `"packages/agent-pi/package.json"`). **NEVER pass `<stageDir>/...`, `/tmp/...`, or any absolute host path outside `candidateDir` to `read`, `write`, `edit`, or `delete`.**
-- Because `CANDIDATE_DIR` is read-only in `bash` while `<stageDir>` sits outside `candidateDir`, inspect `<stageDir>/target-versions.json` and compare `$CANDIDATE_DIR/package-lock.json` against `<stageDir>/package-lock.candidate.json` in `bash` using the absolute `stageDir=<path>` from `upstreamRecords` (for example `cat "<stageDir>/target-versions.json"` and `diff -u "$CANDIDATE_DIR/package-lock.json" "<stageDir>/package-lock.candidate.json"`), then apply the exact targeted hunks to `"package-lock.json"` with `edit` (or full replacement with `write` when rewriting) and update `packages/*/package.json`, `.auto-sync/proposal.json`, TypeScript call sites, and `docs/` via `edit` and `write` using repository-relative paths (or direct workspace file edits when driving locally via `loopwright step`).
+- Host preflight (`spec.preflight`: `scripts/prepare-self-upgrade.mjs`) runs post-authorization before model turns and stages verified read-only resources without smuggling paths through `upstreamRecords.reason`:
+  - `target-versions.json` (`mount: prompt` as `.loopwright-preflight/target-versions.json`, plus `mount: workspace`, `exposeToChecks: true`): exact target `X.Y.Z` versions for every upstream and workspace manifest.
+  - `package-lock.patch` (`mount: prompt` as `.loopwright-preflight/package-lock.patch`, `exposeToChecks: false`): deterministic unified diff (`--- a/package-lock.json` / `+++ b/package-lock.json`) from baseline `package-lock.json` to the pre-resolved candidate lockfile (emitted whenever the diff is non-empty and fits within `64 KiB`).
+  - `package-lock.candidate.json` (`mount: workspace`, `exposeToChecks: true`): pre-resolved clean lockfile (`<= 900 KiB`) matching `target-versions.json`; `verify.sh` validates exact SHA-256 parity against this file via `$LOOPWRIGHT_STAGED_DIR`.
+  - `preflight-metadata.json` (`mount: workspace`, `exposeToChecks: true`): signed host preflight attestation (`schema_version`, `force`, and optional `disposition`).
+  - `npm-cache.tgz` (`mount: workspace`, `exposeToChecks: true`): deterministic offline npm cache archive exposed strictly to `command.v1` checks via `$LOOPWRIGHT_STAGED_DIR` (never decoded into the LLM prompt).
+- **CRITICAL — Tool path confinement (`read`, `write`, `edit`, `delete`):** These tools ONLY accept repository-relative paths inside `candidateDir` (for example `"package-lock.json"` or `"packages/agent-pi/package.json"`). **NEVER pass `/tmp/...` or any absolute host path outside `candidateDir` to `read`, `write`, `edit`, or `delete`.**
+- Read the prompt-mounted `target-versions.json` (`.loopwright-preflight/target-versions.json`) and `package-lock.patch` (`.loopwright-preflight/package-lock.patch`) resources directly from your trusted context:
+  - Apply the exact hunks from `package-lock.patch` to `package-lock.json` (never referencing host `/tmp` paths and never running `npm install`) so `package-lock.json` matches the staged `package-lock.candidate.json` SHA-256 byte-for-byte.
+  - Apply the exact target versions from `target-versions.json` to `packages/*/package.json`, `.auto-sync/proposal.json`, TypeScript call sites, and `docs/**` via `edit` and `write` using repository-relative paths (or direct workspace file edits when driving locally via `loopwright step`).
 - Update `.auto-sync/proposal.json` (`schema_version: 1`, `summary`, `upstreams`, and `packages`) so every version matches the updated workspace `package.json` files and `package-lock.json`.
 
 ## Candidate Capture Limits (`packages/controller/src/step.ts`)

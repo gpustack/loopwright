@@ -34,12 +34,39 @@ resolve_executable() {
   return 1
 }
 
-NODE_BIN="$(resolve_executable \
-  "${NODE_BIN_DIR:+${NODE_BIN_DIR}/node}" \
-  "$(command -v node 2>/dev/null || true)" \
-  "/usr/local/bin/node" \
-  "/opt/homebrew/bin/node" \
-  "/usr/bin/node")" || {
+resolve_node_executable() {
+  local explicit="${NODE_BIN_DIR:+${NODE_BIN_DIR}/node}"
+  if [[ -n "$explicit" && -x "$explicit" && ! -d "$explicit" ]]; then
+    printf '%s\n' "$explicit"
+    return 0
+  fi
+  local fallback=""
+  local dir candidate major
+  local -a search_dirs=()
+  local IFS=':'
+  for dir in ${PATH:-}; do
+    [[ -n "$dir" ]] && search_dirs+=("$dir")
+  done
+  search_dirs+=("/usr/local/bin" "/opt/homebrew/bin" "/usr/bin")
+  for dir in "${search_dirs[@]}"; do
+    candidate="${dir%/}/node"
+    if [[ -x "$candidate" && ! -d "$candidate" ]]; then
+      [[ -z "$fallback" ]] && fallback="$candidate"
+      major="$("$candidate" -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+      if [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 26 )); then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    fi
+  done
+  if [[ -n "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  return 1
+}
+
+NODE_BIN="$(resolve_node_executable)" || {
   echo "verify.sh: unable to locate trusted node executable" >&2
   exit 1
 }
@@ -96,20 +123,40 @@ if [[ ! -d "$CANDIDATE_DIR" || -L "$CANDIDATE_DIR" ]]; then
 fi
 CANDIDATE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$CANDIDATE_DIR")"
 
-BASELINE_REPO="${SELF_UPGRADE_REPO_ROOT:-}"
-if [[ -z "$BASELINE_REPO" ]]; then
-  if "$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel >/dev/null 2>&1; then
-    BASELINE_REPO="$("$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel)"
-  else
-    echo "verify.sh: SELF_UPGRADE_REPO_ROOT must be set when candidate directory has no .git metadata" >&2
+BASE_DIR_RAW="${LOOPWRIGHT_BASE_DIR:-}"
+BASE_DIR_REAL=""
+BASELINE_REAL=""
+if [[ -n "$BASE_DIR_RAW" ]]; then
+  if [[ ! -d "$BASE_DIR_RAW" || -L "$BASE_DIR_RAW" ]]; then
+    echo "verify.sh: LOOPWRIGHT_BASE_DIR '$BASE_DIR_RAW' must be a real directory" >&2
     exit 1
   fi
+  BASE_DIR_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$BASE_DIR_RAW")"
+  BASELINE_REAL="$BASE_DIR_REAL"
+else
+  BASELINE_REPO="${SELF_UPGRADE_REPO_ROOT:-}"
+  if [[ -z "$BASELINE_REPO" ]]; then
+    if "$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel >/dev/null 2>&1; then
+      BASELINE_REPO="$("$GIT_BIN" -C "$CANDIDATE_REAL" rev-parse --show-toplevel)"
+    else
+      echo "verify.sh: LOOPWRIGHT_BASE_DIR or SELF_UPGRADE_REPO_ROOT must be set when candidate directory has no .git metadata" >&2
+      exit 1
+    fi
+  fi
+  BASELINE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$BASELINE_REPO")"
 fi
-BASELINE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$BASELINE_REPO")"
 
-STAGE_RAW="${SELF_UPGRADE_STAGE_DIR:-/tmp/loopwright-self-upgrade-stage}"
+if [[ -n "${LOOPWRIGHT_CHECK_ID:-}" || -n "${LOOPWRIGHT_BASE_DIR:-}" ]]; then
+  if [[ -z "${LOOPWRIGHT_STAGED_DIR:-}" ]]; then
+    echo "verify.sh: LOOPWRIGHT_STAGED_DIR must be set under command.v1 (refusing fallback to /tmp/loopwright-self-upgrade-stage)" >&2
+    exit 1
+  fi
+  STAGE_RAW="${LOOPWRIGHT_STAGED_DIR}"
+else
+  STAGE_RAW="${LOOPWRIGHT_STAGED_DIR:-${SELF_UPGRADE_STAGE_DIR:-/tmp/loopwright-self-upgrade-stage}}"
+fi
 if [[ ! -d "$STAGE_RAW" || -L "$STAGE_RAW" ]]; then
-  echo "verify.sh: trusted stage directory '$STAGE_RAW' does not exist; run scripts/prepare-self-upgrade.mjs first" >&2
+  echo "verify.sh: trusted stage directory '$STAGE_RAW' does not exist; run spec.preflight (scripts/prepare-self-upgrade.mjs) first" >&2
   exit 1
 fi
 STAGE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$STAGE_RAW")"
@@ -118,7 +165,8 @@ STAGE_REAL="$("$PYTHON_EXEC" -c 'import os, sys; print(os.path.realpath(sys.argv
 # Phase 1: Pre-execution manifest, lockfile, protected-file, and staged-bundle audit
 # (Never loads or executes any candidate code prior to passing all checks.)
 # ---------------------------------------------------------------------------
-"$PYTHON_EXEC" - "$CANDIDATE_REAL" "$BASELINE_REAL" "$STAGE_REAL" "$GIT_BIN" <<'PY'
+PHASE1_RC=0
+"$PYTHON_EXEC" - "$CANDIDATE_REAL" "$BASELINE_REAL" "$STAGE_REAL" "$GIT_BIN" "$BASE_DIR_REAL" <<'PY' || PHASE1_RC=$?
 from __future__ import annotations
 import hashlib
 import json
@@ -128,7 +176,13 @@ import stat
 import subprocess
 import sys
 
-candidate_dir, baseline_repo, stage_dir, git_bin = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+candidate_dir, baseline_repo, stage_dir, git_bin, base_snapshot_dir = (
+    sys.argv[1],
+    sys.argv[2],
+    sys.argv[3],
+    sys.argv[4],
+    sys.argv[5],
+)
 
 MAX_LOCKFILE_BYTES = 900 * 1024
 MAX_JSON_BYTES = 64 * 1024
@@ -186,6 +240,7 @@ PROTECTED_EXACT_FILES = [
     "action.yml",
     "AGENTS.md",
     ".auto-sync/taskpack.yaml",
+    ".auto-sync/digests.lock.json",
     ".auto-sync/instructions.md",
     ".auto-sync/checks/verify.sh",
 ]
@@ -218,6 +273,17 @@ if (
     or candidate_dir.startswith(stage_dir + os.sep)
 ):
     fail(f"trusted stage directory {stage_dir!r} must be disjoint from candidate directory {candidate_dir!r}")
+
+try:
+    stage_stat = os.lstat(stage_dir)
+except OSError as exc:
+    fail(f"unable to stat trusted stage directory {stage_dir!r}: {exc}")
+if stat.S_ISLNK(stage_stat.st_mode) or not stat.S_ISDIR(stage_stat.st_mode):
+    fail(f"trusted stage directory {stage_dir!r} must be a real directory")
+if stage_stat.st_uid != os.getuid():
+    fail(
+        f"trusted stage directory {stage_dir!r} owned by uid {stage_stat.st_uid}, expected current uid {os.getuid()}"
+    )
 
 
 def parse_semver(val: object) -> tuple[int, int, int]:
@@ -315,7 +381,82 @@ def read_staged_regular_bytes(rel_path: str, max_bytes: int) -> bytes:
     return read_regular_bytes_under(stage_dir, rel_path, max_bytes, "staged")
 
 
+def read_base_snapshot_optional(rel_path: str, max_bytes: int = 16 * 1024 * 1024) -> bytes | None:
+    parts = [p for p in rel_path.split("/") if p]
+    cur = base_snapshot_dir
+    for idx, seg in enumerate(parts):
+        cur = os.path.join(cur, seg)
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            fail(f"symlink forbidden at base:{rel_path!r}")
+        if idx < len(parts) - 1:
+            if not stat.S_ISDIR(st.st_mode):
+                return None
+        elif not stat.S_ISREG(st.st_mode):
+            fail(f"base:{rel_path!r} must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(cur, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            fail(f"base:{rel_path!r} must be a regular file")
+        if st.st_size > max_bytes:
+            fail(f"base:{rel_path!r} size {st.st_size} exceeds limit {max_bytes} bytes")
+        chunks: list[bytes] = []
+        remaining = st.st_size + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            fail(f"base:{rel_path!r} exceeded limit {max_bytes} bytes")
+        return data
+    finally:
+        os.close(fd)
+
+
+def list_head_files(prefix: str | None = None) -> list[str]:
+    if base_snapshot_dir:
+        search_root = os.path.join(base_snapshot_dir, prefix) if prefix else base_snapshot_dir
+        if not os.path.exists(search_root):
+            return []
+        entries: list[str] = []
+        for r, ds, fs in os.walk(search_root, topdown=True, followlinks=False):
+            if ".git" in ds:
+                ds.remove(".git")
+            for f in fs:
+                full_f = os.path.join(r, f)
+                rel_entry = os.path.relpath(full_f, base_snapshot_dir).replace(os.sep, "/")
+                if rel_entry == ".git":
+                    continue
+                st_f = os.lstat(full_f)
+                if stat.S_ISREG(st_f.st_mode) and not stat.S_ISLNK(st_f.st_mode):
+                    entries.append(rel_entry)
+        entries.sort()
+        return entries
+    args = [git_bin, "-c", "core.hooksPath=/dev/null", "-C", baseline_repo, "ls-tree", "-r", "--name-only", "HEAD"]
+    if prefix:
+        args.extend(["--", prefix])
+    ls_proc = subprocess.run(
+        args,
+        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_NOSYSTEM": "1"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )
+    return sorted(line.strip() for line in ls_proc.stdout.splitlines() if line.strip())
+
+
 def git_show_head_optional(rel_path: str) -> bytes | None:
+    if base_snapshot_dir:
+        return read_base_snapshot_optional(rel_path)
     env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_NOSYSTEM": "1"}
     proc = subprocess.run(
         [git_bin, "-c", "core.hooksPath=/dev/null", "-C", baseline_repo, "show", f"HEAD:{rel_path}"],
@@ -332,12 +473,13 @@ def git_show_head_optional(rel_path: str) -> bytes | None:
 def git_show_head_required(rel_path: str) -> bytes:
     raw = git_show_head_optional(rel_path)
     if raw is None:
-        fail(f"baseline git HEAD in {baseline_repo!r} is missing {rel_path!r}")
+        fail(f"baseline {'LOOPWRIGHT_BASE_DIR' if base_snapshot_dir else 'git HEAD'} in {baseline_repo!r} is missing {rel_path!r}")
     return raw
 
 
 # 1) Walk candidate tree to forbid symlinks, non-regular files, hardlinks, node_modules/, and nested ESLint/TypeScript configs
 cand_tsconfigs: list[str] = []
+all_cand_files: list[str] = []
 for root, dirs, files in os.walk(candidate_dir, topdown=True, followlinks=False):
     if ".git" in dirs:
         dirs.remove(".git")
@@ -364,27 +506,19 @@ for root, dirs, files in os.walk(candidate_dir, topdown=True, followlinks=False)
             fail(f"candidate tree contains forbidden non-regular or symlink entry {rel_f!r}")
         if st_f.st_nlink > 1:
             fail(f"candidate tree contains forbidden hardlink {rel_f!r}")
+        all_cand_files.append(rel_f)
         if (fname.startswith("eslint.config.") or fname.startswith(".eslintrc")) and rel_f != "eslint.config.mjs":
             fail(f"candidate tree contains unauthorized ESLint configuration {rel_f!r}")
         if fname == "tsconfig.json" or (fname.startswith("tsconfig.") and fname.endswith(".json")):
             cand_tsconfigs.append(rel_f)
+all_cand_files.sort()
 
-all_head_ls = subprocess.run(
-    [git_bin, "-c", "core.hooksPath=/dev/null", "-C", baseline_repo, "ls-tree", "-r", "--name-only", "HEAD"],
-    env={"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_NOSYSTEM": "1"},
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True,
-    check=True,
-)
+all_head_files = list_head_files()
 head_tsconfigs = sorted(
-    line.strip()
-    for line in all_head_ls.stdout.splitlines()
-    if line.strip()
-    and (
-        os.path.basename(line.strip()) == "tsconfig.json"
-        or (os.path.basename(line.strip()).startswith("tsconfig.") and os.path.basename(line.strip()).endswith(".json"))
-    )
+    rel
+    for rel in all_head_files
+    if os.path.basename(rel) == "tsconfig.json"
+    or (os.path.basename(rel).startswith("tsconfig.") and os.path.basename(rel).endswith(".json"))
 )
 cand_tsconfigs.sort()
 if cand_tsconfigs != head_tsconfigs:
@@ -408,15 +542,7 @@ for protected_rel in [*PROTECTED_EXACT_FILES, *PROTECTED_SOURCE_FILES]:
         fail(f"protected file {protected_rel!r} differs from baseline HEAD")
 
 for tree_prefix in PROTECTED_TREE_PREFIXES:
-    ls_proc = subprocess.run(
-        [git_bin, "-c", "core.hooksPath=/dev/null", "-C", baseline_repo, "ls-tree", "-r", "--name-only", "HEAD", "--", tree_prefix],
-        env={"PATH": "/usr/bin:/bin:/usr/local/bin", "GIT_CONFIG_NOSYSTEM": "1"},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
-    head_entries = sorted(line.strip() for line in ls_proc.stdout.splitlines() if line.strip())
+    head_entries = list_head_files(tree_prefix)
     cand_entries: list[str] = []
     cand_tree_root = os.path.join(candidate_dir, tree_prefix)
     if os.path.exists(cand_tree_root):
@@ -479,9 +605,6 @@ if not isinstance(yaml_entry, dict) or not json_strict_equal(yaml_entry.get("pac
 parse_semver(yaml_entry.get("version"))
 expected_yaml_target = str(yaml_entry["version"])
 
-staged_lock_bytes = read_staged_regular_bytes("package-lock.candidate.json", MAX_LOCKFILE_BYTES)
-staged_lock_sha256 = hashlib.sha256(staged_lock_bytes).hexdigest()
-
 staged_meta_bytes = read_staged_regular_bytes("preflight-metadata.json", MAX_JSON_BYTES)
 staged_meta_doc = strict_json_loads(staged_meta_bytes, "staged:preflight-metadata.json")
 if not json_strict_equal(staged_meta_doc.get("schema_version"), 1):
@@ -489,6 +612,29 @@ if not json_strict_equal(staged_meta_doc.get("schema_version"), 1):
 staged_force = staged_meta_doc.get("force")
 if not isinstance(staged_force, bool):
     fail("staged preflight-metadata.json force must be a boolean")
+staged_disposition = staged_meta_doc.get("disposition", "candidate")
+if not isinstance(staged_disposition, str) or staged_disposition not in ("candidate", "no_change"):
+    fail(f"staged preflight-metadata.json disposition must be 'candidate' or 'no_change', got {staged_disposition!r}")
+
+staged_lock_sha256: str | None = None
+if staged_disposition == "no_change":
+    if staged_force is not False:
+        fail("staged preflight-metadata.json force must be false when disposition is 'no_change'")
+    expected_head_files = [
+        rel
+        for rel in all_head_files
+        if not (rel == ".claude/skills" and os.path.islink(os.path.join(candidate_dir, rel)))
+    ]
+    if all_cand_files != expected_head_files:
+        fail("no_change candidate file set differs from baseline")
+    for rel in expected_head_files:
+        head_raw = git_show_head_required(rel)
+        cand_raw = read_candidate_regular_bytes(rel, max(len(head_raw) + 1024, 16 * 1024 * 1024))
+        if cand_raw != head_raw:
+            fail(f"no_change candidate file {rel!r} differs from baseline")
+else:
+    staged_lock_bytes = read_staged_regular_bytes("package-lock.candidate.json", MAX_LOCKFILE_BYTES)
+    staged_lock_sha256 = hashlib.sha256(staged_lock_bytes).hexdigest()
 
 # 4) Audit unmanaged workspace package.json files (must equal HEAD with strict JSON types)
 for ws in UNMANAGED_WORKSPACES:
@@ -588,7 +734,10 @@ if yaml_target != expected_yaml_target:
     fail(f"workspace yaml version {yaml_target!r} != staged target {expected_yaml_target!r}")
 
 # Candidate mode MUST strictly advance at least one dependency group beyond HEAD unless preflight attested force=true
-if staged_force is not True:
+if staged_disposition == "no_change":
+    if parse_semver(pi_target) != parse_semver(head_pi_ver) or parse_semver(yaml_target) != parse_semver(head_yaml_ver):
+        fail("no_change candidate manifests must match baseline HEAD")
+elif staged_force is not True:
     if parse_semver(pi_target) == parse_semver(head_pi_ver) and parse_semver(yaml_target) == parse_semver(head_yaml_ver):
         fail("candidate manifests do not advance @earendil-works/pi-* or yaml beyond baseline HEAD")
 
@@ -685,10 +834,13 @@ for ws, dep_map in expected_ws_deps.items():
             fail(f"package-lock.json direct resolution for {ws} -> {dep_name} is {actual!r}, expected {exp_ver!r}")
 
 cand_lock_sha256 = hashlib.sha256(lock_bytes).hexdigest()
-if cand_lock_sha256 != staged_lock_sha256:
-    fail(
-        f"candidate package-lock.json sha256 ({cand_lock_sha256}) does not match trusted staged package-lock.candidate.json ({staged_lock_sha256})"
-    )
+if staged_lock_sha256 is not None:
+    if cand_lock_sha256 != staged_lock_sha256:
+        fail(
+            f"candidate package-lock.json sha256 ({cand_lock_sha256}) does not match trusted staged package-lock.candidate.json ({staged_lock_sha256})"
+        )
+elif lock_bytes != git_show_head_required("package-lock.json"):
+    fail("no_change package-lock.json differs from baseline HEAD")
 
 # 8) Audit .auto-sync/proposal.json parity against staged target-versions.json
 proposal_doc = strict_json_loads(
@@ -715,7 +867,15 @@ for up_id, exp_pkg in {**PI_UPSTREAMS, "yaml": "yaml"}.items():
 
 if not json_strict_equal(prop_packages, expected_ws_deps):
     fail(".auto-sync/proposal.json packages does not match staged target-versions.json")
+
+if staged_disposition == "no_change":
+    sys.exit(10)
 PY
+if [[ "$PHASE1_RC" -eq 10 ]]; then
+  exit 0
+elif [[ "$PHASE1_RC" -ne 0 ]]; then
+  exit "$PHASE1_RC"
+fi
 
 # ---------------------------------------------------------------------------
 # Phase 2: Materialize isolated verification workspace under $TMPDIR
@@ -853,15 +1013,112 @@ if os.path.isdir(os.path.join(dst_root, ".agents", "skills")):
     os.symlink("../.agents/skills", os.path.join(claude_dir, "skills"))
 PY
 
-RAW_CACHE="${SELF_UPGRADE_NPM_CACHE:-${STAGE_REAL}/npm-cache}"
-if [[ -d "$RAW_CACHE" ]]; then
+RAW_CACHE="${SELF_UPGRADE_NPM_CACHE:-}"
+STAGED_CACHE_TGZ="${STAGE_REAL}/npm-cache.tgz"
+if [[ -n "$RAW_CACHE" && -d "$RAW_CACHE" ]]; then
   cp -R "$RAW_CACHE" "$WORK_NPM_CACHE"
+  chmod -R u+w "$WORK_NPM_CACHE"
+elif [[ -e "$STAGED_CACHE_TGZ" || -L "$STAGED_CACHE_TGZ" ]]; then
+  mkdir -p "$WORK_NPM_CACHE"
+  chmod 0700 "$WORK_NPM_CACHE"
+  "$PYTHON_EXEC" - "$STAGED_CACHE_TGZ" "$WORK_NPM_CACHE" <<'PY'
+from __future__ import annotations
+import io
+import os
+import posixpath
+import stat
+import sys
+import tarfile
+
+archive_path, dest_root = sys.argv[1], os.path.realpath(sys.argv[2])
+MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 512 * 1024 * 1024
+MAX_MEMBERS = 65536
+
+st_pre = os.lstat(archive_path)
+if stat.S_ISLNK(st_pre.st_mode) or not stat.S_ISREG(st_pre.st_mode):
+    sys.stderr.write(f"verify.sh: staged npm-cache.tgz {archive_path!r} must be a regular non-symlink file\n")
+    sys.exit(1)
+
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+fd = os.open(archive_path, flags)
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1 or st.st_size > MAX_ARCHIVE_BYTES:
+        sys.stderr.write(f"verify.sh: staged npm-cache.tgz rejected (nlink={st.st_nlink}, size={st.st_size})\n")
+        sys.exit(1)
+    chunks: list[bytes] = []
+    remaining = st.st_size + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_ARCHIVE_BYTES:
+        sys.stderr.write("verify.sh: staged npm-cache.tgz exceeds maximum archive size\n")
+        sys.exit(1)
+finally:
+    os.close(fd)
+
+member_count = 0
+total_bytes = 0
+with tarfile.open(fileobj=io.BytesIO(raw), mode="r|gz") as tf:
+    for member in tf:
+        member_count += 1
+        if member_count > MAX_MEMBERS:
+            sys.stderr.write("verify.sh: staged npm-cache.tgz exceeds member limit\n")
+            sys.exit(1)
+        if not (member.isfile() or member.isdir()):
+            sys.stderr.write(f"verify.sh: staged npm-cache.tgz contains forbidden non-regular entry {member.name!r}\n")
+            sys.exit(1)
+        raw_name = member.name.lstrip("./")
+        if not raw_name or raw_name == ".":
+            continue
+        if "\x00" in raw_name or "\\" in raw_name or raw_name.startswith("/"):
+            sys.stderr.write(f"verify.sh: staged npm-cache.tgz contains unsafe member path {member.name!r}\n")
+            sys.exit(1)
+        norm = posixpath.normpath(raw_name)
+        if norm == ".." or norm.startswith("../") or norm.startswith("/"):
+            sys.stderr.write(f"verify.sh: staged npm-cache.tgz member escapes destination {member.name!r}\n")
+            sys.exit(1)
+        target = os.path.join(dest_root, *norm.split("/"))
+        real_target = os.path.realpath(os.path.dirname(target))
+        if real_target != dest_root and not real_target.startswith(dest_root + os.sep):
+            sys.stderr.write(f"verify.sh: staged npm-cache.tgz member escapes destination {member.name!r}\n")
+            sys.exit(1)
+        if member.isdir():
+            os.makedirs(target, mode=0o700, exist_ok=True)
+            continue
+        if member.size < 0 or total_bytes + member.size > MAX_EXTRACTED_BYTES:
+            sys.stderr.write("verify.sh: staged npm-cache.tgz exceeds extracted byte limit\n")
+            sys.exit(1)
+        os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+        extracted = tf.extractfile(member)
+        if extracted is None:
+            sys.stderr.write(f"verify.sh: staged npm-cache.tgz unreadable member {member.name!r}\n")
+            sys.exit(1)
+        with open(target, "wb") as out_f:
+            while True:
+                buf = extracted.read(65536)
+                if not buf:
+                    break
+                total_bytes += len(buf)
+                if total_bytes > MAX_EXTRACTED_BYTES:
+                    sys.stderr.write("verify.sh: staged npm-cache.tgz exceeds extracted byte limit\n")
+                    sys.exit(1)
+                out_f.write(buf)
+        os.chmod(target, 0o644)
+PY
+elif [[ -d "${STAGE_REAL}/npm-cache" ]]; then
+  cp -R "${STAGE_REAL}/npm-cache" "$WORK_NPM_CACHE"
   chmod -R u+w "$WORK_NPM_CACHE"
 elif [[ -n "${SELF_UPGRADE_TEST_NODE_MODULES:-}" ]]; then
   mkdir -p "$WORK_NPM_CACHE"
   chmod 0700 "$WORK_NPM_CACHE"
 else
-  echo "verify.sh: offline npm cache '$RAW_CACHE' not found; run scripts/prepare-self-upgrade.mjs first" >&2
+  echo "verify.sh: offline npm cache ('${STAGED_CACHE_TGZ}' or '${STAGE_REAL}/npm-cache') not found; run spec.preflight first" >&2
   exit 1
 fi
 

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "taskpack": "self-upgrade",
+  "entries": [
+    {
+      "path": ".auto-sync/checks",
+      "kind": "directory",
+      "sha256": "26288029d77de83ed20feaf71c4606694ae128b5d4952686feb005298f7368ac"
+    },
+    {
+      "path": ".auto-sync/instructions.md",
+      "kind": "file",
+      "sha256": "923cbb55df421219c04a5f7dacfd406f41c59b4b14c6376614e216b2d782d73e"
+    },
+    {
+      "path": "scripts/prepare-self-upgrade.mjs",
+      "kind": "file",
+      "sha256": "3247ad2f9639c31507d8819c4d89b09a65fb567080d44cee00fed48a57977dd2"
+    }
+  ]
+}
