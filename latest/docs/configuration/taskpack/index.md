@@ -321,7 +321,7 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 
 ### Command parameters
 
-- **Mounted environment**: `command.v1` receives `$LOOPWRIGHT_CANDIDATE_DIR`, `$LOOPWRIGHT_BASE_DIR` (read-only baseline), `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`.
+- **Mounted environment**: `command.v1` receives `$LOOPWRIGHT_CANDIDATE_DIR`, `$LOOPWRIGHT_BASE_DIR` (read-only baseline), `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`. Default `PATH` is `/usr/local/bin:/usr/bin:/bin`, so use `toolchainPaths` only for extra directories beyond standard system paths; strict mode validates absolute `toolchainPaths` at startup against symlink, tmpdir, ownership, and group/world-writable checks.
 - **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
 - **Inner sandboxes and gates**: Checks running their own inner OS sandbox (such as macOS `sandbox-exec`) should set `allowCheckNetwork: true` under dual-key `--allow-privileged` to avoid nested Seatbelt `EPERM`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
 

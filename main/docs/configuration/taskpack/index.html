@@ -843,7 +843,7 @@
 </table>
 <h3 id="command-parameters">Command parameters</h3>
 <ul>
-<li><strong>Mounted environment</strong>: <code>command.v1</code> receives <code>$LOOPWRIGHT_CANDIDATE_DIR</code>, <code>$LOOPWRIGHT_BASE_DIR</code> (read-only baseline), <code>$LOOPWRIGHT_STAGED_DIR</code> (when <code>exposeToChecks: true</code>), and <code>$LOOPWRIGHT_CHECK_OUT</code>.</li>
+<li><strong>Mounted environment</strong>: <code>command.v1</code> receives <code>$LOOPWRIGHT_CANDIDATE_DIR</code>, <code>$LOOPWRIGHT_BASE_DIR</code> (read-only baseline), <code>$LOOPWRIGHT_STAGED_DIR</code> (when <code>exposeToChecks: true</code>), and <code>$LOOPWRIGHT_CHECK_OUT</code>. Default <code>PATH</code> is <code>/usr/local/bin:/usr/bin:/bin</code>, so use <code>toolchainPaths</code> only for extra directories beyond standard system paths; strict mode validates absolute <code>toolchainPaths</code> at startup against symlink, tmpdir, ownership, and group/world-writable checks.</li>
 <li><strong>Structured check output</strong>: Writing bounded JSON (<code>{ metrics?, findings?, detail? }</code>, <code>&lt;= 64 KiB</code>) to <code>$LOOPWRIGHT_CHECK_OUT</code> propagates through HMAC-signed <code>gate.v1</code> verdicts (<code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>retryablePreemption</code>) even on exit <code>0</code>.</li>
 <li><strong>Inner sandboxes and gates</strong>: Checks running their own inner OS sandbox (such as macOS <code>sandbox-exec</code>) should set <code>allowCheckNetwork: true</code> under dual-key <code>--allow-privileged</code> to avoid nested Seatbelt <code>EPERM</code>. <code>externalGates[]</code> support per-gate <code>signingCredentialRef</code>, <code>authCredentialRef</code>, and <code>url</code>.</li>
 </ul>
