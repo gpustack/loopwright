@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installedHandlerDigests } from '@loopwright/controller';
-import { serializePrettyYaml } from '@loopwright/github-app';
+import { serializePrettyYaml } from '@loopwright/taskpack';
 import { main as cliMain } from '../src/main.js';
 import { configurationFixture } from '../../controller/test/config-fixtures.js';
 import { setFixture } from '../../controller/test/progress-fixtures.js';

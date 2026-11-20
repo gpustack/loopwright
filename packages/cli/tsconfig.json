@@ -18,6 +18,7 @@
     { "path": "../github-app" },
     { "path": "../memory" },
     { "path": "../state" },
+    { "path": "../taskpack" },
     { "path": "../taskpack-runner" }
   ]
 }

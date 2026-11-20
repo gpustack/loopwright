@@ -1,6 +1,6 @@
 export { parseArguments, UsageError, type Arguments, type DigestAction, type StepAction } from './arguments.js';
 export { canonicalPath, initDraft, writeOutput, appendStepSummary } from './draft.js';
-export { encoded, diagnosticExit, executionExit, closureExitCode, main, type Envelope } from './main.js';
+export { encoded, diagnosticExit, executionExit, closureExitCode, taskpackExitCode, gitHubAppExitCode, main, type Envelope } from './main.js';
 export {
   CLOSURE_CAPABILITY_LEDGER,
   CLOSURE_EVIDENCE_MISSING,

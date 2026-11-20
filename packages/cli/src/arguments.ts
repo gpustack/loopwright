@@ -20,7 +20,7 @@ interface CommandRule {
 const commands: Record<Exclude<Arguments['command'], 'step' | 'digest'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
-  run: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
+  run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'allow-workflow-writes'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
@@ -206,12 +206,38 @@ export function parseArguments(argv: readonly string[]): Arguments {
   const rule = commands[command];
   parseOptions(1, key => rule.flags.includes(key), key => rule.values.includes(key), rule.allowRoleModel === true);
   const required = [...rule.required];
-  if (command === 'run' && !flags.has('dry-run')) { required.push('repo', 'run-root', 'run-id'); if (values.has('output')) throw new UsageError(); }
-  if (command === 'run' && flags.has('dry-run') && (
-    ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))
-    || flags.has('allow-privileged')
-    || flags.has('allow-workflow-writes')
-  )) throw new UsageError();
+  if (command === 'run') {
+    const hasTaskpack = values.has('taskpack');
+    const hasAnyConfig = values.has('config') || values.has('registry') || values.has('registry-sha256');
+    if (hasTaskpack && hasAnyConfig) throw new UsageError();
+    if (!hasTaskpack && !hasAnyConfig) throw new UsageError();
+    if (!hasTaskpack && values.has('mode')) throw new UsageError();
+    if (hasTaskpack) {
+      if (values.get('taskpack')!.trim().length === 0) throw new UsageError();
+      if (values.has('mode')) {
+        const mode = values.get('mode')!;
+        if (mode !== 'candidate' && mode !== 'no-change' && mode !== 'auto') throw new UsageError();
+      }
+      if (flags.has('dry-run')) {
+        required.push('repo');
+        if (['run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))) throw new UsageError();
+      } else {
+        required.push('repo', 'run-root', 'run-id');
+        if (values.has('output')) throw new UsageError();
+      }
+    } else {
+      required.push('config', 'registry', 'registry-sha256');
+      if (!flags.has('dry-run')) {
+        required.push('repo', 'run-root', 'run-id');
+        if (values.has('output')) throw new UsageError();
+      }
+      if (flags.has('dry-run') && (
+        ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))
+        || flags.has('allow-privileged')
+        || flags.has('allow-workflow-writes')
+      )) throw new UsageError();
+    }
+  }
   validateCommonValues(values);
   if (required.some(key => !values.has(key))) throw new UsageError();
   return {

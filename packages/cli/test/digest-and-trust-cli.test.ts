@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { serializePrettyYaml } from '@loopwright/github-app';
+import { serializePrettyYaml } from '@loopwright/taskpack';
 import { parseArguments, UsageError } from '../src/arguments.js';
 import { parseNdjson, runCli, runCliInProcess } from './step-cli-fixtures.js';
 
@@ -35,6 +35,7 @@ async function createDigestTaskpackRepo(
     readonly lockfile?: string;
     readonly execution?: Record<string, unknown>;
     readonly writable?: readonly string[];
+    readonly protected?: readonly string[];
     readonly decisions?: Record<string, unknown>;
   },
 ): Promise<void> {
@@ -84,7 +85,7 @@ async function createDigestTaskpackRepo(
       },
       scope: {
         writable: [...(options?.writable ?? ['docs/**'])],
-        protected: ['docs/protected.md'],
+        protected: [...(options?.protected ?? ['docs/protected.md'])],
       },
       roles: [
         { id: 'author', provider: 'antigravity', model: 'gemini-4-default', thinking: 'low' },
@@ -364,6 +365,7 @@ test('digest-cli: --allow-privileged and --allow-workflow-writes fail closed by 
     const strictRepo = join(root, 'strict-no-escalate-repo');
     await createDigestTaskpackRepo(strictRepo, {
       execution: { mode: 'strict', digests: { pinDigests: false } },
+      protected: ['docs/protected.md', '.github/workflows/**'],
     });
     const strictStep = await runCliInProcess([
       'step', 'next', '--taskpack', '.loopwright/taskpack.yaml', '--repo', strictRepo,
@@ -382,10 +384,10 @@ test('digest-cli: --allow-privileged and --allow-workflow-writes fail closed by 
       'step', 'submit', '--run-root', runRoot, '--run-id', 'strict-no-escalate',
       '--lease', strictLease, '--status', 'completed', '--allow-workflow-writes', '--json',
     ]);
-    assert.equal(escalatedSubmit.status, 8, escalatedSubmit.stdout + escalatedSubmit.stderr);
+    assert.equal(escalatedSubmit.status, 4, escalatedSubmit.stdout + escalatedSubmit.stderr);
     const escalatedEnv = parseNdjson(escalatedSubmit.stdout).at(-1)!;
-    assert.equal(escalatedEnv.kind, 'diagnostic');
-    assert.equal(escalatedEnv.data['code'], 'ARTIFACT_INVALID');
+    assert.equal(escalatedEnv.kind, 'result');
+    assert.equal((escalatedEnv.data['result'] as { spec: { status: string } }).spec.status, 'failed');
 
     // 4. spec.decisions.enabled: true with triageRules wires ControllerPorts.decisions and records advisoryDecisions
     const decRepo = join(root, 'dec-repo');

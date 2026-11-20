@@ -8,10 +8,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cycleFixture } from '../../controller/test/scheduling-fixtures.js';
 import { parseArguments, UsageError } from '../src/arguments.js';
-import { encoded, diagnosticExit, executionExit, main as cliMain } from '../src/main.js';
+import { encoded, diagnosticExit, executionExit, gitHubAppExitCode, main as cliMain, taskpackExitCode } from '../src/main.js';
 import { appendStepSummary, initDraft } from '../src/draft.js';
 import { formatRunReport, loadTrustedConfiguration, type ControllerDiagnostic, type CycleExecution } from '@loopwright/controller';
-import { parseTaskpackDocument } from '@loopwright/github-app';
+import { parseTaskpackDocument, TASKPACK_ERROR_CODES } from '@loopwright/taskpack';
 for (const argv of [[], ['status'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--run-id', 'y'], ['status', '--run-root', '/tmp', '--run-id', 'x', 'extra'], ['check', '--config'], ['run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c'], ['status', '--run-root', '/tmp', '--run-id', 'x', '--latest'], ['run', '--dry-run', '--config', 'a', '--registry', 'b', '--registry-sha256', 'c', '--repo', '/tmp'], ['closure', '--repo'], ['closure', '--repo', '/a', '--repo', '/b'], ['closure', 'extra'], ['closure', '--verify-only'], ['closure', '--json', '--json'], ['closure', '--output'], ['app-serve'], ['app-serve', '--config']]) test('cli: rejects incomplete/duplicate/unknown argument set ' + JSON.stringify(argv), () => assert.throws(() => parseArguments(argv)));
 test('cli: accepts every exact documented command flag shape', () => {
   const common = ['--config', '/config', '--registry', '/registry', '--registry-sha256', 'a'.repeat(64)], run = ['--repo', '/repo', '--run-root', '/runs', '--run-id', 'id'];
@@ -365,5 +365,67 @@ test('cli: appendStepSummary and --step-summary-file refuse symlinked targets an
   } finally {
     await f.cleanup();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cli: parseArguments validates run --taskpack grammar, mutual exclusion, and --mode bounds', () => {
+  const common = ['--config', '/config', '--registry', '/registry', '--registry-sha256', 'a'.repeat(64)];
+  const target = ['--repo', '/repo', '--run-root', '/runs', '--run-id', 'tp-1'];
+
+  // Valid declarative taskpack forms (live and dry-run)
+  const dryRunTp = parseArguments([
+    'run', '--dry-run', '--taskpack', '.loopwright/taskpack.yaml', '--repo', '/repo',
+    '--mode', 'auto', '--role-model', 'author=openai/gpt-5.4:low',
+    '--allow-privileged', '--allow-workflow-writes', '--output', '/tmp/plan.json', '--json',
+  ]);
+  assert.equal(dryRunTp.command, 'run');
+  assert.equal(dryRunTp.values.get('taskpack'), '.loopwright/taskpack.yaml');
+  assert.equal(dryRunTp.values.get('mode'), 'auto');
+  assert.equal(dryRunTp.flags.has('dry-run'), true);
+  assert.equal(dryRunTp.roleModelOverrides?.[0]?.provider, 'openai');
+
+  for (const mode of ['candidate', 'no-change', 'auto']) {
+    const liveTp = parseArguments([
+      'run', '--taskpack', '.loopwright/taskpack.yaml', ...target,
+      '--mode', mode, '--role-model', 'author=zai/glm-5.3:high',
+      '--allow-privileged', '--allow-workflow-writes', '--json',
+      '--output-format', 'text,github-step-summary', '--step-summary-file', '/tmp/sum.md',
+    ]);
+    assert.equal(liveTp.values.get('mode'), mode);
+  }
+
+  // Mutual exclusion and invalid shapes must throw UsageError
+  for (const bad of [
+    ['run'],
+    ['run', '--dry-run'],
+    ['run', '--taskpack', 'tp.yaml', ...common, ...target],
+    ['run', '--taskpack', 'tp.yaml', '--config', '/c', ...target],
+    ['run', '--taskpack', 'tp.yaml', '--registry', '/r', ...target],
+    ['run', '--taskpack', 'tp.yaml', '--registry-sha256', 'a'.repeat(64), ...target],
+    ['run', ...common, ...target, '--mode', 'candidate'],
+    ['run', '--dry-run', ...common, '--mode', 'auto'],
+    ['run', '--taskpack', 'tp.yaml', ...target, '--mode', 'invalid'],
+    ['run', '--taskpack', '   ', ...target],
+    ['run', '--dry-run', '--taskpack', 'tp.yaml'],
+    ['run', '--dry-run', '--taskpack', 'tp.yaml', '--repo', '/repo', '--run-root', '/runs'],
+    ['run', '--dry-run', '--taskpack', 'tp.yaml', '--repo', '/repo', '--run-id', 'id-1'],
+    ['run', '--dry-run', '--taskpack', 'tp.yaml', '--repo', '/repo', '--output-format', 'text'],
+    ['run', '--dry-run', '--taskpack', 'tp.yaml', '--repo', '/repo', '--step-summary-file', '/tmp/s.md'],
+    ['run', '--taskpack', 'tp.yaml', '--repo', '/repo'],
+    ['run', '--taskpack', 'tp.yaml', ...target, '--output', '/tmp/out.json'],
+  ]) {
+    assert.throws(() => parseArguments(bad), UsageError, `expected UsageError for ${JSON.stringify(bad)}`);
+  }
+});
+
+test('cli: main.ts has zero top-level @loopwright/github-app imports and exports taskpackExitCode alias', async () => {
+  const mainSrcPath = fileURLToPath(new URL('../../../../packages/cli/src/main.ts', import.meta.url));
+  const mainSrc = await readFile(mainSrcPath, 'utf8');
+  assert.equal(/^\s*import\b[^;]*@loopwright\/github-app/m.test(mainSrc), false, 'main.ts must not statically import @loopwright/github-app');
+  assert.match(mainSrc, /await import\('@loopwright\/github-app'\)/);
+  assert.equal(taskpackExitCode, gitHubAppExitCode);
+  assert.equal(taskpackExitCode('TASKPACK_TRIGGER_UNSUPPORTED'), 2);
+  for (const code of TASKPACK_ERROR_CODES) {
+    assert.equal(typeof taskpackExitCode(code), 'number');
   }
 });

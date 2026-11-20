@@ -30,6 +30,13 @@ test('closure: freezes the 23-row ledger with honest summary counts', () => {
   assert.equal(ids.size, 23);
   assert.equal(CLOSURE_CAPABILITY_LEDGER.filter(entry => entry.disposition === 'closed_local').length, 18);
   assert.equal(CLOSURE_CAPABILITY_LEDGER.filter(entry => entry.evidenceLevel === 'unprovisioned_external').length, 5);
+  const hostProfileRow = CLOSURE_CAPABILITY_LEDGER.find(entry => entry.id === 'qualified-host-clock-and-storage-profile')!;
+  assert.equal(hostProfileRow.ownerPackage, '@loopwright/taskpack');
+  assert.ok(hostProfileRow.evidencePaths.includes('packages/taskpack/src/qualification.ts'));
+  assert.ok(hostProfileRow.evidencePaths.includes('packages/taskpack/src/sandbox.ts'));
+  const oauthRow = CLOSURE_CAPABILITY_LEDGER.find(entry => entry.id === 'interactive-mcp-oauth-browser-flow')!;
+  assert.equal(oauthRow.ownerPackage, '@loopwright/taskpack');
+  assert.deepEqual(oauthRow.evidencePaths, ['packages/taskpack/src/qualification.ts']);
   const external = CLOSURE_CAPABILITY_LEDGER.filter(entry => entry.evidenceLevel === 'unprovisioned_external');
   for (const entry of external) { assert.notEqual(entry.verificationStatus, 'passed'); assert.ok(entry.unlockPrerequisite !== null && entry.unlockPrerequisite.length > 0); }
 });

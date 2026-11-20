@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { serializePrettyYaml } from '@loopwright/github-app';
+import { serializePrettyYaml } from '@loopwright/taskpack';
 import { main as cliMain } from '../src/main.js';
 
 import {
