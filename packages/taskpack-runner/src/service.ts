@@ -612,14 +612,21 @@ try:
 
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         src_fd = os.open(blob_path, flags)
+        dst_fd = -1
         hasher = hashlib.sha256()
         total = 0
         try:
             st_before = os.fstat(src_fd)
             if not stat.S_ISREG(st_before.st_mode) or st_before.st_nlink != 1 or st_before.st_dev != blob_lstat.st_dev or st_before.st_ino != blob_lstat.st_ino or st_before.st_size != expected_len:
                 fail("candidate blob changed during open: %s" % path)
-            with os.fdopen(src_fd, "rb", closefd=True) as src, open(target, "wb") as dst:
+            dst_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+            dst_fd = os.open(target, dst_flags, 0o600)
+            dst_stat = os.fstat(dst_fd)
+            if not stat.S_ISREG(dst_stat.st_mode):
+                fail("candidate destination is not a regular file: %s" % path)
+            with os.fdopen(src_fd, "rb", closefd=True) as src, os.fdopen(dst_fd, "wb", closefd=True) as dst:
                 src_fd = -1
+                dst_fd = -1
                 while True:
                     chunk = src.read(CHUNK_BYTES)
                     if not chunk:
@@ -635,6 +642,8 @@ try:
         finally:
             if src_fd >= 0:
                 os.close(src_fd)
+            if dst_fd >= 0:
+                os.close(dst_fd)
         if total != expected_len or hasher.hexdigest() != expected_sha:
             fail("candidate blob sha256 mismatch: %s" % path)
 
@@ -1534,7 +1543,12 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
       return { bytes: verdictDocument(binding, { ...verdictBase, status: 'denied', reason: 'candidate .autosync/proposal.json exceeds 1 MiB limit', expiresAtMs: String(Date.now() + 60000), ...metaFields }) };
     }
     const key = `${normalized.storeId}|${normalized.runId}|${candidateDigest}`;
-    const cached = checkedCache.get(key);
+    const rawCached = checkedCache.get(key);
+    const cached = rawCached !== undefined
+      && (rawCached.registration.policyProfile ?? 'github') === (registration.policyProfile ?? 'github')
+      && (rawCached.registration.allowWorkflowWrites === true) === (registration.allowWorkflowWrites === true)
+      ? rawCached
+      : undefined;
     if (cached === undefined) {
       const gateTempDir = await mkdtemp(join(scratch, 'gate-index-'));
       await chmod(gateTempDir, 0o700);
@@ -1641,11 +1655,18 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
       void persistState();
       return { bytes };
     };
-    const cached = checkedCache.get(`${normalized.storeId}|${normalized.runId}|${candidateDigest}`);
-    if (cached === undefined) return settle('not_executed', null, 'gate_revalidation_required: no gate-verified artifact for this binding');
+    const rawCached = checkedCache.get(`${normalized.storeId}|${normalized.runId}|${candidateDigest}`);
     // The gate-verified artifact is bound to the candidate digest; a re-registered binding (for example a
-    // moved prHeadSha) refreshes the identity used for publication guards without re-running the gate.
-    const registration = registrationFor(normalized) ?? cached.registration;
+    // moved prHeadSha) refreshes the identity used for publication guards without re-running the gate,
+    // provided its host policy profile and workflow-write authority have not changed.
+    const registration = registrationFor(normalized) ?? rawCached?.registration;
+    const cached = rawCached !== undefined
+      && registration !== undefined
+      && (rawCached.registration.policyProfile ?? 'github') === (registration.policyProfile ?? 'github')
+      && (rawCached.registration.allowWorkflowWrites === true) === (registration.allowWorkflowWrites === true)
+      ? rawCached
+      : undefined;
+    if (cached === undefined || registration === undefined) return settle('not_executed', null, 'gate_revalidation_required: no gate-verified artifact for this binding');
     if (String(request.baseRevision) !== registration.identity.defaultSha || String(request.sourceRevision) !== registration.identity.headSha) {
       return settle('not_executed', null, 'revision_binding_mismatch: request revisions differ from the registered identity');
     }
