@@ -95,6 +95,11 @@ function makeLockWithOverlay(maxBytes: number) {
   return coreGood(admitTask(task, { admissionId: 'admission-cas-1', runId: 'run-cas-1' }));
 }
 
+async function makeCasTempDir(): Promise<string> {
+  const baseTmp = process.platform === 'darwin' ? '/tmp' : tmpdir();
+  return mkdtemp(join(await realpath(baseTmp), 'lw-cas-'));
+}
+
 async function createRunHost(directory: string, input: PiOpenInput) {
   const runtimeDir = join(directory, 'runtime');
   const artifactsDir = join(directory, 'artifacts');
@@ -922,7 +927,7 @@ test('streamCopyVerifiedBlob supports CoW reflink projection and 1 MiB streaming
 });
 
 test('publishCandidateFileToCas and captureCheckpoint stream-check fresh ingestion and EEXIST dedup hits before accepting CAS blobs', async () => {
-  const dir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-cas-scrub-'));
+  const dir = await makeCasTempDir();
   try {
     const artifactsDir = join(dir, 'artifacts');
     await mkdir(artifactsDir, { recursive: true, mode: 0o700 });
@@ -1081,7 +1086,7 @@ test('publishCandidateFileToCas and captureCheckpoint stream-check fresh ingesti
 });
 
 test('R2-5: public Pi v1/v2 adapters without host.createCandidateStreamChecker reject generic tokens and resolved bearer credentials on fresh capture and EEXIST dedup', async () => {
-  const dir = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-pi-builtin-scrub-'));
+  const dir = await makeCasTempDir();
   try {
     const resolvedToken = 'CustomAdapterSecret+Bearer9876543210==';
     const genericToken = 'ghp_0123456789abcdefghij0123456789';
