@@ -315,8 +315,9 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   let protectedPatterns = validateAndDedupeScopePatterns(baseProtected, 'protected');
 
   for (const writableEntry of writablePatterns) {
+    const writableLower = writableEntry.toLowerCase();
     const overlappingMandatory = mandatoryProtected.find(protectedEntry =>
-      scopePatternsOverlap(writableEntry.toLowerCase(), protectedEntry.toLowerCase()),
+      scopePatternsOverlap(writableLower, protectedEntry.toLowerCase()),
     );
     if (overlappingMandatory !== undefined) {
       throw new RunnerTaskpackError('CONFIG_INVALID', `writable path "${writableEntry}" overlaps protected path "${overlappingMandatory}"`);
@@ -324,16 +325,16 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
     if (
       enforceGitHubWorkflowProtection
       && allowWorkflowWrites
-      && scopePatternsOverlap(writableEntry.toLowerCase(), '.github/**')
-      && writableEntry !== RUNNER_WORKFLOW_PROTECTED_PATH
-      && !writableEntry.startsWith('.github/workflows/')
+      && scopePatternsOverlap(writableLower, '.github/**')
+      && writableLower !== RUNNER_WORKFLOW_PROTECTED_PATH
+      && !writableLower.startsWith('.github/workflows/')
     ) {
       throw new RunnerTaskpackError(
         'CONFIG_INVALID',
         `writable path "${writableEntry}" overlaps protected non-workflow .github/** surface; only .github/workflows/** may be unlocked via allowWorkflowWrites`,
       );
     }
-    if (protectedPatterns.includes(writableEntry)) {
+    if (protectedPatterns.some(protectedEntry => protectedEntry.toLowerCase() === writableLower)) {
       throw new RunnerTaskpackError('CONFIG_INVALID', `writable path "${writableEntry}" is listed in scope.protected`);
     }
   }
