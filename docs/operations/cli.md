@@ -171,7 +171,7 @@ loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event schedul
 loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event issue_comment --comment-body "/loopwright docs retry" --pr-head-ref loopwright-docs-1 --pr-base-ref main --json
 ```
 
-`suite resolve` emits `{ include: [...] }` matrix cells in `--json` mode and exits `0` for `eligible`, `deferred`, and `ignored` dispositions, `2` for usage or manifest errors, and `3` for `blocked` outcomes (including `TASKPACK_SCOPE_VIOLATION`).
+`suite resolve` emits `{ include: [...] }` matrix cells in `--json` mode and exits `0` for `eligible`, `deferred`, and `ignored` dispositions, `2` for usage, unknown `--domain`, or manifest/scope validation errors, and `3` for runtime `blocked` outcomes (such as probe failures or branch-ownership mismatches).
 
 ```sh
 loopwright app-serve --config github-app.yaml --repo . --json
@@ -184,8 +184,8 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 | Code | Meaning |
 | --- | --- |
 | 0 | Completed, no change, successful static command, or `suite` `eligible`/`deferred`/`ignored` |
-| 2 | Usage, configuration, or `TaskpackSuite` manifest rejected |
-| 3 | Unsupported capability or `blocked` (`baseline_merge_conflict`, `suite` `TASKPACK_SCOPE_VIOLATION`) |
+| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite` manifest rejected |
+| 3 | Unsupported capability or runtime `blocked` (`baseline_merge_conflict`, stage probe, branch mismatch) |
 | 4 | Execution or acceptance failed |
 | 5 | Allowance exhausted |
 | 6 | Deadline expired |

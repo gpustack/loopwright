@@ -2938,6 +2938,31 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         : { mode: 'disabled' as const },
     },
   };
+  const collectWatchedPaths = (): readonly string[] => {
+    const activeUpstreamIds = new Set(
+      (bindings.upstreamRecords ?? [])
+        .filter(record => record.status === 'available')
+        .map(record => record.upstreamId),
+    );
+    const matchedUpstreams = activeUpstreamIds.size > 0
+      ? manifest.spec.upstreams.filter(u => activeUpstreamIds.has(u.id))
+      : [];
+    const sourceUpstreams = matchedUpstreams.length > 0 ? matchedUpstreams : manifest.spec.upstreams;
+    const deduped: string[] = [];
+    const seen = new Set<string>();
+    for (const upstream of sourceUpstreams) {
+      for (const rawPath of upstream.watchedPaths) {
+        const trimmed = rawPath.trim();
+        if (trimmed.length === 0 || seen.has(trimmed)) continue;
+        seen.add(trimmed);
+        deduped.push(trimmed);
+        if (deduped.length >= 256) return Object.freeze(deduped);
+      }
+    }
+    return Object.freeze(deduped);
+  };
+  const watchedPaths = collectWatchedPaths();
+
   return {
     registry,
     config,
@@ -2952,6 +2977,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     policyProfile: input.policyProfile,
     baselineAlignment: input.effectiveBaselineAlignment,
     ...(input.extractedConflictPaths !== undefined ? { extractedConflictPaths: input.extractedConflictPaths } : {}),
+    ...(watchedPaths.length > 0 ? { watchedPaths } : {}),
     ...(mergedLimits.maxTurns !== undefined || mergedLimits.maxRepairTurns !== undefined
       ? {
         circuitBreakerLimits: Object.freeze({

@@ -703,6 +703,7 @@ export async function runGitHubActionEntrypoint(
       fetchImpl: input.probeFetch,
       scrubber: turnkeyScrubber,
       env: runtimeEnv,
+      discoverUpstreamUpdates: !allowOfflineStagePrCheck,
       allowOfflineStagePrCheck,
     });
 

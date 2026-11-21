@@ -438,6 +438,7 @@ async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
       ...(args.values.has('pr-base-ref') ? { prBaseRef: args.values.get('pr-base-ref') } : {}),
       ...(args.values.has('domain') ? { domain: args.values.get('domain') } : {}),
       ...(githubToken !== undefined ? { githubToken } : {}),
+      discoverUpstreamUpdates: true,
       scrubber,
       env: suiteEnv,
     });
@@ -458,7 +459,9 @@ async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
       case 'ignored':
         return 0;
       case 'blocked':
-        return 3;
+        return resolution.code === 'TASKPACK_MANIFEST_INVALID' || resolution.code === 'ACTION_INPUT_INVALID'
+          ? 2
+          : 3;
       default: {
         const _exhaustive: never = resolution.disposition;
         return _exhaustive;
@@ -466,9 +469,7 @@ async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
     }
   } catch (err) {
     if (err instanceof TaskpackError) {
-      const exitCode = await emitTaskpackError(err, emit, scrubber);
-      // `suite` maps TASKPACK_SCOPE_VIOLATION to exit 3 (blocked) per suite CLI contract.
-      return err.code === 'TASKPACK_SCOPE_VIOLATION' ? 3 : exitCode;
+      return await emitTaskpackError(err, emit, scrubber);
     }
     throw err;
   }

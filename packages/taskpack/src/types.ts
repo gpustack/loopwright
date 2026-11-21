@@ -841,6 +841,7 @@ export interface CompiledTaskpack {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly baselineAlignment?: ResolvedBaselineAlignmentConfig | undefined;
   readonly extractedConflictPaths?: readonly string[] | undefined;
+  readonly watchedPaths?: readonly string[] | undefined;
   readonly circuitBreakerLimits?: {
     readonly maxTurns?: number | undefined;
     readonly maxRepairTurns?: number | undefined;

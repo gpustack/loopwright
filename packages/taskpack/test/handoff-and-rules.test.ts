@@ -19,6 +19,7 @@ import {
   extractTaskpackResourcePaths,
   INSTRUCTION_MAX_AGGREGATE_BYTES,
   loadDeclarativeTaskpack,
+  openStagedTaskpackStepGate,
   parseTaskpackManifest,
   resolveEffectiveProtectedPaths,
   resolveTaskpackResourcePath,
@@ -1023,6 +1024,132 @@ describe('handoff-and-rules.test.ts: taskpack handoffs, conditional rules, lockf
       if (inspected.ok) {
         assert.equal(inspected.value.status.status, 'completed');
         assert.notEqual(inspected.value.runEval, null);
+      }
+    } finally {
+      await removeTreeForce(holder);
+    }
+  });
+
+  it('propagates watchedPaths through compiled and staged step ports so conditional rules activate on initial turns', async () => {
+    const holder = await realpath(await mkdtemp(join(tmpdir(), 'lw-t8-watched-')));
+    try {
+      const repoRoot = join(holder, 'repo');
+      const runRoot = join(holder, 'runs');
+      await mkdir(join(repoRoot, '.loopwright', 'rules'), { recursive: true });
+      await mkdir(join(repoRoot, 'src'), { recursive: true });
+      await writeFile(join(repoRoot, 'src', 'app.ts'), 'export const app = 1;\n', 'utf8');
+      await writeFile(join(repoRoot, '.loopwright', 'rules', 'base.md'), 'WATCHED_BASE_RULE\n', 'utf8');
+      await writeFile(join(repoRoot, '.loopwright', 'rules', 'ts-only.md'), 'WATCHED_TS_RULE\n', 'utf8');
+      await writeFile(join(repoRoot, '.loopwright', 'rules', 'py-only.md'), 'WATCHED_PY_RULE\n', 'utf8');
+
+      const yaml = [
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: Taskpack',
+        'metadata:',
+        '  name: watched-paths-taskpack',
+        'spec:',
+        '  goal:',
+        '    candidate: Update watched TypeScript files.',
+        '    noChange: Confirm watched files are current.',
+        '  scope:',
+        '    writable:',
+        '      - src/**',
+        '    protected:',
+        '      - .git/**',
+        '  upstreams:',
+        '    - id: ts-feed',
+        '      kind: http-json',
+        '      source: https://example.invalid/ts.json',
+        '      versionPath: version',
+        '      watchedPaths:',
+        '        - src/app.ts',
+        '    - id: py-feed',
+        '      kind: http-json',
+        '      source: https://example.invalid/py.json',
+        '      versionPath: version',
+        '      watchedPaths:',
+        '        - scripts/tool.py',
+        '  instructions:',
+        '    - .loopwright/rules/base.md',
+        '    - path: .loopwright/rules/ts-only.md',
+        '      when:',
+        '        changedPaths:',
+        '          - src/**',
+        '    - path: .loopwright/rules/py-only.md',
+        '      when:',
+        '        extensions:',
+        '          - .py',
+        '  verification:',
+        '    localChecks:',
+        '      - id: ok',
+        '        implementation: no-change.v1',
+        '    externalGates: []',
+        '  publication:',
+        '    mode: disabled',
+        '',
+      ].join('\n');
+      await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), yaml, 'utf8');
+      const baseSha = initGitRepo(repoRoot);
+
+      // 1. Direct compilation narrows watchedPaths to available upstreamRecords when present, else all upstreams.
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repoRoot,
+        policyProfile: 'local',
+        executionMode: 'delegated',
+      });
+      const compiledFiltered = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        repository: 'octo/repo',
+        repositoryRoot: repoRoot,
+        taskpackPath: '.loopwright/taskpack.yaml',
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        budgets: DEFAULT_HOST_BUDGETS,
+        upstreamRecords: [{ upstreamId: 'ts-feed', status: 'available', version: '2.0.0' }],
+      });
+      assert.deepEqual(compiledFiltered.watchedPaths, ['src/app.ts']);
+
+      // 2. Staged step run persists watchedPaths in secrets.json and forwards them via gateHandle.ports to stepNext.
+      const runId = 'watched-step-1';
+      const staged = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repoRoot,
+        runRoot,
+        runId,
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        policyProfile: 'local',
+        upstreamRecordsJson: JSON.stringify([{ upstreamId: 'ts-feed', status: 'available', version: '2.0.0' }]),
+      });
+      assert.deepEqual(staged.watchedPaths, ['src/app.ts']);
+
+      const gate = await openStagedTaskpackStepGate({ runRoot, runId });
+      assert.notEqual(gate, null);
+      try {
+        assert.deepEqual(gate?.ports?.watchedPaths, ['src/app.ts']);
+        const loaded = await loadTrustedConfiguration({
+          configPath: staged.configPath,
+          registryPath: staged.registryPath,
+          registrySha256: staged.registrySha256,
+          untrustedRoots: [repoRoot],
+        });
+        assert.equal(loaded.ok, true);
+        if (!loaded.ok) return;
+
+        const firstTurn = await stepNext(
+          { configuration: loaded.value, repository: repoRoot, runRoot, runId },
+          gate?.ports,
+        );
+        assert.equal(firstTurn.ok, true, firstTurn.ok ? '' : JSON.stringify(firstTurn.error));
+        if (!firstTurn.ok || firstTurn.value.kind !== 'step') return;
+        const bodies = await Promise.all(firstTurn.value.contextFiles.map(cf => readFile(cf, 'utf8')));
+        assert.equal(bodies.some(b => b.includes('WATCHED_BASE_RULE')), true);
+        assert.equal(bodies.some(b => b.includes('WATCHED_TS_RULE')), true);
+        assert.equal(bodies.some(b => b.includes('WATCHED_PY_RULE')), false);
+      } finally {
+        await gate?.close();
       }
     } finally {
       await removeTreeForce(holder);

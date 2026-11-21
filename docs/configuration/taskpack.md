@@ -386,7 +386,7 @@ spec:
           versionFrom: { domain: docs, path: docs/version.json, jsonPointer: /version } # Optional
 ```
 
-- **Suite protection**: Every domain enforces the suite-wide mandatory protected union across `.loopwright/suite.yaml` and peer control-plane paths (`<= 128` patterns, zero writable overlap).
+- **Suite protection**: Action (`suite-path`) and App (`suitePath`) domain runs enforce the suite-wide protected union across `.loopwright/suite.yaml` and peer control paths (`<= 128` patterns); gate standalone CLI `--taskpack` runs with `suite check`.
 - **Branch prefix disjointness**: Domains targeting the same `targetBranch` require pairwise prefix-disjoint `spec.publication.headBranchPrefix` values (`TASKPACK_MANIFEST_INVALID` on collision).
 - **Stateless readiness**: Stage probes (`github-release`, `http-json`, `git-tag`, `git-commit`) read `versionFrom` blobs (`<= 1 MiB`) from `baseRevision` and defer (`eligible` / `deferred`) without Git state files.
 

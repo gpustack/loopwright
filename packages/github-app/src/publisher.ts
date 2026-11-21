@@ -1364,7 +1364,6 @@ export async function startNativePullRequestPublisherServer(
       let candidateProposalBytes: Uint8Array | undefined;
 
       for (const file of filesToStageInput) {
-        candidateNames.add(file.name);
         if (!isAllowedCandidateWrite(file.name, snapshot)) {
           continue;
         }

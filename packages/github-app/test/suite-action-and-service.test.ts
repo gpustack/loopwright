@@ -74,6 +74,7 @@ function makeDomainTaskpackYaml(options: {
   readonly openAiBaseUrl?: string;
   readonly baselineAlignmentPolicy?: 'off' | 'fail-fast' | 'extract-context';
   readonly allowWorkflowWrites?: boolean;
+  readonly upstreams?: readonly Record<string, unknown>[];
 }): string {
   const controlRoot = options.controlDir ?? `.loopwright/${options.name}`;
   return serializePrettyYaml({
@@ -110,6 +111,7 @@ function makeDomainTaskpackYaml(options: {
       ...(options.baselineAlignmentPolicy !== undefined
         ? { baselineAlignment: { policy: options.baselineAlignmentPolicy } }
         : {}),
+      ...(options.upstreams !== undefined ? { upstreams: [...options.upstreams] } : {}),
       verification: {
         localChecks: options.proposalPath !== undefined
           ? [{ id: `${options.name}-json`, implementation: 'json-artifact.v1' }]
@@ -154,7 +156,7 @@ function makeDomainTaskpackYaml(options: {
   });
 }
 
-describe('T9: @loopwright/github-app suite Action routing, PR ownership lookup, multi-domain App, and 3-way publisher', () => {
+describe('@loopwright/github-app suite Action routing, PR ownership lookup, multi-domain App, and 3-way publisher', () => {
   it('re-exports suite & baseline-alignment symbols from @loopwright/github-app and wires action.yml inputs/outputs', async () => {
     const requiredFunctions = [
       'loadTaskpackSuite',
@@ -530,6 +532,83 @@ describe('T9: @loopwright/github-app suite Action routing, PR ownership lookup, 
           'peer domain external instruction must be in suite-wide protected path union',
         );
       }
+
+      // 6. Upstream Stage A declaring a pending spec.upstreams update (even with zero open PRs) defers Stage B
+      releaseMode = 'ok_1_2_0';
+      let upstreamFeedStatus = 200;
+      const upstreamFeedUrl = 'https://upstreams.example.invalid/feed.json';
+      const upstreamProbeFetch: typeof globalThis.fetch = async (input, init) => {
+        const reqUrl = typeof input === 'string'
+          ? input
+          : (input instanceof URL ? input.href : input.url);
+        if (reqUrl === upstreamFeedUrl) {
+          if (upstreamFeedStatus !== 200) {
+            return new Response('upstream error', { status: upstreamFeedStatus, headers: { 'content-type': 'text/plain' } });
+          }
+          return new Response(JSON.stringify({ version: '2.0.0' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return globalThis.fetch(input, init);
+      };
+      const stageAManifestWithUpstream = makeDomainTaskpackYaml({
+        name: 'stage-a',
+        writable: ['packages/sdk/**'],
+        headBranchPrefix: 'loopwright/stage-a/',
+        proposalPath: 'packages/sdk/proposal.json',
+        upstreams: [
+          {
+            id: 'sdk-feed',
+            kind: 'http-json',
+            source: upstreamFeedUrl,
+            versionPath: 'version',
+            watchedPaths: ['packages/sdk/package.json'],
+          },
+        ],
+      });
+      await writeFile(join(repo, '.loopwright', 'stage-a', 'taskpack.yaml'), stageAManifestWithUpstream, 'utf8');
+      await git(repo, ['add', '.loopwright/stage-a/taskpack.yaml']);
+      await git(repo, ['commit', '-m', 'chore: declare stage-a upstream']);
+      const shaWithUpstream = await git(repo, ['rev-parse', 'HEAD']);
+
+      const deferredByUpstream = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        suitePath: '.loopwright/suite.yaml',
+        domain: 'stage-b',
+        resolveSuiteOnly: true,
+        repositoryFullName: 'acme/mono',
+        baseRevision: shaWithUpstream,
+        mode: 'candidate',
+        eventName: 'schedule',
+        runRoot,
+        runId: 'suite-upstream-pending',
+        githubApiBaseUrl: githubServer.url,
+        githubToken: secretToken,
+        probeFetch: upstreamProbeFetch,
+      });
+      assert.equal(deferredByUpstream.kind, 'deferred');
+      if (deferredByUpstream.kind === 'deferred') {
+        assert.equal(deferredByUpstream.reason, 'stage_not_ready');
+      }
+
+      upstreamFeedStatus = 500;
+      const blockedByUpstreamErr = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        suitePath: '.loopwright/suite.yaml',
+        domain: 'stage-b',
+        resolveSuiteOnly: true,
+        repositoryFullName: 'acme/mono',
+        baseRevision: shaWithUpstream,
+        mode: 'candidate',
+        eventName: 'schedule',
+        runRoot,
+        runId: 'suite-upstream-err',
+        githubApiBaseUrl: githubServer.url,
+        githubToken: secretToken,
+        probeFetch: upstreamProbeFetch,
+      });
+      assert.equal(blockedByUpstreamErr.kind, 'blocked');
     } finally {
       await githubServer.close();
       await rm(work, { recursive: true, force: true });

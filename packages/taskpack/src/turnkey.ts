@@ -6225,6 +6225,9 @@ export async function executeTurnkeyCycle(
       ...(effectivePolicyProfile !== undefined ? { policyProfile: effectivePolicyProfile } : {}),
       ...(effectiveAllowWorkflowWrites !== undefined ? { allowWorkflowWrites: effectiveAllowWorkflowWrites } : {}),
       ...(options.taskpack.roleMcpServers !== undefined ? { roleMcpServers: options.taskpack.roleMcpServers } : {}),
+      ...(options.taskpack.watchedPaths !== undefined && options.taskpack.watchedPaths.length > 0
+        ? { watchedPaths: options.taskpack.watchedPaths }
+        : {}),
       ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
       ...(options.decisions !== undefined ? { decisions: options.decisions } : {}),
       openAdapter: async (host: OpenAdapterHost, adapterInput: OpenAdapterInput) => {
@@ -6767,6 +6770,7 @@ export interface StagedTaskpackForStep {
   readonly workspaceStagedDir?: string | null | undefined;
   readonly digests?: Readonly<Record<string, string>> | undefined;
   readonly extractedConflictPaths?: readonly string[] | undefined;
+  readonly watchedPaths?: readonly string[] | undefined;
 }
 
 export interface OpenStagedTaskpackStepGateOptions {
@@ -6786,7 +6790,7 @@ export interface StagedTaskpackStepGateHandle {
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly mcpServers?: readonly StepMcpServerMetadata[] | undefined;
   readonly decisions?: AdvisoryDecisionPort | undefined;
-  readonly ports?: Pick<ControllerPorts, 'gateUrlOverrides' | 'policyProfile' | 'allowWorkflowWrites' | 'roleMcpServers' | 'mcpServers' | 'decisions'> | undefined;
+  readonly ports?: Pick<ControllerPorts, 'gateUrlOverrides' | 'policyProfile' | 'allowWorkflowWrites' | 'roleMcpServers' | 'mcpServers' | 'decisions' | 'watchedPaths'> | undefined;
   readonly serverUrl?: string | undefined;
   close(): Promise<void>;
 }
@@ -6812,6 +6816,7 @@ const STAGED_SECRETS_KEYS: ReadonlySet<string> = new Set([
   'workspaceStagedDir',
   'digests',
   'extractedConflictPaths',
+  'watchedPaths',
 ]);
 const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'checkId',
@@ -7148,6 +7153,20 @@ async function readAndValidateStagedTaskpackSecrets(
     }
     extractedConflictPaths = Object.freeze(cleanConflictPaths);
   }
+  let watchedPaths: readonly string[] | undefined;
+  if (parsed['watchedPaths'] !== undefined) {
+    if (!Array.isArray(parsed['watchedPaths']) || parsed['watchedPaths'].length > 256) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack watchedPaths is invalid');
+    }
+    const cleanWatchedPaths: string[] = [];
+    for (const item of parsed['watchedPaths']) {
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack watchedPaths entry is invalid');
+      }
+      cleanWatchedPaths.push(item.trim());
+    }
+    watchedPaths = Object.freeze(cleanWatchedPaths);
+  }
 
   return {
     stageDir,
@@ -7166,6 +7185,7 @@ async function readAndValidateStagedTaskpackSecrets(
     ...(workspaceStagedDir !== undefined ? { workspaceStagedDir } : {}),
     ...(digests !== undefined ? { digests } : {}),
     ...(extractedConflictPaths !== undefined ? { extractedConflictPaths } : {}),
+    ...(watchedPaths !== undefined ? { watchedPaths } : {}),
   };
 }
 
@@ -7598,6 +7618,7 @@ export async function stageTaskpackForStep(
         ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
         ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
         ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
+        ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
       }, null, 2)}\n`,
       'utf8',
     );
@@ -7620,6 +7641,7 @@ export async function stageTaskpackForStep(
       ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
       ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
       ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
+      ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
     };
   } finally {
     await preflightResult?.cleanup().catch(() => undefined);
@@ -7793,6 +7815,7 @@ export async function openStagedTaskpackStepGate(
       ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
       ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
       ...(decisions !== undefined ? { decisions } : {}),
+      ...(staged.watchedPaths !== undefined && staged.watchedPaths.length > 0 ? { watchedPaths: staged.watchedPaths } : {}),
     });
     return {
       staged,
@@ -7828,6 +7851,7 @@ export async function openStagedTaskpackStepGate(
     ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
     ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
     ...(decisions !== undefined ? { decisions } : {}),
+    ...(staged.watchedPaths !== undefined && staged.watchedPaths.length > 0 ? { watchedPaths: staged.watchedPaths } : {}),
   });
 
   return {

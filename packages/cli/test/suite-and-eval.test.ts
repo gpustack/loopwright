@@ -257,7 +257,7 @@ spec:
     assert.equal(cycleRes.status, 2, cycleRes.stdout + cycleRes.stderr);
     assert.equal(JSON.parse(cycleRes.stdout).data.code, 'TASKPACK_MANIFEST_INVALID');
 
-    // Symlinked suite file -> TASKPACK_SCOPE_VIOLATION -> exit 3
+    // Symlinked suite file -> TASKPACK_SCOPE_VIOLATION -> exit 2 (static load error matches run --taskpack)
     const linkedSuite = join(fixture.repoRoot, '.loopwright', 'suite-link.yaml');
     await symlink(join(fixture.repoRoot, '.loopwright', 'suite.yaml'), linkedSuite);
     const linkRes = spawnSync(
@@ -265,7 +265,7 @@ spec:
       [MAIN_PATH, 'suite', 'check', '--suite', '.loopwright/suite-link.yaml', '--repo', fixture.repoRoot, '--json'],
       { encoding: 'utf8', timeout: 15_000, env: CLEAN_ENV },
     );
-    assert.equal(linkRes.status, 3, linkRes.stdout + linkRes.stderr);
+    assert.equal(linkRes.status, 2, linkRes.stdout + linkRes.stderr);
     assert.equal(JSON.parse(linkRes.stdout).data.code, 'TASKPACK_SCOPE_VIOLATION');
   } finally {
     await fixture.cleanup();
@@ -436,6 +436,16 @@ test('cli-suite: loopwright suite resolve returns exit 0 for eligible/deferred a
     });
     assert.equal(loopwrightOverrideRes.status, 0, loopwrightOverrideRes.stdout + loopwrightOverrideRes.stderr);
     assert.equal(JSON.parse(loopwrightOverrideRes.stdout).data.disposition, 'eligible');
+
+    // 7. Unknown --domain returns TASKPACK_MANIFEST_INVALID with usage/manifest exit 2
+    const unknownDomainRes = await runCliInProcess([
+      'suite', 'resolve', '--suite', fixture.suitePath, '--repo', fixture.repoRoot,
+      '--domain', 'nope', '--json',
+    ], env);
+    assert.equal(unknownDomainRes.status, 2, unknownDomainRes.stdout + unknownDomainRes.stderr);
+    const unknownDomainEnv = JSON.parse(unknownDomainRes.stdout) as { data: { disposition: string; code: string } };
+    assert.equal(unknownDomainEnv.data.disposition, 'blocked');
+    assert.equal(unknownDomainEnv.data.code, 'TASKPACK_MANIFEST_INVALID');
   } finally {
     await fixture.cleanup();
     await new Promise<void>(resolveClosed => server.close(() => resolveClosed()));
