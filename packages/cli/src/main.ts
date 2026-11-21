@@ -664,8 +664,6 @@ function turnkeySummaryExit(summary: TurnkeyCycleAttemptSummary, signal: string 
       return 0;
     case 'blocked':
       return 3;
-    case 'failed':
-      return 4;
     case 'exhausted':
       return 5;
     case 'expired':
@@ -952,15 +950,23 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
     let upstreamRecords: readonly TaskpackUpstreamRecord[] = [];
     let autoNoChangeReason: string | null = null;
     if (manifest.spec.preflight !== undefined) {
-      preflightResult = await runTaskpackPreflight({
-        manifest,
-        repositoryRoot: repoRoot,
-        authorized: true,
-        hostPolicy,
-        env: process.env,
-        scrubber,
-        tempRoot: realRunRoot,
-      });
+      const preflightRun = await withSignalAbort(async (signal, getCaughtSignal) => ({
+        result: await runTaskpackPreflight({
+          manifest,
+          repositoryRoot: repoRoot,
+          authorized: true,
+          hostPolicy,
+          env: process.env,
+          scrubber,
+          tempRoot: realRunRoot,
+          signal,
+        }),
+        caughtSignal: getCaughtSignal(),
+      }));
+      preflightResult = preflightRun.result;
+      if (preflightRun.caughtSignal !== null) {
+        return preflightRun.caughtSignal === 'SIGTERM' ? 143 : 130;
+      }
       if (preflightResult.disposition === 'blocked') {
         const rawReason = preflightResult.reason?.trim();
         const message = rawReason !== undefined && rawReason.length > 0

@@ -922,6 +922,17 @@ test('run-taskpack-cli: live local runs execute minimal manifests (auto/candidat
     assert.match(candRes.stdout, /^Status: completed\b/m);
     assert.match(candRes.stdout, /^Model: local-oai\/mock-model/m);
 
+    // 1c. Reusing an already-completed --run-id fails with exit 7 (OWNER_BUSY) instead of reporting prior completed status
+    const reusedRunIdRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-auto-cand',
+      '--mode', 'auto', '--json',
+    ], baseEnv);
+    assert.equal(reusedRunIdRes.status, 7, reusedRunIdRes.stdout + reusedRunIdRes.stderr);
+    const reusedEnv = parseNdjson(reusedRunIdRes.stdout).at(-1)!;
+    assert.equal(reusedEnv.data['reasonCode'], 'OWNER_BUSY');
+    assert.equal(reusedEnv.data['status'], 'failed');
+
     // 2. Live --mode auto with preflight returning no-change settles check-only with ZERO LLM calls
     await writeAndCommitManifest({
       apiVersion: 'loopwright.dev/v1alpha1',
