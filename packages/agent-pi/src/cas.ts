@@ -798,7 +798,7 @@ export async function streamCopyVerifiedBlob(
       !createdStat.isFile()
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
-      || createdStat.ino === srcBefore.ino
+      || (createdStat.dev === srcBefore.dev && createdStat.ino === srcBefore.ino)
     ) {
       refuse('RECOVERY_REQUIRED', '/candidate');
     }
