@@ -351,7 +351,7 @@
       <article>
         
   <h1 id="declarative-taskpack">Declarative Taskpack</h1>
-<p>Declarative taskpack mode is Loopwright&rsquo;s automated workflow for repository maintainers. Author one <code>.loopwright/taskpack.yaml</code> file in your repository, and the GitHub Action or App compiles contracts, handler digests, preflight stages, and credential bindings automatically.</p>
+<p>Declarative taskpack mode is Loopwright&rsquo;s automated workflow for repository maintainers and local CLI operators. Author one <code>.loopwright/taskpack.yaml</code> file in your repository, and <code>loopwright run --taskpack</code>, <code>loopwright step</code>, or the GitHub Action compiles contracts, handler digests, preflight stages, and credential bindings automatically.</p>
 <p>For strict separation between task authors and out-of-repo <code>TrustedRegistry</code> files, or local CLI controller configs, follow <a href="/loopwright/latest/docs/walkthroughs/managed-controller/">Managed Controller</a>
  instead.</p>
 <h2 id="contents">Contents</h2>
@@ -513,7 +513,8 @@
 <ul>
 <li><strong>Field dictionary</strong>: Inspect every field, bound, and enum in <a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
 .</li>
-<li><strong>Explicit scopes</strong>: Write <code>docs/**</code> for recursive directories and exact paths (or single-segment <code>*</code>/<code>?</code> globs) for files; protected paths always win.</li>
+<li><strong>Concise local manifests</strong>: Local CLI runs (<code>loopwright run --taskpack</code> and <code>loopwright step</code>) can omit <code>triggers</code>, <code>publication</code> (defaults to <code>disabled</code>), and <code>memory</code> (defaults to <code>disabled</code>).</li>
+<li><strong>Explicit scopes</strong>: Write <code>docs/**</code> for recursive directories and exact paths (or single-segment <code>*</code>/<code>?</code> globs) for files. Local runs protect <code>.git</code> and <code>&lt;controlRoot&gt;</code> by default without hardcoded tool directories; declare extra protected paths in <code>scope.protected</code>.</li>
 <li><strong>Inputs</strong>: Create instruction files, <code>preflight.script</code>, and <code>command.v1</code> scripts under protected paths before running. When configuring <code>spec.proposal.path</code>, place it inside a writable path with a <code>.yaml</code>, <code>.yml</code>, or <code>.json</code> extension.</li>
 <li><strong>Secrets</strong>: Never place tokens or ambient <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; use <code>spec.vars</code> only for non-secret static values.</li>
 </ul>
@@ -548,13 +549,15 @@
  for role and step bounds.</p>
 <h2 id="step-2-validate-taskpack">Step 2: Validate taskpack</h2>
 <p>Verify your host meets the <a href="/loopwright/latest/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
-, sync <code>digests.lock.json</code> when <code>pinDigests: true</code>, and test compilation in dry-run mode before enabling live mutations:</p>
+, sync <code>digests.lock.json</code> when <code>pinDigests: true</code>, and validate or execute locally via <code>@loopwright/taskpack</code> before enabling GitHub Actions:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
-</span></span><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json</span></span></code></pre></div>
+</span></span><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json
+</span></span><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo . --dry-run --json
+</span></span><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json</span></span></code></pre></div>
 </div>
-<p>Run the GitHub Action with <code>dry-run: 'true'</code> in a pull request workflow to validate the manifest, verify <code>digests.lock.json</code>, negotiate sandbox capabilities, and compile artifacts without invoking model providers or pushing branches.</p>
+<p>Run <code>loopwright run --taskpack ... --dry-run</code> locally or run the GitHub Action with <code>dry-run: 'true'</code> in a pull request workflow to validate the manifest, verify <code>digests.lock.json</code>, negotiate sandbox capabilities, and compile artifacts without invoking preflight, model providers, or branch pushes.</p>
 <h2 id="step-3-configure-workflow">Step 3: Configure workflow</h2>
 <p>Add <code>.github/workflows/loopwright.yml</code> to your repository to run on <code>schedule</code>, <code>workflow_dispatch</code>, or <code>/loopwright</code> issue comments with <code>mode: auto</code>:</p>
 <div class="code-block">

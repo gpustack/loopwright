@@ -433,15 +433,19 @@
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
-</span></span><span class="line"><span class="cl">loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json</span></span></code></pre></div>
+</span></span><span class="line"><span class="cl">loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
+</span></span><span class="line"><span class="cl">loopwright run --dry-run --taskpack .loopwright/taskpack.yaml --repo . --json</span></span></code></pre></div>
 </div>
-<p>Both commands validate and compile statically. Neither proves execution readiness, provider availability, or host qualification. <code>run --dry-run</code> refuses <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>.</p>
+<p>These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed <code>run --dry-run</code> refuses <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>.</p>
 <h2 id="step-4-run-work">Step 4: Run work</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo REPO --run-root TRUSTED_ROOT --run-id demo
+</span></span><span class="line"><span class="cl">loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 </span></span><span class="line"><span class="cl">loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo</span></span></code></pre></div>
 </div>
+<p><code>run --taskpack</code> runs a local declarative taskpack via <code>@loopwright/taskpack</code> without GitHub variables (<code>--taskpack</code> is mutually exclusive with <code>--config</code>/<code>--registry</code>/<code>--registry-sha256</code>). It accepts <code>--mode candidate|no-change|auto</code>, <code>--role-model</code>, <code>--dry-run</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code>, <code>--output-format</code>, and <code>--step-summary-file</code>.</p>
+<p>Under local CLI runs without a PR publisher, <code>mode: auto</code> defaults to <code>candidate</code> when neither <code>preflight</code> nor <code>upstreams</code> is declared. Declaring <code>publication.mode: pull_request</code> or <code>memory.apply: separate-pull-request</code> fails closed with <code>TASKPACK_HOST_BINDING_INVALID</code>.</p>
 <p>Use <code>resume</code> for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.</p>
 <p><code>run</code>, <code>resume</code>, <code>step next</code>, and <code>step submit</code> accept opt-in <code>--allow-privileged</code> (unlocks privileged execution capabilities) and <code>--allow-workflow-writes</code> (unlocks <code>.github/workflows/**</code> writes when the taskpack also enables them). <code>reconcile</code> accepts <code>--allow-workflow-writes</code> and refuses <code>--allow-privileged</code>. Other non-execution commands (<code>init</code>, <code>check</code>, <code>run --dry-run</code>, <code>status</code>, <code>inspect</code>, <code>closure</code>, <code>digest</code>, <code>app-serve</code>) refuse both flags.</p>
 <p><code>run</code> and <code>step</code> runs wire live <code>@loopwright/decisions</code> adapters into <code>ControllerPorts.decisions</code> whenever <code>spec.decisions.enabled</code> is <code>true</code> (falling back deterministically when credentials or endpoints are unavailable).</p>
@@ -546,15 +550,15 @@ Use <code>--step-summary-file</code> to write a separate Markdown summary. Witho
       </tr>
       <tr>
           <td><code>run</code></td>
-          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
-          <td><code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
-          <td>Execute a bounded controller run</td>
+          <td><code>--taskpack</code> or <code>--config</code>+<code>--registry</code>+<code>--registry-sha256</code>, plus <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
+          <td><code>--mode</code>, <code>--role-model</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
+          <td>Execute a local taskpack or managed controller run</td>
       </tr>
       <tr>
           <td><code>run --dry-run</code></td>
-          <td><code>--dry-run</code>, <code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
-          <td><code>--output</code>, <code>--json</code></td>
-          <td>Compile plan statically (<code>--repo</code>, <code>--run-root</code>, <code>--run-id</code>, privilege flags disallowed)</td>
+          <td><code>--dry-run</code> with <code>--taskpack</code>+<code>--repo</code> or <code>--config</code>+<code>--registry</code>+<code>--registry-sha256</code></td>
+          <td><code>--mode</code>, <code>--role-model</code>, <code>--output</code>, <code>--json</code></td>
+          <td>Compile plan statically without preflight, memory, or publication</td>
       </tr>
       <tr>
           <td><code>resume</code></td>

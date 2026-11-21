@@ -576,7 +576,7 @@
       </tr>
   </tbody>
 </table>
-<p>Turnkey taskpacks protect <code>.github</code>, <code>.loopwright/policies</code>, <code>digests.lock.json</code>, and built-in agent-instruction paths (<code>AGENTS.md</code> and tool-specific config directories) by default; <code>.agents/**</code> is opt-in via <code>writable</code>, and <code>.github/workflows/**</code> requires dual-key <code>allowWorkflowWrites</code>.</p>
+<p>Local taskpacks protect <code>.git</code>, <code>&lt;controlRoot&gt;</code> (preserving the exact-file <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, and repository-declared <code>scope.protected</code> by default without hardcoded tool directories. GitHub Action and App entrypoints also protect <code>.github</code>, requiring dual-key <code>allowWorkflowWrites</code> for <code>.github/workflows/**</code>.</p>
 <h2 id="roles-and-steps">Roles and steps</h2>
 <h3 id="role-and-step-fields">Role and step fields</h3>
 <table>
@@ -777,7 +777,7 @@ For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the gener
           <td><code>budgets.overlay</code></td>
           <td>No</td>
           <td><code>{ maxFiles, maxBytes }</code></td>
-          <td>Optional overlay caps (<code>maxFiles</code>: <code>1..4096</code>, <code>maxBytes</code>: <code>1024..67108864</code>; default <code>128</code>, <code>4 MiB</code>)</td>
+          <td>Optional overlay caps (<code>maxFiles</code>: <code>1..16384</code>, <code>maxBytes</code>: <code>1024..17179869184</code> (<code>16 GiB</code>); default <code>128</code>, <code>4 MiB</code>)</td>
       </tr>
   </tbody>
 </table>
@@ -810,7 +810,7 @@ For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the gener
 Classic <code>{ entries }</code> supports up to 256 entries.
 Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
-<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>4096</code> / <code>64 MiB</code>).</p>
+<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>16,384</code> files / <code>16 GiB</code> via verified CAS blob pointers).</p>
 <p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence</code> and <code>EvaluatedCheck</code> accept optional <code>metrics</code> (finite numbers, strings, or booleans), <code>findings</code>, and <code>detail</code> even on <code>passed</code> (<code>Evidence.spec.reason</code> stays <code>null</code>).</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>

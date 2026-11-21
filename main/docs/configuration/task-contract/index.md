@@ -119,7 +119,7 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `resources[].path` | Conditional | Relative path (`1..1024` chars) | **Required** per item; path resolved under `TrustedRegistry` directory |
 | `resources[].digest` | Conditional | `{ algorithm: 'sha256', hex }` | **Required** per item; 64-char lowercase SHA-256 hex digest |
 
-Turnkey taskpacks protect `.github`, `.loopwright/policies`, `digests.lock.json`, and built-in agent-instruction paths (`AGENTS.md` and tool-specific config directories) by default; `.agents/**` is opt-in via `writable`, and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
+Local taskpacks protect `.git`, `<controlRoot>` (preserving the exact-file `spec.proposal.path` carve-out), `digests.lock.json`, and repository-declared `scope.protected` by default without hardcoded tool directories. GitHub Action and App entrypoints also protect `.github`, requiring dual-key `allowWorkflowWrites` for `.github/workflows/**`.
 
 ## Roles and steps
 
@@ -170,7 +170,7 @@ Every retry and repair attempt draws from the same parent `budgets` envelope. Va
 | `budgets.maxImplementationRepairs` | Yes | Integer (`0 .. maxModelCalls`) | Allowed repair turns after an independent check or gate reports failure |
 | `budgets.maxTransportRetries` | Yes | Integer (`0 .. maxModelCalls`) | Allowed retries on transient network/provider transport failures |
 | `budgets.enforcement.*` | Yes | All 7 dimension keys | Enforcement mode for `wallTime`, `tokens`, `modelCalls`, `concurrency`, `formatRepairs`, `implementationRepairs`, `transportRetries` |
-| `budgets.overlay` | No | `{ maxFiles, maxBytes }` | Optional overlay caps (`maxFiles`: `1..4096`, `maxBytes`: `1024..67108864`; default `128`, `4 MiB`) |
+| `budgets.overlay` | No | `{ maxFiles, maxBytes }` | Optional overlay caps (`maxFiles`: `1..16384`, `maxBytes`: `1024..17179869184` (`16 GiB`); default `128`, `4 MiB`) |
 
 ### Enforcement modes
 
@@ -190,7 +190,7 @@ Classic `{ entries }` supports up to 256 entries.
 Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.
 
-Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }` (`<= 256` state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors `budgets.overlay` (default `128` entries / `4 MiB`, configurable up to `4096` / `64 MiB`).
+Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }` (`<= 256` state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors `budgets.overlay` (default `128` entries / `4 MiB`, configurable up to `16,384` files / `16 GiB` via verified CAS blob pointers).
 
 `ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence` and `EvaluatedCheck` accept optional `metrics` (finite numbers, strings, or booleans), `findings`, and `detail` even on `passed` (`Evidence.spec.reason` stays `null`).
 

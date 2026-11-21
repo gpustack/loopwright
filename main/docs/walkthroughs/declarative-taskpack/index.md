@@ -1,6 +1,6 @@
 # Declarative Taskpack
 
-Declarative taskpack mode is Loopwright's automated workflow for repository maintainers. Author one `.loopwright/taskpack.yaml` file in your repository, and the GitHub Action or App compiles contracts, handler digests, preflight stages, and credential bindings automatically.
+Declarative taskpack mode is Loopwright's automated workflow for repository maintainers and local CLI operators. Author one `.loopwright/taskpack.yaml` file in your repository, and `loopwright run --taskpack`, `loopwright step`, or the GitHub Action compiles contracts, handler digests, preflight stages, and credential bindings automatically.
 
 For strict separation between task authors and out-of-repo `TrustedRegistry` files, or local CLI controller configs, follow [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md) instead.
 
@@ -136,7 +136,8 @@ spec:
 ```
 
 - **Field dictionary**: Inspect every field, bound, and enum in [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md).
-- **Explicit scopes**: Write `docs/**` for recursive directories and exact paths (or single-segment `*`/`?` globs) for files; protected paths always win.
+- **Concise local manifests**: Local CLI runs (`loopwright run --taskpack` and `loopwright step`) can omit `triggers`, `publication` (defaults to `disabled`), and `memory` (defaults to `disabled`).
+- **Explicit scopes**: Write `docs/**` for recursive directories and exact paths (or single-segment `*`/`?` globs) for files. Local runs protect `.git` and `<controlRoot>` by default without hardcoded tool directories; declare extra protected paths in `scope.protected`.
 - **Inputs**: Create instruction files, `preflight.script`, and `command.v1` scripts under protected paths before running. When configuring `spec.proposal.path`, place it inside a writable path with a `.yaml`, `.yml`, or `.json` extension.
 - **Secrets**: Never place tokens or ambient `${ENV}` templates inside `taskpack.yaml`; use `spec.vars` only for non-secret static values.
 
@@ -173,14 +174,16 @@ Work in the yielded candidate directory and obey its allowed tools. Repeat until
 
 ## Step 2: Validate taskpack
 
-Verify your host meets the [runtime baseline](/loopwright/main/docs/getting-started/architecture/index.md#runtime-baseline), sync `digests.lock.json` when `pinDigests: true`, and test compilation in dry-run mode before enabling live mutations:
+Verify your host meets the [runtime baseline](/loopwright/main/docs/getting-started/architecture/index.md#runtime-baseline), sync `digests.lock.json` when `pinDigests: true`, and validate or execute locally via `@loopwright/taskpack` before enabling GitHub Actions:
 
 ```sh
 loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
 loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json
+loopwright run --taskpack .loopwright/taskpack.yaml --repo . --dry-run --json
+loopwright run --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json
 ```
 
-Run the GitHub Action with `dry-run: 'true'` in a pull request workflow to validate the manifest, verify `digests.lock.json`, negotiate sandbox capabilities, and compile artifacts without invoking model providers or pushing branches.
+Run `loopwright run --taskpack ... --dry-run` locally or run the GitHub Action with `dry-run: 'true'` in a pull request workflow to validate the manifest, verify `digests.lock.json`, negotiate sandbox capabilities, and compile artifacts without invoking preflight, model providers, or branch pushes.
 
 ## Step 3: Configure workflow
 

@@ -411,7 +411,7 @@
 <li><strong>Runtime</strong>: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.</li>
 </ul>
 <h2 id="execution-and-publication">Execution and publication</h2>
-<p>A live Action resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code> if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires <code>spec.decisions</code> into <code>ControllerPorts.decisions</code>, and runs the controller.</p>
+<p>A live Action enforces <code>policyProfile: github</code> (persisted in <code>run.json</code> across recovery), validates event eligibility against declared <code>spec.triggers</code> strictly <strong>before</strong> <code>spec.preflight</code>, resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code> if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires <code>spec.decisions</code> into <code>ControllerPorts.decisions</code>, and runs the controller.</p>
 <table>
   <thead>
       <tr>
@@ -422,7 +422,7 @@
   <tbody>
       <tr>
           <td>Preflight</td>
-          <td>Runs <code>spec.preflight.script</code> strictly after actor authorization and scrubber setup, stripping Loopwright, GitHub, and provider secrets</td>
+          <td>Validates <code>spec.triggers</code> first, then runs <code>spec.preflight.script</code> after actor auth and scrubber setup, stripping Loopwright, GitHub, and provider secrets</td>
       </tr>
       <tr>
           <td>Discover</td>
@@ -430,19 +430,19 @@
       </tr>
       <tr>
           <td>Execute</td>
-          <td>Authors a candidate in sandboxed steps and verifies scope and local or external checks; eligible failures can enter bounded repair or <code>rejectTo</code> rework</td>
+          <td>Authors a candidate in sandboxed steps with CAS blob pointers and verifies scope and local or external checks; eligible failures can enter bounded repair or <code>rejectTo</code> rework</td>
       </tr>
       <tr>
           <td>Publish</td>
-          <td>For <code>pull_request</code> mode, creates or updates a managed PR after verification</td>
+          <td>For <code>pull_request</code> mode, streams verified CAS blobs into a managed PR after verification</td>
       </tr>
   </tbody>
 </table>
 <p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Local checks and publication keep protected and non-writable files at <code>GITHUB_SHA</code>, and squash writable changes onto a commit parented on <code>GITHUB_SHA</code>.</p>
-<p>Native publication uses a detached <code>git worktree</code>, a signed-off diff-only commit, and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
+<p>Native publication opens each verified CAS blob once (<code>O_RDONLY | O_NOFOLLOW</code>, <code>nlink === 1</code>), streams <code>1 MiB</code> chunks into <code>git hash-object -w --stdin</code> while verifying SHA-256 and Git blob OID, and commits via a temporary <code>GIT_INDEX_FILE</code> with DCO sign-off and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
 <p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>local-only</code>, or <code>disabled</code>) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs by default (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> before the DCO trailer (<code>skipCi: true</code>). Memory errors or skipped updates never block primary task completion.</p>
 <p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script&rsquo;s parent directory read-only with whole-tree SHA-256 verification and exposing <code>$LOOPWRIGHT_BASE_DIR</code>, <code>$LOOPWRIGHT_STAGED_DIR</code> (when <code>exposeToChecks: true</code>), and <code>$LOOPWRIGHT_CHECK_OUT</code>. If a check opts into a GitHub token, grant that token only the permissions the check may use.</p>
-<p>On GitHub Actions, an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. This uses host process isolation, not a container security boundary. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
+<p>On GitHub-hosted Actions runners (<code>GITHUB_ACTIONS=true</code> and <code>RUNNER_ENVIRONMENT=github-hosted</code>), an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. Self-hosted runners negotiate host OS sandboxes instead. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/latest/docs/configuration/sandbox-backends/">Sandbox Backends</a>
  for isolation tradeoffs.</p>
 <p>Protected paths override writable paths. <code>.github/workflows/**</code> stays write-protected unless both <code>spec.execution.capabilities.allowWorkflowWrites: true</code> and <code>allow-workflow-writes: 'true'</code> are set. See <a href="/loopwright/latest/docs/configuration/taskpack/">Taskpack</a>
  for full manifest fields.</p>
@@ -739,7 +739,7 @@
 Human-readable summaries show cost only for <code>reported</code> or <code>estimated</code> provenance.
 Reports include usage provenance when available. Output is scrubbed and workflow command text is neutralized. Local and fixture tests do not qualify live GitHub publication or provider billing.</p>
 <h2 id="triggers">Triggers</h2>
-<p>Intake supports schedule, manual dispatch, repository dispatch, release, issue comment, and pull request review events, subject to taskpack policy. Pass the event name and payload explicitly as shown above. Comment commands also require actor authorization.</p>
+<p>Intake enforces <code>spec.triggers</code> strictly before <code>spec.preflight</code> or execution. Omitted or disabled triggers reject <code>schedule</code>, <code>workflow_dispatch</code>, <code>release</code>, <code>repository_dispatch</code>, and comment events fail-closed. Pass the event name and payload explicitly as shown above; comment commands also require actor authorization.</p>
 <p>Install a workflow in each consumer repository. For centralized webhook intake and token brokering, see <a href="/loopwright/latest/docs/operations/github-app/">GitHub App</a>
 .</p>
 <nav class="reading-footer" aria-label="Further reading">

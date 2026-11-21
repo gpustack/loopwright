@@ -58,16 +58,22 @@ Review the task scope, exact installed profiles, handlers, credentials, and regi
 ```sh
 loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
 loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
+loopwright run --dry-run --taskpack .loopwright/taskpack.yaml --repo . --json
 ```
 
-Both commands validate and compile statically. Neither proves execution readiness, provider availability, or host qualification. `run --dry-run` refuses `--allow-privileged` and `--allow-workflow-writes`.
+These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed `run --dry-run` refuses `--allow-privileged` and `--allow-workflow-writes`.
 
 ## Step 4: Run work
 
 ```sh
+loopwright run --taskpack .loopwright/taskpack.yaml --repo REPO --run-root TRUSTED_ROOT --run-id demo
 loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 ```
+
+`run --taskpack` runs a local declarative taskpack via `@loopwright/taskpack` without GitHub variables (`--taskpack` is mutually exclusive with `--config`/`--registry`/`--registry-sha256`). It accepts `--mode candidate|no-change|auto`, `--role-model`, `--dry-run`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, and `--step-summary-file`.
+
+Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate` when neither `preflight` nor `upstreams` is declared. Declaring `publication.mode: pull_request` or `memory.apply: separate-pull-request` fails closed with `TASKPACK_HOST_BINDING_INVALID`.
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
 
@@ -145,8 +151,8 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | `init` | `--directory` | `--force`, `--json` | Emit `controller.draft.yaml` and `registry.draft.yaml` |
 | `check` | `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile and verify configuration and registry digest statically |
 | `digest sync` | `--taskpack` | `--repo`, `--check`, `--json` | Write or verify `digests.lock.json` SHA-256 digests |
-| `run` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Execute a bounded controller run |
-| `run --dry-run` | `--dry-run`, `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile plan statically (`--repo`, `--run-root`, `--run-id`, privilege flags disallowed) |
+| `run` | `--taskpack` or `--config`+`--registry`+`--registry-sha256`, plus `--repo`, `--run-root`, `--run-id` | `--mode`, `--role-model`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Execute a local taskpack or managed controller run |
+| `run --dry-run` | `--dry-run` with `--taskpack`+`--repo` or `--config`+`--registry`+`--registry-sha256` | `--mode`, `--role-model`, `--output`, `--json` | Compile plan statically without preflight, memory, or publication |
 | `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
 | `step` | `--run-root`, `--run-id`, action | `--action`, `--allow-privileged`, `--allow-workflow-writes`, `--json` | Pull, submit, or cancel delegated work |
 | `status` | `--run-root`, `--run-id` | `--json` | Read current run stage, lease state, and checkpoint summary |

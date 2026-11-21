@@ -389,7 +389,7 @@
   <tbody>
       <tr>
           <td>Target user</td>
-          <td>Repository maintainers</td>
+          <td>Repository maintainers and local CLI users</td>
           <td>Platform and security operators</td>
       </tr>
       <tr>
@@ -409,12 +409,12 @@
       </tr>
       <tr>
           <td>Credential wiring</td>
-          <td>Mapped from Action or App environment</td>
+          <td>Mapped from local CLI, Action, or App environment</td>
           <td>Explicit <code>credentialBindings</code> and path templates</td>
       </tr>
       <tr>
           <td>Key advantage</td>
-          <td>Zero boilerplate; turnkey triggers and PRs</td>
+          <td>Zero boilerplate; local CLI or GitHub automation</td>
           <td>Duty separation, custom gates/MCP, local CLI control</td>
       </tr>
       <tr>
@@ -534,7 +534,8 @@
   </tbody>
 </table>
 <h2 id="trust-boundaries">Trust boundaries</h2>
-<p>Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local fixture proof never establishes live provider or production qualification, and unknown external effects remain unknown until reconciled.</p>
+<p>Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local runs enforce neutral <code>.git</code> and <code>&lt;controlRoot&gt;</code> protection while GitHub entrypoints enforce triggers, PR publication, and <code>.github/workflows/**</code> dual-key locks.</p>
+<p>Large overlays stream through SHA-256 verified CAS blob pointers (<code>1 MiB</code> chunks, up to <code>16,384</code> files and <code>16 GiB</code>) instead of inline base64 buffers. Local fixture proof never establishes live provider qualification, and unknown external effects stay unknown until reconciled.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>

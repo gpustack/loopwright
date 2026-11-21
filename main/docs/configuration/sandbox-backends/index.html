@@ -404,14 +404,15 @@
 <ul>
 <li><strong>Priority order</strong>: Loopwright probes <code>preferredBackends</code> in order and picks the first backend supporting every listed <code>requiredCapabilities</code> item.</li>
 <li><strong>Declared policy</strong>: Omitting <code>networkMode</code> in an explicit sandbox policy defaults to <code>none</code>.</li>
-<li><strong>Additive path masks</strong>: <code>deniedReadPaths</code> supplements built-in <code>.github</code>, <code>.loopwright/policies</code>, and repository agent-instruction protections.</li>
+<li><strong>Neutral built-in masks</strong>: Locally, sandboxes protect <code>.git</code> and <code>&lt;controlRoot&gt;</code> plus repository-declared <code>scope.protected</code> and <code>deniedReadPaths</code> without hardcoded tool directories. On the GitHub policy profile, <code>.github</code> is also masked read-only unless <code>.github/workflows/**</code> is dual-key unlocked.</li>
+<li><strong>Read-only bind mounts</strong>: Linux <code>bwrap</code> and <code>docker</code> support <code>readOnlyBindMounts</code> for hybrid <code>mountReadOnlyGit</code> (sanitized <code>.git</code> skeleton plus <code>--ro-bind</code> <code>.git/objects</code>), while macOS Seatbelt and Linux Landlock copy <code>.git/objects</code> read-only via single-descriptor <code>1 MiB</code> streaming.</li>
 </ul>
-<p>When <code>GITHUB_ACTIONS=true</code> and <code>spec.sandbox</code> is omitted, <code>resolveEffectiveTaskpackSandboxPolicy</code> selects <code>direct-dedicated</code>.
+<p>When <code>GITHUB_ACTIONS=true</code>, <code>RUNNER_ENVIRONMENT=github-hosted</code>, and <code>spec.sandbox</code> is omitted, <code>resolveEffectiveTaskpackSandboxPolicy</code> selects <code>direct-dedicated</code>.
 It sets <code>allow-outbound</code>, requires <code>processTreeCleanup</code>, and enables <code>allowDedicatedDirectOverride</code>.
-GitHub-hosted runner VMs isolate jobs, but direct execution does not add filesystem or network masks.
-The same default applies to self-hosted Actions runners; confirm their isolation before use.</p>
+GitHub-hosted runner VMs isolate single jobs, whereas direct execution adds no filesystem or network masks.
+Self-hosted Actions runners (where <code>RUNNER_ENVIRONMENT</code> is not <code>github-hosted</code>) stay on OS sandbox negotiation.</p>
 <p>The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>.</p>
-<p>Without <code>GITHUB_ACTIONS=true</code>, an omitted policy selects fail-closed <code>macos-seatbelt</code>, <code>linux-bwrap</code>, or <code>linux-landlock</code> negotiation.</p>
+<p>Outside GitHub-hosted Actions runners, an omitted policy selects fail-closed <code>macos-seatbelt</code>, <code>linux-bwrap</code>, or <code>linux-landlock</code> negotiation.</p>
 <h2 id="policy-fields">Policy fields</h2>
 <p><code>spec.sandbox</code> itself is <strong>optional</strong> inside <code>Taskpack</code>, and every subfield inside <code>spec.sandbox</code> is also optional:</p>
 <table>

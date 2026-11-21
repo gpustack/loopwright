@@ -19,12 +19,12 @@ For out-of-repo `TrustedRegistry` governance or CLI controller files, see [Task 
 
 ## Compilation model
 
-When a GitHub Action, App, or `loopwright step` processes a taskpack, the compiler generates three runtime artifacts:
+When `loopwright run --taskpack`, `loopwright step`, a GitHub Action, or the GitHub App processes a taskpack, the compiler generates three runtime artifacts:
 
 | Generated artifact | Manifest inputs | Compiler defaults |
 | --- | --- | --- |
-| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.steps`, `spec.verification`, `spec.limits` | Adds protected paths, 256-checkpoint scaling, and default budgets (`wallTimeMs: 3600000`, `maxModelCalls: 256`) |
-| `TrustedRegistry` | `spec.preflight`, `spec.proposal`, `spec.verification`, `spec.publication`, `spec.mcp` | Computes runtime SHA-256 digests for handlers, directories, instructions, skills, and staged resources |
+| `TaskContract` | `metadata.name`, `spec.goal`, `spec.scope`, `spec.steps`, `spec.verification`, `spec.limits` | Applies policy-profile protected paths, 256-checkpoint scaling, and default budgets (`wallTimeMs: 3600000`, `maxModelCalls: 256`) |
+| `TrustedRegistry` | `spec.preflight`, `spec.proposal`, `spec.verification`, `spec.publication`, `spec.mcp` | Computes runtime SHA-256 digests for handlers, directories, instructions, skills, and CAS-staged resources |
 | `ControllerConfig` | Binds compiled `TaskContract`, `TrustedRegistry` SHA-256, and optional `spec.decisions` | Sets `drainReserveMs: 120000`, `maxAttempts: 5`, `repeatFailureLimit: 2`, and `${ENV}` templates (`0600`) |
 
 ## Taskpack
@@ -155,12 +155,12 @@ spec:
         signingCredentialRef: LOOPWRIGHT_GATE_SIGNING_SECRET # Optional
         authCredentialRef: LOOPWRIGHT_GATE_AUTH_TOKEN # Optional
         url: https://gates.example.invalid/verify # Optional
-  publication:
+  publication: # Optional in local mode (defaults to disabled)
     mode: pull_request
-    targetBranch: main
-    headBranchPrefix: loopwright-catalog-sync-
-    titleTemplate: "chore(${RELEASE_CHANNEL}) - sync upstream release metadata"
-  memory:
+    targetBranch: main # Optional when mode is disabled
+    headBranchPrefix: loopwright-catalog-sync- # Optional when mode is disabled
+    titleTemplate: "chore(${RELEASE_CHANNEL}) - sync upstream release metadata" # Optional when mode is disabled
+  memory: # Optional in local mode (defaults to disabled under controlRoot)
     directory: .loopwright/memory/catalog-sync
     apply: separate-pull-request
     onNoModelBudget: deterministic-observations-only # Optional when apply is disabled
@@ -171,7 +171,7 @@ spec:
     checkUpstreamVersions: false # Optional (defaults to false)
     publishOnFailure: false # Optional (defaults to false)
     skipCi: true # Optional (defaults to true)
-  triggers:
+  triggers: # Optional in local mode (enforced pre-preflight on GitHub entrypoints)
     schedule: true
     workflowDispatch: true
     releasePublished: false
@@ -232,9 +232,9 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 | `execution.mode` | `'strict'` | `'strict'` or `'privileged'`; `privileged` sets first four capabilities `true` |
 | `capabilities.allowHostEnv` | `false` / `true` | Inherits host env for `preflight` and `command.v1` while stripping Loopwright/provider/GitHub secrets |
 | `capabilities.allowHostPath` | `false` / `true` | Inherits host `PATH` for `preflight` and `command.v1` checks |
-| `capabilities.mountReadOnlyGit` | `false` / `true` | Stages sanitized read-only `.git` (`hooksPath=/dev/null`, config stripped) for `command.v1` |
+| `capabilities.mountReadOnlyGit` | `false` / `true` | Stages sanitized `.git` skeleton (`hooksPath=/dev/null`, config stripped) plus `--ro-bind` or read-only `1 MiB` streamed `.git/objects` for `command.v1` |
 | `capabilities.allowCheckNetwork` | `false` / `true` | Grants outbound network for `command.v1` checks; avoids nested macOS Seatbelt `EPERM` when checks run inner sandboxes |
-| `capabilities.allowWorkflowWrites` | `false` / `false` | Dual-key unlock permitting agent edits under `.github/workflows/**` |
+| `capabilities.allowWorkflowWrites` | `false` / `false` | Dual-key unlock permitting agent edits under `.github/workflows/**` on GitHub policy profile runs |
 | `capabilities.allowAgentNetwork` | `false` / `false` | Governs `resolveEffectiveTaskpackSandboxPolicy` / `executeSandboxedCommand`; turnkey `agent-pi` `bash` stays offline-isolated |
 | `digests.pinDigests` / `lockfile` | `false` / `<controlRoot>/digests.lock.json` | Runtime SHA-256 digests freeze runs when `false`; `true` enforces lockfile parity via `loopwright digest sync` |
 
@@ -256,15 +256,15 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 ### Scope syntax
 
 - **Explicit suffixes**: Use `dir/**` for recursive directories. Paths without `/**` match exact files or bounded single-segment `*`/`?` globs (`packages/*/package.json`), rejecting `..` and reserved names.
-- **Built-in masks**: Built-in agent-instruction paths (such as `AGENTS.md` and tool-specific agent config directories), `.loopwright/policies/**`, `digests.lock.json`, the control root, manifests, instructions, skills, and scripts stay protected; `.agents/**` is opt-in in `writable`, and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
+- **Policy profiles**: Under `'local'` mode (CLI `run --taskpack` and `step`), built-in protection covers `.git`, `<controlRoot>` (preserving the exact-file `spec.proposal.path` carve-out), `digests.lock.json`, manifest scripts, instructions, skills, and repository-declared `spec.scope.protected` with zero hardcoded tool directories. Under `'github'` mode (Action and App, persisted in `run.json` across recovery), `.github` stays protected and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
 
 ## Preflight and upstreams
 
-`spec.preflight` runs once on the host **after** actor authorization and `SecretScrubber` initialization and **before** `TaskContract` compilation (`script` must reside under a protected path such as `scripts/**`, `timeoutSeconds` `1..3600`, explicit `env` allowlist). It writes JSON to `$LOOPWRIGHT_PREFLIGHT_OUT` (`disposition`: `'candidate' | 'no_change' | 'blocked'`, `upstreams[]`, and `stagedResources[]`) and may read/write `$LOOPWRIGHT_STAGING_DIR`.
+`spec.preflight` runs once on the host **after** actor authorization and `SecretScrubber` initialization (and after `spec.triggers` enforcement on GitHub entrypoints) and **before** `TaskContract` compilation (`script` must reside under a protected path such as `scripts/**`, `timeoutSeconds` `1..3600`, explicit `env` allowlist). It writes JSON to `$LOOPWRIGHT_PREFLIGHT_OUT` (`disposition`: `'candidate' | 'no_change' | 'blocked'`, `upstreams[]`, and `stagedResources[]`) and may read/write `$LOOPWRIGHT_STAGING_DIR`.
 
 ### Staged resources
 
-- **Split mounts**: `mount: 'prompt'` (default for `instruction`/`skill`, `<= 64 KiB` UTF-8, `<= 256 KiB` total) loads into `TaskContract.spec.trustedContext.resources`. `mount: 'workspace'` (default for `document`, `<= 128 MiB` per file, `<= 256 MiB` total) stages read-only files on disk without prompt decoding, and `exposeToChecks: true` exposes them under `$LOOPWRIGHT_STAGED_DIR`.
+- **Split mounts**: `mount: 'prompt'` (default for `instruction`/`skill`, `<= 64 KiB` UTF-8, `<= 256 KiB` total) loads into `TaskContract.spec.trustedContext.resources`. `mount: 'workspace'` (default for `document`, `<= 128 MiB` per file, `<= 256 MiB` total) projects read-only files via single-descriptor `1 MiB` streaming (`O_NOFOLLOW`, `nlink === 1`) into separate workspace and `exposeToChecks: true` (`$LOOPWRIGHT_STAGED_DIR`) trees without prompt decoding.
 - **Single-link files**: Every staged resource must be a single-link (`nlink === 1`) regular file; pack directories such as `npm-cache` into a `.tgz` archive.
 
 ### Upstream kinds
@@ -301,7 +301,7 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 
 ### Execution limits
 
-Action `with:` inputs override `spec.limits`, which override `LOOPWRIGHT_*` env vars. Key bounds: `wallTimeSeconds` (`60..21600`), `totalTokens` (`1000..1e9`), `maxModelCalls` (`1..1024`), `maxAttempts` (`1..16`, within 256 checkpoints), `commandTimeoutSeconds` (`1..3600`), and `limits.overlay: { maxFiles: 1..4096, maxBytes: 1024..67108864 }` (default `128` / `4 MiB`; e.g. `512` / `16 MiB`).
+Action `with:` inputs override `spec.limits`, which override `LOOPWRIGHT_*` env vars. Key bounds: `wallTimeSeconds` (`60..21600`), `totalTokens` (`1000..1e9`), `maxModelCalls` (`1..1024`), `maxAttempts` (`1..16`, within 256 checkpoints), `commandTimeoutSeconds` (`1..3600`), and `limits.overlay: { maxFiles: 1..16384, maxBytes: 1024..17179869184 }` (default `128` / `4 MiB`, up to `16,384` files and `16 GiB` via `1 MiB` CAS streaming and single-descriptor staging).
 
 Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session dispatch; when omitted, defaults derive from compiled `maxModelCalls` and `maxImplementationRepairs`. Unlike fallback `LOOPWRIGHT_*` env vars above, `LOOPWRIGHT_MAX_TURNS` and `LOOPWRIGHT_MAX_REPAIR_TURNS` take precedence over `spec.limits` at runtime.
 
@@ -327,11 +327,13 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 
 ## Publication and memory
 
+`spec.publication`, `spec.memory`, and `spec.triggers` are optional in `'local'` mode (`publication` defaults to `{ mode: 'disabled' }`, omitting `targetBranch`, `headBranchPrefix`, and `titleTemplate`; `memory` defaults to `{ directory: '<controlRoot>/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }`). GitHub Action and App entrypoints enforce `spec.triggers` before preflight and require all PR fields when `publication.mode` is `'pull_request'`.
+
 | Field path | Type and values | Meaning |
 | --- | --- | --- |
-| `publication.mode` / `targetBranch` | `'pull_request' \| 'disabled'` / branch | Native PR creation or local/check-only settlement |
-| `publication.headBranchPrefix` / `titleTemplate` | Prefix (`1..64`) / string (`1..256`) | Managed branch prefix and PR title template (optional `bodyTemplate`) |
-| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'local-only' \| 'disabled'` | Protected CAS memory location and application mode |
+| `publication.mode` / `targetBranch` | `'pull_request' \| 'disabled'` / branch | Native PR creation or local/check-only settlement (optional when `disabled`) |
+| `publication.headBranchPrefix` / `titleTemplate` | Prefix (`1..64`) / string (`1..256`) | Managed branch prefix and PR title template (optional when `disabled`) |
+| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'local-only' \| 'disabled'` | Protected CAS memory location and application mode (optional in local mode) |
 | `memory.onNoModelBudget` | `'deterministic-observations-only' \| 'skip'` | Behavior without model budget (optional when `apply` is `'disabled'`) |
 | `memory.ttlDays` / `maxEntries` / `maxPromptEntries` | `1..365` (`15`) / `1..512` (`128`) / `1..128` (`32`) | Retention window and entry limits (`checkCodeFingerprint`, `checkUpstreamVersions`, `publishOnFailure`, `skipCi`) |
 
