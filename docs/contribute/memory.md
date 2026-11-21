@@ -47,7 +47,9 @@ A `MemoryEntry` (`version: 1`) binds a bounded claim (`1..2048` bytes) to a `cla
 
 Each `entries/<id>.md` carries the canonical JSON entry between `---` fences plus the claim body. Active stores keep `index.retired: []`; retiring or superseding an entry removes it from `index.entries` and deletes `entries/<id>.md`.
 
-`loadMemoryStore` still accepts legacy `index.json` (`version: 1`) files with non-empty `retired` arrays and purges legacy `retired` rows plus orphan `.md` files on the next applied proposal.
+`loadMemoryStore` still accepts legacy `index.json` (`version: 1`) files with or without a trailing `\n` (`0x0a`) and with non-empty `retired` arrays, purging legacy `retired` rows plus orphan `.md` files on the next applied proposal.
+
+`serializeMemoryStoreIndex` terminates `index.json` (on-disk staged writes, `MemoryModifiedFile.content`, and diff postimages) with `\n` within `MAX_MEMORY_INDEX_BLOB_BYTES`. `storeDigestOf` and `hashDomain` continue hashing JCS `canonical(...)` without `\n` so `storeDigest` and `proposalDigest` stay unchanged.
 
 `checkCodeFingerprint` and `checkUpstreamVersions` default to `false`; when `currentCodeFingerprint` or `currentUpstreamVersions` is `null` or `undefined`, `selectActiveMemory` skips those exclusions. When non-null values are supplied, `selectActiveMemory` enforces `fingerprint_mismatch` and `upstream_version_changed`.
 
@@ -91,7 +93,9 @@ Emitted proposals carry the base store digest, revision, `memory.json`, and a un
 
 ## Compare-and-swap application
 
-`applyMemoryProposalCAS` re-verifies, then acquires `.cas.lock` (`O_CREAT | O_EXCL | O_NOFOLLOW`, `0o600`, removed in `finally`), and re-checks the store digest under the lock. It backs up prior bytes for modified and deleted `.md` files, unlinks retired `entries/<id>.md` files before renaming `index.json`, and restores unlinked `.md` files (`0o600`) on rollback.
+`applyMemoryProposalCAS` re-verifies, then acquires `.cas.lock` (`O_CREAT | O_EXCL | O_NOFOLLOW`, `0o600`, `\n`-terminated JSON, removed in `finally`), and re-checks the store digest under the lock.
+
+Both `cas.ts` and `finalizer.ts` read bounded on-disk `index.json` preimage bytes, and `unifiedFileDiff` tracks EOF-newline state to emit `\ No newline at end of file` when migrating no-LF files. Rollback restores unlinked `.md` files (`0o600`) after backing up prior bytes.
 
 Retiring or superseding an entry removes it from `index.entries`, leaves `index.retired: []`, and compacts any legacy `retired` rows. A matching `baseStoreDigest` and revision applies directly; a drifted store rebases only when disjoint and all five gates pass, otherwise failing with `MEMORY_CAS_CONFLICT`.
 

@@ -14,8 +14,8 @@ For out-of-repo `TrustedRegistry` governance or CLI controller files, see [Task 
 - [Roles and steps](#roles-and-steps)
 - [Model configuration](#model-configuration)
 - [Verification checks](#verification-checks)
-- [Publication and memory](#publication-and-memory)
-- [Triggers and policies](#triggers-and-policies)
+- [Publication and triggers](#publication-and-triggers)
+- [TaskpackSuite](#taskpacksuite)
 
 ## Compilation model
 
@@ -92,6 +92,12 @@ spec:
       kind: agent
       role: review
       dependsOn: [static-step]
+      handoffs: # Optional 1..16 compact ancestor extracts
+        - fromStep: author-step
+          source: { kind: submission }
+          select: { kind: json_pointer, pointers: [/summary] }
+          maxBytes: 8192 # Optional (64..65536)
+          required: false # Optional
       onRework: # Optional bounded rework edge
         rejectTo: author-step
         maxReworks: 2
@@ -104,6 +110,10 @@ spec:
       - scripts/**
   instructions: # Optional protected UTF-8 instruction files
     - .loopwright/instructions.md
+    - path: .loopwright/docs-rules.md # Optional conditional rule
+      when:
+        changedPaths: [docs/**]
+        phases: [author, repair]
   skills: # Optional protected UTF-8 skill files
     - .agents/skills/catalog/SKILL.md
   upstreams:
@@ -177,6 +187,10 @@ spec:
     releasePublished: false
     commentCommands: [retry, revise, status]
     commentPrefixes: [/loopwright] # Optional
+  baselineAlignment: # Optional isolated 3-way conflict check
+    policy: off # Optional (off, fail-fast, or extract-context)
+    maxConflictFiles: 16 # Optional (1..64)
+    maxConflictBytes: 65536 # Optional (1024..262144)
   models: # Optional ordered model pool (defaults to zai / glm-5.3 / high)
     - provider: zai
       id: glm-5.3
@@ -221,9 +235,7 @@ spec:
 
 ## Execution and vars
 
-`spec.execution` enforces **dual-key host authority**. Even under `mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'` or `--allow-privileged`.
-
-Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writes: 'true'` or `--allow-workflow-writes`. Multi-tenant webhook service runs refuse self-granted privileged capabilities (`TASKPACK_HOST_BINDING_INVALID` / `TASKPACK_SCOPE_VIOLATION`).
+`spec.execution` enforces **dual-key host authority**. Under `mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` still needs `allow-privileged-execution: 'true'` or `--allow-privileged`. `allowWorkflowWrites: true` needs `allow-workflow-writes: 'true'` or `--allow-workflow-writes`. Multi-tenant webhook runs refuse self-granted privileges (`TASKPACK_HOST_BINDING_INVALID` / `TASKPACK_SCOPE_VIOLATION`).
 
 ### Trust capabilities
 
@@ -239,6 +251,7 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 | `digests.pinDigests` / `lockfile` | `false` / `<controlRoot>/digests.lock.json` | Runtime SHA-256 digests freeze runs when `false`; `true` enforces lockfile parity via `loopwright digest sync` |
 
 - **`spec.vars` AST interpolation**: Declare `0..64` static non-secret strings (`[A-Z][A-Z0-9_]*`, `<= 512` chars). Post-parse single-pass interpolation replaces `${VAR}` only in `goal.*`, `publication.titleTemplate`/`bodyTemplate`, `roles[].prompt`, `preflight.env[]`, and `localChecks[].parameters` (`args[]`, `env`, `startMarker`, `endMarker`, `allowedPointers[]`). Undeclared or secret `${...}` expressions refuse with `TASKPACK_UNTRUSTED_INTERPOLATION`.
+- **`spec.baselineAlignment`**: Optional `{ policy: 'off' | 'fail-fast' | 'extract-context', maxConflictFiles, maxConflictBytes }` (`1..64` default `16`; `1024..262144` default `65536`). Probes 3-way conflicts in an isolated object store when `sourceRevision !== baseRevision`.
 
 ## Scope and proposal
 
@@ -248,15 +261,16 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 | `metadata.name` | Yes | Slug (`1..64` chars) | Lowercase identifier (`[a-z][a-z0-9._-]*`) |
 | `spec.goal.candidate` / `noChange` | Yes | Strings (`1..1024` chars) | Role objectives for candidate and `no_change` runs |
 | `spec.scope.writable` / `protected` | No | String lists (`1..128` / `0..128`) | Explicit `/**` directories, exact files, or single-segment `*`/`?` globs |
-| `spec.instructions` / `skills` | No | Path or list (`1..16` paths) | Protected UTF-8 trusted context files (`<= 256 KiB` total) |
+| `spec.instructions` / `skills` | No | Entry or list (`1..16` entries) | Protected UTF-8 files as paths or `{ path, when }` rules (`<= 256 KiB` total) |
 | `spec.target.matrix` | No | `null` or `1..64` `{ id, platform, variant }` | Target matrix metadata passed to `TaskContract` and memory |
 | `spec.proposal` | No | `{ path, requiredFields, schemaVersion }` | Optional writable `.yaml`/`.yml`/`.json` proposal ledger |
 | `spec.submission` | No | `{ path, required? }` | Optional writable `.json` agent deliverable path |
 
-### Scope syntax
+### Scope and conditional rules
 
 - **Explicit suffixes**: Use `dir/**` for recursive directories. Paths without `/**` match exact files or bounded single-segment `*`/`?` globs (`packages/*/package.json`), rejecting `..` and reserved names.
-- **Policy profiles**: Under `'local'` mode (CLI `run --taskpack` and `step`), built-in protection covers `.git`, `<controlRoot>` (preserving the exact-file `spec.proposal.path` carve-out), `digests.lock.json`, manifest scripts, instructions, skills, and repository-declared `spec.scope.protected` with zero hardcoded tool directories. Under `'github'` mode (Action and App, persisted in `run.json` across recovery), `.github` stays protected and `.github/workflows/**` requires dual-key `allowWorkflowWrites`.
+- **Conditional rules**: `spec.instructions`, `spec.skills`, and `spec.roles[].instructions`/`skills` accept `{ path, when }` predicates (`changedPaths`, `extensions`, `phases`, `failedChecks`, `failureCodes`; see [Task Contract](task-contract.md#conditional-activation-rules)). All paths pre-hash at compile time under `discovery: 'disabled'`, enter `digests.lock.json` and protected paths, and fail with `TASKPACK_MANIFEST_INVALID` if the same normalized `path` declares conflicting `when` predicates.
+- **Policy profiles**: Under `'local'` mode (`run --taskpack` and `step`), protection covers `.git`, `<controlRoot>` (keeping the `spec.proposal.path` carve-out), `digests.lock.json`, manifest scripts, instructions, and skills. Under `'github'` mode, `.github` stays protected and `.github/workflows/**` requires `allowWorkflowWrites`.
 
 ## Preflight and upstreams
 
@@ -278,9 +292,9 @@ Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writ
 
 ## Roles and steps
 
-`spec.roles` declares `1..16` roles (`id`, `provider`, `model`, `purpose: task | review`, `thinking`, `tools`: `read | write | edit | bash | delete`, `dependsOn`, per-role `instructions`, `skills`, `prompt`, `mcpServers`, `models`). Review roles default `tools` to `['read']` and `mcpServers` to `[]`. Loopwright compiles per-role `resourceIds` and enforces `mcpServers` allowlists in both Action and `loopwright step` modes.
+`spec.roles` declares `1..16` roles (`id`, `provider`, `model`, `purpose: task | review`, `thinking`, `tools`: `read | write | edit | bash | delete`, `dependsOn`, per-role `instructions`, `skills`, `handoffs`, `prompt`, `mcpServers`, `models`). Review roles default `tools` to `['read']` and `mcpServers` to `[]`.
 
-`spec.steps` declares `1..16` acyclic nodes (`id`, `kind: 'agent' | 'check' | 'compact'`, `role` or `check`, `dependsOn`, and optional `onRework: { rejectTo, maxReworks }` where `rejectTo` is a strict ancestor task step and `maxReworks` is `1..8`). Author steps produce `Submission` records while review steps produce `StepVerdict` (`pass | rework | fail | human`, `summary`, `findings`) without overwriting author claims.
+`spec.steps` declares `1..16` acyclic nodes (`id`, `kind: 'agent' | 'check' | 'compact'`, `role` or `check`, `dependsOn`, optional `handoffs`, and optional `onRework: { rejectTo, maxReworks }` with `maxReworks: 1..8`). Both `spec.roles[].handoffs` and `spec.steps[].handoffs` accept `1..16` `StepHandoffSelector` entries (`fromStep`, `source`, `select`, `maxBytes`, `required`) targeting strict DAG ancestors (see [Task Contract](task-contract.md#handoff-selectors)).
 
 ## Model configuration
 
@@ -325,33 +339,56 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 - **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
 - **Inner sandboxes and gates**: Checks running their own inner OS sandbox (such as macOS `sandbox-exec`) should set `allowCheckNetwork: true` under dual-key `--allow-privileged` to avoid nested Seatbelt `EPERM`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
 
-## Publication and memory
+## Publication and triggers
 
-`spec.publication`, `spec.memory`, and `spec.triggers` are optional in `'local'` mode (`publication` defaults to `{ mode: 'disabled' }`, omitting `targetBranch`, `headBranchPrefix`, and `titleTemplate`; `memory` defaults to `{ directory: '<controlRoot>/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }`). GitHub Action and App entrypoints enforce `spec.triggers` before preflight and require all PR fields when `publication.mode` is `'pull_request'`.
-
-| Field path | Type and values | Meaning |
-| --- | --- | --- |
-| `publication.mode` / `targetBranch` | `'pull_request' \| 'disabled'` / branch | Native PR creation or local/check-only settlement (optional when `disabled`) |
-| `publication.headBranchPrefix` / `titleTemplate` | Prefix (`1..64`) / string (`1..256`) | Managed branch prefix and PR title template (optional when `disabled`) |
-| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'local-only' \| 'disabled'` | Protected CAS memory location and application mode (optional in local mode) |
-| `memory.onNoModelBudget` | `'deterministic-observations-only' \| 'skip'` | Behavior without model budget (optional when `apply` is `'disabled'`) |
-| `memory.ttlDays` / `maxEntries` / `maxPromptEntries` | `1..365` (`15`) / `1..512` (`128`) / `1..128` (`32`) | Retention window and entry limits (`checkCodeFingerprint`, `checkUpstreamVersions`, `publishOnFailure`, `skipCi`) |
-
-### Memory apply modes
-
-| Mode | Behavior | Typical use |
-| --- | --- | --- |
-| `separate-pull-request` | Opens or updates a separate memory branch and PR | Default for reviewed repository memory |
-| `local-only` | Updates `<memoryDirectory>` locally without remote branch writes | Local loops or read-only remotes |
-| `disabled` | Skips memory loading, prompt injection, and finalization | Stateless or `spec.decisions`-driven taskpacks |
-
-## Triggers and policies
+`spec.publication`, `spec.memory`, and `spec.triggers` are optional in `'local'` mode (`publication` defaults to `{ mode: 'disabled' }`; `memory` defaults to `{ directory: '<controlRoot>/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }`). GitHub entrypoints enforce `spec.triggers` before preflight and require PR fields when `publication.mode` is `'pull_request'`.
 
 | Field path | Type and values | Meaning |
 | --- | --- | --- |
+| `publication.mode` / `targetBranch` | `'pull_request' \| 'disabled'` / branch | PR creation or local settlement (optional when `disabled`) |
+| `publication.headBranchPrefix` / `titleTemplate` | Prefix (`1..64`) / string (`1..256`) | Managed branch prefix and PR title (optional when `disabled`) |
+| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'local-only' \| 'disabled'` | Protected CAS memory path and mode (`ttlDays` `15`, `maxEntries` `128`, `maxPromptEntries` `32`) |
+| `memory.onNoModelBudget` | `'deterministic-observations-only' \| 'skip'` | Behavior without model budget (`checkCodeFingerprint`, `checkUpstreamVersions`, `publishOnFailure`, `skipCi`) |
 | `triggers.schedule` / `workflowDispatch` / `releasePublished` | Booleans | Permitted GitHub event triggers |
 | `triggers.commentCommands` / `commentPrefixes` | `['retry', 'revise', 'status']` / `['/loopwright']` | Authorized PR slash commands and command prefixes |
 | `spec.sandbox` / `spec.decisions` / `spec.output` | Objects | Isolation ([Sandbox Backends](sandbox-backends.md)), triage ([Decision Routing](decision-routing.md)), and outputs (`json`, `github-step-summary`, `markdown`, `text`) |
+
+## TaskpackSuite
+
+`TaskpackSuite` (default `.loopwright/suite.yaml`, `<= 64 KiB`) coordinates `1..32` domain taskpacks and `0..16` acyclic promotion stages without storing suite state in Git.
+
+```yaml
+apiVersion: loopwright.dev/v1alpha1
+kind: TaskpackSuite
+metadata:
+  name: repo-automation
+spec:
+  domains:
+    - id: docs
+      taskpack: .loopwright/docs.taskpack.yaml
+      enabled: true # Optional
+      schedules: [nightly] # Optional schedule keys
+      stage: stage-a # Optional stage ID
+      matrix: # Optional cell list or scalar map
+        channel: stable
+    - id: runtime
+      taskpack: .loopwright/runtime.taskpack.yaml
+      stage: stage-b # Optional
+  stages: # Optional 0..16 acyclic promotion stages
+    - id: stage-a
+      dependsOn: [] # Optional
+    - id: stage-b
+      dependsOn: [stage-a]
+      readiness:
+        - id: docs-release # Optional
+          kind: github-release
+          source: octocat/engine
+          versionFrom: { domain: docs, path: docs/version.json, jsonPointer: /version } # Optional
+```
+
+- **Suite protection**: Every domain enforces the suite-wide mandatory protected union across `.loopwright/suite.yaml` and peer control-plane paths (`<= 128` patterns, zero writable overlap).
+- **Branch prefix disjointness**: Domains targeting the same `targetBranch` require pairwise prefix-disjoint `spec.publication.headBranchPrefix` values (`TASKPACK_MANIFEST_INVALID` on collision).
+- **Stateless readiness**: Stage probes (`github-release`, `http-json`, `git-tag`, `git-commit`) read `versionFrom` blobs (`<= 1 MiB`) from `baseRevision` and defer (`eligible` / `deferred`) without Git state files.
 
 ---
 

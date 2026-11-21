@@ -1,6 +1,6 @@
 # Spec: Phase 2 multi-domain suites, compact handoffs, and deterministic run diagnostics
 
-Status: Building
+Status: Built
 Type: Feature
 
 ## Summary
@@ -443,7 +443,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `loopwright suite check|resolve` and `--baseline-alignment` parse strictly with deterministic exit codes (`0` `eligible`/`deferred`, `2` usage/manifest, `3` blocked). `emitOutcomeReports` forwards `inspected.runEval`, `@loopwright/taskpack-runner` parity stays green, and `closure --verify-failures` preserves `18` `closedLocal` / `5` `unprovisionedExternal`.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack-runner && node scripts/run-tests.mjs --pkg cli && node packages/cli/dist/main.js closure --verify-failures --json`
 
-- [ ] **T11 · Connected documentation, Hugo site sync, and workspace verification**
+- [x] **T11 · Connected documentation, Hugo site sync, and workspace verification**
       Blocked by: T9, T10
       Owns: `docs/**`, `site/**`, `README.md`, `.agents/skills/**`, `packages/cli/test/check-docs-rules.test.ts`, `packages/cli/test/docs-and-site.test.ts`
       Acceptance: Owning `docs/configuration/**`, `docs/operations/**`, `docs/contribute/**`, `docs/README.md`, `README.md`, and `.agents/skills/**` pages document Phase 2 contracts within line and STE100 limits. `npm run lint:docs`, `npm run site`, `npm test`, `npm run typecheck`, and `npm run lint` pass cleanly.

@@ -25,7 +25,7 @@ Loopwright supports two operating modes sharing one verification kernel: **Decla
 
 ## Configuration
 
-- [Taskpack](configuration/taskpack/) documents every field and enum in `.loopwright/taskpack.yaml` (`Taskpack`).
+- [Taskpack](configuration/taskpack/) documents every field and enum in `.loopwright/taskpack.yaml` (`Taskpack`) and `.loopwright/suite.yaml` (`TaskpackSuite`).
 - [Task Contract](configuration/task-contract/) documents every field, budget, step, and evidence tier in `TaskContract`.
 - [Controller and Registry](configuration/controller-and-registry/) documents every handler, profile, credential, endpoint, and control in `TrustedRegistry` and `ControllerConfig`.
 - [Sandbox Backends](configuration/sandbox-backends/) covers native OS and container sandbox policies and capabilities.

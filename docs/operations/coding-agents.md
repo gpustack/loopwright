@@ -64,7 +64,7 @@ loopwright step next \
 
 ### Host preflight
 
-`step next --taskpack` runs `spec.preflight` natively without manual staging scripts or `--mode auto`. Pass `--allow-privileged` when the taskpack declares privileged preflight or execution capabilities:
+`step next --taskpack` runs `spec.preflight` natively without manual staging scripts or `--mode auto`, and accepts `--baseline-alignment` and `--source-revision`. Pass `--allow-privileged` when the taskpack declares privileged preflight or execution capabilities:
 
 ```sh
 REPO="$(pwd -P)"
@@ -142,7 +142,7 @@ Pre-commit scan failures (symlinks, hardlinks, size ceilings, or read-only invar
 | Replay or stale `leaseToken` after rotation | `AUTHORITY_REFUSED` | `7` |
 | Unattended `run` or `resume` on delegated role | `CAPABILITY_UNSUPPORTED` | `3` |
 
-Recover a lost lease from a crashed worker by rotating the token explicitly, or abort the run cleanly (exit `130`):
+Recover a lost lease from a crashed worker by rotating the token explicitly (`contextFiles` reconstruct from CAS for active handoffs), or abort the run cleanly (exit `130`):
 
 ```sh
 loopwright step next --run-root "$RUN_ROOT" --run-id "$RUN_ID" --reissue-lease --json
