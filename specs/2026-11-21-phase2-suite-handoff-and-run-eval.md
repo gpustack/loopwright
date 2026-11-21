@@ -380,7 +380,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `cas.ts` and `finalizer.ts` terminate `index.json` and `.cas.lock` with `\n` within `MAX_MEMORY_INDEX_BLOB_BYTES`. `unifiedFileDiff` emits `\ No newline at end of file` against actual on-disk preimages while JCS `storeDigest` stays unchanged.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg memory`
 
-- [ ] **T2 · Core contracts for compact handoffs and conditional rule activation**
+- [x] **T2 · Core contracts for compact handoffs and conditional rule activation**
       Blocked by: None
       Owns: `packages/core/**`
       Gate: review

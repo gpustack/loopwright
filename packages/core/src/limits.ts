@@ -21,6 +21,18 @@ export interface OverlayLimitOptions {
   readonly overlay?: OverlayLimitsInput;
 }
 
+export const HANDOFF_LIMITS = Object.freeze({
+  maxPerStep: 16,
+  maxPointers: 32,
+  minBytes: 64,
+  defaultBytes: 8_192,
+  maxBytes: 65_536,
+  maxAggregateBytes: 65_536,
+  maxSourceBytes: 1_048_576,
+  maxHeadingChars: 256,
+  maxPointerChars: 512,
+});
+
 export const LIMITS = Object.freeze({
   inputBytes: 1_048_576, depth: 64, string: 16_384, nodes: 65_536,
   properties: 128, collection: 1_024, identifier: 64, toolName: 128,
@@ -31,4 +43,26 @@ export const LIMITS = Object.freeze({
   metricEntries: 64, metricKey: 64, metricStringValue: 256,
   findings: 64, findingTitle: 256, findingEvidence: 2_048,
   artifactUri: 2_048, mediaType: 128, maxReworks: 8,
+  handoffsPerStep: HANDOFF_LIMITS.maxPerStep,
+  handoffPointers: HANDOFF_LIMITS.maxPointers,
+  handoffMinBytes: HANDOFF_LIMITS.minBytes,
+  handoffDefaultBytes: HANDOFF_LIMITS.defaultBytes,
+  handoffMaxBytes: HANDOFF_LIMITS.maxBytes,
+  handoffAggregateBytes: HANDOFF_LIMITS.maxAggregateBytes,
+  handoffSourceBytes: HANDOFF_LIMITS.maxSourceBytes,
+  handoffHeading: HANDOFF_LIMITS.maxHeadingChars,
+  handoffPointer: HANDOFF_LIMITS.maxPointerChars,
+  ruleChangedPaths: 128,
+  ruleExtensions: 64,
+  ruleExtension: 33,
+  rulePhases: 4,
+  ruleFailedChecks: 64,
+  ruleFailureCodes: 64,
+  ruleFailureCode: 128,
+  suiteDomains: 32,
+  suiteStages: 16,
+  suiteManifestBytes: 65_536,
+  baselineMaxConflictFiles: 64,
+  baselineMinConflictBytes: 1_024,
+  baselineMaxConflictBytes: 262_144,
 });
