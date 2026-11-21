@@ -471,6 +471,7 @@ export class ArtifactStore {
     const sha = createHash('sha256');
     const gitObjectFormat = options?.gitObjectFormat;
     let byteLength = 0;
+    let checkerFinished = false;
     let tmpClosed = false;
     let tmpUnlinked = false;
 
@@ -484,6 +485,7 @@ export class ArtifactStore {
         await writeAllToHandle(tmpHandle, slice);
       });
       streamChecker.finish();
+      checkerFinished = true;
 
       await tmpHandle.chmod(0o400);
       await tmpHandle.sync();
@@ -557,8 +559,20 @@ export class ArtifactStore {
         blobRef: blobRefRes.value,
         ...(verifiedSeal !== undefined ? { verifiedSeal } : {}),
       });
+    } catch (err) {
+      if (!checkerFinished) {
+        checkerFinished = true;
+        streamChecker.finish();
+      }
+      throw err;
     } finally {
-      streamChecker.finish();
+      if (!checkerFinished) {
+        try {
+          streamChecker.finish();
+        } catch {
+          // Ignore cleanup error after failure.
+        }
+      }
       if (!tmpClosed) {
         await tmpHandle.close().catch(() => {});
       }

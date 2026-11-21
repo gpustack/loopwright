@@ -1448,6 +1448,9 @@ async function scanCandidateDirectory(
       refuse('ARTIFACT_INVALID', '', 'execution');
     }
     if (modeChangedFromBaseline) {
+      if (baseInfo.byteLength === file.byteLength && baseInfo.sha256 === file.sha256) {
+        refuse('ARTIFACT_INVALID', '', 'execution');
+      }
       const writable = isWritablePath(task, file.name);
       if (!writable.ok || !writable.value) {
         refuse('ARTIFACT_INVALID', '', 'execution');

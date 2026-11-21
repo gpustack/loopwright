@@ -282,7 +282,7 @@ export async function copyVerifiedFileReadOnly(
       !createdStat.isFile()
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
-      || createdStat.ino === srcBefore.ino
+      || (createdStat.dev === srcBefore.dev && createdStat.ino === srcBefore.ino)
     ) {
       return fail();
     }
