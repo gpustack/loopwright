@@ -17,6 +17,7 @@ import {
 import {
   compileScopePatterns,
   effectiveProtectedPaths,
+  extractTaskpackResourcePaths,
   isAllowedCandidateWrite,
   isProtectedCandidatePath,
   normalizeCandidateRelativePath,
@@ -291,11 +292,11 @@ export function deriveManifestCompiledScope(options: DeriveManifestCompiledScope
       ? [check.parameters['script']]
       : []
   )));
-  const allManifestInstructions = Object.freeze([
+  const allManifestInstructions = extractTaskpackResourcePaths([
     ...(manifest.spec.instructions ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.instructions ?? []) ?? []),
   ]);
-  const allManifestSkills = Object.freeze([
+  const allManifestSkills = extractTaskpackResourcePaths([
     ...(manifest.spec.skills ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.skills ?? []) ?? []),
   ]);

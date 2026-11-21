@@ -19,7 +19,7 @@ import {
   type SeparateMemoryPullRequestSpec,
 } from '@loopwright/memory';
 import { sanitizeReportText } from './output-format.js';
-import { resolveManifestControlRoot } from './schema.js';
+import { extractTaskpackResourcePaths, resolveManifestControlRoot } from './schema.js';
 import { SecretScrubber } from './scrubber.js';
 import {
   compileScopePatterns,
@@ -91,14 +91,14 @@ export function buildMemoryProtectedPaths(
       ? [check.parameters['script']]
       : [],
   );
-  const allInstructions = [
+  const allInstructions = extractTaskpackResourcePaths([
     ...(manifest.spec.instructions ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.instructions ?? []) ?? []),
-  ];
-  const allSkills = [
+  ]);
+  const allSkills = extractTaskpackResourcePaths([
     ...(manifest.spec.skills ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.skills ?? []) ?? []),
-  ];
+  ]);
   const protectedPaths = [
     ...new Set([
       ...baseAutomationPaths.flatMap(entry => [entry, `${entry}/**`]),

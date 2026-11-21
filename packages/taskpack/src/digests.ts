@@ -12,7 +12,13 @@ import {
   type TaskpackManifest,
   type TaskpackV2Manifest,
 } from './types.js';
-import { IDENTIFIER_PATTERN, normalizeRelativePath, parseJsonSubset, tryNormalizeRelativePath } from './schema.js';
+import {
+  IDENTIFIER_PATTERN,
+  normalizeRelativePath,
+  parseJsonSubset,
+  resolveTaskpackResourcePath,
+  tryNormalizeRelativePath,
+} from './schema.js';
 
 export const DIGEST_STREAM_CHUNK_BYTES = 1_048_576;
 export const DIGEST_MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -406,18 +412,18 @@ export function collectTaskpackDigestTargets(
   }
 
   for (const [idx, instruction] of (taskpack.spec.instructions ?? []).entries()) {
-    addTarget(instruction, 'file', `/spec/instructions/${idx}`);
+    addTarget(resolveTaskpackResourcePath(instruction), 'file', `/spec/instructions/${idx}`);
   }
   for (const [idx, skill] of (taskpack.spec.skills ?? []).entries()) {
-    addTarget(skill, 'file', `/spec/skills/${idx}`);
+    addTarget(resolveTaskpackResourcePath(skill), 'file', `/spec/skills/${idx}`);
   }
 
   for (const [rIdx, role] of (taskpack.spec.roles ?? []).entries()) {
     for (const [iIdx, instruction] of (role.instructions ?? []).entries()) {
-      addTarget(instruction, 'file', `/spec/roles/${rIdx}/instructions/${iIdx}`);
+      addTarget(resolveTaskpackResourcePath(instruction), 'file', `/spec/roles/${rIdx}/instructions/${iIdx}`);
     }
     for (const [sIdx, skill] of (role.skills ?? []).entries()) {
-      addTarget(skill, 'file', `/spec/roles/${rIdx}/skills/${sIdx}`);
+      addTarget(resolveTaskpackResourcePath(skill), 'file', `/spec/roles/${rIdx}/skills/${sIdx}`);
     }
   }
 

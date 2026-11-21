@@ -422,7 +422,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `baseline-align.ts` runs `git merge-tree --write-tree` in a private `GIT_OBJECT_DIRECTORY` before model probes. `fail-fast` blocks with zero provider calls, `extract-context` stages scrubbed conflict hunks and enforces conflict resolution, 3-way carry blobs preserve disjoint same-file edits, and `turnkey.ts` forwards `runEval`.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack`
 
-- [ ] **T8 · Taskpack compilation and lockfile digests for handoffs and conditional rules**
+- [x] **T8 · Taskpack compilation and lockfile digests for handoffs and conditional rules**
       Blocked by: T6, T7
       Owns: `packages/taskpack/src/schema.ts`, `packages/taskpack/src/digests.ts`, `packages/taskpack/src/taskpack.ts`, `packages/taskpack/src/types.ts`, `packages/taskpack/src/index.ts`, `packages/taskpack/test/handoff-and-rules.test.ts`
       Gate: review

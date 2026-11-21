@@ -1,4 +1,14 @@
-import type { Digest, OverlayLimits, ReworkPolicy, TaskContract } from '@loopwright/core';
+import type {
+  Digest,
+  OverlayLimits,
+  ResourceActivationPhase,
+  ResourceActivationRule,
+  ReworkPolicy,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
+  TaskContract,
+} from '@loopwright/core';
 import type { ClockBasis, ClockSample } from '@loopwright/state';
 import type {
   PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
@@ -16,7 +26,12 @@ export type {
   PiSamplingParams,
   PiThinkingLevel,
   PiWireApi,
+  ResourceActivationPhase,
+  ResourceActivationRule,
   RunEvalReport,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
 };
 
 /** Closed set of matchable failure codes for @loopwright/taskpack (and drop-in superset for @loopwright/github-app). */
@@ -148,7 +163,15 @@ export interface TaskpackStepDeclaration {
   readonly check?: string | undefined;
   readonly dependsOn: readonly string[];
   readonly onRework?: ReworkPolicy | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
+
+export interface TaskpackConditionalResourceEntry {
+  readonly path: string;
+  readonly when?: ResourceActivationRule | undefined;
+}
+
+export type TaskpackResourceEntry = string | TaskpackConditionalResourceEntry;
 
 export interface TaskpackProposalDeclaration {
   readonly path: string;
@@ -364,11 +387,12 @@ export interface TaskpackRoleDeclaration {
   readonly thinking?: string | undefined;
   readonly tools?: readonly TaskpackToolName[] | undefined;
   readonly dependsOn?: readonly string[] | undefined;
-  readonly instructions?: readonly string[] | undefined;
-  readonly skills?: readonly string[] | undefined;
+  readonly instructions?: readonly TaskpackResourceEntry[] | undefined;
+  readonly skills?: readonly TaskpackResourceEntry[] | undefined;
   readonly prompt?: string | undefined;
   readonly mcpServers?: readonly string[] | undefined;
   readonly models?: readonly string[] | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
 
 export type TaskpackMemoryApplyMode = 'separate-pull-request' | 'local-only' | 'disabled';
@@ -418,8 +442,8 @@ export interface TaskpackTriggersDeclaration {
 export interface TaskpackManifestSpecBase<TCheck> {
   readonly goal: { readonly candidate: string; readonly noChange: string };
   readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
-  readonly instructions?: readonly string[] | undefined;
-  readonly skills?: readonly string[] | undefined;
+  readonly instructions?: readonly TaskpackResourceEntry[] | undefined;
+  readonly skills?: readonly TaskpackResourceEntry[] | undefined;
   readonly execution?: TaskpackExecutionDeclaration | undefined;
   readonly preflight?: TaskpackPreflightDeclaration | undefined;
   readonly vars?: Readonly<Record<string, string>> | undefined;
@@ -710,6 +734,7 @@ export interface CompiledInstructionResource {
   readonly bytes: Buffer;
   readonly digest: Digest;
   readonly mode?: number | undefined;
+  readonly when?: ResourceActivationRule | undefined;
 }
 
 export interface CompiledLocalCommandGate {

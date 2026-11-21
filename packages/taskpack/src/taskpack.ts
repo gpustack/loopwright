@@ -12,7 +12,11 @@ import {
   resolveOverlayLimits,
   validateDocument,
   type OverlayLimits,
+  type ResourceActivationRule,
   type ReworkPolicy,
+  type StepHandoffSelect,
+  type StepHandoffSelector,
+  type StepHandoffSource,
   type TaskContract,
 } from '@loopwright/core';
 import {
@@ -69,14 +73,18 @@ import {
 } from './sandbox.js';
 import {
   assertManifestScopeInvariants,
+  canonicalizeResourceActivationRule,
   collectMcpReferencedEnvNames,
   compileScopePatterns,
+  extractTaskpackResourcePaths,
   IDENTIFIER_PATTERN,
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
   resolveBaselineAlignmentConfig,
   resolveManifestControlRoot,
+  resolveTaskpackResourcePath,
+  resolveTaskpackResourceWhen,
   validateExecutionAuthority,
   validateMcpServerDeclarations,
   validateTaskpackLimitsDeclaration,
@@ -113,6 +121,7 @@ import {
   type TaskpackLimitsDeclaration,
   type TaskpackManifest,
   type TaskpackMcpServerDeclaration,
+  type TaskpackResourceEntry,
   type TaskpackRolePurpose,
   type TaskpackRunDiagnostic,
   type TaskpackToolName,
@@ -805,6 +814,39 @@ function requireEnvName(value: string | undefined, what: string): string {
   return value;
 }
 
+function cloneHandoffSelector(item: StepHandoffSelector): StepHandoffSelector {
+  const source: StepHandoffSource = item.source.kind === 'artifact'
+    ? { kind: 'artifact', path: item.source.path }
+    : { kind: item.source.kind };
+  const select: StepHandoffSelect = item.select.kind === 'markdown_heading'
+    ? {
+      kind: 'markdown_heading',
+      heading: item.select.heading,
+      ...(item.select.includeSubheadings !== undefined ? { includeSubheadings: item.select.includeSubheadings } : {}),
+    }
+    : item.select.kind === 'json_pointer'
+      ? { kind: 'json_pointer', pointers: [...item.select.pointers] }
+      : { kind: 'full' };
+  return {
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    fromStep: item.fromStep,
+    source,
+    select,
+    ...(item.maxBytes !== undefined ? { maxBytes: item.maxBytes } : {}),
+    ...(item.required !== undefined ? { required: item.required } : {}),
+  };
+}
+
+function cloneResourceActivationRule(rule: ResourceActivationRule): ResourceActivationRule {
+  return {
+    ...(rule.changedPaths !== undefined ? { changedPaths: [...rule.changedPaths] } : {}),
+    ...(rule.extensions !== undefined ? { extensions: [...rule.extensions] } : {}),
+    ...(rule.phases !== undefined ? { phases: [...rule.phases] } : {}),
+    ...(rule.failedChecks !== undefined ? { failedChecks: [...rule.failedChecks] } : {}),
+    ...(rule.failureCodes !== undefined ? { failureCodes: [...rule.failureCodes] } : {}),
+  };
+}
+
 interface CompiledRoleSpec {
   readonly roleId: string;
   readonly profileId: string;
@@ -816,6 +858,7 @@ interface CompiledRoleSpec {
   readonly prompt: string;
   readonly tools: readonly string[];
   readonly resourceIds?: readonly string[] | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
   readonly selection: PiModelSelection | { readonly provider: string; readonly model: string; readonly thinking: string };
   readonly providerCredentialRef: string | null;
   readonly providerEnvName: string | null;
@@ -828,6 +871,7 @@ interface CompiledStepSpec {
   readonly roleId: string | null;
   readonly dependsOn: readonly string[];
   readonly onRework?: ReworkPolicy | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
 
 interface ExtraAgentHandlerSpec {
@@ -1052,6 +1096,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           purpose,
           prompt: rolePrompt,
           tools,
+          ...(role.handoffs !== undefined ? { handoffs: role.handoffs } : {}),
           selection: Object.freeze({
             provider: resolvedModelTarget.provider,
             model: resolvedModelTarget.model,
@@ -1110,6 +1155,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           purpose,
           prompt: rolePrompt,
           tools,
+          ...(role.handoffs !== undefined ? { handoffs: role.handoffs } : {}),
           selection,
           providerCredentialRef: credRef,
           providerEnvName: resolvedRoleProviderEnv,
@@ -1135,18 +1181,30 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
 
   const instructionResources: CompiledInstructionResource[] = [];
   const resourceIdByPath = new Map<string, string>();
+  const resourceMetaByPath = new Map<
+    string,
+    { readonly id: string; readonly whenKey: string }
+  >();
   const sharedResourceIds: string[] = [];
   const roleSpecificResourceIds = new Map<string, string[]>();
   let aggregateResourceBytes = 0;
 
   const loadRepoTextResource = async (
-    relPath: string,
+    entry: TaskpackResourceEntry,
     kind: 'instruction' | 'skill',
     diagPath: string,
     prefix: string,
   ): Promise<string> => {
-    const existing = resourceIdByPath.get(relPath);
-    if (existing !== undefined) return existing;
+    const relPath = normalizeRelativePath(resolveTaskpackResourcePath(entry), diagPath);
+    const when = resolveTaskpackResourceWhen(entry);
+    const whenKey = canonicalizeResourceActivationRule(when);
+    const existingMeta = resourceMetaByPath.get(relPath);
+    if (existingMeta !== undefined) {
+      if (existingMeta.whenKey !== whenKey) {
+        manifestInvalid(`conflicting "when" predicate for resource path "${relPath}"`, diagPath);
+      }
+      return existingMeta.id;
+    }
     if (bindings.repositoryRoot === undefined || bindings.repositoryRoot.trim().length === 0) {
       bindingInvalid(`${diagPath} requires bindings.repositoryRoot`, diagPath);
     }
@@ -1179,19 +1237,27 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     const bytes = Buffer.from(rawBytes);
     const hex = createHash('sha256').update(bytes).digest('hex');
     const digest = { algorithm: 'sha256' as const, hex };
-    instructionResources.push(Object.freeze({ id, kind, path: relPath, bytes, digest }));
+    instructionResources.push(Object.freeze({
+      id,
+      kind,
+      path: relPath,
+      bytes,
+      digest,
+      ...(when !== undefined ? { when: Object.freeze(cloneResourceActivationRule(when)) } : {}),
+    }));
     resourceIdByPath.set(relPath, id);
+    resourceMetaByPath.set(relPath, { id, whenKey });
     digestsMap[`file:${relPath}`] = hex;
     digestsMap[relPath] = hex;
     return id;
   };
 
-  for (const [index, relPath] of (manifest.spec.instructions ?? []).entries()) {
-    const id = await loadRepoTextResource(relPath, 'instruction', `/spec/instructions/${index}`, 'instruction');
+  for (const [index, entry] of (manifest.spec.instructions ?? []).entries()) {
+    const id = await loadRepoTextResource(entry, 'instruction', `/spec/instructions/${index}`, 'instruction');
     sharedResourceIds.push(id);
   }
-  for (const [index, relPath] of (manifest.spec.skills ?? []).entries()) {
-    const id = await loadRepoTextResource(relPath, 'skill', `/spec/skills/${index}`, 'skill');
+  for (const [index, entry] of (manifest.spec.skills ?? []).entries()) {
+    const id = await loadRepoTextResource(entry, 'skill', `/spec/skills/${index}`, 'skill');
     sharedResourceIds.push(id);
   }
 
@@ -1491,14 +1557,14 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   const effectiveTargetMatrix = bindings.targetMatrix !== undefined
     ? bindings.targetMatrix
     : (manifest.spec.target?.matrix ?? null);
-  const allManifestInstructions = [
+  const allManifestInstructions = extractTaskpackResourcePaths([
     ...(manifest.spec.instructions ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.instructions ?? []) ?? []),
-  ];
-  const allManifestSkills = [
+  ]);
+  const allManifestSkills = extractTaskpackResourcePaths([
     ...(manifest.spec.skills ?? []),
     ...(manifest.spec.roles?.flatMap(r => r.skills ?? []) ?? []),
-  ];
+  ]);
   const relativeToolchainPaths = manifest.spec.verification.localChecks.flatMap(c => {
     if (c.implementation !== 'command.v1') return [];
     const raw = c.parameters?.['toolchainPaths'];
@@ -2106,6 +2172,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
               capabilities: ['pi'],
             });
           }
+          const resolvedHandoffs = declaredStep.handoffs ?? rawRoleDecl?.handoffs;
           steps.push({
             id: declaredStep.id,
             kind: 'agent',
@@ -2114,6 +2181,9 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
             dependsOn: [...declaredStep.dependsOn],
             ...(declaredStep.onRework !== undefined
               ? { onRework: { rejectTo: declaredStep.onRework.rejectTo, maxReworks: declaredStep.onRework.maxReworks } }
+              : {}),
+            ...(resolvedHandoffs !== undefined
+              ? { handoffs: resolvedHandoffs.map(cloneHandoffSelector) }
               : {}),
           });
         } else {
@@ -2157,7 +2227,16 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         );
       }
     } else {
-      steps = [...agentSteps];
+      steps = compiledRoles.map(role => ({
+        id: role.stepId,
+        kind: 'agent' as const,
+        uses: role.handlerId,
+        roleId: role.roleId,
+        dependsOn: [...role.dependsOn],
+        ...(role.handoffs !== undefined
+          ? { handoffs: role.handoffs.map(cloneHandoffSelector) }
+          : {}),
+      }));
       for (const [index, check] of activeChecks.entries()) {
         steps.push({
           id: check.id,
@@ -2774,6 +2853,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     kind: r.kind,
     path: r.path,
     digest: r.digest,
+    ...(r.when !== undefined ? { when: cloneResourceActivationRule(r.when) } : {}),
   }));
   const compiledMatrix = input.effectiveTargetMatrix === null || input.effectiveTargetMatrix.length === 0
     ? null
@@ -2817,6 +2897,9 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         dependsOn: [...step.dependsOn],
         ...(step.onRework !== undefined
           ? { onRework: { rejectTo: step.onRework.rejectTo, maxReworks: step.onRework.maxReworks } }
+          : {}),
+        ...(step.handoffs !== undefined
+          ? { handoffs: step.handoffs.map(cloneHandoffSelector) }
           : {}),
       })),
       acceptance: {
