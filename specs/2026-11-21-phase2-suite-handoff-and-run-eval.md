@@ -436,7 +436,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `action.yml` and `action.ts` support `suite-path`, `domain`, `resolve-suite-only`, `baseline-alignment`, and `matrix` output, and verify `issue_comment` PR branch ownership via GitHub API. `service.ts` deduplicates suite webhook fan-out, `publisher.ts` consumes shared 3-way carry blobs, and memory PRs commit `\n`-terminated `index.json`.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg github-app`
 
-- [ ] **T10 · CLI suite commands, baseline-alignment flag, RunEval report wiring, and runner parity**
+- [x] **T10 · CLI suite commands, baseline-alignment flag, RunEval report wiring, and runner parity**
       Blocked by: T8
       Owns: `packages/cli/src/**`, `packages/cli/test/arguments.test.ts`, `packages/cli/test/suite-and-eval.test.ts`, `packages/cli/test/closure-and-failure-matrix.test.ts`, `packages/cli/test/npm-pack.test.ts`, `packages/taskpack-runner/test/**`
       Gate: review

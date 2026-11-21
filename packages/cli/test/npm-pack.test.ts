@@ -112,6 +112,8 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
     assert.equal(helpRun.status, 0, `loopwright --help failed: ${helpRun.stderr}`);
     assert.match(helpRun.stdout, /^loopwright 0\.1\.0-rc1\n/);
     assert.match(helpRun.stdout, /run --taskpack FILE/);
+    assert.match(helpRun.stdout, /suite check --suite FILE/);
+    assert.match(helpRun.stdout, /suite resolve --suite FILE/);
     assert.match(helpRun.stdout, /app-serve --config FILE/);
 
     const draftDir = join(sandbox, 'drafts');

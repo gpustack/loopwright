@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RoleModelOverride, type RunReportInput, type StepTickResult } from '@loopwright/controller';
-import { assertCleanArtifact, buildDefaultAuthorPrompt, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseLoopwrightEnvLimits, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
+import { alignBaselineRevisions, assertCleanArtifact, BASELINE_CONFLICT_REASON, buildDefaultAuthorPrompt, checkTaskpackSuite, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseBaselineAlignmentPolicy, parseLoopwrightEnvLimits, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, resolveTaskpackSuite, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type BaselineAlignmentOverride, type BaselineAlignmentResult, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LoadedTaskpackSuite, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type SuiteResolutionResult, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
 import { parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
@@ -20,8 +20,8 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
-export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nsuite check --suite FILE [--repo DIR] [--verify-digests] [--json]\nsuite resolve --suite FILE [--repo DIR] [--event NAME] [--schedule KEY] [--comment-body TEXT] [--pr-head-ref REF] [--pr-base-ref REF] [--domain ID] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest' | 'suite'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
 }
@@ -103,6 +103,7 @@ async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> 
     model: model !== undefined ? model : (configuration ? primaryModelInfo(configuration) : null),
     usage: report.usage ?? inspected?.usage ?? null,
     externalUrl: inspected?.externalUrl ?? null,
+    runEval: report.runEval ?? inspected?.runEval ?? null,
   };
   if (stepSummaryFile !== undefined) {
     const summaryMd = formatRunReport(reportInput, 'github-step-summary') + '\n';
@@ -154,7 +155,8 @@ async function emitExecutionOutcome(
   });
 }
 /** Map every TaskpackErrorCode exhaustively to its documented CLI exit code. */
-export function taskpackExitCode(code: TaskpackErrorCode): number {
+export function taskpackExitCode(code: TaskpackErrorCode, reason?: string | null): number {
+  if (reason === BASELINE_CONFLICT_REASON) return 3;
   switch (code) {
     case 'TASKPACK_MANIFEST_INVALID':
     case 'TASKPACK_UNTRUSTED_INTERPOLATION':
@@ -294,15 +296,16 @@ async function withSignalAbort<T>(
     process.off('SIGTERM', terminate);
   }
 }
-async function resolveRepoRelativeTaskpackPath(
-  rawTaskpack: string,
+async function resolveRepoRelativeControlPath(
+  rawPath: string,
   rawRepoRoot: string,
   repoRoot: string,
+  label: string,
 ): Promise<string> {
-  if (!isAbsolute(rawTaskpack)) {
-    return normalizeRelativePath(rawTaskpack.replace(/\\/g, '/'), '/');
+  if (!isAbsolute(rawPath)) {
+    return normalizeRelativePath(rawPath.replace(/\\/g, '/'), '/');
   }
-  const absManifest = resolve(rawTaskpack);
+  const absManifest = resolve(rawPath);
   const relFromRaw = relative(rawRepoRoot, absManifest);
   if (relFromRaw.length > 0 && relFromRaw !== '..' && !relFromRaw.startsWith(`..${sep}`) && !isAbsolute(relFromRaw)) {
     return normalizeRelativePath(relFromRaw.split(sep).join('/'), '/');
@@ -325,18 +328,150 @@ async function resolveRepoRelativeTaskpackPath(
     prev = ancestor;
     ancestor = dirname(ancestor);
   }
-  throw new TaskpackError('TASKPACK_MANIFEST_INVALID', 'taskpack manifest escapes the repository root', '/');
+  throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `${label} escapes the repository root`, '/');
+}
+async function resolveRepoRelativeTaskpackPath(
+  rawTaskpack: string,
+  rawRepoRoot: string,
+  repoRoot: string,
+): Promise<string> {
+  return await resolveRepoRelativeControlPath(rawTaskpack, rawRepoRoot, repoRoot, 'taskpack manifest');
+}
+function parseTaskpackAlignmentArgs(args: Arguments): {
+  readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
+  readonly sourceRevision?: string | undefined;
+} {
+  const baselineAlignment = args.values.has('baseline-alignment')
+    ? parseBaselineAlignmentPolicy(args.values.get('baseline-alignment')!, '/baselineAlignment')
+    : undefined;
+  const rawSourceRevision = args.values.get('source-revision')?.trim();
+  const sourceRevision = rawSourceRevision !== undefined && rawSourceRevision.length > 0 ? rawSourceRevision : undefined;
+  return {
+    ...(baselineAlignment !== undefined ? { baselineAlignment } : {}),
+    ...(sourceRevision !== undefined ? { sourceRevision } : {}),
+  };
 }
 async function emitTaskpackError(err: TaskpackError, emit: EmitFn, scrubber?: SecretScrubber): Promise<number> {
   const effectiveScrubber = scrubber ?? createCliScrubber();
   const message = effectiveScrubber.scrub(err.message);
   const path = typeof err.path === 'string' && err.path.length > 0 ? effectiveScrubber.scrub(err.path) : null;
+  const reason = typeof err.reason === 'string' && err.reason.length > 0 ? effectiveScrubber.scrub(err.reason) : null;
   await emit(
     'diagnostic',
-    { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
-    err.code,
+    { version: 1, code: err.code, ...(reason !== null ? { reason } : {}), message, ...(path !== null ? { path } : {}) },
+    reason !== null ? `${err.code}: ${reason}` : err.code,
   );
-  return taskpackExitCode(err.code);
+  return taskpackExitCode(err.code, err.reason);
+}
+async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
+  const rawRepoRoot = resolve(args.values.has('repo') ? args.values.get('repo')! : process.cwd());
+  const repoRoot = await canonicalPath(rawRepoRoot);
+  const scrubber = createCliScrubber();
+  try {
+    const suitePath = await resolveRepoRelativeControlPath(args.values.get('suite')!, rawRepoRoot, repoRoot, 'suite manifest');
+    if (args.suiteAction === 'check') {
+      const verifyDigests = args.flags.has('verify-digests');
+      const loaded: LoadedTaskpackSuite = await checkTaskpackSuite({
+        repositoryRoot: repoRoot,
+        suitePath,
+        policyProfile: 'local',
+        enforceHostAuthority: false,
+        verifyDigests,
+      });
+      const payload = {
+        version: 1,
+        action: 'check',
+        ok: true,
+        verifyDigests,
+        suiteName: scrubber.scrub(loaded.manifest.metadata.name),
+        suitePath: scrubber.scrub(loaded.suitePath),
+        controlRoot: scrubber.scrub(loaded.controlRoot),
+        suiteSha256: loaded.suiteSha256,
+        stageOrder: loaded.stageOrder,
+        suiteProtectedPaths: loaded.suiteProtectedPaths,
+        domains: loaded.domains.map(domain => ({
+          id: domain.id,
+          taskpackPath: scrubber.scrub(domain.taskpackPath),
+          taskpackName: scrubber.scrub(domain.taskpackName),
+          manifestSha256: domain.manifestSha256,
+          controlRoot: scrubber.scrub(domain.controlRoot),
+          enabled: domain.enabled,
+          ...(domain.stage !== undefined ? { stage: domain.stage } : {}),
+          ...(domain.schedules !== undefined ? { schedules: domain.schedules } : {}),
+          ...(domain.matrix !== undefined ? { matrix: domain.matrix } : {}),
+        })),
+      };
+      const summary = scrubber.scrub(
+        `suite check: ok (${loaded.domains.length} domains, ${loaded.stageOrder.length} stages, sha256:${loaded.suiteSha256.slice(0, 12)})`,
+      );
+      await emit('suite', payload, summary);
+      return 0;
+    }
+
+    const githubToken = process.env['GITHUB_TOKEN']?.trim() || process.env['GH_TOKEN']?.trim() || undefined;
+    const rawLoopwrightRepo = process.env['LOOPWRIGHT_REPOSITORY']?.trim();
+    const rawGithubWorkspace = process.env['GITHUB_WORKSPACE']?.trim();
+    let matchesGithubWorkspace = false;
+    if (rawGithubWorkspace !== undefined && rawGithubWorkspace.length > 0) {
+      const realGithubWorkspace = await realpath(rawGithubWorkspace).catch(() => null);
+      matchesGithubWorkspace = realGithubWorkspace === repoRoot;
+    }
+    const hasExplicitLoopwrightRepo = rawLoopwrightRepo !== undefined && rawLoopwrightRepo.length > 0;
+    const rawRepoFullName = hasExplicitLoopwrightRepo
+      ? rawLoopwrightRepo
+      : (matchesGithubWorkspace ? process.env['GITHUB_REPOSITORY']?.trim() : undefined);
+    const repositoryFullName = rawRepoFullName !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(rawRepoFullName)
+      ? rawRepoFullName
+      : undefined;
+    const suiteEnv: NodeJS.ProcessEnv = (!hasExplicitLoopwrightRepo && matchesGithubWorkspace)
+      ? process.env
+      : { ...process.env, GITHUB_REPOSITORY: undefined };
+    const resolution: SuiteResolutionResult = await resolveTaskpackSuite({
+      repositoryRoot: repoRoot,
+      suitePath,
+      baseRevision: 'HEAD',
+      ...(repositoryFullName !== undefined ? { repositoryFullName } : {}),
+      ...(args.values.has('event') ? { eventName: args.values.get('event') } : {}),
+      ...(args.values.has('schedule') ? { schedule: args.values.get('schedule') } : {}),
+      ...(args.values.has('comment-body') ? { commentBody: args.values.get('comment-body') } : {}),
+      ...(args.values.has('pr-head-ref') ? { prHeadRef: args.values.get('pr-head-ref') } : {}),
+      ...(args.values.has('pr-base-ref') ? { prBaseRef: args.values.get('pr-base-ref') } : {}),
+      ...(args.values.has('domain') ? { domain: args.values.get('domain') } : {}),
+      ...(githubToken !== undefined ? { githubToken } : {}),
+      scrubber,
+      env: suiteEnv,
+    });
+    const payload = {
+      version: 1,
+      action: 'resolve',
+      ...resolution,
+    };
+    const cellSummary = resolution.cells.map(cell => `${cell.domainId}:${cell.disposition}:${cell.reason}`).join(', ');
+    const detailSuffix = resolution.detail !== undefined ? ` detail=${resolution.detail}` : '';
+    const summary = scrubber.scrub(
+      `suite resolve: disposition=${resolution.disposition} reason=${resolution.reason} matrix=${resolution.matrix.include.length} cells=[${cellSummary}]${detailSuffix}`,
+    );
+    await emit('suite', payload, summary);
+    switch (resolution.disposition) {
+      case 'eligible':
+      case 'deferred':
+      case 'ignored':
+        return 0;
+      case 'blocked':
+        return 3;
+      default: {
+        const _exhaustive: never = resolution.disposition;
+        return _exhaustive;
+      }
+    }
+  } catch (err) {
+    if (err instanceof TaskpackError) {
+      const exitCode = await emitTaskpackError(err, emit, scrubber);
+      // `suite` maps TASKPACK_SCOPE_VIOLATION to exit 3 (blocked) per suite CLI contract.
+      return err.code === 'TASKPACK_SCOPE_VIOLATION' ? 3 : exitCode;
+    }
+    throw err;
+  }
 }
 async function runDigestCommand(args: Arguments, emit: EmitFn): Promise<number> {
   const rawRepoRoot = resolve(args.values.has('repo') ? args.values.get('repo')! : process.cwd());
@@ -442,12 +577,15 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
             }
           }
         }
+        const { baselineAlignment, sourceRevision } = parseTaskpackAlignmentArgs(args);
         const staged = await stageTaskpackForStep({
           taskpackPath: get('taskpack'),
           repositoryRoot: requestedRepo,
           runRoot,
           runId,
           mode: (args.values.get('mode') as 'candidate' | 'no-change' | undefined) ?? 'candidate',
+          ...(baselineAlignment !== undefined ? { baselineAlignment } : {}),
+          ...(sourceRevision !== undefined ? { sourceRevision } : {}),
           policyProfile: 'local',
           allowPrivileged,
           allowWorkflowWrites,
@@ -827,6 +965,8 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
       if (typeof val === 'string' && val.length > 0) scrubber.register(val);
     }
 
+    const { baselineAlignment, sourceRevision: explicitSourceRevision } = parseTaskpackAlignmentArgs(args);
+
     const envRepo = process.env['LOOPWRIGHT_REPOSITORY']?.trim();
     const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
       ? envRepo
@@ -835,6 +975,9 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
       repositoryRoot: repoRoot,
       repositoryFullName,
       baseRevision: 'HEAD',
+      ...(explicitSourceRevision !== undefined
+        ? { sourceRevision: explicitSourceRevision, preserveExplicitSourceRevision: true }
+        : {}),
       eventName: 'workflow_dispatch',
       scrubber,
     });
@@ -869,6 +1012,7 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         taskpackPath: relativeTaskpackPath,
         baseRevision: resolvedRepo.baseRevision,
         sourceRevision: resolvedRepo.sourceRevision,
+        ...(baselineAlignment !== undefined ? { baselineAlignment } : {}),
         targetMatrix: manifest.spec.target?.matrix ?? null,
         ...(roleSelection !== undefined ? { roleSelection } : {}),
         allowManifestCustomBaseUrl,
@@ -1003,6 +1147,33 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
       ? 'no-change'
       : 'candidate';
 
+    let baselineAlignmentResult: BaselineAlignmentResult | undefined;
+    if (effectiveMode === 'candidate' && resolvedRepo.sourceRevision !== resolvedRepo.baseRevision) {
+      baselineAlignmentResult = await alignBaselineRevisions({
+        repositoryRoot: repoRoot,
+        baseRevision: resolvedRepo.baseRevision,
+        sourceRevision: resolvedRepo.sourceRevision,
+        manifest,
+        taskpackPath: relativeTaskpackPath,
+        policyProfile: 'local',
+        hostPolicy,
+        ...(baselineAlignment !== undefined ? { baselineAlignment } : {}),
+        scrubber,
+        scratchRoot: realRunRoot,
+      });
+      if (baselineAlignmentResult.status === 'blocked') {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          baselineAlignmentResult.detail,
+          '/spec/baselineAlignment',
+          { reason: baselineAlignmentResult.reason },
+        );
+      }
+    }
+    const enableBaselineConflictGate = effectiveMode === 'candidate'
+      && baselineAlignmentResult !== undefined
+      && (baselineAlignmentResult.conflictResource !== null || baselineAlignmentResult.disposition === 'unmerged_off');
+
     let activeGateEndpoints: readonly HostGateEndpointPlan[] = [];
     let trackedSourceTokenEnvNames: readonly string[] = [];
     const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => {
@@ -1040,6 +1211,10 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         taskpackPath: relativeTaskpackPath,
         baseRevision: resolvedRepo.baseRevision,
         sourceRevision: resolvedRepo.sourceRevision,
+        ...(baselineAlignment !== undefined ? { baselineAlignment } : {}),
+        ...(baselineAlignmentResult !== undefined ? { baselineAlignmentResult } : {}),
+        ...(baselineAlignmentResult?.conflictResource != null ? { baselineConflictResource: baselineAlignmentResult.conflictResource } : {}),
+        ...(enableBaselineConflictGate ? { enableBaselineConflictGate: true } : {}),
         upstreamRecords,
         targetMatrix: manifest.spec.target?.matrix ?? null,
         ...(roleSelection !== undefined ? { roleSelection } : {}),
@@ -1183,6 +1358,8 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
     let compiled = await compileDeclarativeTaskpack(manifest, buildBindings(activeCandidate));
     const localCommandGates = compiled.localCommandGates ?? [];
     if (localCommandGates.length > 0) {
+      const extractedConflictPaths = compiled.extractedConflictPaths
+        ?? baselineAlignmentResult?.conflictResource?.extractedPaths;
       localGateServer = await startLocalCommandGateServer({
         runRoot: realRunRoot,
         repositoryRoot: repoRoot,
@@ -1191,6 +1368,7 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         scrubber,
         forbiddenEnvNames: forbiddenCommandEnvNames,
         checkStagedDir: preflightResult?.checkStagedDir,
+        ...(extractedConflictPaths !== undefined ? { extractedConflictPaths } : {}),
       });
       activeGateEndpoints = [localGateServer.endpointPlan];
       ephemeralEnv[DEFAULT_LOCAL_COMMAND_GATE_ENV] = localGateServer.signingSecret;
@@ -1259,6 +1437,7 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         phase: null,
         checks: cycleSummary.checks,
         usage: cycleSummary.usage,
+        runEval: cycleSummary.runEval ?? null,
       },
       emitDefault: () => emit('result', cycleSummary, cycleSummary.status),
     });
@@ -1362,6 +1541,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     if (args.command === 'digest') {
       return await runDigestCommand(args, emit);
+    }
+    if (args.command === 'suite') {
+      return await runSuiteCommand(args, emit);
     }
     if (args.command === 'step') {
       runId = get('run-id');

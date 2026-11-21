@@ -3,10 +3,12 @@ import { parseReportOutputFormats, type RoleModelOverride } from '@loopwright/co
 export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
 export type StepAction = 'next' | 'submit' | 'cancel';
 export type DigestAction = 'sync';
+export type SuiteAction = 'check' | 'resolve';
 export interface Arguments {
-  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest';
+  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest' | 'suite';
   readonly stepAction?: StepAction;
   readonly digestAction?: DigestAction;
+  readonly suiteAction?: SuiteAction;
   readonly roleModelOverrides?: readonly RoleModelOverride[];
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
@@ -17,10 +19,10 @@ interface CommandRule {
   readonly flags: readonly string[];
   readonly allowRoleModel?: boolean;
 }
-const commands: Record<Exclude<Arguments['command'], 'step' | 'digest'>, CommandRule> = {
+const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
-  run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
+  run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'baseline-alignment', 'source-revision', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'allow-workflow-writes'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
@@ -35,10 +37,22 @@ const digestRules: Record<DigestAction, CommandRule> = {
     flags: ['check', 'json'],
   },
 };
+const suiteRules: Record<SuiteAction, CommandRule> = {
+  check: {
+    required: ['suite'],
+    values: ['suite', 'repo'],
+    flags: ['verify-digests', 'json'],
+  },
+  resolve: {
+    required: ['suite'],
+    values: ['suite', 'repo', 'event', 'schedule', 'comment-body', 'pr-head-ref', 'pr-base-ref', 'domain'],
+    flags: ['json'],
+  },
+};
 const stepRules: Record<StepAction, CommandRule> = {
   next: {
     required: ['run-root', 'run-id'],
-    values: ['run-root', 'run-id', 'config', 'registry', 'registry-sha256', 'taskpack', 'repo', 'mode', 'output-format', 'step-summary-file'],
+    values: ['run-root', 'run-id', 'config', 'registry', 'registry-sha256', 'taskpack', 'repo', 'mode', 'baseline-alignment', 'source-revision', 'output-format', 'step-summary-file'],
     flags: ['reissue-lease', 'json', 'allow-privileged', 'allow-workflow-writes'],
     allowRoleModel: true,
   },
@@ -93,6 +107,17 @@ function validateCommonValues(values: ReadonlyMap<string, string>): void {
   if (values.has('step-summary-file') && values.get('step-summary-file')!.trim().length === 0) throw new UsageError();
   if (values.has('run-id') && (values.get('run-id')!.length > 64 || !IDENTIFIER_PATTERN.test(values.get('run-id')!))) throw new UsageError();
 }
+function validateTaskpackAlignmentValues(values: ReadonlyMap<string, string>, hasTaskpack: boolean): void {
+  if (!hasTaskpack && (values.has('baseline-alignment') || values.has('source-revision'))) throw new UsageError();
+  if (values.has('baseline-alignment')) {
+    const policy = values.get('baseline-alignment')!;
+    if (policy !== 'off' && policy !== 'fail-fast' && policy !== 'extract-context') throw new UsageError();
+  }
+  if (values.has('source-revision')) {
+    const rev = values.get('source-revision')!;
+    if (rev.length === 0 || rev.length > 256 || /[\s\p{C}]/u.test(rev) || rev.startsWith('-')) throw new UsageError();
+  }
+}
 function validateStepArguments(
   stepAction: StepAction,
   values: ReadonlyMap<string, string>,
@@ -119,6 +144,7 @@ function validateStepArguments(
       const mode = values.get('mode')!;
       if (mode !== 'candidate' && mode !== 'no-change') throw new UsageError();
     }
+    validateTaskpackAlignmentValues(values, hasTaskpack);
   } else if (stepAction === 'submit') {
     if (values.has('lease') && values.get('lease')!.trim().length === 0) throw new UsageError();
     if (values.has('status')) {
@@ -201,7 +227,25 @@ export function parseArguments(argv: readonly string[]): Arguments {
     };
   }
 
-  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest'>;
+  if (rawCommand === 'suite') {
+    const rawAction = argv[1];
+    if (rawAction !== 'check' && rawAction !== 'resolve') throw new UsageError();
+    const rule = suiteRules[rawAction];
+    parseOptions(2, key => rule.flags.includes(key), key => rule.values.includes(key), false);
+    if (rule.required.some(key => !values.has(key))) throw new UsageError();
+    if (values.get('suite')!.trim().length === 0) throw new UsageError();
+    for (const nonEmptyKey of ['repo', 'event', 'schedule', 'pr-head-ref', 'pr-base-ref', 'domain']) {
+      if (values.has(nonEmptyKey) && values.get(nonEmptyKey)!.trim().length === 0) throw new UsageError();
+    }
+    return {
+      command: 'suite',
+      suiteAction: rawAction,
+      values,
+      flags,
+    };
+  }
+
+  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest' | 'suite'>;
   if (!Object.hasOwn(commands, command)) throw new UsageError();
   const rule = commands[command];
   parseOptions(1, key => rule.flags.includes(key), key => rule.values.includes(key), rule.allowRoleModel === true);
@@ -212,6 +256,7 @@ export function parseArguments(argv: readonly string[]): Arguments {
     if (hasTaskpack && hasAnyConfig) throw new UsageError();
     if (!hasTaskpack && !hasAnyConfig) throw new UsageError();
     if (!hasTaskpack && values.has('mode')) throw new UsageError();
+    validateTaskpackAlignmentValues(values, hasTaskpack);
     if (hasTaskpack) {
       if (values.get('taskpack')!.trim().length === 0) throw new UsageError();
       if (values.has('mode')) {
