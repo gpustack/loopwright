@@ -46,7 +46,7 @@ import {
 function git(cwd: string, args: readonly string[]): string {
   const res = spawnSync(
     'git',
-    ['-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', ...args],
+    ['-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
     {
       cwd,
       encoding: 'utf8',
@@ -73,6 +73,7 @@ async function snapshotGitObjects(repoRoot: string): Promise<readonly string[]> 
   const walk = async (dir: string): Promise<void> => {
     const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (entry.name === 'maintenance.lock') continue;
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);

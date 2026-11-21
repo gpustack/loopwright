@@ -16,20 +16,24 @@ import {
 } from './step-cli-fixtures.js';
 
 function git(cwd: string, args: readonly string[]): string {
-  return execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd,
-    env: {
-      PATH: '/usr/bin:/bin',
-      LANG: 'C',
-      LC_ALL: 'C',
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      HOME: '/nonexistent',
-      GIT_TERMINAL_PROMPT: '0',
+  return execFileSync(
+    '/usr/bin/git',
+    ['-c', 'core.hooksPath=/dev/null', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
+    {
+      cwd,
+      env: {
+        PATH: '/usr/bin:/bin',
+        LANG: 'C',
+        LC_ALL: 'C',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        HOME: '/nonexistent',
+        GIT_TERMINAL_PROMPT: '0',
+      },
+      timeout: 10_000,
+      encoding: 'utf8',
     },
-    timeout: 10_000,
-    encoding: 'utf8',
-  }).trim();
+  ).trim();
 }
 
 async function listGitObjectFiles(repoRoot: string): Promise<readonly string[]> {
@@ -38,6 +42,7 @@ async function listGitObjectFiles(repoRoot: string): Promise<readonly string[]> 
   const walk = async (dir: string, relPrefix: string): Promise<void> => {
     const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
+      if (entry.name === 'maintenance.lock') continue;
       const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
