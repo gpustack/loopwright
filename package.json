@@ -18,7 +18,8 @@
     "packages/taskpack",
     "packages/github-app",
     "packages/memory",
-    "packages/decisions"
+    "packages/decisions",
+    "packages/hardware-runner"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

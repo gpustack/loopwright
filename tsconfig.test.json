@@ -27,6 +27,8 @@
     "packages/taskpack/src/**/*.ts",
     "packages/taskpack/test/**/*.ts",
     "packages/github-app/src/**/*.ts",
-    "packages/github-app/test/**/*.ts"
+    "packages/github-app/test/**/*.ts",
+    "packages/hardware-runner/src/**/*.ts",
+    "packages/hardware-runner/test/**/*.ts"
   ]
 }

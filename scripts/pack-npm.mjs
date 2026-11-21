@@ -17,6 +17,7 @@ const WORKSPACE_PACKAGES = [
   'decisions',
   'taskpack',
   'github-app',
+  'hardware-runner',
   'cli'
 ];
 

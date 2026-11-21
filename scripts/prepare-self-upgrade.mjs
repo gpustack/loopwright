@@ -47,6 +47,7 @@ export const UNMANAGED_WORKSPACES = Object.freeze([
   'packages/state',
   'packages/memory',
   'packages/taskpack-runner',
+  'packages/hardware-runner',
 ]);
 
 const DEFAULT_UPSTREAM_GROUPS = Object.freeze([

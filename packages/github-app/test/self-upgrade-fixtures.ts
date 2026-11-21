@@ -226,6 +226,7 @@ export const ALL_WORKSPACES = [
   'packages/github-app',
   'packages/memory',
   'packages/decisions',
+  'packages/hardware-runner',
 ] as const;
 
 export function fakeIntegrity(label: string): string {
@@ -300,6 +301,10 @@ export function buildSyntheticLockfile(options: {
     'packages/state': { version: '0.0.0', dependencies: { '@loopwright/core': '0.0.0' } },
     'packages/memory': { version: '0.0.0', dependencies: { '@loopwright/core': '0.0.0' } },
     'packages/taskpack-runner': { version: '0.0.0', dependencies: { '@loopwright/core': '0.0.0' } },
+    'packages/hardware-runner': {
+      version: '0.0.0',
+      dependencies: { '@loopwright/core': '0.0.0', '@loopwright/taskpack': '0.0.0' },
+    },
     'packages/agent-pi': {
       version: '0.0.0',
       dependencies: Object.fromEntries([
@@ -529,6 +534,7 @@ export async function createMiniSelfUpgradeRepo(
     'packages/state': { '@loopwright/core': '0.0.0' },
     'packages/memory': { '@loopwright/core': '0.0.0' },
     'packages/taskpack-runner': { '@loopwright/core': '0.0.0' },
+    'packages/hardware-runner': { '@loopwright/core': '0.0.0', '@loopwright/taskpack': '0.0.0' },
     'packages/agent-pi': Object.fromEntries([
       ...PI_PACKAGE_NAMES.map(pkg => [pkg, '1.5.0']),
       ['@loopwright/core', '0.0.0'],

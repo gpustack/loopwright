@@ -21,6 +21,7 @@ const PACKAGES = [
   'decisions',
   'taskpack',
   'github-app',
+  'hardware-runner',
   'cli',
 ];
 

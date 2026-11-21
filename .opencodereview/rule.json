@@ -60,6 +60,11 @@
       "rule": "Flag violations of tenant isolation, webhook authentication and token scrubbing; cite concrete scenarios and preserve package boundaries."
     },
     {
+      "path": "packages/hardware-runner/**/*.ts",
+      "merge_system_rule": true,
+      "rule": "Flag violations of lease fencing, stage-A/stage-B isolation, CAS bounds and secret containment; cite concrete scenarios and preserve package boundaries."
+    },
+    {
       "path": "packages/cli/**/*.ts",
       "merge_system_rule": true,
       "rule": "Flag violations of exit codes and honest closure evidence; cite concrete scenarios and preserve package boundaries."
