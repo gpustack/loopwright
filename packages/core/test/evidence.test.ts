@@ -42,7 +42,19 @@ test('evidence duplicate, contradictory and cross-check receipts are rejected', 
   assert.equal(code(evaluateAcceptance(fixture.input, fixture.artifacts)), 'EVIDENCE_CONTRADICTORY');
 });
 test('evidence level is an explicit allowed set, never a universal ordering', () => {
-  const task = contract(); task.spec.acceptance.checks[0]!.allowedEvidenceLevels = ['hardware_execution'];
+  const task = contract();
+  Object.assign(task.spec.target, {
+    matrix: [{
+      id: 'gpu-sm90',
+      platform: 'linux',
+      variant: 'cuda',
+      hardware: { accelerator: 'sm_90a', isolationMode: 'whole_device' },
+    }],
+  });
+  Object.assign(task.spec.acceptance.checks[0]!, {
+    allowedEvidenceLevels: ['hardware_execution'],
+    targetCellId: 'gpu-sm90',
+  });
   const fixture = evaluationFixture(task);
   fixture.input.trusted.eligibleEvidence[0]!.spec.level = 'synthetic_fixture';
   const result = value(evaluateAcceptance(fixture.input, fixture.artifacts));

@@ -2,7 +2,7 @@ import { API_VERSION, snapshot, type Json } from './boundary.js';
 import { attempt, fail, type Result } from './diagnostics.js';
 import { LIMITS, OVERLAY_LIMITS, type OverlayLimits } from './limits.js';
 import { graphBounds, unique, validateGraph } from './graph.js';
-import { matches, relativeName, scopePattern } from './scope.js';
+import { isVerifierNamespacePath, matches, relativeName, scopePattern } from './scope.js';
 
 export type Schema<T> = (value: Json, path: string) => T;
 export type Infer<S> = S extends Schema<infer T> ? T : never;
@@ -150,6 +150,144 @@ export const mediaType: Schema<string> = (value, path) => {
 };
 
 const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_METRIC_KEYS = FORBIDDEN_PROTOTYPE_KEYS;
+const METRIC_KEY_RE = /^[A-Za-z_][A-Za-z0-9._-]*$/;
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+const DOTTED_VERSION_RE = /^\d+(?:\.\d+)*$/;
+
+export function printableAscii(min = 1, max: number = LIMITS.string): Schema<string> {
+  return (value, path) => {
+    const parsed = text(min, max)(value, path);
+    if (parsed.trim() !== parsed || !/^[\x20-\x7E]+$/.test(parsed)) fail('VALUE_RANGE', path);
+    return parsed;
+  };
+}
+
+export function printableText(min = 1, max: number = LIMITS.string): Schema<string> {
+  return (value, path) => {
+    const parsed = text(min, max)(value, path);
+    if (parsed.trim() !== parsed || /[\r\n\t\p{C}]/u.test(parsed) || LONE_SURROGATE_RE.test(parsed)) {
+      fail('VALUE_RANGE', path);
+    }
+    return parsed;
+  };
+}
+
+function parseDottedVersion(value: string): readonly number[] | null {
+  if (!value.length || !DOTTED_VERSION_RE.test(value)) return null;
+  const segments: number[] = [];
+  for (const part of value.split('.')) {
+    const parsed = Number(part);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) return null;
+    segments.push(parsed);
+  }
+  return segments;
+}
+
+export function matchesDriverConstraint(constraint: string, observedDriverVersion: string): boolean {
+  if (typeof constraint !== 'string' || typeof observedDriverVersion !== 'string') return false;
+  if (!constraint.length || !observedDriverVersion.length) return false;
+  if (constraint.startsWith('>=')) {
+    const expected = parseDottedVersion(constraint.slice(2));
+    const observed = parseDottedVersion(observedDriverVersion);
+    if (!expected || !observed) return false;
+    const length = Math.max(expected.length, observed.length);
+    for (let index = 0; index < length; index++) {
+      const observedPart = observed[index] ?? 0;
+      const expectedPart = expected[index] ?? 0;
+      if (observedPart > expectedPart) return true;
+      if (observedPart < expectedPart) return false;
+    }
+    return true;
+  }
+  return observedDriverVersion === constraint;
+}
+
+export const driverVersionSchema: Schema<string> = printableText(1, 128);
+
+const driverConstraintSchema: Schema<string> = (value, path) => {
+  const constraint = driverVersionSchema(value, path);
+  if (constraint.startsWith('>=') && parseDottedVersion(constraint.slice(2)) === null) {
+    fail('VALUE_RANGE', path);
+  }
+  return constraint;
+};
+
+export const hardwareIsolationMode = enumeration('whole_device', 'sliced');
+export interface HardwareTargetSpec {
+  readonly accelerator: string;
+  readonly isolationMode: 'whole_device' | 'sliced';
+  readonly deviceCount?: number;
+  readonly driverConstraint?: string;
+  readonly topology?: string;
+}
+export const hardwareTargetSchema: Schema<HardwareTargetSpec> = record({
+  accelerator: printableAscii(1, 64),
+  isolationMode: hardwareIsolationMode,
+  deviceCount: optional(integer(1, 64)),
+  driverConstraint: optional(driverConstraintSchema),
+  topology: optional(printableText(1, 128)),
+});
+
+function isValidMetricKey(key: string): boolean {
+  return key.length >= 1 && key.length <= LIMITS.metricKey
+    && !FORBIDDEN_METRIC_KEYS.has(key)
+    && METRIC_KEY_RE.test(key);
+}
+
+const metricKeySchema: Schema<string> = (value, path) => {
+  if (typeof value !== 'string') fail('VALUE_TYPE', path);
+  if (!isValidMetricKey(value)) fail('IDENTIFIER_INVALID', path);
+  return value;
+};
+
+const finiteNumber: Schema<number> = (value, path) => {
+  if (typeof value !== 'number') fail('VALUE_TYPE', path);
+  if (!Number.isFinite(value)) fail('VALUE_RANGE', path);
+  return Object.is(value, -0) ? 0 : value;
+};
+
+export interface MetricBoundsRule {
+  readonly kind: 'bounds';
+  readonly metric: string;
+  readonly min?: number;
+  readonly max?: number;
+}
+export interface MetricComparativeRule {
+  readonly kind: 'comparative';
+  readonly metric: string;
+  readonly baselineMetric: string;
+  readonly operator: 'min_ratio' | 'max_ratio' | 'max_delta';
+  readonly threshold: number;
+}
+export type MetricThresholdRule = MetricBoundsRule | MetricComparativeRule;
+
+const metricBoundsShape = record({
+  kind: enumeration('bounds'),
+  metric: metricKeySchema,
+  min: optional(finiteNumber),
+  max: optional(finiteNumber),
+});
+const metricComparativeShape = record({
+  kind: enumeration('comparative'),
+  metric: metricKeySchema,
+  baselineMetric: metricKeySchema,
+  operator: enumeration('min_ratio', 'max_ratio', 'max_delta'),
+  threshold: finiteNumber,
+});
+
+export const metricThresholdRuleSchema: Schema<MetricThresholdRule> = (value, path) => {
+  const input = object(value, path);
+  if (!Object.hasOwn(input, 'kind')) fail('FIELD_REQUIRED', `${path}/kind`);
+  const kind = enumeration('bounds', 'comparative')(input.kind!, `${path}/kind`);
+  if (kind === 'bounds') {
+    const rule = metricBoundsShape(input, path);
+    if (rule.min === undefined && rule.max === undefined) fail('VALUE_RANGE', path);
+    if (rule.min !== undefined && rule.max !== undefined && rule.min > rule.max) fail('VALUE_RANGE', path);
+    return rule;
+  }
+  return metricComparativeShape(input, path);
+};
 
 export type MetricValue = number | string | boolean;
 export type MetricsMap = Readonly<Record<string, MetricValue>>;
@@ -159,11 +297,7 @@ export function metricsSchema(value: Json, path: string): MetricsMap {
   if (keys.length > LIMITS.metricEntries) fail('VALUE_RANGE', path);
   const output: Record<string, MetricValue> = Object.create(null) as Record<string, MetricValue>;
   for (const key of keys) {
-    if (
-      key.length < 1 || key.length > LIMITS.metricKey
-      || FORBIDDEN_PROTOTYPE_KEYS.has(key)
-      || !/^[A-Za-z_][A-Za-z0-9._-]*$/.test(key)
-    ) {
+    if (!isValidMetricKey(key)) {
       fail('IDENTIFIER_INVALID', path);
     }
     const entryPath = `${path}/${key}`;
@@ -402,7 +536,10 @@ const budgets = record({
 const taskShape = configDocument('TaskContract', record({
   goal: text(1, LIMITS.goal), taskpack: identifier,
   target: record({ repository, baseRevision: revision, sourceRevision: revision,
-    matrix: nullable(arrayOf(record({ id: identifier, platform: label, variant: label }), 1, LIMITS.targets)) }),
+    matrix: nullable(arrayOf(record({
+      id: identifier, platform: label, variant: label,
+      hardware: optional(hardwareTargetSchema),
+    }), 1, LIMITS.targets)) }),
   scope: record({ writable: arrayOf(pattern, 1, LIMITS.patterns), protected: arrayOf(pattern, 0, LIMITS.patterns) }),
   roles: arrayOf(record({ id: identifier, adapter: label, provider: label, model: label, thinking: label,
     tools: arrayOf(toolName, 0, LIMITS.tools),
@@ -420,6 +557,9 @@ const taskShape = configDocument('TaskContract', record({
   }), 1),
   acceptance: record({ required: arrayOf(identifier, 1, LIMITS.checks), checks: arrayOf(record({
     id: identifier, allowedEvidenceLevels: arrayOf(evidenceLevel, 1, 5),
+    targetCellId: optional(identifier),
+    allowSyntheticHardwareProbe: optional(boolean),
+    metricThresholds: optional(arrayOf(metricThresholdRuleSchema, 0, LIMITS.metricThresholds)),
   }), 1, LIMITS.checks) }),
 }));
 export type TaskContract = Infer<typeof taskShape>;
@@ -454,7 +594,26 @@ export function contractSchema(input: Json, path = ''): TaskContract {
   unique(spec.scope.protected, `${path}/spec/scope/protected`);
   unique(spec.acceptance.required, `${path}/spec/acceptance/required`);
   unique(spec.acceptance.checks.map(check => check.id), `${path}/spec/acceptance/checks`);
-  spec.acceptance.checks.forEach((check, index) => unique(check.allowedEvidenceLevels, `${path}/spec/acceptance/checks/${index}/allowedEvidenceLevels`));
+  const matrixCells = new Map((spec.target.matrix ?? []).map(cell => [cell.id, cell] as const));
+  spec.acceptance.checks.forEach((check, index) => {
+    const checkPath = `${path}/spec/acceptance/checks/${index}`;
+    unique(check.allowedEvidenceLevels, `${checkPath}/allowedEvidenceLevels`);
+    if (check.targetCellId !== undefined && !matrixCells.has(check.targetCellId)) {
+      fail('REFERENCE_UNKNOWN', `${checkPath}/targetCellId`);
+    }
+    if (check.allowedEvidenceLevels.includes('hardware_execution')) {
+      if (check.allowedEvidenceLevels.length !== 1) {
+        fail('VALUE_RANGE', `${checkPath}/allowedEvidenceLevels`);
+      }
+      if (check.targetCellId === undefined) {
+        fail('FIELD_REQUIRED', `${checkPath}/targetCellId`);
+      }
+      const cell = matrixCells.get(check.targetCellId);
+      if (!cell || cell.hardware === undefined) {
+        fail('REFERENCE_UNKNOWN', `${checkPath}/targetCellId`);
+      }
+    }
+  });
   graphBounds(spec.steps, stepsPath);
   const checkIds = new Set(spec.acceptance.checks.map(check => check.id));
   spec.acceptance.required.forEach((id, index) => { if (!checkIds.has(id)) fail('REFERENCE_UNKNOWN', `${path}/spec/acceptance/required/${index}`); });
@@ -545,6 +704,7 @@ export function isWritablePath(input: unknown, path: unknown): Result<boolean> {
     const contract = contractSchema(snapshot(input));
     // Wrap scalar input so strings are treated as data, not JSON documents.
     const name = nameSchema(object(snapshot({ path }), '').path!, '/path');
+    if (isVerifierNamespacePath(name)) return false;
     return !contract.spec.scope.protected.some(pattern => matches(pattern, name))
       && contract.spec.scope.writable.some(pattern => matches(pattern, name));
   });

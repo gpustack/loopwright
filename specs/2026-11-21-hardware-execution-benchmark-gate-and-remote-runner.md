@@ -307,7 +307,7 @@ Key conventions:
       Acceptance: `packages/hardware-runner` builds as the 11th workspace package depending only on `@loopwright/core` and `@loopwright/taskpack`, is bundled by `pack-npm.mjs`, is registered in `UNMANAGED_WORKSPACES` without `.auto-sync/proposal.json` churn, and passes incremental build and tarball install tests.
       Verify: `npm install --package-lock-only && npm ci && npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg hardware-runner && node --test .test-build/packages/cli/test/build-incremental.test.js .test-build/packages/cli/test/npm-pack.test.js`
 
-- [ ] **T2 · Core hardware `target.matrix`, `metricThresholds`, `hardwareProvenance`, and verifier CAS budget**
+- [x] **T2 · Core hardware `target.matrix`, `metricThresholds`, `hardwareProvenance`, and verifier CAS budget**
       Blocked by: T1
       Owns: `packages/core/src/**`, `packages/core/test/**`
       Gate: review

@@ -33,6 +33,14 @@ export const HANDOFF_LIMITS = Object.freeze({
   maxPointerChars: 512,
 });
 
+export const VERIFIER_ARTIFACT_LIMITS = Object.freeze({
+  prefix: '.loopwright-verifier',
+  maxFilesPerSlot: 64,
+  maxTotalFiles: 256,
+  maxFileBytes: OVERLAY_LIMITS.maxMaxBytes,
+  maxTotalBytes: OVERLAY_LIMITS.maxMaxBytes,
+});
+
 export const LIMITS = Object.freeze({
   inputBytes: 1_048_576, depth: 64, string: 16_384, nodes: 65_536,
   properties: 128, collection: 1_024, identifier: 64, toolName: 128,
@@ -40,7 +48,7 @@ export const LIMITS = Object.freeze({
   tools: 128, patterns: 128, patternWildcards: 16, targets: 64, graphNodes: 256, graphEdges: 2_048,
   checks: 256, evidence: 256, manifest: 256, overlayEntries: 128, baselineEntries: 65_536, requests: 1_024,
   resolvedArtifacts: 512, artifactBytes: 67_108_864, resolvedBytes: 134_217_728,
-  metricEntries: 64, metricKey: 64, metricStringValue: 256,
+  metricEntries: 64, metricKey: 64, metricStringValue: 256, metricThresholds: 32,
   findings: 64, findingTitle: 256, findingEvidence: 2_048,
   artifactUri: 2_048, mediaType: 128, maxReworks: 8,
   handoffsPerStep: HANDOFF_LIMITS.maxPerStep,
