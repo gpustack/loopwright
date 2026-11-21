@@ -67,6 +67,29 @@ function parseRoleModelOverrides(raw: unknown): readonly RoleModelOverride[] | u
   if (entries.length === 0) return undefined;
   return entries;
 }
+function validateHeadBranchPrefix(rawPrefix: unknown): string {
+  const hbp = text(rawPrefix, '/spec/publication/headBranchPrefix', 64);
+  if (hbp.length < 1 || hbp.startsWith('/') || hbp.includes('//') || hbp.includes('..')) {
+    refuse('CONFIG_SCHEMA', '/spec/publication/headBranchPrefix');
+  }
+  const trimmed = hbp.endsWith('/') ? hbp.slice(0, -1) : hbp;
+  if (trimmed.length === 0 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(trimmed)) {
+    refuse('CONFIG_SCHEMA', '/spec/publication/headBranchPrefix');
+  }
+  for (const segment of trimmed.split('/')) {
+    if (
+      segment.length === 0
+      || segment === '.'
+      || segment === '..'
+      || segment.startsWith('.')
+      || segment.endsWith('.lock')
+      || !/^[A-Za-z0-9._-]+$/.test(segment)
+    ) {
+      refuse('CONFIG_SCHEMA', '/spec/publication/headBranchPrefix');
+    }
+  }
+  return hbp;
+}
 function publicationBlock(raw: unknown): PublicationConfig {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) refuse('CONFIG_SCHEMA', '/spec/publication');
   const mode = (raw as Record<string, unknown>).mode;
@@ -75,9 +98,9 @@ function publicationBlock(raw: unknown): PublicationConfig {
   const value = record(raw, ['mode', 'endpointRef', 'targetBranch', 'headBranchPrefix', 'titleTemplate'], '/spec/publication');
   id(value.endpointRef, '/spec/publication/endpointRef');
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/.test(text(value.targetBranch, '/spec/publication/targetBranch', 128))) refuse('CONFIG_SCHEMA', '/spec/publication/targetBranch');
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(text(value.headBranchPrefix, '/spec/publication/headBranchPrefix', 64).replace(/\/$/, '')) || /\/\//.test(value.headBranchPrefix as string)) refuse('CONFIG_SCHEMA', '/spec/publication/headBranchPrefix');
+  const headBranchPrefix = validateHeadBranchPrefix(value.headBranchPrefix);
   text(value.titleTemplate, '/spec/publication/titleTemplate', 256);
-  return { mode: 'pull_request', endpointRef: value.endpointRef as string, targetBranch: value.targetBranch as string, headBranchPrefix: value.headBranchPrefix as string, titleTemplate: value.titleTemplate as string };
+  return { mode: 'pull_request', endpointRef: value.endpointRef as string, targetBranch: value.targetBranch as string, headBranchPrefix, titleTemplate: value.titleTemplate as string };
 }
 function authoring(raw: unknown): { top: Record<string, unknown>; spec: Record<string, unknown> } {
   const top = record(raw, ['apiVersion', 'kind', 'spec']);
@@ -176,7 +199,8 @@ export function loadConfiguration(unowned: LoadConfigurationInput, ports: Config
     const resources = []; let resourceBytes = 0;
     for (const requested of finalTask.spec.trustedContext.resources) {
       const resource = registry.spec.resources.find(item => item.id === requested.id);
-      if (!resource || !same(resource, requested)) refuse('CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
+      const requestedIdentity = { id: requested.id, kind: requested.kind, path: requested.path, digest: requested.digest };
+      if (!resource || !same(resource, requestedIdentity)) refuse('CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
       const bytes = await readBoundedFile(resolve(dirname(registryPath), resource.path), 4194304, true); resourceBytes += bytes.byteLength;
       if (resourceBytes > 4194304 || hash(bytes).hex !== resource.digest.hex) refuse(resourceBytes > 4194304 ? 'CONFIG_LIMIT' : 'CONFIG_REFERENCE', '/spec/task/spec/trustedContext/resources');
       vault.assertClean(bytes);

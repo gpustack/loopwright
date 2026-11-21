@@ -3,11 +3,12 @@ import type { Authority, CheckpointRecord, LocalRunStore, OperationRecord, Page,
 import { canonical, freeze, hash, id, integer, isRecord, list, record, same, text, digestValue } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
-import { stateValue, checkedRef, ArtifactStore, type ArtifactReader } from './storage.js';
+import { stateValue, checkedRef, ArtifactStore, streamVerifiedCasBlob, type ArtifactReader } from './storage.js';
 import { checkedRefusalRecord, checkedRefusalSubject, refusalSubject } from './refusal-record.js';
 import { canonicalizeCandidateManifest, compareUtf16, overlayManifestBounds } from './source.js';
 import { checkedVerdictText } from './submission.js';
-import type { CheckpointCapacity, CompiledPlan, ControllerProgress, ReceiptIndex, StoredStepVerdict } from './types.js';
+import { decodeJsonPointer } from './handoff.js';
+import { CONTROLLER_LIMITS, type AttemptHandoffExtract, type CheckpointCapacity, type CompiledPlan, type ControllerProgress, type NodeCandidateSnapshot, type ReceiptIndex, type StoredStepVerdict } from './types.js';
 
 export function phaseCheckpointId(runId: string, phase: string): string {
   return (phase.endsWith('.native') ? 'pi.' : 'controller.') + hash('loopwright.dev/controller/checkpoint/v1\0' + canonical({ runId, phase })).hex.slice(0, 40);
@@ -42,12 +43,54 @@ export function journal(store: LocalRunStore) {
   return { view, requests: requests.items, operations: operations.items, checkpoints: checkpoints.items };
 }
 function watermarks(raw: unknown): void { const value = record(raw, ['requests', 'operations']); integer(value.requests, 0, 4096); integer(value.operations, 0, 16384); }
+function validateHandoffSourceRecord(raw: unknown): void {
+  if (!isRecord(raw) || !Object.hasOwn(raw, 'kind')) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const kind = text(raw.kind, '', 16);
+  if (kind === 'artifact') {
+    const src = record(raw, ['kind', 'path']);
+    const p = text(src.path, '', LIMITS.path);
+    if (p.length === 0 || p.startsWith('/') || p.includes('\\') || /[\0\r\n]/.test(p) || p.split('/').some(s => s.length === 0 || s === '.' || s === '..')) {
+      refuse('RECOVERY_REQUIRED', '', 'recovery');
+    }
+    return;
+  }
+  if (kind === 'submission' || kind === 'verdict') {
+    record(raw, ['kind']);
+    return;
+  }
+  refuse('RECOVERY_REQUIRED', '', 'recovery');
+}
+function validateHandoffSelectRecord(raw: unknown): void {
+  if (!isRecord(raw) || !Object.hasOwn(raw, 'kind')) refuse('RECOVERY_REQUIRED', '', 'recovery');
+  const kind = text(raw.kind, '', 32);
+  if (kind === 'markdown_heading') {
+    const hasSub = Object.hasOwn(raw, 'includeSubheadings');
+    const sel = record(raw, hasSub ? ['kind', 'heading', 'includeSubheadings'] : ['kind', 'heading']);
+    const heading = text(sel.heading, '', LIMITS.handoffHeading);
+    if (heading.trim().length === 0 || /[\0\r\n]/.test(heading)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    if (hasSub && typeof sel.includeSubheadings !== 'boolean') refuse('RECOVERY_REQUIRED', '', 'recovery');
+    return;
+  }
+  if (kind === 'json_pointer') {
+    const sel = record(raw, ['kind', 'pointers']);
+    const ptrs = list(sel.pointers, '', LIMITS.handoffPointers).map(item => text(item, '', LIMITS.handoffPointer));
+    if (ptrs.length < 1 || new Set(ptrs).size !== ptrs.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    for (const ptr of ptrs) decodeJsonPointer(ptr, '', 'recovery');
+    return;
+  }
+  if (kind === 'full') {
+    record(raw, ['kind']);
+    return;
+  }
+  refuse('RECOVERY_REQUIRED', '', 'recovery');
+}
 function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): ControllerProgress {
   if (!isRecord(raw)) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const hasPublication = Object.hasOwn(raw, 'publication');
   const hasReworkEpoch = Object.hasOwn(raw, 'reworkEpoch');
   const hasReworkCounts = Object.hasOwn(raw, 'reworkCounts');
   const hasNodeSubmissions = Object.hasOwn(raw, 'nodeSubmissions');
+  const hasNodeCandidates = Object.hasOwn(raw, 'nodeCandidates');
   const hasStepVerdicts = Object.hasOwn(raw, 'stepVerdicts');
   const value = record(raw, [
     'version', 'runId', 'lockHash', 'sequence', 'previous', 'stage', 'nodes', 'attempts', 'nativeCheckpoints',
@@ -55,6 +98,7 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
     ...(hasReworkEpoch ? ['reworkEpoch' as const] : []),
     ...(hasReworkCounts ? ['reworkCounts' as const] : []),
     ...(hasNodeSubmissions ? ['nodeSubmissions' as const] : []),
+    ...(hasNodeCandidates ? ['nodeCandidates' as const] : []),
     ...(hasStepVerdicts ? ['stepVerdicts' as const] : []),
   ]);
   if (value.version !== 2 || value.runId !== lock.spec.runId || !same(value.lockHash, lock.spec.lockHash)) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -105,17 +149,142 @@ function checkedProgress(raw: unknown, plan: CompiledPlan, lock: TaskLock): Cont
   if (attempts.length > plan.capacity.A) refuse('ATTEMPT_LIMIT', '', 'recovery');
   for (const [index, rawAttempt] of attempts.entries()) {
     const hasAttemptEpoch = isRecord(rawAttempt) && Object.hasOwn(rawAttempt, 'reworkEpoch');
-    const attempt = record(rawAttempt, ['ordinal', 'id', 'nodeId', 'nativeStepId', 'sessionId', 'purpose', 'repair', 'command', 'before', 'finished', ...(hasAttemptEpoch ? ['reworkEpoch' as const] : [])]);
+    const hasActivatedResourceIds = isRecord(rawAttempt) && Object.hasOwn(rawAttempt, 'activatedResourceIds');
+    const hasHandoffExtracts = isRecord(rawAttempt) && Object.hasOwn(rawAttempt, 'handoffExtracts');
+    const attempt = record(rawAttempt, [
+      'ordinal',
+      'id',
+      'nodeId',
+      'nativeStepId',
+      'sessionId',
+      'purpose',
+      'repair',
+      'command',
+      'before',
+      'finished',
+      ...(hasAttemptEpoch ? ['reworkEpoch' as const] : []),
+      ...(hasActivatedResourceIds ? ['activatedResourceIds' as const] : []),
+      ...(hasHandoffExtracts ? ['handoffExtracts' as const] : []),
+    ]);
     if (hasAttemptEpoch) integer(attempt.reworkEpoch, 0, currentReworkEpoch);
     if (attempt.ordinal !== index + 1 || !plan.orderedDAG.some(node => node.id === attempt.nodeId && node.kind === 'agent') || !['task', 'reviewer', 'compaction'].includes(text(attempt.purpose)) || !['none', 'format', 'implementation'].includes(text(attempt.repair))
       || attempt.id !== stableId(lock.spec.runId, text(attempt.nodeId), text(attempt.purpose), text(attempt.repair), index + 1)) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const node = plan.orderedDAG.find(node => node.id === attempt.nodeId)!, nativeStep = plan.orderedDAG.find(node => node.id === attempt.nativeStepId);
     if (!nativeStep || nativeStep.kind !== 'agent' || nativeStep.roleId !== node.roleId || !/^[a-z][a-z0-9._-]{0,63}$/.test(text(attempt.sessionId))) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const plannedRole = plan.roles.find(r => r.roleId === node.roleId);
+    if (!plannedRole) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    let activeResourceCount = 0;
+    if (hasActivatedResourceIds) {
+      if (attempt.purpose === 'compaction') refuse('RECOVERY_REQUIRED', '', 'recovery');
+      const ids = list(attempt.activatedResourceIds, '', LIMITS.resources).map(item => id(item));
+      const allowedRoleResIds = plannedRole.policy.resources.slice(1).map(r => r.id);
+      const indexByResId = new Map(allowedRoleResIds.map((resId, pos) => [resId, pos] as const));
+      let prevPos = -1;
+      for (const resId of ids) {
+        const pos = indexByResId.get(resId);
+        if (pos === undefined || pos <= prevPos) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        prevPos = pos;
+      }
+      activeResourceCount = ids.length;
+    }
+    if (hasHandoffExtracts) {
+      if (attempt.purpose === 'compaction' || attempt.repair === 'format' || !node.handoffs) {
+        refuse('RECOVERY_REQUIRED', '', 'recovery');
+      }
+      const rawExtracts = list(attempt.handoffExtracts, '', LIMITS.handoffsPerStep);
+      if (rawExtracts.length !== node.handoffs.length) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      let totalExtractBytes = 0;
+      let presentExtractCount = 0;
+      const seenExtractIds = new Set<string>();
+      for (const rawExt of rawExtracts) {
+        if (!isRecord(rawExt)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        const hasOmittedReason = Object.hasOwn(rawExt, 'omittedReason');
+        const ext = record(rawExt, [
+          'id',
+          'fromStep',
+          'fromAttemptId',
+          'reworkEpoch',
+          'source',
+          'select',
+          'status',
+          'sourceSha256',
+          'extractSha256',
+          'byteLength',
+          'truncated',
+          'artifact',
+          ...(hasOmittedReason ? ['omittedReason' as const] : []),
+        ]);
+        const extId = id(ext.id);
+        if (seenExtractIds.has(extId)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        seenExtractIds.add(extId);
+        const fromStep = id(ext.fromStep);
+        if (!plan.orderedDAG.some(item => item.id === fromStep)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        if (ext.fromAttemptId !== null) id(ext.fromAttemptId);
+        integer(ext.reworkEpoch, 0, currentReworkEpoch);
+        validateHandoffSourceRecord(ext.source);
+        validateHandoffSelectRecord(ext.select);
+        if (typeof ext.truncated !== 'boolean') refuse('RECOVERY_REQUIRED', '', 'recovery');
+        const status = text(ext.status, '', 16);
+        if (status === 'extracted') {
+          if (hasOmittedReason) refuse('RECOVERY_REQUIRED', '', 'recovery');
+          const srcHex = text(ext.sourceSha256, '', 64);
+          const extHex = text(ext.extractSha256, '', 64);
+          if (!/^[0-9a-f]{64}$/.test(srcHex) || !/^[0-9a-f]{64}$/.test(extHex)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+          const byteLen = integer(ext.byteLength, 0, LIMITS.handoffMaxBytes);
+          totalExtractBytes += byteLen;
+          if (totalExtractBytes > LIMITS.handoffAggregateBytes) refuse('RECOVERY_REQUIRED', '', 'recovery');
+          const art = checkedRef(ext.artifact);
+          if (art.byteLength !== byteLen || art.digest.hex !== extHex || art.uri !== 'cas://sha256/' + extHex) {
+            refuse('RECOVERY_REQUIRED', '', 'recovery');
+          }
+          presentExtractCount += 1;
+        } else if (status === 'omitted') {
+          if (!hasOmittedReason || !['source_missing', 'heading_missing', 'pointer_missing'].includes(text(ext.omittedReason, '', 32))) {
+            refuse('RECOVERY_REQUIRED', '', 'recovery');
+          }
+          if (ext.sourceSha256 !== null && !/^[0-9a-f]{64}$/.test(text(ext.sourceSha256, '', 64))) {
+            refuse('RECOVERY_REQUIRED', '', 'recovery');
+          }
+          if (ext.extractSha256 !== null || ext.byteLength !== 0 || ext.truncated !== false || ext.artifact !== null) {
+            refuse('RECOVERY_REQUIRED', '', 'recovery');
+          }
+        } else {
+          refuse('RECOVERY_REQUIRED', '', 'recovery');
+        }
+      }
+      if (activeResourceCount + presentExtractCount > CONTROLLER_LIMITS.maxStepContextFiles) {
+        refuse('RECOVERY_REQUIRED', '', 'recovery');
+      }
+    }
     checkedRef(attempt.command); watermarks(attempt.before);
     if (attempt.finished !== null) { const finished = record(attempt.finished, ['after', 'outcome', 'nativeCheckpointId']); watermarks(finished.after); checkedRef(finished.outcome); if (finished.nativeCheckpointId !== null && finished.nativeCheckpointId !== phaseCheckpointId(lock.spec.runId, 'role.' + (index + 1) + '.native')) refuse('RECOVERY_REQUIRED', '', 'recovery'); }
     else if (index !== attempts.length - 1) refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
   const typedAttempts = attempts as unknown as ControllerProgress['attempts'];
+  if (hasNodeCandidates) {
+    if (!isRecord(value.nodeCandidates)) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const candKeys = Object.keys(value.nodeCandidates);
+    if (candKeys.length > CONTROLLER_LIMITS.maxCompiledDagSteps) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    for (const stepKey of candKeys) {
+      const dagNode = plan.orderedDAG.find(item => item.id === stepKey && item.kind === 'agent' && item.handler.implementation !== 'pi.compact.v1');
+      if (!dagNode) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      const snap = record(value.nodeCandidates[stepKey], ['attemptId', 'reworkEpoch', 'manifest', 'digest', 'workspace']);
+      const snapEpoch = integer(snap.reworkEpoch, 0, currentReworkEpoch);
+      const matchedAttempt = typedAttempts.find(item => item.id === snap.attemptId);
+      if (
+        !matchedAttempt
+        || matchedAttempt.finished === null
+        || matchedAttempt.finished.nativeCheckpointId === null
+        || matchedAttempt.nodeId !== stepKey
+        || (matchedAttempt.reworkEpoch ?? 0) !== snapEpoch
+      ) {
+        refuse('RECOVERY_REQUIRED', '', 'recovery');
+      }
+      checkedRef(snap.manifest);
+      digestValue(snap.digest);
+      checkedRef(snap.workspace);
+    }
+  }
   const taskOrdinary = typedAttempts.filter(attempt => attempt.repair === 'none' && attempt.purpose === 'task');
   const implCount = typedAttempts.filter(attempt => attempt.repair === 'implementation').length;
   const reviewerCounts = new Map<string, number>();
@@ -257,6 +426,7 @@ function extension(previous: ControllerProgress | null, current: ControllerProgr
       current.verifierRefusals.length ||
       current.candidate.generation !== 0 ||
       (current.reworkEpoch ?? 0) !== 0 ||
+      Object.keys(current.nodeCandidates ?? {}).length !== 0 ||
       (current.stepVerdicts?.length ?? 0) !== 0
     ) {
       refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -311,7 +481,10 @@ export class ProgressStore {
   constructor(readonly store: LocalRunStore, readonly authority: Authority | null, readonly artifacts: ArtifactReader, readonly plan: CompiledPlan, readonly lock: TaskLock, readonly planRef: ArtifactRef, readonly sourceRef: ArtifactRef) {}
   #overlayBounds() { return overlayManifestBounds(this.plan.budgets.overlay); }
   #progressBounds() {
-    const wide = this.plan.capacity.D > 64;
+    const hasExtendedMetadata =
+      this.plan.orderedDAG.some(node => node.handoffs !== undefined)
+      || this.plan.task.spec.trustedContext.resources.some(res => res.when !== undefined);
+    const wide = this.plan.capacity.D > 64 || hasExtendedMetadata;
     return { maxBytes: wide ? 262_144 : 65_536, collectionLimit: wide ? 1024 : 256 };
   }
   async manifest(ref: ArtifactRef): Promise<ArtifactManifest> {
@@ -370,7 +543,39 @@ export class ProgressStore {
       await verify(checkpoint.workspace, Math.max(67_108_864, bounds.workspaceMaxBytes)); if (checkpoint.privateSession) await verify(checkpoint.privateSession, 67108864);
       for (const entry of index.entries) await verify(entry.ref);
       for (const attempt of progress.attempts) {
-        await verify(attempt.command, 1048576); if (!attempt.finished) continue;
+        await verify(attempt.command, 1048576);
+        for (const ext of (attempt.handoffExtracts ?? []) as readonly AttemptHandoffExtract[]) {
+          if (ext.status === 'extracted' && ext.artifact !== null && ext.extractSha256 !== null) {
+            const casKey = 'cas:' + ext.extractSha256 + ':' + ext.byteLength;
+            if (!verified.has(casKey)) {
+              if (this.artifacts instanceof ArtifactStore) {
+                await streamVerifiedCasBlob(
+                  this.artifacts.directory,
+                  {
+                    name: ext.artifact.name,
+                    sha256: ext.extractSha256,
+                    byteLength: ext.byteLength,
+                    uri: ext.artifact.uri,
+                    blobRef: ext.artifact,
+                  },
+                  undefined,
+                  'recovery',
+                );
+              } else {
+                await this.artifacts.read(
+                  {
+                    name: 'blobs/sha256/' + ext.extractSha256,
+                    byteLength: ext.byteLength,
+                    digest: ext.artifact.digest,
+                  },
+                  LIMITS.handoffMaxBytes,
+                );
+              }
+              verified.add(casKey);
+            }
+          }
+        }
+        if (!attempt.finished) continue;
         await verify(attempt.finished.outcome, 4194304); const wrapperKey = attempt.id + '\0' + canonical(attempt.finished.outcome);
         if (attempt.finished.nativeCheckpointId === null || wrappers.has(wrapperKey)) continue;
         const wrapper = record(parsePrivateJson(await this.artifacts.read(attempt.finished.outcome, 4194304), 4194304, 16384), ['version', 'attemptId', 'command', 'roleId', 'nodeId', 'stepId', 'sessionId', 'checkpointId', 'originalManifest', 'manifest', 'workspace', 'session', 'submission', 'journal']);
@@ -395,6 +600,21 @@ export class ProgressStore {
       if (progress.submission) await verify(progress.submission, 1048576);
       if (progress.nodeSubmissions) {
         for (const subRef of Object.values(progress.nodeSubmissions)) await verify(subRef, 1048576);
+      }
+      if (progress.nodeCandidates) {
+        for (const snap of Object.values(progress.nodeCandidates) as readonly NodeCandidateSnapshot[]) {
+          const snapManifestKey = canonical(snap.manifest);
+          let snapManifest = manifests.get(snapManifestKey);
+          if (!snapManifest) {
+            snapManifest = await this.manifest(snap.manifest);
+            manifests.set(snapManifestKey, snapManifest);
+          }
+          const snapSubject = bindSubject(this.lock, snapManifest, bounds.options);
+          if (!snapSubject.ok || !same(snapSubject.value.candidateDigest, snap.digest)) {
+            refuse('RECOVERY_REQUIRED', '', 'recovery');
+          }
+          await verify(snap.workspace, Math.max(67_108_864, bounds.workspaceMaxBytes));
+        }
       }
       if (progress.stepVerdicts) {
         for (const verdictItem of progress.stepVerdicts) await verify(verdictItem.raw, 1048576);

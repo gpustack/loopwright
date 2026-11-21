@@ -408,7 +408,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `preflight.ts` strips optional `when` during `ResourceIdentity` matching and admits ordered verified `PiOpenInput.resources` subsets within `maxRequestBytes`. Duplicate or tampered resources fail with `RESOURCE_MISMATCH`, and `recoverSnapshot` digests stay invariant across repairs and compaction.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg agent-pi --concurrency 1`
 
-- [ ] **T6 · Controller compact handoffs and per-attempt conditional rule filtering**
+- [x] **T6 · Controller compact handoffs and per-attempt conditional rule filtering**
       Blocked by: T2, T5
       Owns: `packages/controller/src/handoff.ts`, `packages/controller/src/rules.ts`, `packages/controller/src/config.ts`, `packages/controller/src/compile.ts`, `packages/controller/src/controller.ts`, `packages/controller/src/step.ts`, `packages/controller/src/progress.ts`, `packages/controller/src/errors.ts`, `packages/controller/src/types.ts`, `packages/controller/test/handoff-and-rules.test.ts`
       Gate: review

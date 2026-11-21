@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, isWritablePath, type ArtifactManifest, type ArtifactRef, type Digest, type TaskContract } from '@loopwright/core';
+import { LIMITS, bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, isWritablePath, type ArtifactManifest, type ArtifactRef, type Digest, type TaskContract } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
 import { approvedState } from './config.js';
 import { compilePlan } from './compile.js';
@@ -49,21 +49,24 @@ import { descendants, nextNode } from './scheduler.js';
 import { formatPolicy, reworkPrompt } from './repair.js';
 import { countDelegatedBudgets, observeParentExhaustion, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { validateGateUrlOverrides } from './gate.js';
-import { createCycle, Cycle, roleResourcesFor, type ControllerPorts, type CycleContext } from './controller.js';
+import { appendHandoffPromptBlock, materializeContextFilesDir } from './handoff.js';
+import { createCycle, Cycle, normalizeWatchedPaths, roleResourcesFor, type ControllerPorts, type CycleContext } from './controller.js';
 import { incident, type ControllerIncident } from './finalize.js';
-import type {
-  CasCandidateFile,
-  CompiledPlan,
-  ControllerAttempt,
-  ControllerPolicyProfile,
-  CycleExecution,
-  DelegatedSelection,
-  LoadedConfiguration,
-  PersistedHostPolicy,
-  PlannedRole,
-  StepMcpServerMetadata,
-  StepVerdict,
-  StepYield,
+import {
+  CONTROLLER_LIMITS,
+  type AttemptHandoffExtract,
+  type CasCandidateFile,
+  type CompiledPlan,
+  type ControllerAttempt,
+  type ControllerPolicyProfile,
+  type CycleExecution,
+  type DelegatedSelection,
+  type LoadedConfiguration,
+  type PersistedHostPolicy,
+  type PlannedRole,
+  type StepMcpServerMetadata,
+  type StepVerdict,
+  type StepYield,
 } from './types.js';
 
 export type RunExecution = CycleExecution;
@@ -80,6 +83,7 @@ export interface StepNextInput {
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
+  readonly watchedPaths?: readonly string[] | undefined;
   readonly environment?: (name: string) => string | undefined;
   readonly signal?: AbortSignal;
 }
@@ -109,6 +113,7 @@ interface StepMetaRecord {
   readonly hostPolicy: PersistedHostPolicy;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
+  readonly watchedPaths?: readonly string[];
 }
 
 interface StepLeaseRecord {
@@ -228,6 +233,7 @@ async function readStepMeta(
     ...(Object.hasOwn(parsed, 'allowWorkflowWrites') ? ['allowWorkflowWrites' as const] : []),
     ...(Object.hasOwn(parsed, 'roleMcpServers') ? ['roleMcpServers' as const] : []),
     ...(Object.hasOwn(parsed, 'mcpServers') ? ['mcpServers' as const] : []),
+    ...(Object.hasOwn(parsed, 'watchedPaths') ? ['watchedPaths' as const] : []),
   ];
   const raw = record(parsed, allowedKeys);
   if (raw.version !== 1 || (raw.mode !== 'candidate' && raw.mode !== 'no-change')) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -261,6 +267,7 @@ async function readStepMeta(
   }
   const roleMcpServers = normalizeRoleMcpServers(raw.roleMcpServers, 'recovery');
   const mcpServers = normalizeMcpServersMetadata(raw.mcpServers, 'recovery');
+  const watchedPaths = normalizeWatchedPaths(raw.watchedPaths, 'recovery');
   return freeze({
     version: 1,
     mode: raw.mode,
@@ -268,6 +275,7 @@ async function readStepMeta(
     ...(hostPolicy.allowWorkflowWrites ? { allowWorkflowWrites: true } : {}),
     ...(roleMcpServers !== undefined ? { roleMcpServers } : {}),
     ...(mcpServers !== undefined ? { mcpServers } : {}),
+    ...(watchedPaths !== undefined ? { watchedPaths } : {}),
   });
 }
 
@@ -356,6 +364,9 @@ async function materializeAttemptWorkspace(
   role: PlannedRole,
   repair: ControllerAttempt['repair'],
   hostProtection: HostPathProtectionOptions,
+  activeResources?: ReturnType<typeof roleResourcesFor>,
+  handoffExtracts: readonly AttemptHandoffExtract[] = [],
+  phase: ControllerDiagnostic['phase'] = 'execution',
 ): Promise<{ readonly candidateDir: string; readonly contextFiles: readonly string[] }> {
   const { context } = cycle;
   const { plan, loaded, source, owner, artifacts } = context;
@@ -454,21 +465,14 @@ async function materializeAttemptWorkspace(
     }
   }
 
-  const contextFiles: string[] = [];
-  const roleResources = roleResourcesFor(loaded, plan, role.roleId);
-  for (const resource of roleResources) {
-    const targetPath = join(contextDir, resource.ref.name);
-    await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
-    const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o400);
-    try {
-      await file.writeFile(resource.bytes);
-      await file.chmod(0o400);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    contextFiles.push(targetPath);
-  }
+  const effectiveResources = activeResources ?? roleResourcesFor(loaded, plan, role.roleId);
+  const contextFiles = await materializeContextFilesDir(
+    contextDir,
+    effectiveResources,
+    handoffExtracts,
+    artifacts.directory,
+    phase,
+  );
 
   return { candidateDir, contextFiles };
 }
@@ -550,19 +554,32 @@ async function yieldDelegatedRole(
   const role: PlannedRole = repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
   const purpose = node.handler.implementation === 'pi.compact.v1' ? 'compaction' : node.handler.parameters.purpose === 'review' ? 'reviewer' : 'task';
   if (purpose === 'compaction') refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
-  const roleResources = roleResourcesFor(loaded, plan, role.roleId);
-  await cycle.adviseCapabilityRouting(nodeId, role, purpose, roleResources);
   const nativeStepId = nodeId;
   const ordinal = cycle.draft.attempts.length + 1;
   const attemptEpoch = cycle.reworkEpoch;
   const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal);
   const sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy, attemptEpoch);
   const configured = text(loaded.registry.spec.handlers.find(handler => handler.id === node.handler.id)?.parameters.prompt);
+  // Verify base handler prompt digest FIRST before evaluating or appending any runtime handoff block.
   if (node.handler.parameters.prompt !== '[private command sha256:' + hash(configured).hex + ']') refuse('RECOVERY_REQUIRED', '', 'execution');
+  const preparedCtx = await cycle.prepareAttemptContext(
+    nodeId,
+    role,
+    repair,
+    purpose,
+    attemptEpoch,
+    meta.watchedPaths ?? cycle.context.ports.watchedPaths,
+  );
+  await cycle.adviseCapabilityRouting(nodeId, role, purpose, preparedCtx.activeResources);
+  const maxPromptBytes = Math.min(LIMITS.inputBytes, role.policy.limits.promptBytes);
   const reworkCtx = repair === 'none' && customPrompt === undefined ? await cycle.activeReworkForNode(nodeId) : null;
-  const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(65_536, role.policy.limits.promptBytes)) : configured;
-  const promptText = customPrompt ?? defaultPrompt;
-  const command = await artifacts.put('command', Buffer.from(promptText), Math.min(1_048_576, role.policy.limits.promptBytes));
+  const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(CONTROLLER_LIMITS.reworkPromptMaxBytes, role.policy.limits.promptBytes)) : configured;
+  const basePrompt = customPrompt ?? defaultPrompt;
+  const promptText =
+    repair !== 'format' && preparedCtx.resolvedHandoffs.length > 0
+      ? appendHandoffPromptBlock(basePrompt, preparedCtx.resolvedHandoffs, maxPromptBytes, 'execution')
+      : basePrompt;
+  const command = await artifacts.put('command', Buffer.from(promptText), maxPromptBytes);
   const originalSubmission = cycle.draft.failures.at(-1)?.evidence ?? cycle.draft.submission;
   const before = journal(store).view.counts;
   const oldDigest = cycle.draft.candidate.digest;
@@ -579,6 +596,8 @@ async function yieldDelegatedRole(
     before: { requests: before.requests, operations: before.operations },
     finished: null,
     ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}),
+    activatedResourceIds: preparedCtx.activatedResourceIds,
+    ...(preparedCtx.handoffExtracts !== undefined ? { handoffExtracts: preparedCtx.handoffExtracts } : {}),
   };
   if (repair === 'format') {
     await artifacts.json('format-intent', {
@@ -601,7 +620,17 @@ async function yieldDelegatedRole(
     'role.' + ordinal + '.pre',
   );
   const hostProtection = hostProtectionFromPolicy(meta.hostPolicy);
-  const { contextFiles } = await materializeAttemptWorkspace(cycle, runRoot, commandId, role, repair, hostProtection);
+  const { contextFiles } = await materializeAttemptWorkspace(
+    cycle,
+    runRoot,
+    commandId,
+    role,
+    repair,
+    hostProtection,
+    preparedCtx.activeResources,
+    preparedCtx.handoffExtracts ?? [],
+    'execution',
+  );
   const leaseToken = randomBytes(32).toString('hex');
   await writeAtomicPrivateJson(
     join(directory, 'step-lease.json'),
@@ -1532,7 +1561,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
     if (
       fields.some(
         key =>
-          !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'policyProfile', 'allowWorkflowWrites', 'roleMcpServers', 'mcpServers', 'environment', 'signal'].includes(key),
+          !['configuration', 'repository', 'runRoot', 'runId', 'mode', 'reissueLease', 'policyProfile', 'allowWorkflowWrites', 'roleMcpServers', 'mcpServers', 'watchedPaths', 'environment', 'signal'].includes(key),
       ) ||
       (input.mode !== undefined && input.mode !== 'candidate' && input.mode !== 'no-change') ||
       (input.reissueLease !== undefined && typeof input.reissueLease !== 'boolean') ||
@@ -1552,6 +1581,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
     }
     const normalizedRoleMcp = normalizeRoleMcpServers(input.roleMcpServers ?? ports.roleMcpServers, 'admission');
     const normalizedMcpServers = normalizeMcpServersMetadata(input.mcpServers ?? ports.mcpServers, 'admission');
+    const normalizedWatched = normalizeWatchedPaths(input.watchedPaths ?? ports.watchedPaths, 'admission');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'admission');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'admission');
 
@@ -1596,6 +1626,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         ...(initialHostPolicy.allowWorkflowWrites ? { allowWorkflowWrites: true } : {}),
         ...(normalizedRoleMcp !== undefined ? { roleMcpServers: normalizedRoleMcp } : {}),
         ...(normalizedMcpServers !== undefined ? { mcpServers: normalizedMcpServers } : {}),
+        ...(normalizedWatched !== undefined ? { watchedPaths: normalizedWatched } : {}),
       };
       await writeAtomicPrivateJson(join(context.directory, 'step-meta.json'), initialMeta, context.artifacts.vault);
       const view = stateValue(context.store.inspect());
@@ -1644,6 +1675,7 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
       ...existingMeta,
       ...(normalizedRoleMcp !== undefined ? { roleMcpServers: normalizedRoleMcp } : {}),
       ...(normalizedMcpServers !== undefined ? { mcpServers: normalizedMcpServers } : {}),
+      ...(normalizedWatched !== undefined ? { watchedPaths: normalizedWatched } : {}),
     };
 
     if (decision === 'terminal') {
@@ -1676,8 +1708,46 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         refuse('OWNER_BUSY', '', 'execution');
       }
       const priorLease = await readStepLease(context.directory);
-      const promptText = priorLease?.prompt ?? new TextDecoder('utf-8', { fatal: true }).decode(await context.artifacts.read(active.command, 1_048_576));
-      const contextFiles = priorLease?.contextFiles ?? [];
+      const promptText = priorLease?.prompt ?? new TextDecoder('utf-8', { fatal: true }).decode(await context.artifacts.read(active.command, LIMITS.inputBytes));
+      const effectiveRole = active.repair === 'format' ? { ...activeRole, policy: formatPolicy(activeRole.policy) } : activeRole;
+      const cycle = new Cycle(context, head, candidate, false);
+      const activeResources = cycle.resolveRetainedActiveResources(effectiveRole.roleId, active);
+      const hostProtection = hostProtectionFromPolicy(effectiveMeta.hostPolicy);
+      const workspacesRoot = join(resolve(input.runRoot), 'workspaces');
+      const runWorkspaceDir = join(workspacesRoot, context.lock.spec.runId);
+      const attemptWorkspaceDir = join(runWorkspaceDir, active.id);
+      const candidateDir = join(attemptWorkspaceDir, 'candidate');
+      const contextDir = join(attemptWorkspaceDir, 'context');
+      const candidateExists = await lstat(candidateDir).then(st => st.isDirectory() && !st.isSymbolicLink(), () => false);
+      let contextFiles: readonly string[];
+      if (!candidateExists) {
+        const rematerialized = await materializeAttemptWorkspace(
+          cycle,
+          input.runRoot,
+          active.id,
+          effectiveRole,
+          active.repair,
+          hostProtection,
+          activeResources,
+          active.handoffExtracts ?? [],
+          'recovery',
+        );
+        contextFiles = rematerialized.contextFiles;
+      } else {
+        const excluded = [context.descriptor.repository, ...approvedState(context.loaded).input.untrustedRoots];
+        await privateDirectory(workspacesRoot, excluded);
+        await privateDirectory(runWorkspaceDir, excluded);
+        await privateDirectory(attemptWorkspaceDir, excluded);
+        await rm(contextDir, { recursive: true, force: true });
+        await privateDirectory(contextDir, excluded);
+        contextFiles = await materializeContextFilesDir(
+          contextDir,
+          activeResources,
+          active.handoffExtracts ?? [],
+          context.artifacts.directory,
+          'recovery',
+        );
+      }
       const newToken = randomBytes(32).toString('hex');
       await writeAtomicPrivateJson(
         join(context.directory, 'step-lease.json'),
@@ -1692,8 +1762,6 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         } satisfies StepLeaseRecord,
         context.artifacts.vault,
       );
-      const effectiveRole = active.repair === 'format' ? { ...activeRole, policy: formatPolicy(activeRole.policy) } : activeRole;
-      const cycle = new Cycle(context, head, candidate, false);
       const stepYield = await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
       await cycle.deadline.dispose();
       await cycle.events.suspend();

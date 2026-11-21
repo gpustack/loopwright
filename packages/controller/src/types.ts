@@ -1,10 +1,43 @@
-import type { ArtifactRef, Digest, FindingSeverity, OverlayLimits, ReworkPolicy, RunResult, StructuredFinding, TaskContract, Subject } from '@loopwright/core';
+import type {
+  ArtifactRef,
+  Digest,
+  FindingSeverity,
+  OverlayLimits,
+  ResourceActivationPhase,
+  ResourceActivationRule,
+  ReworkPolicy,
+  RunResult,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
+  StructuredFinding,
+  Subject,
+  TaskContract,
+} from '@loopwright/core';
 import type { AdapterPolicyV2, AdapterPolicy, RuntimeIdentity } from '@loopwright/agent-pi';
 import type { ControllerDiagnostic } from './errors.js';
 import type { ControllerIncident } from './finalize.js';
 import type { Json, Scalar } from './schema.js';
-export type { FindingSeverity, OverlayLimits, ReworkPolicy, StructuredFinding };
+export type {
+  FindingSeverity,
+  OverlayLimits,
+  ResourceActivationPhase,
+  ResourceActivationRule,
+  ReworkPolicy,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
+  StructuredFinding,
+};
 export const CONTROLLER_API_VERSION = 'loopwright.dev/v1alpha1' as const;
+export const CONTROLLER_LIMITS = Object.freeze({
+  maxCompiledDagSteps: 16,
+  maxCompiledRoles: 16,
+  maxStepContextFiles: 64,
+  handoffJsonCollectionLimit: 4_096,
+  verifierSignalJsonBytes: 65_536,
+  reworkPromptMaxBytes: 65_536,
+});
 export type Implementation =
   | 'pi.agent.v1'
   | 'pi.compact.v1'
@@ -229,10 +262,44 @@ export interface CheckpointCapacity { readonly A: number; readonly N: number; re
   readonly publication: boolean; readonly additionalRefs: 4; readonly requiredRefs: 6; readonly checkpointBytes: 40960 }
 export interface VerifierSlot { readonly id: string; readonly checkId: string; readonly implicit: 'scope' | 'no_change' | null; readonly handler: Handler }
 export interface PlannedRole { readonly roleId: string; readonly adapter: RoleAdapterKind; readonly profileRef: string; readonly providerCredentialRef: string | null; readonly runtime: RuntimeProfile; readonly policy: AdapterPolicyV2 }
+export interface PlannedNode {
+  readonly id: string;
+  readonly kind: 'agent' | 'check';
+  readonly dependsOn: readonly string[];
+  readonly roleId: string | null;
+  readonly handler: Handler;
+  readonly onRework?: ReworkPolicy;
+  readonly handoffs?: readonly StepHandoffSelector[];
+}
+export type HandoffOmittedReason = 'source_missing' | 'heading_missing' | 'pointer_missing';
+export interface HandoffProvenance {
+  readonly id: string;
+  readonly fromStep: string;
+  readonly fromAttemptId: string | null;
+  readonly reworkEpoch: number;
+  readonly source: StepHandoffSource;
+  readonly select: StepHandoffSelect;
+  readonly status: 'extracted' | 'omitted';
+  readonly sourceSha256: string | null;
+  readonly extractSha256: string | null;
+  readonly byteLength: number;
+  readonly truncated: boolean;
+  readonly omittedReason?: HandoffOmittedReason;
+}
+export interface AttemptHandoffExtract extends HandoffProvenance {
+  readonly artifact: ArtifactRef | null;
+}
+export interface NodeCandidateSnapshot {
+  readonly attemptId: string;
+  readonly reworkEpoch: number;
+  readonly manifest: ArtifactRef;
+  readonly digest: Digest;
+  readonly workspace: ArtifactRef;
+}
 export interface CompiledPlan {
   readonly version: 1; readonly runId: null; readonly lock: null; readonly admission: 'not_performed'; readonly effectfulReadiness: 'not_checked';
   readonly sourceDocumentDigest: Digest; readonly taskByteDigest: Digest; readonly registryDigest: Digest; readonly planDigest: Digest;
-  readonly task: TaskContract; readonly orderedDAG: readonly { readonly id: string; readonly kind: 'agent' | 'check'; readonly dependsOn: readonly string[]; readonly roleId: string | null; readonly handler: Handler; readonly onRework?: ReworkPolicy }[];
+  readonly task: TaskContract; readonly orderedDAG: readonly PlannedNode[];
   readonly scope: TaskContract['spec']['scope']; readonly budgets: TaskContract['spec']['budgets']; readonly controls: Controls;
   readonly roles: readonly PlannedRole[]; readonly resources: readonly { readonly id: string; readonly kind: RegistryResource['kind']; readonly ref: ArtifactRef }[];
   readonly credentialReferences: readonly { readonly ref: string; readonly consumer: CredentialBinding['consumer']; readonly destinationRef: string }[];
@@ -252,6 +319,8 @@ export interface ControllerAttempt {
   readonly repair: 'none' | 'format' | 'implementation'; readonly command: ArtifactRef; readonly before: Watermarks;
   readonly finished: null | { readonly after: Watermarks; readonly outcome: ArtifactRef; readonly nativeCheckpointId: string | null };
   readonly reworkEpoch?: number;
+  readonly activatedResourceIds?: readonly string[];
+  readonly handoffExtracts?: readonly AttemptHandoffExtract[];
 }
 export interface VerifierRefusalRow { readonly slot: string; readonly generation: number; readonly prospectiveOperationId: string; readonly producerNonce: string; readonly subject: Subject; readonly record: ArtifactRef }
 export interface ControllerProgress {
@@ -270,6 +339,7 @@ export interface ControllerProgress {
   readonly reworkEpoch?: number;
   readonly reworkCounts?: Readonly<Record<string, number>>;
   readonly nodeSubmissions?: Readonly<Record<string, ArtifactRef>>;
+  readonly nodeCandidates?: Readonly<Record<string, NodeCandidateSnapshot>>;
   readonly stepVerdicts?: readonly StoredStepVerdict[];
 }
 export interface ReceiptIndex {

@@ -1,9 +1,9 @@
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir, open, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { openPiAdapterV2, type PiAdapterV2, type PiCandidateArtifactInput, type PiHostV2, type PiOpenInputV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
-import { admitTask, bindSubject, identifyManifest, type ArtifactRef, type Digest, type StructuredFinding, type TaskLock } from '@loopwright/core';
+import { LIMITS, admitTask, bindSubject, identifyManifest, validateRelativePath, type ArtifactRef, type Digest, type StepHandoffSelector, type StructuredFinding, type TaskLock } from '@loopwright/core';
 import { createLocalRun, type Authority, type LocalRunIdentity, type LocalRunStore } from '@loopwright/state';
 import { approvedState, selectRoleResources } from './config.js';
 import { compilePlan } from './compile.js';
@@ -12,9 +12,18 @@ import { privateDirectory, ArtifactStore, checkedRef, stateValue, streamVerified
 import { ControllerOwner, bootIdentity } from './ownership.js';
 import { effectiveRunHostPolicy, hostProtectionFromPolicy, resolveStoreLeaseMs, validatePortPolicyFields } from './retained.js';
 export { resolveStoreLeaseMs };
-import { freezeSource, materializeBaseline, overlayManifestBounds, verifySource, type FrozenSource, type HostPathProtectionOptions } from './source.js';
+import { compareUtf16, freezeSource, gitObjectOid, materializeBaseline, overlayManifestBounds, verifySource, type FrozenSource, type HostPathProtectionOptions } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
-import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
+import { captureRole, adoptRoleCapture, decodeCandidateCapture, nativeSessionId, type CapturedRole } from './capture.js';
+import {
+  appendHandoffPromptBlock,
+  evaluateStepHandoffSelectors,
+  materializeContextFilesDir,
+  persistHandoffExtractsToCas,
+  type ResolvedSelectorExtract,
+  type UpstreamSourceLookupResult,
+} from './handoff.js';
+import { evaluateResourceActivationRules } from './rules.js';
 import {
   boundFindingsForObservations,
   hydrateStepVerdicts,
@@ -38,28 +47,31 @@ import { WorkDeadline } from './deadlines.js';
 import { countDelegatedBudgets, observeParentExhaustion, schedulingSnapshot, isBudgetRefusal, isNoEffectBudgetRefusal, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
 import { ControllerEvents, type ControllerEvent } from './events.js';
 import { Finalizer, incident, type ControllerIncident } from './finalize.js';
-import { canonical, freeze, hash, id, isRecord, record, same, text } from './schema.js';
+import { canonical, freeze, hash, id, isRecord, list, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
-import type {
-  AdvisoryCapabilityTier,
-  AdvisoryDecisionPort,
-  AdvisoryDecisionSource,
-  CandidateDiffSummary,
-  CandidateFileEntry,
-  CompiledPlan,
-  ControllerAttempt,
-  ControllerPolicyProfile,
-  ControllerProgress,
-  CycleAlignmentRoute,
-  CycleExecution,
-  LoadedConfiguration,
-  PersistedHostPolicy,
-  PlannedRole,
-  RoleModelOverride,
-  StepMcpServerMetadata,
-  StepReworkContext,
-  StepVerdict,
-  StoredStepVerdict,
+import {
+  CONTROLLER_LIMITS,
+  type AdvisoryCapabilityTier,
+  type AdvisoryDecisionPort,
+  type AdvisoryDecisionSource,
+  type AttemptHandoffExtract,
+  type CandidateDiffSummary,
+  type CandidateFileEntry,
+  type CompiledPlan,
+  type ControllerAttempt,
+  type ControllerPolicyProfile,
+  type ControllerProgress,
+  type CycleAlignmentRoute,
+  type CycleExecution,
+  type LoadedConfiguration,
+  type NodeCandidateSnapshot,
+  type PersistedHostPolicy,
+  type PlannedRole,
+  type RoleModelOverride,
+  type StepMcpServerMetadata,
+  type StepReworkContext,
+  type StepVerdict,
+  type StoredStepVerdict,
 } from './types.js';
 
 const VALID_ADVISORY_SOURCES: ReadonlySet<string> = new Set<AdvisoryDecisionSource>([
@@ -101,6 +113,34 @@ export interface ControllerPorts {
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
+  readonly watchedPaths?: readonly string[] | undefined;
+}
+export function normalizeWatchedPaths(
+  raw: unknown,
+  phase: ControllerDiagnostic['phase'] = 'admission',
+): readonly string[] | undefined {
+  if (raw === undefined) return undefined;
+  const items = list(raw, '/watchedPaths', LIMITS.patterns).map((entry, idx) => {
+    const str = text(entry, `/watchedPaths/${idx}`, LIMITS.path);
+    const checked = validateRelativePath(str);
+    if (!checked.ok) refuse('CONFIG_SCHEMA', `/watchedPaths/${idx}`, phase);
+    return checked.value;
+  });
+  return freeze([...new Set(items)]);
+}
+function pruneRecordKeys<V>(
+  current: Readonly<Record<string, V>> | undefined,
+  resetIds: ReadonlySet<string>,
+): Readonly<Record<string, V>> | undefined {
+  if (!current) return undefined;
+  const out: Record<string, V> = {};
+  let count = 0;
+  for (const [key, val] of Object.entries(current)) {
+    if (resetIds.has(key)) continue;
+    out[key] = val;
+    count += 1;
+  }
+  return count > 0 ? freeze(out) : undefined;
 }
 function cycleHostProtection(context: CycleContext): HostPathProtectionOptions {
   const persisted = effectiveRunHostPolicy(context.descriptor);
@@ -120,6 +160,17 @@ export interface CycleContext {
   readonly signal: AbortSignal; readonly onEvent: RunCycleInput['onEvent']; readonly ports: ControllerPorts;
 }
 type Draft = Omit<ControllerProgress, 'sequence' | 'previous' | 'stage'> & { readonly stage: Omit<ControllerProgress['stage'], 'consumed' | 'watermarks'> };
+function omitDraftNodeSnapshots(draft: Draft): Omit<Draft, 'nodeSubmissions' | 'nodeCandidates'> {
+  const copy: Record<string, unknown> = { ...draft };
+  delete copy.nodeSubmissions;
+  delete copy.nodeCandidates;
+  return copy as Omit<Draft, 'nodeSubmissions' | 'nodeCandidates'>;
+}
+function isArtifactHandoffSourceStep(plan: CompiledPlan, stepId: string): boolean {
+  return plan.orderedDAG.some(
+    node => node.handoffs?.some(h => h.fromStep === stepId && h.source.kind === 'artifact') === true,
+  );
+}
 async function exclusiveJson(path: string, value: unknown): Promise<void> {
   const bytes = Buffer.from(canonical(value)); if (bytes.length > 1048576) refuse('OUTPUT_LIMIT', '', 'admission');
   const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
@@ -128,6 +179,7 @@ async function exclusiveJson(path: string, value: unknown): Promise<void> {
 export async function createCycle(input: RunCycleInput, ports: ControllerPorts): Promise<CycleContext> {
   const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error); const plan = compiled.value;
   validatePortPolicyFields(ports, 'admission');
+  const normalizedWatchedPaths = normalizeWatchedPaths(ports.watchedPaths, 'admission');
   validateGateUrlOverrides(ports.gateUrlOverrides, 'admission', input.configuration.registry.spec.gateEndpoints);
   const hostPolicy: PersistedHostPolicy = freeze({
     policyProfile: ports.policyProfile ?? 'local',
@@ -137,6 +189,7 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     ...ports,
     policyProfile: hostPolicy.policyProfile,
     allowWorkflowWrites: hostPolicy.allowWorkflowWrites,
+    ...(normalizedWatchedPaths !== undefined ? { watchedPaths: normalizedWatchedPaths } : {}),
   };
   const runId = id(input.runId), root = resolve(text(input.runRoot)), repository = resolve(text(input.repository)), directory = join(root, runId);
   const excluded = [repository, process.cwd(), ...state.input.untrustedRoots];
@@ -560,13 +613,19 @@ export class Cycle {
       });
       const nextStepVerdicts = freeze([...(draft.stepVerdicts ?? []), storedVerdict]);
       if (reworked) {
-        const markedDone = draft.nodes.map(item => (item.id === reworkCheckNode.id ? { ...item, state: 'completed' as const } : item));
+        const resetSet = new Set(reworkSubgraph(plan, reworkCheckNode.onRework.rejectTo));
+        const prunedSubs = pruneRecordKeys(draft.nodeSubmissions, resetSet);
+        const prunedCands = pruneRecordKeys(draft.nodeCandidates, resetSet);
+        const restDraft = omitDraftNodeSnapshots(draft);
+        const markedDone = restDraft.nodes.map(item => (item.id === reworkCheckNode.id ? { ...item, state: 'completed' as const } : item));
         draft = {
-          ...draft,
-          candidate: { ...draft.candidate, generation: nextGen },
+          ...restDraft,
+          candidate: { ...restDraft.candidate, generation: nextGen },
           nodes: [...resetSubgraphNodes(plan, markedDone, reworkCheckNode.onRework.rejectTo)],
           reworkEpoch: currentEpoch + 1,
-          reworkCounts: freeze({ ...(draft.reworkCounts ?? {}), [reworkCheckNode.id]: usedReworks + 1 }),
+          reworkCounts: freeze({ ...(restDraft.reworkCounts ?? {}), [reworkCheckNode.id]: usedReworks + 1 }),
+          ...(prunedSubs !== undefined ? { nodeSubmissions: prunedSubs } : {}),
+          ...(prunedCands !== undefined ? { nodeCandidates: prunedCands } : {}),
           stepVerdicts: nextStepVerdicts,
         };
       } else {
@@ -720,6 +779,7 @@ export class Cycle {
     let nextReworkEpoch = currentEpoch;
     let nextReworkCounts = this.draft.reworkCounts;
     let nextNodeSubmissions = this.draft.nodeSubmissions;
+    let nextNodeCandidates = this.draft.nodeCandidates;
     let nextStepVerdicts = this.draft.stepVerdicts;
     let reworked = false;
     let verdictHalted = false;
@@ -760,8 +820,23 @@ export class Cycle {
       });
       nextStepVerdicts = freeze([...(this.draft.stepVerdicts ?? []), storedVerdict]);
       if (verdictVal.verdict === 'pass') {
+        if (isArtifactHandoffSourceStep(plan, nodeId)) {
+          nextNodeCandidates = freeze({
+            ...(this.draft.nodeCandidates ?? {}),
+            [nodeId]: freeze({
+              attemptId: commandId,
+              reworkEpoch: currentEpoch,
+              manifest: captured.manifest,
+              digest: captured.digest,
+              workspace: captured.workspace,
+            }),
+          });
+        }
         nextNodes = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
       } else if (reworked) {
+        const resetSet = new Set(reworkSubgraph(plan, dagNode.onRework!.rejectTo));
+        nextNodeSubmissions = pruneRecordKeys(nextNodeSubmissions, resetSet);
+        nextNodeCandidates = pruneRecordKeys(nextNodeCandidates, resetSet);
         const markedDone = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
         const resetNodes = resetSubgraphNodes(plan, markedDone, dagNode.onRework!.rejectTo);
         nextNodes = resetNodes.map(item => {
@@ -795,25 +870,39 @@ export class Cycle {
         }
         nextSubmissionRef = this.submission!.raw;
       }
+      if (purpose !== 'compaction' && isArtifactHandoffSourceStep(plan, nodeId)) {
+        nextNodeCandidates = freeze({
+          ...(this.draft.nodeCandidates ?? {}),
+          [nodeId]: freeze({
+            attemptId: commandId,
+            reworkEpoch: currentEpoch,
+            manifest: captured.manifest,
+            digest: captured.digest,
+            workspace: captured.workspace,
+          }),
+        });
+      }
       nextNodes = nextNodes.map(item => (item.id === nodeId ? { ...item, state: 'completed' as const } : item));
     }
 
     const generation = this.generation + (changed || reworked ? 1 : 0);
     if (generation >= plan.capacity.V) refuse('ATTEMPT_LIMIT', '', 'execution');
     const after = stateValue(store.inspect()).counts;
+    const baseDraft = omitDraftNodeSnapshots(this.draft);
     let draft: Draft = {
-      ...this.draft,
-      stage: { ...this.draft.stage, kind: 'role_post' },
-      attempts: this.draft.attempts.map(item =>
+      ...baseDraft,
+      stage: { ...baseDraft.stage, kind: 'role_post' },
+      attempts: baseDraft.attempts.map(item =>
         item.id === commandId ? { ...item, finished: { after: { requests: after.requests, operations: after.operations }, outcome: captured.outcome, nativeCheckpointId: captured.checkpointId } } : item,
       ),
-      nativeCheckpoints: [...this.draft.nativeCheckpoints, { attemptId: commandId, checkpointId: captured.checkpointId, outcome: captured.outcome }],
+      nativeCheckpoints: [...baseDraft.nativeCheckpoints, { attemptId: commandId, checkpointId: captured.checkpointId, outcome: captured.outcome }],
       submission: nextSubmissionRef,
       candidate: { manifest: captured.manifest, digest: captured.digest, generation, workspace: captured.workspace, privateSession: captured.session },
       nodes: nextNodes,
       ...(nextReworkEpoch > 0 ? { reworkEpoch: nextReworkEpoch } : {}),
       ...(nextReworkCounts !== undefined && Object.keys(nextReworkCounts).length > 0 ? { reworkCounts: nextReworkCounts } : {}),
       ...(nextNodeSubmissions !== undefined && Object.keys(nextNodeSubmissions).length > 0 ? { nodeSubmissions: nextNodeSubmissions } : {}),
+      ...(nextNodeCandidates !== undefined && Object.keys(nextNodeCandidates).length > 0 ? { nodeCandidates: nextNodeCandidates } : {}),
       ...(nextStepVerdicts !== undefined && nextStepVerdicts.length > 0 ? { stepVerdicts: nextStepVerdicts } : {}),
     };
     if (failure) {
@@ -840,6 +929,399 @@ export class Cycle {
     await this.publish(draft, 'role.' + ordinal + '.post');
     return failure;
   }
+  computeCandidateChangedPaths(): readonly string[] {
+    if (this.context.source.version === 2) {
+      const changed = [
+        ...this.candidate.manifest.spec.entries.map(entry => entry.name),
+        ...(this.candidate.manifest.spec.deleted ?? []),
+      ];
+      return freeze([...new Set(changed)].sort(compareUtf16));
+    }
+    const baseByPath = new Map(this.context.source.manifest.spec.entries.map(entry => [entry.name, entry]));
+    const present = new Set(this.candidate.manifest.spec.entries.map(entry => entry.name));
+    const changed: string[] = [];
+    for (const entry of this.candidate.manifest.spec.entries) {
+      const baseEntry = baseByPath.get(entry.name);
+      if (baseEntry === undefined || !same(baseEntry.digest, entry.digest)) {
+        changed.push(entry.name);
+      }
+    }
+    for (const baseEntry of this.context.source.manifest.spec.entries) {
+      if (!present.has(baseEntry.name)) changed.push(baseEntry.name);
+    }
+    return freeze([...new Set(changed)].sort(compareUtf16));
+  }
+  async computeFailedCheckSignals(): Promise<{
+    readonly failedChecks: readonly string[];
+    readonly failureCodes: readonly string[];
+  }> {
+    const failedChecks = new Set<string>();
+    const failureCodes = new Set<string>();
+    const { plan, artifacts } = this.context;
+
+    for (const check of this.currentChecks()) {
+      if (check.status === 'passed') continue;
+      failedChecks.add(check.checkId);
+      if (check.reason !== null && check.reason.length > 0) failureCodes.add(check.reason);
+      const slot = plan.verifierSlots.find(s => s.id === check.slotId);
+      if (slot?.handler.implementation === 'gate.v1') {
+        const trusted = authenticatedGate(check);
+        let parsed: unknown = null;
+        try {
+          parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), CONTROLLER_LIMITS.verifierSignalJsonBytes);
+        } catch (error) {
+          if (!(error instanceof ControllerFailure) || error.diagnostic.code !== 'ARTIFACT_INVALID') {
+            throw error;
+          }
+        }
+        const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
+        if (verdict && typeof verdict.reason === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(verdict.reason)) {
+          failureCodes.add(verdict.reason);
+        }
+      }
+    }
+    for (const refusal of this.currentRefusals()) {
+      failedChecks.add(refusal.checkId);
+      if (refusal.reason.length > 0) failureCodes.add(refusal.reason);
+      failureCodes.add('OUTPUT_LIMIT');
+    }
+
+    if (failedChecks.size === 0 && this.reworkEpoch > 0 && this.generation > 0 && this.head) {
+      for (const row of this.head.progress.verifierReceipts) {
+        if (row.generation !== this.generation - 1 || row.output === null) continue;
+        const slot = plan.verifierSlots.find(s => s.id === row.slot);
+        if (!slot || row.output.byteLength > CONTROLLER_LIMITS.verifierSignalJsonBytes) continue;
+        const rawBytes = await artifacts.read(row.output, CONTROLLER_LIMITS.verifierSignalJsonBytes);
+        let parsed: unknown = null;
+        try {
+          parsed = parsePrivateJson(rawBytes, CONTROLLER_LIMITS.verifierSignalJsonBytes);
+        } catch (error) {
+          if (!(error instanceof ControllerFailure) || error.diagnostic.code !== 'ARTIFACT_INVALID') {
+            throw error;
+          }
+        }
+        if (!isRecord(parsed)) continue;
+        const payload = slot.handler.implementation === 'gate.v1' ? parsed.disposition : parsed.response;
+        if (isRecord(payload) && typeof payload.status === 'string' && payload.status !== 'passed') {
+          failedChecks.add(slot.checkId);
+          if (typeof payload.reason === 'string' && payload.reason.length > 0) {
+            failureCodes.add(payload.reason);
+          }
+        }
+      }
+    }
+
+    return freeze({
+      failedChecks: freeze([...failedChecks].sort(compareUtf16)),
+      failureCodes: freeze([...failureCodes].sort(compareUtf16)),
+    });
+  }
+  resolveRetainedActiveResources(roleId: string, retained: ControllerAttempt) {
+    const allRoleResources = roleResourcesFor(this.context.loaded, this.context.plan, roleId);
+    if (retained.activatedResourceIds === undefined) {
+      if (retained.repair === 'format') {
+        const whenById = new Map(
+          this.context.plan.task.spec.trustedContext.resources.map(r => [r.id, r.when] as const),
+        );
+        return allRoleResources.filter(r => whenById.get(r.id) === undefined);
+      }
+      return allRoleResources;
+    }
+    const activeSet = new Set(retained.activatedResourceIds);
+    return allRoleResources.filter(r => activeSet.has(r.id));
+  }
+  async #readSnapshotArtifactBytes(
+    snap: NodeCandidateSnapshot,
+    relPath: string,
+    diagPath: string,
+  ): Promise<Uint8Array | null> {
+    const { artifacts, source, owner, store, lock, plan } = this.context;
+    const manifest = await this.context.progress.manifest(snap.manifest);
+    const readCasOrWorkspaceFile = async (entry: ArtifactRef): Promise<Uint8Array> => {
+      if (entry.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', diagPath, 'execution');
+      const casReused = await artifacts.tryReuseCasBlob(relPath, entry.digest.hex, entry.byteLength);
+      if (casReused !== null) {
+        const chunks: Uint8Array[] = [];
+        await streamVerifiedCasBlob(
+          artifacts.directory,
+          {
+            name: relPath,
+            sha256: casReused.sha256,
+            byteLength: casReused.byteLength,
+            uri: casReused.blobRef.uri,
+            path: casReused.path,
+            blobRef: casReused.blobRef,
+          },
+          chunk => {
+            chunks.push(new Uint8Array(chunk));
+          },
+          'execution',
+        );
+        const bytes = new Uint8Array(Buffer.concat(chunks));
+        if (bytes.byteLength !== entry.byteLength || hash(bytes).hex !== entry.digest.hex) {
+          refuse('ARTIFACT_INVALID', diagPath, 'execution');
+        }
+        return bytes;
+      }
+      if (source.version === 1 && same(snap.workspace, source.workspace)) {
+        const baseFile = source.artifacts.find(f => f.name === relPath);
+        if (!baseFile || baseFile.bytes.byteLength !== entry.byteLength || hash(baseFile.bytes).hex !== entry.digest.hex) {
+          refuse('ARTIFACT_INVALID', diagPath, 'execution');
+        }
+        return new Uint8Array(baseFile.bytes);
+      }
+      const attempt = (this.head?.progress.attempts ?? []).find(a => a.id === snap.attemptId);
+      if (!attempt?.finished?.nativeCheckpointId) refuse('RECOVERY_REQUIRED', diagPath, 'execution');
+      const checkpoint = stateValue(store.getCheckpoint(attempt.finished.nativeCheckpointId));
+      const interval = journal(store).requests.filter(
+        row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests,
+      );
+      const decoded = await decodeCandidateCapture({
+        artifacts,
+        artifactsDirectory: artifacts.directory,
+        lock,
+        plan,
+        checkpoint,
+        attempt,
+        expectedManifest: manifest,
+        requestIds: interval.map(row => row.admission.requestId),
+        phase: 'execution',
+      });
+      const matched = decoded.artifacts.find(f => f.name === relPath);
+      if (!matched) refuse('ARTIFACT_INVALID', diagPath, 'execution');
+      if ('bytes' in matched) {
+        if (matched.bytes.byteLength !== entry.byteLength || hash(matched.bytes).hex !== entry.digest.hex) {
+          refuse('ARTIFACT_INVALID', diagPath, 'execution');
+        }
+        return new Uint8Array(matched.bytes);
+      }
+      const chunks: Uint8Array[] = [];
+      await streamVerifiedCasBlob(
+        artifacts.directory,
+        {
+          name: matched.name,
+          sha256: matched.digest.hex,
+          byteLength: matched.byteLength,
+          uri: 'cas://sha256/' + matched.digest.hex,
+          path: matched.blobPath,
+        },
+        chunk => {
+          chunks.push(new Uint8Array(chunk));
+        },
+        'execution',
+      );
+      const bytes = new Uint8Array(Buffer.concat(chunks));
+      if (bytes.byteLength !== entry.byteLength || hash(bytes).hex !== entry.digest.hex) {
+        refuse('ARTIFACT_INVALID', diagPath, 'execution');
+      }
+      return bytes;
+    };
+
+    if (source.version === 2) {
+      if ((manifest.spec.deleted ?? []).includes(relPath)) return null;
+      const overlayEntry = manifest.spec.entries.find(e => e.name === relPath);
+      if (overlayEntry !== undefined) {
+        return readCasOrWorkspaceFile(overlayEntry);
+      }
+      const baseEntry = (source.baselineEntries ?? []).find(b => b.name === relPath);
+      if (!baseEntry) return null;
+      if (baseEntry.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', diagPath, 'execution');
+      const rawBlob = await owner.git(source.directory, ['cat-file', 'blob', baseEntry.oid], LIMITS.handoffSourceBytes + 1);
+      const blobBytes = new Uint8Array(rawBlob);
+      if (
+        blobBytes.byteLength !== baseEntry.byteLength
+        || gitObjectOid(manifest.spec.baseTree!.objectFormat, 'blob', blobBytes) !== baseEntry.oid
+      ) {
+        refuse('ARTIFACT_INVALID', diagPath, 'execution');
+      }
+      return blobBytes;
+    }
+
+    const entry = manifest.spec.entries.find(e => e.name === relPath);
+    if (!entry) return null;
+    return readCasOrWorkspaceFile(entry);
+  }
+  async readUpstreamHandoffSource(
+    selector: StepHandoffSelector,
+    diagPath: string,
+  ): Promise<UpstreamSourceLookupResult> {
+    const progress = this.head?.progress;
+    const attempts = progress?.attempts ?? [];
+    const lastFromAttempt = [...attempts]
+      .reverse()
+      .find(a => a.nodeId === selector.fromStep && a.purpose !== 'compaction' && Boolean(a.finished?.nativeCheckpointId));
+    const fromNodeCompleted = progress?.nodes.find(n => n.id === selector.fromStep)?.state === 'completed';
+
+    if (selector.source.kind === 'artifact') {
+      const snap = progress?.nodeCandidates?.[selector.fromStep];
+      if (!snap || !fromNodeCompleted) {
+        return {
+          found: false,
+          bytes: null,
+          fromAttemptId: lastFromAttempt?.id ?? null,
+          reworkEpoch: lastFromAttempt?.reworkEpoch ?? this.reworkEpoch,
+        };
+      }
+      const bytes = await this.#readSnapshotArtifactBytes(snap, selector.source.path, `${diagPath}/source/path`);
+      return {
+        found: bytes !== null,
+        bytes,
+        fromAttemptId: snap.attemptId,
+        reworkEpoch: snap.reworkEpoch,
+      };
+    }
+
+    if (selector.source.kind === 'submission') {
+      const subRef = fromNodeCompleted ? progress?.nodeSubmissions?.[selector.fromStep] : undefined;
+      if (!subRef) {
+        return {
+          found: false,
+          bytes: null,
+          fromAttemptId: lastFromAttempt?.id ?? null,
+          reworkEpoch: lastFromAttempt?.reworkEpoch ?? this.reworkEpoch,
+        };
+      }
+      if (subRef.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', `${diagPath}/source`, 'execution');
+      const bytes = await this.context.artifacts.read(subRef, LIMITS.handoffSourceBytes);
+      return {
+        found: true,
+        bytes,
+        fromAttemptId: lastFromAttempt?.id ?? null,
+        reworkEpoch: lastFromAttempt?.reworkEpoch ?? this.reworkEpoch,
+      };
+    }
+
+    if (!fromNodeCompleted) {
+      return {
+        found: false,
+        bytes: null,
+        fromAttemptId: null,
+        reworkEpoch: this.reworkEpoch,
+      };
+    }
+    const fromNode = this.context.plan.orderedDAG.find(n => n.id === selector.fromStep);
+    const verdicts = progress?.stepVerdicts ?? [];
+    const verdictRow = fromNode?.kind === 'agent'
+      ? (lastFromAttempt ? [...verdicts].reverse().find(v => v.attemptId === lastFromAttempt.id) : undefined)
+      : [...verdicts].reverse().find(v => v.stepId === selector.fromStep && v.reworkEpoch === this.reworkEpoch);
+    if (verdictRow) {
+      if (verdictRow.raw.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', `${diagPath}/source`, 'execution');
+      const bytes = await this.context.artifacts.read(verdictRow.raw, LIMITS.handoffSourceBytes);
+      return {
+        found: true,
+        bytes,
+        fromAttemptId: verdictRow.attemptId,
+        reworkEpoch: verdictRow.reworkEpoch,
+      };
+    }
+    if (fromNode?.kind === 'check') {
+      const receipt = [...(progress?.verifierReceipts ?? [])]
+        .reverse()
+        .find(r => r.slot === 'node:' + selector.fromStep && r.generation === this.generation && r.output !== null);
+      if (receipt?.output) {
+        if (receipt.output.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', `${diagPath}/source`, 'execution');
+        const bytes = await this.context.artifacts.read(receipt.output, LIMITS.handoffSourceBytes);
+        return {
+          found: true,
+          bytes,
+          fromAttemptId: null,
+          reworkEpoch: this.reworkEpoch,
+        };
+      }
+    }
+    return {
+      found: false,
+      bytes: null,
+      fromAttemptId: lastFromAttempt?.id ?? null,
+      reworkEpoch: this.reworkEpoch,
+    };
+  }
+  async prepareAttemptContext(
+    nodeId: string,
+    role: PlannedRole,
+    repair: ControllerAttempt['repair'],
+    purpose: ControllerAttempt['purpose'],
+    attemptEpoch: number,
+    watchedPaths?: readonly string[],
+  ): Promise<{
+    readonly activeResources: ReturnType<typeof roleResourcesFor>;
+    readonly activatedResourceIds: readonly string[];
+    readonly resolvedHandoffs: readonly ResolvedSelectorExtract[];
+    readonly handoffExtracts: readonly AttemptHandoffExtract[] | undefined;
+  }> {
+    const { loaded, plan, artifacts, ports } = this.context;
+    const allRoleResources = roleResourcesFor(loaded, plan, role.roleId);
+    if (purpose === 'compaction') {
+      const whenById = new Map(plan.task.spec.trustedContext.resources.map(r => [r.id, r.when] as const));
+      const unconditionalOnly = allRoleResources.filter(r => whenById.get(r.id) === undefined);
+      return {
+        activeResources: unconditionalOnly,
+        activatedResourceIds: freeze(unconditionalOnly.map(r => r.id)),
+        resolvedHandoffs: [],
+        handoffExtracts: undefined,
+      };
+    }
+    const whenById = new Map(plan.task.spec.trustedContext.resources.map(r => [r.id, r.when] as const));
+    const evaluable = allRoleResources.map(res => {
+      const when = whenById.get(res.id);
+      return when !== undefined ? { ...res, when } : { ...res };
+    });
+    const changedPaths = this.computeCandidateChangedPaths();
+    const { failedChecks, failureCodes } = await this.computeFailedCheckSignals();
+    const effectiveWatched = watchedPaths ?? ports.watchedPaths;
+    const filtered = evaluateResourceActivationRules(evaluable, {
+      repair,
+      reworkEpoch: attemptEpoch,
+      purpose,
+      isReviewer: purpose === 'reviewer',
+      changedPaths,
+      ...(effectiveWatched !== undefined ? { watchedPaths: effectiveWatched } : {}),
+      failedChecks,
+      failureCodes,
+    });
+    const activeIdSet = new Set(filtered.map(item => item.id));
+    const activeResources = allRoleResources.filter(item => activeIdSet.has(item.id));
+    const activatedResourceIds = freeze(activeResources.map(item => item.id));
+    if (activeResources.length > CONTROLLER_LIMITS.maxStepContextFiles) {
+      refuse('OUTPUT_LIMIT', '/spec/task/spec/trustedContext/resources', 'execution');
+    }
+
+    const node = plan.orderedDAG.find(n => n.id === nodeId);
+    if (repair === 'format' || !node?.handoffs || node.handoffs.length === 0) {
+      return {
+        activeResources,
+        activatedResourceIds,
+        resolvedHandoffs: [],
+        handoffExtracts: undefined,
+      };
+    }
+
+    const stepIndex = plan.task.spec.steps.findIndex(s => s.id === nodeId);
+    const stepDiagBase = stepIndex >= 0 ? `/spec/task/spec/steps/${stepIndex}/handoffs` : '/handoffs';
+    const lookups: UpstreamSourceLookupResult[] = [];
+    for (let i = 0; i < node.handoffs.length; i += 1) {
+      lookups.push(await this.readUpstreamHandoffSource(node.handoffs[i]!, `${stepDiagBase}/${i}`));
+    }
+    const resolvedHandoffs = evaluateStepHandoffSelectors(
+      node.handoffs,
+      (_, idx) => lookups[idx]!,
+      {
+        ...(stepIndex >= 0 ? { stepIndex } : {}),
+        reworkEpoch: attemptEpoch,
+      },
+    );
+    const extractedCount = resolvedHandoffs.filter(item => item.provenance.status === 'extracted').length;
+    if (activeResources.length + extractedCount > CONTROLLER_LIMITS.maxStepContextFiles) {
+      refuse('OUTPUT_LIMIT', stepDiagBase, 'execution');
+    }
+    const handoffExtracts = await persistHandoffExtractsToCas(resolvedHandoffs, artifacts);
+    return {
+      activeResources,
+      activatedResourceIds,
+      resolvedHandoffs,
+      handoffExtracts,
+    };
+  }
   async role(nodeId: string, repair: ControllerAttempt['repair'] = 'none', prompt?: string, retained?: ControllerAttempt): Promise<void> {
     await this.guard(); const { plan, lock, store, artifacts, authority, loaded, directory } = this.context, bounds = this.#overlayBounds();
     const delegatedCounts = countDelegatedBudgets(plan, this.draft.attempts);
@@ -850,7 +1332,6 @@ export class Cycle {
     if (originalRole.adapter === 'delegated') refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/roles', 'execution');
     const role: PlannedRole = repair === 'format' ? { ...originalRole, policy: formatPolicy(originalRole.policy) } : originalRole;
     const purpose = node.handler.implementation === 'pi.compact.v1' ? 'compaction' : node.handler.parameters.purpose === 'review' ? 'reviewer' : 'task';
-    const roleResources = roleResourcesFor(loaded, plan, role.roleId);
     if (!retained && purpose === 'compaction' && this.context.ports.decisions?.adviseSoftCompaction) {
       const contextUtilization = this.#contextUtilization();
       const failedVerificationLoops = this.#failedVerificationLoops();
@@ -894,18 +1375,27 @@ export class Cycle {
         });
       }
     }
-    if (!retained && purpose !== 'compaction') {
-      await this.adviseCapabilityRouting(nodeId, role, purpose, roleResources);
-    }
     const attemptEpoch = retained ? (retained.reworkEpoch ?? 0) : this.reworkEpoch;
     const nativeStepId = purpose === 'compaction' ? compactionTarget(plan, nodeId) : nodeId, ordinal = retained?.ordinal ?? this.draft.attempts.length + 1;
     const commandId = stableId(lock.spec.runId, nodeId, purpose, repair, ordinal), sessionId = nativeSessionId(lock.spec.runId, role.roleId, nativeStepId, role.policy, attemptEpoch);
     const configured = purpose === 'compaction' ? '' : text(loaded.registry.spec.handlers.find(handler => handler.id === node.handler.id)?.parameters.prompt);
+    // Verify base handler prompt digest FIRST before evaluating or appending any runtime handoff block.
     if (purpose !== 'compaction' && node.handler.parameters.prompt !== '[private command sha256:' + hash(configured).hex + ']') refuse('RECOVERY_REQUIRED', '', 'execution');
+    const preparedCtx = retained ? null : await this.prepareAttemptContext(nodeId, role, repair, purpose, attemptEpoch);
+    const activeResources = retained ? this.resolveRetainedActiveResources(role.roleId, retained) : preparedCtx!.activeResources;
+    if (!retained && purpose !== 'compaction') {
+      await this.adviseCapabilityRouting(nodeId, role, purpose, activeResources);
+    }
+    const maxPromptBytes = Math.min(LIMITS.inputBytes, role.policy.limits.promptBytes);
     const reworkCtx = repair === 'none' && prompt === undefined ? await this.activeReworkForNode(nodeId) : null;
-    const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(65_536, role.policy.limits.promptBytes)) : configured;
-    const commandText = retained ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, 1048576)) : prompt ?? defaultPrompt;
-    const command = await artifacts.put('command', Buffer.from(commandText), Math.min(1048576, role.policy.limits.promptBytes));
+    const defaultPrompt = reworkCtx ? reworkPrompt(configured, reworkCtx, Math.min(CONTROLLER_LIMITS.reworkPromptMaxBytes, role.policy.limits.promptBytes)) : configured;
+    const baseCommandText = prompt ?? defaultPrompt;
+    const commandText = retained
+      ? new TextDecoder('utf-8', { fatal: true }).decode(await artifacts.read(retained.command, LIMITS.inputBytes))
+      : repair !== 'format' && purpose !== 'compaction' && preparedCtx !== null && preparedCtx.resolvedHandoffs.length > 0
+        ? appendHandoffPromptBlock(baseCommandText, preparedCtx.resolvedHandoffs, maxPromptBytes, 'execution')
+        : baseCommandText;
+    const command = await artifacts.put('command', Buffer.from(commandText), maxPromptBytes);
     const originalSubmission = this.draft.failures.at(-1)?.evidence ?? this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
     const originalState = await schedulingSnapshot(store, authority, lock, artifacts, this.candidate, this.draft.candidate);
     observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
@@ -913,6 +1403,8 @@ export class Cycle {
       ordinal, id: commandId, nodeId, nativeStepId, sessionId, purpose, repair, command,
       before: { requests: before.requests, operations: before.operations }, finished: null,
       ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}),
+      ...(purpose !== 'compaction' && preparedCtx !== null ? { activatedResourceIds: preparedCtx.activatedResourceIds } : {}),
+      ...(purpose !== 'compaction' && preparedCtx?.handoffExtracts !== undefined ? { handoffExtracts: preparedCtx.handoffExtracts } : {}),
     };
     if (retained) {
       if (!same(retained, { ...attempt, command, id: commandId, sessionId, nativeStepId, nodeId, purpose, repair, ...(attemptEpoch > 0 ? { reworkEpoch: attemptEpoch } : {}) }) || !same(this.draft.attempts.at(-1), retained) || retained.finished !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
@@ -935,6 +1427,18 @@ export class Cycle {
       if (purpose === 'compaction' && restore === null) refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
     }
     const hostDirectory = join(directory, 'runtime', commandId); await privateDirectory(hostDirectory);
+    if (purpose !== 'compaction') {
+      const contextDirectory = join(hostDirectory, 'context');
+      await rm(contextDirectory, { recursive: true, force: true });
+      await privateDirectory(contextDirectory);
+      await materializeContextFilesDir(
+        contextDirectory,
+        activeResources,
+        attempt.handoffExtracts ?? [],
+        artifacts.directory,
+        retained ? 'recovery' : 'execution',
+      );
+    }
     let baseline: PiOpenInputV2['candidate']['baseline'];
     if (this.context.source.version === 2) {
       const baselineDirectory = join(hostDirectory, 'baseline');
@@ -949,7 +1453,7 @@ export class Cycle {
         ? { name: file.name, bytes: file.bytes }
         : { name: file.name, byteLength: file.byteLength, digest: file.digest, blobPath: file.blobPath },
     );
-    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: piCandidateArtifacts, ...(baseline ? { baseline } : {}) }, resources: roleResources, restore };
+    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: piCandidateArtifacts, ...(baseline ? { baseline } : {}) }, resources: activeResources, restore };
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;

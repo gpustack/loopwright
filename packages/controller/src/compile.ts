@@ -8,7 +8,29 @@ import { installedHandlerDigests } from './handlers.js';
 import { freeze, canonical, hash, same } from './schema.js';
 import { refuse, result } from './errors.js';
 import { compactionTarget, descendants, reworkSubgraph } from './scheduler.js';
-import type { CheckpointCapacity, CompiledPlan, LoadedConfiguration, PlannedRole, RuntimeProfile, VerifierSlot } from './types.js';
+import { CONTROLLER_LIMITS, type CheckpointCapacity, type CompiledPlan, type LoadedConfiguration, type PlannedNode, type PlannedRole, type RuntimeProfile, type StepHandoffSelect, type StepHandoffSelector, type StepHandoffSource, type VerifierSlot } from './types.js';
+function cloneHandoffSelector(item: StepHandoffSelector): StepHandoffSelector {
+  const source: StepHandoffSource = item.source.kind === 'artifact'
+    ? { kind: 'artifact', path: item.source.path }
+    : { kind: item.source.kind };
+  const select: StepHandoffSelect = item.select.kind === 'markdown_heading'
+    ? {
+        kind: 'markdown_heading',
+        heading: item.select.heading,
+        ...(item.select.includeSubheadings !== undefined ? { includeSubheadings: item.select.includeSubheadings } : {}),
+      }
+    : item.select.kind === 'json_pointer'
+      ? { kind: 'json_pointer', pointers: [...item.select.pointers] }
+      : { kind: 'full' };
+  return {
+    ...(item.id !== undefined ? { id: item.id } : {}),
+    fromStep: item.fromStep,
+    source,
+    select,
+    ...(item.maxBytes !== undefined ? { maxBytes: item.maxBytes } : {}),
+    ...(item.required !== undefined ? { required: item.required } : {}),
+  };
+}
 export function checkpointCapacity(A: number, N: number, I: number, C: number, publication: boolean, R = 0, K = 0): CheckpointCapacity {
   if (![A, N, I, C, R, K].every(Number.isSafeInteger) || A < 1 || A > 64 || N < 0 || I < 0 || R < 0 || K < 0 || C < 2 || C > 34 || typeof publication !== 'boolean') refuse('CONFIG_LIMIT', '/spec/controls', 'compile');
   const V = 1 + Math.min(A + K, N + I + R), J = C * V, D = 4 + 3 * A + 2 * J + (publication ? 3 : 0);
@@ -19,8 +41,8 @@ export function compilePlan(loaded: LoadedConfiguration) {
   return result(async (): Promise<CompiledPlan> => {
     const state = approvedState(loaded), config = loaded.configuration, task = config.spec.task, registry = loaded.registry.spec;
     if (
-      task.spec.steps.length > 16 ||
-      task.spec.roles.length > 16 ||
+      task.spec.steps.length > CONTROLLER_LIMITS.maxCompiledDagSteps ||
+      task.spec.roles.length > CONTROLLER_LIMITS.maxCompiledRoles ||
       task.spec.acceptance.checks.some(check => check.allowedEvidenceLevels.includes('hardware_execution'))
     ) {
       refuse('CAPABILITY_UNSUPPORTED', '/spec/task', 'compile');
@@ -29,7 +51,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
     if (config.spec.profiles.roles.length !== task.spec.roles.length || config.spec.profiles.steps.length !== task.spec.steps.length) refuse('CONFIG_REFERENCE', '/spec/profiles', 'compile');
     const installed = await installedHandlerDigests();
     for (const handler of registry.handlers) if (!same(handler.digest, installed[handler.implementation])) refuse('CONFIG_REFERENCE', '/registry/spec/handlers', 'compile');
-    const pending = [...task.spec.steps], orderedDAG: CompiledPlan['orderedDAG'][number][] = [], done = new Set<string>();
+    const pending = [...task.spec.steps], orderedDAG: PlannedNode[] = [], done = new Set<string>();
     while (pending.length) {
       const ready = pending.filter(step => step.dependsOn.every(id => done.has(id))).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)[0];
       if (!ready) refuse('CONFIG_REFERENCE', '/spec/task/spec/steps', 'compile');
@@ -42,6 +64,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
         roleId: ready.roleId,
         handler: handler.implementation === 'pi.agent.v1' ? { ...handler, parameters: { ...handler.parameters, prompt: '[private command sha256:' + hash(String(handler.parameters.prompt)).hex + ']' } } : handler,
         ...(ready.onRework !== undefined ? { onRework: { rejectTo: ready.onRework.rejectTo, maxReworks: ready.onRework.maxReworks } } : {}),
+        ...(ready.handoffs !== undefined ? { handoffs: ready.handoffs.map(cloneHandoffSelector) } : {}),
       });
       done.add(ready.id);
       pending.splice(pending.indexOf(ready), 1);
@@ -60,6 +83,23 @@ export function compilePlan(loaded: LoadedConfiguration) {
         const rejectTarget = orderedDAG.find(item => item.id === node.onRework!.rejectTo);
         if (rejectTarget?.handler.implementation === 'pi.compact.v1') {
           refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+        }
+      }
+      if (node.handoffs !== undefined) {
+        if (node.handler.implementation === 'pi.compact.v1') {
+          refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+        }
+        if (node.kind !== 'agent' || node.handoffs.length < 1 || node.handoffs.length > 16) {
+          refuse('CONFIG_SCHEMA', '/spec/task/spec/steps', 'compile');
+        }
+        for (const handoff of node.handoffs) {
+          const fromNode = orderedDAG.find(item => item.id === handoff.fromStep);
+          if (!fromNode || fromNode.id === node.id || !descendants({ orderedDAG }, fromNode.id).includes(node.id)) {
+            refuse('CONFIG_REFERENCE', '/spec/task/spec/steps', 'compile');
+          }
+          if (fromNode.handler.implementation === 'pi.compact.v1') {
+            refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
+          }
         }
       }
       if (node.handler.implementation === 'pi.compact.v1') {
@@ -188,7 +228,9 @@ export function compilePlan(loaded: LoadedConfiguration) {
         operations: Math.min(profile.limits?.operations ?? maxAvailableOps, maxAvailableOps),
       };
       if (active && task.spec.budgets.maxModelCalls > roleLimits.requests) refuse('CONFIG_LIMIT', '/spec/task/spec/budgets', 'compile');
-      const roleResources = selectRoleResources(task.spec.trustedContext.resources, role.resourceIds, 'compile');
+      const roleResources = selectRoleResources(task.spec.trustedContext.resources, role.resourceIds, 'compile').map(
+        item => ({ id: item.id, kind: item.kind, path: item.path, digest: item.digest }),
+      );
       if (adapter === 'delegated') {
         if (profile.providerCredentialRef !== null) refuse('CONFIG_SCHEMA', '/registry/spec/roleProfiles', 'compile');
         let runtime: RuntimeProfile;
