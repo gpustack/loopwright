@@ -322,6 +322,8 @@ export {
   GUIDANCE_MAX_LINES,
   GUIDANCE_SENTINEL,
   insideRoot,
+  collectHostCredentialEnvNames,
+  collectHostGateCredentialEnvNames,
   INSTRUCTION_MAX_AGGREGATE_BYTES,
   loadDeclarativeTaskpack,
   mergeMcpServerDeclarations,
@@ -475,6 +477,7 @@ export {
   buildMemoryProtectedPaths,
   finalizeLocalTurnkeyMemory,
   finalizeTurnkeyProposal,
+  projectMemoryTargetMatrixCell,
   readRegularJsonBounded,
   resolveSafeRunDirectory,
   resolveVerifiedSettledRun,
@@ -484,4 +487,5 @@ export {
   verifyRetainedRunDescriptorIfPresent,
   type ExpectedSettledRunBindings,
   type FinalizeLocalTurnkeyMemoryOptions,
+  type MemoryTargetMatrixCell,
 } from './turnkey-memory.js';

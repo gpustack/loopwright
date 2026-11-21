@@ -6,13 +6,15 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PI_THINKING_LEVELS, PI_WIRE_APIS, STANDARD_PI_PROVIDER_ENV, isOAuthOnlyPiProvider, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry, type ExternalMcpServerConfig } from '@loopwright/agent-pi/mcp';
-import { formatDurationMs, formatTokenCount, type ReportMcpServerInfo } from '@loopwright/controller';
+import { formatDurationMs, formatTokenCount, type AdvisoryDecisionPort, type ReportMcpServerInfo } from '@loopwright/controller';
 import { DECISION_PROVIDER_API_KEY_ENV, type DecisionTransport } from '@loopwright/decisions';
 import {
   alignBaselineRevisions,
   BASELINE_CONFLICT_REASON,
   boundUtf8Lines,
   buildDefaultAuthorPrompt,
+  collectHostCredentialEnvNames,
+  collectHostGateCredentialEnvNames,
   createTaskpackDecisionPort,
   insideRoot,
   loadTaskpackSuite,
@@ -1083,6 +1085,75 @@ export async function runGitHubActionEntrypoint(
   let preflightResult: RunTaskpackPreflightResult | undefined;
 
   try {
+    let hostGateCredentialEnvs: ReadonlySet<string>;
+    try {
+      hostGateCredentialEnvs = collectHostCredentialEnvNames({
+        credentialEnvMap: input.credentialEnvMap !== undefined || input.providerTokenEnv !== undefined
+          ? {
+            ...(input.credentialEnvMap ?? {}),
+            ...(input.credentialEnvMap?.provider === undefined && input.providerTokenEnv !== undefined
+              ? { provider: input.providerTokenEnv }
+              : {}),
+          }
+          : undefined,
+        gateEndpoints: input.gateEndpoints,
+      });
+      if (input.providerTokenEnv !== undefined && !/^[A-Z][A-Z0-9_]{0,63}$/.test(input.providerTokenEnv)) {
+        throw new GitHubAppError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          'providerTokenEnv credential environment name must match [A-Z][A-Z0-9_]{0,63}',
+        );
+      }
+      const benchmarkEndpointIds = new Set<string>();
+      for (const declaredGate of manifest.spec.verification.externalGates) {
+        if (declaredGate.implementation === 'benchmark-gate.v1') {
+          benchmarkEndpointIds.add(declaredGate.endpointId);
+        }
+      }
+      for (const plan of input.gateEndpoints ?? []) {
+        if (plan.implementation === 'benchmark-gate.v1') {
+          benchmarkEndpointIds.add(plan.id);
+        }
+      }
+      const byCredRef = input.credentialEnvMap?.byCredentialRef;
+      const lookupByCredRef = (ref: string): string | undefined => (
+        byCredRef !== undefined && Object.hasOwn(byCredRef, ref) ? byCredRef[ref] : undefined
+      );
+      for (const plan of input.gateEndpoints ?? []) {
+        if (!benchmarkEndpointIds.has(plan.id)) continue;
+        const signingEnv = lookupByCredRef(plan.signingCredentialRef) ?? input.credentialEnvMap?.gate;
+        if (signingEnv === 'GITHUB_TOKEN' || signingEnv === 'GH_TOKEN') {
+          throw new GitHubAppError(
+            'TASKPACK_HOST_BINDING_INVALID',
+            `benchmark-gate.v1 host binding "${plan.id}" cannot reuse GitHub token env "${signingEnv}"`,
+          );
+        }
+        if (plan.authCredentialRef != null) {
+          const authEnv = lookupByCredRef(plan.authCredentialRef) ?? input.credentialEnvMap?.gateAuth;
+          if (authEnv === 'GITHUB_TOKEN' || authEnv === 'GH_TOKEN') {
+            throw new GitHubAppError(
+              'TASKPACK_HOST_BINDING_INVALID',
+              `benchmark-gate.v1 host binding "${plan.id}" cannot reuse GitHub token env "${authEnv}"`,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (error.code === 'TASKPACK_HOST_BINDING_INVALID') {
+          return { kind: 'refused', code: 'TASKPACK_HOST_BINDING_INVALID', reason: turnkeyScrubber.scrub(error.message) };
+        }
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+    for (const envName of hostGateCredentialEnvs) {
+      const val = runtimeEnv[envName];
+      if (typeof val === 'string' && val.trim().length > 0) {
+        turnkeyScrubber.register(val.trim());
+      }
+    }
+
     if (turnkeyEnabled) {
       try {
         const effectivePolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
@@ -1214,6 +1285,47 @@ export async function runGitHubActionEntrypoint(
       }
     }
 
+    const willRunPreflight = manifest.spec.preflight !== undefined && !isStatusComment;
+    let modelsConfig: ParsedPiModelsJson | undefined;
+    if (willRunPreflight && input.modelsJsonPath !== undefined) {
+      try {
+        modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
+            return { kind: 'refused', code: 'PROVIDER_OAUTH_UNSUPPORTED', reason: error.message };
+          }
+          return blocked(error.code, error.message);
+        }
+        throw error;
+      }
+    }
+
+    const modelsJsonApiKeyEnvs: string[] = [];
+    if (modelsConfig !== undefined) {
+      for (const providerCfg of modelsConfig.providers.values()) {
+        if (typeof providerCfg.apiKeyEnv === 'string' && providerCfg.apiKeyEnv.length > 0) {
+          modelsJsonApiKeyEnvs.push(providerCfg.apiKeyEnv);
+        }
+      }
+    }
+    const preflightExcludedEnvs = new Set<string>([
+      ...hostGateCredentialEnvs,
+      ...(input.providerTokenEnv !== undefined && input.providerTokenEnv.length > 0 ? [input.providerTokenEnv] : []),
+      ...modelsJsonApiKeyEnvs,
+      input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET',
+      input.credentialEnvMap?.gateAuth ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN',
+      input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
+      input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+      input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+    ]);
+    for (const envName of preflightExcludedEnvs) {
+      const val = runtimeEnv[envName];
+      if (typeof val === 'string' && val.trim().length > 0) {
+        turnkeyScrubber.register(val.trim());
+      }
+    }
+
     if (manifest.spec.preflight !== undefined && !isStatusComment) {
       try {
         preflightResult = await runTaskpackPreflight({
@@ -1223,6 +1335,7 @@ export async function runGitHubActionEntrypoint(
           hostPolicy,
           scrubber: turnkeyScrubber,
           env: runtimeEnv,
+          excludedEnvNames: preflightExcludedEnvs,
           tempRoot: input.runRoot,
         });
       } catch (error) {
@@ -1471,8 +1584,7 @@ export async function runGitHubActionEntrypoint(
       `intake: taskpack=${manifest.metadata.name} mode=${input.mode} repo=${input.repositoryFullName} base=${effectiveBaseRevision.slice(0, 12)} kind=${intake.kind}`,
     );
 
-    let modelsConfig: ParsedPiModelsJson | undefined;
-    if (input.modelsJsonPath !== undefined) {
+    if (modelsConfig === undefined && input.modelsJsonPath !== undefined) {
       try {
         modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
       } catch (error) {
@@ -1488,10 +1600,12 @@ export async function runGitHubActionEntrypoint(
 
     const scrubber = turnkeyScrubber;
     const gateEnvName = input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET';
+    const gateAuthEnvName = input.credentialEnvMap?.gateAuth ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN';
     const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
     const publicationAuthEnvName = input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
     const localCmdGateEnvName = input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
     if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
+    if (typeof runtimeEnv[gateAuthEnvName] === 'string') scrubber.register(runtimeEnv[gateAuthEnvName]!);
     if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
     if (typeof runtimeEnv[publicationAuthEnvName] === 'string') scrubber.register(runtimeEnv[publicationAuthEnvName]!);
     if (typeof runtimeEnv[localCmdGateEnvName] === 'string') scrubber.register(runtimeEnv[localCmdGateEnvName]!);
@@ -1592,6 +1706,7 @@ export async function runGitHubActionEntrypoint(
         ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
         allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
         modelsJsonPath: input.modelsJsonPath,
+        ...(modelsConfig !== undefined ? { modelsConfig } : {}),
         runtimeOptions: {},
         budgets: input.budgets ?? DEFAULT_HOST_BUDGETS,
         limits: explicitLimitsOverride,
@@ -1601,12 +1716,20 @@ export async function runGitHubActionEntrypoint(
         gateEndpoints: activeGateEndpoints,
         publicationEndpoint: activePublicationEndpoint,
         credentialEnvMap: {
+          ...(input.credentialEnvMap ?? {}),
+          ...(candidate !== undefined
+            ? {
+              byProvider: {
+                ...(input.credentialEnvMap?.byProvider ?? {}),
+                [candidate.selection.provider]: candidate.providerEnvName,
+              },
+            }
+            : {}),
           provider: candidate !== undefined
-            ? (input.credentialEnvMap?.provider !== undefined && !candidate.usesActiveTokenEnv
-              ? input.credentialEnvMap.provider
-              : candidate.providerEnvName)
-            : (input.credentialEnvMap?.provider ?? input.providerTokenEnv ?? 'LOOPWRIGHT_PROVIDER_TOKEN'),
+            ? candidate.providerEnvName
+            : (input.credentialEnvMap?.provider ?? input.providerTokenEnv),
           gate: gateEnvName,
+          gateAuth: gateAuthEnvName,
           publication: publicationEnvName,
           publicationAuth: publicationAuthEnvName,
           localCommandGate: localCmdGateEnvName,
@@ -1638,7 +1761,7 @@ export async function runGitHubActionEntrypoint(
         const resolved = resolveTaskpackModelCandidates(manifest, buildBindings(), {
           modelsConfig,
           env: runtimeEnv,
-          explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
+          explicitProviderTokenEnv: input.providerTokenEnv,
           scrubber,
         });
         checkOnlyCandidate = resolved[0];
@@ -1663,6 +1786,7 @@ export async function runGitHubActionEntrypoint(
         publicationEnvName,
         publicationAuthEnvName,
         localCmdGateEnvName,
+        ...hostGateCredentialEnvs,
         ...decisionApiKeyEnvs,
         ...manifestSecretEnvs,
         ...collectMcpReferencedEnvNames(effectiveMcpDecls),
@@ -1903,7 +2027,7 @@ export async function runGitHubActionEntrypoint(
       candidates = resolveTaskpackModelCandidates(manifest, candidateBaseBindings, {
         modelsConfig,
         env: runtimeEnv,
-        explicitProviderTokenEnv: input.credentialEnvMap?.provider ?? input.providerTokenEnv,
+        explicitProviderTokenEnv: input.providerTokenEnv,
         scrubber,
       });
     } catch (error) {
@@ -1926,9 +2050,11 @@ export async function runGitHubActionEntrypoint(
       ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
       ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
       gateEnvName,
+      gateAuthEnvName,
       publicationEnvName,
       publicationAuthEnvName,
       localCmdGateEnvName,
+      ...hostGateCredentialEnvs,
       ...decisionApiKeyEnvs,
       ...manifestSecretEnvs,
       ...collectMcpReferencedEnvNames(effectiveMcpDecls),
@@ -1947,6 +2073,37 @@ export async function runGitHubActionEntrypoint(
           return blocked(error.code, scrubber.scrub(error.message));
         }
         throw error;
+      }
+    }
+
+    const effectiveExternalGateEnvs = new Set<string>([
+      gateEnvName,
+      gateAuthEnvName,
+      ...collectHostGateCredentialEnvNames({
+        credentialEnvMap: input.credentialEnvMap !== undefined
+          ? { ...input.credentialEnvMap, localCommandGate: undefined }
+          : undefined,
+        gateEndpoints: activeGateEndpoints.filter(ep => ep.id !== LOCAL_COMMAND_GATE_ENDPOINT_ID),
+      }),
+    ]);
+    const effectiveMcpExcludedGateEnvs = new Set<string>([
+      ...effectiveExternalGateEnvs,
+      localCmdGateEnvName,
+    ]);
+
+    for (const candidate of candidates) {
+      const candidateEnvs = [
+        candidate.providerEnvName,
+        ...(candidate.sourceTokenEnvName !== undefined ? [candidate.sourceTokenEnvName] : []),
+      ];
+      for (const envName of candidateEnvs) {
+        if (effectiveExternalGateEnvs.has(envName)) {
+          return {
+            kind: 'refused',
+            code: 'TASKPACK_HOST_BINDING_INVALID',
+            reason: scrubber.scrub(`provider credential environment variable "${envName}" must not overlap a host external gate credential`),
+          };
+        }
       }
     }
 
@@ -1983,6 +2140,7 @@ export async function runGitHubActionEntrypoint(
               githubToken,
               allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
               scrubber,
+              excludedEnvNames: effectiveMcpExcludedGateEnvs,
             });
           } catch (error) {
             if (error instanceof GitHubAppError) {
@@ -2142,13 +2300,25 @@ export async function runGitHubActionEntrypoint(
         + ` — wallTime=${formatDurationMs(activeBudgets.wallTimeMs)}, totalTokens=${formatTokenCount(activeBudgets.totalTokens)}, maxOutputTokens=${formatTokenCount(activeBudgets.perCallOutputTokens)}, contextWindow=${formatTokenCount(activeContextWindow)}`,
       );
 
-      const decisionPort = createTaskpackDecisionPort(manifest, {
-        runtimeEnv,
-        apiKey: input.decisionApiKey,
-        transport: input.decisionTransport,
-        scrubber,
-        hasPinnedRoles: (manifest.spec.roles?.length ?? 0) > 0 || hasHostRoleOverrides,
-      });
+      let decisionPort: AdvisoryDecisionPort | undefined;
+      try {
+        decisionPort = createTaskpackDecisionPort(manifest, {
+          runtimeEnv,
+          apiKey: input.decisionApiKey,
+          transport: input.decisionTransport,
+          scrubber,
+          hasPinnedRoles: (manifest.spec.roles?.length ?? 0) > 0 || hasHostRoleOverrides,
+          excludedEnvNames: effectiveExternalGateEnvs,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          if (error.code === 'TASKPACK_HOST_BINDING_INVALID') {
+            return { kind: 'refused', code: 'TASKPACK_HOST_BINDING_INVALID', reason: scrubber.scrub(error.message) };
+          }
+          return blocked(error.code, scrubber.scrub(error.message));
+        }
+        throw error;
+      }
       const stepMcpMetadata = mcpRegistry?.servers.map(srv => ({
         id: srv.id,
         transport: srv.transport,
@@ -2377,6 +2547,22 @@ export async function runActionCli(
   const storageProfile = env['INPUT_STORAGE-PROFILE'];
   const mode = env['INPUT_MODE'];
   const gateEndpointUrl = env['INPUT_GATE-ENDPOINT-URL']?.trim();
+  const explicitGateEndpointId = env['INPUT_GATE-ENDPOINT-ID']?.trim() || env['LOOPWRIGHT_GATE_ENDPOINT_ID']?.trim();
+  const gateEndpointId = explicitGateEndpointId || 'default';
+  const gateEndpointImplRaw = env['INPUT_GATE-ENDPOINT-IMPLEMENTATION']?.trim() || env['LOOPWRIGHT_GATE_ENDPOINT_IMPLEMENTATION']?.trim();
+  let gateEndpointImpl: 'gate.v1' | 'benchmark-gate.v1' | undefined;
+  if (gateEndpointImplRaw !== undefined && gateEndpointImplRaw.length > 0) {
+    if (gateEndpointImplRaw !== 'gate.v1' && gateEndpointImplRaw !== 'benchmark-gate.v1') {
+      process.stderr.write(`invalid gate endpoint implementation "${gateEndpointImplRaw}" (expected "gate.v1" or "benchmark-gate.v1")\n`);
+      return 1;
+    }
+    gateEndpointImpl = gateEndpointImplRaw;
+  }
+  if ((gateEndpointImpl !== undefined || (explicitGateEndpointId !== undefined && explicitGateEndpointId.length > 0)) && !gateEndpointUrl) {
+    process.stderr.write('explicit gate endpoint designation requires INPUT_GATE-ENDPOINT-URL\n');
+    return 1;
+  }
+  const hasGateAuthToken = typeof env['LOOPWRIGHT_GATE_AUTH_TOKEN'] === 'string' && env['LOOPWRIGHT_GATE_AUTH_TOKEN'].trim().length > 0;
   const publicationEndpointUrl = env['INPUT_PUBLICATION-ENDPOINT-URL']?.trim();
   const dryRun = env['INPUT_DRY-RUN'] === 'true';
   const force = env['INPUT_FORCE'] === 'true';
@@ -2414,7 +2600,15 @@ export async function runActionCli(
     allowPrivilegedExecution: env['INPUT_ALLOW-PRIVILEGED-EXECUTION'] === 'true',
     allowWorkflowWrites: env['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true',
     allowHostMounts: env['INPUT_ALLOW-HOST-MOUNTS']?.trim() || undefined,
-    gateEndpoints: gateEndpointUrl ? [{ id: 'default', url: gateEndpointUrl, signingCredentialRef: 'taskpack-gate-signing' }] : undefined,
+    gateEndpoints: gateEndpointUrl
+      ? [{
+        id: gateEndpointId,
+        url: gateEndpointUrl,
+        signingCredentialRef: 'taskpack-gate-signing',
+        ...(hasGateAuthToken ? { authCredentialRef: 'taskpack-gate-auth' } : {}),
+        ...(gateEndpointImpl !== undefined ? { implementation: gateEndpointImpl } : {}),
+      }]
+      : undefined,
     publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),
     env,
@@ -2451,6 +2645,7 @@ export async function runActionCli(
     'GITHUB_TOKEN',
     'INPUT_GITHUB-APP-PRIVATE-KEY',
     'LOOPWRIGHT_GATE_SIGNING_SECRET',
+    'LOOPWRIGHT_GATE_AUTH_TOKEN',
     'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
     'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
   ]) {

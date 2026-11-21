@@ -70,6 +70,24 @@ export interface ExpectedSettledRunBindings {
   readonly baseRevision: string;
 }
 
+export interface MemoryTargetMatrixCell {
+  readonly id: string;
+  readonly platform: string;
+  readonly variant: string;
+}
+
+/** Project a TargetMatrixCell down to the strict `{ id, platform, variant }` boundary required by `@loopwright/memory`. */
+export function projectMemoryTargetMatrixCell(
+  cell: TargetMatrixCell | null | undefined,
+): MemoryTargetMatrixCell | null {
+  if (cell === undefined || cell === null) return null;
+  return Object.freeze({
+    id: cell.id,
+    platform: cell.platform,
+    variant: cell.variant,
+  });
+}
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export function buildMemoryProtectedPaths(
@@ -558,9 +576,10 @@ export async function finalizeLocalTurnkeyMemory(
     const checkCodeFingerprint = options.manifest.spec.memory.checkCodeFingerprint === true;
     const checkUpstreamVersions = options.manifest.spec.memory.checkUpstreamVersions === true;
     const manifestMatrix = options.manifest.spec.target?.matrix;
-    const targetMatrix = options.targetMatrix !== undefined
+    const rawTargetMatrix = options.targetMatrix !== undefined
       ? options.targetMatrix
       : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
+    const targetMatrix = projectMemoryTargetMatrixCell(rawTargetMatrix);
 
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,

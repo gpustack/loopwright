@@ -105,6 +105,8 @@ import {
 import { assertCleanArtifact, SecretScrubber } from './scrubber.js';
 import {
   buildDefaultAuthorPrompt,
+  collectHostCredentialEnvNames,
+  collectHostGateCredentialEnvNames,
   compileDeclarativeTaskpack,
   createTaskpackDecisionPort,
   DEFAULT_HOST_BUDGETS,
@@ -129,6 +131,7 @@ import {
   type CompiledLocalCommandGate,
   type ExecutionHostPolicy,
   type GitTreeEntry,
+  type HostCredentialEnvMap,
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
   type InspectedCandidateFile,
@@ -7070,6 +7073,10 @@ export interface StageTaskpackForStepOptions {
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly upstreamRecordsJson?: string | undefined;
   readonly discoverUpstreams?: boolean | undefined;
+  /** Optional host-owned external gate endpoints (e.g. benchmark-gate.v1 relay bindings). */
+  readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
+  /** Optional host-owned credential env mappings isolated from repository manifests and subprocesses. */
+  readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
 }
 
 export interface StagedTaskpackForStep {
@@ -7090,6 +7097,8 @@ export interface StagedTaskpackForStep {
   readonly digests?: Readonly<Record<string, string>> | undefined;
   readonly extractedConflictPaths?: readonly string[] | undefined;
   readonly watchedPaths?: readonly string[] | undefined;
+  readonly hostCredentialEnvNames?: readonly string[] | undefined;
+  readonly hostGateCredentialEnvNames?: readonly string[] | undefined;
 }
 
 export interface OpenStagedTaskpackStepGateOptions {
@@ -7137,6 +7146,8 @@ const STAGED_SECRETS_KEYS: ReadonlySet<string> = new Set([
   'digests',
   'extractedConflictPaths',
   'watchedPaths',
+  'hostCredentialEnvNames',
+  'hostGateCredentialEnvNames',
 ]);
 const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'checkId',
@@ -7493,6 +7504,35 @@ async function readAndValidateStagedTaskpackSecrets(
     watchedPaths = Object.freeze(cleanWatchedPaths);
   }
 
+  let hostCredentialEnvNames: readonly string[] | undefined;
+  if (parsed['hostCredentialEnvNames'] !== undefined) {
+    if (!Array.isArray(parsed['hostCredentialEnvNames'])) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack hostCredentialEnvNames must be an array');
+    }
+    const cleanHostEnvs: string[] = [];
+    for (const item of parsed['hostCredentialEnvNames']) {
+      if (typeof item !== 'string' || !STAGED_COMMAND_ENV_NAME_PATTERN.test(item)) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack hostCredentialEnvNames is invalid');
+      }
+      cleanHostEnvs.push(item);
+    }
+    hostCredentialEnvNames = Object.freeze(cleanHostEnvs);
+  }
+  let hostGateCredentialEnvNames: readonly string[] | undefined;
+  if (parsed['hostGateCredentialEnvNames'] !== undefined) {
+    if (!Array.isArray(parsed['hostGateCredentialEnvNames'])) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack hostGateCredentialEnvNames must be an array');
+    }
+    const cleanGateEnvs: string[] = [];
+    for (const item of parsed['hostGateCredentialEnvNames']) {
+      if (typeof item !== 'string' || !STAGED_COMMAND_ENV_NAME_PATTERN.test(item)) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack hostGateCredentialEnvNames is invalid');
+      }
+      cleanGateEnvs.push(item);
+    }
+    hostGateCredentialEnvNames = Object.freeze(cleanGateEnvs);
+  }
+
   return {
     stageDir,
     configPath,
@@ -7511,6 +7551,8 @@ async function readAndValidateStagedTaskpackSecrets(
     ...(digests !== undefined ? { digests } : {}),
     ...(extractedConflictPaths !== undefined ? { extractedConflictPaths } : {}),
     ...(watchedPaths !== undefined ? { watchedPaths } : {}),
+    ...(hostCredentialEnvNames !== undefined ? { hostCredentialEnvNames } : {}),
+    ...(hostGateCredentialEnvNames !== undefined ? { hostGateCredentialEnvNames } : {}),
   };
 }
 
@@ -7664,6 +7706,48 @@ export async function stageTaskpackForStep(
     executionMode: 'delegated',
   });
 
+  const hostCredentialEnvs = collectHostCredentialEnvNames({
+    credentialEnvMap: options.credentialEnvMap,
+    gateEndpoints: options.gateEndpoints,
+  });
+  const hostGateCredentialEnvs = collectHostGateCredentialEnvNames({
+    credentialEnvMap: options.credentialEnvMap,
+    gateEndpoints: options.gateEndpoints,
+  });
+  const benchmarkEndpointIds = new Set<string>([
+    ...manifest.spec.verification.externalGates
+      .filter(gate => gate.implementation === 'benchmark-gate.v1')
+      .map(gate => gate.endpointId),
+    ...(options.gateEndpoints ?? [])
+      .filter(plan => plan.implementation === 'benchmark-gate.v1')
+      .map(plan => plan.id),
+  ]);
+  const byCredRef = options.credentialEnvMap?.byCredentialRef;
+  const lookupByRef = (ref: string): string | undefined =>
+    byCredRef !== undefined && Object.hasOwn(byCredRef, ref) ? byCredRef[ref] : undefined;
+  const shadowedBenchmarkEnvs = new Set<string>();
+  for (const plan of options.gateEndpoints ?? []) {
+    if (plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID || !benchmarkEndpointIds.has(plan.id)) continue;
+    const signEnv = lookupByRef(plan.signingCredentialRef) ?? options.credentialEnvMap?.gate;
+    if (signEnv !== undefined) shadowedBenchmarkEnvs.add(signEnv);
+    if (plan.authCredentialRef != null) {
+      const authEnv = lookupByRef(plan.authCredentialRef) ?? options.credentialEnvMap?.gateAuth;
+      if (authEnv !== undefined) shadowedBenchmarkEnvs.add(authEnv);
+    }
+  }
+  if (shadowedBenchmarkEnvs.has(DEFAULT_LOCAL_COMMAND_GATE_ENV)) {
+    throw new TaskpackError(
+      'TASKPACK_HOST_BINDING_INVALID',
+      `external gate credential env cannot reuse reserved local command gate env "${DEFAULT_LOCAL_COMMAND_GATE_ENV}"`,
+    );
+  }
+  for (const envName of hostCredentialEnvs) {
+    const val = runtimeEnv[envName];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      scrubber.register(val.trim());
+    }
+  }
+
   let preflightResult: RunTaskpackPreflightResult | undefined;
   let persistentCheckStagedDir: string | null = null;
   let persistentWorkspaceStagedDir: string | null = null;
@@ -7676,6 +7760,7 @@ export async function stageTaskpackForStep(
         authorized: true,
         hostPolicy,
         env: runtimeEnv,
+        excludedEnvNames: hostCredentialEnvs,
         scrubber,
         tempRoot: realRunRoot,
       });
@@ -7789,7 +7874,9 @@ export async function stageTaskpackForStep(
       stepAlignment?.conflictResource != null
       || stepAlignment?.disposition === 'unmerged_off'
     );
-    const gateEndpoints: HostGateEndpointPlan[] = [];
+    const gateEndpoints: HostGateEndpointPlan[] = [
+      ...(options.gateEndpoints ?? []).filter(plan => plan.id !== LOCAL_COMMAND_GATE_ENDPOINT_ID),
+    ];
     if (commandChecks.length > 0 || enableBaselineConflictGate) {
       let maxTimeoutSeconds = effectiveStepLimits.commandTimeoutSeconds ?? 30;
       for (const check of commandChecks) {
@@ -7857,6 +7944,7 @@ export async function stageTaskpackForStep(
       envLimits,
       gateEndpoints,
       credentialEnvMap: {
+        ...(options.credentialEnvMap ?? {}),
         localCommandGate: signingEnvName,
       },
       authorPrompt,
@@ -7870,38 +7958,19 @@ export async function stageTaskpackForStep(
       scrubber,
     });
 
+    const localCmdSigningRef = compiled.registry.spec.gateEndpoints.find(ep => ep.id === LOCAL_COMMAND_GATE_ENDPOINT_ID)?.signingCredentialRef;
+    const shadowedExternalCred = compiled.config.spec.credentials.find(
+      cred => cred.ref !== localCmdSigningRef && cred.template === `\${${signingEnvName}}`,
+    );
+    if (shadowedExternalCred !== undefined) {
+      throw new TaskpackError(
+        'TASKPACK_HOST_BINDING_INVALID',
+        `external gate credential "${shadowedExternalCred.ref}" cannot reuse reserved local command gate env "${signingEnvName}"`,
+      );
+    }
+
     const registryDirectory = join(stageDir, 'registry');
     const configDirectory = join(stageDir, 'config');
-    await mkdir(stageDir, { recursive: true, mode: 0o700 });
-    await chmod(stageDir, 0o700);
-    await assertOwnedPrivateDirectory(stageDir);
-    await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
-    await chmod(registryDirectory, 0o700);
-    await assertOwnedPrivateDirectory(registryDirectory);
-    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
-    await chmod(configDirectory, 0o700);
-    await assertOwnedPrivateDirectory(configDirectory);
-
-    const maxStagedWsBytes = Math.min(
-      OVERLAY_LIMITS.maxMaxBytes,
-      Math.max(PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES, manifest.spec.limits?.overlay?.maxBytes ?? 0),
-    );
-    if (preflightResult?.checkStagedDir !== undefined && preflightResult.checkStagedDir !== null) {
-      persistentCheckStagedDir = join(stageDir, 'preflight-staged');
-      await copyDirectoryTreeReadOnly(preflightResult.checkStagedDir, persistentCheckStagedDir, {
-        maxTotalBytes: maxStagedWsBytes,
-      });
-    }
-    if (
-      persistentWorkspaceStagedDir !== null
-      && preflightResult?.stagedDir !== undefined
-      && preflightResult.stagedDir !== null
-    ) {
-      await copyDirectoryTreeReadOnly(preflightResult.stagedDir, persistentWorkspaceStagedDir, {
-        maxTotalBytes: maxStagedWsBytes,
-      });
-    }
-
     const registryPath = join(registryDirectory, 'registry.yaml');
     const configPath = join(configDirectory, 'controller.yaml');
     const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
@@ -7909,15 +7978,13 @@ export async function stageTaskpackForStep(
     assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
     assertCleanArtifact(configBytes, scrubber, '/config');
     if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
-      await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
       for (const resource of compiled.instructionResources) {
         assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
       }
     }
 
-    await writeExclusiveFile(registryPath, compiled.registryBytes, 0o600);
-    await writeExclusiveFile(configPath, configBytes, 0o600);
-
+    const willStageCheckDir = preflightResult?.checkStagedDir !== undefined && preflightResult.checkStagedDir !== null;
+    const plannedCheckStagedDir = willStageCheckDir ? join(stageDir, 'preflight-staged') : null;
     const mcpServersMeta: readonly StepMcpServerMetadata[] = Object.freeze(
       (manifest.spec.mcp?.servers ?? []).map(srv => Object.freeze({
         id: srv.id,
@@ -7925,9 +7992,10 @@ export async function stageTaskpackForStep(
         toolNames: Object.freeze([] as readonly string[]),
       })),
     );
-
     const effectivePolicyProfile = compiled.policyProfile ?? policyProfile;
     const localCommandGates = compiled.localCommandGates ?? [];
+    const sortedHostCredentialEnvNames = [...hostCredentialEnvs].sort();
+    const sortedHostGateCredentialEnvNames = [...hostGateCredentialEnvs].sort();
     const secretsPayload = Buffer.from(
       `${JSON.stringify({
         version: 1,
@@ -7944,14 +8012,59 @@ export async function stageTaskpackForStep(
         ...(compiled.allowWorkflowWrites !== undefined ? { allowWorkflowWrites: compiled.allowWorkflowWrites } : {}),
         ...(compiled.roleMcpServers !== undefined ? { roleMcpServers: compiled.roleMcpServers } : {}),
         ...(mcpServersMeta.length > 0 ? { mcpServers: mcpServersMeta } : {}),
-        ...(persistentCheckStagedDir !== null ? { checkStagedDir: persistentCheckStagedDir } : {}),
+        ...(plannedCheckStagedDir !== null ? { checkStagedDir: plannedCheckStagedDir } : {}),
         ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
         ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
         ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
         ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
+        ...(sortedHostCredentialEnvNames.length > 0 ? { hostCredentialEnvNames: sortedHostCredentialEnvNames } : {}),
+        ...(sortedHostGateCredentialEnvNames.length > 0 ? { hostGateCredentialEnvNames: sortedHostGateCredentialEnvNames } : {}),
       }, null, 2)}\n`,
       'utf8',
     );
+    if (secretsPayload.byteLength > MAX_STAGED_SECRETS_BYTES) {
+      throw new TaskpackError(
+        'TASKPACK_HOST_BINDING_INVALID',
+        `staged taskpack metadata exceeds ${MAX_STAGED_SECRETS_BYTES} byte limit (${secretsPayload.byteLength} bytes)`,
+      );
+    }
+
+    await mkdir(stageDir, { recursive: true, mode: 0o700 });
+    await chmod(stageDir, 0o700);
+    await assertOwnedPrivateDirectory(stageDir);
+    await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+    await chmod(registryDirectory, 0o700);
+    await assertOwnedPrivateDirectory(registryDirectory);
+    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+    await chmod(configDirectory, 0o700);
+    await assertOwnedPrivateDirectory(configDirectory);
+
+    const maxStagedWsBytes = Math.min(
+      OVERLAY_LIMITS.maxMaxBytes,
+      Math.max(PREFLIGHT_MAX_WORKSPACE_RESOURCES_TOTAL_BYTES, manifest.spec.limits?.overlay?.maxBytes ?? 0),
+    );
+    if (plannedCheckStagedDir !== null && preflightResult?.checkStagedDir != null) {
+      persistentCheckStagedDir = plannedCheckStagedDir;
+      await copyDirectoryTreeReadOnly(preflightResult.checkStagedDir, persistentCheckStagedDir, {
+        maxTotalBytes: maxStagedWsBytes,
+      });
+    }
+    if (
+      persistentWorkspaceStagedDir !== null
+      && preflightResult?.stagedDir !== undefined
+      && preflightResult.stagedDir !== null
+    ) {
+      await copyDirectoryTreeReadOnly(preflightResult.stagedDir, persistentWorkspaceStagedDir, {
+        maxTotalBytes: maxStagedWsBytes,
+      });
+    }
+
+    if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+      await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+    }
+
+    await writeExclusiveFile(registryPath, compiled.registryBytes, 0o600);
+    await writeExclusiveFile(configPath, configBytes, 0o600);
     await writeExclusiveFile(secretsPath, secretsPayload, 0o600);
 
     return {
@@ -7972,6 +8085,8 @@ export async function stageTaskpackForStep(
       ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
       ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
       ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
+      ...(sortedHostCredentialEnvNames.length > 0 ? { hostCredentialEnvNames: Object.freeze(sortedHostCredentialEnvNames) } : {}),
+      ...(sortedHostGateCredentialEnvNames.length > 0 ? { hostGateCredentialEnvNames: Object.freeze(sortedHostGateCredentialEnvNames) } : {}),
     };
   } finally {
     await preflightResult?.cleanup().catch(() => undefined);
@@ -8018,10 +8133,17 @@ export async function openStagedTaskpackStepGate(
       ? staged.signingSecret
       : (Object.hasOwn(baseEnv, name) ? baseEnv[name] : undefined);
 
-  const readOnlyGitHubToken = baseEnv['INPUT_GITHUB-TOKEN']?.trim()
-    || baseEnv['GITHUB_TOKEN']?.trim()
-    || baseEnv['GH_TOKEN']?.trim()
-    || undefined;
+  const excludedGateEnvSet = new Set<string>(staged.hostGateCredentialEnvNames ?? []);
+  const readAllowedTokenEnv = (name: string): string | undefined => {
+    if (excludedGateEnvSet.has(name) || !Object.hasOwn(baseEnv, name)) {
+      return undefined;
+    }
+    const val = baseEnv[name];
+    return typeof val === 'string' && val.trim().length > 0 ? val.trim() : undefined;
+  };
+  const readOnlyGitHubToken = readAllowedTokenEnv('INPUT_GITHUB-TOKEN')
+    ?? readAllowedTokenEnv('GITHUB_TOKEN')
+    ?? readAllowedTokenEnv('GH_TOKEN');
   const stepScrubber = new SecretScrubber();
   stepScrubber.register(staged.signingSecret);
   if (readOnlyGitHubToken !== undefined) stepScrubber.register(readOnlyGitHubToken);
@@ -8031,6 +8153,7 @@ export async function openStagedTaskpackStepGate(
   const decisionApiKeyEnvs = Object.values(DECISION_PROVIDER_API_KEY_ENV).flat();
   const forbiddenEnvNames = new Set<string>([
     staged.signingEnvName,
+    ...(staged.hostCredentialEnvNames ?? []),
     ...Object.values(STANDARD_PI_PROVIDER_ENV),
     ...decisionApiKeyEnvs,
   ]);
@@ -8043,6 +8166,7 @@ export async function openStagedTaskpackStepGate(
     'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
     'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
     DEFAULT_LOCAL_COMMAND_GATE_ENV,
+    ...(staged.hostCredentialEnvNames ?? []),
     ...Object.values(STANDARD_PI_PROVIDER_ENV),
     ...decisionApiKeyEnvs,
   ]) {
@@ -8127,6 +8251,7 @@ export async function openStagedTaskpackStepGate(
         apiKey: options.decisionApiKey,
         scrubber: stepScrubber,
         hasPinnedRoles: (loadedManifest.spec.roles ?? []).length > 0,
+        excludedEnvNames: staged.hostGateCredentialEnvNames,
       });
     }
   } catch (error) {

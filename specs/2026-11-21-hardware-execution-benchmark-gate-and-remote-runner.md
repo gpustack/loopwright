@@ -328,7 +328,7 @@ Key conventions:
       Acceptance: `config.ts` loads bounded YAML/JSON via `@loopwright/taskpack` helpers; `queue.ts` enforces `(relayBootId, jobId, leaseEpoch, leaseToken)` fencing, `1,000ms` Relay clock drift guards, timer expiry sweeps, and single-owner `preemptionCount`; `relay-server.ts` serves controller `/v1/benchmark/jobs/*`, worker `/v1/runner/leases*`, SSE cancel watch, `1 MiB` CAS streaming, `409 QUEUE_LEASE_FENCED` stale-epoch rejection, and `<casDir>` receipt retention.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg hardware-runner`
 
-- [ ] **T4 · Taskpack and GitHub App host-owned `benchmark-gate.v1` compilation and memory projection**
+- [x] **T4 · Taskpack and GitHub App host-owned `benchmark-gate.v1` compilation and memory projection**
       Blocked by: T3
       Owns: `packages/taskpack/src/**`, `packages/taskpack/test/**`, `packages/github-app/src/turnkey-memory.ts`, `packages/github-app/test/turnkey-memory*.test.ts`
       Gate: review

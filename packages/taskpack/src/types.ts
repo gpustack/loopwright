@@ -1,5 +1,9 @@
 import type {
   Digest,
+  HardwareTargetSpec,
+  MetricBoundsRule,
+  MetricComparativeRule,
+  MetricThresholdRule,
   OverlayLimits,
   ResourceActivationPhase,
   ResourceActivationRule,
@@ -15,10 +19,15 @@ import type {
 } from '@loopwright/agent-pi';
 import type { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
 import type { ControllerConfiguration, RunEvalReport, TrustedRegistry } from '@loopwright/controller';
+import type { ParsedPiModelsJson } from './models-config.js';
 
 export type {
   ClockBasis,
   ClockSample,
+  HardwareTargetSpec,
+  MetricBoundsRule,
+  MetricComparativeRule,
+  MetricThresholdRule,
   PiCustomModelCompat,
   PiCustomProviderConfig,
   PiModelCost,
@@ -381,14 +390,22 @@ export interface TaskpackV2CheckDeclaration {
   readonly parameters?: Readonly<Record<string, TaskpackCheckParameterValue>> | undefined;
 }
 
+export type TaskpackExternalGateImplementation = 'gate.v1' | 'benchmark-gate.v1';
+
 export interface TaskpackExternalGateDeclaration {
   readonly id: string;
+  readonly implementation?: TaskpackExternalGateImplementation | undefined;
   readonly gateId: string;
   readonly endpointId: string;
   readonly required: boolean;
   readonly signingCredentialRef?: string | undefined;
   readonly authCredentialRef?: string | undefined;
   readonly url?: string | undefined;
+  readonly targetCellId?: string | undefined;
+  readonly heldOutWorkloadId?: string | undefined;
+  readonly maxPreemptions?: number | undefined;
+  readonly allowSyntheticHardwareProbe?: boolean | undefined;
+  readonly metricThresholds?: readonly MetricThresholdRule[] | undefined;
 }
 
 export type TaskpackRolePurpose = 'task' | 'review';
@@ -692,7 +709,12 @@ export interface SandboxedCommandResult {
 // Host-injected bindings and compiled output
 // ---------------------------------------------------------------------------
 
-export interface TargetMatrixCell { readonly id: string; readonly platform: string; readonly variant: string }
+export interface TargetMatrixCell {
+  readonly id: string;
+  readonly platform: string;
+  readonly variant: string;
+  readonly hardware?: HardwareTargetSpec | undefined;
+}
 
 export interface HostRoleSelection {
   readonly provider?: string | undefined;
@@ -716,6 +738,8 @@ export interface HostGateEndpointPlan {
   readonly url: string;
   readonly signingCredentialRef: string;
   readonly authCredentialRef?: string | null | undefined;
+  /** Trusted host endpoint classification; `'benchmark-gate.v1'` reserves endpoint and credentials regardless of manifest declarations. */
+  readonly implementation?: TaskpackExternalGateImplementation | undefined;
   readonly timeoutMs?: number | undefined;
   readonly maxPollMs?: number | undefined;
   readonly pollInitialMs?: number | undefined;
@@ -735,9 +759,14 @@ export interface HostPublicationEndpointPlan {
 export interface HostCredentialEnvMap {
   readonly provider?: string | undefined;
   readonly gate?: string | undefined;
+  readonly gateAuth?: string | undefined;
   readonly localCommandGate?: string | undefined;
   readonly publication?: string | undefined;
   readonly publicationAuth?: string | undefined;
+  /** Per-provider env mappings isolated from gate credential IDs and fixed slot names. */
+  readonly byProvider?: Readonly<Record<string, string | undefined>> | undefined;
+  /** Per-gate-credential-ID env mappings isolated from provider names and fixed slot names (such as `publication`). */
+  readonly byCredentialRef?: Readonly<Record<string, string | undefined>> | undefined;
 }
 
 export const LOCAL_COMMAND_GATE_ENDPOINT_ID = 'loopwright-local-command' as const;
@@ -798,6 +827,8 @@ export interface HostTaskpackBindings {
   readonly candidateIndex?: number | undefined;
   readonly allowManifestCustomBaseUrl?: boolean | undefined;
   readonly modelsJsonPath?: string | undefined;
+  /** Pre-loaded models.json snapshot so readiness probes and compilation use an identical immutable view. */
+  readonly modelsConfig?: ParsedPiModelsJson | undefined;
   readonly runtimeOptions?: HostRuntimeOptions | undefined;
   readonly budgets: TaskContract['spec']['budgets'];
   readonly limits?: TaskpackLimitsDeclaration | undefined;

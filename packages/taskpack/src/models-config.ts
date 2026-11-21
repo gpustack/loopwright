@@ -8,7 +8,7 @@ import { SecretScrubber } from './scrubber.js';
 import { readBoundedRegularFile } from './yaml.js';
 import {
   MAX_EXPANDED_MODEL_CANDIDATES, MAX_TASKPACK_MODEL_CANDIDATES, TASKPACK_MANIFEST_BYTES, TaskpackError,
-  type HostTaskpackBindings, type ModelCandidateProbeAttempt, type ModelCandidateSelectionResult,
+  type HostCredentialEnvMap, type HostTaskpackBindings, type ModelCandidateProbeAttempt, type ModelCandidateSelectionResult,
   type PiCustomModelCompat, type PiCustomProviderConfig, type PiModelCost, type PiModelSelection, type PiSamplingParams,
   type PiThinkingLevel, type PiWireApi, type ResolvedModelCandidate, type TaskpackManifest,
   type TaskpackModelDeclaration,
@@ -806,6 +806,28 @@ export interface ResolveModelCandidatesOptions {
   readonly scrubber?: SecretScrubber | undefined;
 }
 
+/** Shared provider credential env precedence used by both candidate resolution and implicit-author compilation. */
+export function resolveBoundProviderCredentialEnv(input: {
+  readonly provider: string;
+  readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
+  readonly explicitProviderTokenEnv?: string | undefined;
+  readonly modelsJsonApiKeyEnv?: string | undefined;
+  readonly manifestApiKeyEnv?: string | undefined;
+  readonly hasMultipleModels: boolean;
+  readonly hasPinnedCandidate: boolean;
+}): string | undefined {
+  const byProvider = input.credentialEnvMap?.byProvider;
+  const perProviderEnv = byProvider !== undefined && Object.hasOwn(byProvider, input.provider)
+    ? byProvider[input.provider]
+    : undefined;
+  if (perProviderEnv !== undefined) return perProviderEnv;
+  if (input.explicitProviderTokenEnv !== undefined) return input.explicitProviderTokenEnv;
+  if (input.hasMultipleModels && !input.hasPinnedCandidate) {
+    return input.modelsJsonApiKeyEnv ?? input.manifestApiKeyEnv ?? input.credentialEnvMap?.provider;
+  }
+  return input.credentialEnvMap?.provider ?? input.modelsJsonApiKeyEnv ?? input.manifestApiKeyEnv;
+}
+
 /**
  * Validate every declared entry in `manifest.spec.models` and expand comma-separated token pools
  * into an ordered list of `ResolvedModelCandidate` items.
@@ -815,14 +837,17 @@ export function resolveTaskpackModelCandidates(
   bindings: HostTaskpackBindings,
   options: ResolveModelCandidatesOptions = {},
 ): readonly ResolvedModelCandidate[] {
+  const effectiveModelsConfig = options.modelsConfig ?? bindings.modelsConfig;
   const manifestModels = manifest.spec.models;
   const manifestLimitsContextWindow = manifest.spec.limits?.contextWindow;
   const hostRole = bindings.roleSelection;
   const hostPinsProviderOrModel = hostRole?.provider !== undefined || hostRole?.model !== undefined;
+  const hasMultipleModels = (manifestModels?.length ?? 0) > 1;
+  const hasPinnedCandidate = hostPinsProviderOrModel || bindings.candidateIndex !== undefined;
 
   const validatedManifestEntries = manifestModels === undefined
     ? []
-    : manifestModels.map((entry, idx) => resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, false, manifestLimitsContextWindow));
+    : manifestModels.map((entry, idx) => resolveSingleModelEntry(entry, idx, bindings, effectiveModelsConfig, false, manifestLimitsContextWindow));
 
   let baseEntries: { readonly manifestIndex: number; readonly selection: PiModelSelection; readonly apiKeyEnv?: string }[];
   if (hostPinsProviderOrModel) {
@@ -834,27 +859,34 @@ export function resolveTaskpackModelCandidates(
       matchingIdx = manifestModels?.findIndex(m => m.provider === hostRole.provider) ?? -1;
     }
     const matchedEntry = matchingIdx >= 0 ? manifestModels![matchingIdx] : manifestModels?.[0];
-    const resolved = resolveSingleModelEntry(matchedEntry, Math.max(0, matchingIdx), bindings, options.modelsConfig, true, manifestLimitsContextWindow);
+    const resolved = resolveSingleModelEntry(matchedEntry, Math.max(0, matchingIdx), bindings, effectiveModelsConfig, true, manifestLimitsContextWindow);
     baseEntries = [{ manifestIndex: Math.max(0, matchingIdx), ...resolved }];
   } else if (manifestModels !== undefined && manifestModels.length > 0) {
     baseEntries = manifestModels.map((entry, idx) => {
       const resolved = hostRole !== undefined
-        ? resolveSingleModelEntry(entry, idx, bindings, options.modelsConfig, true, manifestLimitsContextWindow)
+        ? resolveSingleModelEntry(entry, idx, bindings, effectiveModelsConfig, true, manifestLimitsContextWindow)
         : validatedManifestEntries[idx]!;
       return { manifestIndex: idx, ...resolved };
     });
   } else {
-    const resolved = resolveSingleModelEntry(undefined, 0, bindings, options.modelsConfig, true, manifestLimitsContextWindow);
+    const resolved = resolveSingleModelEntry(undefined, 0, bindings, effectiveModelsConfig, true, manifestLimitsContextWindow);
     baseEntries = [{ manifestIndex: 0, ...resolved }];
   }
 
   const expanded: ResolvedModelCandidate[] = [];
   for (const base of baseEntries) {
-    const modelsJsonApiKeyEnv = options.modelsConfig?.providers.get(base.selection.provider)?.apiKeyEnv;
-    const sourceEnvName = resolveDefaultProviderTokenEnv(base.selection.provider, {
-      explicitEnv: options.explicitProviderTokenEnv,
+    const modelsJsonApiKeyEnv = effectiveModelsConfig?.providers.get(base.selection.provider)?.apiKeyEnv;
+    const boundEnv = resolveBoundProviderCredentialEnv({
+      provider: base.selection.provider,
+      credentialEnvMap: bindings.credentialEnvMap,
+      explicitProviderTokenEnv: options.explicitProviderTokenEnv,
       modelsJsonApiKeyEnv,
       manifestApiKeyEnv: base.apiKeyEnv,
+      hasMultipleModels,
+      hasPinnedCandidate,
+    });
+    const sourceEnvName = resolveDefaultProviderTokenEnv(base.selection.provider, {
+      explicitEnv: boundEnv,
       env: options.env,
     });
     const tokens = options.env === undefined
