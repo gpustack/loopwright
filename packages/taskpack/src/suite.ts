@@ -3178,6 +3178,9 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
           });
           return { ok: true, pr };
         }
+        if (options.allowOfflineStagePrCheck === true) {
+          return { ok: true, pr: null };
+        }
         if (effectiveRepoFullName !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(effectiveRepoFullName)) {
           const pr = await findOpenManagedPullRequest({
             repositoryFullName: effectiveRepoFullName,
@@ -3192,9 +3195,6 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
             timeoutMs,
           });
           return { ok: true, pr };
-        }
-        if (options.allowOfflineStagePrCheck === true) {
-          return { ok: true, pr: null };
         }
         return {
           ok: false,
