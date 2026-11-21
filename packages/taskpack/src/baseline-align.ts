@@ -1904,15 +1904,30 @@ export async function alignBaselineRevisions(
   }
 }
 
-async function readCandidateFileVerifiedBytes(file: InspectedCandidateFile): Promise<{
+async function readCandidateFileVerifiedBytes(
+  file: InspectedCandidateFile,
+  maxBytes: number = MAX_CARRY_BLOB_BYTES,
+): Promise<{
   readonly bytes: Buffer;
   readonly sha256: string;
 }> {
   if (file.kind === 'inline') {
+    if (file.bytes.byteLength > maxBytes) {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        `candidate file "${file.name}" (${file.bytes.byteLength} bytes) exceeds reconciliation ceiling (${maxBytes} bytes)`,
+      );
+    }
     return {
       bytes: file.bytes,
       sha256: createHash('sha256').update(file.bytes).digest('hex'),
     };
+  }
+  if (file.byteLength > maxBytes) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `CAS blob for "${file.name}" (${file.byteLength} bytes) exceeds reconciliation ceiling (${maxBytes} bytes)`,
+    );
   }
   const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
   const before = await lstat(file.canonicalBlobPath);
@@ -1925,17 +1940,14 @@ async function readCandidateFileVerifiedBytes(file: InspectedCandidateFile): Pro
     if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== before.dev || stat.ino !== before.ino || stat.size !== file.byteLength) {
       throw new TaskpackError('ACTION_INPUT_INVALID', `CAS blob for "${file.name}" changed identity before conflict check`);
     }
-    const chunks: Buffer[] = [];
+    const bytes = Buffer.allocUnsafe(file.byteLength);
     const hash = createHash('sha256');
-    const buf = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, file.byteLength)));
     let offset = 0;
     while (offset < file.byteLength) {
-      const toRead = Math.min(buf.byteLength, file.byteLength - offset);
-      const { bytesRead } = await handle.read(buf, 0, toRead, offset);
+      const toRead = Math.min(STREAM_CHUNK_BYTES, file.byteLength - offset);
+      const { bytesRead } = await handle.read(bytes, offset, toRead, offset);
       if (bytesRead <= 0) break;
-      const slice = Buffer.from(buf.subarray(0, bytesRead));
-      hash.update(slice);
-      chunks.push(slice);
+      hash.update(bytes.subarray(offset, offset + bytesRead));
       offset += bytesRead;
     }
     const sha256 = hash.digest('hex');
@@ -1943,7 +1955,7 @@ async function readCandidateFileVerifiedBytes(file: InspectedCandidateFile): Pro
       throw new TaskpackError('ACTION_INPUT_INVALID', `CAS blob for "${file.name}" failed SHA-256 verification`);
     }
     return {
-      bytes: Buffer.concat(chunks),
+      bytes,
       sha256,
     };
   } finally {

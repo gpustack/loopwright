@@ -431,21 +431,68 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     reconcileRequired: boolean;
   }
 
+  interface ActiveRevocationWatch {
+    revoked: boolean;
+  }
+
   const MAX_TOTAL_TRACKED_DELIVERY_LINKS = MAX_TRACKED_FANOUT_DELIVERIES * 4;
   const enqueuedByDeliveryDomain = new Map<string, EnqueuedDomainRecord>();
   const fanoutDeliveriesById = new Map<string, TrackedFanoutDelivery>();
   const deliveryIdsByQueueItemId = new Map<string, Set<string>>();
-  const installationRevocationGen = new Map<number, number>();
-  const repoRevocationGen = new Map<string, number>();
+  const activeInstRevocationWatches = new Map<number, Set<ActiveRevocationWatch>>();
+  const activeRepoRevocationWatches = new Map<string, Set<ActiveRevocationWatch>>();
   let totalTrackedDeliveryLinks = 0;
+
+  const beginRevocationWatch = (
+    installationId: number,
+    repositoryId: number,
+  ): { readonly watch: ActiveRevocationWatch; readonly release: () => void } => {
+    const watch: ActiveRevocationWatch = { revoked: false };
+    let instSet = activeInstRevocationWatches.get(installationId);
+    if (instSet === undefined) {
+      instSet = new Set<ActiveRevocationWatch>();
+      activeInstRevocationWatches.set(installationId, instSet);
+    }
+    instSet.add(watch);
+    const repoKey = `${installationId}:${repositoryId}`;
+    let repoSet = activeRepoRevocationWatches.get(repoKey);
+    if (repoSet === undefined) {
+      repoSet = new Set<ActiveRevocationWatch>();
+      activeRepoRevocationWatches.set(repoKey, repoSet);
+    }
+    repoSet.add(watch);
+    let released = false;
+    return {
+      watch,
+      release: () => {
+        if (released) return;
+        released = true;
+        const curInst = activeInstRevocationWatches.get(installationId);
+        if (curInst !== undefined) {
+          curInst.delete(watch);
+          if (curInst.size === 0) activeInstRevocationWatches.delete(installationId);
+        }
+        const curRepo = activeRepoRevocationWatches.get(repoKey);
+        if (curRepo !== undefined) {
+          curRepo.delete(watch);
+          if (curRepo.size === 0) activeRepoRevocationWatches.delete(repoKey);
+        }
+      },
+    };
+  };
 
   const bumpRevocationGeneration = (installationId: number, repositoryIds: readonly number[]): void => {
     if (repositoryIds.length === 0) {
-      installationRevocationGen.set(installationId, (installationRevocationGen.get(installationId) ?? 0) + 1);
+      const instWatches = activeInstRevocationWatches.get(installationId);
+      if (instWatches !== undefined) {
+        for (const watch of instWatches) watch.revoked = true;
+      }
     } else {
       for (const repoId of repositoryIds) {
-        const key = `${installationId}:${repoId}`;
-        repoRevocationGen.set(key, (repoRevocationGen.get(key) ?? 0) + 1);
+        const repoWatches = activeRepoRevocationWatches.get(`${installationId}:${repoId}`);
+        if (repoWatches !== undefined) {
+          for (const watch of repoWatches) watch.revoked = true;
+        }
       }
     }
   };
@@ -885,9 +932,9 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     }
 
     const entry = delivery.entry;
-    const startInstRevocationGen = installationRevocationGen.get(installationId) ?? 0;
-    const startRepoRevocationGen = repoRevocationGen.get(`${installationId}:${repository.id}`) ?? 0;
-    let matchedDomains: LoadedTaskpackSuiteDomain[];
+    const admissionWatch = beginRevocationWatch(installationId, repository.id);
+    try {
+      let matchedDomains: LoadedTaskpackSuiteDomain[];
     let action: 'discover' | 'revise' | 'status' = 'discover';
     let verifiedPrHeadSha: string | undefined;
     let verifiedPrBaseSha: string | undefined;
@@ -1340,120 +1387,160 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       }
     }
 
-    if (
-      (installationRevocationGen.get(installationId) ?? 0) !== startInstRevocationGen
-      || (repoRevocationGen.get(`${installationId}:${repository.id}`) ?? 0) !== startRepoRevocationGen
-    ) {
-      deliveryStore.markDeliveryState(entry.deliveryId, 'succeeded');
-      return respond(response, 200, {
-        kind: 'ignored',
-        reason: 'installation_revoked_during_admission',
-      });
-    }
-
-    deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
-    try {
-      const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
-      const kind = action === 'revise' ? 'revise' : action === 'status' ? 'status' : 'discover';
-      const reviseBinding = kind === 'revise' ? readReviseBinding(rawBytes, verifiedPrHeadSha) : null;
-      const admitted: Array<{
-        readonly domainId: string;
-        readonly taskpackId: string;
-        readonly manifestDigest: string;
-        readonly queueItemId: string;
-        readonly runId: string;
-        readonly coalesced: boolean;
-      }> = [];
-
-      for (const domain of matchedDomains) {
-        const domainRec = registry.byDomainId.get(domain.id)!;
-        const tenant: TenantIdentity = {
-          installationId,
-          repositoryId: repository.id,
-          repositoryFullName: repository.fullName,
-          taskpackId: domain.manifest.metadata.name,
-        };
-        const dedupKey = `${entry.deliveryId}\0${domain.id}`;
-        let enqueuedRecord = enqueuedByDeliveryDomain.get(dedupKey);
-        if (enqueuedRecord !== undefined && delivery.kind === 'retry_failed') {
-          const liveItem = queue.getItem(tenant, enqueuedRecord.item.queueItemId);
-          const isReconcileLocked = enqueuedRecord.reconcileRequired || liveItem?.state === 'reconcile_required';
-          if (
-            !isReconcileLocked
-            && (
-              liveItem === null
-              || liveItem.state === 'failed'
-              || liveItem.state === 'blocked'
-              || liveItem.state === 'cancelled'
-            )
-          ) {
-            enqueuedByDeliveryDomain.delete(dedupKey);
-            enqueuedRecord = undefined;
-          }
-        }
-        if (enqueuedRecord === undefined) {
-          reserveDeliveryLinkCapacity(1);
-          const outcome = queue.enqueue(tenant, {
-            kind,
-            baseRevision: baseShaByDomain.get(domain.id)!,
-            deliveryId: entry.deliveryId,
-            payloadDigest: entry.payloadDigest,
-            domainId: domain.id,
-            manifestDigest: domainRec.manifestDigest,
-            ...(kind === 'revise'
-              ? {
-                command: reviseBinding ?? {
-                  commandId: 0,
-                  headSha: verifiedPrHeadSha ?? tenant.repositoryFullName,
-                  commandDigest: entry.payloadDigest,
-                },
-              }
-              : {}),
-          });
-          enqueuedRecord = { item: outcome.item, coalesced: outcome.kind === 'coalesced', reconcileRequired: false };
-          enqueuedByDeliveryDomain.set(dedupKey, enqueuedRecord);
-          queueSummary.enqueued += outcome.kind === 'coalesced' ? 0 : 1;
-          queueSummary.coalesced += outcome.kind === 'coalesced' ? 1 : 0;
-          trackedDelivery.entriesByDomain.set(domain.id, {
-            tenant,
-            domainId: domain.id,
-            queueItemId: outcome.item.queueItemId,
-          });
-          trackQueueItemDelivery(outcome.item.queueItemId, entry.deliveryId);
-        }
-        admitted.push({
-          domainId: domain.id,
-          taskpackId: domain.manifest.metadata.name,
-          manifestDigest: domainRec.manifestDigest,
-          queueItemId: enqueuedRecord.item.queueItemId,
-          runId: enqueuedRecord.item.runId,
-          coalesced: enqueuedRecord.coalesced,
+      if (admissionWatch.watch.revoked) {
+        deliveryStore.markDeliveryState(entry.deliveryId, 'succeeded');
+        return respond(response, 200, {
+          kind: 'ignored',
+          reason: 'installation_revoked_during_admission',
         });
       }
 
-      return respond(response, 202, {
-        kind: 'accepted',
-        action,
-        suiteName: suite.manifest.metadata.name,
-        domains: admitted,
-        ...(deferredCellsOut.length > 0 ? { deferredDomains: deferredCellsOut } : {}),
-        queueItemId: admitted[0]!.queueItemId,
-        runId: admitted[0]!.runId,
-        coalesced: admitted.every(a => a.coalesced),
-        attemptCount: entry.attemptCount,
-      });
-    } catch (error) {
-      const failedTracker = fanoutDeliveriesById.get(entry.deliveryId);
-      if (failedTracker !== undefined && failedTracker.entriesByDomain.size === 0) {
-        fanoutDeliveriesById.delete(entry.deliveryId);
-      }
-      if (error !== null && typeof error === 'object' && 'code' in error) {
-        if (WEBHOOK_DELIVERY_ID_TEST.test(entry.deliveryId)) {
-          deliveryStore.markDeliveryState(entry.deliveryId, 'failed', String((error as { code: unknown }).code));
+      deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
+      try {
+        const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
+        const kind = action === 'revise' ? 'revise' : action === 'status' ? 'status' : 'discover';
+        const reviseBinding = kind === 'revise' ? readReviseBinding(rawBytes, verifiedPrHeadSha) : null;
+        const admitted: Array<{
+          readonly domainId: string;
+          readonly taskpackId: string;
+          readonly manifestDigest: string;
+          readonly queueItemId: string;
+          readonly runId: string;
+          readonly coalesced: boolean;
+        }> = [];
+
+        for (const domain of matchedDomains) {
+          const domainRec = registry.byDomainId.get(domain.id)!;
+          const tenant: TenantIdentity = {
+            installationId,
+            repositoryId: repository.id,
+            repositoryFullName: repository.fullName,
+            taskpackId: domain.manifest.metadata.name,
+          };
+          const dedupKey = `${entry.deliveryId}\0${domain.id}`;
+          let enqueuedRecord = enqueuedByDeliveryDomain.get(dedupKey);
+          if (enqueuedRecord !== undefined && delivery.kind === 'retry_failed') {
+            const liveItem = queue.getItem(tenant, enqueuedRecord.item.queueItemId);
+            const isReconcileLocked = enqueuedRecord.reconcileRequired || liveItem?.state === 'reconcile_required';
+            if (
+              !isReconcileLocked
+              && (
+                liveItem === null
+                || liveItem.state === 'failed'
+                || liveItem.state === 'blocked'
+                || liveItem.state === 'cancelled'
+              )
+            ) {
+              enqueuedByDeliveryDomain.delete(dedupKey);
+              enqueuedRecord = undefined;
+            }
+          }
+          if (enqueuedRecord === undefined) {
+            reserveDeliveryLinkCapacity(1);
+            const outcome = queue.enqueue(tenant, {
+              kind,
+              baseRevision: baseShaByDomain.get(domain.id)!,
+              deliveryId: entry.deliveryId,
+              payloadDigest: entry.payloadDigest,
+              domainId: domain.id,
+              manifestDigest: domainRec.manifestDigest,
+              ...(kind === 'revise'
+                ? {
+                  command: reviseBinding ?? {
+                    commandId: 0,
+                    headSha: verifiedPrHeadSha ?? tenant.repositoryFullName,
+                    commandDigest: entry.payloadDigest,
+                  },
+                }
+                : {}),
+            });
+            enqueuedRecord = { item: outcome.item, coalesced: outcome.kind === 'coalesced', reconcileRequired: false };
+            enqueuedByDeliveryDomain.set(dedupKey, enqueuedRecord);
+            queueSummary.enqueued += outcome.kind === 'coalesced' ? 0 : 1;
+            queueSummary.coalesced += outcome.kind === 'coalesced' ? 1 : 0;
+            trackedDelivery.entriesByDomain.set(domain.id, {
+              tenant,
+              domainId: domain.id,
+              queueItemId: outcome.item.queueItemId,
+            });
+            trackQueueItemDelivery(outcome.item.queueItemId, entry.deliveryId);
+          }
+          admitted.push({
+            domainId: domain.id,
+            taskpackId: domain.manifest.metadata.name,
+            manifestDigest: domainRec.manifestDigest,
+            queueItemId: enqueuedRecord.item.queueItemId,
+            runId: enqueuedRecord.item.runId,
+            coalesced: enqueuedRecord.coalesced,
+          });
         }
-        return respondError(response, error);
+
+        // Recompute live delivery state after admission (critical on retry_failed when a previously
+        // failed sibling domain is now deferred and only already-completed domains matched).
+        let hasActiveWork = false;
+        let hasUnadmittedOrFailed = deferredCellsOut.length > 0;
+        let firstFailureReason: string | null = deferredCellsOut.length > 0 ? 'stage_not_ready' : null;
+        for (const expectedDomainId of trackedDelivery.expectedDomains) {
+          const fEntry = trackedDelivery.entriesByDomain.get(expectedDomainId);
+          if (fEntry === undefined) {
+            hasUnadmittedOrFailed = true;
+            firstFailureReason ??= 'partial_fanout';
+            continue;
+          }
+          const fState = queue.getItem(fEntry.tenant, fEntry.queueItemId)?.state;
+          if (fState === undefined) {
+            hasUnadmittedOrFailed = true;
+            firstFailureReason ??= 'partial_fanout';
+            continue;
+          }
+          if (fState === 'pending' || fState === 'leased') {
+            hasActiveWork = true;
+          } else if (fState !== 'completed' && fState !== 'cancelled' && fState !== 'reconcile_required') {
+            hasUnadmittedOrFailed = true;
+            firstFailureReason ??= fState;
+          }
+        }
+        if (!hasActiveWork) {
+          if (hasUnadmittedOrFailed) {
+            // Preserve completed receipts while leaving delivery retryable for deferred/failed siblings.
+            deliveryStore.markDeliveryState(entry.deliveryId, 'failed', firstFailureReason ?? 'partial_fanout');
+            return respond(response, 200, {
+              kind: 'deferred',
+              reason: firstFailureReason ?? 'stage_not_ready',
+              ...(deferredCellsOut.length > 0 ? { deferredDomains: deferredCellsOut } : {}),
+              domains: admitted,
+            });
+          }
+          deliveryStore.markDeliveryState(entry.deliveryId, 'succeeded');
+          evictDeliveryTracking(entry.deliveryId);
+        }
+
+        return respond(response, 202, {
+          kind: 'accepted',
+          action,
+          suiteName: suite.manifest.metadata.name,
+          domains: admitted,
+          ...(deferredCellsOut.length > 0 ? { deferredDomains: deferredCellsOut } : {}),
+          queueItemId: admitted[0]!.queueItemId,
+          runId: admitted[0]!.runId,
+          coalesced: admitted.every(a => a.coalesced),
+          attemptCount: entry.attemptCount,
+        });
+      } catch (error) {
+        const failedTracker = fanoutDeliveriesById.get(entry.deliveryId);
+        if (failedTracker !== undefined && failedTracker.entriesByDomain.size === 0) {
+          fanoutDeliveriesById.delete(entry.deliveryId);
+        }
+        if (error !== null && typeof error === 'object' && 'code' in error) {
+          if (WEBHOOK_DELIVERY_ID_TEST.test(entry.deliveryId)) {
+            deliveryStore.markDeliveryState(entry.deliveryId, 'failed', String((error as { code: unknown }).code));
+          }
+          return respondError(response, error);
+        }
+        throw error;
       }
-      throw error;
+    } finally {
+      admissionWatch.release();
     }
   };
 
@@ -1676,10 +1763,26 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           }
           const grant = queue.leaseNext(tenant, workerId, nowSample);
           if (grant === null) return respond(response, 200, { item: null });
+          const leaseWatch = beginRevocationWatch(tenant.installationId, tenant.repositoryId);
+          let token;
+          try {
+            token = await options.tokenBroker.mint(tenant, 'read_only');
+            if (leaseWatch.watch.revoked) {
+              options.tokenBroker.revokeRepositoryTokens(tenant.installationId, [tenant.repositoryId]);
+              throw new GitHubAppError(
+                'TENANT_INSTALLATION_REVOKED',
+                `lease on ${grant.queueItemId} was revoked while minting installation credentials`,
+              );
+            }
+          } finally {
+            leaseWatch.release();
+          }
+          const postMintSample = isClockSample(parsed.body['nowSample']) ? nowSample : systemSample();
+          const item = queue.assertActiveLease(tenant, grant.queueItemId, grant.leaseEpoch, workerId, postMintSample);
           queueSummary.leased += 1;
-          const token = await options.tokenBroker.mint(tenant, 'read_only');
-          const item = queue.inspectTenantQueue(tenant).items.find(candidate => candidate.queueItemId === grant.queueItemId);
-          if (item !== undefined && item.deliveryId !== null) deliveryStore.markDeliveryState(item.deliveryId, 'processing');
+          if (item.deliveryId !== null && deliveryStore.getDelivery(item.deliveryId)?.state !== 'succeeded') {
+            deliveryStore.markDeliveryState(item.deliveryId, 'processing');
+          }
           const tokenMarker = `lw-token-${randomBytes(8).toString('hex')}`;
           const leaseOut = suiteDomainRecord !== undefined
             ? {

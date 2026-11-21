@@ -144,14 +144,22 @@ export class TenantAdmissionQueue {
     return count;
   }
 
+  #expireToReconcileRequired(item: QueueItem): void {
+    const wasLeased = item.state === 'leased';
+    item.state = 'reconcile_required';
+    item.reconcileEffect = 'reconcile_required';
+    item.lease = null;
+    if (wasLeased) {
+      this.#onLeaseExpired?.(copyItem(item));
+    }
+  }
+
   /** Transition leases whose monotonic expiry passed; expired items enter reconcile_required. */
   #sweepExpired(now: ClockSample): void {
     const nowMono = monotonic(now.monotonicMs);
     for (const item of this.#items.values()) {
       if (item.state === 'leased' && item.lease !== null && nowMono >= monotonic(item.lease.notAfterMonotonicMs)) {
-        item.state = 'reconcile_required';
-        item.reconcileEffect = 'reconcile_required';
-        this.#onLeaseExpired?.(copyItem(item));
+        this.#expireToReconcileRequired(item);
       }
     }
   }
@@ -283,6 +291,11 @@ export class TenantAdmissionQueue {
     return copyItem(item);
   }
 
+  /** Revalidate that an existing lease grant is still active, unrevoked, and unexpired. */
+  assertActiveLease(tenant: TenantIdentity, queueItemId: string, leaseEpoch: number, workerId: string, nowSample: ClockSample): QueueItem {
+    return copyItem(this.#requireActiveLease(tenant, queueItemId, leaseEpoch, workerId, nowSample));
+  }
+
   reconcileExpiredLease(tenant: TenantIdentity, queueItemId: string, effect: ExpiredLeaseEffect, nowSample: ClockSample): QueueItem {
     const item = this.#requireItem(tenant, queueItemId);
     const now = validateSample(nowSample, 'reconcile clock sample');
@@ -291,9 +304,13 @@ export class TenantAdmissionQueue {
     }
     const expired = item.lease !== null && monotonic(now.monotonicMs) >= monotonic(item.lease.notAfterMonotonicMs);
     if (item.state === 'reconcile_required' || (item.state === 'leased' && expired)) {
-      item.state = effect === 'not_executed' ? 'pending' : 'reconcile_required';
-      item.reconcileEffect = effect;
-      item.lease = null;
+      if (effect === 'reconcile_required') {
+        this.#expireToReconcileRequired(item);
+      } else {
+        item.state = 'pending';
+        item.reconcileEffect = effect;
+        item.lease = null;
+      }
       return copyItem(item);
     }
     queueError('QUEUE_STATE_INVALID', `queue item ${queueItemId} has no expired lease to reconcile`);

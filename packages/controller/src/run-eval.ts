@@ -11,7 +11,7 @@ import { inside, streamRegularFile } from './files.js';
 import { parsePrivateJson } from './parser.js';
 import { phaseCheckpointId, type ProgressHead, type journal } from './progress.js';
 import { sanitizeReportText } from './report.js';
-import { checkedRef, freeze, isRecord, same } from './schema.js';
+import { checkedRef, freeze, isRecord } from './schema.js';
 import { compareUtf16 } from './source.js';
 import { streamVerifiedCasBlob, type ArtifactReader } from './storage.js';
 import type { CompiledPlan, ControllerAttempt } from './types.js';
@@ -345,7 +345,15 @@ class BoundedArtifactReader {
         );
         const bytes = new Uint8Array(Buffer.concat(chunks));
         const actual = digestArtifact(ref.name, bytes);
-        if (!actual.ok || !same(actual.value, ref)) return null;
+        if (
+          !actual.ok
+          || actual.value.name !== ref.name
+          || actual.value.byteLength !== ref.byteLength
+          || actual.value.digest.algorithm !== ref.digest.algorithm
+          || actual.value.digest.hex !== ref.digest.hex
+        ) {
+          return null;
+        }
         return bytes;
       } catch {
         return null;
@@ -358,7 +366,15 @@ class BoundedArtifactReader {
         this.#debitConsumed(bytes.byteLength);
         if (bytes.byteLength > effectiveCap) return null;
         const actual = digestArtifact(ref.name, bytes);
-        if (!actual.ok || !same(actual.value, ref)) return null;
+        if (
+          !actual.ok
+          || actual.value.name !== ref.name
+          || actual.value.byteLength !== ref.byteLength
+          || actual.value.digest.algorithm !== ref.digest.algorithm
+          || actual.value.digest.hex !== ref.digest.hex
+        ) {
+          return null;
+        }
         return bytes;
       } catch {
         return null;
@@ -808,13 +824,22 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
   // 4. Verifier outputs across generations -> ping-pong check oscillations, repeats, failingCheckDelta, check elapsedMs.
   interface GenerationChecks {
     evaluatedCount: number;
+    unresolvedUnreadCount: number;
     readonly failedItems: { readonly checkId: string; readonly reason: string }[];
+    readonly failedEvidenceDigests: Set<string>;
+    readonly unreadEvidenceDigests: Set<string>;
   }
   const byGeneration = new Map<number, GenerationChecks>();
   const ensureGeneration = (gen: number): GenerationChecks => {
     let entry = byGeneration.get(gen);
     if (entry === undefined) {
-      entry = { evaluatedCount: 0, failedItems: [] };
+      entry = {
+        evaluatedCount: 0,
+        unresolvedUnreadCount: 0,
+        failedItems: [],
+        failedEvidenceDigests: new Set<string>(),
+        unreadEvidenceDigests: new Set<string>(),
+      };
       byGeneration.set(gen, entry);
     }
     return entry;
@@ -835,8 +860,13 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
       }
     }
     if (row.output === null) continue;
+    const genEntry = ensureGeneration(row.generation);
     const parsed = await reader.readJson(row.output, RUN_EVAL_ARTIFACT_MAX_BYTES);
-    if (!parsed.ok || !isRecord(parsed.value)) continue;
+    if (!parsed.ok || !isRecord(parsed.value)) {
+      genEntry.unresolvedUnreadCount += 1;
+      genEntry.unreadEvidenceDigests.add(row.output.digest.hex);
+      continue;
+    }
     const response = own(parsed.value, 'response');
     const disposition = own(parsed.value, 'disposition');
     const binding = own(parsed.value, 'binding');
@@ -850,8 +880,11 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
     const reasonValue =
       (isRecord(response) ? ownString(response, 'reason') : null) ??
       (isRecord(disposition) ? ownString(disposition, 'reason') : null);
-    if (statusValue === null) continue;
-    const genEntry = ensureGeneration(row.generation);
+    if (statusValue === null) {
+      genEntry.unresolvedUnreadCount += 1;
+      genEntry.unreadEvidenceDigests.add(row.output.digest.hex);
+      continue;
+    }
     genEntry.evaluatedCount += 1;
     if (statusValue === 'failed') {
       genEntry.failedItems.push({
@@ -859,6 +892,7 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
         reason: clean(reasonValue ?? 'failed'),
       });
       const evHex = row.output.digest.hex;
+      genEntry.failedEvidenceDigests.add(evHex);
       failedReceiptCountsByEvidence.set(evHex, (failedReceiptCountsByEvidence.get(evHex) ?? 0) + 1);
     }
   }
@@ -866,17 +900,25 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
   let fallbackExtraRepeats = 0;
   for (const failure of head?.progress.failures ?? []) {
     const genEntry = ensureGeneration(failure.generation);
-    if (genEntry.evaluatedCount === 0 && genEntry.failedItems.length === 0) {
+    const evHex = failure.evidence?.digest.hex ?? null;
+    const matchedInGen = evHex !== null && genEntry.failedEvidenceDigests.has(evHex);
+    if (!matchedInGen) {
       genEntry.evaluatedCount += 1;
       genEntry.failedItems.push({
         checkId: 'failure',
         reason: failure.signature.hex.slice(0, 12),
       });
+      if (evHex !== null) {
+        genEntry.failedEvidenceDigests.add(evHex);
+        if (genEntry.unreadEvidenceDigests.delete(evHex)) {
+          genEntry.unresolvedUnreadCount = Math.max(0, genEntry.unresolvedUnreadCount - 1);
+        }
+      }
       if (failure.count > 1) {
         fallbackExtraRepeats += failure.count - 1;
       }
-    } else if (failure.count > 1 && failure.evidence !== null) {
-      const matchedReceipts = failedReceiptCountsByEvidence.get(failure.evidence.digest.hex) ?? 0;
+    } else if (failure.count > 1 && evHex !== null) {
+      const matchedReceipts = failedReceiptCountsByEvidence.get(evHex) ?? 0;
       if (matchedReceipts > 0 && failure.count > matchedReceipts) {
         fallbackExtraRepeats += failure.count - matchedReceipts;
       }
@@ -942,12 +984,17 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
   };
 
   // 7. Repair convergence metrics.
-  const evaluatedGenerations = sortedGenerations.filter(([, info]) => info.evaluatedCount > 0);
+  const evaluatedGenerations = sortedGenerations.filter(([, info]) => info.evaluatedCount > 0 || info.unresolvedUnreadCount > 0);
   const firstFailingGen = evaluatedGenerations.find(([, info]) => info.failedItems.length > 0);
   const lastEvaluatedGen = evaluatedGenerations.at(-1);
-  const initialFailingChecks = firstFailingGen !== undefined ? firstFailingGen[1].failedItems.length : null;
+  const initialFailingChecks =
+    firstFailingGen !== undefined && firstFailingGen[1].unresolvedUnreadCount === 0
+      ? firstFailingGen[1].failedItems.length
+      : null;
   const finalFailingChecks =
-    firstFailingGen !== undefined && lastEvaluatedGen !== undefined ? lastEvaluatedGen[1].failedItems.length : null;
+    firstFailingGen !== undefined && lastEvaluatedGen !== undefined && lastEvaluatedGen[1].unresolvedUnreadCount === 0
+      ? lastEvaluatedGen[1].failedItems.length
+      : null;
   const failingCheckDelta =
     initialFailingChecks !== null && finalFailingChecks !== null ? finalFailingChecks - initialFailingChecks : null;
 

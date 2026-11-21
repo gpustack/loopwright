@@ -83,9 +83,22 @@ function validateMaxBytesOption(
 }
 
 function stripOptionalClosingHashes(raw: string): string {
-  const trimmed = raw.replace(/[ \t]+$/, '');
-  if (/^#+$/.test(trimmed)) return '';
-  return trimmed.replace(/[ \t]+#+$/, '').trim();
+  let end = raw.length;
+  while (end > 0 && (raw.charCodeAt(end - 1) === 0x20 || raw.charCodeAt(end - 1) === 0x09)) {
+    end -= 1;
+  }
+  let hashStart = end;
+  while (hashStart > 0 && raw.charCodeAt(hashStart - 1) === 0x23) {
+    hashStart -= 1;
+  }
+  if (hashStart === 0) return '';
+  if (hashStart < end && (raw.charCodeAt(hashStart - 1) === 0x20 || raw.charCodeAt(hashStart - 1) === 0x09)) {
+    end = hashStart;
+    while (end > 0 && (raw.charCodeAt(end - 1) === 0x20 || raw.charCodeAt(end - 1) === 0x09)) {
+      end -= 1;
+    }
+  }
+  return raw.slice(0, end).trim();
 }
 
 function finalizeExtractedSection(sectionText: string, sourceSha256: string, maxBytes: number): ExtractedSection {
