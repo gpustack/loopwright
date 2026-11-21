@@ -321,7 +321,7 @@ Key conventions:
       Acceptance: `compile.ts` enforces bidirectional `hardware_execution` <-> `benchmark-gate.v1` binding; `benchmark-gate.ts` stages candidate CAS blobs, verifies HMAC verdicts, pulls `.loopwright-verifier/<slotId>/*` blobs (`O_NOFOLLOW`, `nlink === 1`, `0o400`, `SecretScrubber` binary reject), maps threshold misses to `failed` and `BENCHMARK_PREEMPTED` to `blocked` (zero `implementationRepair`/`onRework`), and preserves crash recovery, `refusal-record.ts`, and `loopwright reconcile` parity within `D <= 256` checkpoints.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg controller`
 
-- [ ] **T5 · Hardware-runner config, Relay-authoritative pull-lease queue, and HTTP/CAS relay server**
+- [x] **T5 · Hardware-runner config, Relay-authoritative pull-lease queue, and HTTP/CAS relay server**
       Blocked by: T2
       Owns: `packages/hardware-runner/src/types.ts`, `packages/hardware-runner/src/config.ts`, `packages/hardware-runner/src/queue.ts`, `packages/hardware-runner/src/relay-server.ts`, `packages/hardware-runner/test/config.test.ts`, `packages/hardware-runner/test/queue.test.ts`, `packages/hardware-runner/test/relay-server.test.ts`
       Gate: review
