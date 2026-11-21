@@ -415,7 +415,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `controller.ts` and `step.ts` filter `when` rules and extract ATX Markdown (`## C#`-safe) and JSON-pointer handoffs from `fromStep`'s epoch snapshot. `role_pre` persists `activatedResourceIds` and CAS `handoffExtracts` (`<= 64` `contextFiles`), preserving prompt-hash checks and `--reissue-lease` recovery.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg controller`
 
-- [ ] **T7 · Taskpack isolated 3-way baseline conflict alignment, merged carry tree, and RunEval sink wiring**
+- [x] **T7 · Taskpack isolated 3-way baseline conflict alignment, merged carry tree, and RunEval sink wiring**
       Blocked by: T3, T4
       Owns: `packages/taskpack/src/baseline-align.ts`, `packages/taskpack/src/schema.ts`, `packages/taskpack/src/taskpack.ts`, `packages/taskpack/src/turnkey.ts`, `packages/taskpack/src/types.ts`, `packages/taskpack/src/index.ts`, `packages/taskpack/test/baseline-align.test.ts`
       Gate: review

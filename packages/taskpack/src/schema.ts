@@ -1,9 +1,11 @@
 import { posix } from 'node:path';
 import {
+  isWritablePath,
   LIMITS,
   OVERLAY_LIMITS,
   matchesScopePattern,
   resolveOverlayLimits,
+  validateRelativePath,
   validateScopePattern,
   type OverlayLimits,
   type ReworkPolicy,
@@ -16,12 +18,19 @@ import {
   DEFAULT_MEMORY_TTL_DAYS,
 } from '@loopwright/memory';
 import {
+  BASELINE_ALIGNMENT_POLICIES, DEFAULT_BASELINE_ALIGNMENT_POLICY,
+  DEFAULT_BASELINE_MAX_CONFLICT_BYTES, DEFAULT_BASELINE_MAX_CONFLICT_FILES,
   DEFAULT_COMMENT_PREFIXES, GITHUB_PROTECTED_AUTOMATION_PATHS, LOCAL_PROTECTED_AUTOMATION_PATHS,
-  LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_STEP_REWORKS, MAX_TASKPACK_ROLES, MAX_TASKPACK_STEPS,
+  LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_BASELINE_MAX_CONFLICT_BYTES, MAX_BASELINE_MAX_CONFLICT_FILES,
+  MAX_STEP_REWORKS, MAX_TASKPACK_ROLES, MAX_TASKPACK_STEPS,
+  MIN_BASELINE_MAX_CONFLICT_BYTES, MIN_BASELINE_MAX_CONFLICT_FILES,
   MULTI_TENANT_HOST_POLICY, TASKPACK_COMMENT_COMMANDS, TASKPACK_MANIFEST_API_VERSION,
   TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS, TASKPACK_TOOL_NAMES, TaskpackError,
+  type BaselineAlignmentConfig, type BaselineAlignmentOverride, type BaselineAlignmentPolicy,
+  type CandidateScopeSnapshot,
   type ExecutionHostPolicy, type PolicyProfile,
-  type ResolvedTaskpackExecutionCapabilities, type SandboxBackendId, type SandboxCapability,
+  type ResolvedBaselineAlignmentConfig, type ResolvedTaskpackExecutionCapabilities,
+  type SandboxBackendId, type SandboxCapability,
   type SandboxNetworkMode, type TargetMatrixCell,
   type TaskpackCheckParameterValue, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy,
   type TaskpackDecisionProviderKind, type TaskpackDecisionsDeclaration, type TaskpackDecisionTriageRule,
@@ -1893,6 +1902,146 @@ function validateVersionPath(value: unknown, path: string): string {
   return text;
 }
 
+function parseBaselineAlignmentObject(
+  raw: unknown,
+  path: string,
+  errorCode: 'TASKPACK_MANIFEST_INVALID' | 'ACTION_INPUT_INVALID',
+  defaults: ResolvedBaselineAlignmentConfig,
+): ResolvedBaselineAlignmentConfig {
+  function fail(message: string, fieldPath = path): never {
+    throw new TaskpackError(errorCode, message, fieldPath);
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    fail('expected an object');
+  }
+  const proto: unknown = Object.getPrototypeOf(raw);
+  if (proto !== Object.prototype && proto !== null) {
+    fail('expected an object');
+  }
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (
+      !Object.hasOwn(record, key)
+      || FORBIDDEN_KEYS.has(key)
+      || (key !== 'policy' && key !== 'maxConflictFiles' && key !== 'maxConflictBytes')
+    ) {
+      fail(`unknown field "${key}"`);
+    }
+  }
+
+  let policy: BaselineAlignmentPolicy = defaults.policy;
+  if (Object.hasOwn(record, 'policy') && record['policy'] !== undefined) {
+    const rawPolicy = record['policy'];
+    if (typeof rawPolicy !== 'string' || !(BASELINE_ALIGNMENT_POLICIES as readonly string[]).includes(rawPolicy)) {
+      fail('spec.baselineAlignment.policy must be "off", "fail-fast", or "extract-context"', `${path}/policy`);
+    }
+    policy = rawPolicy as BaselineAlignmentPolicy;
+  }
+
+  let maxConflictFiles: number = defaults.maxConflictFiles;
+  if (Object.hasOwn(record, 'maxConflictFiles') && record['maxConflictFiles'] !== undefined) {
+    const rawMaxFiles = record['maxConflictFiles'];
+    if (typeof rawMaxFiles !== 'number') {
+      fail(
+        `spec.baselineAlignment.maxConflictFiles must be an integer in [${MIN_BASELINE_MAX_CONFLICT_FILES}, ${MAX_BASELINE_MAX_CONFLICT_FILES}]`,
+        `${path}/maxConflictFiles`,
+      );
+    }
+    const numMaxFiles: number = rawMaxFiles;
+    if (
+      !Number.isSafeInteger(numMaxFiles)
+      || Object.is(numMaxFiles, -0)
+      || numMaxFiles < MIN_BASELINE_MAX_CONFLICT_FILES
+      || numMaxFiles > MAX_BASELINE_MAX_CONFLICT_FILES
+    ) {
+      fail(
+        `spec.baselineAlignment.maxConflictFiles must be an integer in [${MIN_BASELINE_MAX_CONFLICT_FILES}, ${MAX_BASELINE_MAX_CONFLICT_FILES}]`,
+        `${path}/maxConflictFiles`,
+      );
+    }
+    maxConflictFiles = numMaxFiles;
+  }
+
+  let maxConflictBytes: number = defaults.maxConflictBytes;
+  if (Object.hasOwn(record, 'maxConflictBytes') && record['maxConflictBytes'] !== undefined) {
+    const rawMaxBytes = record['maxConflictBytes'];
+    if (typeof rawMaxBytes !== 'number') {
+      fail(
+        `spec.baselineAlignment.maxConflictBytes must be an integer in [${MIN_BASELINE_MAX_CONFLICT_BYTES}, ${MAX_BASELINE_MAX_CONFLICT_BYTES}]`,
+        `${path}/maxConflictBytes`,
+      );
+    }
+    const numMaxBytes: number = rawMaxBytes;
+    if (
+      !Number.isSafeInteger(numMaxBytes)
+      || Object.is(numMaxBytes, -0)
+      || numMaxBytes < MIN_BASELINE_MAX_CONFLICT_BYTES
+      || numMaxBytes > MAX_BASELINE_MAX_CONFLICT_BYTES
+    ) {
+      fail(
+        `spec.baselineAlignment.maxConflictBytes must be an integer in [${MIN_BASELINE_MAX_CONFLICT_BYTES}, ${MAX_BASELINE_MAX_CONFLICT_BYTES}]`,
+        `${path}/maxConflictBytes`,
+      );
+    }
+    maxConflictBytes = numMaxBytes;
+  }
+
+  return Object.freeze({ policy, maxConflictFiles, maxConflictBytes });
+}
+
+/** Validate `spec.baselineAlignment` (`off | fail-fast | extract-context`, file/byte bounds, null-prototype-safe closed keys). */
+export function validateBaselineAlignmentDeclaration(
+  raw: unknown,
+  path = '/spec/baselineAlignment',
+): ResolvedBaselineAlignmentConfig {
+  return parseBaselineAlignmentObject(raw, path, 'TASKPACK_MANIFEST_INVALID', {
+    policy: DEFAULT_BASELINE_ALIGNMENT_POLICY,
+    maxConflictFiles: DEFAULT_BASELINE_MAX_CONFLICT_FILES,
+    maxConflictBytes: DEFAULT_BASELINE_MAX_CONFLICT_BYTES,
+  });
+}
+
+/** Parse a CLI/Action runtime baseline alignment policy string (`off | fail-fast | extract-context`). */
+export function parseBaselineAlignmentPolicy(
+  raw: unknown,
+  path = '/baselineAlignment',
+): BaselineAlignmentPolicy {
+  if (typeof raw !== 'string' || !(BASELINE_ALIGNMENT_POLICIES as readonly string[]).includes(raw)) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      'baselineAlignment policy must be "off", "fail-fast", or "extract-context"',
+      path,
+    );
+  }
+  return raw as BaselineAlignmentPolicy;
+}
+
+/** Resolve effective `ResolvedBaselineAlignmentConfig` from manifest declaration plus optional CLI/Action runtime override. */
+export function resolveBaselineAlignmentConfig(
+  manifestConfig?: BaselineAlignmentConfig | undefined,
+  override?: BaselineAlignmentOverride | undefined,
+): ResolvedBaselineAlignmentConfig {
+  const base: ResolvedBaselineAlignmentConfig = manifestConfig !== undefined
+    ? validateBaselineAlignmentDeclaration(manifestConfig, '/spec/baselineAlignment')
+    : Object.freeze({
+      policy: DEFAULT_BASELINE_ALIGNMENT_POLICY,
+      maxConflictFiles: DEFAULT_BASELINE_MAX_CONFLICT_FILES,
+      maxConflictBytes: DEFAULT_BASELINE_MAX_CONFLICT_BYTES,
+    });
+  if (override === undefined) {
+    return base;
+  }
+  if (typeof override === 'string') {
+    const policy = parseBaselineAlignmentPolicy(override, '/baselineAlignment');
+    return Object.freeze({
+      policy,
+      maxConflictFiles: base.maxConflictFiles,
+      maxConflictBytes: base.maxConflictBytes,
+    });
+  }
+  return parseBaselineAlignmentObject(override, '/baselineAlignment', 'ACTION_INPUT_INVALID', base);
+}
+
 function validateExecutionSection(
   rawExecution: unknown,
   controlRoot: string,
@@ -2138,7 +2287,7 @@ function validateTaskpackManifestInternal(
   const rawSpecBeforeInterp = requireObject(rawRoot['spec'], '/spec', [
     'goal', 'scope', 'instructions', 'skills', 'execution', 'preflight', 'vars', 'target',
     'upstreams', 'upstreamGroups', 'proposal', 'submission', 'verification',
-    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'roles', 'steps', 'output',
+    'publication', 'memory', 'triggers', 'baselineAlignment', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'roles', 'steps', 'output',
   ]);
   const vars: Readonly<Record<string, string>> | undefined = rawSpecBeforeInterp['vars'] === undefined
     ? undefined
@@ -2949,6 +3098,11 @@ function validateTaskpackManifestInternal(
     );
   }
 
+  const baselineAlignment: ResolvedBaselineAlignmentConfig | undefined =
+    Object.hasOwn(spec, 'baselineAlignment') && spec['baselineAlignment'] !== undefined
+      ? validateBaselineAlignmentDeclaration(spec['baselineAlignment'], '/spec/baselineAlignment')
+      : undefined;
+
   let sandbox: TaskpackSandboxDeclaration | undefined;
   if (spec['sandbox'] !== undefined) {
     const rawSandbox = requireObject(spec['sandbox'], '/spec/sandbox', ['preferredBackends', 'networkMode', 'requiredCapabilities', 'deniedReadPaths']);
@@ -3485,6 +3639,7 @@ function validateTaskpackManifestInternal(
     publication: publicationRecord,
     memory: memoryRecord,
     triggers: triggersRecord,
+    ...(baselineAlignment === undefined ? {} : { baselineAlignment }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),
     ...(models === undefined ? {} : { models }),
@@ -3542,4 +3697,122 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     manifestInvalid('spec.proposal is required', '/spec/proposal');
   }
   return v2 as unknown as TaskpackManifestWithProposal;
+}
+
+// ---------------------------------------------------------------------------
+// Shared candidate path & scope pattern helpers
+// ---------------------------------------------------------------------------
+
+/** Compile manifest `writable` or `protected` path entries into `@loopwright/core` scope patterns. */
+export function compileScopePatterns(
+  entries: readonly string[] | undefined,
+  mode: 'writable' | 'protected',
+  options?: { readonly exactEntries?: ReadonlySet<string> | undefined },
+): readonly string[] {
+  if (entries === undefined || entries.length === 0) {
+    return mode === 'writable' ? Object.freeze(['**']) : Object.freeze([]);
+  }
+  const exactEntries = options?.exactEntries;
+  const compiled: string[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const diagPath = `/spec/scope/${mode}/${index}`;
+    const check = validateScopePattern(entry);
+    if (!check.ok) {
+      manifestInvalid(`invalid scope pattern "${entry}": ${check.errors[0]?.code ?? 'PATTERN_UNSUPPORTED'}`, diagPath);
+    }
+    if (mode === 'writable') {
+      compiled.push(check.value);
+    } else if (
+      exactEntries?.has(check.value)
+      || check.value === '**'
+      || check.value.endsWith('/**')
+      || check.value.includes('*')
+      || check.value.includes('?')
+      || check.value.length > LIMITS.path - 3
+    ) {
+      compiled.push(check.value);
+    } else {
+      compiled.push(`${check.value}/**`);
+    }
+  }
+  return Object.freeze([...new Set(compiled)]);
+}
+
+function normalizeProtectedCandidatePrefix(protectedEntry: string): string {
+  const withoutGlob = protectedEntry.endsWith('/**') ? protectedEntry.slice(0, -3) : protectedEntry;
+  return withoutGlob.replace(/\/+$/, '');
+}
+
+/** True when `name` matches or sits beneath any entry in `protectedPaths`. */
+export function isProtectedCandidatePath(name: string, protectedPaths: readonly string[]): boolean {
+  for (const protectedEntry of protectedPaths) {
+    if (protectedEntry === '**') return true;
+    const directMatch = matchesScopePattern(protectedEntry, name);
+    if (directMatch.ok && directMatch.value) return true;
+    const clean = normalizeProtectedCandidatePrefix(protectedEntry);
+    if (clean.length === 0) continue;
+    if (!clean.includes('*') && !clean.includes('?')) {
+      if (name === clean || name.startsWith(`${clean}/`)) {
+        return true;
+      }
+    } else {
+      const subtreeMatch = matchesScopePattern(`${clean}/**`, name);
+      if (subtreeMatch.ok && subtreeMatch.value) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** True when `name` is outside `protectedPaths` (including NFC case-insensitive checks) and within `writable` scope. */
+export function isAllowedCandidateWrite(
+  name: string,
+  snapshot: CandidateScopeSnapshot,
+): boolean {
+  if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
+    return false;
+  }
+  const lowerName = name.normalize('NFC').toLowerCase();
+  const lowerProtected = snapshot.protectedPaths.map(entry => entry.normalize('NFC').toLowerCase());
+  if (isProtectedCandidatePath(lowerName, lowerProtected)) {
+    return false;
+  }
+  if (snapshot.contract !== undefined) {
+    const writableCheck = isWritablePath(snapshot.contract, name);
+    return writableCheck.ok && writableCheck.value === true;
+  }
+  if (snapshot.writablePaths !== undefined) {
+    if (!validateRelativePath(name).ok) return false;
+    const isProt = snapshot.protectedPaths.some(pattern => {
+      const res = matchesScopePattern(pattern, name);
+      return res.ok && res.value;
+    });
+    if (isProt) return false;
+    return snapshot.writablePaths.some(pattern => {
+      const res = matchesScopePattern(pattern, name);
+      return res.ok && res.value;
+    });
+  }
+  return false;
+}
+
+/** Validate a non-empty POSIX candidate relative path without NUL, backslashes, leading `/`, `.`, or `..`. */
+export function normalizeCandidateRelativePath(name: string): string {
+  if (
+    typeof name !== 'string'
+    || name.length === 0
+    || name.includes('\0')
+    || name.includes('\\')
+    || name.startsWith('/')
+  ) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate relative file path "${name}"`);
+  }
+  const parts = name.split('/');
+  for (const part of parts) {
+    if (part.length === 0 || part === '.' || part === '..') {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate path segment in "${name}"`);
+    }
+  }
+  return name;
 }

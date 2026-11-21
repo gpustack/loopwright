@@ -11,7 +11,6 @@ import {
   OVERLAY_LIMITS,
   resolveOverlayLimits,
   validateDocument,
-  validateScopePattern,
   type OverlayLimits,
   type ReworkPolicy,
   type TaskContract,
@@ -55,6 +54,7 @@ import {
   computeDirectoryTreeDigest,
   computeTaskpackDigests,
 } from './digests.js';
+import { alignBaselineRevisions, deriveManifestCompiledScope } from './baseline-align.js';
 import {
   loadPiModelsJson,
   resolveDefaultProviderTokenEnv,
@@ -70,11 +70,12 @@ import {
 import {
   assertManifestScopeInvariants,
   collectMcpReferencedEnvNames,
-  effectiveProtectedPaths,
+  compileScopePatterns,
   IDENTIFIER_PATTERN,
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
+  resolveBaselineAlignmentConfig,
   resolveManifestControlRoot,
   validateExecutionAuthority,
   validateMcpServerDeclarations,
@@ -92,6 +93,7 @@ import {
   TASKPACK_MANIFEST_BYTES,
   TaskpackError,
   type ActionEntrypointResult,
+  type BaselineConflictContextResource,
   type CompiledActiveMemorySummary,
   type CompiledInstructionResource,
   type CompiledLocalCommandGate,
@@ -103,6 +105,7 @@ import {
   type ParsedCommentCommand,
   type PiModelSelection,
   type PolicyProfile,
+  type ResolvedBaselineAlignmentConfig,
   type SandboxNetworkMode,
   type TaskpackCommentCommand,
   type TaskpackIntakeInput,
@@ -126,6 +129,7 @@ import { readBoundedRegularFile, serializePrettyYaml } from './yaml.js';
 export {
   collectControlRootSiblingPaths,
   collectGitHubSiblingPaths,
+  compileScopePatterns,
   normalizeRelativePath,
   resolveManifestControlRoot,
   type CollectGitHubSiblingPathsOptions,
@@ -179,6 +183,11 @@ const MAX_GENERATED_AUTHOR_PROMPT_BYTES = 15_360;
 const DEFAULT_ROLE_FILE_BYTES = 67_108_864;
 const DEFAULT_ROLE_ARTIFACT_BYTES = 268_435_456;
 const DEFAULT_ROLE_CANDIDATE_ENTRIES = 4_096;
+const DEFAULT_ROLE_PROMPT_MAX_BYTES = 262_144;
+const DELEGATED_ROLE_PROMPT_MAX_BYTES = 16_384;
+const MAX_CONFLICT_PROMPT_PREVIEW_PATHS = 8;
+const SYNTHESIZED_CONFLICT_GUARD_TIMEOUT_SECONDS = 30;
+const SYNTHESIZED_CONFLICT_GUARD_SCRIPT_SHA256 = '0'.repeat(64);
 
 function parseOptionalLimitInt(env: NodeJS.ProcessEnv, envKey: string): number | undefined {
   const val = env[envKey]?.trim();
@@ -577,41 +586,6 @@ function injectActiveMemoryIntoAuthorPrompt(
   return basePrompt;
 }
 
-/** Compile manifest `writable` or `protected` path entries into `@loopwright/core` scope patterns. */
-export function compileScopePatterns(
-  entries: readonly string[] | undefined,
-  mode: 'writable' | 'protected',
-  options?: { readonly exactEntries?: ReadonlySet<string> | undefined },
-): readonly string[] {
-  if (entries === undefined || entries.length === 0) {
-    return mode === 'writable' ? Object.freeze(['**']) : Object.freeze([]);
-  }
-  const exactEntries = options?.exactEntries;
-  const compiled: string[] = [];
-  for (const [index, entry] of entries.entries()) {
-    const diagPath = `/spec/scope/${mode}/${index}`;
-    const check = validateScopePattern(entry);
-    if (!check.ok) {
-      manifestInvalid(`invalid scope pattern "${entry}": ${check.errors[0]?.code ?? 'PATTERN_UNSUPPORTED'}`, diagPath);
-    }
-    if (mode === 'writable') {
-      compiled.push(check.value);
-    } else if (
-      exactEntries?.has(check.value)
-      || check.value === '**'
-      || check.value.endsWith('/**')
-      || check.value.includes('*')
-      || check.value.includes('?')
-      || check.value.length > 1021
-    ) {
-      compiled.push(check.value);
-    } else {
-      compiled.push(`${check.value}/**`);
-    }
-  }
-  return Object.freeze([...new Set(compiled)]);
-}
-
 async function assertNoSymlinkAlongProposalPath(
   repositoryRoot: string,
   relativePath: string,
@@ -919,6 +893,55 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   const mode = bindings.mode;
   const candidate = mode === 'candidate';
   const checkOnlyNoChange = !candidate && bindings.checkOnlyNoChange === true;
+  const effectiveBaselineAlignment = resolveBaselineAlignmentConfig(
+    manifest.spec.baselineAlignment,
+    bindings.baselineAlignment,
+  );
+  let conflictResource: BaselineConflictContextResource | null = bindings.baselineConflictResource ?? null;
+  if (bindings.baselineAlignmentResult !== undefined) {
+    if (candidate && bindings.baselineAlignmentResult.disposition === 'blocked') {
+      throw new TaskpackError(
+        'TASKPACK_SCOPE_VIOLATION',
+        bindings.baselineAlignmentResult.detail,
+        '/spec/baselineAlignment',
+        { reason: bindings.baselineAlignmentResult.reason },
+      );
+    }
+    if (conflictResource === null && candidate && bindings.baselineAlignmentResult.disposition === 'extracted') {
+      conflictResource = bindings.baselineAlignmentResult.conflictResource;
+    }
+  } else if (
+    conflictResource === null
+    && candidate
+    && bindings.sourceRevision !== bindings.baseRevision
+    && effectiveBaselineAlignment.policy !== 'off'
+    && bindings.repositoryRoot !== undefined
+    && bindings.repositoryRoot.trim().length > 0
+    && existsSync(resolve(bindings.repositoryRoot))
+  ) {
+    const aligned = await alignBaselineRevisions({
+      repositoryRoot: bindings.repositoryRoot,
+      baseRevision: bindings.baseRevision,
+      sourceRevision: bindings.sourceRevision,
+      manifest,
+      taskpackPath: bindings.taskpackPath,
+      policyProfile,
+      hostPolicy: bindings.hostPolicy,
+      baselineAlignment: effectiveBaselineAlignment,
+      scrubber: bindings.scrubber instanceof SecretScrubber ? bindings.scrubber : undefined,
+    });
+    if (aligned.disposition === 'blocked') {
+      throw new TaskpackError(
+        'TASKPACK_SCOPE_VIOLATION',
+        aligned.detail,
+        '/spec/baselineAlignment',
+        { reason: aligned.reason },
+      );
+    }
+    if (aligned.disposition === 'extracted') {
+      conflictResource = aligned.conflictResource;
+    }
+  }
   const executionMode = bindings.executionMode ?? 'pi';
   const isDelegated = executionMode === 'delegated';
   const resourceVersion = bindings.resourceVersion ?? `taskpack-${manifest.metadata.name}`;
@@ -1200,6 +1223,60 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
   }
 
+  if (candidate && conflictResource !== null && !resourceIdByPath.has(conflictResource.path)) {
+    const conflictScrubber = bindings.scrubber instanceof SecretScrubber
+      ? bindings.scrubber
+      : new SecretScrubber();
+    conflictScrubber.assertClean(conflictResource.bytes, conflictResource.path);
+    const conflictResBytes = Buffer.from(conflictResource.bytes);
+    aggregateResourceBytes += conflictResBytes.byteLength;
+    if (aggregateResourceBytes > INSTRUCTION_MAX_AGGREGATE_BYTES) {
+      manifestInvalid(
+        `trusted resources exceed ${INSTRUCTION_MAX_AGGREGATE_BYTES} aggregate bytes when staging baseline conflict context`,
+        '/spec/baselineAlignment',
+      );
+    }
+    const hex = createHash('sha256').update(conflictResBytes).digest('hex');
+    if (hex !== conflictResource.sha256) {
+      bindingInvalid('baselineConflictResource sha256 digest mismatch', '/baselineConflictResource');
+    }
+    instructionResources.push(Object.freeze({
+      id: conflictResource.id,
+      kind: 'document' as const,
+      path: conflictResource.path,
+      bytes: conflictResBytes,
+      digest: { algorithm: 'sha256' as const, hex },
+      mode: 0o400,
+    }));
+    resourceIdByPath.set(conflictResource.path, conflictResource.id);
+    sharedResourceIds.push(conflictResource.id);
+    digestsMap[`baseline:conflicts:${conflictResource.id}`] = hex;
+
+    const conflictPreview = conflictResource.extractedPaths.slice(0, MAX_CONFLICT_PROMPT_PREVIEW_PATHS).join(', ');
+    const conflictPromptNote = [
+      `Baseline 3-way conflict context is staged read-only at "${conflictResource.path}" (${conflictResource.extractedPaths.length} file(s): ${conflictPreview}).`,
+      'You MUST explicitly update or delete every conflicted file listed in that document so both target and source changes are reconciled cleanly, and leave ZERO residual Git conflict markers (<<<<<<<, |||||||, >>>>>>>).',
+    ].join(' ');
+    const promptLimit = bindings.limits?.promptBytes
+      ?? manifest.spec.limits?.promptBytes
+      ?? bindings.envLimits?.promptBytes
+      ?? DEFAULT_ROLE_PROMPT_MAX_BYTES;
+    for (let i = 0; i < compiledRoles.length; i += 1) {
+      const role = compiledRoles[i]!;
+      if (role.purpose !== 'task') continue;
+      const effectiveRoleCap = role.adapter === 'delegated'
+        ? Math.min(DELEGATED_ROLE_PROMPT_MAX_BYTES, promptLimit)
+        : promptLimit;
+      const markerIdx = role.prompt.lastIndexOf(FINAL_RESPONSE_SECTION_MARKER);
+      const nextPrompt = markerIdx > 0
+        ? `${role.prompt.slice(0, markerIdx)}\n\n${conflictPromptNote}${role.prompt.slice(markerIdx)}`
+        : `${role.prompt}\n\n${conflictPromptNote}`;
+      if (Buffer.byteLength(nextPrompt, 'utf8') <= effectiveRoleCap) {
+        compiledRoles[i] = { ...role, prompt: nextPrompt };
+      }
+    }
+  }
+
   let hasAnyPerRoleResources = false;
   if (hasManifestRoles) {
     for (const [rIdx, role] of manifest.spec.roles!.entries()) {
@@ -1444,27 +1521,20 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         bindings.repository,
         resolvedMemoryRoot,
       );
-      const preProtected = effectiveProtectedPaths(manifest.spec.scope.protected, {
+      const {
+        writablePaths: preWritablePatterns,
+        protectedPaths: preProtectedPatterns,
+      } = deriveManifestCompiledScope({
+        manifest,
+        repositoryRoot: bindings.repositoryRoot,
+        taskpackPath: bindings.taskpackPath,
+        baseRevision: bindings.baseRevision,
+        sourceRevision: bindings.sourceRevision,
         policyProfile,
-        controlRoot,
-        manifestPath,
-        digestsLockfile: manifest.spec.execution?.digests.lockfile,
-        instructions: allManifestInstructions.length > 0 ? allManifestInstructions : undefined,
-        skills: allManifestSkills.length > 0 ? allManifestSkills : undefined,
-        preflightScript: manifest.spec.preflight?.script,
-        commandScripts,
-        toolchainPaths: relativeToolchainPaths.length > 0 ? relativeToolchainPaths : undefined,
-        proposalPath,
-        priorityControlRootSiblings: controlRootSiblingSet.prioritySiblings,
-        controlRootSiblings: controlRootSiblingSet.regularSiblings,
-        allowWorkflowWrites,
+        hostPolicy: bindings.hostPolicy,
         githubSiblings,
+        controlRootSiblingSet,
       });
-      const preExactWritable = proposalPath !== undefined && pathCoveredBy(proposalPath, controlRoot)
-        ? new Set<string>([proposalPath])
-        : undefined;
-      const preWritablePatterns = compileScopePatterns(manifest.spec.scope.writable, 'writable', { exactEntries: preExactWritable });
-      const preProtectedPatterns = compileScopePatterns(preProtected, 'protected');
       const checkCodeFingerprint = manifest.spec.memory.checkCodeFingerprint === true;
       const checkUpstreamVersions = manifest.spec.memory.checkUpstreamVersions === true;
       const currentCodeFingerprint = checkCodeFingerprint && loadedMemory.index.entries.length > 0
@@ -1927,6 +1997,35 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     }
   }
 
+  let synthesizedConflictCheckId: string | null = null;
+  if (candidate && bindings.enableBaselineConflictGate === true && localCommandGates.length === 0) {
+    synthesizedConflictCheckId = activeChecks.some(c => c.id === 'baseline-conflict-resolution')
+      ? 'lw-baseline-conflict-guard'
+      : 'baseline-conflict-resolution';
+    const synthGateId = 'cmd-baseline-conflict-guard';
+    localCommandGates.push(Object.freeze({
+      checkId: synthesizedConflictCheckId,
+      gateId: synthGateId,
+      endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+      script: '.loopwright/baseline-conflict-guard',
+      scriptSha256: SYNTHESIZED_CONFLICT_GUARD_SCRIPT_SHA256,
+      timeoutSeconds: SYNTHESIZED_CONFLICT_GUARD_TIMEOUT_SECONDS,
+      allowReadOnlyGitHubToken: false,
+      env: Object.freeze([]),
+      baselineConflictGuardOnly: true,
+    }));
+    activeChecks.push({
+      id: synthesizedConflictCheckId,
+      implementation: 'gate.v1',
+      parameters: {
+        checkId: synthesizedConflictCheckId,
+        endpointRef: LOCAL_COMMAND_GATE_ENDPOINT_ID,
+        gateId: synthGateId,
+      },
+      allowedEvidenceLevels: ['external_service'],
+    });
+  }
+
   let localCmdGateEnv: string | null = null;
   let localCmdGateSigningRef: string | null = null;
   if ((candidate || checkOnlyNoChange) && localCommandGates.length > 0) {
@@ -2069,7 +2168,13 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         });
       }
     }
-    const required = activeChecks.filter((_, index) => index < manifest.spec.verification.localChecks.length || gates[index - manifest.spec.verification.localChecks.length]?.required === true).map(check => check.id);
+    const required = activeChecks
+      .filter((check, index) => (
+        check.id === synthesizedConflictCheckId
+        || index < manifest.spec.verification.localChecks.length
+        || gates[index - manifest.spec.verification.localChecks.length]?.required === true
+      ))
+      .map(check => check.id);
     if (required.length === 0) {
       if (hasManifestRoles) {
         manifestInvalid('spec.roles requires at least one verification check', '/spec/verification');
@@ -2113,6 +2218,8 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       relativeToolchainPaths,
       digests: resolvedDigests,
       roleMcpServers: frozenRoleMcpServers,
+      effectiveBaselineAlignment,
+      extractedConflictPaths: conflictResource?.extractedPaths,
     });
   }
   const noChangeCheck: ActiveCheck = {
@@ -2182,6 +2289,8 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     relativeToolchainPaths,
     digests: resolvedDigests,
     roleMcpServers: frozenRoleMcpServers,
+    effectiveBaselineAlignment,
+    extractedConflictPaths: undefined,
   });
 }
 
@@ -2222,6 +2331,8 @@ interface AssembleInput {
   readonly relativeToolchainPaths: readonly string[];
   readonly digests: Readonly<Record<string, string>> | undefined;
   readonly roleMcpServers: Readonly<Record<string, readonly string[]>>;
+  readonly effectiveBaselineAlignment: ResolvedBaselineAlignmentConfig;
+  readonly extractedConflictPaths: readonly string[] | undefined;
 }
 
 function computeStepReworkBudgets(
@@ -2647,26 +2758,17 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   };
   const registryBytes = Buffer.from(serializePrettyYaml(registry), 'utf8');
   const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
-  const proposalPath = manifest.spec.proposal?.path;
-  const fullProtected = effectiveProtectedPaths(manifest.spec.scope.protected, {
+  const compiledScope = deriveManifestCompiledScope({
+    manifest,
+    repositoryRoot: bindings.repositoryRoot,
+    taskpackPath: bindings.taskpackPath,
+    baseRevision: bindings.baseRevision,
+    sourceRevision: bindings.sourceRevision,
     policyProfile: input.policyProfile,
-    controlRoot: input.controlRoot,
-    manifestPath: input.manifestPath,
-    digestsLockfile: manifest.spec.execution?.digests.lockfile,
-    instructions: input.allManifestInstructions.length > 0 ? input.allManifestInstructions : undefined,
-    skills: input.allManifestSkills.length > 0 ? input.allManifestSkills : undefined,
-    preflightScript: manifest.spec.preflight?.script,
-    commandScripts: input.commandScripts,
-    toolchainPaths: input.relativeToolchainPaths.length > 0 ? input.relativeToolchainPaths : undefined,
-    proposalPath,
-    priorityControlRootSiblings: input.controlRootSiblingSet.prioritySiblings,
-    controlRootSiblings: input.controlRootSiblingSet.regularSiblings,
-    allowWorkflowWrites: input.allowWorkflowWrites,
+    hostPolicy: bindings.hostPolicy,
     githubSiblings: input.githubSiblings,
+    controlRootSiblingSet: input.controlRootSiblingSet,
   });
-  const exactWritableEntries = proposalPath !== undefined && pathCoveredBy(proposalPath, input.controlRoot)
-    ? new Set<string>([proposalPath])
-    : undefined;
   const compiledResources = input.instructionResources.map(r => ({
     id: r.id,
     kind: r.kind,
@@ -2693,8 +2795,8 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         matrix: compiledMatrix,
       },
       scope: {
-        writable: [...compileScopePatterns(manifest.spec.scope.writable, 'writable', { exactEntries: exactWritableEntries })],
-        protected: [...compileScopePatterns(fullProtected, 'protected')],
+        writable: [...compiledScope.writablePaths],
+        protected: [...compiledScope.protectedPaths],
       },
       roles: compiledRoles.map(role => ({
         id: role.roleId,
@@ -2765,6 +2867,8 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     roleMcpServers: input.roleMcpServers,
     allowWorkflowWrites: input.allowWorkflowWrites,
     policyProfile: input.policyProfile,
+    baselineAlignment: input.effectiveBaselineAlignment,
+    ...(input.extractedConflictPaths !== undefined ? { extractedConflictPaths: input.extractedConflictPaths } : {}),
     ...(mergedLimits.maxTurns !== undefined || mergedLimits.maxRepairTurns !== undefined
       ? {
         circuitBreakerLimits: Object.freeze({
