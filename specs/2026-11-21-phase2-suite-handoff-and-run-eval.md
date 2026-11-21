@@ -394,7 +394,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `evaluateRunHealth` computes `toolRepeats`, `pingPong`, `repairConvergence`, per-step/role breakdowns, and `0..8` scrubbed `autoApplied: false` hints from one `journal(store)` revision. `inspectRun` writes `run-eval.json` and `formatRunReport` renders `Run Health` across all four formats.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg controller`
 
-- [ ] **T4 · Multi-domain TaskpackSuite schema, router, and stateless stage promotion**
+- [x] **T4 · Multi-domain TaskpackSuite schema, router, and stateless stage promotion**
       Blocked by: None
       Owns: `packages/taskpack/src/suite.ts`, `packages/taskpack/src/schema.ts`, `packages/taskpack/src/types.ts`, `packages/taskpack/src/index.ts`, `packages/taskpack/test/suite.test.ts`
       Gate: review

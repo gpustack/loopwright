@@ -829,6 +829,7 @@ export interface EffectiveProtectedPathsOptions {
   readonly commandScripts?: readonly string[] | undefined;
   readonly toolchainPaths?: readonly string[] | undefined;
   readonly proposalPath?: string | undefined;
+  readonly extraProtectedPaths?: readonly string[] | undefined;
   readonly controlRootSiblings?: readonly string[] | undefined;
   readonly priorityControlRootSiblings?: readonly string[] | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
@@ -873,6 +874,9 @@ function explicitProtectedPathsWithoutControlRoot(
   ]);
   if (options.manifestPath !== undefined) baseSet.add(options.manifestPath);
   if (options.digestsLockfile !== undefined) baseSet.add(options.digestsLockfile);
+  if (options.extraProtectedPaths !== undefined) {
+    for (const extra of options.extraProtectedPaths) baseSet.add(extra);
+  }
   if (options.instructions !== undefined) {
     for (const instruction of options.instructions) baseSet.add(instruction);
   }
@@ -1097,6 +1101,7 @@ export function assertManifestScopeInvariants(
     readonly manifestPath?: string | undefined;
     readonly policyProfile?: PolicyProfile | undefined;
     readonly commandScripts?: readonly string[] | undefined;
+    readonly extraProtectedPaths?: readonly string[] | undefined;
     readonly controlRootSiblings?: readonly string[] | undefined;
     readonly priorityControlRootSiblings?: readonly string[] | undefined;
     readonly githubSiblings?: readonly string[] | undefined;
@@ -1222,6 +1227,9 @@ export function assertManifestScopeInvariants(
     }
   }
 
+  const extraProtectedPaths = options.extraProtectedPaths?.map((entry, idx) => (
+    normalizeScopePattern(entry, `/extraProtectedPaths/${idx}`)
+  ));
   const protectedOptions: EffectiveProtectedPathsOptions = {
     policyProfile,
     controlRoot,
@@ -1233,6 +1241,7 @@ export function assertManifestScopeInvariants(
     commandScripts,
     toolchainPaths: relativeToolchainPaths.length > 0 ? relativeToolchainPaths : undefined,
     proposalPath,
+    extraProtectedPaths,
     controlRootSiblings: options.controlRootSiblings,
     priorityControlRootSiblings: options.priorityControlRootSiblings,
     allowWorkflowWrites,
@@ -1684,6 +1693,150 @@ export interface ValidateTaskpackManifestOptions {
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly enforceHostAuthority?: boolean | undefined;
   readonly githubSiblings?: readonly string[] | undefined;
+  readonly extraProtectedPaths?: readonly string[] | undefined;
+}
+
+/**
+ * Validate a non-root RFC 6901 JSON Pointer (`1..256` chars, `1..32` segments),
+ * decode `~1` (`/`) and `~0` (`~`), and reject prototype-chain segments (`__proto__`, `constructor`, `prototype`).
+ */
+export function validateRfc6901JsonPointer(value: unknown, path: string): readonly string[] {
+  const text = requireString(value, path, 1, 256);
+  const rfc6901PointerPattern = /^(?:\/(?:[^~/]|~[01])*)+$/;
+  if (!rfc6901PointerPattern.test(text)) {
+    manifestInvalid(`invalid RFC 6901 JSON Pointer "${text}"`, path);
+  }
+  const rawSegments = text.slice(1).split('/');
+  if (rawSegments.length < 1 || rawSegments.length > 32) {
+    manifestInvalid('RFC 6901 JSON Pointer must contain 1..32 segments', path);
+  }
+  const decodedSegments = rawSegments.map(seg => {
+    const decoded = seg.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (FORBIDDEN_KEYS.has(decoded)) {
+      manifestInvalid(`RFC 6901 JSON Pointer must not reference forbidden property "${decoded}"`, path);
+    }
+    return decoded;
+  });
+  return Object.freeze(decodedSegments);
+}
+
+/**
+ * True when two `headBranchPrefix` values on the same `targetBranch` collide (either one is a
+ * string prefix of the other or one stripped Git ref path covers the other).
+ */
+export function headBranchPrefixesCollide(prefixA: string, prefixB: string): boolean {
+  if (prefixA.startsWith(prefixB) || prefixB.startsWith(prefixA)) {
+    return true;
+  }
+  const stripA = prefixA.replace(/\/+$/, '');
+  const stripB = prefixB.replace(/\/+$/, '');
+  return stripA.length === 0 || stripB.length === 0 || pathCoveredBy(stripA, stripB) || pathCoveredBy(stripB, stripA);
+}
+
+/** True when a `writable` scope pattern could overlap a mandatory protected path or subtree. */
+export function writableOverlapsMandatoryProtected(
+  writablePattern: string,
+  protectedEntry: string,
+  allowWorkflowWrites = false,
+  isBuiltInProtected = false,
+): boolean {
+  return writableEntryOverlapsProtected(writablePattern, protectedEntry, allowWorkflowWrites, isBuiltInProtected);
+}
+
+export interface ManifestControlPlanePathsSummary {
+  readonly controlRoot: string;
+  readonly manifestPath?: string | undefined;
+  readonly carvedOutProposalPath?: string | undefined;
+  readonly explicitWithoutControlRoot: readonly string[];
+  readonly compactMandatoryPaths: readonly string[];
+}
+
+/**
+ * Collect mandatory control-plane paths declared by a validated domain manifest (excluding user
+ * `spec.scope.protected` exclusions so peer domains can still own disjoint writable trees).
+ */
+export function collectManifestControlPlanePaths(
+  manifest: TaskpackManifest | TaskpackV2Manifest,
+  options: EffectiveProtectedPathsOptions = {},
+): ManifestControlPlanePathsSummary {
+  const policyProfile = resolvePolicyProfile(options.policyProfile, undefined);
+  const controlRoot = options.controlRoot ?? manifest.controlRoot ?? '.loopwright';
+  const manifestPath = options.manifestPath ?? manifest.manifestPath;
+  const allowWorkflowWrites = policyProfile === 'github' && options.allowWorkflowWrites === true;
+  const instructions = options.instructions ?? [
+    ...(manifest.spec.instructions ?? []),
+    ...(manifest.spec.roles ?? []).flatMap(role => role.instructions ?? []),
+  ];
+  const skills = options.skills ?? [
+    ...(manifest.spec.skills ?? []),
+    ...(manifest.spec.roles ?? []).flatMap(role => role.skills ?? []),
+  ];
+  const preflightScript = options.preflightScript ?? manifest.spec.preflight?.script;
+  const digestsLockfile = options.digestsLockfile ?? manifest.spec.execution?.digests.lockfile;
+  const commandScripts = options.commandScripts ?? manifest.spec.verification.localChecks
+    .filter(c => c.implementation === 'command.v1')
+    .map(c => c.parameters?.['script'])
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const toolchainPaths = options.toolchainPaths ?? manifest.spec.verification.localChecks
+    .flatMap(c => (
+      c.implementation === 'command.v1' && Array.isArray(c.parameters?.['toolchainPaths'])
+        ? c.parameters['toolchainPaths'].filter((entry): entry is string => typeof entry === 'string' && entry.length > 0 && !entry.startsWith('/'))
+        : []
+    ));
+  const proposalPath = options.proposalPath ?? manifest.spec.proposal?.path;
+  const effectiveOpts: EffectiveProtectedPathsOptions = {
+    ...options,
+    policyProfile,
+    controlRoot,
+    manifestPath,
+    digestsLockfile,
+    instructions: instructions.length > 0 ? instructions : undefined,
+    skills: skills.length > 0 ? skills : undefined,
+    preflightScript,
+    commandScripts: commandScripts.length > 0 ? commandScripts : undefined,
+    toolchainPaths: toolchainPaths.length > 0 ? toolchainPaths : undefined,
+    proposalPath,
+    allowWorkflowWrites,
+  };
+  const explicitWithManifest = explicitProtectedPathsWithoutControlRoot(manifest.spec.scope.protected, effectiveOpts);
+  const explicitWithoutControlRoot = explicitProtectedPathsWithoutControlRoot([], effectiveOpts);
+  const carvedOut = canCarveOutControlRootProposal(proposalPath, controlRoot, explicitWithManifest)
+    && isControlRootProposalWritableAllowed(proposalPath, manifest.spec.scope.writable, controlRoot, explicitWithManifest);
+
+  const compact = new Set<string>([
+    ...automationPathsFor(policyProfile, allowWorkflowWrites),
+    controlRoot,
+  ]);
+  if (manifestPath !== undefined) compact.add(manifestPath);
+  if (digestsLockfile !== undefined && !pathCoveredBy(digestsLockfile, controlRoot)) {
+    compact.add(digestsLockfile);
+  }
+  for (const instruction of instructions) compact.add(instruction);
+  for (const skill of skills) compact.add(skill);
+  if (preflightScript !== undefined && !pathCoveredBy(preflightScript, controlRoot)) {
+    compact.add(preflightScript);
+  }
+  for (const script of commandScripts) {
+    if (!pathCoveredBy(script, controlRoot)) compact.add(script);
+    const parentDir = commandScriptOutsideParentDir(script, controlRoot);
+    if (parentDir !== undefined) compact.add(parentDir);
+  }
+  for (const entry of toolchainPaths) {
+    if (!entry.startsWith('/') && !pathCoveredBy(entry, controlRoot)) compact.add(entry);
+  }
+  if (policyProfile === 'github' && allowWorkflowWrites && options.githubSiblings !== undefined) {
+    for (const sibling of options.githubSiblings) {
+      if (!isWorkflowSubpathCaseInsensitive(sibling)) compact.add(sibling);
+    }
+  }
+
+  return Object.freeze({
+    controlRoot,
+    ...(manifestPath !== undefined ? { manifestPath } : {}),
+    ...(carvedOut && proposalPath !== undefined ? { carvedOutProposalPath: proposalPath } : {}),
+    explicitWithoutControlRoot,
+    compactMandatoryPaths: Object.freeze([...compact]),
+  });
 }
 
 function isValidCredentialRef(value: string): boolean {
@@ -2609,7 +2762,14 @@ function validateTaskpackManifestInternal(
     };
     const validateHeadBranchPrefix = (val: unknown): string => {
       const hbp = requireString(val, '/spec/publication/headBranchPrefix', 1, 64);
-      if (hbp.includes('//') || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(hbp.replace(/\/$/, ''))) {
+      const trimmed = hbp.replace(/\/$/, '');
+      const segments = trimmed.split('/');
+      if (
+        hbp.includes('//')
+        || hbp.startsWith('/')
+        || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$/.test(trimmed)
+        || segments.some(seg => seg.length === 0 || seg === '.' || seg === '..' || seg.startsWith('.') || seg.endsWith('.lock'))
+      ) {
         manifestInvalid('headBranchPrefix is not a valid branch prefix', '/spec/publication/headBranchPrefix');
       }
       return hbp;
@@ -3201,6 +3361,9 @@ function validateTaskpackManifestInternal(
   // Final effective protected-path check including command scripts, preflight script, lockfile, toolchainPaths, and per-role assets.
   const combinedInstructions = [...(instructions ?? []), ...allRoleInstructions];
   const combinedSkills = [...(skills ?? []), ...allRoleSkills];
+  const extraProtectedPaths = options.extraProtectedPaths?.map((entry, idx) => (
+    normalizeScopePattern(entry, `/extraProtectedPaths/${idx}`)
+  ));
   const finalProtected = resolveProtectedPathSets(manifestProtected, {
     policyProfile,
     controlRoot,
@@ -3212,6 +3375,7 @@ function validateTaskpackManifestInternal(
     commandScripts,
     toolchainPaths: relativeToolchainPaths.length > 0 ? relativeToolchainPaths : undefined,
     proposalPath,
+    extraProtectedPaths,
     allowWorkflowWrites,
     githubSiblings: options.githubSiblings,
   });

@@ -1072,5 +1072,159 @@ export type ActionEntrypointResult =
     readonly memory?: TurnkeyMemorySummary | undefined;
   };
 
+// ---------------------------------------------------------------------------
+// Multi-domain TaskpackSuite (.loopwright/suite.yaml) & staged promotion
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_TASKPACK_SUITE_PATH = '.loopwright/suite.yaml' as const;
+export const TASKPACK_SUITE_MANIFEST_BYTES = 65_536;
+export const MAX_SUITE_DOMAINS = 32;
+export const MAX_SUITE_STAGES = 16;
+export const MAX_SUITE_STAGE_READINESS_PROBES = 16;
+export const MAX_SUITE_STAGE_VERSION_BLOB_BYTES = 1_048_576;
+
+export const SUITE_STAGE_READINESS_PROBE_KINDS = Object.freeze([
+  'github-release',
+  'http-json',
+  'git-tag',
+  'git-commit',
+] as const);
+export type SuiteStageReadinessProbeKind = typeof SUITE_STAGE_READINESS_PROBE_KINDS[number];
+
+export interface SuiteVersionFromSelector {
+  readonly domain: string;
+  readonly path: string;
+  readonly jsonPointer?: string | undefined;
+}
+
+export interface SuiteStageReadinessProbe {
+  readonly id?: string | undefined;
+  readonly kind: SuiteStageReadinessProbeKind;
+  readonly source: string;
+  readonly versionFrom?: SuiteVersionFromSelector | undefined;
+  readonly expectedVersion?: string | undefined;
+  readonly ref?: string | undefined;
+  readonly tagPrefix?: string | undefined;
+  readonly jsonPointer?: string | undefined;
+  readonly versionPath?: string | undefined;
+  readonly allowPrerelease?: boolean | undefined;
+}
+
+export interface TaskpackSuiteStageDeclaration {
+  readonly id: string;
+  readonly dependsOn: readonly string[];
+  readonly readiness: readonly SuiteStageReadinessProbe[];
+}
+
+export type TaskpackSuiteDomainMatrix =
+  | readonly TargetMatrixCell[]
+  | Readonly<Record<string, string | number | boolean>>;
+
+export interface TaskpackSuiteDomainDeclaration {
+  readonly id: string;
+  readonly taskpack: string;
+  readonly enabled: boolean;
+  readonly schedules?: readonly string[] | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+}
+
+export interface TaskpackSuiteManifest {
+  readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
+  readonly kind: 'TaskpackSuite';
+  readonly metadata: { readonly name: string };
+  readonly suitePath?: string | undefined;
+  readonly controlRoot?: string | undefined;
+  readonly spec: {
+    readonly domains: readonly TaskpackSuiteDomainDeclaration[];
+    readonly stages: readonly TaskpackSuiteStageDeclaration[];
+  };
+}
+
+export interface LoadedTaskpackSuiteDomain {
+  readonly id: string;
+  readonly taskpackPath: string;
+  readonly taskpackName: string;
+  readonly controlRoot: string;
+  readonly manifestSha256: string;
+  readonly enabled: boolean;
+  readonly schedules?: readonly string[] | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+  readonly manifest: TaskpackManifest;
+  readonly protectedPaths: readonly string[];
+}
+
+export interface LoadedTaskpackSuite {
+  readonly manifest: TaskpackSuiteManifest;
+  readonly suitePath: string;
+  readonly controlRoot: string;
+  readonly suiteSha256: string;
+  readonly suiteProtectedPaths: readonly string[];
+  readonly stageOrder: readonly string[];
+  readonly domains: readonly LoadedTaskpackSuiteDomain[];
+}
+
+export type SuiteDisposition = 'eligible' | 'deferred' | 'blocked' | 'ignored';
+
+export interface SuiteStageProbeEvaluation {
+  readonly stageId: string;
+  readonly probeIndex: number;
+  readonly probeId?: string | undefined;
+  readonly kind: SuiteStageReadinessProbeKind;
+  readonly source: string;
+  readonly disposition: 'eligible' | 'deferred' | 'blocked';
+  readonly expectedVersion?: string | undefined;
+  readonly observedVersion?: string | undefined;
+  readonly reason: string;
+  readonly detail?: string | undefined;
+}
+
+export interface SuiteMatrixCell {
+  readonly domainId: string;
+  readonly taskpackPath: string;
+  readonly taskpackName: string;
+  readonly manifestSha256: string;
+  readonly controlRoot: string;
+  readonly baseRevision: string;
+  readonly headSha?: string | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+  readonly protectedPaths: readonly string[];
+}
+
+export interface SuiteDomainResolution extends SuiteMatrixCell {
+  readonly disposition: 'eligible' | 'deferred' | 'blocked';
+  readonly reason: string;
+  readonly detail?: string | undefined;
+  readonly code?: TaskpackErrorCode | undefined;
+  readonly probes?: readonly SuiteStageProbeEvaluation[] | undefined;
+}
+
+export interface ParsedSuiteCommentCommand {
+  readonly prefix: string;
+  readonly domainId?: string | undefined;
+  readonly command: TaskpackCommentCommand;
+  readonly guidance: string;
+}
+
+export interface SuiteResolutionResult {
+  readonly suiteName: string;
+  readonly suitePath: string;
+  readonly suiteSha256: string;
+  readonly eventName: string;
+  readonly baseRevision: string;
+  readonly disposition: SuiteDisposition;
+  readonly reason: string;
+  readonly detail?: string | undefined;
+  readonly code?: TaskpackErrorCode | undefined;
+  readonly validDomainIds: readonly string[];
+  readonly suiteProtectedPaths: readonly string[];
+  readonly comment?: ParsedSuiteCommentCommand | undefined;
+  readonly cells: readonly SuiteDomainResolution[];
+  readonly eligibleCells: readonly SuiteMatrixCell[];
+  readonly matrix: { readonly include: readonly SuiteMatrixCell[] };
+}
+
 /** Re-exported utility type so consumers can name a digest without importing core directly. */
 export type { Digest };
