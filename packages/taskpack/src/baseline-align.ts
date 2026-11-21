@@ -2207,6 +2207,24 @@ export async function mergeCandidateOverlayWithCarry(
   try {
     const baseEntries = options.baseEntries ?? await listTreeEntriesAtRevision(repositoryRoot, baseRevision, isolatedEnv);
     const sourceEntries = options.sourceEntries ?? await listTreeEntriesAtRevision(repositoryRoot, sourceRevision, isolatedEnv);
+    const maxTotalInlineBytes = Math.min(
+      MAX_CARRY_BLOB_BYTES,
+      options.snapshot.contract?.spec.budgets.overlay?.maxBytes ?? MAX_CARRY_BLOB_BYTES,
+    );
+    let retainedInlineBytes = 0;
+    const pushInlineReconciled = (
+      target: InspectedCandidateFile[],
+      entry: { readonly kind: 'inline'; readonly name: string; readonly mode?: '100644' | '100755' | undefined; readonly bytes: Buffer },
+    ): void => {
+      retainedInlineBytes += entry.bytes.byteLength;
+      if (retainedInlineBytes > maxTotalInlineBytes) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `reconciled candidate overlay inline bytes (${retainedInlineBytes}) exceed ceiling (${maxTotalInlineBytes})`,
+        );
+      }
+      target.push(entry);
+    };
 
     for (const rawDel of deletedList) {
       const delPath = normalizeGitRelativePath(rawDel);
@@ -2294,20 +2312,24 @@ export async function mergeCandidateOverlayWithCarry(
           : oursMode;
 
       if (oursBytes.equals(theirsBytes)) {
-        reconciled.push(
-          file.mode === resolvedMode
-            ? file
-            : {
-              kind: 'inline',
-              name: cleanName,
-              mode: resolvedMode,
-              bytes: oursBytes,
-            },
-        );
+        if (file.mode === resolvedMode) {
+          if (file.kind === 'inline') {
+            pushInlineReconciled(reconciled, file);
+          } else {
+            reconciled.push(file);
+          }
+        } else {
+          pushInlineReconciled(reconciled, {
+            kind: 'inline',
+            name: cleanName,
+            mode: resolvedMode,
+            bytes: oursBytes,
+          });
+        }
         continue;
       }
       if (srcEntry !== undefined && ancBytes.equals(theirsBytes)) {
-        reconciled.push({
+        pushInlineReconciled(reconciled, {
           kind: 'inline',
           name: cleanName,
           mode: resolvedMode,
@@ -2316,16 +2338,20 @@ export async function mergeCandidateOverlayWithCarry(
         continue;
       }
       if (srcEntry !== undefined && srcEntry.oid === oursOid) {
-        reconciled.push(
-          file.mode === resolvedMode
-            ? file
-            : {
-              kind: 'inline',
-              name: cleanName,
-              mode: resolvedMode,
-              bytes: theirsBytes,
-            },
-        );
+        if (file.mode === resolvedMode) {
+          if (file.kind === 'inline') {
+            pushInlineReconciled(reconciled, file);
+          } else {
+            reconciled.push(file);
+          }
+        } else {
+          pushInlineReconciled(reconciled, {
+            kind: 'inline',
+            name: cleanName,
+            mode: resolvedMode,
+            bytes: theirsBytes,
+          });
+        }
         continue;
       }
       if (ancBytes.includes(0) || oursBytes.includes(0) || theirsBytes.includes(0)) {
@@ -2344,6 +2370,7 @@ export async function mergeCandidateOverlayWithCarry(
       await writeFile(fAnc, ancBytes, { mode: 0o600 });
       await writeFile(fTheirs, theirsBytes, { mode: 0o600 });
 
+      const remainingInlineBudget = Math.max(0, maxTotalInlineBytes - retainedInlineBytes);
       const mergeRes = await runIsolatedGit(
         repositoryRoot,
         [
@@ -2357,7 +2384,7 @@ export async function mergeCandidateOverlayWithCarry(
           fTheirs,
         ],
         isolatedEnv,
-        { maxStdoutBytes: MAX_CARRY_BLOB_BYTES },
+        { maxStdoutBytes: remainingInlineBudget },
       );
 
       if (mergeRes.code === 0 && mergeRes.signal === null && !mergeRes.timedOut && !mergeRes.stdoutOverflow) {
@@ -2365,12 +2392,17 @@ export async function mergeCandidateOverlayWithCarry(
           file.mode !== undefined && (srcEntry === undefined || file.mode !== srcEntry.mode)
             ? file.mode
             : oursMode;
-        reconciled.push({
+        pushInlineReconciled(reconciled, {
           kind: 'inline',
           name: cleanName,
           mode: resolvedMode,
           bytes: mergeRes.stdout,
         });
+      } else if (mergeRes.stdoutOverflow) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `reconciled candidate overlay inline bytes exceed ceiling (${maxTotalInlineBytes}) while merging "${cleanName}"`,
+        );
       } else if (mergeRes.code !== null && mergeRes.code > 0 && mergeRes.code <= MAX_MERGE_FILE_EXIT_CONFLICTS) {
         throw new TaskpackError(
           'TASKPACK_SCOPE_VIOLATION',

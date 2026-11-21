@@ -435,7 +435,20 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
   const enqueuedByDeliveryDomain = new Map<string, EnqueuedDomainRecord>();
   const fanoutDeliveriesById = new Map<string, TrackedFanoutDelivery>();
   const deliveryIdsByQueueItemId = new Map<string, Set<string>>();
+  const installationRevocationGen = new Map<number, number>();
+  const repoRevocationGen = new Map<string, number>();
   let totalTrackedDeliveryLinks = 0;
+
+  const bumpRevocationGeneration = (installationId: number, repositoryIds: readonly number[]): void => {
+    if (repositoryIds.length === 0) {
+      installationRevocationGen.set(installationId, (installationRevocationGen.get(installationId) ?? 0) + 1);
+    } else {
+      for (const repoId of repositoryIds) {
+        const key = `${installationId}:${repoId}`;
+        repoRevocationGen.set(key, (repoRevocationGen.get(key) ?? 0) + 1);
+      }
+    }
+  };
 
   const unlinkQueueItemDelivery = (queueItemId: string, deliveryId: string): void => {
     const linked = deliveryIdsByQueueItemId.get(queueItemId);
@@ -610,6 +623,64 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     }
   };
 
+  const settleExpiredQueueItem = (expiredItem: QueueItem): void => {
+    const affectedDeliveries = new Set<string>();
+    if (expiredItem.deliveryId !== null) affectedDeliveries.add(expiredItem.deliveryId);
+    for (const deliveryId of clearQueueItemLinks(expiredItem.queueItemId)) {
+      affectedDeliveries.add(deliveryId);
+    }
+    for (const deliveryId of affectedDeliveries) {
+      if (expiredItem.domainId !== undefined) {
+        const rec = enqueuedByDeliveryDomain.get(`${deliveryId}\0${expiredItem.domainId}`);
+        if (rec !== undefined) rec.reconcileRequired = true;
+      }
+      const tracked = fanoutDeliveriesById.get(deliveryId);
+      if (tracked !== undefined && tracked.expectedDomains.size > 0) {
+        let hasActive = false;
+        let hasUnadmitted = false;
+        let firstRetryableFailure: string | null = null;
+        for (const expectedDomainId of tracked.expectedDomains) {
+          const fEntry = tracked.entriesByDomain.get(expectedDomainId);
+          if (fEntry === undefined) {
+            hasUnadmitted = true;
+            continue;
+          }
+          const fState = fEntry.queueItemId === expiredItem.queueItemId
+            ? 'reconcile_required'
+            : queue.getItem(fEntry.tenant, fEntry.queueItemId)?.state;
+          if (fState === undefined) {
+            hasUnadmitted = true;
+            continue;
+          }
+          if (fState === 'pending' || fState === 'leased') {
+            hasActive = true;
+          } else if (
+            fState !== 'completed'
+            && fState !== 'cancelled'
+            && fState !== 'reconcile_required'
+            && firstRetryableFailure === null
+          ) {
+            firstRetryableFailure = fState;
+          }
+        }
+        if (!hasActive) {
+          if (hasUnadmitted || firstRetryableFailure !== null) {
+            deliveryStore.markDeliveryState(deliveryId, 'failed', firstRetryableFailure ?? 'partial_fanout');
+          } else {
+            deliveryStore.markDeliveryState(deliveryId, 'succeeded');
+            evictDeliveryTracking(deliveryId);
+          }
+        }
+      } else {
+        if (deliveryStore.getDelivery(deliveryId) !== undefined) {
+          deliveryStore.markDeliveryState(deliveryId, 'succeeded');
+        }
+        evictDeliveryTracking(deliveryId);
+      }
+    }
+  };
+  queue.setOnLeaseExpiredListener(settleExpiredQueueItem);
+
   const ensureBoundedFanoutDelivery = (
     deliveryId: string,
     expectedDomainIds: readonly string[],
@@ -736,6 +807,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         const revoked = revOutcome.repositoryIds.length === 0
           ? queue.revokeInstallationScope(installationId)
           : queue.revokeRepositoryScope(installationId, revOutcome.repositoryIds);
+        bumpRevocationGeneration(installationId, revOutcome.repositoryIds);
         settleRevokedQueueItems(revoked.cancelledQueueItemIds, revoked.fencedQueueItemIds);
         if (options.tokenBroker !== undefined) {
           if (revOutcome.repositoryIds.length === 0) options.tokenBroker.revokeInstallationTokens(installationId);
@@ -813,6 +885,8 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     }
 
     const entry = delivery.entry;
+    const startInstRevocationGen = installationRevocationGen.get(installationId) ?? 0;
+    const startRepoRevocationGen = repoRevocationGen.get(`${installationId}:${repository.id}`) ?? 0;
     let matchedDomains: LoadedTaskpackSuiteDomain[];
     let action: 'discover' | 'revise' | 'status' = 'discover';
     let verifiedPrHeadSha: string | undefined;
@@ -972,7 +1046,23 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
     > => {
       if (options.baseRevision !== undefined && options.baseRevision.trim().length > 0) {
-        return resolveRefToCommitSha(options.baseRevision);
+        const overrideRes = await resolveRefToCommitSha(options.baseRevision);
+        if (!overrideRes.ok) return overrideRes;
+        if (
+          action !== 'status'
+          && verifiedPrBaseSha !== undefined
+          && COMMIT_SHA_PATTERN.test(verifiedPrBaseSha)
+          && overrideRes.sha.toLowerCase() !== verifiedPrBaseSha.toLowerCase()
+        ) {
+          return {
+            ok: false,
+            status: 400,
+            message: scrubber.scrub(
+              `configured baseRevision "${overrideRes.sha}" disagrees with verified pull request base SHA "${verifiedPrBaseSha}"`,
+            ),
+          };
+        }
+        return overrideRes;
       }
       if (verifiedPrBaseSha !== undefined && COMMIT_SHA_PATTERN.test(verifiedPrBaseSha)) {
         return { ok: true, sha: verifiedPrBaseSha.toLowerCase() };
@@ -1250,6 +1340,17 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       }
     }
 
+    if (
+      (installationRevocationGen.get(installationId) ?? 0) !== startInstRevocationGen
+      || (repoRevocationGen.get(`${installationId}:${repository.id}`) ?? 0) !== startRepoRevocationGen
+    ) {
+      deliveryStore.markDeliveryState(entry.deliveryId, 'succeeded');
+      return respond(response, 200, {
+        kind: 'ignored',
+        reason: 'installation_revoked_during_admission',
+      });
+    }
+
     deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
     try {
       const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
@@ -1342,6 +1443,10 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         attemptCount: entry.attemptCount,
       });
     } catch (error) {
+      const failedTracker = fanoutDeliveriesById.get(entry.deliveryId);
+      if (failedTracker !== undefined && failedTracker.entriesByDomain.size === 0) {
+        fanoutDeliveriesById.delete(entry.deliveryId);
+      }
       if (error !== null && typeof error === 'object' && 'code' in error) {
         if (WEBHOOK_DELIVERY_ID_TEST.test(entry.deliveryId)) {
           deliveryStore.markDeliveryState(entry.deliveryId, 'failed', String((error as { code: unknown }).code));
@@ -1407,6 +1512,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         const revoked = outcome.repositoryIds.length === 0
           ? queue.revokeInstallationScope(installationId)
           : queue.revokeRepositoryScope(installationId, outcome.repositoryIds);
+        bumpRevocationGeneration(installationId, outcome.repositoryIds);
         settleRevokedQueueItems(revoked.cancelledQueueItemIds, revoked.fencedQueueItemIds);
         if (options.tokenBroker !== undefined) {
           if (outcome.repositoryIds.length === 0) options.tokenBroker.revokeInstallationTokens(installationId);

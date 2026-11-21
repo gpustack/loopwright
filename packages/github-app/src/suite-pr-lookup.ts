@@ -353,23 +353,63 @@ export async function verifySuiteCommentPullRequest(
       const fBase = isPlainRecord(prData['base']) ? prData['base'] : null;
       const fHeadRepo = fHead !== null && isPlainRecord(fHead['repo']) ? fHead['repo'] : null;
       const fBaseRepo = fBase !== null && isPlainRecord(fBase['repo']) ? fBase['repo'] : null;
-      if (fHead !== null && fHead['repo'] === null) prHeadRepoNull = true;
-      prHeadRef ??= readNonEmptyString(fHead, 'ref') ?? undefined;
-      prBaseRef ??= readNonEmptyString(fBase, 'ref') ?? undefined;
-      if (prHeadSha === undefined || !COMMIT_SHA_PATTERN.test(prHeadSha.trim())) {
-        prHeadSha = readNonEmptyString(fHead, 'sha') ?? prHeadSha;
-      }
-      if (prBaseSha === undefined || !COMMIT_SHA_PATTERN.test(prBaseSha.trim())) {
-        prBaseSha = readNonEmptyString(fBase, 'sha') ?? prBaseSha;
-      }
-      prHeadRepoFullName ??= readNonEmptyString(fHeadRepo, 'full_name') ?? undefined;
+      const apiHeadRepoNull = fHead !== null && fHead['repo'] === null;
+      const apiHeadRef = readNonEmptyString(fHead, 'ref') ?? undefined;
+      const apiBaseRef = readNonEmptyString(fBase, 'ref') ?? undefined;
+      const apiHeadSha = readNonEmptyString(fHead, 'sha') ?? undefined;
+      const apiBaseSha = readNonEmptyString(fBase, 'sha') ?? undefined;
+      const apiHeadRepoFullName = readNonEmptyString(fHeadRepo, 'full_name') ?? undefined;
+      let apiHeadRepoFork: boolean | undefined;
       if (typeof fHeadRepo?.['fork'] === 'boolean') {
         const sameForkRepo = fBaseRepo !== null
           && fBaseRepo['fork'] === true
           && typeof fHeadRepo['id'] === 'number'
           && fHeadRepo['id'] === fBaseRepo['id'];
-        prHeadRepoFork ??= sameForkRepo ? false : fHeadRepo['fork'];
+        apiHeadRepoFork = sameForkRepo ? false : fHeadRepo['fork'];
       }
+
+      // Take the whole ownership tuple from the single API snapshot and reject any disagreement
+      // with pins already supplied in the triggering event payload (e.g., retargeted base or force-push).
+      const pinMismatch = (
+        (prHeadRef !== undefined && apiHeadRef !== undefined && prHeadRef.trim() !== apiHeadRef.trim())
+        || (prBaseRef !== undefined && apiBaseRef !== undefined && prBaseRef.trim() !== apiBaseRef.trim())
+        || (
+          prHeadSha !== undefined
+          && COMMIT_SHA_PATTERN.test(prHeadSha.trim())
+          && apiHeadSha !== undefined
+          && COMMIT_SHA_PATTERN.test(apiHeadSha.trim())
+          && prHeadSha.trim().toLowerCase() !== apiHeadSha.trim().toLowerCase()
+        )
+        || (
+          prBaseSha !== undefined
+          && COMMIT_SHA_PATTERN.test(prBaseSha.trim())
+          && apiBaseSha !== undefined
+          && COMMIT_SHA_PATTERN.test(apiBaseSha.trim())
+          && prBaseSha.trim().toLowerCase() !== apiBaseSha.trim().toLowerCase()
+        )
+        || (
+          prHeadRepoFullName !== undefined
+          && apiHeadRepoFullName !== undefined
+          && prHeadRepoFullName.trim().toLowerCase() !== apiHeadRepoFullName.trim().toLowerCase()
+        )
+      );
+      if (pinMismatch) {
+        return {
+          kind: 'scope_violation',
+          code: 'TASKPACK_SCOPE_VIOLATION',
+          reason: 'pull_request_snapshot_mismatch',
+          detail: 'pull request metadata changed between event payload and GitHub API lookup',
+          comment: parsedCmd,
+        };
+      }
+
+      prHeadRepoNull = apiHeadRepoNull;
+      prHeadRef = apiHeadRef;
+      prBaseRef = apiBaseRef;
+      prHeadSha = apiHeadSha;
+      prBaseSha = apiBaseSha;
+      prHeadRepoFullName = apiHeadRepoFullName;
+      prHeadRepoFork = apiHeadRepoFork;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       return {

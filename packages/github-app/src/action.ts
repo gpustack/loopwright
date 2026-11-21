@@ -688,6 +688,7 @@ export async function runGitHubActionEntrypoint(
       eventPayload: input.eventPayload,
       schedule: input.schedule,
       domain: effectiveDomain,
+      ...(input.commentPrefixes !== undefined ? { commentPrefixes: input.commentPrefixes } : {}),
       ...(verifiedSuiteCommentMeta !== undefined
         ? {
           prHeadRef: verifiedSuiteCommentMeta.prHeadRef,

@@ -229,9 +229,12 @@ class BoundedArtifactReader {
     if (ref.byteLength > maxBytes) {
       return { ok: false, reason: 'cap_exceeded' };
     }
-    const cacheKey = `${ref.name}\0${ref.digest.hex}\0${ref.uri ?? ''}`;
+    const cacheKey = `${ref.name}\0${ref.digest.hex}\0${ref.byteLength}\0${ref.uri ?? ''}`;
     const cached = this.#cache.get(cacheKey);
     if (cached !== undefined) {
+      if (cached.byteLength !== ref.byteLength) {
+        return { ok: false, reason: 'unavailable' };
+      }
       return { ok: true, bytes: cached };
     }
     if (ref.byteLength > this.#remainingBytes) {

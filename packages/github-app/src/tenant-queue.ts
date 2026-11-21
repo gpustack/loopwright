@@ -98,6 +98,7 @@ export class TenantAdmissionQueue {
   readonly #runRoot: string;
   #leaseEpoch = 0;
   #counter = 0;
+  #onLeaseExpired?: ((item: QueueItem) => void) | undefined;
 
   constructor(options: TenantAdmissionQueueOptions = {}) {
     const maxPending = options.maxPendingPerGroup ?? DEFAULT_MAX_PENDING_PER_GROUP;
@@ -111,6 +112,11 @@ export class TenantAdmissionQueue {
     this.#maxPendingPerGroup = maxPending;
     this.#leaseDurationMs = leaseDuration;
     this.#runRoot = options.runRoot ?? '';
+  }
+
+  /** Register a listener invoked whenever an active lease expires into `reconcile_required`. */
+  setOnLeaseExpiredListener(listener: ((item: QueueItem) => void) | undefined): void {
+    this.#onLeaseExpired = listener;
   }
 
   #requireItem(tenant: TenantIdentity, queueItemId: string): QueueItem {
@@ -144,6 +150,8 @@ export class TenantAdmissionQueue {
     for (const item of this.#items.values()) {
       if (item.state === 'leased' && item.lease !== null && nowMono >= monotonic(item.lease.notAfterMonotonicMs)) {
         item.state = 'reconcile_required';
+        item.reconcileEffect = 'reconcile_required';
+        this.#onLeaseExpired?.(copyItem(item));
       }
     }
   }

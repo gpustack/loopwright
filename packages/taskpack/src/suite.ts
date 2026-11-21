@@ -911,6 +911,13 @@ export interface LoadTaskpackSuiteOptions {
  * path union (`<= 128` patterns, disjoint from every domain's `writable` paths).
  */
 export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Promise<LoadedTaskpackSuite> {
+  if (options.gitRevision !== undefined && options.verifyDigests === true) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      'verifyDigests cannot be combined with gitRevision because digest verification inspects the working tree',
+      '/',
+    );
+  }
   const policyProfile: PolicyProfile = options.policyProfile ?? options.hostPolicy?.policyProfile ?? 'local';
   const { resolvedRoot, realRoot } = await resolveSafeRepositoryRoot(options.repositoryRoot);
   const pinnedGitSha = options.gitRevision !== undefined
@@ -1374,51 +1381,175 @@ async function fetchGitHubContentsBlobBytes(options: {
   readonly optional: boolean;
 }): Promise<Buffer | null> {
   const normalizedPath = normalizeRelativePath(options.relPath, '/baseline/path');
-  const encodedPath = normalizedPath.split('/').map(seg => encodeURIComponent(seg)).join('/');
-  const url = `${options.apiBaseUrl}/repos/${options.repositoryFullName}/contents/${encodedPath}?ref=${encodeURIComponent(options.resolvedSha)}`;
-  const res = await fetchBoundedProbeResponse(url, options.fetchImpl, options.githubHeaders, options.timeoutMs);
-  if (res.status === 404) {
-    if (options.optional) return null;
+  const treeEnvelopeLimit = Math.max(MAX_SUITE_STAGE_VERSION_BLOB_BYTES * 4, 4 * 1024 * 1024);
+  const blobEnvelopeLimit = Math.ceil((options.maxBytes * 4) / 3) + 65_536;
+
+  // 1. Resolve commit -> root tree SHA via Git Data API so symlinks (mode 120000) are NEVER dereferenced.
+  const commitUrl = `${options.apiBaseUrl}/repos/${options.repositoryFullName}/git/commits/${encodeURIComponent(options.resolvedSha)}`;
+  const commitRes = await fetchBoundedProbeResponse(
+    commitUrl,
+    options.fetchImpl,
+    options.githubHeaders,
+    options.timeoutMs,
+    MAX_SUITE_STAGE_VERSION_BLOB_BYTES,
+  );
+  if (commitRes.status === 404) {
     throw new TaskpackError(
       'ACTION_INPUT_INVALID',
-      `path "${normalizedPath}" does not exist in remote commit ${options.resolvedSha}`,
+      `remote commit ${options.resolvedSha} does not exist in "${options.repositoryFullName}"`,
     );
   }
-  if (!res.ok) {
+  if (!commitRes.ok) {
     throw new TaskpackError(
       'ACTION_INPUT_INVALID',
-      `remote blob lookup for "${normalizedPath}" at ${options.resolvedSha} failed with HTTP ${res.status}`,
+      `remote commit lookup for ${options.resolvedSha} failed with HTTP ${commitRes.status}`,
     );
   }
-  let doc: unknown;
+  let commitDoc: unknown;
   try {
-    doc = JSON.parse(res.text) as unknown;
+    commitDoc = JSON.parse(commitRes.text) as unknown;
+  } catch {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `remote commit lookup for ${options.resolvedSha} returned invalid JSON`);
+  }
+  const rootTreeObj = isPlainRecord(commitDoc) && isPlainRecord(commitDoc['tree']) ? commitDoc['tree'] : null;
+  const rootTreeSha = typeof rootTreeObj?.['sha'] === 'string' && COMMIT_SHA_PATTERN.test(rootTreeObj['sha'])
+    ? rootTreeObj['sha'].toLowerCase()
+    : null;
+  if (rootTreeSha === null) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `remote commit ${options.resolvedSha} response lacks a valid tree SHA`);
+  }
+
+  // 2. Walk every literal path segment through pinned Git trees, requiring 040000 dirs and 100644/100755 leaf blob.
+  const segments = normalizedPath.split('/');
+  let currentTreeSha = rootTreeSha;
+  let leafBlobSha: string | null = null;
+  for (let i = 0; i < segments.length; i += 1) {
+    const seg = segments[i]!;
+    const isLeaf = i === segments.length - 1;
+    const treeUrl = `${options.apiBaseUrl}/repos/${options.repositoryFullName}/git/trees/${encodeURIComponent(currentTreeSha)}`;
+    const treeRes = await fetchBoundedProbeResponse(
+      treeUrl,
+      options.fetchImpl,
+      options.githubHeaders,
+      options.timeoutMs,
+      treeEnvelopeLimit,
+    );
+    if (!treeRes.ok) {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        `remote tree lookup for ${currentTreeSha} failed with HTTP ${treeRes.status}`,
+      );
+    }
+    let treeDoc: unknown;
+    try {
+      treeDoc = JSON.parse(treeRes.text) as unknown;
+    } catch {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `remote tree lookup for ${currentTreeSha} returned invalid JSON`);
+    }
+    if (!isPlainRecord(treeDoc) || !Array.isArray(treeDoc['tree'])) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `remote tree ${currentTreeSha} response lacks a tree array`);
+    }
+    let matchedEntry: Record<string, unknown> | null = null;
+    for (const rawEntry of treeDoc['tree']) {
+      if (isPlainRecord(rawEntry) && rawEntry['path'] === seg) {
+        matchedEntry = rawEntry;
+        break;
+      }
+    }
+    if (matchedEntry === null) {
+      if (treeDoc['truncated'] === true) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `remote tree ${currentTreeSha} was truncated while resolving "${normalizedPath}"`,
+        );
+      }
+      if (options.optional) return null;
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        `path "${normalizedPath}" does not exist in remote commit ${options.resolvedSha}`,
+      );
+    }
+    const mode = typeof matchedEntry['mode'] === 'string' ? matchedEntry['mode'] : '';
+    const entryType = typeof matchedEntry['type'] === 'string' ? matchedEntry['type'] : '';
+    const entrySha = typeof matchedEntry['sha'] === 'string' && COMMIT_SHA_PATTERN.test(matchedEntry['sha'])
+      ? matchedEntry['sha'].toLowerCase()
+      : null;
+    if (entrySha === null) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `remote tree entry "${seg}" lacks a valid SHA`);
+    }
+    if (!isLeaf) {
+      if (mode !== '040000' || entryType !== 'tree') {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `remote path "${normalizedPath}" traverses non-tree segment "${seg}" (mode=${mode} type=${entryType})`,
+        );
+      }
+      currentTreeSha = entrySha;
+    } else {
+      if ((mode !== '100644' && mode !== '100755') || entryType !== 'blob') {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `remote path "${normalizedPath}" at ${options.resolvedSha} must be a regular blob (found mode=${mode} type=${entryType})`,
+        );
+      }
+      if (typeof matchedEntry['size'] === 'number' && matchedEntry['size'] > options.maxBytes) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `remote blob "${normalizedPath}" (${matchedEntry['size']} bytes) exceeds ${options.maxBytes} bytes`,
+        );
+      }
+      leafBlobSha = entrySha;
+    }
+  }
+
+  if (leafBlobSha === null) return null;
+
+  // 3. Fetch the exact blob by object ID with transport cap sized for base64 JSON envelope,
+  //    then enforce maxBytes on the decoded bytes and verify the Git blob SHA-1.
+  const blobUrl = `${options.apiBaseUrl}/repos/${options.repositoryFullName}/git/blobs/${encodeURIComponent(leafBlobSha)}`;
+  const blobRes = await fetchBoundedProbeResponse(
+    blobUrl,
+    options.fetchImpl,
+    options.githubHeaders,
+    options.timeoutMs,
+    blobEnvelopeLimit,
+  );
+  if (!blobRes.ok) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `remote blob lookup for "${normalizedPath}" (${leafBlobSha}) failed with HTTP ${blobRes.status}`,
+    );
+  }
+  let blobDoc: unknown;
+  try {
+    blobDoc = JSON.parse(blobRes.text) as unknown;
   } catch {
     throw new TaskpackError('ACTION_INPUT_INVALID', `remote blob lookup for "${normalizedPath}" returned invalid JSON`);
   }
-  if (!isPlainRecord(doc)) {
-    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `remote path "${normalizedPath}" at ${options.resolvedSha} must be a regular file`);
+  if (!isPlainRecord(blobDoc)) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `remote blob response for "${normalizedPath}" must be an object`);
   }
-  if (doc['type'] !== 'file') {
-    throw new TaskpackError(
-      'TASKPACK_SCOPE_VIOLATION',
-      `remote path "${normalizedPath}" at ${options.resolvedSha} must be a regular file (found type=${String(doc['type'])})`,
-    );
-  }
-  if (typeof doc['size'] === 'number' && doc['size'] > options.maxBytes) {
+  if (typeof blobDoc['size'] === 'number' && blobDoc['size'] > options.maxBytes) {
     throw new TaskpackError(
       'ACTION_INPUT_INVALID',
-      `remote blob "${normalizedPath}" (${doc['size']} bytes) exceeds ${options.maxBytes} bytes`,
+      `remote blob "${normalizedPath}" (${blobDoc['size']} bytes) exceeds ${options.maxBytes} bytes`,
     );
   }
-  if (doc['encoding'] !== 'base64' || typeof doc['content'] !== 'string') {
+  if (blobDoc['encoding'] !== 'base64' || typeof blobDoc['content'] !== 'string') {
     throw new TaskpackError('ACTION_INPUT_INVALID', `remote blob "${normalizedPath}" lacks base64 content`);
   }
-  const bytes = Buffer.from(doc['content'].replace(/\s+/g, ''), 'base64');
+  const bytes = Buffer.from(blobDoc['content'].replace(/\s+/g, ''), 'base64');
   if (bytes.byteLength > options.maxBytes) {
     throw new TaskpackError(
       'ACTION_INPUT_INVALID',
       `remote blob "${normalizedPath}" (${bytes.byteLength} bytes) exceeds ${options.maxBytes} bytes`,
+    );
+  }
+  const actualGitBlobSha = createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
+  if (actualGitBlobSha !== leafBlobSha) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `remote blob "${normalizedPath}" SHA-1 mismatch (expected ${leafBlobSha}, got ${actualGitBlobSha})`,
     );
   }
   return bytes;
@@ -1650,6 +1781,7 @@ async function fetchBoundedProbeResponse(
   fetchImpl: typeof globalThis.fetch,
   headers: Readonly<Record<string, string>>,
   timeoutMs: number,
+  maxResponseBytes: number = MAX_SUITE_STAGE_VERSION_BLOB_BYTES,
 ): Promise<{
   readonly status: number;
   readonly ok: boolean;
@@ -1669,9 +1801,9 @@ async function fetchBoundedProbeResponse(
     const contentLengthHeader = response.headers.get('content-length');
     if (contentLengthHeader !== null) {
       const declared = Number.parseInt(contentLengthHeader, 10);
-      if (Number.isFinite(declared) && declared > MAX_SUITE_STAGE_VERSION_BLOB_BYTES) {
+      if (Number.isFinite(declared) && declared > maxResponseBytes) {
         await response.body?.cancel().catch(() => {});
-        throw new Error(`probe response declared content-length ${declared} > ${MAX_SUITE_STAGE_VERSION_BLOB_BYTES}`);
+        throw new Error(`probe response declared content-length ${declared} > ${maxResponseBytes}`);
       }
     }
     const linkHeader = response.headers.get('link');
@@ -1685,9 +1817,9 @@ async function fetchBoundedProbeResponse(
       const { done, value } = await reader.read();
       if (done) break;
       total += value.byteLength;
-      if (total > MAX_SUITE_STAGE_VERSION_BLOB_BYTES) {
+      if (total > maxResponseBytes) {
         await reader.cancel().catch(() => {});
-        throw new Error(`probe response exceeded ${MAX_SUITE_STAGE_VERSION_BLOB_BYTES} bytes`);
+        throw new Error(`probe response exceeded ${maxResponseBytes} bytes`);
       }
       chunks.push(value);
     }
