@@ -180,6 +180,16 @@ export function evaluateValidated(
     if (evidence && (evidence.spec.checkId !== claim.checkId || evidence.spec.observedStatus !== claim.status)) fail('EVIDENCE_CONTRADICTORY', `${claimsPath}/${index}/evidenceId`, claim.checkId);
   });
   const inventory = resolveInventory(artifacts, effectiveOverlay ? { overlay: effectiveOverlay } : undefined);
+  if (effectiveOverlay !== undefined && manifest.spec.baseTree !== undefined) {
+    let candidateOverlayTotal = 0;
+    for (let index = 0; index < manifest.spec.entries.length; index++) {
+      const entry = manifest.spec.entries[index]!;
+      if (entry.byteLength > effectiveOverlay.maxBytes - candidateOverlayTotal) {
+        fail('LIMIT_RESOLVED_BYTES', `/trusted/candidateManifest/spec/entries/${index}`);
+      }
+      candidateOverlayTotal += entry.byteLength;
+    }
+  }
   const candidateIssue = artifactIssue(manifest.spec.entries, inventory, '/trusted/candidateManifest/spec/entries');
   const issues = new Map(eligibleEvidence.map((evidence, index) => [evidence.metadata.id,
     artifactIssue(evidence.spec.artifacts, inventory, `/trusted/eligibleEvidence/${index}/spec/artifacts`)]));
