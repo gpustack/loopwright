@@ -492,8 +492,15 @@ from tools.auto_sync.checks import validate_candidate
 work = Path(tempfile.mkdtemp(prefix="runner-gate-"))
 try:
     repo = work / "target"
-    subprocess.run(["git", "clone", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-q", "--no-hardlinks", config["repository"], str(repo)], check=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "-B", "pr-head", config["identity"]["head_sha"]], check=True)
+    git_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": "/nonexistent",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.file.allow=always", "clone", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-q", "--no-hardlinks", "--", config["repository"], str(repo)], env=git_env, check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", "checkout", "-q", "-B", "pr-head", config["identity"]["head_sha"]], env=git_env, check=True)
     repo_real = repo.resolve()
 
     index_path = Path(config["candidateIndexPath"])
