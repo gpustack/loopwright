@@ -1240,10 +1240,12 @@ describe('negative and security regression tests', () => {
         targetBranch: 'main',
       };
       const first = await postJsonSigned(pubServer.url, reqBody, pubServer.signingSecret, pubServer.authToken);
-      const second = await postJsonSigned(pubServer.url, { ...reqBody, candidateDigest: 'b'.repeat(64) }, pubServer.signingSecret, pubServer.authToken);
+      const second = await postJsonSigned(pubServer.url, { ...reqBody, dispatchId: 'disp-cache-retry' }, pubServer.signingSecret, pubServer.authToken);
+      const conflict = await postJsonSigned(pubServer.url, { ...reqBody, candidateDigest: 'b'.repeat(64) }, pubServer.signingSecret, pubServer.authToken);
       assert.equal(first.status, 200);
       assert.equal(second.status, 200);
       assert.deepEqual(second.json, first.json, 'duplicate idempotencyKey must return the exact cached receipt');
+      assert.equal(conflict.status, 409, 'mismatched binding reusing idempotencyKey must be rejected with 409');
     } finally {
       await pubServer?.close();
       await openAiServer?.close();

@@ -1154,6 +1154,15 @@ export async function startNativePullRequestPublisherServer(
     if (idempotencyKey.length > 0) {
       const cached = receiptCache.get(idempotencyKey);
       if (cached !== undefined) {
+        if (
+          cached.storeId !== storeId
+          || cached.runId !== runId
+          || cached.operationId !== operationId
+          || cached.candidateDigest !== candidateDigest
+        ) {
+          writePlainJsonResponse(res, 409, { error: 'idempotency_key_conflict' });
+          return;
+        }
         writeSignedJsonResponse(res, 200, signingSecret, cached);
         return;
       }
