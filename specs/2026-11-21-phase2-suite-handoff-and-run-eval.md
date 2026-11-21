@@ -1,6 +1,6 @@
 # Spec: Phase 2 multi-domain suites, compact handoffs, and deterministic run diagnostics
 
-Status: Built
+Status: Shipped
 Type: Feature
 
 ## Summary
