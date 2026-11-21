@@ -439,13 +439,14 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tokenTtlSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="c"># Optional (defaults to 600)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxPayloadBytes</span><span class="p">:</span><span class="w"> </span><span class="m">1048576</span><span class="w"> </span><span class="c"># Optional (defaults to 1048576)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpackPath</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional repo-relative taskpack path</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">suitePath</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/suite.yaml</span><span class="w"> </span><span class="c"># Optional suite path (mutually exclusive with taskpackPath)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">operatorAllowlist</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional GitHub login allowlist for slash commands</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">release-operator</span></span></span></code></pre></div>
 </div>
 <ul>
 <li><strong>Secrets</strong>: Provide environment variable names, not secret values.</li>
 <li><strong>Listen</strong>: Add authenticated ingress before serving external webhooks.</li>
-<li><strong>Path</strong>: The taskpack path must be relative and cannot traverse directories.</li>
+<li><strong>Path</strong>: <code>taskpackPath</code> and <code>suitePath</code> must be repo-relative, regular files, and mutually exclusive.</li>
 </ul>
 <table>
   <thead>
@@ -491,7 +492,7 @@
           <td><code>spec.apiBaseUrl</code></td>
           <td>No</td>
           <td><code>https://api.github.com</code></td>
-          <td>HTTPS URL, or loopback HTTP (<code>127.0.0.1</code> / <code>localhost</code> / <code>[::1]</code>)</td>
+          <td>HTTPS URL (or loopback HTTP); used for tokens and <code>issue_comment</code> PR lookup</td>
       </tr>
       <tr>
           <td><code>spec.listen</code></td>
@@ -539,7 +540,13 @@
           <td><code>spec.taskpackPath</code></td>
           <td>No</td>
           <td>Unset</td>
-          <td>Relative regular-file path validated at startup</td>
+          <td>Relative regular-file path validated at startup (mutually exclusive with <code>suitePath</code>)</td>
+      </tr>
+      <tr>
+          <td><code>spec.suitePath</code></td>
+          <td>No</td>
+          <td>Unset</td>
+          <td>Relative <code>TaskpackSuite</code> path validated at startup (mutually exclusive with <code>taskpackPath</code>)</td>
       </tr>
       <tr>
           <td><code>spec.operatorAllowlist</code></td>
@@ -557,6 +564,7 @@
 </div>
 <p>The command applies the configured listener and token broker settings. It refuses disabled or invalid configuration. The loader resolves the named webhook secret and private key from the environment.</p>
 <p>The service binds loopback by default. Provide authenticated ingress and a configured broker in the trusted host; do not expose tenant lease endpoints publicly. Endpoints include the configured <code>listen.webhookPath</code> (default <code>/webhooks/github</code>), <code>/healthz</code>, and tenant lease and settle routes. The broker issues scoped short-lived tokens and scrubs secrets from responses.</p>
+<p>When <code>spec.suitePath</code> is configured, a single verified <code>X-GitHub-Delivery</code> fans out across matching domains while deduplicating redeliveries, enforces the suite-wide protected path union, and binds each leased domain to its per-domain manifest SHA-256 digest. For <code>issue_comment</code> webhooks lacking PR branch metadata, intake queries <code>spec.apiBaseUrl</code> (default <code>https://api.github.com</code>) to verify same-repo PR ownership and target branch routing before admission.</p>
 <h3 id="webhook-events">Webhook events</h3>
 <table>
   <thead>

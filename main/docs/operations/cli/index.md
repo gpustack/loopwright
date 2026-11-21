@@ -71,7 +71,9 @@ loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --re
 loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 ```
 
-`run --taskpack` runs a local declarative taskpack via `@loopwright/taskpack` without GitHub variables (`--taskpack` is mutually exclusive with `--config`/`--registry`/`--registry-sha256`). It accepts `--mode candidate|no-change|auto`, `--role-model`, `--dry-run`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, and `--step-summary-file`.
+`run --taskpack` runs a local declarative taskpack via `@loopwright/taskpack` without GitHub variables (`--taskpack` is mutually exclusive with `--config`/`--registry`/`--registry-sha256`). It accepts `--mode candidate|no-change|auto`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--role-model`, `--dry-run`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, and `--step-summary-file`.
+
+When `--source-revision` differs from `HEAD`, `--baseline-alignment` probes 3-way merge conflicts in an isolated Git object directory before model calls (`fail-fast` halts as `baseline_merge_conflict`, exit `3`; `extract-context` stages scrubbed conflict hunks).
 
 Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate` when neither `preflight` nor `upstreams` is declared. Declaring `publication.mode: pull_request` or `memory.apply: separate-pull-request` fails closed with `TASKPACK_HOST_BINDING_INVALID`.
 
@@ -81,10 +83,8 @@ Use `resume` for an existing run with the same trusted identity and bindings. Do
 
 `run` and `step` runs wire live `@loopwright/decisions` adapters into `ControllerPorts.decisions` whenever `spec.decisions.enabled` is `true` (falling back deterministically when credentials or endpoints are unavailable).
 
-`run`, `resume`, and `reconcile` accept `--output-format <csv>` with `json`, `github-step-summary`, `markdown`, and `text`.
-Use `--step-summary-file <path>` to select the summary file.
-With `--json`, stdout stays pure NDJSON. The CLI does not emit selected Markdown or text reports in this mode.
-Use `--step-summary-file` to write a separate Markdown summary. Without `--json`, selected reports go to stdout.
+`run`, `resume`, and `reconcile` accept `--output-format <csv>` with `json`, `github-step-summary`, `markdown`, and `text` (each emitting a sanitized `Run Health` (`RunEval`) section covering tool repeats, ping-pong loops, repair convergence, per-step/role breakdowns, and `autoApplied: false` suggestions).
+Use `--step-summary-file <path>` to write a separate Markdown summary. With `--json`, stdout stays pure NDJSON and omits selected Markdown or text reports. Without `--json`, selected reports go to stdout.
 
 ## Step 5: Inspect recovery
 
@@ -100,7 +100,7 @@ loopwright inspect --run-root TRUSTED_ROOT --run-id demo --output INSPECTION_DIR
 loopwright reconcile --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --receipt RECEIPT --json
 ```
 
-Inspect state and evidence before recovery. Reconcile an unknown external outcome with its matching authenticated receipt; absent evidence stays unknown.
+Inspect state and evidence before recovery. `loopwright inspect` exports `run-eval.json` inside `--output` and attaches `runEval` to JSON output without calling a model or network service. Reconcile an unknown external outcome with its matching authenticated receipt; absent evidence stays unknown.
 
 ## Step 6: Audit closure
 
@@ -136,7 +136,7 @@ loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --sta
 loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json
 ```
 
-Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`, `--allow-privileged`, and `--allow-workflow-writes`. Pass the same privilege flags to `step submit` when running `command.v1` checks that require privileged host capabilities.
+Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--allow-privileged`, and `--allow-workflow-writes`. Pass the same privilege flags to `step submit` when running `command.v1` checks that require privileged host capabilities.
 
 A parked run rejects another pull unless `--reissue-lease` replaces a lost lease. Submit each single-use `--lease` token once. `--submission-file` supplies an artifact; `--status` accepts `completed`, `no_change`, `failed`, or `blocked`. Use `--reason` for a failure or block.
 
@@ -151,15 +151,27 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | `init` | `--directory` | `--force`, `--json` | Emit `controller.draft.yaml` and `registry.draft.yaml` |
 | `check` | `--config`, `--registry`, `--registry-sha256` | `--output`, `--json` | Compile and verify configuration and registry digest statically |
 | `digest sync` | `--taskpack` | `--repo`, `--check`, `--json` | Write or verify `digests.lock.json` SHA-256 digests |
-| `run` | `--taskpack` or `--config`+`--registry`+`--registry-sha256`, plus `--repo`, `--run-root`, `--run-id` | `--mode`, `--role-model`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Execute a local taskpack or managed controller run |
-| `run --dry-run` | `--dry-run` with `--taskpack`+`--repo` or `--config`+`--registry`+`--registry-sha256` | `--mode`, `--role-model`, `--output`, `--json` | Compile plan statically without preflight, memory, or publication |
+| `suite check` | `--suite` | `--repo`, `--verify-digests`, `--json` | Validate `TaskpackSuite`, protected union, and prefix disjointness |
+| `suite resolve` | `--suite` | `--repo`, `--event`, `--schedule`, `--comment-body`, `--pr-head-ref`, `--pr-base-ref`, `--domain`, `--json` | Resolve domain matrix, PR comments, and stage readiness |
+| `run` | `--taskpack` or `--config`+`--registry`+`--registry-sha256`, plus `--repo`, `--run-root`, `--run-id` | `--mode`, `--baseline-alignment`, `--source-revision`, `--role-model`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Execute a local taskpack or managed controller run |
+| `run --dry-run` | `--dry-run` with `--taskpack`+`--repo` or `--config`+`--registry`+`--registry-sha256` | `--mode`, `--baseline-alignment`, `--source-revision`, `--role-model`, `--output`, `--json` | Compile plan statically without preflight, memory, or publication |
 | `resume` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id` | `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, `--step-summary-file` | Resume an existing run under identical trusted bindings |
-| `step` | `--run-root`, `--run-id`, action | `--action`, `--allow-privileged`, `--allow-workflow-writes`, `--json` | Pull, submit, or cancel delegated work |
+| `step` | `--run-root`, `--run-id`, action | `--action`, `--baseline-alignment`, `--source-revision`, `--allow-privileged`, `--allow-workflow-writes`, `--json` | Pull, submit, or cancel delegated work |
 | `status` | `--run-root`, `--run-id` | `--json` | Read current run stage, lease state, and checkpoint summary |
-| `inspect` | `--run-root`, `--run-id` | `--output`, `--json` | Export redacted run receipts, checkpoints, and diagnostics |
+| `inspect` | `--run-root`, `--run-id` | `--output`, `--json` | Export redacted receipts, `run-eval.json`, and diagnostics |
 | `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json`, `--output-format`, `--step-summary-file` | Settle an unknown external outcome with an authenticated receipt |
 | `closure` | None | `--repo`, `--output`, `--verify-failures`, `--json` | Audit the 23-capability closure matrix and 14-case failure suite |
 | `app-serve` | `--config` | `--repo`, `--json` | Start the opt-in GitHub App HTTP webhook and token listener |
+
+### Suite commands
+
+```sh
+loopwright suite check --suite .loopwright/suite.yaml --repo . --verify-digests --json
+loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event schedule --schedule nightly --json
+loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event issue_comment --comment-body "/loopwright docs retry" --pr-head-ref loopwright-docs-1 --pr-base-ref main --json
+```
+
+`suite resolve` emits `{ include: [...] }` matrix cells in `--json` mode and exits `0` for `eligible`, `deferred`, and `ignored` dispositions, `2` for usage, unknown `--domain`, or manifest/scope validation errors, and `3` for runtime `blocked` outcomes (such as probe failures or branch-ownership mismatches).
 
 ```sh
 loopwright app-serve --config github-app.yaml --repo . --json
@@ -171,9 +183,9 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Completed, no change, or successful static command |
-| 2 | Usage or configuration rejected |
-| 3 | Unsupported capability or blocked work |
+| 0 | Completed, no change, successful static command, or `suite` `eligible`/`deferred`/`ignored` |
+| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite` manifest rejected |
+| 3 | Unsupported capability or runtime `blocked` (`baseline_merge_conflict`, stage probe, branch mismatch) |
 | 4 | Execution or acceptance failed |
 | 5 | Allowance exhausted |
 | 6 | Deadline expired |

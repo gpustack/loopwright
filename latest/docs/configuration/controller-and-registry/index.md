@@ -271,7 +271,7 @@ spec:
 
 ### Handler implementations
 
-Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (installed file SHA-256 from `installedHandlerDigests()`), `kind`, `implementation`, `parameters`, and exact `capabilities` (`<= 256` checkpoints; roles bind `resourceIds`, steps set `onRework`, and `Evidence` carries `metrics`, `findings`, `detail`):
+Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (from `installedHandlerDigests()`), `kind`, `implementation`, `parameters`, and exact `capabilities` (`<= 256` checkpoints; roles bind `resourceIds`, resources support conditional `when`, steps accept `handoffs` and `onRework`; see [Task Contract](/loopwright/latest/docs/configuration/task-contract/index.md)).
 
 | Implementation | `kind` | Required `capabilities` | Required `parameters` keys |
 | --- | --- | --- | --- |

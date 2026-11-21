@@ -426,7 +426,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
 </div>
 <h3 id="host-preflight">Host preflight</h3>
-<p><code>step next --taskpack</code> runs <code>spec.preflight</code> natively without manual staging scripts or <code>--mode auto</code>. Pass <code>--allow-privileged</code> when the taskpack declares privileged preflight or execution capabilities:</p>
+<p><code>step next --taskpack</code> runs <code>spec.preflight</code> natively without manual staging scripts or <code>--mode auto</code>, and accepts <code>--baseline-alignment</code> and <code>--source-revision</code>. Pass <code>--allow-privileged</code> when the taskpack declares privileged preflight or execution capabilities:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REPO</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">&#34;</span>
@@ -576,7 +576,7 @@
       </tr>
   </tbody>
 </table>
-<p>Recover a lost lease from a crashed worker by rotating the token explicitly, or abort the run cleanly (exit <code>130</code>):</p>
+<p>Recover a lost lease from a crashed worker by rotating the token explicitly (<code>contextFiles</code> reconstruct from CAS for active handoffs), or abort the run cleanly (exit <code>130</code>):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --reissue-lease --json

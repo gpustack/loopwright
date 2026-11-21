@@ -49,6 +49,12 @@ spec:
         digest:
           algorithm: sha256
           hex: <hash>
+        when: # Optional deterministic activation predicates
+          changedPaths: ["packages/app/**"] # Optional path globs
+          extensions: [.json] # Optional lowercase .ext suffixes
+          phases: [author, repair] # Optional author, review, repair, rework
+          failedChecks: [manifest-json] # Optional check IDs
+          failureCodes: [CHECK_FAILED] # Optional verifier codes
   budgets:
     wallTimeMs: 300000
     totalTokens: 64000
@@ -72,12 +78,27 @@ spec:
       uses: pi-author
       roleId: builder
       dependsOn: []
+    - id: review-change
+      kind: agent
+      uses: pi-review
+      roleId: builder
+      dependsOn: [author-change]
+      handoffs: # Optional 1..16 compact ancestor extracts
+        - id: author-summary # Optional unique handoff ID
+          fromStep: author-change
+          source:
+            kind: submission # Optional artifact, submission, or verdict
+          select:
+            kind: json_pointer
+            pointers: [/summary]
+          maxBytes: 8192 # Optional (64..65536, default 8192)
+          required: true # Optional (defaults to true)
     - id: verify-manifest
       kind: check
       uses: check-manifest-json
       roleId: null # Optional on schema; null for check steps
       dependsOn:
-        - author-change
+        - review-change
   acceptance:
     required:
       - manifest-json
@@ -118,6 +139,19 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `resources[].kind` | Conditional | `'instruction'` \| `'skill'` \| `'document'` | **Required** per item; declares how runtime mounts the context file |
 | `resources[].path` | Conditional | Relative path (`1..1024` chars) | **Required** per item; path resolved under `TrustedRegistry` directory |
 | `resources[].digest` | Conditional | `{ algorithm: 'sha256', hex }` | **Required** per item; 64-char lowercase SHA-256 hex digest |
+| `resources[].when` | No | `ResourceActivationRule` | Optional predicate object (unconditional when omitted; requires `>= 1` field) |
+
+### Conditional activation rules
+
+`resources[].when` filters pre-hashed `trustedContext.resources[]` per dispatch without runtime discovery (`discovery: 'disabled'`). Specified fields combine with logical `AND`, and values inside each list combine with logical `OR`:
+
+| Predicate field | Bounds | Values and matching |
+| --- | --- | --- |
+| `changedPaths` | `1..128` globs | Relative path globs matching candidate diffs or initial `watchedPaths` |
+| `extensions` | `1..64` suffixes | Lowercase `.ext` suffixes (`2..33` chars) matching changed file extensions |
+| `phases` | `1..4` phases | `author`, `review`, `repair`, `rework` (`format` mounts zero conditional rules) |
+| `failedChecks` | `1..64` IDs | Check identifiers matching failed check receipts |
+| `failureCodes` | `1..64` codes | Check or verifier reason codes (`1..128` chars) |
 
 Local taskpacks protect `.git`, `<controlRoot>` (preserving the exact-file `spec.proposal.path` carve-out), `digests.lock.json`, and repository-declared `scope.protected` by default without hardcoded tool directories. GitHub Action and App entrypoints also protect `.github`, requiring dual-key `allowWorkflowWrites` for `.github/workflows/**`.
 
@@ -142,6 +176,22 @@ Local taskpacks protect `.git`, `<controlRoot>` (preserving the exact-file `spec
 | `steps[].roleId` | Yes (`null` for check) | Identifier or `null` | Non-null `roles[].id` when `kind: agent`; must be `null` when `kind: check` |
 | `steps[].dependsOn` | Yes | Identifier list | Upstream `steps[].id` nodes that must succeed first (pass `[]` for roots) |
 | `steps[].onRework` | No | `{ rejectTo, maxReworks }` | Optional bounded subgraph reset targeting an ancestor step (`maxReworks`: `1..8`) |
+| `steps[].handoffs` | No | `1..16` `StepHandoffSelector` | Non-compaction `agent` steps only (`<= 65536` bytes aggregate) |
+
+### Handoff selectors
+
+`steps[].handoffs[]` extracts bounded read-only (`0o400`) context with `sourceSha256` and `extractSha256` provenance from a strict DAG ancestor `fromStep`:
+
+| Selector field | Required | Values and bounds | Behavior |
+| --- | --- | --- | --- |
+| `id` | No | Identifier (`1..64` chars) | Unique selector ID within `steps[].handoffs` |
+| `fromStep` | Yes | Ancestor `steps[].id` | Strict DAG ancestor (`GRAPH_CYCLE` / `REFERENCE_UNKNOWN` otherwise) |
+| `source.kind` | Yes | `'artifact'` \| `'submission'` \| `'verdict'` | Reads `<= 1 MiB` epoch artifact (`source.path`), `Submission`, or `StepVerdict` |
+| `select.kind` | Yes | `'markdown_heading'` \| `'json_pointer'` \| `'full'` | Fence-aware ATX heading (`includeSubheadings`), `1..32` RFC 6901 pointers, or slice |
+| `maxBytes` | No | Integer (`64..65536`) | Per-selector UTF-8 cap (default `8192`; `<= 65536` per step) |
+| `required` | No | Boolean (`true` default) | Fails closed when missing if `true`; emits omitted provenance if `false` |
+
+`json_pointer` decodes `~1` and `~0` escapes and rejects `__proto__`, `constructor`, and `prototype` segments.
 
 The Pi adapter restricts its runtime tool names further.
 For MCP access, it accepts `mcp__workspace__read_file`, not the generic `mcp` name.

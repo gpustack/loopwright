@@ -392,6 +392,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">suite-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/suite.yaml</span><span class="w"> </span><span class="c"># Optional multi-domain suite</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">domain</span><span class="p">:</span><span class="w"> </span><span class="l">docs</span><span class="w"> </span><span class="c"># Optional suite domain ID</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">resolve-suite-only</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional matrix resolution only</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">baseline-alignment</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;off&#39;</span><span class="w"> </span><span class="c"># Optional (off, fail-fast, extract-context)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional (auto, candidate, or no-change)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-privileged-execution</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key host unlock</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-workflow-writes</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key workflow write unlock</span><span class="w">
@@ -406,12 +410,15 @@
 </div>
 <ul>
 <li><strong>Mode <code>auto</code></strong>: Runs <code>spec.preflight</code> or upstream discovery, dispatches <code>candidate</code> when updates exist or <code>force</code> is <code>'true'</code>, and compiles a check-only <code>no-change</code> run with zero agent model calls when settled.</li>
+<li><strong>Suite matrix</strong>: Pass <code>suite-path</code> with <code>resolve-suite-only: 'true'</code> to emit <code>outputs.matrix</code> (<code>{ include: [...] }</code>), then run each matrix job with <code>domain: ${{ matrix.domainId }}</code> for per-job revalidation.</li>
+<li><strong>Comment checkout</strong>: Workflows triggered on <code>issue_comment</code> should fetch the PR head commit when running candidate checkout (<code>Suite</code> lookup verifies <code>head.repo.full_name</code>, <code>base.ref</code>, <code>head.ref</code>, and <code>head.sha</code>).</li>
 <li><strong>Dual-key authority</strong>: Even under <code>spec.execution.mode: strict</code>, enabling <code>allowHostEnv</code>, <code>allowHostPath</code>, <code>mountReadOnlyGit</code>, <code>allowCheckNetwork</code>, <code>allowAgentNetwork</code>, or <code>command.v1</code> <code>mountReadOnlyGit: true</code> requires <code>allow-privileged-execution: 'true'</code>. Enabling <code>allowWorkflowWrites: true</code> independently requires <code>allow-workflow-writes: 'true'</code>.</li>
 <li><strong>Provider</strong>: Set the token variable for the selected model, not necessarily <code>ZAI_API_KEY</code>.</li>
 <li><strong>Runtime</strong>: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.</li>
 </ul>
 <h2 id="execution-and-publication">Execution and publication</h2>
-<p>A live Action enforces <code>policyProfile: github</code> (persisted in <code>run.json</code> across recovery), validates event eligibility against declared <code>spec.triggers</code> strictly <strong>before</strong> <code>spec.preflight</code>, resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code> if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires <code>spec.decisions</code> into <code>ControllerPorts.decisions</code>, and runs the controller.</p>
+<p>A live Action enforces <code>policyProfile: github</code> (persisted in <code>run.json</code>), validates <code>spec.triggers</code> strictly <strong>before</strong> <code>spec.preflight</code>, resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code>, and checks for an existing managed PR.</p>
+<p>When <code>suite-path</code> is set, intake resolves <code>.loopwright/suite.yaml</code> (verifying PR ownership via GitHub API on <code>issue_comment</code> and refusing cross-fork PRs or domain conflicts), enforces the suite-wide protected union, and revalidates domain eligibility per matrix job before compiling outside the checkout.</p>
 <table>
   <thead>
       <tr>
@@ -422,7 +429,11 @@
   <tbody>
       <tr>
           <td>Preflight</td>
-          <td>Validates <code>spec.triggers</code> first, then runs <code>spec.preflight.script</code> after actor auth and scrubber setup, stripping Loopwright, GitHub, and provider secrets</td>
+          <td>Validates <code>spec.triggers</code> (and <code>suite-path</code> domain/stage probes) first, then runs <code>spec.preflight.script</code> after actor auth and scrubber setup</td>
+      </tr>
+      <tr>
+          <td>Align</td>
+          <td>When <code>sourceRevision !== baseRevision</code>, runs isolated 3-way <code>git merge-tree</code> (<code>fail-fast</code> blocks conflicts; <code>extract-context</code> stages scrubbed hunks) before model probes</td>
       </tr>
       <tr>
           <td>Discover</td>
@@ -434,7 +445,7 @@
       </tr>
       <tr>
           <td>Publish</td>
-          <td>For <code>pull_request</code> mode, streams verified CAS blobs into a managed PR after verification</td>
+          <td>For <code>pull_request</code> mode, consumes shared 3-way merged carry blobs, verifies extracted conflict resolution, and streams verified CAS blobs into a managed PR</td>
       </tr>
   </tbody>
 </table>
@@ -495,6 +506,26 @@
           <td><code>taskpack-path</code></td>
           <td><code>.loopwright/taskpack.yaml</code></td>
           <td>Repository-relative manifest path, including a custom control directory.</td>
+      </tr>
+      <tr>
+          <td><code>suite-path</code></td>
+          <td>Unset</td>
+          <td>Optional repository-relative <code>TaskpackSuite</code> manifest path (for example <code>.loopwright/suite.yaml</code>).</td>
+      </tr>
+      <tr>
+          <td><code>domain</code></td>
+          <td>Unset</td>
+          <td>Optional target domain identifier within <code>suite-path</code>.</td>
+      </tr>
+      <tr>
+          <td><code>resolve-suite-only</code></td>
+          <td><code>false</code></td>
+          <td>Set <code>true</code> with <code>suite-path</code> to emit <code>outputs.matrix</code> without executing a domain run.</td>
+      </tr>
+      <tr>
+          <td><code>baseline-alignment</code></td>
+          <td>Taskpack <code>off</code></td>
+          <td>Optional 3-way conflict alignment override (<code>off</code>, <code>fail-fast</code>, or <code>extract-context</code>).</td>
       </tr>
       <tr>
           <td><code>mode</code></td>
@@ -706,9 +737,14 @@
           <td><code>cost-usd</code></td>
           <td>Six-decimal USD known subtotal when cost provenance is <code>reported</code> or <code>estimated</code>; otherwise omitted.</td>
       </tr>
+      <tr>
+          <td><code>matrix</code></td>
+          <td>Deterministic JSON matrix (<code>{ include: [...] }</code>) emitted when <code>suite-path</code> resolves.</td>
+      </tr>
   </tbody>
 </table>
-<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. Step summaries and human-readable reports format token counts using <code>K</code>/<code>M</code>/<code>B</code> and elapsed durations using <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code>, while <code>total-tokens</code> and JSON reports preserve exact integer counts. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.</p>
+<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. <code>github-step-summary</code>, <code>markdown</code>, <code>text</code>, and <code>json</code> include a sanitized <code>Run Health</code> (<code>RunEval</code>) section with <code>toolRepeats</code>, <code>pingPong</code>, <code>repairConvergence</code>, per-role/per-step breakdowns, and <code>autoApplied: false</code> hints.</p>
+<p>Step summaries and human-readable reports format token counts using <code>K</code>/<code>M</code>/<code>B</code> and elapsed durations using <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code>, while <code>total-tokens</code> and JSON reports preserve exact integers. Estimated cost uses model pricing, not provider-attested billing; missing cost is unknown, not zero.</p>
 <table>
   <thead>
       <tr>

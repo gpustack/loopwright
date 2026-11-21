@@ -624,7 +624,8 @@
 </div>
 <h2 id="handlers-and-profiles">Handlers and profiles</h2>
 <h3 id="handler-implementations">Handler implementations</h3>
-<p>Each <code>TrustedRegistry.spec.handlers[]</code> entry pins <code>id</code>, <code>version: 1</code>, <code>digest</code> (installed file SHA-256 from <code>installedHandlerDigests()</code>), <code>kind</code>, <code>implementation</code>, <code>parameters</code>, and exact <code>capabilities</code> (<code>&lt;= 256</code> checkpoints; roles bind <code>resourceIds</code>, steps set <code>onRework</code>, and <code>Evidence</code> carries <code>metrics</code>, <code>findings</code>, <code>detail</code>):</p>
+<p>Each <code>TrustedRegistry.spec.handlers[]</code> entry pins <code>id</code>, <code>version: 1</code>, <code>digest</code> (from <code>installedHandlerDigests()</code>), <code>kind</code>, <code>implementation</code>, <code>parameters</code>, and exact <code>capabilities</code> (<code>&lt;= 256</code> checkpoints; roles bind <code>resourceIds</code>, resources support conditional <code>when</code>, steps accept <code>handoffs</code> and <code>onRework</code>; see <a href="/loopwright/latest/docs/configuration/task-contract/">Task Contract</a>
+).</p>
 <table>
   <thead>
       <tr>

@@ -406,6 +406,12 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">digest</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">when</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional deterministic activation predicates</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">changedPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&#34;packages/app/**&#34;</span><span class="p">]</span><span class="w"> </span><span class="c"># Optional path globs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">extensions</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">.json]</span><span class="w"> </span><span class="c"># Optional lowercase .ext suffixes</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">phases</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author, repair]</span><span class="w"> </span><span class="c"># Optional author, review, repair, rework</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">failedChecks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifest-json]</span><span class="w"> </span><span class="c"># Optional check IDs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">failureCodes</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">CHECK_FAILED]</span><span class="w"> </span><span class="c"># Optional verifier codes</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeMs</span><span class="p">:</span><span class="w"> </span><span class="m">300000</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">64000</span><span class="w">
@@ -429,12 +435,27 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">pi-author</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">review-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">agent</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">pi-review</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author-change]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">handoffs</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..16 compact ancestor extracts</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author-summary</span><span class="w"> </span><span class="c"># Optional unique handoff ID</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">fromStep</span><span class="p">:</span><span class="w"> </span><span class="l">author-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">submission</span><span class="w"> </span><span class="c"># Optional artifact, submission, or verdict</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">select</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">json_pointer</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">pointers</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/summary]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional (64..65536, default 8192)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional (defaults to true)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">verify-manifest</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w"> </span><span class="c"># Optional on schema; null for check steps</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">author-change</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">review-change</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">acceptance</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">required</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">manifest-json</span><span class="w">
@@ -574,6 +595,50 @@
           <td><code>{ algorithm: 'sha256', hex }</code></td>
           <td><strong>Required</strong> per item; 64-char lowercase SHA-256 hex digest</td>
       </tr>
+      <tr>
+          <td><code>resources[].when</code></td>
+          <td>No</td>
+          <td><code>ResourceActivationRule</code></td>
+          <td>Optional predicate object (unconditional when omitted; requires <code>&gt;= 1</code> field)</td>
+      </tr>
+  </tbody>
+</table>
+<h3 id="conditional-activation-rules">Conditional activation rules</h3>
+<p><code>resources[].when</code> filters pre-hashed <code>trustedContext.resources[]</code> per dispatch without runtime discovery (<code>discovery: 'disabled'</code>). Specified fields combine with logical <code>AND</code>, and values inside each list combine with logical <code>OR</code>:</p>
+<table>
+  <thead>
+      <tr>
+          <th>Predicate field</th>
+          <th>Bounds</th>
+          <th>Values and matching</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>changedPaths</code></td>
+          <td><code>1..128</code> globs</td>
+          <td>Relative path globs matching candidate diffs or initial <code>watchedPaths</code></td>
+      </tr>
+      <tr>
+          <td><code>extensions</code></td>
+          <td><code>1..64</code> suffixes</td>
+          <td>Lowercase <code>.ext</code> suffixes (<code>2..33</code> chars) matching changed file extensions</td>
+      </tr>
+      <tr>
+          <td><code>phases</code></td>
+          <td><code>1..4</code> phases</td>
+          <td><code>author</code>, <code>review</code>, <code>repair</code>, <code>rework</code> (<code>format</code> mounts zero conditional rules)</td>
+      </tr>
+      <tr>
+          <td><code>failedChecks</code></td>
+          <td><code>1..64</code> IDs</td>
+          <td>Check identifiers matching failed check receipts</td>
+      </tr>
+      <tr>
+          <td><code>failureCodes</code></td>
+          <td><code>1..64</code> codes</td>
+          <td>Check or verifier reason codes (<code>1..128</code> chars)</td>
+      </tr>
   </tbody>
 </table>
 <p>Local taskpacks protect <code>.git</code>, <code>&lt;controlRoot&gt;</code> (preserving the exact-file <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, and repository-declared <code>scope.protected</code> by default without hardcoded tool directories. GitHub Action and App entrypoints also protect <code>.github</code>, requiring dual-key <code>allowWorkflowWrites</code> for <code>.github/workflows/**</code>.</p>
@@ -680,8 +745,65 @@
           <td><code>{ rejectTo, maxReworks }</code></td>
           <td>Optional bounded subgraph reset targeting an ancestor step (<code>maxReworks</code>: <code>1..8</code>)</td>
       </tr>
+      <tr>
+          <td><code>steps[].handoffs</code></td>
+          <td>No</td>
+          <td><code>1..16</code> <code>StepHandoffSelector</code></td>
+          <td>Non-compaction <code>agent</code> steps only (<code>&lt;= 65536</code> bytes aggregate)</td>
+      </tr>
   </tbody>
 </table>
+<h3 id="handoff-selectors">Handoff selectors</h3>
+<p><code>steps[].handoffs[]</code> extracts bounded read-only (<code>0o400</code>) context with <code>sourceSha256</code> and <code>extractSha256</code> provenance from a strict DAG ancestor <code>fromStep</code>:</p>
+<table>
+  <thead>
+      <tr>
+          <th>Selector field</th>
+          <th>Required</th>
+          <th>Values and bounds</th>
+          <th>Behavior</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>id</code></td>
+          <td>No</td>
+          <td>Identifier (<code>1..64</code> chars)</td>
+          <td>Unique selector ID within <code>steps[].handoffs</code></td>
+      </tr>
+      <tr>
+          <td><code>fromStep</code></td>
+          <td>Yes</td>
+          <td>Ancestor <code>steps[].id</code></td>
+          <td>Strict DAG ancestor (<code>GRAPH_CYCLE</code> / <code>REFERENCE_UNKNOWN</code> otherwise)</td>
+      </tr>
+      <tr>
+          <td><code>source.kind</code></td>
+          <td>Yes</td>
+          <td><code>'artifact'</code> | <code>'submission'</code> | <code>'verdict'</code></td>
+          <td>Reads <code>&lt;= 1 MiB</code> epoch artifact (<code>source.path</code>), <code>Submission</code>, or <code>StepVerdict</code></td>
+      </tr>
+      <tr>
+          <td><code>select.kind</code></td>
+          <td>Yes</td>
+          <td><code>'markdown_heading'</code> | <code>'json_pointer'</code> | <code>'full'</code></td>
+          <td>Fence-aware ATX heading (<code>includeSubheadings</code>), <code>1..32</code> RFC 6901 pointers, or slice</td>
+      </tr>
+      <tr>
+          <td><code>maxBytes</code></td>
+          <td>No</td>
+          <td>Integer (<code>64..65536</code>)</td>
+          <td>Per-selector UTF-8 cap (default <code>8192</code>; <code>&lt;= 65536</code> per step)</td>
+      </tr>
+      <tr>
+          <td><code>required</code></td>
+          <td>No</td>
+          <td>Boolean (<code>true</code> default)</td>
+          <td>Fails closed when missing if <code>true</code>; emits omitted provenance if <code>false</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><code>json_pointer</code> decodes <code>~1</code> and <code>~0</code> escapes and rejects <code>__proto__</code>, <code>constructor</code>, and <code>prototype</code> segments.</p>
 <p>The Pi adapter restricts its runtime tool names further.
 For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the generic <code>mcp</code> name.</p>
 <h3 id="step-kinds">Step kinds</h3>
@@ -908,10 +1030,15 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
     <li><a href="#contents">Contents</a></li>
     <li><a href="#taskcontract">TaskContract</a></li>
     <li><a href="#envelope-and-target">Envelope and target</a></li>
-    <li><a href="#scope-and-context">Scope and context</a></li>
+    <li><a href="#scope-and-context">Scope and context</a>
+      <ul>
+        <li><a href="#conditional-activation-rules">Conditional activation rules</a></li>
+      </ul>
+    </li>
     <li><a href="#roles-and-steps">Roles and steps</a>
       <ul>
         <li><a href="#role-and-step-fields">Role and step fields</a></li>
+        <li><a href="#handoff-selectors">Handoff selectors</a></li>
         <li><a href="#step-kinds">Step kinds</a></li>
       </ul>
     </li>

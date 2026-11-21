@@ -373,9 +373,9 @@
 </li>
 <li><a href="#verification-checks">Verification checks</a>
 </li>
-<li><a href="#publication-and-memory">Publication and memory</a>
+<li><a href="#publication-and-triggers">Publication and triggers</a>
 </li>
-<li><a href="#triggers-and-policies">Triggers and policies</a>
+<li><a href="#taskpacksuite">TaskpackSuite</a>
 </li>
 </ul>
 <h2 id="compilation-model">Compilation model</h2>
@@ -471,6 +471,12 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">agent</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">static-step]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">handoffs</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..16 compact ancestor extracts</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">fromStep</span><span class="p">:</span><span class="w"> </span><span class="l">author-step</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">submission }</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">select</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">kind: json_pointer, pointers</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/summary] }</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional (64..65536)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">onRework</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional bounded rework edge</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">rejectTo</span><span class="p">:</span><span class="w"> </span><span class="l">author-step</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">maxReworks</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
@@ -483,6 +489,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">scripts/**</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional protected UTF-8 instruction files</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.loopwright/instructions.md</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/docs-rules.md</span><span class="w"> </span><span class="c"># Optional conditional rule</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">when</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">changedPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">docs/**]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">phases</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author, repair]</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">skills</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional protected UTF-8 skill files</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.agents/skills/catalog/SKILL.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
@@ -556,6 +566,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">releasePublished</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">retry, revise, status]</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/loopwright]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">baselineAlignment</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional isolated 3-way conflict check</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">policy</span><span class="p">:</span><span class="w"> </span><span class="kc">off</span><span class="w"> </span><span class="c"># Optional (off, fail-fast, or extract-context)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxConflictFiles</span><span class="p">:</span><span class="w"> </span><span class="m">16</span><span class="w"> </span><span class="c"># Optional (1..64)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxConflictBytes</span><span class="p">:</span><span class="w"> </span><span class="m">65536</span><span class="w"> </span><span class="c"># Optional (1024..262144)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional ordered model pool (defaults to zai / glm-5.3 / high)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
@@ -598,8 +612,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
 </div>
 <h2 id="execution-and-vars">Execution and vars</h2>
-<p><code>spec.execution</code> enforces <strong>dual-key host authority</strong>. Even under <code>mode: strict</code>, enabling <code>allowHostEnv</code>, <code>allowHostPath</code>, <code>mountReadOnlyGit</code>, <code>allowCheckNetwork</code>, <code>allowAgentNetwork</code>, or <code>command.v1</code> <code>mountReadOnlyGit: true</code> requires <code>allow-privileged-execution: 'true'</code> or <code>--allow-privileged</code>.</p>
-<p>Enabling <code>allowWorkflowWrites: true</code> independently requires <code>allow-workflow-writes: 'true'</code> or <code>--allow-workflow-writes</code>. Multi-tenant webhook service runs refuse self-granted privileged capabilities (<code>TASKPACK_HOST_BINDING_INVALID</code> / <code>TASKPACK_SCOPE_VIOLATION</code>).</p>
+<p><code>spec.execution</code> enforces <strong>dual-key host authority</strong>. Under <code>mode: strict</code>, enabling <code>allowHostEnv</code>, <code>allowHostPath</code>, <code>mountReadOnlyGit</code>, <code>allowCheckNetwork</code>, <code>allowAgentNetwork</code>, or <code>command.v1</code> <code>mountReadOnlyGit: true</code> still needs <code>allow-privileged-execution: 'true'</code> or <code>--allow-privileged</code>. <code>allowWorkflowWrites: true</code> needs <code>allow-workflow-writes: 'true'</code> or <code>--allow-workflow-writes</code>. Multi-tenant webhook runs refuse self-granted privileges (<code>TASKPACK_HOST_BINDING_INVALID</code> / <code>TASKPACK_SCOPE_VIOLATION</code>).</p>
 <h3 id="trust-capabilities">Trust capabilities</h3>
 <table>
   <thead>
@@ -654,6 +667,7 @@
 </table>
 <ul>
 <li><strong><code>spec.vars</code> AST interpolation</strong>: Declare <code>0..64</code> static non-secret strings (<code>[A-Z][A-Z0-9_]*</code>, <code>&lt;= 512</code> chars). Post-parse single-pass interpolation replaces <code>${VAR}</code> only in <code>goal.*</code>, <code>publication.titleTemplate</code>/<code>bodyTemplate</code>, <code>roles[].prompt</code>, <code>preflight.env[]</code>, and <code>localChecks[].parameters</code> (<code>args[]</code>, <code>env</code>, <code>startMarker</code>, <code>endMarker</code>, <code>allowedPointers[]</code>). Undeclared or secret <code>${...}</code> expressions refuse with <code>TASKPACK_UNTRUSTED_INTERPOLATION</code>.</li>
+<li><strong><code>spec.baselineAlignment</code></strong>: Optional <code>{ policy: 'off' | 'fail-fast' | 'extract-context', maxConflictFiles, maxConflictBytes }</code> (<code>1..64</code> default <code>16</code>; <code>1024..262144</code> default <code>65536</code>). Probes 3-way conflicts in an isolated object store when <code>sourceRevision !== baseRevision</code>.</li>
 </ul>
 <h2 id="scope-and-proposal">Scope and proposal</h2>
 <table>
@@ -693,8 +707,8 @@
       <tr>
           <td><code>spec.instructions</code> / <code>skills</code></td>
           <td>No</td>
-          <td>Path or list (<code>1..16</code> paths)</td>
-          <td>Protected UTF-8 trusted context files (<code>&lt;= 256 KiB</code> total)</td>
+          <td>Entry or list (<code>1..16</code> entries)</td>
+          <td>Protected UTF-8 files as paths or <code>{ path, when }</code> rules (<code>&lt;= 256 KiB</code> total)</td>
       </tr>
       <tr>
           <td><code>spec.target.matrix</code></td>
@@ -716,10 +730,12 @@
       </tr>
   </tbody>
 </table>
-<h3 id="scope-syntax">Scope syntax</h3>
+<h3 id="scope-and-conditional-rules">Scope and conditional rules</h3>
 <ul>
 <li><strong>Explicit suffixes</strong>: Use <code>dir/**</code> for recursive directories. Paths without <code>/**</code> match exact files or bounded single-segment <code>*</code>/<code>?</code> globs (<code>packages/*/package.json</code>), rejecting <code>..</code> and reserved names.</li>
-<li><strong>Policy profiles</strong>: Under <code>'local'</code> mode (CLI <code>run --taskpack</code> and <code>step</code>), built-in protection covers <code>.git</code>, <code>&lt;controlRoot&gt;</code> (preserving the exact-file <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, manifest scripts, instructions, skills, and repository-declared <code>spec.scope.protected</code> with zero hardcoded tool directories. Under <code>'github'</code> mode (Action and App, persisted in <code>run.json</code> across recovery), <code>.github</code> stays protected and <code>.github/workflows/**</code> requires dual-key <code>allowWorkflowWrites</code>.</li>
+<li><strong>Conditional rules</strong>: <code>spec.instructions</code>, <code>spec.skills</code>, and <code>spec.roles[].instructions</code>/<code>skills</code> accept <code>{ path, when }</code> predicates (<code>changedPaths</code>, <code>extensions</code>, <code>phases</code>, <code>failedChecks</code>, <code>failureCodes</code>; see <a href="/loopwright/latest/docs/configuration/task-contract/#conditional-activation-rules">Task Contract</a>
+). All paths pre-hash at compile time under <code>discovery: 'disabled'</code>, enter <code>digests.lock.json</code> and protected paths, and fail with <code>TASKPACK_MANIFEST_INVALID</code> if the same normalized <code>path</code> declares conflicting <code>when</code> predicates.</li>
+<li><strong>Policy profiles</strong>: Under <code>'local'</code> mode (<code>run --taskpack</code> and <code>step</code>), protection covers <code>.git</code>, <code>&lt;controlRoot&gt;</code> (keeping the <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, manifest scripts, instructions, and skills. Under <code>'github'</code> mode, <code>.github</code> stays protected and <code>.github/workflows/**</code> requires <code>allowWorkflowWrites</code>.</li>
 </ul>
 <h2 id="preflight-and-upstreams">Preflight and upstreams</h2>
 <p><code>spec.preflight</code> runs once on the host <strong>after</strong> actor authorization and <code>SecretScrubber</code> initialization (and after <code>spec.triggers</code> enforcement on GitHub entrypoints) and <strong>before</strong> <code>TaskContract</code> compilation (<code>script</code> must reside under a protected path such as <code>scripts/**</code>, <code>timeoutSeconds</code> <code>1..3600</code>, explicit <code>env</code> allowlist). It writes JSON to <code>$LOOPWRIGHT_PREFLIGHT_OUT</code> (<code>disposition</code>: <code>'candidate' | 'no_change' | 'blocked'</code>, <code>upstreams[]</code>, and <code>stagedResources[]</code>) and may read/write <code>$LOOPWRIGHT_STAGING_DIR</code>.</p>
@@ -761,8 +777,9 @@
   </tbody>
 </table>
 <h2 id="roles-and-steps">Roles and steps</h2>
-<p><code>spec.roles</code> declares <code>1..16</code> roles (<code>id</code>, <code>provider</code>, <code>model</code>, <code>purpose: task | review</code>, <code>thinking</code>, <code>tools</code>: <code>read | write | edit | bash | delete</code>, <code>dependsOn</code>, per-role <code>instructions</code>, <code>skills</code>, <code>prompt</code>, <code>mcpServers</code>, <code>models</code>). Review roles default <code>tools</code> to <code>['read']</code> and <code>mcpServers</code> to <code>[]</code>. Loopwright compiles per-role <code>resourceIds</code> and enforces <code>mcpServers</code> allowlists in both Action and <code>loopwright step</code> modes.</p>
-<p><code>spec.steps</code> declares <code>1..16</code> acyclic nodes (<code>id</code>, <code>kind: 'agent' | 'check' | 'compact'</code>, <code>role</code> or <code>check</code>, <code>dependsOn</code>, and optional <code>onRework: { rejectTo, maxReworks }</code> where <code>rejectTo</code> is a strict ancestor task step and <code>maxReworks</code> is <code>1..8</code>). Author steps produce <code>Submission</code> records while review steps produce <code>StepVerdict</code> (<code>pass | rework | fail | human</code>, <code>summary</code>, <code>findings</code>) without overwriting author claims.</p>
+<p><code>spec.roles</code> declares <code>1..16</code> roles (<code>id</code>, <code>provider</code>, <code>model</code>, <code>purpose: task | review</code>, <code>thinking</code>, <code>tools</code>: <code>read | write | edit | bash | delete</code>, <code>dependsOn</code>, per-role <code>instructions</code>, <code>skills</code>, <code>handoffs</code>, <code>prompt</code>, <code>mcpServers</code>, <code>models</code>). Review roles default <code>tools</code> to <code>['read']</code> and <code>mcpServers</code> to <code>[]</code>.</p>
+<p><code>spec.steps</code> declares <code>1..16</code> acyclic nodes (<code>id</code>, <code>kind: 'agent' | 'check' | 'compact'</code>, <code>role</code> or <code>check</code>, <code>dependsOn</code>, optional <code>handoffs</code>, and optional <code>onRework: { rejectTo, maxReworks }</code> with <code>maxReworks: 1..8</code>). Both <code>spec.roles[].handoffs</code> and <code>spec.steps[].handoffs</code> accept <code>1..16</code> <code>StepHandoffSelector</code> entries (<code>fromStep</code>, <code>source</code>, <code>select</code>, <code>maxBytes</code>, <code>required</code>) targeting strict DAG ancestors (see <a href="/loopwright/latest/docs/configuration/task-contract/#handoff-selectors">Task Contract</a>
+).</p>
 <h2 id="model-configuration">Model configuration</h2>
 <h3 id="model-fields">Model fields</h3>
 <p><code>spec.models</code> (<code>1..8</code> items; defaults <code>zai</code> / <code>glm-5.3</code> / <code>high</code>) accepts token-authenticated Pi HTTP providers and custom <code>baseUrl</code> gateways (<code>allow-custom-base-url: 'true'</code>); interactive OAuth/CLI providers fail closed (<code>PROVIDER_OAUTH_UNSUPPORTED</code>).</p>
@@ -847,8 +864,8 @@
 <li><strong>Structured check output</strong>: Writing bounded JSON (<code>{ metrics?, findings?, detail? }</code>, <code>&lt;= 64 KiB</code>) to <code>$LOOPWRIGHT_CHECK_OUT</code> propagates through HMAC-signed <code>gate.v1</code> verdicts (<code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>retryablePreemption</code>) even on exit <code>0</code>.</li>
 <li><strong>Inner sandboxes and gates</strong>: Checks running their own inner OS sandbox (such as macOS <code>sandbox-exec</code>) should set <code>allowCheckNetwork: true</code> under dual-key <code>--allow-privileged</code> to avoid nested Seatbelt <code>EPERM</code>. <code>externalGates[]</code> support per-gate <code>signingCredentialRef</code>, <code>authCredentialRef</code>, and <code>url</code>.</li>
 </ul>
-<h2 id="publication-and-memory">Publication and memory</h2>
-<p><code>spec.publication</code>, <code>spec.memory</code>, and <code>spec.triggers</code> are optional in <code>'local'</code> mode (<code>publication</code> defaults to <code>{ mode: 'disabled' }</code>, omitting <code>targetBranch</code>, <code>headBranchPrefix</code>, and <code>titleTemplate</code>; <code>memory</code> defaults to <code>{ directory: '&lt;controlRoot&gt;/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }</code>). GitHub Action and App entrypoints enforce <code>spec.triggers</code> before preflight and require all PR fields when <code>publication.mode</code> is <code>'pull_request'</code>.</p>
+<h2 id="publication-and-triggers">Publication and triggers</h2>
+<p><code>spec.publication</code>, <code>spec.memory</code>, and <code>spec.triggers</code> are optional in <code>'local'</code> mode (<code>publication</code> defaults to <code>{ mode: 'disabled' }</code>; <code>memory</code> defaults to <code>{ directory: '&lt;controlRoot&gt;/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }</code>). GitHub entrypoints enforce <code>spec.triggers</code> before preflight and require PR fields when <code>publication.mode</code> is <code>'pull_request'</code>.</p>
 <table>
   <thead>
       <tr>
@@ -861,67 +878,23 @@
       <tr>
           <td><code>publication.mode</code> / <code>targetBranch</code></td>
           <td><code>'pull_request' | 'disabled'</code> / branch</td>
-          <td>Native PR creation or local/check-only settlement (optional when <code>disabled</code>)</td>
+          <td>PR creation or local settlement (optional when <code>disabled</code>)</td>
       </tr>
       <tr>
           <td><code>publication.headBranchPrefix</code> / <code>titleTemplate</code></td>
           <td>Prefix (<code>1..64</code>) / string (<code>1..256</code>)</td>
-          <td>Managed branch prefix and PR title template (optional when <code>disabled</code>)</td>
+          <td>Managed branch prefix and PR title (optional when <code>disabled</code>)</td>
       </tr>
       <tr>
           <td><code>memory.directory</code> / <code>apply</code></td>
           <td><code>&lt;controlRoot&gt;/memory</code> / <code>'separate-pull-request' | 'local-only' | 'disabled'</code></td>
-          <td>Protected CAS memory location and application mode (optional in local mode)</td>
+          <td>Protected CAS memory path and mode (<code>ttlDays</code> <code>15</code>, <code>maxEntries</code> <code>128</code>, <code>maxPromptEntries</code> <code>32</code>)</td>
       </tr>
       <tr>
           <td><code>memory.onNoModelBudget</code></td>
           <td><code>'deterministic-observations-only' | 'skip'</code></td>
-          <td>Behavior without model budget (optional when <code>apply</code> is <code>'disabled'</code>)</td>
+          <td>Behavior without model budget (<code>checkCodeFingerprint</code>, <code>checkUpstreamVersions</code>, <code>publishOnFailure</code>, <code>skipCi</code>)</td>
       </tr>
-      <tr>
-          <td><code>memory.ttlDays</code> / <code>maxEntries</code> / <code>maxPromptEntries</code></td>
-          <td><code>1..365</code> (<code>15</code>) / <code>1..512</code> (<code>128</code>) / <code>1..128</code> (<code>32</code>)</td>
-          <td>Retention window and entry limits (<code>checkCodeFingerprint</code>, <code>checkUpstreamVersions</code>, <code>publishOnFailure</code>, <code>skipCi</code>)</td>
-      </tr>
-  </tbody>
-</table>
-<h3 id="memory-apply-modes">Memory apply modes</h3>
-<table>
-  <thead>
-      <tr>
-          <th>Mode</th>
-          <th>Behavior</th>
-          <th>Typical use</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>separate-pull-request</code></td>
-          <td>Opens or updates a separate memory branch and PR</td>
-          <td>Default for reviewed repository memory</td>
-      </tr>
-      <tr>
-          <td><code>local-only</code></td>
-          <td>Updates <code>&lt;memoryDirectory&gt;</code> locally without remote branch writes</td>
-          <td>Local loops or read-only remotes</td>
-      </tr>
-      <tr>
-          <td><code>disabled</code></td>
-          <td>Skips memory loading, prompt injection, and finalization</td>
-          <td>Stateless or <code>spec.decisions</code>-driven taskpacks</td>
-      </tr>
-  </tbody>
-</table>
-<h2 id="triggers-and-policies">Triggers and policies</h2>
-<table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Type and values</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
       <tr>
           <td><code>triggers.schedule</code> / <code>workflowDispatch</code> / <code>releasePublished</code></td>
           <td>Booleans</td>
@@ -941,6 +914,42 @@
       </tr>
   </tbody>
 </table>
+<h2 id="taskpacksuite">TaskpackSuite</h2>
+<p><code>TaskpackSuite</code> (default <code>.loopwright/suite.yaml</code>, <code>&lt;= 64 KiB</code>) coordinates <code>1..32</code> domain taskpacks and <code>0..16</code> acyclic promotion stages without storing suite state in Git.</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskpackSuite</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">repo-automation</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">domains</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/docs.taskpack.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">schedules</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">nightly]</span><span class="w"> </span><span class="c"># Optional schedule keys</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">stage</span><span class="p">:</span><span class="w"> </span><span class="l">stage-a</span><span class="w"> </span><span class="c"># Optional stage ID</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">matrix</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional cell list or scalar map</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">channel</span><span class="p">:</span><span class="w"> </span><span class="l">stable</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">runtime</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/runtime.taskpack.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">stage</span><span class="p">:</span><span class="w"> </span><span class="l">stage-b</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">stages</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 0..16 acyclic promotion stages</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">stage-a</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">stage-b</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">stage-a]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">readiness</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs-release</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l">octocat/engine</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">versionFrom</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">domain: docs, path: docs/version.json, jsonPointer</span><span class="p">:</span><span class="w"> </span><span class="l">/version }</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
+</div>
+<ul>
+<li><strong>Suite protection</strong>: Action (<code>suite-path</code>) and App (<code>suitePath</code>) domain runs enforce the suite-wide protected union across <code>.loopwright/suite.yaml</code> and peer control paths (<code>&lt;= 128</code> patterns); gate standalone CLI <code>--taskpack</code> runs with <code>suite check</code>.</li>
+<li><strong>Branch prefix disjointness</strong>: Domains targeting the same <code>targetBranch</code> require pairwise prefix-disjoint <code>spec.publication.headBranchPrefix</code> values (<code>TASKPACK_MANIFEST_INVALID</code> on collision).</li>
+<li><strong>Stateless readiness</strong>: Stage probes (<code>github-release</code>, <code>http-json</code>, <code>git-tag</code>, <code>git-commit</code>) read <code>versionFrom</code> blobs (<code>&lt;= 1 MiB</code>) from <code>baseRevision</code> and defer (<code>eligible</code> / <code>deferred</code>) without Git state files.</li>
+</ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -970,7 +979,7 @@
     </li>
     <li><a href="#scope-and-proposal">Scope and proposal</a>
       <ul>
-        <li><a href="#scope-syntax">Scope syntax</a></li>
+        <li><a href="#scope-and-conditional-rules">Scope and conditional rules</a></li>
       </ul>
     </li>
     <li><a href="#preflight-and-upstreams">Preflight and upstreams</a>
@@ -993,12 +1002,8 @@
         <li><a href="#command-parameters">Command parameters</a></li>
       </ul>
     </li>
-    <li><a href="#publication-and-memory">Publication and memory</a>
-      <ul>
-        <li><a href="#memory-apply-modes">Memory apply modes</a></li>
-      </ul>
-    </li>
-    <li><a href="#triggers-and-policies">Triggers and policies</a></li>
+    <li><a href="#publication-and-triggers">Publication and triggers</a></li>
+    <li><a href="#taskpacksuite">TaskpackSuite</a></li>
   </ul>
 </nav>
         
