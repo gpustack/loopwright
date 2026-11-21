@@ -101,8 +101,9 @@ export function parseDocumentBytes(bytes: Uint8Array, format: 'json' | 'yaml'): 
 }
 /** Private immutable records have their own explicit collection bound; authoring config keeps the default 128. */
 export function parsePrivateJson(bytes: Uint8Array, maximum: number, collectionLimit = 256): Json {
-  if (bytes.byteLength > maximum || maximum > 100_663_296 || collectionLimit > 16384) refuse('ARTIFACT_INVALID', '', 'recovery');
+  if (bytes.byteLength > maximum || maximum > 100_663_296 || collectionLimit > 65_536) refuse('ARTIFACT_INVALID', '', 'recovery');
   const stringLimit = Math.min(44_739_248, Math.max(1_048_576, maximum));
-  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, 262144, stringLimit, true); }
+  const nodeLimit = Math.max(262_144, collectionLimit * 24);
+  try { return json(new TextDecoder('utf-8', { fatal: true }).decode(bytes), collectionLimit, nodeLimit, stringLimit, true); }
   catch { refuse('ARTIFACT_INVALID', '', 'recovery'); }
 }

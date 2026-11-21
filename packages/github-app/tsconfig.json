@@ -16,6 +16,7 @@
     { "path": "../core" },
     { "path": "../decisions" },
     { "path": "../memory" },
-    { "path": "../state" }
+    { "path": "../state" },
+    { "path": "../taskpack" }
   ]
 }

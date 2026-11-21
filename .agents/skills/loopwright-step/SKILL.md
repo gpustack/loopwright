@@ -51,9 +51,9 @@ loopwright step next --config <controller.yaml> --registry <registry.yaml> --reg
 ### 2. Dispatch the role and enforce tools
 
 - **Model routing**: Dispatch each yielded role to a host subagent or supervised Orca worker matching `selection.provider`, `selection.model`, and `selection.thinking`. Execute inline only when the active session already matches `selection`.
-- **Workspace confinement**: Work ONLY inside `candidateDir`. Never edit `--repo` directly during stepping, follow paths into `<runRoot>/<runId>` or `.taskpack-<runId>`, or create symlinks, hardlinks (`nlink > 1`), or `.git` entries. Keep overlay changes within default 128 files and 4 MiB (`<= 1 MiB` per file), or the taskpack's `spec.limits.overlay` ceiling (up to 4096 files and 64 MiB).
+- **Workspace confinement**: Work ONLY inside `candidateDir`. Never edit `--repo` directly during stepping, follow paths into `<runRoot>/<runId>` or `.taskpack-<runId>`, or create symlinks, hardlinks (`nlink > 1`), or `.git` entries. Keep overlay changes within default 128 files and 4 MiB, or the taskpack's `spec.limits.overlay` ceiling (up to 16,384 files and 16 GiB via `1 MiB` CAS streaming).
 - **Read-only and format repairs**: When `repair === "format"` or `allowedTools` excludes mutating tools (`write`, `edit`, `delete`, `bash`) — such as `purpose: "reviewer"` — leave `candidateDir` byte-identical and report findings via `--status`, `--reason`, or `--submission-file`.
-- **Protected paths**: Never touch `0o400` / `0o500` read-only files in `candidateDir` or any path matched by `scope.protected` (plus host-protected workflow and agent-instruction paths unless explicitly unlocked).
+- **Protected paths**: Never touch `0o400` / `0o500` read-only files in `candidateDir`, `.git`, `<controlRoot>`, any path matched by `scope.protected`, or `.github/workflows/**` on GitHub policy runs unless explicitly unlocked.
 
 ### 3. Optional fast screening (`jev`)
 
@@ -89,13 +89,13 @@ INSPECT_DIR="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/loopwright-inspect.XXXXXX")" && 
 loopwright inspect --run-root <outside-dir> --run-id <id> --output "$INSPECT_DIR" --json
 ```
 
-Confirm `"$INSPECT_DIR/result.json"` has `spec.status === "completed"`, ensure the local checkout is clean and `HEAD` matches the immutable baseline commit OID, then apply `"$INSPECT_DIR/candidate.files.json"` onto `<repo-dir>`. Because `candidate.files.json` exports `{ name, encoding, body }` without POSIX mode bits, existing `0755` bits on updated scripts are preserved while newly created files write as `0644` (`chmod +x` any brand-new executable script before `git add`):
+Confirm `"$INSPECT_DIR/result.json"` has `spec.status === "completed"`, ensure the local checkout is clean and `HEAD` matches the immutable baseline commit OID, then apply `"$INSPECT_DIR/candidate.files.json"` onto `<repo-dir>`. `candidate.files.json` exports `version: 2` CAS pointers (`{ name, mode, sha256, byteLength, uri, blobPath }`, verified via `O_NOFOLLOW`, `nlink === 1`, and `1 MiB` streaming SHA-256 while preserving `100644`/`100755` modes), with passive fallback for legacy `version: 1` base64 `body` bundles:
 
 ```bash
 node -e '
-const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process");
+const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process"), crypto = require("node:crypto");
 const [inspectDir, repoArg] = process.argv.slice(1);
-const repoRoot = fs.realpathSync(repoArg);
+const repoRoot = fs.realpathSync(repoArg), CHUNK = 1048576;
 const readJson = (n) => JSON.parse(fs.readFileSync(path.join(inspectDir, n), "utf8"));
 const res = readJson("result.json");
 if (res.spec?.status !== "completed") throw new Error(`Refusing apply: status=${res.spec?.status}`);
@@ -124,6 +124,29 @@ const safePath = (rel) => {
   }
   return cur;
 };
+const streamHash = (filePath, expectedLen, outFd) => {
+  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1) throw new Error(`Unsafe source: ${filePath}`);
+    if (expectedLen !== null && st.size !== expectedLen) throw new Error(`Size mismatch: ${filePath}`);
+    const hash = crypto.createHash("sha256"), buf = Buffer.allocUnsafe(CHUNK);
+    let total = 0, n = 0;
+    while ((n = fs.readSync(fd, buf, 0, CHUNK, null)) > 0) {
+      hash.update(buf.subarray(0, n));
+      if (outFd !== null) for (let off = 0; off < n;) off += fs.writeSync(outFd, buf, off, n - off);
+      total += n;
+    }
+    const after = fs.fstatSync(fd);
+    if (after.ino !== st.ino || after.dev !== st.dev || after.size !== st.size || after.mtimeMs !== st.mtimeMs) throw new Error(`Source mutated: ${filePath}`);
+    if (expectedLen !== null && total !== expectedLen) throw new Error(`Short read: ${filePath}`);
+    return hash.digest("hex");
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+const isV2 = bundle.version === 2;
+if (!isV2 && bundle.version !== 1) throw new Error(`Unsupported bundle version: ${bundle.version}`);
 const files = bundle.files ?? [], present = new Set(files.map((f) => f.name));
 let deleted;
 if (bundle.manifest?.spec?.baseTree != null) {
@@ -143,8 +166,15 @@ if (bundle.manifest?.spec?.baseTree != null) {
 }
 for (const del of deleted) safePath(del);
 for (const file of files) {
-  if (file.encoding !== "base64") throw new Error(`Unsupported encoding: ${file.encoding}`);
   safePath(file.name);
+  if (isV2) {
+    if (!/^[0-9a-f]{64}$/.test(file.sha256) || file.uri !== `cas://sha256/${file.sha256}`) throw new Error(`Invalid CAS ref: ${file.name}`);
+    if (!Number.isSafeInteger(file.byteLength) || file.byteLength < 0 || typeof file.blobPath !== "string" || !path.isAbsolute(file.blobPath)) throw new Error(`Invalid blobPath: ${file.name}`);
+    if (file.mode !== "100644" && file.mode !== "100755") throw new Error(`Invalid mode: ${file.name}`);
+    if (streamHash(file.blobPath, file.byteLength, null) !== file.sha256) throw new Error(`Digest mismatch: ${file.name}`);
+  } else if (file.encoding !== "base64" || typeof file.body !== "string") {
+    throw new Error(`Invalid v1 bundle entry: ${file.name}`);
+  }
 }
 for (const del of deleted) {
   const target = safePath(del);
@@ -155,12 +185,13 @@ for (const del of deleted) {
 }
 for (const file of files) {
   const target = safePath(file.name);
-  const nextBytes = Buffer.from(file.body, "base64");
-  let mode = 0o644, unchanged = false;
+  const v1Bytes = isV2 ? null : Buffer.from(file.body, "base64");
+  let mode = file.mode === "100755" ? 0o755 : 0o644, unchanged = false;
   try {
     const st = fs.lstatSync(target);
-    if (st.mode & 0o111) mode = 0o755;
-    if (st.size === nextBytes.length && fs.readFileSync(target).equals(nextBytes)) unchanged = true;
+    if (file.mode == null && (st.mode & 0o111)) mode = 0o755;
+    if (isV2) unchanged = st.size === file.byteLength && streamHash(target, file.byteLength, null) === file.sha256 && ((st.mode & 0o111) !== 0) === (mode === 0o755);
+    else unchanged = st.size === v1Bytes.length && fs.readFileSync(target).equals(v1Bytes);
   } catch {}
   if (unchanged) continue;
   fs.mkdirSync(path.dirname(target), { recursive: true });
@@ -168,7 +199,11 @@ for (const file of files) {
   const tmp = path.join(path.dirname(target), `.lw-apply-${process.pid}-${Math.random().toString(16).slice(2)}`);
   const fd = fs.openSync(tmp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, mode);
   try {
-    fs.writeFileSync(fd, nextBytes);
+    if (isV2) {
+      if (streamHash(file.blobPath, file.byteLength, fd) !== file.sha256) throw new Error(`Digest mismatch: ${file.name}`);
+    } else {
+      fs.writeFileSync(fd, v1Bytes);
+    }
     fs.fchmodSync(fd, mode);
     fs.closeSync(fd);
     fs.renameSync(tmp, target);

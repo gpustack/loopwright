@@ -660,16 +660,18 @@ test('roleModelOverrides persist in run.json so stepSubmit and inspectRun recons
     if (settled.kind !== 'result') return;
     assert.equal(settled.result.spec.status, 'completed');
 
-    // inspectRun decodes candidate.files.json from delegated-capture.v1!
+    // inspectRun decodes candidate.files.json v2 from delegated-capture.v2!
     const exportDir = join(f.root, 'inspect-out');
     const inspected = assertOk(await inspectRun({ runRoot: f.runRoot, runId, output: exportDir }), 'inspectRun');
     assert.equal(inspected.status.status, 'completed');
     const candidateFilesJson = JSON.parse(await readFile(join(exportDir, 'candidate.files.json'), 'utf8')) as {
-      files: { name: string; body: string }[];
+      version: number;
+      files: { name: string; blobPath: string; uri: string }[];
     };
+    assert.equal(candidateFilesJson.version, 2);
     const resultEntry = candidateFilesJson.files.find(entry => entry.name === 'packages/result.json');
     assert.ok(resultEntry);
-    assert.deepEqual(JSON.parse(Buffer.from(resultEntry.body, 'base64').toString('utf8')), { ok: true, overridden: true });
+    assert.deepEqual(JSON.parse(await readFile(resultEntry.blobPath, 'utf8')), { ok: true, overridden: true });
   } finally {
     await f.cleanup();
   }
@@ -872,7 +874,10 @@ test('mixed adapter: pi + adapter: delegated two-role pipeline hands off cleanly
             const bytes =
               ref.name === 'packages/result.json'
                 ? updatedBytes
-                : Buffer.from(input.candidate.artifacts.find(a => a.name === ref.name)!.bytes);
+                : await (async () => {
+                    const found = input.candidate.artifacts.find(a => a.name === ref.name)!;
+                    return 'bytes' in found ? Buffer.from(found.bytes) : await readFile(found.blobPath);
+                  })();
             fileChunks.push(line({ type: 'file', ref }));
             fileChunks.push(line({ type: 'chunk', index: 0, data: bytes.toString('base64') }));
             fileChunks.push(line({ type: 'file_end', byteLength: bytes.byteLength, digest: hash(bytes).hex }));
@@ -2017,7 +2022,10 @@ test('mixed delegated -> pi pipeline enforces post-capture maxModelCalls when pi
             const bytes =
               ref.name === 'packages/result.json'
                 ? updatedBytes
-                : Buffer.from(input.candidate.artifacts.find(a => a.name === ref.name)!.bytes);
+                : await (async () => {
+                    const found = input.candidate.artifacts.find(a => a.name === ref.name)!;
+                    return 'bytes' in found ? Buffer.from(found.bytes) : await readFile(found.blobPath);
+                  })();
             fileChunks.push(line({ type: 'file', ref }));
             fileChunks.push(line({ type: 'chunk', index: 0, data: bytes.toString('base64') }));
             fileChunks.push(line({ type: 'file_end', byteLength: bytes.byteLength, digest: hash(bytes).hex }));
@@ -3022,9 +3030,10 @@ test('wide overlay (maxFiles: 512, maxBytes: 16 MiB) with > 13 MiB modified file
     const { overlayManifestBounds } = await import('../src/source.js');
     const { readRetained } = await import('../src/retained.js');
 
-    // Verify bounds scaling up to 64 MiB maxBytes and ArtifactStore 96 MiB single-artifact cap
+    // Verify unrestricted perFileMaxBytes up to maxBytes, v2WorkspaceJsonMaxBytes <= 16 MiB, and legacy workspaceMaxBytes <= 96 MiB
     const maxBounds = overlayManifestBounds({ maxFiles: 4096, maxBytes: 67_108_864 });
-    assert.equal(maxBounds.perFileMaxBytes, 33_554_432);
+    assert.equal(maxBounds.perFileMaxBytes, 67_108_864);
+    assert.ok(maxBounds.v2WorkspaceJsonMaxBytes <= 16_777_216);
     assert.ok(maxBounds.workspaceMaxBytes > 89_000_000 && maxBounds.workspaceMaxBytes <= 100_663_296);
 
     const wideOverlay = { maxFiles: 512, maxBytes: 16_777_216 };
@@ -3083,7 +3092,7 @@ test('wide overlay (maxFiles: 512, maxBytes: 16 MiB) with > 13 MiB modified file
     );
     assert.equal(s2.roleId, 'review');
 
-    // Verify persisted workspace artifact (> 18 MiB JSON) decodes cleanly via decodeDelegatedWorkspace
+    // Verify persisted workspace artifact (delegated-capture.v2 metadata JSON, zero base64 inflation) decodes cleanly via decodeDelegatedWorkspace
     const retained = await readRetained({ runRoot: f.runRoot, runId });
     const store = stateValue(reopenLocalRun(retained.descriptor.identity));
     try {
@@ -3091,14 +3100,18 @@ test('wide overlay (maxFiles: 512, maxBytes: 16 MiB) with > 13 MiB modified file
       const head = await progress.read();
       assert.ok(head !== null);
       if (!head) return;
-      assert.ok(head.progress.candidate.workspace.byteLength > 18_000_000);
-      const wsBytes = await retained.artifacts.read(head.progress.candidate.workspace, bounds.workspaceMaxBytes);
-      const decoded = decodeDelegatedWorkspace(wsBytes, head.manifest, retained.lock, 'inspection');
+      assert.ok(head.progress.candidate.workspace.byteLength <= bounds.v2WorkspaceJsonMaxBytes && head.progress.candidate.workspace.byteLength < 32_768);
+      const wsBytes = await retained.artifacts.read(head.progress.candidate.workspace, bounds.v2WorkspaceJsonMaxBytes);
+      const decoded = await decodeDelegatedWorkspace(wsBytes, head.manifest, retained.lock, 'inspection', join(retained.directory, 'artifacts'));
+      assert.equal(decoded.payload.version, 2);
       assert.equal(decoded.artifacts.length, 15);
       const decodedTwoMib = decoded.artifacts.find(a => a.name === 'packages/large-2mib.bin');
-      assert.ok(decodedTwoMib !== undefined);
-      assert.equal(decodedTwoMib?.bytes.byteLength, 2_097_152);
-      assert.equal(Buffer.from(decodedTwoMib!.bytes.subarray(0, 12)).toString('utf8'), 'two-mib-head');
+      assert.ok(decodedTwoMib !== undefined && 'blobPath' in decodedTwoMib);
+      if (decodedTwoMib && 'blobPath' in decodedTwoMib) {
+        assert.equal(decodedTwoMib.byteLength, 2_097_152);
+        const headSlice = (await readFile(decodedTwoMib.blobPath)).subarray(0, 12);
+        assert.equal(headSlice.toString('utf8'), 'two-mib-head');
+      }
     } finally {
       stateValue(store.close());
     }

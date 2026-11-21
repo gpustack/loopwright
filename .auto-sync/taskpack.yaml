@@ -36,8 +36,12 @@ spec:
       - packages/controller/**
       - packages/decisions/**
       - packages/github-app/**
+      - packages/taskpack/package.json
       - docs/**
     protected:
+      - .claude/**
+      - AGENTS.md
+      - CLAUDE.md
       - packages/agent-pi/qualification/**
       - packages/controller/qualification/**
       - packages/cli/src/closure.ts
@@ -106,6 +110,7 @@ spec:
         - packages/controller/package.json
         - packages/decisions/package.json
         - packages/github-app/package.json
+        - packages/taskpack/package.json
       allowPrerelease: false
       versionPath: version
       monotonicSemver: true
@@ -168,14 +173,22 @@ spec:
           path: packages/github-app/package.json
           allowedPointers:
             - /dependencies/yaml
+      - id: taskpack-manifest-keys
+        implementation: json-keys-guard.v1
+        parameters:
+          path: packages/taskpack/package.json
+          allowedPointers:
+            - /dependencies/yaml
       - id: self-upgrade-verify
         implementation: command.v1
         parameters:
           script: .auto-sync/checks/verify.sh
           timeoutSeconds: 900
           allowReadOnlyGitHubToken: false
+          networkMode: loopback-only
           env:
             - GITHUB_ACTIONS
+            - RUNNER_ENVIRONMENT
             - SELF_UPGRADE_RUN_ROOT
             - SELF_UPGRADE_REQUIRE_HUGO
             - SELF_UPGRADE_ALLOW_TEST_FIXTURE

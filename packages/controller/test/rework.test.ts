@@ -176,7 +176,14 @@ function createPiMockPort(
     let lastCommandText = '';
     let lastRequestId = '';
     let lastOpId = '';
-    let currentFiles = new Map<string, Uint8Array>(input.candidate.artifacts.map(a => [a.name, new Uint8Array(a.bytes)]));
+    let currentFiles = new Map<string, Uint8Array>(
+      await Promise.all(
+        input.candidate.artifacts.map(async a => [
+          a.name,
+          'bytes' in a ? new Uint8Array(a.bytes) : new Uint8Array(await readFile(a.blobPath)),
+        ] as const),
+      ),
+    );
     let responseText = '';
 
     const adapter: PiAdapterV2 = {
@@ -1371,12 +1378,14 @@ test('step.ts parity: .agents/** opt-in writable, .claude/** protected, .github/
     await f.save();
     const loaded = assertOk(await f.load(), 'load overlay + scope fixture');
 
-    // A. Default allowWorkflowWrites === false:
+    // A. Under policyProfile: 'github' with default allowWorkflowWrites === false:
     // - .agents/skills/s.md IS writable (0o600)
     // - .claude/settings.json IS protected (0o400)
     // - .github/workflows/ci.yml IS protected (0o400) even though scope.writable includes .github/workflows/**!
     const runDefault = 'run-scope-default';
-    const yDefault = assertStepYield(assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId: runDefault })));
+    const yDefault = assertStepYield(
+      assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId: runDefault, policyProfile: 'github' })),
+    );
     assert.equal(yDefault.allowWorkflowWrites, false);
     assert.equal((await lstat(join(yDefault.candidateDir, '.agents', 'skills', 's.md'))).mode & 0o777, 0o600);
     assert.equal((await lstat(join(yDefault.candidateDir, '.claude', 'settings.json'))).mode & 0o777, 0o400);
@@ -1405,10 +1414,10 @@ test('step.ts parity: .agents/** opt-in writable, .claude/** protected, .github/
     const inspected = assertOk(await inspectRun({ runRoot, runId: runDefault }), 'inspectRun 512-file overlay');
     assert.equal(inspected.status.source, 'current');
 
-    // B. Host-gated allowWorkflowWrites === true unlocks .github/workflows/ci.yml (while keeping .claude/** protected!)
+    // B. Host-gated policyProfile: 'github' + allowWorkflowWrites === true unlocks .github/workflows/ci.yml (while keeping .claude/** protected!)
     const runUnlocked = 'run-scope-unlocked';
     const yUnlocked = assertStepYield(
-      assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId: runUnlocked, allowWorkflowWrites: true })),
+      assertOk(await stepNext({ configuration: loaded, repository, runRoot, runId: runUnlocked, policyProfile: 'github', allowWorkflowWrites: true })),
     );
     assert.equal(yUnlocked.allowWorkflowWrites, true);
     assert.equal((await lstat(join(yUnlocked.candidateDir, '.github', 'workflows', 'ci.yml'))).mode & 0o777, 0o600);
@@ -1926,20 +1935,23 @@ test('adoptRoleCapture enforces allowWorkflowWrites on Pi runs, and readStepMeta
       responseJson: { version: 1, status: 'completed', checks: [{ checkId: 'tests', status: 'passed', evidenceId: null, reason: null }], reason: null },
     }));
 
-    // 1. Default allowWorkflowWrites=false: Pi capture refuses ARTIFACT_INVALID (incident)!
+    // 1. policyProfile: 'github' + default allowWorkflowWrites=false: Pi capture refuses ARTIFACT_INVALID (incident)!
     const piBlocked = assertOk(
-      await runCycleWithPorts({ configuration: piLoaded, repository, runRoot, runId: 'run-pi-wf-deny' }, { openAdapter: wfAdapter }),
+      await runCycleWithPorts(
+        { configuration: piLoaded, repository, runRoot, runId: 'run-pi-wf-deny' },
+        { openAdapter: wfAdapter, policyProfile: 'github' },
+      ),
     );
     assert.equal(piBlocked.kind, 'incident');
     if (piBlocked.kind === 'incident') {
       assert.equal(piBlocked.incident.code, 'ARTIFACT_INVALID');
     }
 
-    // 2. Host-gated allowWorkflowWrites=true: Pi capture allows .github/workflows/ci.yml!
+    // 2. Host-gated policyProfile: 'github' + allowWorkflowWrites=true: Pi capture allows .github/workflows/ci.yml!
     const piAllowed = assertOk(
       await runCycleWithPorts(
         { configuration: piLoaded, repository, runRoot, runId: 'run-pi-wf-allow' },
-        { openAdapter: wfAdapter, allowWorkflowWrites: true },
+        { openAdapter: wfAdapter, policyProfile: 'github', allowWorkflowWrites: true },
       ),
     );
     assert.equal(piAllowed.kind, 'result');

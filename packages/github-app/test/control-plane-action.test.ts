@@ -5,13 +5,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { evaluateCommentPayload, runActionCli, runGitHubActionEntrypoint } from '../src/action.js';
-import { startGitHubAppControlPlane, type ControlPlaneOptions } from '../src/service.js';
-import { compilePlan, loadTrustedConfiguration } from '@loopwright/controller';
+import { MULTI_TENANT_HOST_POLICY, startGitHubAppControlPlane, type ControlPlaneOptions } from '../src/service.js';
+import { compilePlan, loadTrustedConfiguration, resumeCycleWithPorts } from '@loopwright/controller';
+import {
+  parseTaskpackManifest,
+  serializePrettyYaml as serializeTaskpackYaml,
+  TASKPACK_ERROR_CODES,
+  TaskpackError,
+  validateTaskpackV2Manifest as validateTaskpackFromPkg,
+} from '@loopwright/taskpack';
+import { execFileSync } from 'node:child_process';
 import { dirname } from 'node:path';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { InstallationTokenBroker } from '../src/token-broker.js';
 import { TenantAdmissionQueue } from '../src/tenant-queue.js';
-import type { InstallationTokenRequest, TenantIdentity } from '../src/types.js';
+import { GITHUB_APP_ERROR_CODES, GitHubAppError, type InstallationTokenRequest, type TenantIdentity } from '../src/types.js';
+import { WebhookDeliveryStore } from '../src/webhook.js';
+import { createFastTurnkeyAdapter } from './fast-turnkey-adapter.js';
+import { sseToolCalls, startHttpServer } from './mcp-test-fixtures.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -117,8 +128,26 @@ describe('loopback control plane (AC-6)', () => {
       return { token: `ghs_${requests.length.toString().padStart(24, '0')}`, expiresAtMs: 1_700_003_600_000 };
     } },
   });
+  const pinnedManifest = validateTaskpackFromPkg({
+    apiVersion: 'loopwright.dev/v1alpha1',
+    kind: 'Taskpack',
+    metadata: { name: TASKPACK_ID },
+    spec: {
+      goal: { candidate: 'Refresh docs.', noChange: 'Confirm no change.' },
+      scope: { writable: ['docs/**'], protected: [] },
+      upstreams: [],
+      verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
+      triggers: {
+        schedule: false,
+        workflowDispatch: false,
+        releasePublished: false,
+        commentCommands: ['retry', 'revise', 'status'],
+        commentPrefixes: ['/loopwright'],
+      },
+    },
+  }, { policyProfile: 'github', hostPolicy: MULTI_TENANT_HOST_POLICY, enforceHostAuthority: true });
   const options: ControlPlaneOptions = {
-    port: 0, webhookSecret: SECRET, tokenBroker: broker, taskpackId: TASKPACK_ID, baseRevision: BASE_REVISION,
+    port: 0, webhookSecret: SECRET, tokenBroker: broker, taskpackId: TASKPACK_ID, baseRevision: BASE_REVISION, manifest: pinnedManifest,
   };
   let handle: Awaited<ReturnType<typeof startGitHubAppControlPlane>>;
   let firstQueueItemId = '';
@@ -966,6 +995,429 @@ describe('reusable Action entrypoint (AC-6)', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
       await rm(runRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('decoupled @loopwright/taskpack parity, GitHubAppError identity, and policyProfile: github trigger gates', () => {
+  it('shares identical constructor identity between GitHubAppError and TaskpackError across both packages', () => {
+    assert.equal(GitHubAppError, TaskpackError);
+    assert.equal(GITHUB_APP_ERROR_CODES, TASKPACK_ERROR_CODES);
+
+    let thrownFromTaskpack: unknown;
+    try {
+      parseTaskpackManifest(Buffer.from('apiVersion: invalid\n', 'utf8'));
+    } catch (err) {
+      thrownFromTaskpack = err;
+    }
+    assert.equal(thrownFromTaskpack instanceof TaskpackError, true);
+    assert.equal(thrownFromTaskpack instanceof GitHubAppError, true);
+
+    let thrownFromGitHubApp: unknown;
+    try {
+      new WebhookDeliveryStore().markDeliveryState('missing-delivery', 'succeeded');
+    } catch (err) {
+      thrownFromGitHubApp = err;
+    }
+    assert.equal(thrownFromGitHubApp instanceof GitHubAppError, true);
+    assert.equal(thrownFromGitHubApp instanceof TaskpackError, true);
+  });
+
+  it('refuses omitted and disabled spec.triggers in runGitHubActionEntrypoint BEFORE preflight executes, and persists hostPolicy: { policyProfile: "github" } across recovery', async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'lw-gh-triggers-repo-'));
+    const runRoot = await mkdtemp(join(await realpath(tmpdir()), 'lw-gh-triggers-runs-'));
+    try {
+      await mkdir(join(root, '.loopwright', 'scripts'), { recursive: true });
+      await mkdir(join(root, '.github', 'workflows'), { recursive: true });
+      await mkdir(join(root, 'docs'), { recursive: true });
+      await writeFile(join(root, '.github', 'workflows', 'ci.yml'), 'name: ci\n', 'utf8');
+      await writeFile(join(root, 'docs', 'guide.md'), '# Guide v1\n', 'utf8');
+      await writeFile(
+        join(root, '.loopwright', 'scripts', 'preflight.sh'),
+        '#!/bin/sh\nprintf \'{"disposition":"blocked","reason":"PREFLIGHT_EXECUTED_SENTINEL"}\' > "$LOOPWRIGHT_PREFLIGHT_OUT"\n',
+        { mode: 0o755 },
+      );
+
+      // 1) Manifest omitting spec.triggers, publication, and memory (valid minimal Taskpack)
+      const omittedTriggersYaml = serializeTaskpackYaml({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'omitted-triggers' },
+        spec: {
+          goal: { candidate: 'Update docs.', noChange: 'Confirm no change.' },
+          preflight: { script: '.loopwright/scripts/preflight.sh', timeoutSeconds: 10 },
+          scope: { writable: ['docs/**'], protected: [] },
+          upstreams: [],
+          verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
+        },
+      });
+      await writeFile(join(root, '.loopwright', 'taskpack.yaml'), omittedTriggersYaml, 'utf8');
+      execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', 'init'], { cwd: root, stdio: 'ignore' });
+      const headSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+      for (const [idx, eventName] of ['schedule', 'workflow_dispatch', 'release', 'repository_dispatch', 'issue_comment'].entries()) {
+        const res = await runGitHubActionEntrypoint({
+          repositoryRoot: root,
+          repositoryFullName: 'octocat/target',
+          baseRevision: headSha,
+          mode: 'candidate',
+          eventName,
+          ...(eventName === 'issue_comment'
+            ? {
+              eventPayload: {
+                action: 'created',
+                issue: { number: 1, pull_request: { number: 1, head: { sha: headSha } } },
+                comment: { id: 10, body: '/loopwright retry', author_association: 'OWNER', user: { login: 'octocat', type: 'User' } },
+              },
+            }
+            : {}),
+          runRoot,
+          runId: `omit-trig-${idx}`,
+        });
+        assert.equal(res.kind, 'refused', `expected refused for ${eventName}, got ${JSON.stringify(res)}`);
+        if (res.kind === 'refused') {
+          assert.equal(res.code, 'TASKPACK_TRIGGER_UNSUPPORTED');
+        }
+      }
+
+      // 2) Manifest enabling only workflowDispatch + commentCommands: ['status'] refuses schedule, release, and /loopwright retry before preflight,
+      //    while enabled workflow_dispatch reaches preflight (returning PREFLIGHT_EXECUTED_SENTINEL)!
+      const selectiveTriggersYaml = serializeTaskpackYaml({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'selective-triggers' },
+        spec: {
+          goal: { candidate: 'Update docs.', noChange: 'Confirm no change.' },
+          preflight: { script: '.loopwright/scripts/preflight.sh', timeoutSeconds: 10 },
+          scope: { writable: ['docs/**'], protected: [] },
+          upstreams: [],
+          verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
+          triggers: {
+            schedule: false,
+            workflowDispatch: true,
+            releasePublished: false,
+            commentCommands: ['status'],
+          },
+          models: [{ provider: 'openai', id: 'gpt-4.1-mini', apiKeyEnv: 'OPENAI_API_KEY' }],
+        },
+      });
+      await writeFile(join(root, '.loopwright', 'taskpack.yaml'), selectiveTriggersYaml, 'utf8');
+      execFileSync('git', ['add', '.loopwright/taskpack.yaml'], { cwd: root, stdio: 'ignore' });
+      execFileSync('git', ['commit', '-m', 'selective triggers'], { cwd: root, stdio: 'ignore' });
+      const selectiveSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+      for (const [idx, badEvent] of [
+        { eventName: 'schedule' },
+        { eventName: 'release', eventPayload: { action: 'published' } },
+        {
+          eventName: 'issue_comment',
+          eventPayload: {
+            action: 'created',
+            issue: { number: 2, pull_request: { number: 2, head: { sha: selectiveSha } } },
+            comment: { id: 11, body: '/loopwright retry', author_association: 'OWNER', user: { login: 'octocat', type: 'User' } },
+          },
+        },
+      ].entries()) {
+        const res = await runGitHubActionEntrypoint({
+          repositoryRoot: root,
+          repositoryFullName: 'octocat/target',
+          baseRevision: selectiveSha,
+          mode: 'candidate',
+          eventName: badEvent.eventName,
+          eventPayload: badEvent.eventPayload,
+          runRoot,
+          runId: `disabled-trig-${idx}`,
+        });
+        assert.equal(res.kind, 'refused');
+        if (res.kind === 'refused') {
+          assert.equal(res.code, 'TASKPACK_TRIGGER_UNSUPPORTED');
+        }
+      }
+
+      const enabledPreflightRes = await runGitHubActionEntrypoint({
+        repositoryRoot: root,
+        repositoryFullName: 'octocat/target',
+        baseRevision: selectiveSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'enabled-trig-sentinel',
+      });
+      assert.equal(enabledPreflightRes.kind, 'blocked');
+      if (enabledPreflightRes.kind === 'blocked') {
+        assert.equal(enabledPreflightRes.detail, 'PREFLIGHT_EXECUTED_SENTINEL');
+      }
+
+      // 3) Enabled workflow_dispatch executes turnkey cycle and persists hostPolicy: { policyProfile: 'github', allowWorkflowWrites: false }
+      //    across interrupted recovery (resumeCycleWithPorts with mismatched policyProfile: 'local' fails closed with RECOVERY_REQUIRED)
+      const fastAdapter = createFastTurnkeyAdapter();
+      let llmCalls = 0;
+      const mockLlm = await startHttpServer((_req, res) => {
+        llmCalls += 1;
+        if (llmCalls === 1) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.end(sseToolCalls('gpt-4.1-mini', 't1', [{
+            id: 'call-wf',
+            name: 'write',
+            args: { path: 'docs/guide.md', content: '# Guide v2\n' },
+          }]));
+          return;
+        }
+        res.destroy();
+      });
+      try {
+        await writeFile(
+          join(root, '.loopwright', 'scripts', 'preflight.sh'),
+          '#!/bin/sh\nprintf \'{"disposition":"candidate"}\' > "$LOOPWRIGHT_PREFLIGHT_OUT"\n',
+          { mode: 0o755 },
+        );
+        const persistedYaml = serializeTaskpackYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'Taskpack',
+          metadata: { name: 'selective-triggers' },
+          spec: {
+            goal: { candidate: 'Update docs.', noChange: 'Confirm no change.' },
+            preflight: { script: '.loopwright/scripts/preflight.sh', timeoutSeconds: 10 },
+            scope: { writable: ['docs/**'], protected: [] },
+            proposal: { path: 'docs/status.json', requiredFields: ['ok'], schemaVersion: 1 },
+            upstreams: [],
+            verification: {
+              localChecks: [
+                { id: 'doc-json', implementation: 'json-artifact.v1' },
+              ],
+              externalGates: [],
+            },
+            triggers: {
+              schedule: false,
+              workflowDispatch: true,
+              releasePublished: false,
+              commentCommands: ['status'],
+            },
+            models: [{
+              provider: 'openai',
+              id: 'gpt-4.1-mini',
+              api: 'openai-completions',
+              apiKeyEnv: 'OPENAI_API_KEY',
+              baseUrl: `${mockLlm.url}/v1`,
+              cost: { input: 1, output: 2 },
+            }],
+          },
+        });
+        await writeFile(join(root, '.loopwright', 'taskpack.yaml'), persistedYaml, 'utf8');
+        execFileSync('git', ['add', '.loopwright/taskpack.yaml', '.loopwright/scripts/preflight.sh'], { cwd: root, stdio: 'ignore' });
+        execFileSync('git', ['commit', '-m', 'persisted github policy'], { cwd: root, stdio: 'ignore' });
+        const persistedSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+
+        const runId = 'github-persisted-policy';
+        let interruptedOnce = false;
+        const crashingAdapter: typeof fastAdapter = async (host, adapterInput, extra) => {
+          const opened = await fastAdapter(host, adapterInput, extra);
+          if (!opened.ok) return opened;
+          return {
+            ok: true,
+            value: {
+              ...opened.value,
+              execute: async execInput => {
+                if (!interruptedOnce) {
+                  interruptedOnce = true;
+                  throw new Error('simulated crash mid-turn');
+                }
+                return opened.value.execute(execInput);
+              },
+            },
+          };
+        };
+
+        const crashRes = await runGitHubActionEntrypoint({
+          turnkey: true,
+          allowManifestCustomBaseUrl: true,
+          repositoryRoot: root,
+          repositoryId: 77,
+          repositoryFullName: 'octocat/target',
+          baseRevision: persistedSha,
+          mode: 'candidate',
+          eventName: 'workflow_dispatch',
+          runRoot,
+          runId,
+          env: { OPENAI_API_KEY: 'sk-test-github-policy-key' },
+          openHostSessionAdapter: crashingAdapter,
+        });
+        assert.equal(crashRes.kind, 'compiled', JSON.stringify(crashRes));
+        if (crashRes.kind === 'compiled') {
+          assert.equal(crashRes.delegateOutcome?.ok, false, JSON.stringify(crashRes.delegateOutcome));
+        }
+
+        const runRootEntries = await readdir(runRoot);
+        assert.equal(runRootEntries.includes(runId), true, `expected ${runId} in [${runRootEntries.join(',')}], detail=${crashRes.kind === 'compiled' ? crashRes.delegateOutcome?.detail : ''}`);
+
+        const runJson = JSON.parse(await readFile(join(runRoot, runId, 'run.json'), 'utf8')) as {
+          hostPolicy?: { policyProfile?: string; allowWorkflowWrites?: boolean };
+        };
+        assert.deepEqual(runJson.hostPolicy, { policyProfile: 'github', allowWorkflowWrites: false });
+
+        const entries = await readdir(runRoot);
+        const actionDirName = entries.find(name => name.startsWith('lw-action-'))!;
+        const configPath = join(runRoot, actionDirName, 'config', 'config.yaml');
+        const registryPath = join(runRoot, actionDirName, 'registry', 'registry.yaml');
+        const registryBytes = await readFile(registryPath);
+        const { createHash } = await import('node:crypto');
+        const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
+
+        const prevKey = process.env['OPENAI_API_KEY'];
+        process.env['OPENAI_API_KEY'] = 'sk-test-github-policy-key';
+        try {
+          const loaded = await loadTrustedConfiguration({
+            configPath,
+            registryPath,
+            registrySha256,
+            untrustedRoots: [root],
+          });
+          assert.equal(loaded.ok, true);
+          if (loaded.ok) {
+            const mismatchedResume = await resumeCycleWithPorts(
+              { configuration: loaded.value, repository: root, runRoot, runId },
+              { policyProfile: 'local' },
+            );
+            assert.equal(mismatchedResume.ok, false);
+            if (!mismatchedResume.ok) {
+              assert.equal(mismatchedResume.error.code, 'RECOVERY_REQUIRED');
+            }
+          }
+        } finally {
+          if (prevKey === undefined) delete process.env['OPENAI_API_KEY'];
+          else process.env['OPENAI_API_KEY'] = prevKey;
+        }
+      } finally {
+        await mockLlm.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces policyProfile: github and pre-enqueue spec.triggers on startGitHubAppControlPlane while keeping installation revocations unconditional', async () => {
+    const broker = new InstallationTokenBroker({
+      appId: 1234,
+      privateKeyPem: PRIVATE_KEY_PEM,
+      nowSeconds: () => 1_700_000_000,
+      transport: {
+        createInstallationToken: async () => ({
+          token: 'ghs_trig_gate_tok_0000000000000001',
+          expiresAtMs: 1_700_003_600_000,
+        }),
+      },
+    });
+
+    // Rejects manifest with .github/CODEOWNERS in writable when passed to startGitHubAppControlPlane
+    const unvalidatedGithubWriteManifest = validateTaskpackFromPkg({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'bad-gh-scope' },
+      spec: {
+        goal: { candidate: 'Sync', noChange: 'None' },
+        scope: { writable: ['.github/CODEOWNERS'], protected: [] },
+        upstreams: [],
+        verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
+      },
+    }, { policyProfile: 'local' });
+
+    await assert.rejects(
+      () => startGitHubAppControlPlane({
+        port: 0,
+        webhookSecret: SECRET,
+        tokenBroker: broker,
+        manifest: unvalidatedGithubWriteManifest,
+      }),
+      (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+    );
+
+    // Manifest with omitted spec.triggers ignores schedule, workflow_dispatch, release, and issue_comment BEFORE queue.enqueue,
+    // while installation / installation_repositories revocation webhooks still execute unconditionally!
+    const omittedTriggersManifest = validateTaskpackFromPkg({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: TASKPACK_ID },
+      spec: {
+        goal: { candidate: 'Sync', noChange: 'None' },
+        scope: { writable: ['docs/**'], protected: [] },
+        upstreams: [],
+        verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
+      },
+    }, { policyProfile: 'github' });
+
+    const queue = new TenantAdmissionQueue();
+    const handle = await startGitHubAppControlPlane({
+      port: 0,
+      webhookSecret: SECRET,
+      tokenBroker: broker,
+      queue,
+      manifest: omittedTriggersManifest,
+      baseRevision: BASE_REVISION,
+    });
+    try {
+      for (const [idx, delivery] of [
+        { event: 'schedule', payload: { installation: { id: TENANT.installationId }, repository: { id: TENANT.repositoryId, full_name: TENANT.repositoryFullName } } },
+        { event: 'workflow_dispatch', payload: { installation: { id: TENANT.installationId }, repository: { id: TENANT.repositoryId, full_name: TENANT.repositoryFullName } } },
+        { event: 'release', payload: { action: 'published', installation: { id: TENANT.installationId }, repository: { id: TENANT.repositoryId, full_name: TENANT.repositoryFullName } } },
+        { event: 'repository_dispatch', payload: { installation: { id: TENANT.installationId }, repository: { id: TENANT.repositoryId, full_name: TENANT.repositoryFullName } } },
+        { event: 'issue_comment', payload: commentPayload() },
+      ].entries()) {
+        const raw = JSON.stringify(delivery.payload);
+        const res = await post(handle, '/webhooks/github', raw, {
+          'x-hub-signature-256': sign(raw),
+          'x-github-event': delivery.event,
+          'x-github-delivery': `delivery-trig-omit-000${idx}`,
+        });
+        assert.equal(res.status, 200, `expected 200 ignored for ${delivery.event}, got ${res.status}: ${JSON.stringify(res.body)}`);
+        assert.equal(res.body['kind'], 'ignored');
+        assert.equal(queue.inspectTenantQueue(TENANT).counts.pending, 0, `${delivery.event} must NOT enqueue when spec.triggers omits it`);
+      }
+
+      // Lifecycle revocation webhooks remain unconditional even when all triggers are disabled
+      queue.enqueue(TENANT, { kind: 'discover', baseRevision: BASE_REVISION });
+      assert.equal(queue.inspectTenantQueue(TENANT).counts.pending, 1);
+      const revokeRaw = JSON.stringify({ action: 'suspend', installation: { id: TENANT.installationId } });
+      const revokeRes = await post(handle, '/webhooks/github', revokeRaw, {
+        'x-hub-signature-256': sign(revokeRaw),
+        'x-github-event': 'installation',
+        'x-github-delivery': 'delivery-trig-revoke-0001',
+      });
+      assert.equal(revokeRes.status, 202);
+      assert.equal(revokeRes.body['kind'], 'revoked');
+      assert.equal(revokeRes.body['cancelled'], 1);
+      assert.equal(queue.inspectTenantQueue(TENANT).counts.pending, 0);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('ignores actionable triggers without enqueueing when startGitHubAppControlPlane omits options.manifest', async () => {
+    const queue = new TenantAdmissionQueue();
+    const unconfigured = await startGitHubAppControlPlane({
+      port: 0,
+      webhookSecret: SECRET,
+      taskpackId: TASKPACK_ID,
+      baseRevision: BASE_REVISION,
+      queue,
+    });
+    try {
+      const body = JSON.stringify(commentPayload());
+      const res = await post(unconfigured, '/webhooks/github', body, {
+        'x-hub-signature-256': sign(body),
+        'x-github-event': 'issue_comment',
+        'x-github-delivery': 'delivery-unconf-0001',
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.body['kind'], 'ignored');
+      assert.equal(res.body['code'], 'TASKPACK_TRIGGER_UNSUPPORTED');
+      assert.equal(queue.inspectTenantQueue(TENANT).counts.pending, 0);
+    } finally {
+      await unconfigured.close();
     }
   });
 });

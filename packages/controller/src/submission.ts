@@ -1,10 +1,11 @@
 import { LIMITS, validateRelativePath, type SubmittedCheck, type TaskContract, type ArtifactRef, type FindingSeverity, type StructuredFinding } from '@loopwright/core';
 import { canonical, freeze, id, integer, isRecord, list, record, text, hash } from './schema.js';
+import { readBoundedFile } from './files.js';
 import { parsePrivateJson } from './parser.js';
-import { refuse, type ControllerDiagnostic } from './errors.js';
+import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 import type { CapturedRole } from './capture.js';
-import type { CompiledPlan, Controls, RecordedStepVerdict, StepVerdict, StepVerdictDisposition, StoredStepVerdict } from './types.js';
-import type { ArtifactReader, ArtifactStore } from './storage.js';
+import type { CandidateFileEntry, CompiledPlan, Controls, RecordedStepVerdict, StepVerdict, StepVerdictDisposition, StoredStepVerdict } from './types.js';
+import { resolveCanonicalCasBlobPath, type ArtifactReader, type ArtifactStore } from './storage.js';
 export interface Submission { readonly version: 1; readonly status: 'completed' | 'no_change' | 'failed' | 'blocked'; readonly checks: readonly SubmittedCheck[]; readonly reason: string | null }
 export interface RetainedSubmission { readonly version: 1; readonly origin: 'artifact' | 'assistant' | 'both' | 'controller'; readonly raw: ArtifactRef; readonly value: Submission }
 export interface RetainedStepVerdict { readonly version: 1; readonly origin: 'artifact' | 'assistant' | 'both' | 'controller'; readonly raw: ArtifactRef; readonly value: StepVerdict }
@@ -194,8 +195,46 @@ export function isStepVerdictBytes(bytes: Uint8Array): boolean {
     return false;
   }
 }
+function candidateEntrySummary(file: CandidateFileEntry): { readonly byteLength: number; readonly sha256: string } {
+  if ('bytes' in file) {
+    return { byteLength: file.bytes.byteLength, sha256: hash(file.bytes).hex };
+  }
+  return { byteLength: file.byteLength, sha256: file.digest.hex };
+}
+
+export async function readSubmissionCandidateBytes(
+  file: CandidateFileEntry | undefined,
+  artifacts: ArtifactStore,
+  phase: ControllerDiagnostic['phase'] = 'verification',
+): Promise<Uint8Array | undefined> {
+  if (file === undefined) return undefined;
+  if ('bytes' in file) {
+    if ('blobPath' in file) refuse('ARTIFACT_INVALID', '', phase);
+    if (file.bytes.byteLength > 1_048_576) refuse('SUBMISSION_INVALID', '', phase);
+    return file.bytes;
+  }
+  if (file.byteLength > 1_048_576) {
+    refuse('SUBMISSION_INVALID', '', phase);
+  }
+  const canonicalPath = await resolveCanonicalCasBlobPath(artifacts.directory, file.digest.hex, file.blobPath, phase);
+  let raw: Buffer;
+  try {
+    raw = await readBoundedFile(canonicalPath, 1_048_576, true);
+  } catch (error) {
+    if (error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_LIMIT') {
+      refuse('SUBMISSION_INVALID', '', phase);
+    }
+    refuse('ARTIFACT_INVALID', '', phase);
+  }
+  if (raw.byteLength !== file.byteLength || hash(raw).hex !== file.digest.hex) {
+    refuse('ARTIFACT_INVALID', '', phase);
+  }
+  return new Uint8Array(raw);
+}
+
 export async function retainSubmission(capture: CapturedRole, controls: Controls['submission'], task: TaskContract, artifacts: ArtifactStore): Promise<RetainedSubmission> {
-  const artifact = controls.path === null ? undefined : capture.artifacts.find(file => file.name === controls.path)?.bytes;
+  const selectedFile = controls.path === null ? undefined : capture.artifacts.find(file => file.name === controls.path);
+  const artifact = await readSubmissionCandidateBytes(selectedFile, artifacts, 'verification');
   const assistant = capture.submission === null ? null : await artifacts.read(capture.submission, 1048576);
   if (artifact !== undefined && assistant !== null && !Buffer.from(artifact).equals(Buffer.from(assistant))) refuse('SUBMISSION_AMBIGUOUS', '', 'verification');
   const bytes = artifact ?? assistant; if (bytes === null || bytes === undefined) refuse('SUBMISSION_INVALID', '', 'verification');
@@ -211,19 +250,24 @@ export async function retainStepOutput(
   artifacts: ArtifactStore,
   options?: {
     readonly ignoreArtifactPath?: boolean;
-    readonly previousFiles?: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+    readonly previousFiles?: readonly CandidateFileEntry[];
     readonly expectedKind?: 'submission' | 'verdict';
   },
 ): Promise<CapturedStepOutput> {
-  let artifact = options?.ignoreArtifactPath || controls.path === null
+  let selectedFile = options?.ignoreArtifactPath || controls.path === null
     ? undefined
-    : capture.artifacts.find(file => file.name === controls.path)?.bytes;
-  if (artifact !== undefined && capture.submission !== null && options?.previousFiles !== undefined) {
+    : capture.artifacts.find(file => file.name === controls.path);
+  if (selectedFile !== undefined && capture.submission !== null && options?.previousFiles !== undefined) {
     const prior = options.previousFiles.find(file => file.name === controls.path);
-    if (prior !== undefined && Buffer.from(prior.bytes).equals(Buffer.from(artifact))) {
-      artifact = undefined;
+    if (prior !== undefined) {
+      const priorSummary = candidateEntrySummary(prior);
+      const currentSummary = candidateEntrySummary(selectedFile);
+      if (priorSummary.byteLength === currentSummary.byteLength && priorSummary.sha256 === currentSummary.sha256) {
+        selectedFile = undefined;
+      }
     }
   }
+  const artifact = await readSubmissionCandidateBytes(selectedFile, artifacts, 'verification');
   const assistant = capture.submission === null ? null : await artifacts.read(capture.submission, 1048576);
   if (artifact !== undefined && assistant !== null && !Buffer.from(artifact).equals(Buffer.from(assistant))) {
     refuse('SUBMISSION_AMBIGUOUS', '', 'verification');

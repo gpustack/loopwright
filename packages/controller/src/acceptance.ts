@@ -1,4 +1,4 @@
-import { bindSubject, evaluateAcceptance, constructRunResult, type ArtifactManifest, type Evidence, type RequestUsage, type ResolvedArtifact, type RunResult, type RunStatus, type SubmittedCheck, type TaskLock, type VerificationResult } from '@loopwright/core';
+import { bindSubject, evaluateAcceptance, constructRunResult, type ArtifactManifest, type Evidence, type RequestUsage, type ResolvedArtifactInput, type RunResult, type RunStatus, type SubmittedCheck, type TaskLock, type VerificationResult } from '@loopwright/core';
 import type { LocalRunStore } from '@loopwright/state';
 import { authenticatedCheck, authenticatedRefusal, type PreflightRefusal, type VerifiedCheck } from './verification.js';
 import { authenticatedGate } from './gate.js';
@@ -6,7 +6,7 @@ import { journal } from './progress.js';
 import { canonical, freeze, hash, same } from './schema.js';
 import { refuse } from './errors.js';
 import type { ControllerDiagnostic } from './errors.js';
-import type { CompiledPlan } from './types.js';
+import type { CandidateFileEntry, CompiledPlan } from './types.js';
 import type { Submission } from './submission.js';
 export interface AcceptanceObservation {
   readonly result: RunResult; readonly verification: VerificationResult; readonly requestedStatus: Submission['status'] | null; readonly diagnostic: ControllerDiagnostic['code'] | null;
@@ -16,12 +16,16 @@ export interface AcceptanceObservation {
 }
 /** Core inputs are JSON-owned here so shared immutable source refs cannot create input aliases. */
 const tree = (input: unknown): unknown => JSON.parse(canonical(input));
-export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock, candidate: ArtifactManifest, candidateFiles: readonly ResolvedArtifact[], generation: number,
+export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock, candidate: ArtifactManifest, candidateFiles: readonly (ResolvedArtifactInput | CandidateFileEntry)[], generation: number,
   checks: readonly VerifiedCheck[], submission: Submission | null, store: LocalRunStore, forced: 'reconcile_required' | 'expired' | 'cancelled' | 'exhausted' | 'blocked' | 'failed' | null = null, graphComplete = true, refusals: readonly PreflightRefusal[] = [], forcedDiagnostic: ControllerDiagnostic['code'] | null = null): AcceptanceObservation {
   if (!same(plan.task, lock.spec.contract)) refuse('ARTIFACT_INVALID', '', 'verification');
   const overlayOpts = lock.spec.contract.spec.budgets.overlay ? { overlay: lock.spec.contract.spec.budgets.overlay } : undefined;
   const bound = bindSubject(lock, candidate, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); const subject = bound.value, records = journal(store);
-  const eligible: Evidence[] = [], artifacts: ResolvedArtifact[] = [...candidateFiles], bySlot = new Map<string, VerifiedCheck>();
+  const eligible: Evidence[] = [], artifacts: ResolvedArtifactInput[] = candidateFiles.map(file =>
+    'bytes' in file
+      ? { name: file.name, bytes: file.bytes }
+      : { name: file.name, byteLength: file.byteLength, digest: { algorithm: file.digest.algorithm, hex: file.digest.hex } },
+  ), bySlot = new Map<string, VerifiedCheck>();
   for (const checked of checks) {
     const original = plan.verifierSlots.find(slot => slot.id === checked.slotId)?.handler.implementation === 'gate.v1' ? authenticatedGate(checked) : authenticatedCheck(checked), slot = plan.verifierSlots.find(slot => slot.id === checked.slotId), operation = records.operations.find(item => item.intent.operationId === checked.operationId);
     if (!slot || bySlot.has(slot.id) || checked.generation !== generation || checked.checkId !== slot.checkId || !same(original.subject, subject) || !same(original.evidence.spec.subject, subject)

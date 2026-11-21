@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import { createBashTool, createReadTool } from '@earendil-works/pi-coding-agent';
 import type { JsonRpcMessage } from '@earendil-works/pi-mcp';
+import { LIMITS, OVERLAY_LIMITS } from '@loopwright/core';
 import { constructAdapterV2 } from './adapter-v2.js';
 import { constructAdapter, type FactoryPorts, type LeasePort } from './adapter.js';
 import { stateValue } from './admission.js';
@@ -1114,7 +1115,8 @@ class HostToolProcess implements ToolProcessPort {
     if (!this.#readyComplete || this.#closing || this.#used) refuse('RECOVERY_REQUIRED', '', { phase: 'tool' });
     this.#used = true;
 
-    const fileBytes = integer(this.input.policy.limits.fileBytes, 1, 67108864);
+    const fileBytes = integer(this.input.policy.limits.fileBytes, 1, OVERLAY_LIMITS.maxMaxBytes);
+    const readFileMaxBytes = Math.min(fileBytes, LIMITS.artifactBytes);
     const resultBytes = integer(this.input.policy.limits.toolResultBytes, 1, 4194304);
     const wallMs = integer(this.input.policy.limits.toolWallMs, 1, 1800000);
 
@@ -1143,7 +1145,7 @@ class HostToolProcess implements ToolProcessPort {
         const check = async (targetPath: string) => {
           if (targetPath !== expectedPath) refuse('TOOL_DENIED');
           const info = await lstat(targetPath);
-          if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > fileBytes) refuse('TOOL_DENIED');
+          if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > readFileMaxBytes) refuse('TOOL_DENIED');
         };
         const readTool = createReadTool(this.#canonicalCandidate, {
           autoResizeImages: false,
@@ -1155,7 +1157,7 @@ class HostToolProcess implements ToolProcessPort {
               const fd = await open(targetPath, constants.O_RDONLY | constants.O_NOFOLLOW);
               try {
                 const info = await fd.stat();
-                if (!info.isFile() || info.nlink !== 1 || info.size > fileBytes) refuse('TOOL_DENIED');
+                if (!info.isFile() || info.nlink !== 1 || info.size > readFileMaxBytes) refuse('TOOL_DENIED');
                 const buf = Buffer.alloc(info.size + 1);
                 let offset = 0;
                 while (offset < buf.length) {
@@ -1853,7 +1855,7 @@ class HostRuntimeSession {
     const roleMcpAllowlist = resolveSessionMcpAllowlist(this.input, this.options);
     const permittedToolNames = roleMcpAllowlist.filterToolNames(this.input.policy.tools);
 
-    const restored = recoverSnapshot(this.host, this.input);
+    const restored = await recoverSnapshot(this.host, this.input);
     if (restored) {
       const accepted = this.#wait('restore-ready');
       await Promise.all([

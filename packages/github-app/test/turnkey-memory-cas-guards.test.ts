@@ -565,6 +565,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-cas-llm-token-123456',
         },
       });
@@ -926,6 +927,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-p6-llm-token-123456',
         },
       });
@@ -959,6 +961,7 @@ describe('turnkey @loopwright/memory CAS, PR binding, and remote merge guards', 
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-p6-llm-token-123456',
         },
       });

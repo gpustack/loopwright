@@ -272,16 +272,17 @@ describe('Taskpack 2.0 compiler, guards, per-role isolation, and digests', () =>
 
       await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
 
-      // Without hostPolicy.allowWorkflowWrites, loadDeclarativeTaskpack fails closed!
+      // Without hostPolicy.allowWorkflowWrites, loadDeclarativeTaskpack under policyProfile: 'github' fails closed!
       await assert.rejects(
-        () => loadDeclarativeTaskpack({ manifestPath: '.loopwright/taskpack.yaml', repositoryRoot: repoRoot }),
+        () => loadDeclarativeTaskpack({ manifestPath: '.loopwright/taskpack.yaml', repositoryRoot: repoRoot, policyProfile: 'github' } as Parameters<typeof loadDeclarativeTaskpack>[0]),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
       );
 
-      const hostPolicy = { allowPrivileged: false, allowWorkflowWrites: true };
+      const hostPolicy = { policyProfile: 'github' as const, allowPrivileged: false, allowWorkflowWrites: true };
       const manifest = await loadDeclarativeTaskpack({
         manifestPath: '.loopwright/taskpack.yaml',
         repositoryRoot: repoRoot,
+        policyProfile: 'github',
         hostPolicy,
       } as Parameters<typeof loadDeclarativeTaskpack>[0]);
       assert.equal(manifest.spec.proposal, undefined);
@@ -328,7 +329,7 @@ describe('Taskpack 2.0 compiler, guards, per-role isolation, and digests', () =>
       assert.equal(writableScope.includes('package.json/**'), false);
       assert.equal(writableScope.includes('.agents/notes/**'), true);
       assert.equal(writableScope.includes('.github/workflows/**'), true);
-      assert.equal(protectedScope.includes('.claude/**'), true);
+      assert.equal(protectedScope.includes('.claude/**'), false);
       assert.equal(protectedScope.includes('.agents/**'), false);
       assert.equal(protectedScope.includes('.github/CODEOWNERS/**'), true);
 
@@ -590,7 +591,7 @@ describe('Dual-key operator unlock, authorized preflight, mode: auto, and multi-
   });
 
   it('refuses self-granted privileged capabilities in multi-tenant service.ts', async () => {
-    assert.deepEqual(MULTI_TENANT_HOST_POLICY, { allowPrivileged: false, allowWorkflowWrites: false });
+    assert.deepEqual(MULTI_TENANT_HOST_POLICY, { policyProfile: 'github', allowPrivileged: false, allowWorkflowWrites: false });
     const privilegedManifest = validateTaskpackV2Manifest(
       {
         apiVersion: 'loopwright.dev/v1alpha1',
@@ -1338,9 +1339,10 @@ describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/wor
     (process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec')) ||
     (process.platform === 'linux' && (existsSync('/usr/bin/bwrap') || existsSync('/usr/bin/python3')));
 
-  it('drops .agents from ALWAYS_PROTECTED_WORKSPACE_SUBPATHS while keeping .claude protected', () => {
+  it('drops .agents and .claude from ALWAYS_PROTECTED_WORKSPACE_SUBPATHS while keeping .git protected', () => {
     assert.equal(ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.includes('.agents'), false);
-    assert.equal(ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.includes('.claude'), true);
+    assert.equal(ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.includes('.claude'), false);
+    assert.equal(ALWAYS_PROTECTED_WORKSPACE_SUBPATHS.includes('.git'), true);
   });
 
   it('permits writes to matched packages/*/package.json and docs/** while blocking sibling packages/core/src/index.ts, and enforces dual-key .github/workflows', async () => {
@@ -1372,7 +1374,7 @@ describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/wor
           execution: { mode: 'strict', capabilities: { allowWorkflowWrites: true } },
           scope: {
             writable: ['packages/*/package.json', 'docs/**', '.agents/**', '.github/workflows/**'],
-            protected: [],
+            protected: ['.claude/**'],
           },
           upstreams: [],
           verification: { localChecks: [{ id: 'nc', implementation: 'no-change.v1' }], externalGates: [] },
@@ -1381,22 +1383,24 @@ describe('Sandbox */? glob translation, .agents opt-in, and dual-key .github/wor
           triggers: { schedule: true, workflowDispatch: true, releasePublished: false, commentCommands: [] },
         },
       }, {
-        hostPolicy: { allowPrivileged: false, allowWorkflowWrites: true },
+        policyProfile: 'github',
+        hostPolicy: { policyProfile: 'github', allowPrivileged: false, allowWorkflowWrites: true },
         githubSiblings: ['.github/CODEOWNERS'],
-      });
+      } as Parameters<typeof validateTaskpackV2Manifest>[1]);
       await writeFile(join(workspaceRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifest), 'utf8');
 
       // Without hostPolicy.allowWorkflowWrites, resolveEffectiveTaskpackSandboxPolicy fails closed!
       assert.throws(
-        () => resolveEffectiveTaskpackSandboxPolicy(manifest, { workspaceRoot, env: {} }),
+        () => resolveEffectiveTaskpackSandboxPolicy(manifest, { workspaceRoot, policyProfile: 'github', env: {} } as Parameters<typeof resolveEffectiveTaskpackSandboxPolicy>[1]),
         (err: unknown) => err instanceof GitHubAppError,
       );
 
       const policy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
         workspaceRoot,
-        hostPolicy: { allowPrivileged: false, allowWorkflowWrites: true },
+        policyProfile: 'github',
+        hostPolicy: { policyProfile: 'github', allowPrivileged: false, allowWorkflowWrites: true },
         env: {},
-      });
+      } as Parameters<typeof resolveEffectiveTaskpackSandboxPolicy>[1]);
 
       const seatbelt = compileMacosSeatbeltProfile(policy, { platform: 'darwin', arch: 'arm64', probeExecutables: false });
       assert.equal(seatbelt.profileText.includes(`(subpath "${join(workspaceRoot, 'packages', 'core')}")`), false, 'must NEVER grant subpath on packages/core');
@@ -1712,15 +1716,16 @@ describe('Live spec.decisions wiring and stageTaskpackForStep parity', () => {
       await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
       initGitRepo(repoRoot);
 
-      // Without allowWorkflowWrites host authorization, stageTaskpackForStep fails closed!
+      // Without allowWorkflowWrites host authorization, stageTaskpackForStep under policyProfile: 'github' fails closed!
       await assert.rejects(
         () => stageTaskpackForStep({
           taskpackPath: '.loopwright/taskpack.yaml',
           repositoryRoot: repoRoot,
           runRoot,
           runId: 'step-denied-wf',
+          policyProfile: 'github',
           discoverUpstreams: false,
-        }),
+        } as Parameters<typeof stageTaskpackForStep>[0]),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
       );
 
@@ -1729,9 +1734,10 @@ describe('Live spec.decisions wiring and stageTaskpackForStep parity', () => {
         repositoryRoot: repoRoot,
         runRoot,
         runId: 'step-v2-rework',
+        policyProfile: 'github',
         allowWorkflowWrites: true,
         discoverUpstreams: false,
-      });
+      } as Parameters<typeof stageTaskpackForStep>[0]);
       assert.equal(staged.allowWorkflowWrites, true);
       assert.deepEqual(staged.roleMcpServers, {
         implementer: ['docs-mcp', 'repo-mcp'],
@@ -2605,6 +2611,70 @@ exit 0
         }),
         (err: unknown) => err instanceof GitHubAppError && err.code === 'TOKEN_SECRET_LEAK_DETECTED',
       );
+    });
+  });
+
+  it('validates command.v1 toolchainPaths before selectHealthyModelCandidate probes with 2 configured model candidates', async () => {
+    await withTempDir(async dir => {
+      const repoRoot = join(dir, 'repo-tc-probe');
+      const runRoot = join(dir, 'runs-tc-probe');
+      const tmpToolchain = join(dir, 'tmp-bin');
+      await mkdir(join(repoRoot, '.loopwright', 'checks'), { recursive: true });
+      await mkdir(join(repoRoot, 'docs'), { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await mkdir(tmpToolchain, { recursive: true, mode: 0o755 });
+      await writeFile(join(repoRoot, 'docs', 'a.txt'), 'ok\n', 'utf8');
+      await writeFile(join(repoRoot, '.loopwright', 'checks', 'check-a.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+      const twoModelManifestObj = makeRuntimeManifest('tc-runtime-two-models', {
+        models: [
+          { provider: 'openai', id: 'gpt-4.1-mini', apiKeyEnv: 'OPENAI_API_KEY' },
+          { provider: 'zai', id: 'glm-5.3', apiKeyEnv: 'ZAI_API_KEY' },
+        ],
+        verification: {
+          localChecks: [
+            { id: 'check-a', implementation: 'command.v1', parameters: { script: '.loopwright/checks/check-a.sh', toolchainPaths: [tmpToolchain] } },
+          ],
+          externalGates: [],
+        },
+      });
+      await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(twoModelManifestObj), 'utf8');
+      const headSha = initGitRepo(repoRoot);
+
+      let probeCalls = 0;
+      let adapterCalls = 0;
+      const multiTcRes = await runGitHubActionEntrypoint({
+        turnkey: true,
+        repositoryRoot: repoRoot,
+        repositoryId: 92,
+        repositoryFullName: 'octocat/tc-runtime',
+        baseRevision: headSha,
+        mode: 'candidate',
+        force: true,
+        allowPrivilegedExecution: false,
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'tc-strict-two-models',
+        env: {
+          OPENAI_API_KEY: 'sk-openai-probe-guard-test-123456',
+          ZAI_API_KEY: 'zai-probe-guard-test-123456',
+        },
+        probeFetch: async () => {
+          probeCalls += 1;
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+        openHostSessionAdapter: async (host, input, opts) => {
+          adapterCalls += 1;
+          return FAST_ADAPTER(host, input, opts);
+        },
+      });
+      assert.equal(multiTcRes.kind, 'blocked', 'candidate mode with 2 models must fail fast on invalid toolchainPath');
+      if (multiTcRes.kind === 'blocked') {
+        assert.equal(multiTcRes.reason, 'ACTION_INPUT_INVALID');
+        assert.match(multiTcRes.detail ?? '', /under tmpdir is forbidden without allowPrivileged/);
+      }
+      assert.equal(probeCalls, 0, 'invalid toolchainPaths must fail BEFORE selectHealthyModelCandidate sends any provider probe');
+      assert.equal(adapterCalls, 0, 'invalid toolchainPaths must not invoke agent adapter');
     });
   });
 });

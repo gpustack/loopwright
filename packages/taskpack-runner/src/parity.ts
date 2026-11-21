@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -436,7 +437,9 @@ interface AdapterState {
 
 function manifestFor(state: AdapterState, attempt: FakeAdapterAttempt) {
   const files = new Map<string, Buffer>();
-  for (const artifact of state.input.candidate.artifacts) files.set(artifact.name, Buffer.from(artifact.bytes));
+  for (const artifact of state.input.candidate.artifacts) {
+    files.set(artifact.name, 'bytes' in artifact ? Buffer.from(artifact.bytes) : readFileSync(artifact.blobPath));
+  }
   if (attempt.proposal != null && attempt.proposal !== '') files.set('.autosync/proposal.json', Buffer.from(attempt.proposal, 'utf8'));
   for (const edit of attempt.edits) files.set(edit.path, Buffer.from(edit.content, 'utf8'));
   const entries = [...files.entries()].sort(([a], [b]) => a < b ? -1 : 1).map(([name, bytes]) => ({ name, digest: sha256(bytes), byteLength: bytes.byteLength }));

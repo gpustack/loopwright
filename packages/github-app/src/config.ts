@@ -1,18 +1,27 @@
 import { dirname, extname, join, resolve } from 'node:path';
 import { normalizeRelativePath, parseTaskpackDocument, type Json } from './schema.js';
-import { startGitHubAppControlPlane, type ControlPlaneHandle } from './service.js';
+import { MULTI_TENANT_HOST_POLICY, startGitHubAppControlPlane, type ControlPlaneHandle } from './service.js';
 import { loadDeclarativeTaskpack } from './taskpack.js';
 import { createGitHubRestTokenTransport, InstallationTokenBroker, SecretScrubber } from './token-broker.js';
 import { readBoundedRegularFile } from './yaml.js';
 import {
-  DEFAULT_TOKEN_REFRESH_MARGIN_MS, GITHUB_APP_CONFIG_API_VERSION, GITHUB_APP_CONFIG_BYTES, GitHubAppError,
-  type GitHubAppConfigDocument, type GitHubAppListenConfig, type LoadedGitHubAppConfig,
+  DEFAULT_TOKEN_REFRESH_MARGIN_MS,
+  GITHUB_APP_CONFIG_API_VERSION,
+  GITHUB_APP_CONFIG_BYTES,
+  GitHubAppError,
+  type GitHubAppConfigDocument,
+  type GitHubAppListenConfig,
+  type LoadedGitHubAppConfig,
   type TaskpackCommentCommand,
+  type TaskpackManifest,
 } from './types.js';
 
 export {
-  GITHUB_APP_CONFIG_API_VERSION, GITHUB_APP_CONFIG_BYTES,
-  type GitHubAppConfigDocument, type GitHubAppListenConfig, type LoadedGitHubAppConfig,
+  GITHUB_APP_CONFIG_API_VERSION,
+  GITHUB_APP_CONFIG_BYTES,
+  type GitHubAppConfigDocument,
+  type GitHubAppListenConfig,
+  type LoadedGitHubAppConfig,
 };
 
 const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -284,16 +293,18 @@ export async function startConfiguredGitHubApp(
   });
 
   const repoRoot = resolve(options?.repoRoot ?? dirname(resolve(configPath)));
+  let manifest: TaskpackManifest | undefined;
   let taskpackId: string | undefined;
   let commentPrefixes: readonly string[] | undefined;
   let commentCommands: readonly TaskpackCommentCommand[] | undefined;
 
   if (loaded.document.spec.taskpackPath !== undefined) {
-    let manifest;
     try {
       manifest = await loadDeclarativeTaskpack({
         manifestPath: join(repoRoot, loaded.document.spec.taskpackPath),
         repositoryRoot: repoRoot,
+        policyProfile: 'github',
+        hostPolicy: MULTI_TENANT_HOST_POLICY,
       });
     } catch (error) {
       throw new GitHubAppError(
@@ -318,6 +329,7 @@ export async function startConfiguredGitHubApp(
     webhookSecret,
     tokenBroker,
     scrubber,
+    manifest,
     taskpackId,
     commentPrefixes,
     commentCommands,

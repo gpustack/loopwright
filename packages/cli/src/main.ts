@@ -1,10 +1,14 @@
 #!/usr/bin/env node
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { chmod, lstat, readdir, realpath, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RunReportInput, type StepTickResult } from '@loopwright/controller';
-import { computeTaskpackDigests, GitHubAppError, loadDeclarativeTaskpack, openStagedTaskpackStepGate, resolveDigestLockfilePath, SecretScrubber, stageTaskpackForStep, startConfiguredGitHubApp, verifyDigestLockfile, writeDigestLockfile, type GitHubAppErrorCode, type StagedTaskpackStepGateHandle } from '@loopwright/github-app';
+import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
+import { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
+import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RoleModelOverride, type RunReportInput, type StepTickResult } from '@loopwright/controller';
+import { assertCleanArtifact, buildDefaultAuthorPrompt, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseLoopwrightEnvLimits, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
 import { parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
@@ -16,7 +20,7 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -73,11 +77,12 @@ interface EmitOutcomeReportInput {
   readonly runId: string;
   readonly json: boolean;
   readonly configuration?: LoadedConfiguration;
+  readonly model?: ReportModelInfo | null;
   readonly report: Omit<RunReportInput, 'runId' | 'model' | 'usage' | 'externalUrl'> & { readonly usage?: RunReportInput['usage'] };
   readonly emitDefault: () => Promise<void>;
 }
 async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> {
-  const { args, runRoot, runId, json, configuration, report, emitDefault } = input;
+  const { args, runRoot, runId, json, configuration, model, report, emitDefault } = input;
   const outputFormats: readonly ReportOutputFormat[] = args.values.has('output-format')
     ? parseReportOutputFormats(args.values.get('output-format'))
     : [];
@@ -95,7 +100,7 @@ async function emitOutcomeReports(input: EmitOutcomeReportInput): Promise<void> 
     reasonCode: report.reasonCode ?? null,
     phase: report.phase ?? inspected?.status.stage ?? null,
     checks: report.checks ?? [],
-    model: configuration ? primaryModelInfo(configuration) : null,
+    model: model !== undefined ? model : (configuration ? primaryModelInfo(configuration) : null),
     usage: report.usage ?? inspected?.usage ?? null,
     externalUrl: inspected?.externalUrl ?? null,
   };
@@ -148,13 +153,14 @@ async function emitExecutionOutcome(
       : emit('result', outcome, outcome.result.spec.status),
   });
 }
-/** Map every GitHubAppErrorCode exhaustively to its documented CLI exit code. */
-export function gitHubAppExitCode(code: GitHubAppErrorCode): number {
+/** Map every TaskpackErrorCode exhaustively to its documented CLI exit code. */
+export function taskpackExitCode(code: TaskpackErrorCode): number {
   switch (code) {
     case 'TASKPACK_MANIFEST_INVALID':
     case 'TASKPACK_UNTRUSTED_INTERPOLATION':
     case 'TASKPACK_SCOPE_VIOLATION':
     case 'TASKPACK_HOST_BINDING_INVALID':
+    case 'TASKPACK_TRIGGER_UNSUPPORTED':
     case 'SANDBOX_POLICY_INVALID':
     case 'GITHUB_APP_CONFIG_INVALID':
     case 'TOKEN_BROKER_CONFIG_INVALID':
@@ -197,6 +203,7 @@ export function gitHubAppExitCode(code: GitHubAppErrorCode): number {
     }
   }
 }
+export { taskpackExitCode as gitHubAppExitCode };
 function createCliScrubber(extraKeys: readonly string[] = []): SecretScrubber {
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraKeys]) {
@@ -287,37 +294,60 @@ async function withSignalAbort<T>(
     process.off('SIGTERM', terminate);
   }
 }
+async function resolveRepoRelativeTaskpackPath(
+  rawTaskpack: string,
+  rawRepoRoot: string,
+  repoRoot: string,
+): Promise<string> {
+  if (!isAbsolute(rawTaskpack)) {
+    return normalizeRelativePath(rawTaskpack.replace(/\\/g, '/'), '/');
+  }
+  const absManifest = resolve(rawTaskpack);
+  const relFromRaw = relative(rawRepoRoot, absManifest);
+  if (relFromRaw.length > 0 && relFromRaw !== '..' && !relFromRaw.startsWith(`..${sep}`) && !isAbsolute(relFromRaw)) {
+    return normalizeRelativePath(relFromRaw.split(sep).join('/'), '/');
+  }
+  const relFromReal = relative(repoRoot, absManifest);
+  if (relFromReal.length > 0 && relFromReal !== '..' && !relFromReal.startsWith(`..${sep}`) && !isAbsolute(relFromReal)) {
+    return normalizeRelativePath(relFromReal.split(sep).join('/'), '/');
+  }
+  let ancestor = dirname(absManifest);
+  let prev = '';
+  while (ancestor !== prev) {
+    const realAncestor = await realpath(ancestor).catch(() => null);
+    if (realAncestor === repoRoot) {
+      const relFromAncestor = relative(ancestor, absManifest);
+      if (relFromAncestor.length > 0 && relFromAncestor !== '..' && !relFromAncestor.startsWith(`..${sep}`) && !isAbsolute(relFromAncestor)) {
+        return normalizeRelativePath(relFromAncestor.split(sep).join('/'), '/');
+      }
+      break;
+    }
+    prev = ancestor;
+    ancestor = dirname(ancestor);
+  }
+  throw new TaskpackError('TASKPACK_MANIFEST_INVALID', 'taskpack manifest escapes the repository root', '/');
+}
+async function emitTaskpackError(err: TaskpackError, emit: EmitFn, scrubber?: SecretScrubber): Promise<number> {
+  const effectiveScrubber = scrubber ?? createCliScrubber();
+  const message = effectiveScrubber.scrub(err.message);
+  const path = typeof err.path === 'string' && err.path.length > 0 ? effectiveScrubber.scrub(err.path) : null;
+  await emit(
+    'diagnostic',
+    { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
+    err.code,
+  );
+  return taskpackExitCode(err.code);
+}
 async function runDigestCommand(args: Arguments, emit: EmitFn): Promise<number> {
   const rawRepoRoot = resolve(args.values.has('repo') ? args.values.get('repo')! : process.cwd());
   const repoRoot = await canonicalPath(rawRepoRoot);
-  let manifestPath = args.values.get('taskpack')!;
-  if (isAbsolute(manifestPath)) {
-    const absManifest = resolve(manifestPath);
-    const relFromRaw = relative(rawRepoRoot, absManifest);
-    if (relFromRaw.length > 0 && relFromRaw !== '..' && !relFromRaw.startsWith(`..${sep}`) && !isAbsolute(relFromRaw)) {
-      manifestPath = relFromRaw.split(sep).join('/');
-    } else {
-      let ancestor = dirname(absManifest);
-      let prev = '';
-      while (ancestor !== prev) {
-        const realAncestor = await realpath(ancestor).catch(() => null);
-        if (realAncestor === repoRoot) {
-          const relFromAncestor = relative(ancestor, absManifest);
-          if (relFromAncestor.length > 0 && relFromAncestor !== '..' && !relFromAncestor.startsWith(`..${sep}`) && !isAbsolute(relFromAncestor)) {
-            manifestPath = relFromAncestor.split(sep).join('/');
-          }
-          break;
-        }
-        prev = ancestor;
-        ancestor = dirname(ancestor);
-      }
-    }
-  }
   const checkOnly = args.flags.has('check');
   try {
+    const manifestPath = await resolveRepoRelativeTaskpackPath(args.values.get('taskpack')!, rawRepoRoot, repoRoot);
     const manifest = await loadDeclarativeTaskpack({
       manifestPath,
       repositoryRoot: repoRoot,
+      policyProfile: 'local',
       enforceHostAuthority: false,
     });
     const lockfilePath = resolveDigestLockfilePath(manifest, manifest.controlRoot);
@@ -371,16 +401,8 @@ async function runDigestCommand(args: Arguments, emit: EmitFn): Promise<number> 
     );
     return 0;
   } catch (err) {
-    if (err instanceof GitHubAppError) {
-      const scrubber = createCliScrubber();
-      const message = scrubber.scrub(err.message);
-      const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
-      await emit(
-        'diagnostic',
-        { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
-        err.code,
-      );
-      return gitHubAppExitCode(err.code);
+    if (err instanceof TaskpackError) {
+      return await emitTaskpackError(err, emit);
     }
     throw err;
   }
@@ -426,9 +448,10 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
           runRoot,
           runId,
           mode: (args.values.get('mode') as 'candidate' | 'no-change' | undefined) ?? 'candidate',
+          policyProfile: 'local',
           allowPrivileged,
           allowWorkflowWrites,
-          hostPolicy: { allowPrivileged, allowWorkflowWrites },
+          hostPolicy: { policyProfile: 'local', allowPrivileged, allowWorkflowWrites },
           runPreflight: true,
           runtimeEnv: process.env,
         });
@@ -532,16 +555,8 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
         stepped = await stepCancel({ runRoot, runId, ...gateEnvOpt }, gatePorts);
       }
     } catch (err) {
-      if (err instanceof GitHubAppError) {
-        const scrubber = createCliScrubber();
-        const message = scrubber.scrub(err.message);
-        const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
-        await emit(
-          'diagnostic',
-          { version: 1, code: err.code, message, ...(path !== null ? { path } : {}) },
-          err.code,
-        );
-        return gitHubAppExitCode(err.code);
+      if (err instanceof TaskpackError) {
+        return await emitTaskpackError(err, emit);
       }
       throw err;
     }
@@ -570,6 +585,704 @@ async function runStepCommand(args: Arguments, json: boolean, emit: EmitFn): Pro
     }
   }
 }
+const DRY_RUN_PUBLICATION_SENTINEL_URL = 'http://127.0.0.1:65535/loopwright-dry-run-publication';
+function applyTaskpackRoleModelOverrides(
+  manifest: TaskpackManifest,
+  overrides: readonly RoleModelOverride[] | undefined,
+): { readonly manifest: TaskpackManifest; readonly roleSelection?: HostRoleSelection } {
+  if (overrides === undefined || overrides.length === 0) {
+    return { manifest };
+  }
+  const declaredRoles = manifest.spec.roles;
+  if (declaredRoles !== undefined && declaredRoles.length > 0) {
+    const byId = new Map<string, RoleModelOverride>();
+    const knownIds = new Set(declaredRoles.map(role => role.id));
+    for (const override of overrides) {
+      if (!knownIds.has(override.roleId)) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `unknown --role-model role "${override.roleId}"`,
+          '/roleModelOverrides',
+        );
+      }
+      byId.set(override.roleId, override);
+    }
+    const updatedRoles = declaredRoles.map(role => {
+      const override = byId.get(role.id);
+      if (override === undefined) return role;
+      const { models: _unusedModels, ...roleBase } = role;
+      void _unusedModels;
+      return {
+        ...roleBase,
+        provider: override.provider,
+        model: override.model,
+        ...(override.thinking !== undefined ? { thinking: override.thinking } : {}),
+      };
+    });
+    return {
+      manifest: {
+        ...manifest,
+        spec: {
+          ...manifest.spec,
+          roles: updatedRoles,
+        },
+      },
+    };
+  }
+  let seenAuthor = false;
+  for (const override of overrides) {
+    if (override.roleId !== 'author') {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        `unknown --role-model role "${override.roleId}"`,
+        '/roleModelOverrides',
+      );
+    }
+    if (seenAuthor) {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        'duplicate --role-model override for role "author"',
+        '/roleModelOverrides',
+      );
+    }
+    seenAuthor = true;
+  }
+  const authorOverride = overrides[0]!;
+  return {
+    manifest,
+    roleSelection: {
+      provider: authorOverride.provider,
+      model: authorOverride.model,
+      ...(authorOverride.thinking !== undefined ? { thinking: authorOverride.thinking as PiThinkingLevel } : {}),
+    },
+  };
+}
+function turnkeySummaryExit(summary: TurnkeyCycleAttemptSummary, signal: string | null): number {
+  switch (summary.status) {
+    case 'completed':
+    case 'no_change':
+      return 0;
+    case 'blocked':
+      return 3;
+    case 'exhausted':
+      return 5;
+    case 'expired':
+      return 6;
+    case 'reconcile_required':
+      return 7;
+    case 'cancelled':
+      return signal === 'SIGTERM' ? 143 : 130;
+    default:
+      break;
+  }
+  switch (summary.reasonCode) {
+    case 'RECOVERY_REQUIRED':
+    case 'AUTHORITY_REFUSED':
+    case 'OWNER_BUSY':
+    case 'RECEIPT_CONFLICT':
+      return 7;
+    case 'CAPABILITY_UNSUPPORTED':
+    case 'MCP_AUTHENTICATION_REQUIRED':
+      return 3;
+    case 'BUDGET_EXHAUSTED':
+    case 'ATTEMPT_LIMIT':
+    case 'REPEAT_FAILURE':
+      return 5;
+    case 'DEADLINE':
+      return 6;
+    case 'CANCELLED':
+      return signal === 'SIGTERM' ? 143 : 130;
+    case 'STATE_UNAVAILABLE':
+    case 'CLEANUP_FAILED':
+    case 'ARTIFACT_INVALID':
+    case 'OUTPUT_LIMIT':
+      return 8;
+    default:
+      return 4;
+  }
+}
+async function writeCompiledTaskpackDir(
+  trustedDirectory: string,
+  compiled: CompiledTaskpack,
+  scrubber: SecretScrubber,
+): Promise<WrittenCompiledTaskpack> {
+  const registryDirectory = join(trustedDirectory, 'registry');
+  const configDirectory = join(trustedDirectory, 'config');
+  await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+  await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+  await chmod(trustedDirectory, 0o700);
+  await chmod(registryDirectory, 0o700);
+  await chmod(configDirectory, 0o700);
+  const registryPath = join(registryDirectory, 'registry.yaml');
+  const configPath = join(configDirectory, 'config.yaml');
+  const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+  assertCleanArtifact(compiled.registryBytes, scrubber, '/registry');
+  assertCleanArtifact(configBytes, scrubber, '/config');
+  for (const resource of compiled.instructionResources ?? []) {
+    assertCleanArtifact(resource.bytes, scrubber, `/resources/${resource.id}`);
+  }
+  await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
+  await writeFile(configPath, configBytes, { mode: 0o600 });
+  await chmod(registryPath, 0o600);
+  await chmod(configPath, 0o600);
+  if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+    await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+  }
+  return {
+    ...compiled,
+    configBytes,
+    trustedDirectory,
+    registryPath,
+    configPath,
+  };
+}
+async function validateManifestCommandToolchainPaths(
+  manifest: TaskpackManifest,
+  repositoryRoot: string,
+  allowPrivileged: boolean,
+): Promise<void> {
+  let realTmpRoot: string | undefined;
+  for (const check of manifest.spec.verification.localChecks) {
+    if (check.implementation !== 'command.v1') continue;
+    const rawPaths = check.parameters?.['toolchainPaths'];
+    if (!Array.isArray(rawPaths) || rawPaths.length === 0) continue;
+    realTmpRoot ??= await realpath(tmpdir());
+    const script = typeof check.parameters?.['script'] === 'string' ? check.parameters['script'] : '';
+    const gate = {
+      checkId: check.id,
+      gateId: `precheck-${check.id}`,
+      endpointRef: 'loopwright-local-command' as const,
+      script,
+      scriptSha256: '0'.repeat(64),
+      timeoutSeconds: 30,
+      allowReadOnlyGitHubToken: false,
+      env: [] as readonly string[],
+      allowPrivileged,
+    };
+    for (const tp of rawPaths) {
+      if (typeof tp !== 'string') continue;
+      await validateGateToolchainPath(tp, gate, repositoryRoot, realTmpRoot);
+    }
+  }
+}
+
+async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn): Promise<number> {
+  const get = (key: string) => args.values.get(key)!;
+  const dryRun = args.flags.has('dry-run');
+  const allowPrivileged = args.flags.has('allow-privileged');
+  const allowWorkflowWrites = args.flags.has('allow-workflow-writes');
+  const output = args.values.get('output');
+  const scrubber = createCliScrubber();
+  let localGateServer: LocalCommandGateServer | undefined;
+  let mcpRegistry: HostMcpRegistry | undefined;
+  let preflightResult: RunTaskpackPreflightResult | undefined;
+  try {
+    const rawRepoRoot = resolve(get('repo'));
+    let repoRoot: string;
+    try {
+      repoRoot = await realpath(rawRepoRoot);
+      const repoStat = await lstat(repoRoot);
+      if (!repoStat.isDirectory()) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'repositoryRoot must exist');
+      }
+    } catch (err) {
+      if (err instanceof TaskpackError) throw err;
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'repositoryRoot must exist');
+    }
+
+    const relativeTaskpackPath = await resolveRepoRelativeTaskpackPath(get('taskpack'), rawRepoRoot, repoRoot);
+    const hostPolicy: ExecutionHostPolicy = {
+      policyProfile: 'local',
+      allowPrivileged,
+      allowWorkflowWrites,
+    };
+    const rawManifest = await loadDeclarativeTaskpack({
+      manifestPath: relativeTaskpackPath,
+      repositoryRoot: repoRoot,
+      policyProfile: 'local',
+      hostPolicy,
+    });
+
+    if (!dryRun) {
+      if (rawManifest.spec.publication.mode === 'pull_request') {
+        throw new TaskpackError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          'local CLI "loopwright run --taskpack" has no GitHub pull-request publisher bound; set spec.publication.mode to "disabled" or run via GitHub Action/App',
+          '/spec/publication/mode',
+        );
+      }
+      if (rawManifest.spec.memory.apply === 'separate-pull-request') {
+        throw new TaskpackError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          'local CLI "loopwright run --taskpack" has no GitHub pull-request memory publisher bound; set spec.memory.apply to "local-only" or "disabled"',
+          '/spec/memory/apply',
+        );
+      }
+    }
+
+    const { manifest, roleSelection } = applyTaskpackRoleModelOverrides(rawManifest, args.roleModelOverrides);
+    const manifestSecretEnvs = collectManifestSecretEnvNames(manifest);
+    for (const envName of manifestSecretEnvs) {
+      const val = process.env[envName];
+      if (typeof val === 'string' && val.length > 0) scrubber.register(val);
+    }
+
+    const envRepo = process.env['LOOPWRIGHT_REPOSITORY']?.trim();
+    const repositoryFullName = envRepo !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(envRepo)
+      ? envRepo
+      : 'local/repo';
+    const resolvedRepo = await resolveRepositoryAndRevisions({
+      repositoryRoot: repoRoot,
+      repositoryFullName,
+      baseRevision: 'HEAD',
+      eventName: 'workflow_dispatch',
+      scrubber,
+    });
+
+    const modelsJsonPath = process.env['LOOPWRIGHT_MODELS_JSON']?.trim() || undefined;
+    const modelsConfig: ParsedPiModelsJson | undefined = modelsJsonPath !== undefined
+      ? await loadPiModelsJson(modelsJsonPath)
+      : undefined;
+    const allowManifestCustomBaseUrl = process.env['LOOPWRIGHT_ALLOW_MANIFEST_CUSTOM_BASE_URL'] === 'true';
+    const envLimits = parseLoopwrightEnvLimits(process.env);
+    const actionInputLimits = parseActionInputLimits(process.env);
+    const requestedMode = (args.values.get('mode') as 'candidate' | 'no-change' | 'auto' | undefined) ?? 'auto';
+
+    if (dryRun) {
+      const effectiveDryRunMode: 'candidate' | 'no-change' = requestedMode === 'no-change' ? 'no-change' : 'candidate';
+      const defaultProviderEnv = roleSelection?.provider !== undefined
+        ? resolveDefaultProviderTokenEnv(roleSelection.provider, {
+            modelsJsonApiKeyEnv: modelsConfig?.providers.get(roleSelection.provider)?.apiKeyEnv,
+            env: process.env,
+          })
+        : manifest.spec.models !== undefined && manifest.spec.models.length > 0
+          ? (manifest.spec.models[0]!.apiKeyEnv ?? resolveDefaultProviderTokenEnv(manifest.spec.models[0]!.provider, {
+              modelsJsonApiKeyEnv: modelsConfig?.providers.get(manifest.spec.models[0]!.provider)?.apiKeyEnv,
+              env: process.env,
+            }))
+          : 'LOOPWRIGHT_PROVIDER_TOKEN';
+      const dryRunBindings: HostTaskpackBindings = {
+        mode: effectiveDryRunMode,
+        hostPolicy,
+        repository: repositoryFullName,
+        repositoryRoot: repoRoot,
+        taskpackPath: relativeTaskpackPath,
+        baseRevision: resolvedRepo.baseRevision,
+        sourceRevision: resolvedRepo.sourceRevision,
+        targetMatrix: manifest.spec.target?.matrix ?? null,
+        ...(roleSelection !== undefined ? { roleSelection } : {}),
+        allowManifestCustomBaseUrl,
+        modelsJsonPath,
+        budgets: DEFAULT_HOST_BUDGETS,
+        limits: actionInputLimits,
+        envLimits,
+        publicationEndpoint: effectiveDryRunMode === 'candidate' && manifest.spec.publication.mode === 'pull_request'
+          ? {
+              id: 'dry-run-publication',
+              url: DRY_RUN_PUBLICATION_SENTINEL_URL,
+              signingCredentialRef: 'taskpack-publication-signing',
+            }
+          : null,
+        credentialEnvMap: {
+          provider: defaultProviderEnv,
+          gate: 'LOOPWRIGHT_GATE_SIGNING_SECRET',
+          publication: 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+          publicationAuth: 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+          localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV,
+        },
+        scrubber,
+      };
+      const compiled = await compileDeclarativeTaskpack(manifest, dryRunBindings);
+      const dryRunRoot = await realpath(await mkdtemp(join(tmpdir(), 'loopwright-dryrun-')));
+      const savedEnv = new Map<string, string | undefined>();
+      try {
+        const written = await writeCompiledTaskpackDir(dryRunRoot, compiled, scrubber);
+        for (const binding of compiled.registry.spec.environmentBindings) {
+          if (binding.classification === 'credential' && process.env[binding.name] === undefined) {
+            savedEnv.set(binding.name, undefined);
+            process.env[binding.name] = `dry-run-${randomBytes(8).toString('hex')}`;
+          }
+        }
+        const loaded = await loadTrustedConfiguration({
+          configPath: written.configPath,
+          registryPath: written.registryPath,
+          registrySha256: written.registrySha256,
+          untrustedRoots: [repoRoot],
+        });
+        if (!loaded.ok) {
+          await emit('diagnostic', loaded.error, loaded.error.code);
+          return diagnosticExit(loaded.error);
+        }
+        const plan = await compilePlan(loaded.value);
+        if (!plan.ok) {
+          await emit('diagnostic', plan.error, plan.error.code);
+          return diagnosticExit(plan.error);
+        }
+        if (output !== undefined) await writeOutput(output, Buffer.from(encoded(plan.value) + '\n'));
+        await emit('plan', plan.value, 'Plan checked; admission not performed; execution readiness not checked.');
+        return 0;
+      } finally {
+        for (const [key, prior] of savedEnv.entries()) {
+          if (prior === undefined) delete process.env[key];
+          else process.env[key] = prior;
+        }
+        await removeStagedDirSafely(dryRunRoot);
+      }
+    }
+
+    const runId = get('run-id');
+    const resolvedRunRoot = resolve(get('run-root'));
+    const preflightRootCheck = await inspectExistingDisjointRunRoot(resolvedRunRoot, repoRoot);
+    if (preflightRootCheck.prospectiveRunRoot === null || !preflightRootCheck.disjoint) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory outside the target repository checkout');
+    }
+    await mkdir(resolvedRunRoot, { recursive: true, mode: 0o700 });
+    const runRootStat = await lstat(resolvedRunRoot);
+    if (runRootStat.isSymbolicLink() || !runRootStat.isDirectory()) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
+    }
+    await chmod(resolvedRunRoot, 0o700);
+    const realRunRoot = await realpath(resolvedRunRoot);
+    if (insideRoot(realRunRoot, repoRoot) || insideRoot(repoRoot, realRunRoot)) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'runRoot must live outside the target repository checkout');
+    }
+
+    let upstreamRecords: readonly TaskpackUpstreamRecord[] = [];
+    let autoNoChangeReason: string | null = null;
+    if (manifest.spec.preflight !== undefined) {
+      const preflightRun = await withSignalAbort(async (signal, getCaughtSignal) => ({
+        result: await runTaskpackPreflight({
+          manifest,
+          repositoryRoot: repoRoot,
+          authorized: true,
+          hostPolicy,
+          env: process.env,
+          scrubber,
+          tempRoot: realRunRoot,
+          signal,
+        }),
+        caughtSignal: getCaughtSignal(),
+      }));
+      preflightResult = preflightRun.result;
+      if (preflightRun.caughtSignal !== null) {
+        return preflightRun.caughtSignal === 'SIGTERM' ? 143 : 130;
+      }
+      if (preflightResult.disposition === 'blocked') {
+        const rawReason = preflightResult.reason?.trim();
+        const message = rawReason !== undefined && rawReason.length > 0
+          ? `preflight blocked: ${rawReason}`
+          : 'preflight blocked: blocked by preflight';
+        throw new TaskpackError('ACTION_INPUT_INVALID', scrubber.scrub(message));
+      }
+      if (requestedMode === 'auto' && preflightResult.disposition === 'no_change') {
+        autoNoChangeReason = preflightResult.reason ?? 'preflight returned no_change';
+      }
+      upstreamRecords = preflightResult.upstreams;
+    }
+
+    if (manifest.spec.upstreams.length > 0 && upstreamRecords.length === 0) {
+      const discovered = await discoverTaskpackUpstreamsV2(manifest, {
+        repositoryRoot: repoRoot,
+        scrubber,
+        env: process.env,
+      });
+      upstreamRecords = discovered.records;
+      if (requestedMode === 'auto' && autoNoChangeReason === null) {
+        const intakeDisp = evaluateUpstreamIntakeDisposition(discovered.records);
+        if (intakeDisp.disposition === 'blocked') {
+          throw new TaskpackError('ACTION_INPUT_INVALID', scrubber.scrub(intakeDisp.reason));
+        }
+        if (intakeDisp.disposition === 'no_change') {
+          autoNoChangeReason = intakeDisp.reason;
+        }
+      }
+    }
+
+    const isAutoNoChange = requestedMode === 'auto' && autoNoChangeReason !== null;
+    const effectiveMode: 'candidate' | 'no-change' = (requestedMode === 'no-change' || isAutoNoChange)
+      ? 'no-change'
+      : 'candidate';
+
+    let activeGateEndpoints: readonly HostGateEndpointPlan[] = [];
+    let trackedSourceTokenEnvNames: readonly string[] = [];
+    const buildBindings = (candidate?: ResolvedModelCandidate): HostTaskpackBindings => {
+      const externalMcpTools = mcpRegistry !== undefined && mcpRegistry.toolNames.length > 0
+        ? mcpRegistry.toolNames
+        : undefined;
+      const externalMcpToolSchemas = mcpRegistry !== undefined && externalMcpTools !== undefined
+        ? mcpRegistry.toolSchemasFor(externalMcpTools)
+        : undefined;
+      const acceptanceCheckIds = [
+        ...manifest.spec.verification.localChecks.map(check => check.id),
+        ...manifest.spec.verification.externalGates.map(gate => gate.id),
+      ];
+      const basePrompt = buildDefaultAuthorPrompt({
+        mode: effectiveMode,
+        repositoryFullName,
+        upstreamRecords,
+        externalMcpTools,
+        acceptanceCheckIds,
+        runtimeEnv: process.env,
+        scrubber,
+      });
+      const wsManifestText = preflightResult !== undefined && preflightResult.workspaceResources.length > 0
+        ? formatWorkspaceResourcesManifest(preflightResult.workspaceResources, preflightResult.stagedDir, scrubber)
+        : undefined;
+      const authorPrompt = wsManifestText !== undefined && wsManifestText.length > 0
+        ? `${basePrompt}\n\n${wsManifestText}`
+        : basePrompt;
+      return {
+        mode: effectiveMode,
+        ...(isAutoNoChange ? { checkOnlyNoChange: true } : {}),
+        hostPolicy,
+        repository: repositoryFullName,
+        repositoryRoot: repoRoot,
+        taskpackPath: relativeTaskpackPath,
+        baseRevision: resolvedRepo.baseRevision,
+        sourceRevision: resolvedRepo.sourceRevision,
+        upstreamRecords,
+        targetMatrix: manifest.spec.target?.matrix ?? null,
+        ...(roleSelection !== undefined ? { roleSelection } : {}),
+        ...(candidate !== undefined && roleSelection === undefined ? { candidateIndex: candidate.manifestIndex } : {}),
+        allowManifestCustomBaseUrl,
+        modelsJsonPath,
+        budgets: DEFAULT_HOST_BUDGETS,
+        limits: actionInputLimits,
+        envLimits,
+        ...(externalMcpTools !== undefined ? { externalMcpTools } : {}),
+        ...(externalMcpToolSchemas !== undefined ? { externalMcpToolSchemas } : {}),
+        gateEndpoints: activeGateEndpoints,
+        publicationEndpoint: null,
+        credentialEnvMap: {
+          provider: candidate !== undefined
+            ? candidate.providerEnvName
+            : (roleSelection?.provider !== undefined
+                ? resolveDefaultProviderTokenEnv(roleSelection.provider, {
+                    modelsJsonApiKeyEnv: modelsConfig?.providers.get(roleSelection.provider)?.apiKeyEnv,
+                    env: process.env,
+                  })
+                : 'LOOPWRIGHT_PROVIDER_TOKEN'),
+          gate: 'LOOPWRIGHT_GATE_SIGNING_SECRET',
+          publication: 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+          publicationAuth: 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+          localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV,
+        },
+        ...(trackedSourceTokenEnvNames.length > 0 ? { sourceTokenEnvNames: trackedSourceTokenEnvNames } : {}),
+        authorPrompt,
+        preflightPromptResources: preflightResult?.promptResources,
+        preflightWorkspaceResources: preflightResult?.workspaceResources,
+        scrubber,
+      };
+    };
+
+    const roleProviderEnvNames: string[] = [];
+    if (!isAutoNoChange && manifest.spec.roles !== undefined && manifest.spec.roles.length > 0) {
+      for (const role of manifest.spec.roles) {
+        const roleBindings: HostTaskpackBindings = {
+          ...buildBindings(),
+          candidateIndex: undefined,
+          roleSelection: {
+            provider: role.provider,
+            model: role.model,
+            ...(role.thinking !== undefined ? { thinking: role.thinking as PiThinkingLevel } : {}),
+          },
+        };
+        const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
+        const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
+        roleProviderEnvNames.push(resolveDefaultProviderTokenEnv(selection.provider, {
+          modelsJsonApiKeyEnv,
+          manifestApiKeyEnv: apiKeyEnv,
+          env: process.env,
+        }));
+      }
+    }
+
+    let activeCandidate: ResolvedModelCandidate | undefined;
+    if (isAutoNoChange) {
+      try {
+        const ncCandidates = resolveTaskpackModelCandidates(manifest, buildBindings(), {
+          modelsConfig,
+          env: process.env,
+          scrubber,
+        });
+        activeCandidate = ncCandidates[0];
+      } catch (err) {
+        if (err instanceof TaskpackError && err.code === 'PROVIDER_OAUTH_UNSUPPORTED') throw err;
+        activeCandidate = undefined;
+      }
+    } else {
+      if (effectiveMode === 'candidate') {
+        await validateManifestCommandToolchainPaths(manifest, repoRoot, hostPolicy.allowPrivileged === true);
+      }
+      const firstRole = manifest.spec.roles?.[0];
+      const candidateBaseBindings = (manifest.spec.models === undefined && firstRole !== undefined && roleSelection === undefined)
+        ? {
+            ...buildBindings(),
+            roleSelection: {
+              provider: firstRole.provider,
+              model: firstRole.model,
+              ...(firstRole.thinking !== undefined ? { thinking: firstRole.thinking as PiThinkingLevel } : {}),
+            },
+          }
+        : buildBindings();
+      const candidates = resolveTaskpackModelCandidates(manifest, candidateBaseBindings, {
+        modelsConfig,
+        env: process.env,
+        scrubber,
+      });
+      if (candidates.length >= 2) {
+        const selected = await selectHealthyModelCandidate(candidates, { scrubber });
+        activeCandidate = candidates[selected.index];
+      } else {
+        activeCandidate = candidates[0];
+      }
+    }
+
+    const effectiveMcpDecls = manifest.spec.mcp?.servers ?? [];
+    const forbiddenCommandEnvNames = new Set<string>([
+      ...Object.values(STANDARD_PI_PROVIDER_ENV),
+      ...(activeCandidate !== undefined
+        ? [
+            activeCandidate.providerEnvName,
+            ...(activeCandidate.sourceTokenEnvName !== undefined ? [activeCandidate.sourceTokenEnvName] : []),
+          ]
+        : []),
+      ...roleProviderEnvNames,
+      ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: process.env })) ?? []),
+      'LOOPWRIGHT_GATE_SIGNING_SECRET',
+      'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+      'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+      DEFAULT_LOCAL_COMMAND_GATE_ENV,
+      ...manifestSecretEnvs,
+      ...collectMcpReferencedEnvNames(effectiveMcpDecls),
+    ]);
+    trackedSourceTokenEnvNames = [...forbiddenCommandEnvNames];
+
+    if (!isAutoNoChange && effectiveMcpDecls.length > 0) {
+      const resolvedMcpConfigs = resolveExternalMcpConfigs({
+        declarations: effectiveMcpDecls,
+        runtimeEnv: process.env,
+        allowLoopbackHttp: allowManifestCustomBaseUrl,
+        scrubber,
+      });
+      if (resolvedMcpConfigs.length > 0) {
+        mcpRegistry = await HostMcpRegistry.connect(resolvedMcpConfigs, {
+          untrustedRoots: [repoRoot],
+          trustedPathEnv: process.env['PATH'],
+          scrub: text => scrubber.scrub(text),
+        });
+      }
+    }
+
+    const ephemeralEnv: Record<string, string> = {};
+    if (activeCandidate !== undefined && activeCandidate.usesActiveTokenEnv && activeCandidate.token !== undefined) {
+      ephemeralEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = activeCandidate.token;
+      scrubber.register(activeCandidate.token);
+    }
+
+    let compiled = await compileDeclarativeTaskpack(manifest, buildBindings(activeCandidate));
+    const localCommandGates = compiled.localCommandGates ?? [];
+    if (localCommandGates.length > 0) {
+      localGateServer = await startLocalCommandGateServer({
+        runRoot: realRunRoot,
+        repositoryRoot: repoRoot,
+        gates: localCommandGates,
+        runtimeEnv: process.env,
+        scrubber,
+        forbiddenEnvNames: forbiddenCommandEnvNames,
+        checkStagedDir: preflightResult?.checkStagedDir,
+      });
+      activeGateEndpoints = [localGateServer.endpointPlan];
+      ephemeralEnv[DEFAULT_LOCAL_COMMAND_GATE_ENV] = localGateServer.signingSecret;
+      compiled = await compileDeclarativeTaskpack(manifest, buildBindings(activeCandidate));
+    }
+
+    const trustedDirectory = join(realRunRoot, `lw-cli-${runId}-${process.pid}-${Date.now().toString(36)}`);
+    const writtenTaskpack = await writeCompiledTaskpackDir(trustedDirectory, compiled, scrubber);
+    const decisionPort = createTaskpackDecisionPort(manifest, {
+      runtimeEnv: process.env,
+      scrubber,
+      hasPinnedRoles: (manifest.spec.roles?.length ?? 0) > 0 || (args.roleModelOverrides?.length ?? 0) > 0,
+    });
+    const stepMcpMetadata = mcpRegistry?.servers.map(srv => ({
+      id: srv.id,
+      transport: srv.transport,
+      toolNames: srv.toolNames,
+    }));
+
+    const { cycleSummary, caughtSignal } = await withSignalAbort(async (signal, getSignal) => ({
+      cycleSummary: await executeTurnkeyCycle({
+        runId,
+        attemptSeq: 0,
+        repositoryRoot: repoRoot,
+        taskpack: writtenTaskpack,
+        runtimeEnv: process.env,
+        ephemeralEnv,
+        scrubber,
+        ...(mcpRegistry !== undefined ? { mcpRegistry } : {}),
+        ...(stepMcpMetadata !== undefined ? { mcpServers: stepMcpMetadata } : {}),
+        decisions: decisionPort,
+        policyProfile: 'local',
+        allowWorkflowWrites: writtenTaskpack.allowWorkflowWrites,
+        signal,
+        memoryFinalizer: async ({ runRoot: settledRunRoot, runId: settledRunId }) =>
+          await finalizeLocalTurnkeyMemory({
+            runRoot: settledRunRoot,
+            runId: settledRunId,
+            repositoryRoot: repoRoot,
+            repositoryFullName,
+            manifest,
+            taskpackPath: relativeTaskpackPath,
+            baseRevision: resolvedRepo.baseRevision,
+            policyProfile: 'local',
+            upstreamRecords,
+            scrubber,
+          }),
+      }),
+      caughtSignal: getSignal(),
+    }));
+
+    const firstRole = writtenTaskpack.config.spec.task.spec.roles[0];
+    const primaryModel: ReportModelInfo | null = firstRole
+      ? { provider: firstRole.provider, model: firstRole.model, thinking: firstRole.thinking }
+      : null;
+
+    await emitOutcomeReports({
+      args,
+      runRoot: realRunRoot,
+      runId: cycleSummary.attemptRunId,
+      json,
+      model: primaryModel,
+      report: {
+        status: cycleSummary.status,
+        reasonCode: cycleSummary.reasonCode,
+        phase: null,
+        checks: cycleSummary.checks,
+        usage: cycleSummary.usage,
+      },
+      emitDefault: () => emit('result', cycleSummary, cycleSummary.status),
+    });
+    return turnkeySummaryExit(cycleSummary, caughtSignal);
+  } catch (err) {
+    if (err instanceof TaskpackError) {
+      return await emitTaskpackError(err, emit, scrubber);
+    }
+    throw err;
+  } finally {
+    if (localGateServer !== undefined) {
+      await localGateServer.close().catch(() => {});
+    }
+    if (mcpRegistry !== undefined) {
+      await mcpRegistry.close().catch(() => {});
+    }
+    if (preflightResult?.stagedDir) {
+      await removeStagedDirSafely(preflightResult.stagedDir);
+    }
+    if (preflightResult?.checkStagedDir && preflightResult.checkStagedDir !== preflightResult.stagedDir) {
+      await removeStagedDirSafely(preflightResult.checkStagedDir);
+    }
+  }
+}
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
   if (argv.length === 1 && argv[0] === '--version') { await stdout(`${CLI_VERSION}\n`); return 0; }
@@ -589,6 +1302,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     if (args.command === 'app-serve') {
       let handle;
       try {
+        const { startConfiguredGitHubApp } = await import('@loopwright/github-app');
         handle = await startConfiguredGitHubApp(resolve(get('config')), {
           env: process.env,
           repoRoot: args.values.has('repo') ? resolve(get('repo')) : undefined,
@@ -652,6 +1366,10 @@ export async function main(argv: readonly string[]): Promise<number> {
     if (args.command === 'step') {
       runId = get('run-id');
       return await runStepCommand(args, json, emit);
+    }
+    if (args.command === 'run' && args.values.has('taskpack')) {
+      if (!args.flags.has('dry-run')) runId = get('run-id');
+      return await runTaskpackCommand(args, json, emit);
     }
     const loaded = await loadTrustedConfiguration({
       configPath: resolve(get('config')),

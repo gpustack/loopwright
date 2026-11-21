@@ -24,6 +24,8 @@
     "packages/memory/test/**/*.ts",
     "packages/decisions/src/**/*.ts",
     "packages/decisions/test/**/*.ts",
+    "packages/taskpack/src/**/*.ts",
+    "packages/taskpack/test/**/*.ts",
     "packages/github-app/src/**/*.ts",
     "packages/github-app/test/**/*.ts"
   ]

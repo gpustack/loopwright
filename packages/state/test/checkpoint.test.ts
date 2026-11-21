@@ -162,3 +162,57 @@ test('default run without budgets.overlay still rejects 129-file overlay manifes
     }finally{s.close();}
   }finally{f.cleanup();}
 });
+
+test('STATE_LIMITS.wideCheckpointBytes=8 MiB and overlayCheckpointBounds admit 16,384-entry checkpoint inputs while rejecting 16,385',async ()=>{
+  const { OVERLAY_LIMITS, digestArtifactFromMetadata } = await import('@loopwright/core');
+  const { STATE_LIMITS, overlayCheckpointBounds } = await import('../src/boundary.js');
+  const { checkpointInput } = await import('../src/checkpoint.js');
+  const { StateFailure } = await import('../src/errors.js');
+
+  assert.equal(STATE_LIMITS.wideCheckpointBytes,8_388_608);
+  const maxOverlay={maxFiles:16_384,maxBytes:OVERLAY_LIMITS.maxMaxBytes} as const;
+  assert.deepEqual(overlayCheckpointBounds(maxOverlay),{
+    maxBytes:8_388_608,
+    nodes:268_288,
+    collection:16_385,
+  });
+
+  const baseTree:BaseTreeAnchor={objectFormat:'sha256',commitOid:'c'.repeat(64),treeOid:'d'.repeat(64)};
+  const sampleDigest={algorithm:'sha256' as const,hex:'e'.repeat(64)};
+  const entries16384=Array.from({length:16_384},(_,i)=>{
+    const res=digestArtifactFromMetadata(`src/mod-${String(i).padStart(5,'0')}.ts`,{digest:sampleDigest,byteLength:128});
+    if(!res.ok)throw new Error('digestArtifactFromMetadata failed');
+    return res.value;
+  });
+  const manifest16384:ArtifactManifest={
+    apiVersion:'loopwright.dev/v1alpha1',
+    kind:'ArtifactManifest',
+    metadata:{id:'candidate'},
+    spec:{baseTree,entries:entries16384,deleted:[]},
+  };
+  const baseCp=checkpoint(0,'cp-overlay-16384');
+  const rawInput16384={...baseCp,candidateManifest:manifest16384};
+  assert.ok(Buffer.byteLength(JSON.stringify(rawInput16384))>2_097_152,'16,384-entry checkpoint input exceeds old 2 MiB ceiling');
+
+  const validated=checkpointInput(rawInput16384,maxOverlay);
+  assert.equal((validated.candidateManifest as ArtifactManifest).spec.entries.length,16_384);
+
+  const extraRes=digestArtifactFromMetadata('src/mod-16384.ts',{digest:sampleDigest,byteLength:128});
+  if(!extraRes.ok)throw new Error('digestArtifactFromMetadata failed');
+  const manifest16385:ArtifactManifest={
+    ...manifest16384,
+    spec:{baseTree,entries:[...entries16384,extraRes.value],deleted:[]},
+  };
+  assert.throws(
+    ()=>checkpointInput({...baseCp,candidateManifest:manifest16385},maxOverlay),
+    (err:unknown)=>err instanceof StateFailure && err.code==='INVALID_INPUT',
+  );
+  const manifest16386:ArtifactManifest={
+    ...manifest16384,
+    spec:{baseTree,entries:[...entries16384,extraRes.value,extraRes.value],deleted:[]},
+  };
+  assert.throws(
+    ()=>checkpointInput({...baseCp,candidateManifest:manifest16386},maxOverlay),
+    (err:unknown)=>err instanceof StateFailure && err.code==='LIMIT_EXCEEDED',
+  );
+});

@@ -7,13 +7,85 @@ import { compilePlan } from './compile.js';
 import { readBoundedFile, canonicalComponents } from './files.js';
 import { checkedRef, readArtifact, type ArtifactReader } from './storage.js';
 import { parsePrivateJson } from './parser.js';
-import { hash, id, list, record, same, text } from './schema.js';
+import { freeze, hash, id, isRecord, list, record, same, text } from './schema.js';
 import { labelValue } from './registry.js';
 import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 import { bootIdentity } from './ownership.js';
-import type { RunDescriptor } from './controller.js';
-import type { CompiledPlan, LoadedConfiguration, RoleModelOverride } from './types.js';
+import type { ControllerPorts, RunDescriptor } from './controller.js';
+import type { HostPathProtectionOptions } from './source.js';
+import type {
+  CompiledPlan,
+  ControllerPolicyProfile,
+  LoadedConfiguration,
+  PersistedHostPolicy,
+  RoleModelOverride,
+} from './types.js';
+
 export interface RetainedRunInput { readonly runRoot: string; readonly runId: string }
+
+export const CONSERVATIVE_LEGACY_HOST_POLICY: PersistedHostPolicy = freeze({
+  policyProfile: 'github',
+  allowWorkflowWrites: false,
+});
+
+export function parsePersistedHostPolicy(
+  raw: unknown,
+  path: string,
+  phase: ControllerDiagnostic['phase'] = 'recovery',
+): PersistedHostPolicy {
+  if (!isRecord(raw)) refuse('RECOVERY_REQUIRED', path, phase);
+  const fields = record(raw, ['policyProfile', 'allowWorkflowWrites'], path);
+  if (
+    (fields.policyProfile !== 'local' && fields.policyProfile !== 'github') ||
+    typeof fields.allowWorkflowWrites !== 'boolean'
+  ) {
+    refuse('RECOVERY_REQUIRED', path, phase);
+  }
+  return freeze({
+    policyProfile: fields.policyProfile as ControllerPolicyProfile,
+    allowWorkflowWrites: fields.allowWorkflowWrites,
+  });
+}
+
+export function effectiveRunHostPolicy(descriptor: Pick<RunDescriptor, 'hostPolicy'>): PersistedHostPolicy {
+  return descriptor.hostPolicy ?? CONSERVATIVE_LEGACY_HOST_POLICY;
+}
+
+export function hostProtectionFromPolicy(policy: PersistedHostPolicy): HostPathProtectionOptions {
+  return {
+    enforceGitHubWorkflowProtection: policy.policyProfile === 'github',
+    allowWorkflowWrites: policy.allowWorkflowWrites,
+  };
+}
+
+export function validatePortPolicyFields(ports: ControllerPorts, phase: ControllerDiagnostic['phase']): void {
+  if (ports.policyProfile !== undefined && ports.policyProfile !== 'local' && ports.policyProfile !== 'github') {
+    refuse('CONFIG_SCHEMA', '/policyProfile', phase);
+  }
+  if (ports.allowWorkflowWrites !== undefined && typeof ports.allowWorkflowWrites !== 'boolean') {
+    refuse('CONFIG_SCHEMA', '/allowWorkflowWrites', phase);
+  }
+}
+
+export function validatePortsAgainstHostPolicy(
+  ports: ControllerPorts,
+  persisted: PersistedHostPolicy,
+  phase: ControllerDiagnostic['phase'] = 'recovery',
+): ControllerPorts {
+  validatePortPolicyFields(ports, phase);
+  if (ports.policyProfile !== undefined && ports.policyProfile !== persisted.policyProfile) {
+    refuse('RECOVERY_REQUIRED', '/policyProfile', phase);
+  }
+  if (ports.allowWorkflowWrites !== undefined && ports.allowWorkflowWrites !== persisted.allowWorkflowWrites) {
+    refuse('RECOVERY_REQUIRED', '/allowWorkflowWrites', phase);
+  }
+  return {
+    ...ports,
+    policyProfile: persisted.policyProfile,
+    allowWorkflowWrites: persisted.allowWorkflowWrites,
+  };
+}
+
 export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: CompiledPlan): number {
   let maxEndpointTimeoutMs = 0;
   for (const slot of plan.verifierSlots) {
@@ -23,6 +95,7 @@ export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: Co
   }
   return maxEndpointTimeoutMs > 58000 ? Math.min(3700000, maxEndpointTimeoutMs + 30000) : 60000;
 }
+
 function retainedRoleModelOverrides(raw: unknown): readonly RoleModelOverride[] | undefined {
   if (raw === undefined) return undefined;
   const items = list(raw, '/configuration/roleModelOverrides', Number.MAX_SAFE_INTEGER);
@@ -41,6 +114,7 @@ function retainedRoleModelOverrides(raw: unknown): readonly RoleModelOverride[] 
   if (new Set(entries.map(item => item.roleId)).size !== entries.length) refuse('RECOVERY_REQUIRED', '/configuration/roleModelOverrides', 'recovery');
   return entries;
 }
+
 /** Read only: never mkdir, claim, discover configuration, inspect Docker or resolve credentials. */
 export async function readRetained(input: RetainedRunInput) {
   const root = resolve(text(input.runRoot)), runId = id(input.runId), directory = join(root, runId);
@@ -48,20 +122,47 @@ export async function readRetained(input: RetainedRunInput) {
     await canonicalComponents(path); const info = await lstat(path);
     if (!info.isDirectory() || info.uid !== process.getuid?.() || info.mode & 0o077) refuse('ARTIFACT_INVALID', '', 'recovery');
   }
-  const raw = record(parsePrivateJson(await readBoundedFile(join(directory, 'run.json'), 1048576, true), 1048576), ['version', 'identity', 'plan', 'source', 'sourceWorkspace', 'configuration', 'repository']);
+  const parsedRun = parsePrivateJson(await readBoundedFile(join(directory, 'run.json'), 1048576, true), 1048576);
+  const hasHostPolicy = isRecord(parsedRun) && Object.hasOwn(parsedRun, 'hostPolicy') && parsedRun.hostPolicy !== undefined;
+  const raw = record(parsedRun, [
+    'version',
+    'identity',
+    'plan',
+    'source',
+    'sourceWorkspace',
+    'configuration',
+    'repository',
+    ...(hasHostPolicy ? ['hostPolicy' as const] : []),
+  ]);
   const identity = record(raw.identity, ['directory', 'storeId', 'lock', 'policy', 'binding']), lock = validateDocument(identity.lock, 'TaskLock');
   if (raw.version !== 1 || !lock.ok || lock.value.spec.runId !== runId || identity.directory !== join(directory, 'state')) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const hasOverrides = raw.configuration !== null && typeof raw.configuration === 'object' && !Array.isArray(raw.configuration) && Object.hasOwn(raw.configuration, 'roleModelOverrides');
   const configuration = record(raw.configuration, hasOverrides ? ['configPath', 'registryPath', 'registrySha256', 'roleModelOverrides'] : ['configPath', 'registryPath', 'registrySha256']);
   text(configuration.configPath); text(configuration.registryPath); if (!/^[a-f0-9]{64}$/.test(text(configuration.registrySha256))) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const roleModelOverrides = hasOverrides ? retainedRoleModelOverrides(configuration.roleModelOverrides) : undefined;
-  const descriptor: RunDescriptor = { version: 1, identity: identity as unknown as LocalRunIdentity, plan: checkedRef(raw.plan), source: checkedRef(raw.source), sourceWorkspace: checkedRef(raw.sourceWorkspace),
-    configuration: { configPath: text(configuration.configPath), registryPath: text(configuration.registryPath), registrySha256: text(configuration.registrySha256), ...(roleModelOverrides !== undefined ? { roleModelOverrides } : {}) }, repository: text(raw.repository) };
+  const parsedHostPolicy = hasHostPolicy ? parsePersistedHostPolicy(raw.hostPolicy, '/hostPolicy', 'recovery') : undefined;
+  const descriptor: RunDescriptor = {
+    version: 1,
+    identity: identity as unknown as LocalRunIdentity,
+    plan: checkedRef(raw.plan),
+    source: checkedRef(raw.source),
+    sourceWorkspace: checkedRef(raw.sourceWorkspace),
+    configuration: {
+      configPath: text(configuration.configPath),
+      registryPath: text(configuration.registryPath),
+      registrySha256: text(configuration.registrySha256),
+      ...(roleModelOverrides !== undefined ? { roleModelOverrides } : {}),
+    },
+    repository: text(raw.repository),
+    ...(parsedHostPolicy !== undefined ? { hostPolicy: parsedHostPolicy } : {}),
+  };
+  const hostPolicy = effectiveRunHostPolicy(descriptor);
   const artifacts: ArtifactReader = { read: (ref, maximum) => readArtifact(join(directory, 'artifacts'), ref, maximum) };
   const plan = parsePrivateJson(await artifacts.read(descriptor.plan, 4194304), 4194304) as unknown as CompiledPlan;
   if (plan.version !== 1 || !same(plan.task, lock.value.spec.contract)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return { directory, descriptor, plan, lock: lock.value, artifacts };
+  return { directory, descriptor, hostPolicy, plan, lock: lock.value, artifacts };
 }
+
 export async function admitRetainedRun(input: {
   readonly runRoot: string;
   readonly runId: string;

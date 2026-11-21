@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GITHUB_APP_ERROR_CODES, serializePrettyYaml, type GitHubAppErrorCode } from '@loopwright/github-app';
+import { loadMemoryStore } from '@loopwright/memory';
+import { GITHUB_APP_ERROR_CODES, type GitHubAppErrorCode } from '@loopwright/github-app';
+import { serializePrettyYaml } from '@loopwright/taskpack';
 import { parseArguments, UsageError } from '../src/arguments.js';
 import { gitHubAppExitCode, main as cliMain } from '../src/main.js';
 
@@ -578,6 +581,7 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
     TASKPACK_UNTRUSTED_INTERPOLATION: 2,
     TASKPACK_SCOPE_VIOLATION: 2,
     TASKPACK_HOST_BINDING_INVALID: 2,
+    TASKPACK_TRIGGER_UNSUPPORTED: 2,
     SANDBOX_POLICY_INVALID: 2,
     GITHUB_APP_CONFIG_INVALID: 2,
     TOKEN_BROKER_CONFIG_INVALID: 2,
@@ -668,6 +672,428 @@ test('step-cli: gitHubAppExitCode maps all 33 GitHubAppErrorCode values and live
     assert.equal(scrubEnv.data['code'], 'ACTION_INPUT_INVALID');
     assert.match(String(scrubEnv.data['message']), /\[scrubbed\]/);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('run-taskpack-cli: --dry-run is side-effect-free (no preflight/memory/publication) and applies --role-model', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'lw-run-tp-dry-')));
+  const repoRoot = join(root, 'repo');
+  const sentinelPath = join(root, 'preflight-ran.marker');
+  const planOutputPath = join(root, 'plan.json');
+  try {
+    await mkdir(join(repoRoot, '.loopwright', 'scripts'), { recursive: true, mode: 0o700 });
+    await mkdir(join(repoRoot, '.loopwright', 'checks'), { recursive: true, mode: 0o700 });
+    await mkdir(join(repoRoot, 'docs'), { recursive: true, mode: 0o700 });
+    await writeFile(join(repoRoot, 'docs', 'notes.md'), '# Notes\n', { mode: 0o600 });
+    await writeFile(
+      join(repoRoot, '.loopwright', 'scripts', 'preflight.sh'),
+      `#!/bin/sh\necho ran > "${sentinelPath}"\nexit 99\n`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(repoRoot, '.loopwright', 'checks', 'verify.sh'),
+      '#!/bin/sh\ntest -f docs/notes.md\n',
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(repoRoot, '.loopwright', 'taskpack.yaml'),
+      serializePrettyYaml({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'dry-run-minimal' },
+        spec: {
+          goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+          preflight: { script: '.loopwright/scripts/preflight.sh', timeoutSeconds: 10 },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: {
+            localChecks: [
+              { id: 'verify-notes', implementation: 'command.v1', parameters: { script: '.loopwright/checks/verify.sh', timeoutSeconds: 10 } },
+            ],
+            externalGates: [],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const git = (args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+      cwd: repoRoot,
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
+      encoding: 'utf8',
+    });
+    git(['init', '-q']);
+    git(['add', '.']);
+    git(['-c', 'user.name=Test', '-c', 'user.email=test@localhost.invalid', 'commit', '-qm', 'init']);
+
+    const dryRes = await runCliInProcess([
+      'run', '--dry-run',
+      '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot,
+      '--role-model', 'author=openai/gpt-5.4:low',
+      '--output', planOutputPath,
+      '--json',
+    ]);
+    assert.equal(dryRes.status, 0, dryRes.stdout + dryRes.stderr);
+    const env = parseNdjson(dryRes.stdout)[0]!;
+    assert.equal(env.kind, 'plan');
+    assert.equal(env.runId, null);
+    const roles = env.data['roles'] as readonly { readonly roleId: string; readonly policy: { readonly selection: { readonly provider: string; readonly model: string; readonly thinking: string } } }[];
+    assert.equal(roles[0]?.roleId, 'author');
+    assert.equal(roles[0]?.policy.selection.provider, 'openai');
+    assert.equal(roles[0]?.policy.selection.model, 'gpt-5.4');
+    assert.equal(roles[0]?.policy.selection.thinking, 'low');
+
+    const writtenPlan = JSON.parse(await readFile(planOutputPath, 'utf8')) as { roles: typeof roles };
+    assert.equal(writtenPlan.roles[0]?.policy.selection.model, 'gpt-5.4');
+    await assert.rejects(() => lstat(sentinelPath), { code: 'ENOENT' }, 'preflight must not execute during --dry-run');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('run-taskpack-cli: live local runs execute minimal manifests (auto/candidate, no-change, preflight auto-no-change, local-only memory) and fail closed on unbound PR bindings or invalid toolchainPaths', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'lw-run-tp-live-')));
+  const repoRoot = join(root, 'repo');
+  const runRoot = join(root, 'runs');
+  const tmpToolchainDir = join(root, 'tmp-toolchain');
+  let sseRequestCount = 0;
+  let sseMode: 'no-change' | 'edit-and-complete' | 'fail-submission' = 'no-change';
+  let editTurn = 0;
+
+  const sseServer = createServer((req, res) => {
+    sseRequestCount += 1;
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (sseMode === 'no-change') {
+        const chunk = {
+          id: 'chatcmpl-nc',
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: { role: 'assistant', content: '{"version":1,"status":"no_change","checks":[],"reason":"already up to date"}' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+        };
+        res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+      if (sseMode === 'fail-submission') {
+        const chunk = {
+          id: 'chatcmpl-fail',
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: { role: 'assistant', content: '{"version":1,"status":"failed","checks":[],"reason":"reproducible check failure"}' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 12, total_tokens: 22 },
+        };
+        res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+      editTurn += 1;
+      if (editTurn === 1) {
+        const toolCallChunk = {
+          id: 'chatcmpl-edit-1',
+          object: 'chat.completion.chunk',
+          choices: [{
+            index: 0,
+            delta: {
+              role: 'assistant',
+              tool_calls: [{
+                index: 0,
+                id: 'call_write_1',
+                type: 'function',
+                function: {
+                  name: 'write',
+                  arguments: JSON.stringify({ path: 'docs/notes.md', content: '# Updated\nready\n' }),
+                },
+              }],
+            },
+            finish_reason: 'tool_calls',
+          }],
+          usage: { prompt_tokens: 15, completion_tokens: 18, total_tokens: 33 },
+        };
+        res.end(`data: ${JSON.stringify(toolCallChunk)}\n\ndata: [DONE]\n\n`);
+        return;
+      }
+      const doneChunk = {
+        id: 'chatcmpl-edit-2',
+        object: 'chat.completion.chunk',
+        choices: [{ index: 0, delta: { role: 'assistant', content: '{"version":1,"status":"completed","checks":[],"reason":"updated docs/notes.md"}' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 20, completion_tokens: 14, total_tokens: 34 },
+      };
+      res.end(`data: ${JSON.stringify(doneChunk)}\n\ndata: [DONE]\n\n`);
+    });
+  });
+
+  await new Promise<void>(resolveListen => sseServer.listen(0, '127.0.0.1', () => resolveListen()));
+  const ssePort = (sseServer.address() as { port: number }).port;
+
+  try {
+    await mkdir(join(repoRoot, '.loopwright', 'checks'), { recursive: true, mode: 0o700 });
+    await mkdir(join(repoRoot, '.loopwright', 'scripts'), { recursive: true, mode: 0o700 });
+    await mkdir(join(repoRoot, 'docs'), { recursive: true, mode: 0o700 });
+    await mkdir(tmpToolchainDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(repoRoot, 'docs', 'notes.md'), '# Initial\n', { mode: 0o600 });
+    await writeFile(
+      join(repoRoot, '.loopwright', 'checks', 'verify.sh'),
+      '#!/bin/sh\ngrep -q "ready" docs/notes.md\n',
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(repoRoot, '.loopwright', 'scripts', 'preflight-nc.sh'),
+      '#!/bin/sh\nprintf \'{"disposition":"no_change","reason":"nothing to update"}\' > "$LOOPWRIGHT_PREFLIGHT_OUT"\n',
+      { mode: 0o755 },
+    );
+
+    const modelsJsonPath = join(root, 'models.json');
+    await writeFile(
+      modelsJsonPath,
+      JSON.stringify({
+        providers: {
+          'local-oai': {
+            baseUrl: `http://127.0.0.1:${ssePort}/v1`,
+            api: 'openai-completions',
+            apiKey: 'LOCAL_OAI_KEY',
+            models: [
+              { id: 'mock-model', contextWindow: 128_000, maxTokens: 4_096 },
+              { id: 'mock-model-b', contextWindow: 128_000, maxTokens: 4_096 },
+            ],
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const baseEnv = {
+      PATH: '/usr/bin:/bin',
+      ...(process.env['TMPDIR'] !== undefined ? { TMPDIR: process.env['TMPDIR'] } : {}),
+      LOOPWRIGHT_MODELS_JSON: modelsJsonPath,
+      LOCAL_OAI_KEY: 'sk-local-oai-test-1234567890',
+    };
+
+    const writeAndCommitManifest = async (doc: Record<string, unknown>, message: string): Promise<void> => {
+      await writeFile(join(repoRoot, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(doc), { mode: 0o600 });
+      const git = (args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+        cwd: repoRoot,
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', HOME: '/nonexistent', GIT_TERMINAL_PROMPT: '0' },
+        encoding: 'utf8',
+      });
+      if (message === 'init') git(['init', '-q']);
+      git(['add', '.']);
+      git(['-c', 'user.name=Test', '-c', 'user.email=test@localhost.invalid', 'commit', '-qm', message]);
+    };
+
+    // 1. Minimal local manifest omitting triggers, publication, and memory
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-minimal' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md to contain ready.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [{ provider: 'local-oai', id: 'mock-model', apiKeyEnv: 'LOCAL_OAI_KEY' }],
+        verification: {
+          localChecks: [
+            { id: 'verify-notes', implementation: 'command.v1', parameters: { script: '.loopwright/checks/verify.sh', timeoutSeconds: 15 } },
+          ],
+          externalGates: [],
+        },
+      },
+    }, 'init');
+
+    // 1a. Live --mode no-change succeeds with status no_change
+    sseMode = 'no-change';
+    const ncRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-nc',
+      '--mode', 'no-change', '--json',
+    ], baseEnv);
+    assert.equal(ncRes.status, 0, ncRes.stdout + ncRes.stderr);
+    const ncEnv = parseNdjson(ncRes.stdout).at(-1)!;
+    assert.equal(ncEnv.kind, 'result');
+    assert.equal(ncEnv.data['status'], 'no_change');
+
+    // 1b. Live --mode auto (without preflight/upstreams -> defaults to candidate) completes edit + command.v1 check
+    sseMode = 'edit-and-complete';
+    editTurn = 0;
+    const candRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-auto-cand',
+      '--mode', 'auto', '--output-format', 'text',
+    ], baseEnv);
+    assert.equal(candRes.status, 0, candRes.stdout + candRes.stderr);
+    assert.match(candRes.stdout, /^Run ID: tp-live-auto-cand$/m);
+    assert.match(candRes.stdout, /^Status: completed\b/m);
+    assert.match(candRes.stdout, /^Model: local-oai\/mock-model/m);
+
+    // 1c. Reusing an already-completed --run-id fails with exit 7 (OWNER_BUSY) instead of reporting prior completed status
+    const reusedRunIdRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-auto-cand',
+      '--mode', 'auto', '--json',
+    ], baseEnv);
+    assert.equal(reusedRunIdRes.status, 7, reusedRunIdRes.stdout + reusedRunIdRes.stderr);
+    const reusedEnv = parseNdjson(reusedRunIdRes.stdout).at(-1)!;
+    assert.equal(reusedEnv.data['reasonCode'], 'OWNER_BUSY');
+    assert.equal(reusedEnv.data['status'], 'failed');
+
+    // 2. Live --mode auto with preflight returning no-change settles check-only with ZERO LLM calls
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-minimal' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        preflight: { script: '.loopwright/scripts/preflight-nc.sh', timeoutSeconds: 10 },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [{ provider: 'local-oai', id: 'mock-model', apiKeyEnv: 'LOCAL_OAI_KEY' }],
+        verification: { localChecks: [], externalGates: [] },
+      },
+    }, 'preflight-nc');
+    const callsBeforePreflightNc = sseRequestCount;
+    const preflightNcRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-preflight-nc',
+      '--mode', 'auto', '--json',
+    ], baseEnv);
+    assert.equal(preflightNcRes.status, 0, preflightNcRes.stdout + preflightNcRes.stderr);
+    assert.equal(sseRequestCount, callsBeforePreflightNc, 'auto no-change from preflight must spend zero LLM calls');
+
+    // 3. Invalid toolchainPaths fails fast at startup BEFORE calling LLM (PR #31 parity)
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-minimal' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [{ provider: 'local-oai', id: 'mock-model', apiKeyEnv: 'LOCAL_OAI_KEY' }],
+        verification: {
+          localChecks: [
+            {
+              id: 'bad-tc',
+              implementation: 'command.v1',
+              parameters: { script: '.loopwright/checks/verify.sh', timeoutSeconds: 15, toolchainPaths: [tmpToolchainDir] },
+            },
+          ],
+          externalGates: [],
+        },
+      },
+    }, 'bad-toolchain');
+    const callsBeforeBadTc = sseRequestCount;
+    const badTcRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-bad-tc',
+      '--mode', 'candidate', '--json',
+    ], baseEnv);
+    assert.equal(badTcRes.status, 2, badTcRes.stdout + badTcRes.stderr);
+    assert.equal(parseNdjson(badTcRes.stdout)[0]!.data['code'], 'ACTION_INPUT_INVALID');
+    assert.equal(sseRequestCount, callsBeforeBadTc, 'invalid toolchainPaths must fail fast before invoking LLM');
+
+    // 3b. With 2 configured model candidates, invalid toolchainPaths must fail BEFORE selectHealthyModelCandidate probes the provider!
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-minimal' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [
+          { provider: 'local-oai', id: 'mock-model', apiKeyEnv: 'LOCAL_OAI_KEY' },
+          { provider: 'local-oai', id: 'mock-model-b', apiKeyEnv: 'LOCAL_OAI_KEY' },
+        ],
+        verification: {
+          localChecks: [
+            {
+              id: 'bad-tc-two-models',
+              implementation: 'command.v1',
+              parameters: { script: '.loopwright/checks/verify.sh', timeoutSeconds: 15, toolchainPaths: [tmpToolchainDir] },
+            },
+          ],
+          externalGates: [],
+        },
+      },
+    }, 'bad-toolchain-two-models');
+    const callsBeforeTwoModelBadTc = sseRequestCount;
+    const badTwoModelTcRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-bad-tc-2m',
+      '--mode', 'candidate', '--json',
+    ], baseEnv);
+    assert.equal(badTwoModelTcRes.status, 2, badTwoModelTcRes.stdout + badTwoModelTcRes.stderr);
+    assert.equal(parseNdjson(badTwoModelTcRes.stdout)[0]!.data['code'], 'ACTION_INPUT_INVALID');
+    assert.equal(sseRequestCount, callsBeforeTwoModelBadTc, 'invalid toolchainPaths must fail fast before sending any provider health probe');
+
+    // 4. Local-only memory persists deterministic failure observations on disk without git commits
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-mem-cli' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        models: [{ provider: 'local-oai', id: 'mock-model', apiKeyEnv: 'LOCAL_OAI_KEY' }],
+        memory: {
+          directory: '.loopwright/memory/local-mem-cli',
+          apply: 'local-only',
+          onNoModelBudget: 'deterministic-observations-only',
+        },
+        verification: {
+          localChecks: [
+            { id: 'verify-notes', implementation: 'command.v1', parameters: { script: '.loopwright/checks/verify.sh', timeoutSeconds: 15 } },
+          ],
+          externalGates: [],
+        },
+      },
+    }, 'local-mem');
+    sseMode = 'fail-submission';
+    const memRes = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-live-local-mem',
+      '--mode', 'candidate', '--json',
+    ], baseEnv);
+    assert.equal(memRes.status, 5, memRes.stdout + memRes.stderr);
+    const memEnv = parseNdjson(memRes.stdout).at(-1)!;
+    const memSummary = memEnv.data['memory'] as { readonly status: string; readonly entryCount: number } | undefined;
+    assert.equal(memSummary?.status, 'local_only');
+    assert.ok((memSummary?.entryCount ?? 0) >= 1);
+    const loadedStore = await loadMemoryStore(repoRoot, 'local-mem-cli', 'local/repo', '.loopwright/memory');
+    assert.ok(loadedStore.index.entries.length >= 1);
+
+    // 5. Refuses unbound pull_request publication and separate-pull-request memory on live local CLI runs
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-pr-refuse' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        verification: { localChecks: [], externalGates: [] },
+        publication: { mode: 'pull_request', targetBranch: 'main', headBranchPrefix: 'lw-', titleTemplate: 'docs: sync' },
+      },
+    }, 'pr-mode');
+    const prRefused = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-pr-refuse', '--json',
+    ], baseEnv);
+    assert.equal(prRefused.status, 2, prRefused.stdout + prRefused.stderr);
+    assert.equal(parseNdjson(prRefused.stdout)[0]!.data['code'], 'TASKPACK_HOST_BINDING_INVALID');
+
+    await writeAndCommitManifest({
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Taskpack',
+      metadata: { name: 'local-mem-pr-refuse' },
+      spec: {
+        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+        scope: { writable: ['docs/**'], protected: [] },
+        verification: { localChecks: [], externalGates: [] },
+        memory: { directory: '.loopwright/memory/local-mem-pr-refuse', apply: 'separate-pull-request', onNoModelBudget: 'skip' },
+      },
+    }, 'mem-pr-mode');
+    const memPrRefused = await runCliInProcess([
+      'run', '--taskpack', '.loopwright/taskpack.yaml',
+      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-mem-pr-refuse', '--json',
+    ], baseEnv);
+    assert.equal(memPrRefused.status, 2, memPrRefused.stdout + memPrRefused.stderr);
+    assert.equal(parseNdjson(memPrRefused.stdout)[0]!.data['code'], 'TASKPACK_HOST_BINDING_INVALID');
+  } finally {
+    await new Promise<void>(resolveClose => sseServer.close(() => resolveClose()));
     await rm(root, { recursive: true, force: true });
   }
 });

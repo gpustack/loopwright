@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  admitTask, bindSubject, constructRunResult, digestArtifact, evaluateAcceptance, validateDocument, LIMITS,
+  admitTask, bindSubject, constructRunResult, digestArtifact, digestArtifactFromMetadata, evaluateAcceptance,
+  identifyManifest, validateDocument, LIMITS, OVERLAY_LIMITS, type Digest, type ResolvedArtifactInput,
 } from '../src/index.js';
 import { contract, evaluationFixture, value, code } from './fixtures.js';
 
@@ -567,4 +568,111 @@ test('overlay widening applies only to candidateManifest after TaskLock verifica
     candidate: { status: 'completed', checks: hugeClaims, memory: { status: 'not_requested', reason: null } },
   };
   assert.equal(code(constructRunResult(hugeRunInput, [{ name: 'test.log', bytes: logBytes }])), 'LIMIT_BYTES');
+});
+
+test('evaluateAcceptance and constructRunResult accept VerifiedArtifactDescriptor > 64 MiB, > 128 MiB aggregate, and > 4 GiB while enforcing raw caps and failure codes', () => {
+  const eightyMiB = 80 * 1024 * 1024;
+  const ninetyMiB = 90 * 1024 * 1024;
+  const fiveGiB = 5 * 1024 * 1024 * 1024;
+  const makeDigest = (ch: string): Digest => ({ algorithm: 'sha256', hex: ch.repeat(64) });
+  const logBytes = Buffer.from('streaming verification pass\n');
+
+  const buildLargeScenario = (descriptors: readonly { readonly name: string; readonly byteLength: number; readonly digest: Digest }[]) => {
+    const task = contract();
+    Object.assign(task.spec.budgets, { overlay: { maxFiles: 128, maxBytes: OVERLAY_LIMITS.maxMaxBytes } });
+    const expectedLock = value(admitTask(task, { admissionId: 'admission-1', runId: 'run-1' }));
+    const entries = descriptors.map(d => value(digestArtifactFromMetadata(d.name, { digest: d.digest, byteLength: d.byteLength })));
+    const candidateManifest = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'ArtifactManifest',
+      metadata: { id: 'candidate' },
+      spec: {
+        baseTree: { objectFormat: 'sha256' as const, commitOid: 'a'.repeat(64), treeOid: 'b'.repeat(64) },
+        entries,
+        deleted: [] as string[],
+      },
+    };
+    const subject = value(bindSubject(expectedLock, candidateManifest));
+    const evidence = {
+      apiVersion: 'loopwright.dev/v1alpha1',
+      kind: 'Evidence',
+      metadata: { id: 'observation-1' },
+      spec: {
+        checkId: 'tests',
+        observedStatus: 'passed',
+        producerId: 'host-verifier',
+        method: 'node-test',
+        level: 'local_execution',
+        subject: structuredClone(subject),
+        artifacts: [value(digestArtifact('test.log', logBytes))],
+        reason: null as string | null,
+      },
+    };
+    const claims = [{ checkId: 'tests', status: 'passed', evidenceId: 'observation-1', reason: null }];
+    return {
+      expectedDigest: value(identifyManifest(candidateManifest)).digest.hex,
+      evalInput: { trusted: { expectedLock, candidateManifest, eligibleEvidence: [evidence] }, claims },
+      runInput: {
+        trusted: { expectedLock, candidateManifest, eligibleEvidence: [evidence], usage: [], externalEffects: 'none', noChange: null },
+        candidate: { status: 'completed', checks: claims, memory: { status: 'not_requested', reason: null } },
+      },
+      artifacts: [...descriptors, { name: 'test.log', bytes: logBytes }] satisfies readonly ResolvedArtifactInput[],
+    };
+  };
+
+  for (const descriptors of [
+    [{ name: 'packages/large-80m.bin', byteLength: eightyMiB, digest: makeDigest('1') }],
+    [
+      { name: 'packages/part-a.bin', byteLength: ninetyMiB, digest: makeDigest('2') },
+      { name: 'packages/part-b.bin', byteLength: ninetyMiB, digest: makeDigest('3') },
+    ],
+    [{ name: 'packages/model-5g.bin', byteLength: fiveGiB, digest: makeDigest('4') }],
+  ]) {
+    const scenario = buildLargeScenario(descriptors);
+    const evaluated = value(evaluateAcceptance(scenario.evalInput, scenario.artifacts));
+    assert.equal(evaluated.spec.satisfied, true);
+    assert.equal(evaluated.spec.subject.candidateDigest.hex, scenario.expectedDigest);
+    assert.equal(validateDocument(evaluated, 'VerificationResult').ok, true);
+
+    const run = value(constructRunResult(scenario.runInput, scenario.artifacts));
+    assert.equal(run.spec.status, 'completed');
+    assert.equal(run.spec.subject.candidateDigest.hex, scenario.expectedDigest);
+    assert.equal(validateDocument(run, 'RunResult').ok, true);
+  }
+
+  // Mismatch, duplicate, ambiguous descriptor, and raw buffer cap refusals
+  const base = buildLargeScenario([{ name: 'packages/model-5g.bin', byteLength: fiveGiB, digest: makeDigest('5') }]);
+  const badDigest = value(evaluateAcceptance(base.evalInput, [
+    { name: 'packages/model-5g.bin', byteLength: fiveGiB, digest: makeDigest('6') },
+    { name: 'test.log', bytes: logBytes },
+  ]));
+  assert.equal(badDigest.spec.satisfied, false);
+  assert.equal(badDigest.spec.diagnostics[0]!.code, 'ARTIFACT_DIGEST_MISMATCH');
+
+  const badLength = value(evaluateAcceptance(base.evalInput, [
+    { name: 'packages/model-5g.bin', byteLength: fiveGiB - 1, digest: makeDigest('5') },
+    { name: 'test.log', bytes: logBytes },
+  ]));
+  assert.equal(badLength.spec.satisfied, false);
+  assert.equal(badLength.spec.diagnostics[0]!.code, 'ARTIFACT_LENGTH_MISMATCH');
+
+  assert.equal(code(evaluateAcceptance(base.evalInput, [
+    { name: 'packages/model-5g.bin', byteLength: fiveGiB, digest: makeDigest('5') },
+    { name: 'packages/model-5g.bin', byteLength: fiveGiB, digest: makeDigest('5') },
+    { name: 'test.log', bytes: logBytes },
+  ])), 'ARTIFACT_DUPLICATE');
+
+  assert.equal(code(evaluateAcceptance(base.evalInput, [
+    { name: 'packages/model-5g.bin', bytes: new Uint8Array(1), byteLength: fiveGiB, digest: makeDigest('5') } as unknown as ResolvedArtifactInput,
+    { name: 'test.log', bytes: logBytes },
+  ])), 'INPUT_UNSUPPORTED');
+
+  // Raw Uint8Array still fails closed above 64 MiB single file and 128 MiB aggregate
+  assert.equal(code(evaluateAcceptance(base.evalInput, [{ name: 'raw-big.bin', bytes: new Uint8Array(LIMITS.artifactBytes + 1) }])), 'LIMIT_ARTIFACT_BYTES');
+  const raw64 = new Uint8Array(LIMITS.artifactBytes);
+  assert.equal(code(constructRunResult(base.runInput, [
+    { name: 'r1.bin', bytes: raw64 },
+    { name: 'r2.bin', bytes: raw64 },
+    { name: 'r3.bin', bytes: new Uint8Array(1) },
+  ])), 'LIMIT_RESOLVED_BYTES');
 });

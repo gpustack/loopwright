@@ -203,7 +203,7 @@ describe('declarative taskpack loading (AC-1)', () => {
     const base = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
     assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
       (draft.spec as Record<string, unknown>).scope = { writable: ['docs', '.github'], protected: [] };
-    })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
+    }), { policyProfile: 'github' } as Parameters<typeof validateTaskpackManifest>[1]), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
   });
 
   it('requires the proposal path to live inside the writable scope', async () => {
@@ -220,7 +220,7 @@ describe('declarative taskpack loading (AC-1)', () => {
     })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
     assert.throws(() => validateTaskpackManifest(editedManifest(base, draft => {
       (draft.spec as Record<string, unknown>).scope = { writable: ['.github/workflows', 'docs'], protected: [] };
-    })), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
+    }), { policyProfile: 'github' } as Parameters<typeof validateTaskpackManifest>[1]), (error: GitHubAppError) => error.code === 'TASKPACK_SCOPE_VIOLATION');
   });
 
   it('rejects proposal paths that overlap protected paths with TASKPACK_SCOPE_VIOLATION', async () => {
@@ -1220,28 +1220,30 @@ spec:
       - /auto-sync
 `;
       await writeFile(join(root, '.auto-sync', 'sync.yaml'), customManifestYaml);
-      const loadedCustom = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/sync.yaml', repositoryRoot: root });
+      const loadedCustom = await loadDeclarativeTaskpack({ manifestPath: '.auto-sync/sync.yaml', repositoryRoot: root, policyProfile: 'github' } as Parameters<typeof loadDeclarativeTaskpack>[0]);
       assert.equal(loadedCustom.controlRoot, '.auto-sync');
       assert.equal(loadedCustom.manifestPath, '.auto-sync/sync.yaml');
       assert.deepEqual(loadedCustom.spec.scope, { writable: [], protected: [] });
 
       withEnv('TASKPACK_TEST_PROVIDER_TOKEN', 'provider-token-value');
       const compiledCustom = await compileDeclarativeTaskpack(loadedCustom, bindingsFor(loadedCustom, {
+        hostPolicy: { policyProfile: 'github' } as HostTaskpackBindings['hostPolicy'],
         publicationEndpoint: null,
         credentialEnvMap: { provider: 'TASKPACK_TEST_PROVIDER_TOKEN' },
       }));
       assert.deepEqual(compiledCustom.config.spec.task.spec.scope.writable, ['**']);
-      assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.codex'), true);
+      assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.git'), true);
+      assert.equal(PROTECTED_AUTOMATION_PATHS.includes('.codex'), false);
       assert.deepEqual(compiledCustom.registry.spec.roleProfiles[0]?.tools, ['read', 'write', 'edit', 'bash', 'delete']);
       assert.deepEqual(compiledCustom.config.spec.task.spec.roles[0]?.tools, ['read', 'write', 'edit', 'bash', 'delete']);
       const protectedPatterns = compiledCustom.config.spec.task.spec.scope.protected;
       for (const expected of [
-        '.github/**', '.claude/**', '.codex/**', '.loopwright/policies/**',
-        'AGENTS.md/**', 'CLAUDE.md/**', '.auto-sync/policies/**', '.auto-sync/checks/**',
+        '.github/**', '.git/**', '.auto-sync/policies/**', '.auto-sync/checks/**',
         '.auto-sync/memory/**', '.auto-sync/sync.yaml/**',
       ]) {
         assert.equal(protectedPatterns.includes(expected), true, `missing protected pattern ${expected}`);
       }
+      assert.equal(protectedPatterns.includes('.claude/**'), false, '.claude must not be hardcoded when omitted from scope.protected');
       assert.equal(protectedPatterns.includes('.agents/**'), false, '.agents must not be unconditionally protected in Taskpack 2.0');
 
       // Root taskpack.yaml defaults controlRoot to .loopwright while protecting exact taskpack.yaml
@@ -1289,11 +1291,11 @@ spec:
       (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
     );
 
-    // Reject .claude and .codex in writable
+    // Reject repository-declared .claude and .codex in writable when listed in scope.protected
     for (const protectedWritable of ['.claude', '.claude/skills', '.codex', '.codex/config.toml']) {
       assert.throws(
         () => validateTaskpackManifest(editedManifest(base, draft => {
-          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [protectedWritable] };
+          (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [protectedWritable], protected: ['.claude', '.codex'] };
         })),
         (err: GitHubAppError) => err.code === 'TASKPACK_SCOPE_VIOLATION',
       );
@@ -1447,7 +1449,7 @@ spec:
               localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', timeoutSeconds: badTimeout } }],
               externalGates: [],
             };
-          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml', policyProfile: 'github' } as Parameters<typeof validateTaskpackManifest>[1]),
           (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
         );
       }
@@ -1459,7 +1461,7 @@ spec:
               localChecks: [{ id: 'verify-local', implementation: 'command.v1', parameters: { script: '.auto-sync/checks/verify.sh', env: [badEnv] } }],
               externalGates: [],
             };
-          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml', policyProfile: 'github' } as Parameters<typeof validateTaskpackManifest>[1]),
           (err: GitHubAppError) => err.code === 'TASKPACK_MANIFEST_INVALID',
           `expected reserved env "${badEnv}" to be rejected`,
         );
@@ -2194,7 +2196,7 @@ spec:
           () => validateTaskpackManifest(editedManifest(loaded, draft => {
             (draft['spec'] as Record<string, unknown>)['scope'] = { writable: [forbiddenProposal, 'pack/cann/**'], protected: [] };
             ((draft['spec'] as Record<string, unknown>)['proposal'] as Record<string, unknown>)['path'] = forbiddenProposal;
-          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml' }),
+          }), { controlRoot: '.auto-sync', manifestPath: '.auto-sync/taskpack.yaml', policyProfile: 'github' } as Parameters<typeof validateTaskpackManifest>[1]),
           (err: unknown) => err instanceof GitHubAppError && err.code === 'TASKPACK_SCOPE_VIOLATION',
           `expected TASKPACK_SCOPE_VIOLATION for ${forbiddenProposal}`,
         );

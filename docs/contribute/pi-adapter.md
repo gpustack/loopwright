@@ -125,13 +125,11 @@ guard. A retained binding/legacy/identity refusal returns `RECOVERY_REQUIRED` an
 
 ## Capture and recovery
 
-Capture validates every bounded native session row and tool pair, writes synced immutable session/workspace artifacts, then
-publishes their refs through state authority. Unreferenced artifacts grant no restore authority. A committed checkpoint with a lost ACK is looked up by identity.
+Capture validates every bounded native session row and tool pair, writes crash-safe `1 MiB`-streamed CAS blobs under `<artifactsDir>/blobs/sha256/<hex>` referenced by `{ type: 'blob_ref' }` rows in `.workspace.ndjson` (retaining read-only `{ type: 'chunk' }` v1 decoding), and publishes refs through state authority. Unreferenced artifacts grant no restore authority. A committed checkpoint with a lost ACK is looked up by identity.
 
-Restore supplies the retained checkpoint ID, workspace/session refs and authenticated bytes, plus candidate bytes matching the
-captured manifest. Runtime, policy, resources, lock, role, original clock and authoritative current checkpoint must still match.
-Restore uses public in-memory native session construction and never calls prompt/resume automatically.
-Later known charges remain retained. Missing bytes, unresolved work, changed identity or expired original deadline blocks execution.
+Restore accepts up to 16,384 verified CAS candidate descriptors materialized via single-descriptor `1 MiB` streaming (`O_NOFOLLOW`, `nlink === 1`, SHA-256 verified), alongside retained session and workspace refs. Runtime, policy, resources, lock, role, original clock, and authoritative current checkpoint must still match.
+
+Restore uses public in-memory native session construction and never calls prompt/resume automatically. Later known charges remain retained. Missing bytes, unresolved work, changed identity, or expired original deadline blocks execution.
 
 The persistent execution guard records owner PID/birth/boot and exact container/attach identities before delivery. Private execution-owner header version 2 retains the canonical original socket and bounded Engine ID before any child starts. Recovery rejects a changed/unknown/legacy binding before daemon calls.
 
@@ -165,7 +163,7 @@ Every physical attempt persists a content-free ContextAssessment in immutable co
 
 Unsupported coverage records that refusal, with null assessment when safe assessment is unavailable. Strict default preflight refusal occurs before a handle/event stream exists. Capabilities name the estimator; these metadata records are available independently of their digest and contain no prompt, schema, signature or credential bytes.
 
-Responses stop at 1 MiB; tool arguments/results at 64 KiB. Events are at most 4 KiB each, with 128 queued/512 KiB total and finite backpressure, then terminal `EVENT_OVERFLOW`. Private session capture is at most 8 MiB in acknowledged 32 KiB chunks; resolved artifacts together must fit 16 MiB. An overflowing history blocks another request and safe capture.
+Control documents stay strictly bounded: prompt inputs at `1 MiB`, tool arguments/results at `4 MiB`, session captures at `64 MiB`, and events at `4 KiB` each (`128` queued / `512 KiB` total). CAS-backed candidate overlays scale up to `16,384` entries and `16 GiB` (`fileBytes` / `artifactBytes`) via `1 MiB` streaming chunks without buffering whole files in RAM. An overflowing history blocks another request and safe capture.
 
 Transport frames and pending-channel work are fixed at 64 KiB and 256 KiB. Different requested values are unsupported; other ceilings may be tightened within their validated minima. Diagnostics below 64 bytes are unsupported. See [measured limits and costs](../configuration/sandbox-backends.md#limits-and-costs) for retained-state growth and native VM bounds.
 
@@ -209,7 +207,7 @@ Docker is this adapter version's implemented backend. It is not a universal Loop
 
 Provider/MCP paths use `/workspace/candidate`, while retained execution ownership uses macOS PID birth and boot observations. The existing environment/session constructor seam is internal.
 
-The GitHub App also negotiates other sandbox backends for its own subprocess execution. That capability does not change PiHost requirements or establish cross-backend restore. See [sandbox capabilities](../configuration/sandbox-backends.md#sandbox-capabilities).
+`@loopwright/taskpack` also negotiates native OS sandbox backends for taskpack and local CLI execution. That capability does not change PiHost requirements or establish cross-backend restore. See [sandbox capabilities](../configuration/sandbox-backends.md#sandbox-capabilities).
 
 A task requiring isolation must refuse an incapable backend; direct execution alone cannot prevent same-privilege code from bypassing mediation, reading credentials or changing state. Common admission, budgets, events, deadlines and recovery remain separate responsibilities. These constraints do not imply that the Pi adapter supports every App backend.
 

@@ -20,7 +20,7 @@ function input(extraTools: readonly string[] = []) {
 }
 async function fixture(extraTools: readonly string[] = [], leaseMs?: number) {
   const f = await requestFixture(undefined, () => input(extraTools), leaseMs), candidate = join(f.directory, 'candidate');
-  for (const file of f.input.candidate.artifacts) { await mkdir(join(candidate, file.name, '..'), { recursive: true }); await writeFile(join(candidate, file.name), file.bytes, { mode: 0o444 }); }
+  for (const file of f.input.candidate.artifacts) { await mkdir(join(candidate, file.name, '..'), { recursive: true }); if ('bytes' in file) await writeFile(join(candidate, file.name), file.bytes, { mode: 0o444 }); }
   const actor = () => new Execution(f.host, f.input, candidate, { process: () => { throw new Error('Host mutations must not run an interpreter'); } });
   return { ...f, candidate, actor };
 }

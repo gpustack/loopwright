@@ -51,6 +51,9 @@
     },
     "packages/github-app": {
       "yaml": "2.9.1"
+    },
+    "packages/taskpack": {
+      "yaml": "2.9.1"
     }
   }
 }

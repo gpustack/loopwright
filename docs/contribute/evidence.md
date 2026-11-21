@@ -25,14 +25,13 @@ An observation binds one acceptance check and its observed status to the exact l
 
 Static inspection, synthetic fixture, local execution, external service, and hardware execution are distinct levels. Each check has an explicit allowed set; there is no universal ordering.
 
-Supply already-loaded bytes as `[{name,bytes}]` to the evaluator.
-Names are inventory keys, not paths to open. The library does not fetch URLs or run a resolver callback.
-Candidate entries and evidence references are checked against the inventory's byte length and SHA-256.
-All inventory byte bounds are checked before copying/hashing; bytes are hashed once per inventory entry.
+Supply either in-memory bytes (`{ name, bytes }`) or trusted host-verified CAS descriptors (`VerifiedArtifactDescriptor`: `{ name, byteLength, digest }` via `digestArtifactFromMetadata`) to `resolveInventory`, `evaluateAcceptance`, and `constructRunResult`.
 
-The `tree_overlay` inventory uses binary framing with magic `0x4c574f56` (`LWOV`).
+Raw `Uint8Array` buffers enforce `64 MiB` per file and `128 MiB` total, while verified CAS descriptors backed by `<artifactsDir>/blobs/sha256/<hex>` scale up to `16,384` entries and `16 GiB` without RAM buffering. `ArtifactManifest.spec.entries` omits `uri` so canonical JCS `candidateDigest` hashes stay identical across v1 and v2 captures.
+
+The `tree_overlay` inventory uses binary framing with magic `0x4c574f56` (`LWOV`) or `delegated-capture.v2` CAS pointers.
 It carries the tree anchor, modified or added `entries`, and `deleted` paths.
-`no-change.v1` compares both lists; `scope.v1` checks every modified, added, and deleted path.
+`no-change.v1` and `scope.v1` validate pointer metadata with zero file reads; structured JSON/section guards read only their single targeted file (`<= 1,032,184` bytes).
 
 For untouched baseline JSON, `json-artifact.v1` authenticates the blob through a Git Merkle tree-path proof.
 The proof contains at most 16 trees and 256 KiB of raw tree bytes.

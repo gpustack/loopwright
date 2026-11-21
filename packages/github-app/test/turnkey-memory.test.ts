@@ -429,6 +429,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       const exitCode1 = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: repo,
         LOOPWRIGHT_REPOSITORY: 'acme/repo',
         GITHUB_SHA: mainSha,
@@ -535,6 +536,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-turnkey-mem-llm-123456',
         },
       });
@@ -618,6 +620,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-turnkey-mem-llm-123456',
         },
       });
@@ -677,7 +680,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       await mkdir(join(repo, 'pack'), { recursive: true });
       await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), '# Guide\n', 'utf8');
 
-      const leakedToken = 'ghp_SuperSecretCheckToken9876543210AbCdEf';
+      const leakedToken = 'sk-SuperSecretCheckToken9876543210AbCdEf';
       await writeFile(
         join(repo, '.auto-sync', 'checks', 'verify.sh'),
         `#!/bin/sh\nset -eu\nif grep -q "leak-now" "$LOOPWRIGHT_CANDIDATE_DIR/docs/status.md"; then\n  echo "auth failed with token ${leakedToken}" >&2\n  exit 1\nfi\ngrep -q "verified-v2" "$LOOPWRIGHT_CANDIDATE_DIR/docs/status.md"\n`,
@@ -804,6 +807,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-neg-llm-token-123456',
         },
       });
@@ -850,6 +854,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
           env: {
             PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
             GITHUB_ACTIONS: 'true',
+            RUNNER_ENVIRONMENT: 'github-hosted',
             LLM_TOKEN: 'sk-neg-llm-token-123456',
           },
         });
@@ -874,6 +879,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       const exit500 = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: repo,
         LOOPWRIGHT_REPOSITORY: 'acme/repo',
         GITHUB_SHA: headSha,
@@ -991,6 +997,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-neg-llm-token-123456',
         },
       });
@@ -1027,6 +1034,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-neg-llm-token-123456',
         },
       });
@@ -1156,6 +1164,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-neg-llm-token-123456',
         },
       });
@@ -1199,6 +1208,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-neg-llm-token-123456',
         },
       });
@@ -2027,6 +2037,7 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-gc-llm-token-123456',
         },
       });

@@ -25,6 +25,10 @@ export interface RuntimeIdentity {
   readonly sdkIntegrity: string; readonly graphDigest: Digest; readonly imageDigest: string;
   readonly configDigest: Digest; readonly profile: 'linux/arm64';
 }
+export interface PiCandidateStreamChecker {
+  readonly push: (chunk: Uint8Array) => void;
+  readonly finish: () => void;
+}
 /** Trusted construction only: these functions and paths are never accepted from model policy JSON. */
 export interface PiHost {
   readonly store: LocalRunStore; readonly authority: Authority;
@@ -32,6 +36,7 @@ export interface PiHost {
   readonly dockerExecutable: string; readonly dockerSocket: string;
   readonly runtime: RuntimeIdentity;
   readonly resolveCredential: (binding: { readonly provider: string; readonly model: string; readonly destination: string; readonly purpose: Purpose; readonly runId: string; readonly roleId: string; readonly stepId: string; readonly notAfterMonotonicMs: string; readonly signal: AbortSignal }) => Promise<{ readonly bearerToken: string }>;
+  readonly createCandidateStreamChecker?: () => PiCandidateStreamChecker;
 }
 export interface ResourceIdentity {
   readonly id: string; readonly kind: 'instruction' | 'skill' | 'document'; readonly path: string; readonly digest: Digest;
@@ -115,11 +120,20 @@ export interface PiCandidateBaseline {
   readonly directory: string;
   readonly entries: readonly PiBaselineEntry[];
 }
+export interface PiCandidateBlobArtifact {
+  readonly name: string;
+  readonly byteLength: number;
+  readonly digest: Digest;
+  readonly blobPath: string;
+}
+export type PiCandidateArtifactInput =
+  | { readonly name: string; readonly bytes: Uint8Array }
+  | PiCandidateBlobArtifact;
 export interface PiOpenInput {
   readonly version: 1; readonly lock: TaskLock; readonly roleId: string; readonly stepId: string; readonly sessionId: string;
   readonly policy: AdapterPolicy;
   readonly candidate: { readonly manifest: ArtifactManifest; readonly baseRevision: string; readonly sourceRevision: string;
-    readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[]; readonly baseline?: PiCandidateBaseline };
+    readonly artifacts: readonly PiCandidateArtifactInput[]; readonly baseline?: PiCandidateBaseline };
   readonly resources: readonly { readonly id: string; readonly kind: ResourceIdentity['kind']; readonly ref: ArtifactRef; readonly bytes: Uint8Array }[];
   readonly restore: null | { readonly checkpointId: string; readonly workspace: { readonly ref: ArtifactRef; readonly bytes: Uint8Array };
     readonly session: { readonly ref: ArtifactRef; readonly bytes: Uint8Array } };

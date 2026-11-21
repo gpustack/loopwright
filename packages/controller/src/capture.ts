@@ -1,8 +1,25 @@
 import { decodePiCapture, type PiAdapterV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
-import { bindSubject, digestArtifact, identifyManifest, type ArtifactManifest, type ArtifactRef, type TaskLock } from '@loopwright/core';
+import {
+  OVERLAY_LIMITS,
+  bindSubject,
+  digestArtifact,
+  digestArtifactFromMetadata,
+  identifyManifest,
+  isWritablePath,
+  type ArtifactManifest,
+  type ArtifactRef,
+  type TaskContract,
+  type TaskLock,
+} from '@loopwright/core';
 import type { Authority, CheckpointRecord, LocalRunStore } from '@loopwright/state';
-import { stateValue, type ArtifactReader, type ArtifactStore } from './storage.js';
-import { canonical, hash, list, record, same, text } from './schema.js';
+import {
+  ArtifactStore,
+  resolveCanonicalCasBlobPath,
+  stateValue,
+  streamVerifiedCasBlob,
+  type ArtifactReader,
+} from './storage.js';
+import { canonical, hash, integer, isRecord, list, record, same, text } from './schema.js';
 import { parsePrivateJson } from './parser.js';
 import { journal, phaseCheckpointId } from './progress.js';
 import { formatPolicy } from './repair.js';
@@ -14,61 +31,253 @@ import {
   isHostProtectedPath,
   overlayManifestBounds,
   type FrozenSource,
+  type HostPathProtectionOptions,
 } from './source.js';
-import type { CompiledPlan, ControllerAttempt, PlannedRole } from './types.js';
+import type {
+  CandidateFileEntry,
+  CasCandidateFile,
+  CompiledPlan,
+  ControllerAttempt,
+  PlannedRole,
+  RawCandidateFile,
+} from './types.js';
+
 export interface CapturedRole {
-  readonly checkpointId: string; readonly outcome: ArtifactRef; readonly originalManifest: ArtifactRef;
-  readonly manifest: ArtifactRef; readonly digest: import('@loopwright/core').Digest;
-  readonly workspace: ArtifactRef; readonly session: ArtifactRef | null; readonly submission: ArtifactRef | null;
-  readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly checkpointId: string;
+  readonly outcome: ArtifactRef;
+  readonly originalManifest: ArtifactRef;
+  readonly manifest: ArtifactRef;
+  readonly digest: import('@loopwright/core').Digest;
+  readonly workspace: ArtifactRef;
+  readonly session: ArtifactRef | null;
+  readonly submission: ArtifactRef | null;
+  readonly artifacts: readonly CandidateFileEntry[];
 }
-export interface DelegatedCapturePayload {
+
+export interface DelegatedCaptureOverlayEntryV1 {
+  readonly name: string;
+  readonly mode: '100644' | '100755';
+  readonly bodyBase64: string;
+}
+
+export interface DelegatedCapturePayloadV1 {
   readonly format: 'delegated-capture.v1';
   readonly version: 1;
   readonly baseRevision: string;
   readonly sourceRevision: string;
-  readonly overlay: readonly { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[];
+  readonly overlay: readonly DelegatedCaptureOverlayEntryV1[];
   readonly deleted: readonly string[];
   readonly assistantText: string | null;
   readonly status: 'completed' | 'no_change' | 'failed' | 'blocked';
   readonly reason: string | null;
 }
+
+export interface DelegatedCaptureOverlayEntryV2 {
+  readonly name: string;
+  readonly mode: '100644' | '100755';
+  readonly sha256: string;
+  readonly byteLength: number;
+  readonly blobRef: ArtifactRef;
+}
+
+export interface DelegatedCapturePayloadV2 {
+  readonly format: 'delegated-capture.v2';
+  readonly version: 2;
+  readonly baseRevision: string;
+  readonly sourceRevision: string;
+  readonly overlay: readonly DelegatedCaptureOverlayEntryV2[];
+  readonly deleted: readonly string[];
+  readonly assistantText: string | null;
+  readonly status: 'completed' | 'no_change' | 'failed' | 'blocked';
+  readonly reason: string | null;
+}
+
+export type DelegatedCapturePayload = DelegatedCapturePayloadV1 | DelegatedCapturePayloadV2;
+
 export function nativeSessionId(runId: string, roleId: string, stepId: string, policy: PlannedRole['policy'], reworkEpoch = 0): string {
   const payload = reworkEpoch > 0 ? { runId, roleId, stepId, policy, reworkEpoch } : { runId, roleId, stepId, policy };
   return 'session.' + hash('loopwright.dev/controller/session/v1\0' + canonical(payload)).hex.slice(0, 40);
 }
-export function decodeDelegatedWorkspace(
+
+function parseValidatedV2OverlayEntry(
+  item: unknown,
+  maxFileBytes: number,
+  fail: () => never,
+): { readonly overlayEntry: DelegatedCaptureOverlayEntryV2; readonly manifestEntry: ArtifactRef } {
+  let entry: Record<string, unknown>;
+  try {
+    entry = record(item, ['name', 'mode', 'sha256', 'byteLength', 'blobRef']);
+  } catch {
+    return fail();
+  }
+  const name = text(entry.name, '', 4096);
+  const mode = text(entry.mode);
+  const sha256 = text(entry.sha256, '', 64);
+  if (
+    (mode !== '100644' && mode !== '100755') ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    typeof entry.byteLength !== 'number' ||
+    !Number.isSafeInteger(entry.byteLength) ||
+    Object.is(entry.byteLength, -0) ||
+    entry.byteLength < 0 ||
+    entry.byteLength > Math.min(maxFileBytes, OVERLAY_LIMITS.maxMaxBytes) ||
+    !isRecord(entry.blobRef)
+  ) {
+    return fail();
+  }
+  const byteLength = integer(entry.byteLength, 0, Math.min(maxFileBytes, OVERLAY_LIMITS.maxMaxBytes));
+  const expectedUri = 'cas://sha256/' + sha256;
+  const expectedBlobRef = digestArtifactFromMetadata(name, {
+    digest: { algorithm: 'sha256', hex: sha256 },
+    byteLength,
+    uri: expectedUri,
+  });
+  const expectedManifestEntry = digestArtifactFromMetadata(name, {
+    digest: { algorithm: 'sha256', hex: sha256 },
+    byteLength,
+  });
+  if (
+    !expectedBlobRef.ok ||
+    !expectedManifestEntry.ok ||
+    !same(entry.blobRef, expectedBlobRef.value)
+  ) {
+    return fail();
+  }
+  return {
+    overlayEntry: {
+      name,
+      mode,
+      sha256,
+      byteLength,
+      blobRef: expectedBlobRef.value,
+    },
+    manifestEntry: expectedManifestEntry.value,
+  };
+}
+
+export async function decodeDelegatedWorkspace(
   workspaceBytes: Uint8Array,
   expectedManifest: ArtifactManifest,
   lock: TaskLock,
   phase: ControllerDiagnostic['phase'] = 'recovery',
-): {
+  artifactsDirectory?: string,
+): Promise<{
   readonly candidate: ArtifactManifest;
-  readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly artifacts: readonly CandidateFileEntry[];
   readonly submission: Uint8Array | null;
   readonly payload: DelegatedCapturePayload;
-} {
-  const fail = () => refuse(phase === 'inspection' ? 'ARTIFACT_INVALID' : 'RECOVERY_REQUIRED', '', phase);
+}> {
+  const fail = (): never => refuse(phase === 'inspection' ? 'ARTIFACT_INVALID' : 'RECOVERY_REQUIRED', '', phase);
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
+  const maxJsonBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+  if (workspaceBytes.byteLength > maxJsonBytes) return fail();
   let raw: unknown;
-  try { raw = parsePrivateJson(Buffer.from(workspaceBytes), bounds.workspaceMaxBytes, bounds.collectionLimit); } catch { return fail(); }
-  const doc = record(raw, ['format', 'version', 'baseRevision', 'sourceRevision', 'overlay', 'deleted', 'assistantText', 'status', 'reason']);
-  if (doc.format !== 'delegated-capture.v1' || doc.version !== 1
-    || text(doc.baseRevision) !== lock.spec.contract.spec.target.baseRevision
-    || text(doc.sourceRevision) !== lock.spec.contract.spec.target.sourceRevision
-    || !['completed', 'no_change', 'failed', 'blocked'].includes(text(doc.status))
-    || doc.reason !== null && typeof doc.reason !== 'string'
-    || doc.assistantText !== null && typeof doc.assistantText !== 'string') return fail();
-  const deleted = list(doc.deleted, '', 4096).map(item => text(item, '', 4096));
+  try {
+    raw = parsePrivateJson(Buffer.from(workspaceBytes), maxJsonBytes, bounds.collectionLimit);
+  } catch {
+    return fail();
+  }
+  let doc: Record<string, unknown>;
+  try {
+    doc = record(raw, ['format', 'version', 'baseRevision', 'sourceRevision', 'overlay', 'deleted', 'assistantText', 'status', 'reason']);
+  } catch {
+    return fail();
+  }
+  if (
+    text(doc.baseRevision) !== lock.spec.contract.spec.target.baseRevision ||
+    text(doc.sourceRevision) !== lock.spec.contract.spec.target.sourceRevision ||
+    !['completed', 'no_change', 'failed', 'blocked'].includes(text(doc.status)) ||
+    (doc.reason !== null && typeof doc.reason !== 'string') ||
+    (doc.assistantText !== null && typeof doc.assistantText !== 'string')
+  ) {
+    return fail();
+  }
+  const deleted = list(doc.deleted, '', bounds.maxFiles).map(item => text(item, '', 4096));
   if (!same([...deleted].sort(compareUtf16), deleted) || new Set(deleted).size !== deleted.length) return fail();
+
+  if (doc.format === 'delegated-capture.v2' && doc.version === 2) {
+    if (workspaceBytes.byteLength > bounds.v2WorkspaceJsonMaxBytes || !artifactsDirectory) return fail();
+    const overlayRaw = list(doc.overlay, '', bounds.maxFiles);
+    const overlay: DelegatedCaptureOverlayEntryV2[] = [];
+    const artifacts: CasCandidateFile[] = [];
+    const entries: ArtifactRef[] = [];
+    let totalBytes = 0;
+    for (const item of overlayRaw) {
+      const { overlayEntry, manifestEntry } = parseValidatedV2OverlayEntry(item, bounds.perFileMaxBytes, fail);
+      if ((totalBytes += overlayEntry.byteLength) > bounds.maxBytes) return fail();
+      let blobPath: string;
+      try {
+        blobPath = await resolveCanonicalCasBlobPath(artifactsDirectory, overlayEntry.sha256, undefined, phase);
+        await streamVerifiedCasBlob(
+          artifactsDirectory,
+          {
+            name: overlayEntry.name,
+            sha256: overlayEntry.sha256,
+            byteLength: overlayEntry.byteLength,
+            uri: 'cas://sha256/' + overlayEntry.sha256,
+            path: blobPath,
+            blobRef: overlayEntry.blobRef,
+          },
+          undefined,
+          phase,
+        );
+      } catch {
+        return fail();
+      }
+      overlay.push(overlayEntry);
+      artifacts.push({
+        name: overlayEntry.name,
+        byteLength: overlayEntry.byteLength,
+        digest: manifestEntry.digest,
+        blobPath,
+        mode: overlayEntry.mode,
+      });
+      entries.push(manifestEntry);
+    }
+    if (!same([...overlay.map(o => o.name)].sort(compareUtf16), overlay.map(o => o.name)) || new Set(overlay.map(o => o.name)).size !== overlay.length) {
+      return fail();
+    }
+    const draftManifest = expectedManifest.spec.baseTree !== undefined
+      ? { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { baseTree: expectedManifest.spec.baseTree, entries, deleted } }
+      : { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { entries } };
+    const identified = identifyManifest(draftManifest, bounds.options);
+    if (!identified.ok || !same(canonicalizeCandidateManifest(identified.value.manifest), expectedManifest)) return fail();
+    const assistantText = doc.assistantText as string | null;
+    const submission = assistantText === null ? null : new Uint8Array(Buffer.from(assistantText, 'utf8'));
+    return {
+      candidate: identified.value.manifest,
+      artifacts,
+      submission,
+      payload: {
+        format: 'delegated-capture.v2',
+        version: 2,
+        baseRevision: text(doc.baseRevision),
+        sourceRevision: text(doc.sourceRevision),
+        overlay,
+        deleted,
+        assistantText,
+        status: doc.status as DelegatedCapturePayload['status'],
+        reason: doc.reason as string | null,
+      },
+    };
+  }
+
+  if (doc.format !== 'delegated-capture.v1' || doc.version !== 1 || workspaceBytes.byteLength > bounds.workspaceMaxBytes) {
+    return fail();
+  }
   const overlayRaw = list(doc.overlay, '', bounds.maxFiles);
-  const maxBase64Length = Math.ceil((bounds.perFileMaxBytes * 4) / 3) + 4;
-  const overlay: { readonly name: string; readonly mode: '100644' | '100755'; readonly bodyBase64: string }[] = [];
-  const artifacts: { readonly name: string; readonly bytes: Uint8Array }[] = [];
+  const maxBase64Length = Math.min(100_663_296, Math.ceil((bounds.perFileMaxBytes * 4) / 3) + 4);
+  const overlay: DelegatedCaptureOverlayEntryV1[] = [];
+  const artifacts: RawCandidateFile[] = [];
   const entries: ArtifactRef[] = [];
   let totalBytes = 0;
   for (const item of overlayRaw) {
-    const entry = record(item, ['name', 'mode', 'bodyBase64']);
+    let entry: Record<string, unknown>;
+    try {
+      entry = record(item, ['name', 'mode', 'bodyBase64']);
+    } catch {
+      return fail();
+    }
     const name = text(entry.name, '', 4096), mode = text(entry.mode), bodyBase64 = text(entry.bodyBase64, '', maxBase64Length);
     if (mode !== '100644' && mode !== '100755') return fail();
     const bytes = new Uint8Array(Buffer.from(bodyBase64, 'base64'));
@@ -104,8 +313,43 @@ export function decodeDelegatedWorkspace(
     },
   };
 }
+
+async function assertCandidateArtifactsClean(
+  artifacts: ArtifactStore,
+  entries: readonly CandidateFileEntry[],
+  phase: ControllerDiagnostic['phase'],
+): Promise<void> {
+  for (const entry of entries) {
+    if ('bytes' in entry) {
+      artifacts.vault.assertClean(entry.bytes);
+    } else {
+      const checker = artifacts.vault.createStreamChecker();
+      try {
+        await streamVerifiedCasBlob(
+          artifacts.directory,
+          {
+            name: entry.name,
+            sha256: entry.digest.hex,
+            byteLength: entry.byteLength,
+            uri: 'cas://sha256/' + entry.digest.hex,
+            path: entry.blobPath,
+          },
+          chunk => {
+            checker.push(chunk);
+          },
+          phase,
+        );
+        checker.finish();
+      } finally {
+        checker.finish();
+      }
+    }
+  }
+}
+
 export async function decodeCandidateCapture(input: {
   readonly artifacts: ArtifactReader;
+  readonly artifactsDirectory?: string;
   readonly lock: TaskLock;
   readonly plan: CompiledPlan;
   readonly checkpoint: CheckpointRecord;
@@ -115,19 +359,33 @@ export async function decodeCandidateCapture(input: {
   readonly phase: ControllerDiagnostic['phase'];
 }): Promise<{
   readonly candidate: ArtifactManifest;
-  readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly artifacts: readonly CandidateFileEntry[];
   readonly submission: Uint8Array | null;
+  readonly delegatedPayload?: DelegatedCapturePayload;
 }> {
   const { artifacts, lock, plan, checkpoint, attempt, expectedManifest, requestIds, phase } = input;
+  const effectiveArtifactsDir = artifacts instanceof ArtifactStore ? artifacts.directory : input.artifactsDirectory;
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
-  const workspaceBytes = await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes));
+  const maxWsBytes = Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+  const workspaceBytes = await artifacts.read(checkpoint.workspace, maxWsBytes);
   let peek: unknown = null;
-  if (workspaceBytes.byteLength <= bounds.workspaceMaxBytes) {
-    try { peek = parsePrivateJson(Buffer.from(workspaceBytes), bounds.workspaceMaxBytes, bounds.collectionLimit); } catch { peek = null; }
+  if (workspaceBytes.byteLength <= maxWsBytes) {
+    try { peek = parsePrivateJson(Buffer.from(workspaceBytes), maxWsBytes, bounds.collectionLimit); } catch { peek = null; }
   }
-  if (peek !== null && typeof peek === 'object' && !Array.isArray(peek) && (peek as Record<string, unknown>).format === 'delegated-capture.v1') {
-    const decoded = decodeDelegatedWorkspace(workspaceBytes, expectedManifest, lock, phase);
-    return { candidate: decoded.candidate, artifacts: decoded.artifacts, submission: decoded.submission };
+  if (
+    isRecord(peek) &&
+    (peek.format === 'delegated-capture.v1' || peek.format === 'delegated-capture.v2')
+  ) {
+    const decoded = await decodeDelegatedWorkspace(workspaceBytes, expectedManifest, lock, phase, effectiveArtifactsDir);
+    if (artifacts instanceof ArtifactStore) {
+      await assertCandidateArtifactsClean(artifacts, decoded.artifacts, phase);
+    }
+    return {
+      candidate: decoded.candidate,
+      artifacts: decoded.artifacts,
+      submission: decoded.submission,
+      delegatedPayload: decoded.payload,
+    };
   }
   if (checkpoint.privateSession === null) refuse(phase === 'inspection' ? 'ARTIFACT_INVALID' : 'RECOVERY_REQUIRED', '', phase);
   const originalRole = plan.roles.find(role => role.roleId === plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
@@ -143,12 +401,55 @@ export async function decodeCandidateCapture(input: {
     workspace: { ref: checkpoint.workspace, bytes: workspaceBytes },
     session: { ref: checkpoint.privateSession, bytes: await artifacts.read(checkpoint.privateSession, 67_108_864) },
     command: attempt.purpose === 'compaction' ? null : { textDigest: hash(await artifacts.read(attempt.command, 1_048_576)), requestIds },
+    ...(effectiveArtifactsDir !== undefined ? { artifactsDirectory: effectiveArtifactsDir } : {}),
+    includeArtifactBytes: false,
   });
   if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), expectedManifest)) {
     refuse(phase === 'inspection' ? 'ARTIFACT_INVALID' : 'RECOVERY_REQUIRED', '', phase);
   }
-  return { candidate: decoded.value.candidate, artifacts: decoded.value.artifacts, submission: decoded.value.submission };
+  const candidateArtifacts: readonly CandidateFileEntry[] =
+    decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
+  if (artifacts instanceof ArtifactStore) {
+    await assertCandidateArtifactsClean(artifacts, candidateArtifacts, phase);
+  }
+  return {
+    candidate: decoded.value.candidate,
+    artifacts: candidateArtifacts,
+    submission: decoded.value.submission,
+  };
 }
+
+function assertNoUnauthorizedModeMutations(
+  candidateFiles: readonly CandidateFileEntry[],
+  overlayEntries: readonly { readonly name: string; readonly mode: '100644' | '100755' }[],
+  source: FrozenSource,
+  task: TaskContract,
+  hostProtection: boolean | HostPathProtectionOptions,
+  phase: ControllerDiagnostic['phase'],
+): void {
+  const baselineModeByPath = new Map<string, '100644' | '100755'>(
+    source.version === 2
+      ? (source.baselineEntries ?? []).map(entry => [entry.name, entry.mode])
+      : source.artifacts.map(entry => [entry.name, entry.mode ?? '100644']),
+  );
+  const overlayModeByPath = new Map<string, '100644' | '100755'>(
+    overlayEntries.map(entry => [entry.name, entry.mode]),
+  );
+  for (const file of candidateFiles) {
+    const fileMode = (!('bytes' in file) ? file.mode : undefined) ?? overlayModeByPath.get(file.name);
+    const baselineMode = baselineModeByPath.get(file.name);
+    if (fileMode !== undefined && baselineMode !== undefined && fileMode !== baselineMode) {
+      if (isHostProtectedPath(file.name, hostProtection)) {
+        refuse('ARTIFACT_INVALID', '', phase);
+      }
+      const writable = isWritablePath(task, file.name);
+      if (!writable.ok || !writable.value) {
+        refuse('ARTIFACT_INVALID', '', phase);
+      }
+    }
+  }
+}
+
 export async function captureDelegatedRole(
   store: LocalRunStore,
   authority: Authority,
@@ -159,17 +460,21 @@ export async function captureDelegatedRole(
   source: FrozenSource,
   input: {
     readonly candidateManifest: ArtifactManifest;
-    readonly candidateFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+    readonly candidateFiles: readonly CandidateFileEntry[];
     readonly payload: DelegatedCapturePayload;
     readonly submissionBytes: Uint8Array | null;
   },
+  hostProtection: boolean | HostPathProtectionOptions = false,
 ): Promise<CapturedRole> {
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
   const checkpointId = phaseCheckpointId(lock.spec.runId, 'role.' + attempt.ordinal + '.native');
   const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(input.candidateManifest), bounds.options);
   if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest)) > bounds.manifestMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, input.candidateFiles, source, 'execution');
-  const workspace = await artifacts.json('workspace', input.payload, bounds.workspaceMaxBytes);
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, input.candidateFiles, source, 'execution');
+  assertNoHostProtectedMutations(canonicalManifest.value.manifest, input.candidateFiles, source, hostProtection, 'execution');
+  assertNoUnauthorizedModeMutations(input.candidateFiles, input.payload.overlay, source, lock.spec.contract, hostProtection, 'execution');
+  const wsMaxBytes = input.payload.version === 2 ? bounds.v2WorkspaceJsonMaxBytes : bounds.workspaceMaxBytes;
+  const workspace = await artifacts.json('workspace', input.payload, wsMaxBytes);
   const current = stateValue(store.inspect());
   if (current.counts.requests !== attempt.before.requests || current.counts.operations !== attempt.before.operations) refuse('RECOVERY_REQUIRED', '', 'execution');
   stateValue(store.writeCheckpoint(authority, {
@@ -211,6 +516,7 @@ export async function captureDelegatedRole(
     artifacts: input.candidateFiles,
   };
 }
+
 export async function adoptDelegatedCapture(
   store: LocalRunStore,
   artifacts: ArtifactStore,
@@ -218,7 +524,7 @@ export async function adoptDelegatedCapture(
   role: PlannedRole,
   attempt: ControllerAttempt,
   source: FrozenSource,
-  allowWorkflowWrites = false,
+  hostProtection: boolean | HostPathProtectionOptions = false,
 ): Promise<CapturedRole> {
   const checkpointId = phaseCheckpointId(lock.spec.runId, 'role.' + attempt.ordinal + '.native'), records = journal(store);
   const checkpoint = records.checkpoints.find(item => item.checkpointId === checkpointId);
@@ -228,22 +534,34 @@ export async function adoptDelegatedCapture(
     || checkpoint.counts.requests !== records.view.counts.requests || checkpoint.counts.operations !== records.view.counts.operations
     || !same(checkpoint.clockBasis, records.view.clock.basis) || attempt.finished !== null) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
-  const maxBase64Length = Math.ceil((bounds.perFileMaxBytes * 4) / 3) + 4;
-  const workspaceBytes = await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes));
+  const maxWsBytes = Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+  const workspaceBytes = await artifacts.read(checkpoint.workspace, maxWsBytes);
   let raw: unknown;
-  try { raw = parsePrivateJson(Buffer.from(workspaceBytes), bounds.workspaceMaxBytes, bounds.collectionLimit); } catch { refuse('RECOVERY_REQUIRED', '', 'recovery'); }
+  try { raw = parsePrivateJson(Buffer.from(workspaceBytes), maxWsBytes, bounds.collectionLimit); } catch { refuse('RECOVERY_REQUIRED', '', 'recovery'); }
   const doc = record(raw, ['format', 'version', 'baseRevision', 'sourceRevision', 'overlay', 'deleted', 'assistantText', 'status', 'reason']);
   const overlayRaw = list(doc.overlay, '', bounds.maxFiles);
   const entries: ArtifactRef[] = [];
-  for (const item of overlayRaw) {
-    const entry = record(item, ['name', 'mode', 'bodyBase64']);
-    const bytes = new Uint8Array(Buffer.from(text(entry.bodyBase64, '', maxBase64Length), 'base64'));
-    if (bytes.byteLength > bounds.perFileMaxBytes) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    const ref = digestArtifact(text(entry.name, '', 4096), bytes);
-    if (!ref.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
-    entries.push(ref.value);
+  if (doc.format === 'delegated-capture.v2' && doc.version === 2) {
+    if (workspaceBytes.byteLength > bounds.v2WorkspaceJsonMaxBytes) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    for (const item of overlayRaw) {
+      const parsed = parseValidatedV2OverlayEntry(item, bounds.perFileMaxBytes, () => refuse('RECOVERY_REQUIRED', '', 'recovery'));
+      entries.push(parsed.manifestEntry);
+    }
+  } else if (doc.format === 'delegated-capture.v1' && doc.version === 1) {
+    if (workspaceBytes.byteLength > bounds.workspaceMaxBytes) refuse('RECOVERY_REQUIRED', '', 'recovery');
+    const maxBase64Length = Math.min(100_663_296, Math.ceil((bounds.perFileMaxBytes * 4) / 3) + 4);
+    for (const item of overlayRaw) {
+      const entry = record(item, ['name', 'mode', 'bodyBase64']);
+      const bytes = new Uint8Array(Buffer.from(text(entry.bodyBase64, '', maxBase64Length), 'base64'));
+      if (bytes.byteLength > bounds.perFileMaxBytes) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      const ref = digestArtifact(text(entry.name, '', 4096), bytes);
+      if (!ref.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
+      entries.push(ref.value);
+    }
+  } else {
+    refuse('RECOVERY_REQUIRED', '', 'recovery');
   }
-  const deleted = list(doc.deleted, '', 4096).map(item => text(item, '', 4096));
+  const deleted = list(doc.deleted, '', bounds.maxFiles).map(item => text(item, '', 4096));
   const draftManifest = source.version === 2
     ? { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { baseTree: source.manifest.spec.baseTree!, entries, deleted } }
     : { apiVersion: 'loopwright.dev/v1alpha1' as const, kind: 'ArtifactManifest' as const, metadata: { id: 'candidate' }, spec: { entries } };
@@ -253,9 +571,11 @@ export async function adoptDelegatedCapture(
   if (!canonicalManifest.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const bound = bindSubject(lock, canonicalManifest.value.manifest, bounds.options);
   if (!bound.ok || !same(bound.value, checkpoint.subject)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  const decoded = decodeDelegatedWorkspace(workspaceBytes, canonicalManifest.value.manifest, lock, 'recovery');
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, decoded.artifacts, source, 'recovery');
-  assertNoHostProtectedMutations(canonicalManifest.value.manifest, decoded.artifacts, source, allowWorkflowWrites);
+  const decoded = await decodeDelegatedWorkspace(workspaceBytes, canonicalManifest.value.manifest, lock, 'recovery', artifacts.directory);
+  await assertCandidateArtifactsClean(artifacts, decoded.artifacts, 'recovery');
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, decoded.artifacts, source, 'recovery');
+  assertNoHostProtectedMutations(canonicalManifest.value.manifest, decoded.artifacts, source, hostProtection, 'recovery');
+  assertNoUnauthorizedModeMutations(decoded.artifacts, decoded.payload.overlay, source, lock.spec.contract, hostProtection, 'recovery');
   const originalManifest = await artifacts.json('native-manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const manifest = await artifacts.json('manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const submission = decoded.submission === null ? null : await artifacts.put('submission', decoded.submission, 1_048_576);
@@ -287,55 +607,86 @@ export async function adoptDelegatedCapture(
     artifacts: decoded.artifacts,
   };
 }
-function assertNoHostProtectedMutations(
+
+export function assertNoHostProtectedMutations(
   manifest: ArtifactManifest,
-  files: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+  files: readonly CandidateFileEntry[],
   source: FrozenSource,
-  allowWorkflowWrites: boolean,
+  hostProtection: boolean | HostPathProtectionOptions,
+  phase: ControllerDiagnostic['phase'] = 'execution',
 ): void {
+  const code: ControllerDiagnostic['code'] = 'ARTIFACT_INVALID';
   for (const deletedPath of manifest.spec.deleted ?? []) {
-    if (isHostProtectedPath(deletedPath, allowWorkflowWrites)) {
-      refuse('ARTIFACT_INVALID', '', 'execution');
+    if (isHostProtectedPath(deletedPath, hostProtection)) {
+      refuse(code, '', phase);
     }
   }
   if (source.version === 2) {
     for (const file of files) {
-      if (isHostProtectedPath(file.name, allowWorkflowWrites)) {
-        refuse('ARTIFACT_INVALID', '', 'execution');
+      if (isHostProtectedPath(file.name, hostProtection)) {
+        refuse(code, '', phase);
       }
     }
     return;
   }
-  const baselineByPath = new Map(source.artifacts.map(item => [item.name, item.bytes]));
+  const baselineByPath = new Map(
+    source.artifacts.map(item => [item.name, { bytes: item.bytes, mode: item.mode ?? ('100644' as const) }]),
+  );
   const present = new Set<string>();
   for (const file of files) {
     present.add(file.name);
-    const baseBytes = baselineByPath.get(file.name);
-    const modifiedOrAdded = baseBytes === undefined || !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
-    if (modifiedOrAdded && isHostProtectedPath(file.name, allowWorkflowWrites)) {
-      refuse('ARTIFACT_INVALID', '', 'execution');
+    const baseEntry = baselineByPath.get(file.name);
+    const bytesChangedOrAdded =
+      baseEntry === undefined
+        ? true
+        : 'bytes' in file
+          ? !Buffer.from(baseEntry.bytes).equals(Buffer.from(file.bytes))
+          : baseEntry.bytes.byteLength !== file.byteLength || hash(baseEntry.bytes).hex !== file.digest.hex;
+    const modeChanged =
+      baseEntry !== undefined && !('bytes' in file) && file.mode !== undefined && file.mode !== baseEntry.mode;
+    if ((bytesChangedOrAdded || modeChanged) && isHostProtectedPath(file.name, hostProtection)) {
+      refuse(code, '', phase);
     }
   }
   for (const base of source.artifacts) {
-    if (!present.has(base.name) && isHostProtectedPath(base.name, allowWorkflowWrites)) {
-      refuse('ARTIFACT_INVALID', '', 'execution');
+    if (!present.has(base.name) && isHostProtectedPath(base.name, hostProtection)) {
+      refuse(code, '', phase);
     }
   }
 }
+
 /** Only the production adapter handle can create its native checkpoint; controller checkpoints use a distinct ID. */
-export async function captureRole(adapter: PiAdapterV2, store: LocalRunStore, artifacts: ArtifactStore, lock: TaskLock, role: PlannedRole,
-  attempt: ControllerAttempt, outcome: PiOutcomeV2, source: FrozenSource, allowWorkflowWrites = false): Promise<CapturedRole> {
+export async function captureRole(
+  adapter: PiAdapterV2,
+  store: LocalRunStore,
+  artifacts: ArtifactStore,
+  lock: TaskLock,
+  role: PlannedRole,
+  attempt: ControllerAttempt,
+  outcome: PiOutcomeV2,
+  source: FrozenSource,
+  hostProtection: boolean | HostPathProtectionOptions = false,
+): Promise<CapturedRole> {
   const checkpointId = phaseCheckpointId(lock.spec.runId, 'role.' + attempt.ordinal + '.native');
   const mcpBlocked = outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED';
   if ((outcome.status !== 'execution_settled' && !mcpBlocked) || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution');
   const captured = await adapter.capture({ checkpointId }); if (!captured.ok) refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: captured.error.code, effect: captured.error.effect });
   const checkpoint = stateValue(store.getCheckpoint(checkpointId));
   if (checkpoint.additionalArtifacts.length || !same(checkpoint.workspace, captured.value.workspace) || !same(checkpoint.privateSession, captured.value.session)) refuse('RECOVERY_REQUIRED', '', 'execution');
-  return adoptRoleCapture(store, artifacts, lock, role, attempt, outcome.requestIds, source, allowWorkflowWrites);
+  return adoptRoleCapture(store, artifacts, lock, role, attempt, outcome.requestIds, source, hostProtection);
 }
+
 /** Adopt an original S02 capture without creating an adapter, dispatch permit, request or replacement native ID. */
-export async function adoptRoleCapture(store: LocalRunStore, artifacts: ArtifactStore, lock: TaskLock, role: PlannedRole,
-  attempt: ControllerAttempt, expectedRequests: readonly string[] | undefined, source: FrozenSource, allowWorkflowWrites = false): Promise<CapturedRole> {
+export async function adoptRoleCapture(
+  store: LocalRunStore,
+  artifacts: ArtifactStore,
+  lock: TaskLock,
+  role: PlannedRole,
+  attempt: ControllerAttempt,
+  expectedRequests: readonly string[] | undefined,
+  source: FrozenSource,
+  hostProtection: boolean | HostPathProtectionOptions = false,
+): Promise<CapturedRole> {
   const checkpointId = phaseCheckpointId(lock.spec.runId, 'role.' + attempt.ordinal + '.native'), records = journal(store);
   const checkpoint = records.checkpoints.find(item => item.checkpointId === checkpointId);
   if (!checkpoint || checkpoint.additionalArtifacts.length || checkpoint.privateSession === null || records.view.clockStatus !== 'trusted'
@@ -356,17 +707,31 @@ export async function adoptRoleCapture(store: LocalRunStore, artifacts: Artifact
       || item.linkedRequestId !== null && !requestIds.includes(item.linkedRequestId))) refuse('RECOVERY_REQUIRED', '', 'recovery');
   const command = await artifacts.read(attempt.command, 1048576);
   const bounds = overlayManifestBounds(lock.spec.contract.spec.budgets.overlay);
-  const decoded = await decodePiCapture({ version: 1, lock, policy: role.policy, checkpoint, sessionId: attempt.sessionId, roleId: role.roleId, stepId: attempt.nativeStepId,
-    workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes)) }, session: { ref: checkpoint.privateSession, bytes: await artifacts.read(checkpoint.privateSession, 67108864) },
-    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(command), requestIds } });
+  const decoded = await decodePiCapture({
+    version: 1,
+    lock,
+    policy: role.policy,
+    checkpoint,
+    sessionId: attempt.sessionId,
+    roleId: role.roleId,
+    stepId: attempt.nativeStepId,
+    workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes)) },
+    session: { ref: checkpoint.privateSession, bytes: await artifacts.read(checkpoint.privateSession, 67108864) },
+    command: attempt.purpose === 'compaction' ? null : { textDigest: hash(command), requestIds },
+    artifactsDirectory: artifacts.directory,
+    includeArtifactBytes: false,
+  });
   if (!decoded.ok) refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: decoded.error.code });
   const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(decoded.value.candidate), bounds.options);
   if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest)) > bounds.manifestMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-  assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, decoded.value.artifacts, source, 'execution');
-  assertNoHostProtectedMutations(canonicalManifest.value.manifest, decoded.value.artifacts, source, allowWorkflowWrites);
+  const candidateArtifacts: readonly CandidateFileEntry[] =
+    decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
+  await assertCandidateArtifactsClean(artifacts, candidateArtifacts, 'execution');
+  await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, candidateArtifacts, source, 'execution');
+  assertNoHostProtectedMutations(canonicalManifest.value.manifest, candidateArtifacts, source, hostProtection);
   const originalManifest = await artifacts.json('native-manifest', decoded.value.candidate, bounds.manifestMaxBytes), manifest = await artifacts.json('manifest', canonicalManifest.value.manifest, bounds.manifestMaxBytes);
   const submission = decoded.value.submission === null ? null : await artifacts.put('submission', decoded.value.submission, 1048576);
   const wrapper = await artifacts.json('role-outcome', { version: 1, attemptId: attempt.id, command: attempt.command, roleId: role.roleId, nodeId: attempt.nodeId, stepId: attempt.nativeStepId, sessionId: attempt.sessionId, checkpointId,
     originalManifest, manifest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, journal: { requestIds, operationIds } }, 4194304);
-  return { checkpointId, outcome: wrapper, originalManifest, manifest, digest: canonicalManifest.value.digest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, artifacts: decoded.value.artifacts };
+  return { checkpointId, outcome: wrapper, originalManifest, manifest, digest: canonicalManifest.value.digest, workspace: checkpoint.workspace, session: checkpoint.privateSession, submission, artifacts: candidateArtifacts };
 }

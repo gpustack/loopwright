@@ -159,7 +159,7 @@ function minorVersionAtLeast(version: string, major: number, minor: number): boo
 
 const AUTO_CANDIDATES = ['python3', 'python3.11', 'python3.12', 'python3.10', 'python3.13'] as const;
 const SEATBELT_EXECUTABLE = '/usr/bin/sandbox-exec';
-const BUILTIN_PROTECTED_SUBPATHS = ['.git', '.github', '.loopwright', '.claude', 'AGENTS.md', 'CLAUDE.md'] as const;
+const BUILTIN_PROTECTED_SUBPATHS = ['.git', '.loopwright'] as const;
 const DEFAULT_DENIED_HOME_SUBPATHS = [
   '.ssh', '.aws', '.gnupg', '.config/gh', '.config/gcloud',
   '.kube', '.docker', '.netrc', '.npmrc', '.pypirc',

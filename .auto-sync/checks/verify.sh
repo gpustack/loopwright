@@ -264,6 +264,7 @@ YAML_WORKSPACES = [
     "packages/controller",
     "packages/decisions",
     "packages/github-app",
+    "packages/taskpack",
 ]
 UNMANAGED_WORKSPACES = [
     "packages/core",
@@ -921,6 +922,7 @@ expected_ws_deps: dict[str, dict[str, str]] = {
     "packages/controller": {"yaml": yaml_target},
     "packages/decisions": {"yaml": yaml_target},
     "packages/github-app": {"yaml": yaml_target},
+    "packages/taskpack": {"yaml": yaml_target},
 }
 
 if not json_strict_equal(staged_packages, expected_ws_deps):
@@ -1306,6 +1308,7 @@ export NODE_BIN NPM_BIN NODE_RESOLVED_DIR HUGO_RESOLVED COMPILE_RUNNER TEST_RUNN
 
 "$PYTHON_EXEC" - <<'PY'
 from __future__ import annotations
+import base64
 import errno
 import hashlib
 import json
@@ -1313,7 +1316,9 @@ import os
 import pwd
 import shutil
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -1377,10 +1382,17 @@ test_runner = os.path.realpath(os.environ["TEST_RUNNER"])
 run_root_env = os.environ.get("SELF_UPGRADE_RUN_ROOT", "").strip()
 
 platform_name = sys.platform
-is_dedicated_runner = os.environ.get("GITHUB_ACTIONS") == "true"
+runner_env = os.environ.get("RUNNER_ENVIRONMENT", "").strip()
+has_macos_sb_helper = bool(os.environ.get("LOOPWRIGHT_MACOS_SB_SOCK", "").strip())
+is_dedicated_runner = (
+    os.environ.get("GITHUB_ACTIONS") == "true"
+    and runner_env == "github-hosted"
+    and not has_macos_sb_helper
+)
 
 # Verify OS containment backend availability upfront when running outside a dedicated GitHub Actions VM
 bwrap_bin: str | None = None
+macos_sb_helper_sock: str | None = None
 if is_dedicated_runner:
     pass
 elif platform_name == "darwin":
@@ -1398,15 +1410,106 @@ elif platform_name == "darwin":
             "/usr/bin/true",
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         check=False,
     )
     if seatbelt_probe.returncode != 0:
-        msg = "verify.sh: /usr/bin/sandbox-exec containment unavailable on macOS; failing closed"
+        probe_stderr = seatbelt_probe.stderr or b""
+        cand_sock = os.environ.get("LOOPWRIGHT_MACOS_SB_SOCK", "").strip()
+        if (
+            os.environ.get("LOOPWRIGHT_CHECK_ID", "").strip() != ""
+            and b"Operation not permitted" in probe_stderr
+            and cand_sock != ""
+            and os.path.isabs(cand_sock)
+        ):
+            write_blocked = False
+            probe_tmp_file = os.path.join("/private/tmp", f".lw-sb-check-{os.getpid()}")
+            try:
+                fd = os.open(
+                    probe_tmp_file,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                os.close(fd)
+                try:
+                    os.unlink(probe_tmp_file)
+                except OSError:
+                    pass
+            except PermissionError:
+                write_blocked = True
+            except OSError as exc:
+                if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS):
+                    write_blocked = True
+
+            secrets_blocked = False
+            try:
+                with open(os.path.join(stage_dir, "..", "secrets.json"), "rb") as _sf:
+                    _sf.read(1)
+            except (PermissionError, FileNotFoundError):
+                secrets_blocked = True
+            except OSError as exc:
+                if exc.errno in (errno.EPERM, errno.EACCES, errno.ENOENT):
+                    secrets_blocked = True
+
+            git_blocked = False
+            try:
+                with open(os.path.join(baseline_repo, ".git", "HEAD"), "rb") as _gf:
+                    _gf.read(1)
+            except (PermissionError, FileNotFoundError):
+                git_blocked = True
+            except OSError as exc:
+                if exc.errno in (errno.EPERM, errno.EACCES, errno.ENOENT):
+                    git_blocked = True
+
+            net_blocked = False
+            probe_net = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe_net.setblocking(False)
+                probe_net.connect(("192.0.2.1", 80))
+            except PermissionError:
+                net_blocked = True
+            except OSError as exc:
+                if exc.errno in (errno.EPERM, errno.EACCES):
+                    net_blocked = True
+            finally:
+                probe_net.close()
+
+            helper_ok = False
+            try:
+                sock_st = os.stat(cand_sock)
+                if stat.S_ISSOCK(sock_st.st_mode) and sock_st.st_uid == os.getuid():
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as ping_sock:
+                        ping_sock.settimeout(5.0)
+                        ping_sock.connect(cand_sock)
+                        ping_sock.sendall(b'{"op":"ping"}\n')
+                        ping_buf = b""
+                        while b"\n" not in ping_buf and len(ping_buf) < 4096:
+                            chunk = ping_sock.recv(1024)
+                            if not chunk:
+                                break
+                            ping_buf += chunk
+                        if b"\n" in ping_buf:
+                            ping_resp = json.loads(ping_buf.split(b"\n", 1)[0].decode("utf-8"))
+                            if isinstance(ping_resp, dict) and ping_resp.get("ok") is True:
+                                helper_ok = True
+            except (OSError, ValueError):
+                helper_ok = False
+
+            if write_blocked and secrets_blocked and git_blocked and net_blocked and helper_ok:
+                macos_sb_helper_sock = cand_sock
+
+        if macos_sb_helper_sock is None:
+            msg = "verify.sh: /usr/bin/sandbox-exec per-stage containment unavailable on macOS; failing closed"
+            write_phase3_check_out(msg, "OS containment backend unavailable", msg)
+            sys.stderr.write(msg + "\n")
+            sys.exit(1)
+elif platform_name.startswith("linux"):
+    host_machine = os.uname().machine
+    if host_machine not in ("x86_64", "amd64", "aarch64", "arm64"):
+        msg = f"verify.sh: unsupported Linux architecture {host_machine!r} for seccomp filter; failing closed"
         write_phase3_check_out(msg, "OS containment backend unavailable", msg)
         sys.stderr.write(msg + "\n")
         sys.exit(1)
-elif platform_name.startswith("linux"):
     for candidate in ("/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             probe = subprocess.run(
@@ -1485,7 +1588,7 @@ if "/node_modules/npm/" in npm_bin:
 else:
     add_tool_read_root(os.path.dirname(npm_bin))
 if hugo_bin:
-    add_tool_read_root(os.path.dirname(hugo_bin))
+    add_tool_read_root(hugo_bin)
 if test_nm_real:
     add_tool_read_root(test_nm_real)
 
@@ -1683,6 +1786,41 @@ def restore_and_verify_masks(
     return tampered
 
 
+def build_no_ip_seccomp_bpf(machine: str) -> bytes:
+    if machine in ("x86_64", "amd64"):
+        audit_arch = 0xC000003E
+        nr_socket = 41
+        block_x32 = True
+    elif machine in ("aarch64", "arm64"):
+        audit_arch = 0xC00000B7
+        nr_socket = 198
+        block_x32 = False
+    else:
+        raise ValueError(f"unsupported architecture {machine!r} for Linux seccomp filter")
+    deny_errno = 0x00050000 | (errno.EPERM & 0xFFFF)
+    insns: list[tuple[int, int, int, int]] = [
+        (0x20, 0, 0, 4),
+        (0x15, 1, 0, audit_arch),
+        (0x06, 0, 0, deny_errno),
+        (0x20, 0, 0, 0),
+    ]
+    if block_x32:
+        insns.append((0x35, 7, 0, 0x40000000))
+    insns.extend(
+        [
+            (0x15, 6, 0, 425),
+            (0x15, 5, 0, 426),
+            (0x15, 4, 0, 427),
+            (0x15, 0, 2, nr_socket),
+            (0x20, 0, 0, 16),
+            (0x15, 0, 1, 1),
+            (0x06, 0, 0, 0x7FFF0000),
+            (0x06, 0, 0, deny_errno),
+        ]
+    )
+    return b"".join(struct.pack("<HBBI", code, jt, jf, k) for code, jt, jf, k in insns)
+
+
 def run_contained(
     stage_label: str,
     argv: list[str],
@@ -1762,10 +1900,87 @@ def run_contained(
             sys.exit(returncode)
         return
 
+    if macos_sb_helper_sock is not None:
+        req_payload = {
+            "op": "exec",
+            "argv": argv,
+            "cwd": stage_cwd,
+            "env": stage_env,
+            "allowedReadRoots": sorted({os.path.realpath(p) for p in allowed_read_roots}),
+            "deniedReadRoots": sorted(denied_read_roots),
+            "writablePaths": real_writables,
+            "readOnlyMasks": real_ro_masks,
+            "networkMode": network_mode,
+        }
+        helper_rc: int | None = None
+        helper_err: str | None = None
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sb_sock:
+                sb_sock.connect(macos_sb_helper_sock)
+                sb_sock.sendall((json.dumps(req_payload) + "\n").encode("utf-8"))
+                recv_buf = b""
+                while True:
+                    chunk = sb_sock.recv(65536)
+                    if not chunk:
+                        break
+                    recv_buf += chunk
+                    while b"\n" in recv_buf:
+                        raw_line, recv_buf = recv_buf.split(b"\n", 1)
+                        if not raw_line:
+                            continue
+                        frame = json.loads(raw_line.decode("utf-8"))
+                        if not isinstance(frame, dict):
+                            helper_err = "malformed helper frame"
+                            break
+                        if frame.get("ok") is False:
+                            helper_err = str(frame.get("error", "stage containment rejected"))
+                            break
+                        stream_name = frame.get("stream")
+                        if stream_name in ("stdout", "stderr") and isinstance(frame.get("data"), str):
+                            decoded = base64.b64decode(frame["data"])
+                            target_stream = sys.stdout.buffer if stream_name == "stdout" else sys.stderr.buffer
+                            target_stream.write(decoded)
+                            target_stream.flush()
+                        if frame.get("done") is True:
+                            helper_rc = int(frame.get("exitCode", 1))
+                    if helper_err is not None or helper_rc is not None:
+                        break
+        except (OSError, ValueError) as exc:
+            helper_err = f"helper communication failed: {exc}"
+
+        if helper_err is not None or helper_rc is None:
+            detail_msg = f"verify.sh: macOS sandbox helper failed in stage {stage_label!r}: {helper_err or 'unexpected EOF'}"
+            write_phase3_check_out(detail_msg, "OS containment backend unavailable", detail_msg)
+            sys.stderr.write(detail_msg + "\n")
+            sys.exit(1)
+        if helper_rc != 0:
+            detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {helper_rc}"
+            write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
+            sys.stderr.write(detail_msg + "\n")
+            sys.exit(helper_rc)
+        return
+
     if platform_name == "darwin":
-        ancestors: set[str] = set()
-        for ar in allowed_read_roots:
-            cur = os.path.dirname(os.path.realpath(ar))
+        darwin_system_roots = [
+            "/System",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/Library/Apple",
+            "/Library/Developer",
+            "/Library/Frameworks",
+            "/Library/Preferences",
+            "/Applications/Xcode.app",
+            "/opt/homebrew",
+            "/dev",
+            "/private/etc",
+            "/private/var/db",
+            "/private/var/select",
+        ]
+        positive_grants = sorted({*darwin_system_roots, *(os.path.realpath(p) for p in allowed_read_roots), *real_writables})
+        ancestors: set[str] = {"/", "/etc", "/var", "/tmp", "/private", "/private/tmp", "/private/var"}
+        for gp in positive_grants:
+            cur = os.path.dirname(gp)
             while cur and cur != "/":
                 ancestors.add(cur)
                 cur = os.path.dirname(cur)
@@ -1786,21 +2001,47 @@ def run_contained(
             '  (sysctl-name "kern.proc")',
             '  (sysctl-name-prefix "kern.proc.")',
             ")",
+            "(deny file-read*)",
+            "(allow file-read-metadata",
         ]
-        if denied_read_roots:
+        for anc in sorted(ancestors):
+            lines.append(f'  (literal "{escape_sbpl(anc)}")')
+        lines.append(")")
+        lines.append("(allow file-read*")
+        lines.append('  (literal "/")')
+        lines.append('  (literal "/etc")')
+        lines.append('  (literal "/var")')
+        lines.append('  (literal "/tmp")')
+        for gp in positive_grants:
+            if os.path.isfile(gp):
+                lines.append(f'  (literal "{escape_sbpl(gp)}")')
+            else:
+                lines.append(f'  (subpath "{escape_sbpl(gp)}")')
+        lines.append('  (regex #"^/private/tmp/sh-thd[^/]*$")')
+        lines.append(")")
+        explicit_reopen = {os.path.realpath(p) for p in allowed_read_roots} | set(real_writables)
+        post_denied = sorted(
+            dr for dr in denied_read_roots
+            if dr not in explicit_reopen
+            and any(dr.startswith(gp + "/") for gp in positive_grants)
+        )
+        if post_denied:
             lines.append("(deny file-read*")
-            for dr in sorted(denied_read_roots):
+            for dr in post_denied:
                 lines.append(f'  (subpath "{escape_sbpl(dr)}")')
             lines.append(")")
-        if ancestors:
-            lines.append("(allow file-read-metadata")
-            for anc in sorted(ancestors):
-                lines.append(f'  (literal "{escape_sbpl(anc)}")')
-            lines.append(")")
-        lines.append("(allow file-read*")
-        for ar in sorted({os.path.realpath(p) for p in allowed_read_roots}):
-            lines.append(f'  (subpath "{escape_sbpl(ar)}")')
-        lines.append(")")
+            nested_reopen = sorted(
+                er for er in explicit_reopen
+                if any(er.startswith(dr + "/") for dr in post_denied)
+            )
+            if nested_reopen:
+                lines.append("(allow file-read*")
+                for nr in nested_reopen:
+                    if os.path.isfile(nr):
+                        lines.append(f'  (literal "{escape_sbpl(nr)}")')
+                    else:
+                        lines.append(f'  (subpath "{escape_sbpl(nr)}")')
+                lines.append(")")
 
         lines.append("(deny file-write*)")
         lines.append("(allow file-write*")
@@ -1890,17 +2131,46 @@ def run_contained(
         cmd.extend(["--chdir", stage_cwd, "--clearenv"])
         for env_k, env_v in sorted(stage_env.items()):
             cmd.extend(["--setenv", env_k, env_v])
-        cmd.extend(["--", *argv])
 
-    proc = subprocess.Popen(cmd, cwd=stage_cwd, env=stage_env, start_new_session=True)
+    seccomp_r: int | None = None
+    proc: subprocess.Popen[bytes] | None = None
     returncode = 1
     try:
+        if platform_name != "darwin":
+            if network_mode == "none":
+                bpf_bytes = build_no_ip_seccomp_bpf(os.uname().machine)
+                seccomp_r, seccomp_w = os.pipe()
+                try:
+                    written = 0
+                    while written < len(bpf_bytes):
+                        written += os.write(seccomp_w, bpf_bytes[written:])
+                finally:
+                    os.close(seccomp_w)
+                os.set_inheritable(seccomp_r, True)
+                cmd.extend(["--seccomp", str(seccomp_r)])
+            cmd.extend(["--", *argv])
+        proc = subprocess.Popen(
+            cmd,
+            cwd=stage_cwd,
+            env=stage_env,
+            start_new_session=True,
+            pass_fds=(seccomp_r,) if seccomp_r is not None else (),
+        )
+        if seccomp_r is not None:
+            os.close(seccomp_r)
+            seccomp_r = None
         returncode = proc.wait()
     finally:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        if seccomp_r is not None:
+            try:
+                os.close(seccomp_r)
+            except OSError:
+                pass
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
     if returncode != 0:
         detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
         write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)

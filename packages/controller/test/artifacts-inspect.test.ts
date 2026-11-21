@@ -23,6 +23,15 @@ test('artifacts: public status and inspect export current bound bytes without cl
   }
   const all = JSON.stringify(inspected.value) + await readFile(join(output, 'checkpoint.manifest.json'), 'utf8');
   for (const excluded of ['nonce', 'privateSession', '.sqlite', 'PROVIDER_TOKEN', 'session.json', f.input.registryPath]) assert.equal(all.includes(excluded), false, excluded);
+  const candFilesDoc = JSON.parse(await readFile(join(output, 'candidate.files.json'), 'utf8')) as {
+    version: number;
+    files: { name: string; mode: string; sha256: string; byteLength: number; uri: string; blobPath: string; body?: unknown }[];
+  };
+  assert.equal(candFilesDoc.version, 2);
+  assert.equal(candFilesDoc.files.length, 1);
+  assert.equal(candFilesDoc.files[0]!.name, 'result.json');
+  assert.equal('body' in candFilesDoc.files[0]!, false);
+  assert.equal(candFilesDoc.files[0]!.uri, `cas://sha256/${candFilesDoc.files[0]!.sha256}`);
   assert.equal(inspected.value.manifest.entries.find(row => row.name === 'review.json')!.presence, 'not_run');
   const after = stateValue(store.inspect()); assert.equal(after.revision, before.revision); assert.equal(after.owner.generation, before.owner.generation); assert.deepEqual(after.ledger, before.ledger);
   stateValue(store.close());
@@ -35,7 +44,7 @@ test('artifacts: unavailable run remains unknown without creating state or an ou
   assert.equal(await lstat(f.runRoot).then(() => true, () => false), false); assert.equal(await lstat(join(f.root, 'absent-export')).then(() => true, () => false), false);
 });
 test('artifacts: byte caps and symlink destinations refuse rather than truncate or overwrite', async () => {
-  const bundle = new PublicBundle('bundle', hash('lock')); assert.throws(() => bundle.add('large', Buffer.alloc(8388609)));
+  const bundle = new PublicBundle('bundle', hash('lock')); assert.throws(() => bundle.add('large', Buffer.alloc(33_554_433)));
   bundle.add('one', Buffer.from('one'));
   const f = await cycleFixture(true); await symlink(f.root, join(f.root, 'link'));
   await assert.rejects(bundle.write(join(f.root, 'link', 'export'), join(f.root, 'private')));

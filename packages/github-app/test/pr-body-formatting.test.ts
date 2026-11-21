@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { chmod, link, mkdir, mkdtemp, open, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { inspectRun, signPayload } from '@loopwright/controller';
+import { promisify } from 'node:util';
+import { inspectRun, loadTrustedConfiguration, signPayload, stepNext, stepSubmit } from '@loopwright/controller';
+import { openStagedTaskpackStepGate, resolveGitExecutable, serializePrettyYaml, stageTaskpackForStep } from '@loopwright/taskpack';
 import {
   buildNativePullRequestBody,
+  DEFAULT_LOCAL_COMMAND_GATE_ENV,
+  makeTreeWritableForCleanup,
   runGitHubActionEntrypoint,
   SecretScrubber,
   startNativePullRequestPublisherServer,
@@ -815,5 +822,661 @@ spec:
       scrubber,
     });
     assert.ok(singleOmitPathsBody.includes('_...and 1 additional path omitted._'), singleOmitPathsBody);
+  });
+
+  it('streams a 68 MiB (> 64 MiB) v2 CAS blob in 1 MiB chunks via a single O_NOFOLLOW fd into git hash-object, preserves 100755 mode, and refuses tampered/hardlinked/writable/cross-run CAS blobs', async () => {
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-pub-cas-68m-'));
+    const work = await realpath(rawWork);
+    const bareRemote = join(work, 'remote.git');
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    let githubApiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let pubServer: Awaited<ReturnType<typeof startNativePullRequestPublisherServer>> | undefined;
+
+    try {
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(repo, { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await git(bareRemote, ['init', '--bare', '--initial-branch=main']);
+      await git(repo, ['init', '--initial-branch=main']);
+      await git(repo, ['config', 'user.name', 'Test User']);
+      await git(repo, ['config', 'user.email', 'test@example.com']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      await mkdir(join(repo, '.loopwright'), { recursive: true });
+      await mkdir(join(repo, 'assets'), { recursive: true });
+      await mkdir(join(repo, 'scripts'), { recursive: true });
+      await writeFile(
+        join(repo, '.loopwright', 'proposal.json'),
+        JSON.stringify({ schema_version: 1, summary: 'Baseline.', versions: { bundle: '1.0.0' } }) + '\n',
+        'utf8',
+      );
+      const taskpackObj = {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'cas-68m-pub' },
+        spec: {
+          goal: { candidate: 'Stream 68 MiB asset and script.', noChange: 'None.' },
+          scope: {
+            writable: ['.loopwright/proposal.json', 'assets/**', 'scripts/**'],
+            protected: [],
+          },
+          proposal: {
+            path: '.loopwright/proposal.json',
+            requiredFields: ['schema_version', 'summary'],
+            schemaVersion: 1,
+          },
+          upstreams: [],
+          roles: [
+            { id: 'implementer', purpose: 'task', provider: 'antigravity', model: 'gemini-4-carbon' },
+          ],
+          steps: [
+            { id: 'implement', kind: 'agent', role: 'implementer', dependsOn: [] },
+          ],
+          limits: {
+            overlay: { maxFiles: 64, maxBytes: 134_217_728 },
+          },
+          verification: {
+            localChecks: [
+              { id: 'prop-json', implementation: 'json-artifact.v1', parameters: { path: '.loopwright/proposal.json' } },
+            ],
+            externalGates: [],
+          },
+          publication: {
+            mode: 'disabled',
+          },
+        },
+      };
+      await writeFile(join(repo, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(taskpackObj), 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'initial']);
+      const baseSha = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+      await git(repo, ['push', 'origin', 'main']);
+
+      const runId = 'cas-68m-run';
+      const staged = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repo,
+        runRoot,
+        runId,
+        policyProfile: 'github',
+        discoverUpstreams: false,
+      });
+      const gateHandle = await openStagedTaskpackStepGate({ runRoot, runId });
+      assert.notEqual(gateHandle, null);
+
+      const totalLargeBytes = 68 * 1024 * 1024; // 71,303,168 bytes (> 64 MiB)
+      const chunk1MiB = Buffer.alloc(1024 * 1024, 0x5a);
+      chunk1MiB.write('LOOPWRIGHT_CAS_68MIB_HEADER', 0, 'utf8');
+      const expectedSha256Hasher = createHash('sha256');
+      const expectedGitBlobHasher = createHash('sha1').update(`blob ${totalLargeBytes}\0`);
+      for (let i = 0; i < 68; i += 1) {
+        expectedSha256Hasher.update(chunk1MiB);
+        expectedGitBlobHasher.update(chunk1MiB);
+      }
+      const expectedLargeSha256 = expectedSha256Hasher.digest('hex');
+      const expectedLargeGitOid = expectedGitBlobHasher.digest('hex');
+
+      const prevGateEnv = process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV];
+      process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV] = gateHandle!.environment(DEFAULT_LOCAL_COMMAND_GATE_ENV);
+      let candidateDigest = '';
+      try {
+        const loaded = await loadTrustedConfiguration({
+          configPath: staged.configPath,
+          registryPath: staged.registryPath,
+          registrySha256: staged.registrySha256,
+          untrustedRoots: [repo],
+        });
+        assert.equal(loaded.ok, true);
+        if (!loaded.ok) return;
+
+        const firstTick = await stepNext(
+          { configuration: loaded.value, repository: repo, runRoot, runId, environment: gateHandle!.environment },
+          gateHandle!.ports,
+        );
+        assert.equal(firstTick.ok, true);
+        if (!firstTick.ok || firstTick.value.kind !== 'step') {
+          assert.fail(`expected step yield from stepNext: ${JSON.stringify(firstTick)}`);
+        }
+
+        // Stream-write 68 MiB file to candidateDir without allocating a 68 MiB Buffer
+        await mkdir(join(firstTick.value.candidateDir, 'assets'), { recursive: true });
+        const fh = await open(join(firstTick.value.candidateDir, 'assets', 'bundle.bin'), 'w', 0o600);
+        try {
+          for (let i = 0; i < 68; i += 1) {
+            await fh.write(chunk1MiB, 0, chunk1MiB.byteLength, i * chunk1MiB.byteLength);
+          }
+        } finally {
+          await fh.close();
+        }
+        await mkdir(join(firstTick.value.candidateDir, 'scripts'), { recursive: true });
+        const deployScript = join(firstTick.value.candidateDir, 'scripts', 'deploy.sh');
+        await writeFile(deployScript, '#!/usr/bin/env bash\necho deploy-ok\n', { mode: 0o755 });
+        await chmod(deployScript, 0o755);
+
+        await writeFile(
+          join(firstTick.value.candidateDir, '.loopwright', 'proposal.json'),
+          JSON.stringify({
+            schema_version: 1,
+            summary: 'Streamed 68 MiB asset cleanly.',
+            versions: { bundle: '2.0.0' },
+          }) + '\n',
+          'utf8',
+        );
+
+        const submitted = await stepSubmit(
+          {
+            runRoot,
+            runId,
+            leaseToken: firstTick.value.leaseToken,
+            status: 'completed',
+            reason: 'streamed 68 MiB asset',
+            environment: gateHandle!.environment,
+          },
+          gateHandle!.ports,
+        );
+        assert.equal(submitted.ok, true, JSON.stringify(submitted));
+        if (submitted.ok && submitted.value.kind === 'result') {
+          assert.equal(submitted.value.result.spec.status, 'completed');
+          candidateDigest = submitted.value.result.spec.subject.candidateDigest.hex;
+        } else {
+          assert.fail(`expected settled completed result, got ${JSON.stringify(submitted)}`);
+        }
+      } finally {
+        if (prevGateEnv === undefined) delete process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV];
+        else process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV] = prevGateEnv;
+        await gateHandle!.close();
+      }
+
+      // Confirm inspectRun exports version: 2 CAS pointers
+      const inspectCheckDir = join(work, 'inspect-check');
+      const inspectCheck = await inspectRun({ runRoot, runId, output: inspectCheckDir });
+      assert.equal(inspectCheck.ok, true);
+      const exportedCandidateFiles = JSON.parse(await readFile(join(inspectCheckDir, 'candidate.files.json'), 'utf8')) as {
+        version: number;
+        files: Array<{ name: string; mode: string; sha256: string; byteLength: number; uri: string }>;
+      };
+      assert.equal(exportedCandidateFiles.version, 2);
+      const bundleEntry = exportedCandidateFiles.files.find(f => f.name === 'assets/bundle.bin');
+      assert.equal(bundleEntry?.sha256, expectedLargeSha256);
+      assert.equal(bundleEntry?.byteLength, totalLargeBytes);
+
+      const capturedPrRequests: Array<Record<string, unknown>> = [];
+      githubApiServer = await startHttpServer(async (req, res) => {
+        if (req.method === 'POST' && req.url === '/repos/acme/cas-repo/pulls') {
+          const body = await readJsonBody(req);
+          capturedPrRequests.push(body);
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ number: 101, html_url: 'https://github.invalid/acme/cas-repo/pull/101' }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      pubServer = await startNativePullRequestPublisherServer({
+        runRoot,
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/cas-repo',
+        targetBranch: 'main',
+        headBranchPrefix: 'loopwright/',
+        proposalPath: '.loopwright/proposal.json',
+        titleTemplate: 'feat(assets): publish 68 MiB CAS bundle',
+        remoteUrl: bareRemote,
+        apiBaseUrl: githubApiServer.url,
+        gitWriteToken: 'ghs_cas_68m_secret_token_123456',
+      });
+
+      const postPublish = async (idempotencyKey: string) => {
+        const payloadBytes = Buffer.from(JSON.stringify({
+          storeId: 'store-cas',
+          runId,
+          operationId: `op-${idempotencyKey}`,
+          dispatchId: `disp-${idempotencyKey}`,
+          dispatchGeneration: 1,
+          idempotencyKey,
+          candidateDigest,
+          baseRevision: baseSha,
+          sourceRevision: baseSha,
+          targetBranch: 'main',
+        }), 'utf8');
+        const res = await fetch(pubServer!.url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-loopwright-signature': signPayload(pubServer!.signingSecret, payloadBytes),
+            authorization: `Bearer ${pubServer!.authToken}`,
+          },
+          body: payloadBytes,
+        });
+        return {
+          status: res.status,
+          receipt: await res.json() as { outcome: string; externalUrl: string | null; reason: string | null },
+        };
+      };
+
+      // 1) Anti-TOCTOU negative guards BEFORE valid publication pushes refs/heads/loopwright/main:
+      const sha256BlobDir = join(runRoot, runId, 'artifacts', 'blobs', 'sha256');
+      const casBlobPath = join(sha256BlobDir, expectedLargeSha256);
+
+      // 1a) Hardlinked CAS blob (nlink > 1) -> refused before push
+      const hardlinkSibling = join(work, 'hardlink-blob.bin');
+      await chmod(sha256BlobDir, 0o700);
+      await link(casBlobPath, hardlinkSibling);
+      try {
+        const hardlinkRes = await postPublish('idem-hardlink');
+        assert.equal(hardlinkRes.receipt.outcome, 'not_executed', JSON.stringify(hardlinkRes.receipt));
+      } finally {
+        await unlink(hardlinkSibling);
+      }
+
+      // 1b) Writable CAS blob (0o644) -> refused before push
+      await chmod(sha256BlobDir, 0o700);
+      await chmod(casBlobPath, 0o644);
+      try {
+        const writableRes = await postPublish('idem-writable');
+        assert.equal(writableRes.receipt.outcome, 'not_executed', JSON.stringify(writableRes.receipt));
+      } finally {
+        await chmod(sha256BlobDir, 0o700);
+        await chmod(casBlobPath, 0o400);
+      }
+
+      // 1c) Tampered CAS blob bytes (same byteLength, flipped byte -> SHA-256 mismatch) -> refused before push
+      const backupBlobPath = join(work, 'backup-cas-blob.bin');
+      await chmod(sha256BlobDir, 0o700);
+      await link(casBlobPath, backupBlobPath);
+      await unlink(casBlobPath);
+      const tamperedFh = await open(casBlobPath, 'w', 0o400);
+      try {
+        const badChunk = Buffer.from(chunk1MiB);
+        badChunk[0] = 0xff;
+        await tamperedFh.write(badChunk, 0, badChunk.byteLength, 0);
+        for (let i = 1; i < 68; i += 1) {
+          await tamperedFh.write(chunk1MiB, 0, chunk1MiB.byteLength, i * chunk1MiB.byteLength);
+        }
+        await tamperedFh.chmod(0o400);
+      } finally {
+        await tamperedFh.close();
+      }
+      try {
+        const tamperedRes = await postPublish('idem-tampered');
+        assert.equal(tamperedRes.receipt.outcome, 'not_executed', JSON.stringify(tamperedRes.receipt));
+      } finally {
+        await chmod(sha256BlobDir, 0o700);
+        await unlink(casBlobPath);
+        await link(backupBlobPath, casBlobPath);
+        await unlink(backupBlobPath);
+      }
+
+      // 1d) Cross-run symlinked CAS blob -> refused before push
+      const otherRunBlobDir = join(runRoot, 'other-run', 'artifacts', 'blobs', 'sha256');
+      await mkdir(otherRunBlobDir, { recursive: true });
+      const otherRunBlob = join(otherRunBlobDir, expectedLargeSha256);
+      await writeFile(otherRunBlob, 'cross-run', { mode: 0o400 });
+      const savedRealBlob = join(work, 'saved-real-blob.bin');
+      await chmod(sha256BlobDir, 0o700);
+      await link(casBlobPath, savedRealBlob);
+      await unlink(casBlobPath);
+      await symlink(otherRunBlob, casBlobPath);
+      try {
+        const crossRunRes = await postPublish('idem-cross-run');
+        assert.equal(crossRunRes.receipt.outcome, 'not_executed', JSON.stringify(crossRunRes.receipt));
+      } finally {
+        await chmod(sha256BlobDir, 0o700);
+        await unlink(casBlobPath);
+        await link(savedRealBlob, casBlobPath);
+        await unlink(savedRealBlob);
+        await chmod(sha256BlobDir, 0o500);
+      }
+
+      assert.equal(
+        (await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main'])).trim(),
+        '',
+        'no remote ref may be created when CAS guards reject tampered/hardlinked/writable/cross-run blobs',
+      );
+
+      // 2) Valid 68 MiB single-FD streaming publication succeeds, verifies Git OID, preserves 100755 mode, and formats PR body from proposal.json only!
+      const okRes = await postPublish('idem-valid-68m');
+      assert.equal(okRes.status, 200);
+      assert.equal(okRes.receipt.outcome, 'succeeded', `expected succeeded, got: ${JSON.stringify(okRes.receipt)}`);
+      assert.equal(okRes.receipt.externalUrl, 'https://github.invalid/acme/cas-repo/pull/101');
+
+      const remoteHead = (await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main'])).trim().split(/\s+/)[0]!;
+      assert.match(remoteHead, /^[0-9a-f]{40}$/);
+      await git(repo, ['fetch', bareRemote, 'refs/heads/loopwright/main']);
+      const treeLines = (await git(repo, ['ls-tree', '-r', '-l', '--full-tree', remoteHead])).trim().split('\n');
+      const bundleTreeLine = treeLines.find(line => line.endsWith('\tassets/bundle.bin')) ?? '';
+      const scriptTreeLine = treeLines.find(line => line.endsWith('\tscripts/deploy.sh')) ?? '';
+      assert.match(bundleTreeLine, new RegExp(`^100644 blob ${expectedLargeGitOid}\\s+${totalLargeBytes}\\tassets/bundle\\.bin$`));
+      assert.match(scriptTreeLine, /^100755 blob [0-9a-f]{40}\s+\d+\tscripts\/deploy\.sh$/);
+
+      assert.equal(capturedPrRequests.length, 1);
+      const renderedBody = String(capturedPrRequests[0]?.['body'] ?? '');
+      assert.ok(renderedBody.includes('Streamed 68 MiB asset cleanly.'), renderedBody);
+      assert.ok(renderedBody.includes('| `bundle` | `1.0.0` | `2.0.0` | Updated |'), renderedBody);
+      assert.ok(renderedBody.includes('- `assets/bundle.bin`'), renderedBody);
+      assert.ok(renderedBody.includes('- `scripts/deploy.sh`'), renderedBody);
+    } finally {
+      await pubServer?.close();
+      await githubApiServer?.close();
+      await makeTreeWritableForCleanup(work).catch(() => undefined);
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('honors explicit CAS v2 file.mode 100644 on classic snapshots even when baseline tracked the script as 100755', async () => {
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-pub-classic-mode-'));
+    const work = await realpath(rawWork);
+    const bareRemote = join(work, 'remote.git');
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    let githubApiServer: Awaited<ReturnType<typeof startHttpServer>> | undefined;
+    let pubServer: Awaited<ReturnType<typeof startNativePullRequestPublisherServer>> | undefined;
+
+    try {
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(repo, { recursive: true });
+      await mkdir(runRoot, { recursive: true, mode: 0o700 });
+      await chmod(runRoot, 0o700);
+      await git(bareRemote, ['init', '--bare', '--initial-branch=main']);
+      await git(repo, ['init', '--initial-branch=main']);
+      await git(repo, ['config', 'user.name', 'Test User']);
+      await git(repo, ['config', 'user.email', 'test@example.com']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      await mkdir(join(repo, '.loopwright'), { recursive: true });
+      await mkdir(join(repo, 'scripts'), { recursive: true });
+      const clearedScript = join(repo, 'scripts', 'clear-exec.sh');
+      const keptScript = join(repo, 'scripts', 'keep-exec.sh');
+      await writeFile(clearedScript, '#!/usr/bin/env bash\necho old\n', { mode: 0o755 });
+      await chmod(clearedScript, 0o755);
+      await writeFile(keptScript, '#!/usr/bin/env bash\necho keep\n', { mode: 0o755 });
+      await chmod(keptScript, 0o755);
+      await writeFile(
+        join(repo, '.loopwright', 'proposal.json'),
+        JSON.stringify({ schema_version: 1, summary: 'Baseline.', versions: { scripts: '1.0.0' } }) + '\n',
+        'utf8',
+      );
+      const taskpackObj = {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'classic-mode-pub' },
+        spec: {
+          goal: { candidate: 'Clear executable bit on scripts/clear-exec.sh.', noChange: 'None.' },
+          scope: {
+            writable: ['.loopwright/proposal.json', 'scripts/**'],
+            protected: [],
+          },
+          proposal: {
+            path: '.loopwright/proposal.json',
+            requiredFields: ['schema_version', 'summary'],
+            schemaVersion: 1,
+          },
+          upstreams: [],
+          roles: [
+            { id: 'implementer', purpose: 'task', provider: 'antigravity', model: 'gemini-4-carbon' },
+          ],
+          steps: [
+            { id: 'implement', kind: 'agent', role: 'implementer', dependsOn: [] },
+          ],
+          verification: {
+            localChecks: [
+              { id: 'prop-json', implementation: 'json-artifact.v1', parameters: { path: '.loopwright/proposal.json' } },
+            ],
+            externalGates: [],
+          },
+          publication: {
+            mode: 'disabled',
+          },
+        },
+      };
+      await writeFile(join(repo, '.loopwright', 'taskpack.yaml'), serializePrettyYaml(taskpackObj), 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'initial with 100755 scripts']);
+      const baseSha = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+      await git(repo, ['push', 'origin', 'main']);
+
+      // Verify baseline tracks both scripts as 100755.
+      const baseTreeLines = (await git(repo, ['ls-tree', '-r', '--full-tree', baseSha])).trim().split('\n');
+      assert.match(baseTreeLines.find(line => line.endsWith('\tscripts/clear-exec.sh')) ?? '', /^100755 blob /);
+      assert.match(baseTreeLines.find(line => line.endsWith('\tscripts/keep-exec.sh')) ?? '', /^100755 blob /);
+
+      const runId = 'classic-mode-run';
+      const staged = await stageTaskpackForStep({
+        taskpackPath: '.loopwright/taskpack.yaml',
+        repositoryRoot: repo,
+        runRoot,
+        runId,
+        policyProfile: 'github',
+        discoverUpstreams: false,
+      });
+      const gateHandle = await openStagedTaskpackStepGate({ runRoot, runId });
+      assert.notEqual(gateHandle, null);
+
+      const prevGateEnv = process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV];
+      process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV] = gateHandle!.environment(DEFAULT_LOCAL_COMMAND_GATE_ENV);
+      let candidateDigest = '';
+      try {
+        const loaded = await loadTrustedConfiguration({
+          configPath: staged.configPath,
+          registryPath: staged.registryPath,
+          registrySha256: staged.registrySha256,
+          untrustedRoots: [repo],
+        });
+        assert.equal(loaded.ok, true);
+        if (!loaded.ok) return;
+
+        const firstTick = await stepNext(
+          { configuration: loaded.value, repository: repo, runRoot, runId, environment: gateHandle!.environment },
+          gateHandle!.ports,
+        );
+        assert.equal(firstTick.ok, true);
+        if (!firstTick.ok || firstTick.value.kind !== 'step') {
+          assert.fail(`expected step yield from stepNext: ${JSON.stringify(firstTick)}`);
+        }
+
+        // Edit scripts/clear-exec.sh and explicitly clear its executable bit (0o644).
+        const candidateCleared = join(firstTick.value.candidateDir, 'scripts', 'clear-exec.sh');
+        await writeFile(candidateCleared, '#!/usr/bin/env bash\necho non-executable\n', { mode: 0o644 });
+        await chmod(candidateCleared, 0o644);
+        await writeFile(
+          join(firstTick.value.candidateDir, '.loopwright', 'proposal.json'),
+          JSON.stringify({
+            schema_version: 1,
+            summary: 'Clear executable bit on scripts/clear-exec.sh.',
+            versions: { scripts: '1.0.1' },
+          }) + '\n',
+          'utf8',
+        );
+
+        const submitted = await stepSubmit(
+          {
+            runRoot,
+            runId,
+            leaseToken: firstTick.value.leaseToken,
+            status: 'completed',
+            reason: 'cleared executable mode on script',
+            environment: gateHandle!.environment,
+          },
+          gateHandle!.ports,
+        );
+        assert.equal(submitted.ok, true, JSON.stringify(submitted));
+        if (submitted.ok && submitted.value.kind === 'result') {
+          assert.equal(submitted.value.result.spec.status, 'completed');
+          candidateDigest = submitted.value.result.spec.subject.candidateDigest.hex;
+        } else {
+          assert.fail(`expected settled completed result, got ${JSON.stringify(submitted)}`);
+        }
+      } finally {
+        if (prevGateEnv === undefined) delete process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV];
+        else process.env[DEFAULT_LOCAL_COMMAND_GATE_ENV] = prevGateEnv;
+        await gateHandle!.close();
+      }
+
+      // Confirm classic snapshot (baseTree === undefined) with CAS v2 mode: '100644'.
+      const inspectCheckDir = join(work, 'inspect-check');
+      const inspectCheck = await inspectRun({ runRoot, runId, output: inspectCheckDir });
+      assert.equal(inspectCheck.ok, true);
+      const exportedCandidateFiles = JSON.parse(await readFile(join(inspectCheckDir, 'candidate.files.json'), 'utf8')) as {
+        version: number;
+        manifest: { spec?: { baseTree?: unknown } };
+        files: Array<{ name: string; mode: string; uri: string }>;
+      };
+      assert.equal(exportedCandidateFiles.manifest.spec?.baseTree, undefined, 'expected classic snapshot with baseTree === undefined');
+      assert.equal(exportedCandidateFiles.version, 2);
+      const clearedEntry = exportedCandidateFiles.files.find(f => f.name === 'scripts/clear-exec.sh');
+      assert.equal(clearedEntry?.mode, '100644', 'CAS v2 candidate entry must carry mode 100644');
+      const keptEntry = exportedCandidateFiles.files.find(f => f.name === 'scripts/keep-exec.sh');
+      assert.equal(keptEntry?.mode, '100755', 'untouched executable script must remain mode 100755');
+
+      githubApiServer = await startHttpServer(async (req, res) => {
+        if (req.method === 'POST' && req.url === '/repos/acme/classic-mode-repo/pulls') {
+          await readJsonBody(req);
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ number: 102, html_url: 'https://github.invalid/acme/classic-mode-repo/pull/102' }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      pubServer = await startNativePullRequestPublisherServer({
+        runRoot,
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/classic-mode-repo',
+        targetBranch: 'main',
+        headBranchPrefix: 'loopwright/',
+        proposalPath: '.loopwright/proposal.json',
+        titleTemplate: 'fix(scripts): clear executable bit on clear-exec.sh',
+        remoteUrl: bareRemote,
+        apiBaseUrl: githubApiServer.url,
+        gitWriteToken: 'ghs_classic_mode_secret_token_123456',
+      });
+
+      const payloadBytes = Buffer.from(JSON.stringify({
+        storeId: 'store-classic-mode',
+        runId,
+        operationId: 'op-classic-mode',
+        dispatchId: 'disp-classic-mode',
+        dispatchGeneration: 1,
+        idempotencyKey: 'idem-classic-mode',
+        candidateDigest,
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        targetBranch: 'main',
+      }), 'utf8');
+      const res = await fetch(pubServer.url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-loopwright-signature': signPayload(pubServer.signingSecret, payloadBytes),
+          authorization: `Bearer ${pubServer.authToken}`,
+        },
+        body: payloadBytes,
+      });
+      assert.equal(res.status, 200);
+      const receipt = await res.json() as { outcome: string; reason: string | null };
+      assert.equal(receipt.outcome, 'succeeded', JSON.stringify(receipt));
+
+      const remoteHead = (await git(repo, ['ls-remote', bareRemote, 'refs/heads/loopwright/main'])).trim().split(/\s+/)[0]!;
+      assert.match(remoteHead, /^[0-9a-f]{40}$/);
+      await git(repo, ['fetch', bareRemote, 'refs/heads/loopwright/main']);
+      const publishedTreeLines = (await git(repo, ['ls-tree', '-r', '-l', '--full-tree', remoteHead])).trim().split('\n');
+      const publishedClearedLine = publishedTreeLines.find(line => line.endsWith('\tscripts/clear-exec.sh')) ?? '';
+      const publishedKeptLine = publishedTreeLines.find(line => line.endsWith('\tscripts/keep-exec.sh')) ?? '';
+      assert.match(publishedClearedLine, /^100644 blob [0-9a-f]{40}\s+\d+\tscripts\/clear-exec\.sh$/, `expected 100644, got: ${publishedClearedLine}`);
+      assert.match(publishedKeptLine, /^100755 blob [0-9a-f]{40}\s+\d+\tscripts\/keep-exec\.sh$/, `expected 100755, got: ${publishedKeptLine}`);
+    } finally {
+      await pubServer?.close();
+      await githubApiServer?.close();
+      await makeTreeWritableForCleanup(work).catch(() => undefined);
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('streams regular-file fd 0 into git -c core.bigFileThreshold=1m hash-object -w --stdin with constant O(1) child peak RSS on 8 MiB vs 96 MiB blobs', async () => {
+    const execFileAsync = promisify(execFile);
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-git-hash-rss-'));
+    const work = await realpath(rawWork);
+    const repo = join(work, 'repo');
+    const pythonBin = existsSync('/usr/bin/python3') ? '/usr/bin/python3' : 'python3';
+    const gitBin = resolveGitExecutable();
+
+    try {
+      await mkdir(repo, { recursive: true });
+      await git(repo, ['init', '--initial-branch=main']);
+
+      const writePatternFile = async (filePath: string, sizeMiB: number, fillByte: number): Promise<string> => {
+        const totalBytes = sizeMiB * 1024 * 1024;
+        const chunk = Buffer.alloc(1024 * 1024, fillByte);
+        const hasher = createHash('sha1').update(`blob ${totalBytes}\0`);
+        const fh = await open(filePath, 'w', 0o600);
+        try {
+          for (let i = 0; i < sizeMiB; i += 1) {
+            chunk.writeUInt32BE(i, 0);
+            hasher.update(chunk);
+            await fh.write(chunk, 0, chunk.byteLength, i * chunk.byteLength);
+          }
+        } finally {
+          await fh.close();
+        }
+        return hasher.digest('hex');
+      };
+
+      const file8Path = join(work, 'blob-8m.bin');
+      const file96Path = join(work, 'blob-96m.bin');
+      const expected8Oid = await writePatternFile(file8Path, 8, 0x41);
+      const expected96Oid = await writePatternFile(file96Path, 96, 0x42);
+
+      const measureScript = `
+import json, os, subprocess, sys
+git_bin, repo_root, blob_path = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(blob_path, 'rb') as fh:
+    proc = subprocess.Popen(
+        [git_bin, '-c', 'core.hooksPath=/dev/null', '-c', 'core.bigFileThreshold=1m', '-C', repo_root, 'hash-object', '-w', '--stdin'],
+        stdin=fh,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    out = proc.stdout.read().decode('utf-8').strip()
+    err = proc.stderr.read().decode('utf-8').strip()
+    proc.stdout.close()
+    proc.stderr.close()
+    _, status, rusage = os.wait4(proc.pid, 0)
+    exit_code = os.waitstatus_to_exitcode(status)
+    maxrss_bytes = int(rusage.ru_maxrss) if sys.platform == 'darwin' else int(rusage.ru_maxrss) * 1024
+print(json.dumps({'exitCode': exit_code, 'oid': out, 'stderr': err, 'maxRssBytes': maxrss_bytes}))
+`;
+
+      const measure = async (blobPath: string): Promise<{ exitCode: number; oid: string; stderr: string; maxRssBytes: number }> => {
+        const res = await execFileAsync(pythonBin, ['-c', measureScript, gitBin, repo, blobPath], {
+          encoding: 'utf8',
+          timeout: 120_000,
+        });
+        return JSON.parse(res.stdout.trim()) as { exitCode: number; oid: string; stderr: string; maxRssBytes: number };
+      };
+
+      const res8 = await measure(file8Path);
+      assert.equal(res8.exitCode, 0, res8.stderr);
+      assert.equal(res8.oid, expected8Oid);
+
+      const res96 = await measure(file96Path);
+      assert.equal(res96.exitCode, 0, res96.stderr);
+      assert.equal(res96.oid, expected96Oid);
+
+      // Regular-file fd 0 + core.bigFileThreshold=1m streams directly to a packfile instead of buffering 96 MiB in RAM.
+      const rssBoundBytes = 48 * 1024 * 1024;
+      assert.ok(
+        res96.maxRssBytes < rssBoundBytes,
+        `expected git hash-object peak RSS on 96 MiB regular-file fd 0 to stay < 48 MiB, got ${(res96.maxRssBytes / (1024 * 1024)).toFixed(1)} MiB (8 MiB was ${(res8.maxRssBytes / (1024 * 1024)).toFixed(1)} MiB)`,
+      );
+      assert.ok(
+        Math.abs(res96.maxRssBytes - res8.maxRssBytes) < 32 * 1024 * 1024,
+        `expected near-constant O(1) peak RSS between 8 MiB (${(res8.maxRssBytes / (1024 * 1024)).toFixed(1)} MiB) and 96 MiB (${(res96.maxRssBytes / (1024 * 1024)).toFixed(1)} MiB)`,
+      );
+    } finally {
+      await rm(work, { recursive: true, force: true });
+    }
   });
 });

@@ -52,7 +52,7 @@ test('a known original capture adopts current-command bytes without adapter star
   try {
     const before = journal(f.store), adopted = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source), again = await adoptRoleCapture(f.store, f.artifacts, f.lock, f.role, f.attempt, undefined, f.source);
     assert.equal(canonical(adopted), canonical(again)); assert.equal(adopted.checkpointId, f.native.checkpointId); assert.equal(Buffer.from(await f.artifacts.read(adopted.submission!)).toString(), f.submission);
-    assert.equal(adopted.artifacts.length, 1); assert.equal(Buffer.from(adopted.artifacts[0]!.bytes).toString(), 'export const value = 0;\n');
+    assert.equal(adopted.artifacts.length, 1); const first = adopted.artifacts[0]!; assert.ok('bytes' in first); assert.equal(Buffer.from(first.bytes).toString(), 'export const value = 0;\n');
     assert.deepEqual(journal(f.store).view.counts, before.view.counts); assert.deepEqual(journal(f.store).view.ledger, before.view.ledger);
     const finished = { ...f.attempt, finished: { after: { requests: before.view.counts.requests, operations: before.view.counts.operations }, outcome: adopted.outcome, nativeCheckpointId: adopted.checkpointId } };
     const post = await f.progress.publish({ ...f.pre.progress, stage: { ...f.pre.progress.stage, kind: 'role_post' }, attempts: [finished], nativeCheckpoints: [{ attemptId: f.attempt.id, checkpointId: adopted.checkpointId, outcome: adopted.outcome }], submission: adopted.submission,

@@ -1,9 +1,10 @@
-import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { chmod, link, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import {
   bindSubject,
   digestArtifact,
+  digestArtifactFromMetadata,
   isWritablePath,
   type ArtifactManifest,
   type ArtifactRef,
@@ -432,7 +433,7 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
 
     const files = new Map<string, Buffer>();
     for (const art of input.candidate.artifacts) {
-      files.set(art.name, Buffer.from(art.bytes));
+      files.set(art.name, 'bytes' in art ? Buffer.from(art.bytes) : await readFile(art.blobPath));
     }
     const deleted = new Set<string>(input.candidate.manifest.spec.deleted ?? []);
     const sessionEntries: SessionJsonlEntry[] = [];
@@ -464,10 +465,20 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
         const name = isPlainObject(ref) && typeof ref['name'] === 'string' ? ref['name'] : '';
         idx += 1;
         const chunks: Buffer[] = [];
-        while (idx < wsRows.length && wsRows[idx]?.['type'] === 'chunk') {
-          const data = wsRows[idx]?.['data'];
-          if (typeof data === 'string') chunks.push(Buffer.from(data, 'base64'));
+        if (idx < wsRows.length && wsRows[idx]?.['type'] === 'blob_ref') {
+          const blobRefObj = wsRows[idx]?.['blobRef'];
+          const digestObj = isPlainObject(blobRefObj) ? blobRefObj['digest'] : null;
+          const hex = isPlainObject(digestObj) && typeof digestObj['hex'] === 'string' ? digestObj['hex'] : '';
+          if (hex.length === 64) {
+            chunks.push(await readFile(join(host.artifactsDirectory, 'blobs', 'sha256', hex)));
+          }
           idx += 1;
+        } else {
+          while (idx < wsRows.length && wsRows[idx]?.['type'] === 'chunk') {
+            const data = wsRows[idx]?.['data'];
+            if (typeof data === 'string') chunks.push(Buffer.from(data, 'base64'));
+            idx += 1;
+          }
         }
         if (idx < wsRows.length && wsRows[idx]?.['type'] === 'file_end') {
           idx += 1;
@@ -1071,7 +1082,12 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
               entries,
             },
         };
-        const subject = bindSubject(input.lock, candidateManifest);
+        const overlayLimits = input.lock.spec.contract.spec.budgets.overlay;
+        const subject = bindSubject(
+          input.lock,
+          candidateManifest,
+          overlayLimits !== undefined ? { overlay: overlayLimits } : undefined,
+        );
         if (!subject.ok) {
           return { ok: false, error: makePiError('BINDING_MISMATCH', '', 'restore', false, 'none') };
         }
@@ -1106,16 +1122,42 @@ export function createFastTurnkeyAdapter(): typeof openPiHostSessionAdapterV2 {
           sequence: captureSeq,
         };
 
+        const blobsDir = join(host.artifactsDirectory, 'blobs');
+        const sha256Dir = join(blobsDir, 'sha256');
+        await mkdir(blobsDir, { recursive: true, mode: 0o700 });
+        await chmod(blobsDir, 0o700);
+        await mkdir(sha256Dir, { recursive: true, mode: 0o700 });
+        await chmod(sha256Dir, 0o700);
+
         const wsChunks: Buffer[] = [
           Buffer.from(`${JSON.stringify({ type: 'workspace_snapshot', version: 1, binding, manifest: candidateManifest })}\n`, 'utf8'),
         ];
         for (const ref of entries) {
           const data = files.get(ref.name)!;
-          wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'file', ref })}\n`, 'utf8'));
-          for (let offset = 0; offset < data.byteLength; offset += 32_768) {
-            const slice = data.subarray(offset, Math.min(offset + 32_768, data.byteLength));
-            wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'chunk', index: Math.floor(offset / 32_768), data: slice.toString('base64') })}\n`, 'utf8'));
+          const finalBlobPath = join(sha256Dir, ref.digest.hex);
+          const tmpBlobPath = join(sha256Dir, `.tmp-fast-${randomBytes(8).toString('hex')}`);
+          await writeFile(tmpBlobPath, data, { mode: 0o600 });
+          await chmod(tmpBlobPath, 0o400);
+          try {
+            await link(tmpBlobPath, finalBlobPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+              await unlink(tmpBlobPath).catch(() => undefined);
+              throw error;
+            }
           }
+          await unlink(tmpBlobPath).catch(() => undefined);
+
+          const blobRefRes = digestArtifactFromMetadata(ref.name, {
+            digest: ref.digest,
+            byteLength: ref.byteLength,
+            uri: `cas://sha256/${ref.digest.hex}`,
+          });
+          if (!blobRefRes.ok) {
+            return { ok: false, error: makePiError('OUTPUT_LIMIT', '', 'restore', false, 'none') };
+          }
+          wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'file', ref })}\n`, 'utf8'));
+          wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'blob_ref', ref, blobRef: blobRefRes.value })}\n`, 'utf8'));
           wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'file_end', byteLength: data.byteLength, digest: ref.digest.hex })}\n`, 'utf8'));
         }
         wsChunks.push(Buffer.from(`${JSON.stringify({ type: 'end', files: entries.length })}\n`, 'utf8'));

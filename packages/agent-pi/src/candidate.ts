@@ -1,11 +1,12 @@
-import { constants, existsSync, type BigIntStats } from 'node:fs';
-import { chmod, lstat, open, mkdir, realpath, readdir, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
+import { constants, existsSync, promises as fsPromises, type BigIntStats } from 'node:fs';
+import { chmod, lstat, open, mkdir, realpath, rename, rmdir, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   LIMITS,
   OVERLAY_LIMITS,
   digestArtifact,
+  digestArtifactFromMetadata,
   identifyManifest,
   isWritablePath,
   resolveOverlayLimits,
@@ -15,8 +16,9 @@ import {
   type OverlayLimitsInput,
 } from '@loopwright/core';
 import { canonical, freeze, object, list } from './boundary.js';
+import { CAS_CHUNK_BYTES, streamCopyVerifiedBlob } from './cas.js';
 import { refuse, PiFailure } from './errors.js';
-import type { PiBaselineEntry, PiCandidateBaseline, PiOpenInput } from './types.js';
+import type { PiBaselineEntry, PiCandidateArtifactInput, PiCandidateBaseline, PiOpenInput } from './types.js';
 
 export interface CandidateChange {
   readonly path: string;
@@ -83,6 +85,67 @@ function artifact(path: string, bytes: Uint8Array): ArtifactRef {
   const value = digestArtifact(path, bytes);
   if (!value.ok) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
   return value.value;
+}
+
+function artifactFromMetadata(path: string, byteLength: number, sha256Hex: string): ArtifactRef {
+  const value = digestArtifactFromMetadata(path, { digest: { algorithm: 'sha256', hex: sha256Hex }, byteLength });
+  if (!value.ok) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+  return value.value;
+}
+
+async function streamHashDescriptor(
+  descriptor: FileHandle,
+  expectedSize: number,
+  before: BigIntStats,
+  phase: 'admission' | 'tool',
+  options: { readonly computeSha256: boolean; readonly gitObjectFormat?: 'sha1' | 'sha256' | undefined },
+): Promise<{ readonly sha256Hex: string | null; readonly gitOid: string | null }> {
+  const sha256 = options.computeSha256 ? createHash('sha256') : null;
+  const gitHash = options.gitObjectFormat
+    ? createHash(options.gitObjectFormat).update(`blob ${expectedSize}\0`)
+    : null;
+  const chunkBuf = Buffer.allocUnsafe(CAS_CHUNK_BYTES);
+  let totalRead = 0;
+  for (;;) {
+    const part = await descriptor.read(chunkBuf, 0, chunkBuf.length, totalRead);
+    if (part.bytesRead === 0) break;
+    const slice = chunkBuf.subarray(0, part.bytesRead);
+    totalRead += slice.length;
+    if (totalRead > expectedSize) refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+    sha256?.update(slice);
+    gitHash?.update(slice);
+  }
+  const after = await descriptor.stat({ bigint: true });
+  if (
+    !after.isFile()
+    || Number(after.nlink) !== 1
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || after.size !== before.size
+    || after.mtimeNs !== before.mtimeNs
+    || after.ctimeNs !== before.ctimeNs
+    || totalRead !== expectedSize
+  ) {
+    refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+  }
+  return {
+    sha256Hex: sha256 ? sha256.digest('hex') : null,
+    gitOid: gitHash ? gitHash.digest('hex') : null,
+  };
+}
+
+async function materializeArtifactEntry(targetPath: string, file: PiCandidateArtifactInput, mode: number): Promise<void> {
+  if ('bytes' in file) {
+    await writeFile(targetPath, file.bytes, { flag: 'wx', mode });
+    await chmod(targetPath, mode);
+    return;
+  }
+  await streamCopyVerifiedBlob(
+    file.blobPath,
+    targetPath,
+    { byteLength: file.byteLength, sha256Hex: file.digest.hex },
+    mode,
+  );
 }
 
 function compareUtf16(a: string, b: string): number {
@@ -153,7 +216,7 @@ async function scanOverlayTree(
     if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink() || Number(dirInfo.uid) !== (process.getuid?.() ?? Number(dirInfo.uid))) {
       refuse('RECOVERY_REQUIRED', '/candidate');
     }
-    const entries = await readdir(dir);
+    const entries = await fsPromises.readdir(dir);
     for (const entry of entries) {
       const name = prefix ? prefix + '/' + entry : entry;
       const fullPath = join(dir, entry);
@@ -215,7 +278,7 @@ export async function setDirectoryTreeMode(dir: string, mode: number): Promise<v
   if (mode & 0o200) {
     await chmod(dir, mode);
   }
-  const entries = await readdir(dir);
+  const entries = await fsPromises.readdir(dir);
   for (const entry of entries) {
     const childPath = join(dir, entry);
     const childInfo = await lstat(childPath);
@@ -238,8 +301,7 @@ export async function materializeCandidateDirectory(candidateDir: string, input:
     for (const file of input.candidate.artifacts) {
       const path = join(candidateDir, file.name);
       await mkdir(resolve(path, '..'), { recursive: true, mode: 0o755 });
-      await writeFile(path, file.bytes, { flag: 'wx', mode: 0o444 });
-      await chmod(path, 0o444);
+      await materializeArtifactEntry(path, file, 0o444);
     }
     await setDirectoryTreeMode(candidateDir, 0o555);
     return;
@@ -270,8 +332,7 @@ export async function materializeCandidateDirectory(candidateDir: string, input:
     await mkdir(parent, { recursive: true, mode: 0o755 });
     const targetMode = baselineMap.get(file.name)?.mode === '100755' ? 0o555 : 0o444;
     const temporary = join(parent, '.lw-init-' + randomBytes(12).toString('hex'));
-    await writeFile(temporary, file.bytes, { flag: 'wx', mode: targetMode });
-    await chmod(temporary, targetMode);
+    await materializeArtifactEntry(temporary, file, targetMode);
     await rename(temporary, targetPath);
   }
 
@@ -282,7 +343,8 @@ export async function materializeCandidateDirectory(candidateDir: string, input:
   }
   for (const file of input.candidate.artifacts) {
     const mode = baselineMap.get(file.name)?.mode === '100755' ? 0o555 : 0o444;
-    expectedFiles.set(file.name, { kind: 'artifact', byteLength: file.bytes.byteLength, mode });
+    const byteLength = 'bytes' in file ? file.bytes.byteLength : file.byteLength;
+    expectedFiles.set(file.name, { kind: 'artifact', byteLength, mode });
   }
 
   await scanOverlayTree(candidateDir, expectedFiles);
@@ -317,6 +379,7 @@ export class Candidate {
   readonly #deleteChanges = new WeakSet<CandidateChange>();
   readonly #used = new WeakSet<CandidateChange>();
   #total: number;
+  #captureDirCache: Map<string, ReadonlyMap<string, string>> | null = null;
 
   constructor(readonly root: string, readonly input: PiOpenInput) {
     const baseTree = input.candidate.manifest.spec.baseTree;
@@ -650,7 +713,7 @@ export class Candidate {
         // exact entry presence blocks case-alias tricks, and callers immediately heal search
         // bits and re-verify realpath(path) === resolved.
         try {
-          return (await readdir(parent)).includes(basename(resolved));
+          return (await fsPromises.readdir(parent)).includes(basename(resolved));
         } catch (readdirError) {
           if ((readdirError as NodeJS.ErrnoException).code === 'EACCES') return false;
           throw readdirError;
@@ -746,10 +809,51 @@ export class Candidate {
     }
   }
 
-  async #entry(parent: string, segment: string): Promise<boolean> {
-    const entries = await readdir(parent);
+  async withCapturePassCache<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#captureDirCache !== null) {
+      return await fn();
+    }
+    this.#captureDirCache = new Map();
+    try {
+      return await fn();
+    } finally {
+      this.#captureDirCache = null;
+    }
+  }
+
+  #buildCaptureDirMap(entries: readonly string[]): ReadonlyMap<string, string> {
+    const dirMap = new Map<string, string>();
+    for (const value of entries) {
+      const lower = value.toLowerCase();
+      if (dirMap.has(lower)) {
+        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      }
+      dirMap.set(lower, value);
+    }
+    return dirMap;
+  }
+
+  async #readCaptureDirMap(parent: string): Promise<ReadonlyMap<string, string>> {
+    const key = resolve(parent);
+    const cached = this.#captureDirCache!.get(key);
+    if (cached !== undefined) return cached;
+    const entries = await fsPromises.readdir(parent);
     if (entries.length > this.#dirEntryLimit(true)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
-    const found = entries.find(value => value.toLowerCase() === segment.toLowerCase());
+    const dirMap = this.#buildCaptureDirMap(entries);
+    this.#captureDirCache!.set(key, dirMap);
+    return dirMap;
+  }
+
+  async #entry(parent: string, segment: string): Promise<boolean> {
+    let found: string | undefined;
+    if (this.#captureDirCache !== null) {
+      const dirMap = await this.#readCaptureDirMap(parent);
+      found = dirMap.get(segment.toLowerCase());
+    } else {
+      const entries = await fsPromises.readdir(parent);
+      if (entries.length > this.#dirEntryLimit(true)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
+      found = entries.find(value => value.toLowerCase() === segment.toLowerCase());
+    }
     if (found && found !== segment) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     if (found) return true;
     try { await lstat(join(parent, segment)); } catch (error) { if (absent(error)) return false; throw error; }
@@ -818,11 +922,14 @@ export class Candidate {
     expected: PiBaselineEntry,
     info: BigIntStats,
     phase: 'admission' | 'tool',
-    readBytes: boolean,
+    mode: 'verify_only' | 'ref' | 'bytes',
     allowOversize: boolean,
-  ): Promise<Buffer | null> {
+  ): Promise<Buffer | ArtifactRef | null> {
     verifyUntouchedBaselineIdentity(info, expected, phase);
     if (!allowOversize && expected.byteLength > this.input.policy.limits.fileBytes) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    if (mode === 'bytes' && expected.byteLength > LIMITS.artifactBytes) {
       refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     }
     const expectedMode = expected.mode === '100755' ? 0o555 : 0o444;
@@ -847,7 +954,7 @@ export class Candidate {
       && modeMatches
       && sameFingerprint(expectedStat, infoFingerprint),
     );
-    if (fastStatMatches && !readBytes) {
+    if (fastStatMatches && mode === 'verify_only') {
       return null;
     }
 
@@ -868,39 +975,74 @@ export class Candidate {
       if (!allowOversize && Number(current.size) > this.input.policy.limits.fileBytes) {
         refuse('TOOL_DENIED', '/path', { phase: 'tool' });
       }
+      if (mode === 'bytes' && Number(current.size) > LIMITS.artifactBytes) {
+        refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+      }
       const fdFingerprint = fingerprintFromStat(current);
-      if (fastStatMatches && sameFingerprint(infoFingerprint, fdFingerprint)) {
-        return await descriptor.readFile();
-      }
-      const bytes = await descriptor.readFile();
-      if (bytes.length !== expected.byteLength || gitBlobOid(this.#objectFormat!, bytes) !== expected.oid) {
-        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
-      }
-      let finalFingerprint = fdFingerprint;
-      if ((Number(current.mode) & 0o777) !== expectedMode) {
-        await descriptor.chmod(expectedMode);
-        const healed = await descriptor.stat({ bigint: true });
-        if (
-          !healed.isFile()
-          || Number(healed.nlink) !== 1
-          || healed.dev !== info.dev
-          || healed.ino !== info.ino
-          || Number(healed.size) !== expected.byteLength
-          || (Number(healed.mode) & 0o777) !== expectedMode
-        ) {
+      if (mode === 'bytes') {
+        if (fastStatMatches && sameFingerprint(infoFingerprint, fdFingerprint)) {
+          return await descriptor.readFile();
+        }
+        const bytes = await descriptor.readFile();
+        if (bytes.length !== expected.byteLength || gitBlobOid(this.#objectFormat!, bytes) !== expected.oid) {
           refuse('RECOVERY_REQUIRED', '/candidate', { phase });
         }
-        finalFingerprint = fingerprintFromStat(healed);
+        let finalFingerprint = fdFingerprint;
+        if ((Number(current.mode) & 0o777) !== expectedMode) {
+          await descriptor.chmod(expectedMode);
+          const healed = await descriptor.stat({ bigint: true });
+          if (
+            !healed.isFile()
+            || Number(healed.nlink) !== 1
+            || healed.dev !== info.dev
+            || healed.ino !== info.ino
+            || Number(healed.size) !== expected.byteLength
+            || (Number(healed.mode) & 0o777) !== expectedMode
+          ) {
+            refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+          }
+          finalFingerprint = fingerprintFromStat(healed);
+        }
+        this.#baselineStats.set(name, finalFingerprint);
+        this.#verifiedBaseline.add(name);
+        return bytes;
       }
-      this.#baselineStats.set(name, finalFingerprint);
-      this.#verifiedBaseline.add(name);
-      return readBytes ? bytes : null;
+
+      const needGitCheck = !(fastStatMatches && sameFingerprint(infoFingerprint, fdFingerprint));
+      const hashed = await streamHashDescriptor(descriptor, expected.byteLength, current, phase, {
+        computeSha256: mode === 'ref',
+        gitObjectFormat: needGitCheck ? this.#objectFormat! : undefined,
+      });
+      if (needGitCheck && hashed.gitOid !== expected.oid) {
+        refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+      }
+      if (needGitCheck) {
+        let finalFingerprint = fdFingerprint;
+        if ((Number(current.mode) & 0o777) !== expectedMode) {
+          await descriptor.chmod(expectedMode);
+          const healed = await descriptor.stat({ bigint: true });
+          if (
+            !healed.isFile()
+            || Number(healed.nlink) !== 1
+            || healed.dev !== info.dev
+            || healed.ino !== info.ino
+            || Number(healed.size) !== expected.byteLength
+            || (Number(healed.mode) & 0o777) !== expectedMode
+          ) {
+            refuse('RECOVERY_REQUIRED', '/candidate', { phase });
+          }
+          finalFingerprint = fingerprintFromStat(healed);
+        }
+        this.#baselineStats.set(name, finalFingerprint);
+        this.#verifiedBaseline.add(name);
+      }
+      return mode === 'ref' ? artifactFromMetadata(name, expected.byteLength, hashed.sha256Hex!) : null;
     } finally {
       await descriptor.close();
     }
   }
 
-  async #current(name: string): Promise<Buffer | null> {
+  async #verifyCurrentRef(name: string): Promise<ArtifactRef | null> {
     const parent = await this.#parent(name, false);
     const knownOverlay = this.#files.get(name);
     const baseEntry = this.#isOverlay && !this.#deleted.has(name) ? this.#baseline.get(name) : undefined;
@@ -932,6 +1074,57 @@ export class Candidate {
         if (!current.isFile() || Number(current.nlink) !== 1 || current.dev !== info.dev || current.ino !== info.ino || Number(current.size) > this.input.policy.limits.fileBytes) {
           refuse('TOOL_DENIED', '/path', { phase: 'tool' });
         }
+        if (Number(current.size) !== knownOverlay.byteLength) {
+          refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+        }
+        const hashed = await streamHashDescriptor(descriptor, knownOverlay.byteLength, current, 'tool', { computeSha256: true });
+        const actualRef = artifactFromMetadata(name, knownOverlay.byteLength, hashed.sha256Hex!);
+        if (canonical(actualRef) !== canonical(knownOverlay)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+        if ((this.#isOverlay || this.#enforceLockedDirs) && (Number(current.mode) & 0o777) !== expectedOverlayMode) {
+          await descriptor.chmod(expectedOverlayMode);
+        }
+        return actualRef;
+      } finally {
+        await descriptor.close();
+      }
+    }
+
+    return (await this.#verifyAndHealBaselineFile(name, path, baseEntry!, info, 'tool', 'ref', false)) as ArtifactRef;
+  }
+
+  async #currentBytes(name: string): Promise<Buffer | null> {
+    const parent = await this.#parent(name, false);
+    const knownOverlay = this.#files.get(name);
+    const baseEntry = this.#isOverlay && !this.#deleted.has(name) ? this.#baseline.get(name) : undefined;
+    const isKnown = knownOverlay !== undefined || baseEntry !== undefined;
+
+    if (parent === null || !await this.#entry(parent, name.split('/').at(-1)!)) {
+      if (isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+      return null;
+    }
+    const path = join(this.root, name);
+    const info = await lstat(path, { bigint: true });
+    const editMaxBytes = Math.min(this.input.policy.limits.fileBytes, LIMITS.artifactBytes);
+    if (
+      !info.isFile()
+      || info.isSymbolicLink()
+      || Number(info.nlink) !== 1
+      || Number(info.uid) !== process.getuid?.()
+      || Number(info.size) > editMaxBytes
+      || (baseEntry !== undefined && baseEntry.byteLength > editMaxBytes)
+    ) {
+      refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    }
+    if (!isKnown) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
+
+    if (knownOverlay !== undefined) {
+      const expectedOverlayMode = this.#baseline.get(name)?.mode === '100755' ? 0o555 : 0o444;
+      const descriptor = await this.#openRegularReadOnlyNoFollow(path, info, 'tool', this.#isOverlay || this.#enforceLockedDirs);
+      try {
+        const current = await descriptor.stat({ bigint: true });
+        if (!current.isFile() || Number(current.nlink) !== 1 || current.dev !== info.dev || current.ino !== info.ino || Number(current.size) > editMaxBytes) {
+          refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+        }
         const bytes = await descriptor.readFile();
         if (canonical(artifact(name, bytes)) !== canonical(knownOverlay)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
         if ((this.#isOverlay || this.#enforceLockedDirs) && (Number(current.mode) & 0o777) !== expectedOverlayMode) {
@@ -943,12 +1136,12 @@ export class Candidate {
       }
     }
 
-    return await this.#verifyAndHealBaselineFile(name, path, baseEntry!, info, 'tool', true, false);
+    return (await this.#verifyAndHealBaselineFile(name, path, baseEntry!, info, 'tool', 'bytes', false)) as Buffer | null;
   }
 
   async #listDirectoryEntries(dirPath: string): Promise<string> {
     await this.#directory(dirPath);
-    const entries = await readdir(dirPath);
+    const entries = await fsPromises.readdir(dirPath);
     if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
     const visible = entries.filter(entry => entry.toLowerCase() !== '.git').sort(compareUtf16);
     const shown = visible.slice(0, 200);
@@ -965,9 +1158,9 @@ export class Candidate {
   }
 
   async checkRead(raw: string): Promise<{ readonly path: string; readonly ref: ArtifactRef }> {
-    const path = this.normalize(raw), bytes = await this.#current(path);
-    if (!bytes) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-    return freeze({ path, ref: artifact(path, bytes) });
+    const path = this.normalize(raw), ref = await this.#verifyCurrentRef(path);
+    if (!ref) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
+    return freeze({ path, ref });
   }
 
   async inspectReadTarget(raw: string): Promise<CandidateReadInspection> {
@@ -1016,9 +1209,9 @@ export class Candidate {
     return freeze({ kind: 'file' as const, path: checked.path, ref: checked.ref });
   }
 
-  #prepare(path: string, before: Buffer | null, bytes: Buffer): CandidateChange {
+  #prepare(path: string, old: ArtifactRef | null, bytes: Buffer): CandidateChange {
     this.#checkWriteCollisions(path);
-    const after = artifact(path, bytes), old = before === null ? null : artifact(path, before), limits = this.input.policy.limits;
+    const after = artifact(path, bytes), limits = this.input.policy.limits;
     const capacity = limits.artifactBytes - limits.sessionBytes - this.input.resources.reduce((total, item) => total + item.bytes.length, 0);
     if (bytes.length > limits.fileBytes) refuse('OUTPUT_LIMIT', '/candidate', { phase: 'tool' });
 
@@ -1065,13 +1258,13 @@ export class Candidate {
     if (typeof content !== 'string' || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(content)) !== content) {
       refuse('TOOL_DENIED', '/content', { phase: 'tool' });
     }
-    return this.#prepare(path, await this.#current(path), Buffer.from(content));
+    return this.#prepare(path, await this.#verifyCurrentRef(path), Buffer.from(content));
   }
 
   async prepareEdit(raw: string, input: unknown): Promise<CandidateChange> {
     const path = this.normalize(raw);
     this.#writable(path);
-    const before = await this.#current(path);
+    const before = await this.#currentBytes(path);
     if (!before) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
     let text: string;
     try { text = new TextDecoder('utf-8', { fatal: true }).decode(before); } catch { refuse('TOOL_DENIED', '/edits', { phase: 'tool' }); }
@@ -1093,15 +1286,14 @@ export class Candidate {
       offset = range.end;
     }
     result += text.slice(offset);
-    return this.#prepare(path, before, Buffer.from(result));
+    return this.#prepare(path, artifact(path, before), Buffer.from(result));
   }
 
   async prepareDelete(raw: string): Promise<CandidateChange> {
     const path = this.normalize(raw);
     this.#writable(path);
-    const before = await this.#current(path);
-    if (!before) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-    const old = artifact(path, before);
+    const old = await this.#verifyCurrentRef(path);
+    if (!old) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
 
     if (this.#isOverlay && this.#baseline.has(path)) {
       const nextOverlay = new Map(this.#files);
@@ -1163,7 +1355,7 @@ export class Candidate {
         message: `Cannot write ${path}: path is a directory, not a file.`,
       });
     }
-    return freeze({ kind: 'change' as const, change: this.#prepare(path, await this.#current(path), Buffer.from(content)) });
+    return freeze({ kind: 'change' as const, change: this.#prepare(path, await this.#verifyCurrentRef(path), Buffer.from(content)) });
   }
 
   async tryPrepareEdit(
@@ -1255,7 +1447,7 @@ export class Candidate {
         message: `Cannot edit ${path}: trailing slash is not allowed for file paths.`,
       });
     }
-    const before = await this.#current(path);
+    const before = await this.#currentBytes(path);
     if (!before) {
       return freeze({
         kind: 'error' as const,
@@ -1321,7 +1513,7 @@ export class Candidate {
       offset = range.end;
     }
     result += text.slice(offset);
-    return freeze({ kind: 'change' as const, change: this.#prepare(path, before, Buffer.from(result)) });
+    return freeze({ kind: 'change' as const, change: this.#prepare(path, artifact(path, before), Buffer.from(result)) });
   }
 
   async tryPrepareDelete(
@@ -1454,7 +1646,7 @@ export class Candidate {
       return this.#withUnlockedAncestors(path, true, async ({ onPruneDir }) => {
         const parent = await this.#parent(path, false);
         if (!parent) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-        const current = await this.#current(path), before = current === null ? null : artifact(path, current);
+        const before = await this.#verifyCurrentRef(path);
         if (canonical(before) !== canonical(change.before)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
         guard();
         const targetPath = join(this.root, path);
@@ -1480,7 +1672,7 @@ export class Candidate {
     return this.#withUnlockedAncestors(path, false, async ({ onCreateDir }) => {
       const parent = await this.#parent(path, true, guard, onCreateDir);
       if (!parent) refuse('TOOL_DENIED', '/path', { phase: 'tool' });
-      const current = await this.#current(path), before = current === null ? null : artifact(path, current);
+      const before = await this.#verifyCurrentRef(path);
       if (canonical(before) !== canonical(change.before)) refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
       const baseEntry = this.#baseline.get(path);
       const fileMode = baseEntry?.mode === '100755' ? 0o555 : 0o444;
@@ -1496,8 +1688,8 @@ export class Candidate {
           await descriptor.close();
         }
         await this.#parent(path, false);
-        const latest = await this.#current(path);
-        if (canonical(latest === null ? null : artifact(path, latest)) !== canonical(change.before)) {
+        const latest = await this.#verifyCurrentRef(path);
+        if (canonical(latest) !== canonical(change.before)) {
           refuse('RECOVERY_REQUIRED', '/candidate', { phase: 'tool' });
         }
         guard();
@@ -1549,70 +1741,75 @@ export class Candidate {
   }
 
   async manifest(): Promise<ArtifactManifest> {
-    let seenOverlay = 0;
-    let seenBaseline = 0;
-    const visit = async (parent: string, prefix: string): Promise<void> => {
-      await this.#directory(parent);
-      const entries = await readdir(parent);
-      if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate');
-      for (const entry of entries) {
-        const name = prefix ? prefix + '/' + entry : entry;
-        const fullPath = join(parent, entry);
-        const info = await lstat(fullPath, { bigint: true });
-        this.normalize(name);
-        if (info.isSymbolicLink()) refuse('RECOVERY_REQUIRED', '/candidate');
-        if (info.isDirectory()) {
-          await visit(fullPath, name);
-          continue;
+    return await this.withCapturePassCache(async () => {
+      let seenOverlay = 0;
+      let seenBaseline = 0;
+      const visit = async (parent: string, prefix: string): Promise<void> => {
+        await this.#directory(parent);
+        const entries = await fsPromises.readdir(parent);
+        if (entries.length > this.#dirEntryLimit(false)) refuse('OUTPUT_LIMIT', '/candidate');
+        if (this.#captureDirCache !== null) {
+          this.#captureDirCache.set(resolve(parent), this.#buildCaptureDirMap(entries));
         }
-        if (this.#files.has(name)) {
-          await this.#current(name);
-          seenOverlay++;
-          continue;
-        }
-        if (this.#isOverlay && !this.#deleted.has(name)) {
-          const baseEntry = this.#baseline.get(name);
-          if (baseEntry) {
-            await this.#verifyAndHealBaselineFile(name, fullPath, baseEntry, info, 'admission', false, true);
-            seenBaseline++;
+        for (const entry of entries) {
+          const name = prefix ? prefix + '/' + entry : entry;
+          const fullPath = join(parent, entry);
+          const info = await lstat(fullPath, { bigint: true });
+          this.normalize(name);
+          if (info.isSymbolicLink()) refuse('RECOVERY_REQUIRED', '/candidate');
+          if (info.isDirectory()) {
+            await visit(fullPath, name);
             continue;
           }
+          if (this.#files.has(name)) {
+            await this.#verifyCurrentRef(name);
+            seenOverlay++;
+            continue;
+          }
+          if (this.#isOverlay && !this.#deleted.has(name)) {
+            const baseEntry = this.#baseline.get(name);
+            if (baseEntry) {
+              await this.#verifyAndHealBaselineFile(name, fullPath, baseEntry, info, 'admission', 'verify_only', true);
+              seenBaseline++;
+              continue;
+            }
+          }
+          refuse('RECOVERY_REQUIRED', '/candidate');
         }
+      };
+      await visit(this.root, '');
+
+      let expectedBaseline = 0;
+      if (this.#isOverlay) {
+        for (const name of this.#baseline.keys()) {
+          if (!this.#files.has(name) && !this.#deleted.has(name)) expectedBaseline++;
+        }
+      }
+      if (seenOverlay !== this.#files.size || seenBaseline !== expectedBaseline) {
         refuse('RECOVERY_REQUIRED', '/candidate');
       }
-    };
-    await visit(this.root, '');
 
-    let expectedBaseline = 0;
-    if (this.#isOverlay) {
-      for (const name of this.#baseline.keys()) {
-        if (!this.#files.has(name) && !this.#deleted.has(name)) expectedBaseline++;
+      if (this.#isOverlay) {
+        const manifest = this.#buildOverlayManifest(this.#files, this.#deleted);
+        if (
+          manifest.spec.entries.length > this.#effectiveOverlayMaxEntries()
+          || (manifest.spec.deleted?.length ?? 0) > this.#overlayLimits.maxFiles
+          || this.#total > this.#overlayLimits.maxBytes
+          || Buffer.byteLength(canonical(manifest)) > this.#overlayLimits.manifestMaxBytes
+        ) {
+          refuse('OUTPUT_LIMIT', '/candidate');
+        }
+        const identified = identifyManifest(manifest, {
+          overlay: { maxFiles: this.#overlayLimits.maxFiles, maxBytes: this.#overlayLimits.maxBytes },
+        });
+        if (!identified.ok) {
+          refuse('OUTPUT_LIMIT', '/candidate');
+        }
+        return freeze(manifest);
       }
-    }
-    if (seenOverlay !== this.#files.size || seenBaseline !== expectedBaseline) {
-      refuse('RECOVERY_REQUIRED', '/candidate');
-    }
 
-    if (this.#isOverlay) {
-      const manifest = this.#buildOverlayManifest(this.#files, this.#deleted);
-      if (
-        manifest.spec.entries.length > this.#effectiveOverlayMaxEntries()
-        || (manifest.spec.deleted?.length ?? 0) > this.#overlayLimits.maxFiles
-        || this.#total > this.#overlayLimits.maxBytes
-        || Buffer.byteLength(canonical(manifest)) > this.#overlayLimits.manifestMaxBytes
-      ) {
-        refuse('OUTPUT_LIMIT', '/candidate');
-      }
-      const identified = identifyManifest(manifest, {
-        overlay: { maxFiles: this.#overlayLimits.maxFiles, maxBytes: this.#overlayLimits.maxBytes },
-      });
-      if (!identified.ok) {
-        refuse('OUTPUT_LIMIT', '/candidate');
-      }
-      return freeze(manifest);
-    }
-
-    const entries = [...this.#files.values()].sort((a, b) => compareUtf16(a.name, b.name));
-    return freeze({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+      const entries = [...this.#files.values()].sort((a, b) => compareUtf16(a.name, b.name));
+      return freeze({ apiVersion: 'loopwright.dev/v1alpha1', kind: 'ArtifactManifest', metadata: { id: 'candidate' }, spec: { entries } });
+    });
   }
 }

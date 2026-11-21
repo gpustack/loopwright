@@ -4,7 +4,7 @@ import {
   record, resolveOverlayOptions, text, type Infer,
 } from './contracts.js';
 import { attempt, fail, type Result } from './diagnostics.js';
-import { manifestSchema, type ArtifactManifest, type ResolvedArtifact } from './artifacts.js';
+import { manifestSchema, type ArtifactManifest, type ResolvedArtifactInput } from './artifacts.js';
 import { evaluateValidated, verificationSchema } from './acceptance.js';
 import { claimSchema, evidenceSchema, type Evidence } from './evidence.js';
 import { lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
@@ -103,7 +103,7 @@ export function runSchema(input: Json, path = ''): RunResult {
 }
 export function constructRunResult(
   input: unknown,
-  artifacts: readonly ResolvedArtifact[],
+  artifacts: readonly ResolvedArtifactInput[],
   options?: OverlayLimitOptions,
 ): Result<RunResult> {
   return attempt(() => {

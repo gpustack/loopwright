@@ -15,7 +15,8 @@ import { DecisionBudgetTracker, DecisionError, DEFAULT_DECISION_POLICY, assertDe
 import type { DecisionPolicyConfig } from '@loopwright/decisions';
 import { buildCompactionSummary, evaluateCompactionPolicy, restoreFromCompactionLedger, selectActiveMemory, storeDigestOf } from '@loopwright/memory';
 import type { CompactionLedgerState, MemoryEntry, MemoryStoreIndex } from '@loopwright/memory';
-import { compileLinuxBwrapCommand, compileMacosSeatbeltProfile, GitHubAppError, loadDeclarativeTaskpack, negotiateSandboxBackend, validateMcpAuthConfiguration, validateTaskpackManifest } from '@loopwright/github-app';
+import { compileLinuxBwrapCommand, compileMacosSeatbeltProfile, loadDeclarativeTaskpack, negotiateSandboxBackend, TaskpackError, validateMcpAuthConfiguration, validateTaskpackManifest } from '@loopwright/taskpack';
+import { GitHubAppError } from '@loopwright/github-app';
 import { computeRunnerCandidateDigest, defaultCorpusRoot, startRunnerTaskpackService } from '@loopwright/taskpack-runner';
 import { diagnosticExit, executionExit } from './main.js';
 import type { IntegratedFailureMatrixReport, IntegratedFailureScenarioId, IntegratedFailureScenarioResult } from './closure.js';
@@ -41,7 +42,7 @@ function unwrap<T>(result: { readonly ok: true; readonly value: T } | { readonly
   throw new Error('errors' in result ? result.errors[0]?.code ?? 'REFUSED' : result.error.code);
 }
 function codeOf(error: unknown): string {
-  if (error instanceof DecisionError || error instanceof GitHubAppError) return error.code;
+  if (error instanceof DecisionError || error instanceof GitHubAppError || error instanceof TaskpackError) return error.code;
   if (error instanceof Error && 'code' in error && typeof (error as { code: unknown }).code === 'string') return (error as { code: string }).code;
   return error instanceof Error ? error.name : 'SCENARIO_FAULT';
 }
@@ -504,31 +505,33 @@ spec:
 `;
 async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
   const id = 'untrusted_taskpack_and_oauth_boundary_refusal', started = performance.now(), r = recorder();
-  const manifest = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml' });
+  const githubHostPolicy = { policyProfile: 'github' as const, allowPrivileged: false, allowWorkflowWrites: false };
+  const manifest = await loadDeclarativeTaskpack({ bytes: Buffer.from(VALID_MANIFEST_YAML, 'utf8'), format: 'yaml', policyProfile: 'github' });
   r.expect(String(manifest.metadata.name), 'docs-sync', 'the declarative taskpack manifest parses and validates');
   const escalated = structuredClone(manifest) as unknown as Record<string, unknown>;
   ((escalated.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows/**', 'docs/**'], protected: [] };
   let scopeCode: string | null = null;
-  try { validateTaskpackManifest(escalated as never); } catch (error) { scopeCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  try { validateTaskpackManifest(escalated as never, { policyProfile: 'github', hostPolicy: githubHostPolicy }); } catch (error) { scopeCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
   r.expect(scopeCode ?? '', 'TASKPACK_SCOPE_VIOLATION', 'protected-path escalation refuses with TASKPACK_SCOPE_VIOLATION');
   const privilegedWithoutUnlock = structuredClone(manifest) as unknown as Record<string, unknown>;
   (privilegedWithoutUnlock.spec as Record<string, unknown>).execution = { mode: 'privileged', digests: { pinDigests: false } };
   let privCode: string | null = null;
-  try { validateTaskpackManifest(privilegedWithoutUnlock as never, { hostPolicy: { allowPrivileged: false, allowWorkflowWrites: false } }); } catch (error) { privCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  try { validateTaskpackManifest(privilegedWithoutUnlock as never, { hostPolicy: githubHostPolicy }); } catch (error) { privCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
   r.expect(privCode ?? '', 'TASKPACK_HOST_BINDING_INVALID', 'privileged mode without operator host unlock refuses with TASKPACK_HOST_BINDING_INVALID');
   const wfWithoutUnlock = structuredClone(manifest) as unknown as Record<string, unknown>;
   (wfWithoutUnlock.spec as Record<string, unknown>).execution = { mode: 'strict', capabilities: { allowWorkflowWrites: true }, digests: { pinDigests: false } };
   ((wfWithoutUnlock.spec as Record<string, unknown>).scope as unknown) = { writable: ['.github/workflows/**', 'docs/**'], protected: [] };
   let wfCode: string | null = null;
-  try { validateTaskpackManifest(wfWithoutUnlock as never, { hostPolicy: { allowPrivileged: false, allowWorkflowWrites: false } }); } catch (error) { wfCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  try { validateTaskpackManifest(wfWithoutUnlock as never, { hostPolicy: githubHostPolicy }); } catch (error) { wfCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
   r.expect(wfCode ?? '', 'TASKPACK_SCOPE_VIOLATION', 'allowWorkflowWrites without operator host unlock refuses with TASKPACK_SCOPE_VIOLATION');
   let untrustedInterpCode: string | null = null;
   try {
     await loadDeclarativeTaskpack({
       bytes: Buffer.from(VALID_MANIFEST_YAML.replace("titleTemplate: 'docs: sync upstream documentation'", "titleTemplate: 'docs: sync ${AMBIENT_SECRET}'"), 'utf8'),
       format: 'yaml',
+      policyProfile: 'github',
     });
-  } catch (error) { untrustedInterpCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  } catch (error) { untrustedInterpCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
   r.expect(untrustedInterpCode ?? '', 'TASKPACK_UNTRUSTED_INTERPOLATION', 'undeclared ${...} interpolation refuses with TASKPACK_UNTRUSTED_INTERPOLATION');
   const withDeclaredVars = await loadDeclarativeTaskpack({
     bytes: Buffer.from(
@@ -538,8 +541,9 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
       'utf8',
     ),
     format: 'yaml',
+    policyProfile: 'github',
   });
-  r.expect(withDeclaredVars.spec.publication.titleTemplate, 'docs: sync stable', 'declared spec.vars interpolate safely in permitted fields');
+  r.expect(withDeclaredVars.spec.publication.titleTemplate ?? '', 'docs: sync stable', 'declared spec.vars interpolate safely in permitted fields');
   for (const oauthProvider of ['github-copilot', 'openai-codex', 'claude-code', 'gemini']) {
     const withOauthModel = structuredClone(manifest) as unknown as Record<string, unknown>;
     (withOauthModel.spec as Record<string, unknown>).models = [
@@ -547,7 +551,7 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
       { provider: oauthProvider, id: 'glm-5.3', thinking: 'high' },
     ];
     let modelCode: string | null = null;
-    try { validateTaskpackManifest(withOauthModel as never); } catch (error) { modelCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+    try { validateTaskpackManifest(withOauthModel as never, { policyProfile: 'github' }); } catch (error) { modelCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
     r.expect(modelCode ?? '', 'PROVIDER_OAUTH_UNSUPPORTED', `OAuth Pi model provider "${oauthProvider}" refuses with PROVIDER_OAUTH_UNSUPPORTED`);
   }
   const oauth = validateMcpAuthConfiguration({ servers: [{ serverId: 'workspace', auth: { type: 'oauth' } }] });
@@ -560,7 +564,7 @@ async function scenarioThirteen(): Promise<IntegratedFailureScenarioResult> {
       { workspaceRoot: '/tmp/lw-sandbox-probe', writablePaths: ['docs'], preferredBackends: ['direct-dedicated'] },
       { platform: 'darwin', arch: 'arm64', probeExecutables: false },
     );
-  } catch (error) { sandboxCode = error instanceof GitHubAppError ? error.code : 'WRONG_ERROR'; }
+  } catch (error) { sandboxCode = error instanceof GitHubAppError && error instanceof TaskpackError ? error.code : 'WRONG_ERROR'; }
   r.expect(sandboxCode ?? '', 'SANDBOX_CAPABILITY_INSUFFICIENT', 'direct-dedicated sandbox without override refuses with SANDBOX_CAPABILITY_INSUFFICIENT');
   const seatbelt = compileMacosSeatbeltProfile(
     { workspaceRoot: '/tmp/lw-sandbox-probe', writablePaths: ['docs'], protectedPaths: ['docs/protected-notes.md'], networkMode: 'none' },

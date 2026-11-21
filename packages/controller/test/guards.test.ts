@@ -857,17 +857,17 @@ test('runCycleWithPorts and stepNext/stepSubmit resolve baseline Merkle proofs f
 });
 
 test('wide-overlay bounds align across source.ts & verifier-protocol.ts, handle 512 entries+deleted with URIs, and route inventory overflow to VerifierSizingFailure', async () => {
-  // 1. Bounds alignment across source.ts and verifier-protocol.ts at 512 and 4096 maxFiles
-  for (const maxFiles of [128, 512, 4096] as const) {
+  // 1. Bounds alignment across source.ts and verifier-protocol.ts at 512, 4096, and 16384 maxFiles
+  for (const maxFiles of [128, 512, 4096, 16_384] as const) {
     const overlay = { maxFiles, maxBytes: 67_108_864 };
     const srcBounds = overlayManifestBounds(overlay);
     const protoBounds = overlayProtocolBounds(overlay);
     assert.equal(srcBounds.manifestMaxBytes, protoBounds.manifestMaxBytes, `manifestMaxBytes aligned at ${maxFiles}`);
     assert.ok(protoBounds.inventoryMaxBytes >= protoBounds.manifestMaxBytes, `inventoryMaxBytes >= manifestMaxBytes at ${maxFiles}`);
   }
-  const maxBounds = overlayProtocolBounds({ maxFiles: 4096, maxBytes: 67_108_864 });
+  const maxBounds = overlayProtocolBounds({ maxFiles: 16_384, maxBytes: 67_108_864 });
   assert.ok(
-    maxBounds.allocationMaxBytes > 41_943_040 + 2 * maxBounds.manifestMaxBytes,
+    maxBounds.allocationMaxBytes > 167_772_160 + 2 * maxBounds.manifestMaxBytes,
     `allocationMaxBytes (${maxBounds.allocationMaxBytes}) must exceed MAX_ABSOLUTE_PACKET_BYTES + 2*manifestMaxBytes`,
   );
 

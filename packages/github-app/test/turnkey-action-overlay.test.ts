@@ -217,6 +217,8 @@ spec:
       - 'pack/**'
       - 'docs/**'
       - 'scripts/**'
+    protected:
+      - '.codex/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -286,6 +288,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-overlay-cmdgate-token-1234',
         },
       });
@@ -496,6 +499,9 @@ spec:
       - 'pack/**'
       - 'docs/**'
       - 'scripts/**'
+    protected:
+      - '.claude/**'
+      - '.codex/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -678,6 +684,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-overlay-600-init-token-1234',
         },
       });
@@ -760,6 +767,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-overlay-600-revise-token-1234',
         },
       });
@@ -980,6 +988,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-sym-pub-check-token-1234',
         },
       });
@@ -1059,7 +1068,7 @@ spec:
       await git(repo, ['commit', '-m', 'protected regular + protected symlink']);
       const protectedOnlySha = await git(repo, ['rev-parse', 'HEAD']);
 
-      const protectedEntries = await listBaselineRegularEntries(repo, protectedOnlySha);
+      const protectedEntries = await listBaselineRegularEntries(repo, protectedOnlySha, ['.git', '.github', '.codex']);
       assert.deepEqual(
         protectedEntries.map(e => e.path).sort(),
         ['.github/workflows/ci.yml', 'AGENTS.md', 'docs/readme.txt'],
@@ -1276,6 +1285,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-basetree-bind-token-1234',
         },
       });
@@ -1589,6 +1599,8 @@ spec:
       - 'pack/**'
       - 'docs/**'
       - 'scripts/**'
+    protected:
+      - '.codex/**'
   instructions:
     - .auto-sync/prompts/instructions.md
   upstreams:
@@ -1684,6 +1696,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-revise-prot-token-1234',
         },
       });
@@ -1948,6 +1961,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-classic-del-token-1234',
         },
       });
@@ -2504,6 +2518,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-empty-pr-refuse-token-1234',
         },
       });
@@ -2565,6 +2580,18 @@ spec:
       assert.match(receipt.reason ?? '', /candidate tree matches base tree/);
       assert.equal(postPullsCalled, 0);
       assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+
+      await assert.rejects(
+        startNativePullRequestPublisherServer({
+          runRoot,
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          targetBranch: 'main',
+          headBranchPrefix: 'auto-sync/',
+          host: '0.0.0.0',
+        }),
+        (err: unknown) => err instanceof Error && /loopback host/.test(err.message),
+      );
     } finally {
       await pubServer?.close();
       await openAiServer?.close();
@@ -2867,6 +2894,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-candidate-no-change-token-1234',
         },
       });
@@ -2878,6 +2906,18 @@ spec:
       assert.equal(capturedReport?.report?.detail, null);
       assert.equal(postPullsCalled, 0);
       assert.equal(await git(repo, ['ls-remote', bareRemote, 'refs/heads/auto-sync/*']), '');
+
+      await assert.rejects(
+        startNativePullRequestPublisherServer({
+          runRoot,
+          repositoryRoot: repo,
+          repositoryFullName: 'gpustack/runner',
+          targetBranch: 'main',
+          headBranchPrefix: 'auto-sync/',
+          host: '0.0.0.0',
+        }),
+        (err: unknown) => err instanceof Error && /loopback host/.test(err.message),
+      );
     } finally {
       await openAiServer?.close();
       await githubServer?.close();
@@ -3138,6 +3178,7 @@ spec:
         {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           GITHUB_WORKSPACE: repo,
           LOOPWRIGHT_REPOSITORY: 'acme/repo',
           GITHUB_SHA: baseSha,
@@ -3238,6 +3279,7 @@ spec:
         {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           GITHUB_WORKSPACE: repo,
           LOOPWRIGHT_REPOSITORY: 'acme/repo',
           GITHUB_SHA: baseSha,
@@ -3427,6 +3469,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-classic-gate-token-1234',
         },
       });
@@ -3517,6 +3560,7 @@ spec:
       const resolvedDryExit = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: repo,
         LOOPWRIGHT_REPOSITORY: 'acme/repo',
         GITHUB_SHA: secondSha,
@@ -3803,6 +3847,7 @@ spec:
           env: {
             PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
             GITHUB_ACTIONS: 'true',
+            RUNNER_ENVIRONMENT: 'github-hosted',
             LLM_TOKEN: 'sk-comment-retry-token-1234',
           },
         });
@@ -4104,6 +4149,7 @@ spec:
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-carried-proposal-token-1234',
         },
       });

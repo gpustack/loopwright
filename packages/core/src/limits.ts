@@ -3,8 +3,8 @@ export const OVERLAY_LIMITS = Object.freeze({
   defaultMaxBytes: 4_194_304,
   minMaxFiles: 1,
   minMaxBytes: 1_024,
-  maxMaxFiles: 4_096,
-  maxMaxBytes: 67_108_864,
+  maxMaxFiles: 16_384,
+  maxMaxBytes: 17_179_869_184,
 });
 
 export interface OverlayLimits {

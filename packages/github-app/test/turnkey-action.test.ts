@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { constants as fsConstants, existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { describe, it, before, after } from 'node:test';
 import { inspectRun, loadTrustedConfiguration, signPayload, stepNext, stepSubmit, verifySignedPayload } from '@loopwright/controller';
 import {
@@ -103,7 +103,7 @@ spec:
       const actionsPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
         workspaceRoot: repo,
         relativeTaskpackPath: '.auto-sync/taskpack.yaml',
-        env: { GITHUB_ACTIONS: 'true' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' },
       });
       assert.deepEqual(actionsPolicy.writablePaths, ['.']);
       assert.ok(actionsPolicy.protectedPaths?.includes('pack/dependencies.json'));
@@ -115,6 +115,23 @@ spec:
       });
       assert.equal(negotiated.backendId, 'direct-dedicated');
       assert.equal(negotiated.networkMode, 'allow-outbound');
+
+      // Missing RUNNER_ENVIRONMENT (or self-hosted) must NOT select direct-dedicated under GITHUB_ACTIONS=true.
+      const missingRunnerEnvPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
+        workspaceRoot: repo,
+        relativeTaskpackPath: '.auto-sync/taskpack.yaml',
+        env: { GITHUB_ACTIONS: 'true' },
+      });
+      assert.equal(missingRunnerEnvPolicy.preferredBackends?.includes('direct-dedicated') ?? false, false);
+      assert.equal(missingRunnerEnvPolicy.allowDedicatedDirectOverride, undefined);
+      assert.throws(() => negotiateSandboxBackend(missingRunnerEnvPolicy, {
+        platform: 'linux',
+        arch: 'x64',
+        probeExecutables: true,
+        bwrapExecutable: '/nonexistent/bwrap',
+        pythonExecutable: '/nonexistent/python3',
+        dockerExecutable: '/nonexistent/docker',
+      }));
 
       // Standalone negotiateSandboxBackend without GITHUB_ACTIONS remains fail-closed when sandbox tools are missing.
       const localPolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
@@ -483,6 +500,7 @@ describe('turnkey Action cycle end-to-end execution', () => {
 
       const exitCode = await runActionCli({
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         LOOPWRIGHT_REPOSITORY: 'acme/repo',
         GITHUB_SHA: headAfterTaskpack,
@@ -677,6 +695,7 @@ describe('turnkey Action cycle end-to-end execution', () => {
       const outputFile = join(fixture.work, 'lease-output.txt');
       const exitCode = await runActionCli({
         GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         LOOPWRIGHT_REPOSITORY: 'acme/repo',
         GITHUB_SHA: headSha,
@@ -1066,6 +1085,8 @@ describe('negative and security regression tests', () => {
 
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         GITHUB_REPOSITORY: 'acme/sync-target',
         GITHUB_REPOSITORY_ID: '100',
@@ -1168,6 +1189,8 @@ describe('negative and security regression tests', () => {
 
       const exitCode = await runActionCli({
         PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        GITHUB_ACTIONS: 'true',
+        RUNNER_ENVIRONMENT: 'github-hosted',
         GITHUB_WORKSPACE: fixture.repo,
         GITHUB_REPOSITORY: 'acme/sync-target',
         GITHUB_REPOSITORY_ID: '100',
@@ -1217,10 +1240,12 @@ describe('negative and security regression tests', () => {
         targetBranch: 'main',
       };
       const first = await postJsonSigned(pubServer.url, reqBody, pubServer.signingSecret, pubServer.authToken);
-      const second = await postJsonSigned(pubServer.url, { ...reqBody, candidateDigest: 'b'.repeat(64) }, pubServer.signingSecret, pubServer.authToken);
+      const second = await postJsonSigned(pubServer.url, { ...reqBody, dispatchId: 'disp-cache-retry' }, pubServer.signingSecret, pubServer.authToken);
+      const conflict = await postJsonSigned(pubServer.url, { ...reqBody, candidateDigest: 'b'.repeat(64) }, pubServer.signingSecret, pubServer.authToken);
       assert.equal(first.status, 200);
       assert.equal(second.status, 200);
       assert.deepEqual(second.json, first.json, 'duplicate idempotencyKey must return the exact cached receipt');
+      assert.equal(conflict.status, 409, 'mismatched binding reusing idempotencyKey must be rejected with 409');
     } finally {
       await pubServer?.close();
       await openAiServer?.close();
@@ -1305,6 +1330,7 @@ describe('negative and security regression tests', () => {
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: fixture.goodToken,
           CHECK_MARKER: fixture.verifySecret,
         },
@@ -1520,7 +1546,7 @@ ${backendsYaml}
       const dockerManifest = await loadDeclarativeTaskpack({ repositoryRoot: repo, manifestPath: '.auto-sync/taskpack.yaml' });
       const resolvedDocker = resolveEffectiveTaskpackSandboxPolicy(dockerManifest, {
         workspaceRoot: repo,
-        env: { GITHUB_ACTIONS: 'true' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' },
       });
       assert.deepEqual(resolvedDocker.preferredBackends, ['docker']);
       assert.equal(resolvedDocker.allowDedicatedDirectOverride, undefined);
@@ -1537,7 +1563,7 @@ ${backendsYaml}
         runId: 'run-sandbox-docker-fail',
         turnkey: true,
         upstreamRecords: [{ upstreamId: 'custom-u', status: 'available', version: '1.0.0' }],
-        env: { GITHUB_ACTIONS: 'true' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' },
       });
       assert.equal(dockerEntry.kind, 'blocked');
       assert.equal(
@@ -1551,7 +1577,7 @@ ${backendsYaml}
       const directManifest = await loadDeclarativeTaskpack({ repositoryRoot: repo, manifestPath: '.auto-sync/taskpack.yaml' });
       const resolvedDirect = resolveEffectiveTaskpackSandboxPolicy(directManifest, {
         workspaceRoot: repo,
-        env: { GITHUB_ACTIONS: 'true' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted' },
       });
       assert.equal(resolvedDirect.allowDedicatedDirectOverride, true);
       const negotiatedDirect = negotiateSandboxBackend(resolvedDirect, {
@@ -1575,7 +1601,7 @@ ${backendsYaml}
         dryRun: true,
         allowManifestCustomBaseUrl: true,
         upstreamRecords: [{ upstreamId: 'custom-u', status: 'available', version: '1.0.0' }],
-        env: { GITHUB_ACTIONS: 'true', LLM_TOKEN: 'tok-direct' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', LLM_TOKEN: 'tok-direct' },
       });
       assert.equal(directEntry.kind, 'compiled', `unexpected directEntry: ${JSON.stringify(directEntry)}`);
     } finally {
@@ -1710,7 +1736,7 @@ spec:
         turnkey: true,
         allowManifestCustomBaseUrl: true,
         upstreamRecords: [{ upstreamId: 'custom-u', status: 'available', version: '1.0.0' }],
-        env: { GITHUB_ACTIONS: 'true', FIRST_KEY: 'tok-1', SECOND_KEY: 'tok-2' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', FIRST_KEY: 'tok-1', SECOND_KEY: 'tok-2' },
         delegate: async compiled => {
           delegateCalls += 1;
           assert.equal(compiled.registryBytes.length > 0, true);
@@ -1820,7 +1846,7 @@ spec:
           headers: { 'content-type': 'application/json' },
         }),
         upstreamRecords: [{ upstreamId: 'custom-u', status: 'available', version: '1.0.0' }],
-        env: { GITHUB_ACTIONS: 'true', SYNC_LLM_KEY: 'tok-first-pool-1234,tok-second-pool-5678' },
+        env: { GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', SYNC_LLM_KEY: 'tok-first-pool-1234,tok-second-pool-5678' },
       });
       assert.equal(entryResult.kind, 'blocked', `expected blocked, got ${JSON.stringify(entryResult)}`);
       assert.equal(entryResult.reason, 'TASKPACK_MANIFEST_INVALID');
@@ -2251,11 +2277,11 @@ spec:
     let seeded: Awaited<ReturnType<typeof seedCommandGateCandidateRun>> | undefined;
 
     try {
-      const counterFile = join(work, 'exec-counter.txt');
+      let verifyExecCount = 0;
       const scriptContent = `#!/usr/bin/env bash
 set -euo pipefail
 sleep 0.25
-printf '1\\n' >> ${JSON.stringify(counterFile)}
+printf '{"detail":"verified-once"}\\n' > "$LOOPWRIGHT_CHECK_OUT"
 `;
       seeded = await seedCommandGateCandidateRun({
         work,
@@ -2286,6 +2312,11 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
         repositoryRoot: seeded.repo,
         gates: preview.localCommandGates ?? [],
         syncWaitMs: 50,
+        onLog: line => {
+          if (line.includes('check verify-cmd: running ')) {
+            verifyExecCount += 1;
+          }
+        },
       });
 
       // Compile written taskpack pointing at our syncWaitMs: 50 gateServer and executeTurnkeyActionCycle end-to-end.
@@ -2354,8 +2385,7 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
       assert.equal(cycleRes.ok, true, `executeTurnkeyActionCycle failed: ${cycleRes.detail}`);
       assert.equal(cycleRes.status, 'completed');
 
-      const countLinesAfterCycle = (await readFile(counterFile, 'utf8')).trim().split('\n').filter(Boolean);
-      assert.equal(countLinesAfterCycle.length, 1, 'end-to-end multi-poll cycle must execute verify.sh exactly once');
+      assert.equal(verifyExecCount, 1, 'end-to-end multi-poll cycle must execute verify.sh exactly once');
 
       // Inspect persisted run to verify Gate.run polled >= 2 times (pending -> approved) and grab candidateDigest.
       const inspectDir = join(work, 'inspected-e2e');
@@ -2374,9 +2404,9 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
       assert.equal(gateOutput.verdict.status, 'approved');
       assert.equal(gateOutput.observation.attempts >= 2, true, `expected >= 2 polling attempts, got ${gateOutput.observation.attempts}`);
 
-      // Reset counter file and test direct HTTP POST deduplication with syncWaitMs: 50.
+      // Reset execution counter and test direct HTTP POST deduplication with syncWaitMs: 50.
       const gateMeta = (preview.localCommandGates ?? [])[0]!;
-      await writeFile(counterFile, '');
+      verifyExecCount = 0;
       const payload = {
         storeId: 'store-dedup',
         runId: 'run-async-poll-e2e',
@@ -2410,8 +2440,7 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
       assert.equal(finalVerdict.status, 200);
       assert.equal(finalVerdict.json['status'], 'approved');
 
-      const directLines = (await readFile(counterFile, 'utf8')).trim().split('\n').filter(Boolean);
-      assert.equal(directLines.length, 1, 'concurrent and repeated polls for same operationKey must run script exactly once');
+      assert.equal(verifyExecCount, 1, 'concurrent and repeated polls for same operationKey must run script exactly once');
     } finally {
       await gateServer?.close();
       await seeded?.openAiServer.close();
@@ -2430,21 +2459,16 @@ printf '1\\n' >> ${JSON.stringify(counterFile)}
     readonly runRoot: string;
     readonly candidateDigest: string;
     readonly scriptSha256ByRel: Readonly<Record<string, string>>;
-    readonly pidFile: string;
-    readonly scratchMarkerFile: string;
   } | undefined;
 
   before(async () => {
     sharedWork = await sharedWorkDirPromise;
-    const pidFile = join(sharedWork, 'pids.txt');
-    const scratchMarkerFile = join(sharedWork, 'scratch-base.txt');
     const longSleepRel = '.auto-sync/checks/long-sleep.sh';
     const longSleepContent = `#!/usr/bin/env bash
 set -euo pipefail
 sleep 30 &
 bg_pid=$!
-printf '%s\\n' "$HOME" > ${JSON.stringify(scratchMarkerFile)}
-printf '%s %s\\n' "$$" "$bg_pid" > ${JSON.stringify(pidFile)}
+printf '%s %s\\n' "$$" "$bg_pid" > "$HOME/pids.txt"
 wait "$bg_pid"
 `;
     const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
@@ -2470,7 +2494,7 @@ exit 1
         [overflowScriptRel]: overflowScriptContent,
       },
     });
-    sharedSeed = { ...seeded, pidFile, scratchMarkerFile };
+    sharedSeed = seeded;
   });
 
   after(async () => {
@@ -2485,6 +2509,8 @@ exit 1
     try {
       const seeded = sharedSeed!;
       const scriptRel = '.auto-sync/checks/long-sleep.sh';
+      const realTmp = await realpath(tmpdir());
+      const beforeGateDirs = new Set((await readdir(realTmp)).filter(name => name.startsWith('loopwright-gate-')));
       gateServer = await startLocalCommandGateServer({
         runRoot: seeded.runRoot,
         repositoryRoot: seeded.repo,
@@ -2500,6 +2526,9 @@ exit 1
         }],
         syncWaitMs: 10_000,
       });
+      const newGateDirName = (await readdir(realTmp)).find(name => name.startsWith('loopwright-gate-') && !beforeGateDirs.has(name));
+      assert.ok(newGateDirName !== undefined, 'expected owned loopwright-gate-* scratch directory');
+      const scratchBasePath = join(realTmp, newGateDirName!);
 
       const inFlightPost = postGateSignedWithHeaders(
         gateServer.url,
@@ -2517,20 +2546,29 @@ exit 1
         gateServer.signingSecret,
       ).catch(() => undefined);
 
-      // Wait until script + background grandchild PIDs are recorded.
+      // Wait until script + background grandchild PIDs are recorded inside sandboxed $HOME/pids.txt.
+      let pidFileContent: string | null = null;
       const waitStart = Date.now();
-      while (!existsSync(seeded.pidFile) && Date.now() - waitStart < 5_000) {
-        await new Promise(r => setTimeout(r, 25));
+      while (pidFileContent === null && Date.now() - waitStart < 5_000) {
+        const execDirs = (await readdir(scratchBasePath).catch(() => [])).filter(name => name.startsWith('exec-'));
+        for (const execDir of execDirs) {
+          const candidatePidFile = join(scratchBasePath, execDir, 'home', 'pids.txt');
+          const content = await readFile(candidatePidFile, 'utf8').catch(() => '');
+          if (content.trim().split(/\s+/).length >= 2) {
+            pidFileContent = content;
+            break;
+          }
+        }
+        if (pidFileContent === null) {
+          await new Promise(r => setTimeout(r, 25));
+        }
       }
-      assert.equal(existsSync(seeded.pidFile), true, 'long-running gate child must have started');
-      const [childPidStr, grandchildPidStr] = (await readFile(seeded.pidFile, 'utf8')).trim().split(/\s+/);
+      assert.notEqual(pidFileContent, null, 'long-running gate child must have started');
+      const [childPidStr, grandchildPidStr] = pidFileContent!.trim().split(/\s+/);
       const childPid = Number(childPidStr);
       const grandchildPid = Number(grandchildPidStr);
       assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
       assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
-
-      const scratchHomePath = (await readFile(seeded.scratchMarkerFile, 'utf8')).trim();
-      const scratchBasePath = dirname(dirname(scratchHomePath));
       assert.equal(existsSync(scratchBasePath), true);
 
       const closeStarted = performance.now();

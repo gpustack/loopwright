@@ -1,37 +1,38 @@
 ---
 name: loopwright-overview
 description: >-
-  Route Loopwright architecture, YAML-first configuration surfaces, nine-package
-  boundaries, and repository skill workflows to their owning docs/, specs/, and
-  packages/ entry points.
+  Route Loopwright architecture, YAML-first configuration surfaces, workspace
+  package boundaries, and repository skill workflows to their owning docs/, specs/,
+  and packages/ entry points.
 ---
 
 # Loopwright Overview
 
-Loopwright is a nine-package TypeScript harness and GitHub Action/App control plane for bounded, independently verified repository automation.
+Loopwright is a TypeScript harness and GitHub Action/App control plane for bounded, independently verified repository automation.
 
 ## Architecture in Brief
 
-1. **1. Admit**: Webhook or CLI intake validates collaborator authority, parses the `TaskContract`, and acquires a monotonic SQLite WAL lease fence (`@loopwright/core`, `@loopwright/state`, `@loopwright/github-app`).
-2. **2. Execute**: An isolated Pi session executes inside a native OS or container sandbox (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, or `direct-dedicated`) with physical send admission and optional System-One decision routing (`@loopwright/agent-pi`, `@loopwright/decisions`), or external OAuth coding agents pull leased `adapter: delegated` role assignments via `loopwright step` (`next|submit|cancel`) with optional `--role-model` overrides (`@loopwright/controller`, `@loopwright/cli`).
-3. **3. Verify**: Independent verification hooks run against a clean base checkout and mint cryptographic HMAC `gate.v1` receipts (`@loopwright/controller`, `@loopwright/taskpack-runner`).
-4. **4. Publish & Remember**: Head-pinned pull requests (or `no_change` outcomes) publish safely, reviewed proposals compact into CAS memory (`@loopwright/memory`), and `loopwright closure` audits capability evidence (`@loopwright/cli`).
+1. **1. Admit**: Local CLI, Action, or webhook intake validates authority, parses `Taskpack` or `TaskContract`, and acquires a monotonic SQLite lease fence (`@loopwright/core`, `@loopwright/state`, `@loopwright/taskpack`, `@loopwright/github-app`).
+2. **2. Execute**: An isolated Pi session executes inside a native OS or container sandbox (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, or `direct-dedicated`) with physical send admission, CAS blob pointers, and optional System-One decision routing (`@loopwright/agent-pi`, `@loopwright/decisions`, `@loopwright/taskpack`), or external OAuth coding agents pull leased `adapter: delegated` role assignments via `loopwright step` (`next|submit|cancel`) with optional `--role-model` overrides (`@loopwright/controller`, `@loopwright/cli`).
+3. **3. Verify**: Independent verification hooks run against a clean base checkout and mint cryptographic HMAC `gate.v1` receipts (`@loopwright/controller`, `@loopwright/taskpack`, `@loopwright/taskpack-runner`).
+4. **4. Publish & Remember**: Head-pinned pull requests (or local / `no_change` outcomes) settle safely, reviewed proposals compact into CAS memory (`@loopwright/memory`), and `loopwright closure` audits capability evidence (`@loopwright/cli`).
 
 Read [Architecture](../../../docs/getting-started/architecture.md) for the four-stage execution flow and [the shared module map](../../../docs/README.md#module-map) for source routing.
 
-## Nine Workspace Packages
+## Workspace Packages
 
 | Package | Directory | Responsibility |
 | --- | --- | --- |
-| `@loopwright/core` | [packages/core](../../../packages/core/) | Schemas (`TaskContract`, `VerificationProfile`, `AttemptReceipt`), RFC 8785 JCS canonical digests, and evidence binding |
-| `@loopwright/state` | [packages/state](../../../packages/state/) | SQLite WAL persistence, monotonic lease fencing, clock skew guards, and `unknown` effect accounting |
-| `@loopwright/agent-pi` | [packages/agent-pi](../../../packages/agent-pi/) | Isolated Pi subprocess adapter, physical send admission, secret scrubbing, and native OS/container sandboxes |
-| `@loopwright/controller` | [packages/controller](../../../packages/controller/) | Trusted configuration (`loadTrustedConfiguration`), bounded repair loop, delegated stepping (`stepNext`, `stepSubmit`, `stepCancel`), `--role-model` overrides, independent verification, and HMAC `gate.v1` tokens |
+| `@loopwright/core` | [packages/core](../../../packages/core/) | Schemas (`TaskContract`, `VerificationProfile`, `AttemptReceipt`), RFC 8785 JCS canonical digests, and verified CAS descriptor acceptance |
+| `@loopwright/state` | [packages/state](../../../packages/state/) | SQLite persistence, monotonic lease fencing, clock skew guards, and `unknown` effect accounting |
+| `@loopwright/agent-pi` | [packages/agent-pi](../../../packages/agent-pi/) | Isolated Pi subprocess adapter, physical send admission, CAS checkpoint blobs, secret scrubbing, and container isolation |
+| `@loopwright/controller` | [packages/controller](../../../packages/controller/) | Trusted configuration (`loadTrustedConfiguration`), CAS blob store, bounded repair loop, delegated stepping (`stepNext`, `stepSubmit`, `stepCancel`), `--role-model` overrides, independent verification, and HMAC `gate.v1` tokens |
 | `@loopwright/taskpack-runner` | [packages/taskpack-runner](../../../packages/taskpack-runner/) | Frozen taskpack corpus execution and offline runner parity |
 | `@loopwright/memory` | [packages/memory](../../../packages/memory/) | Reviewed memory proposals, compare-and-swap (CAS) compaction, and retention limits |
 | `@loopwright/decisions` | [packages/decisions](../../../packages/decisions/) | System-One 3-zone decision routing (`act`, `confirm`, `escalate`), 6 non-delegable intents, and `decisions.yaml` policy loader |
-| `@loopwright/github-app` | [packages/github-app](../../../packages/github-app/) | Webhook intake, collaborator permission checks, `.loopwright/taskpack.yaml` compiler, `github-app.yaml` loader, and Action entrypoint |
-| `@loopwright/cli` | [packages/cli](../../../packages/cli/) | Local operator CLI (`init`, `check`, `validate`, `run`, `resume`, `step`, `inspect`, `reconcile`, `closure`, `app-serve`), `--role-model` routing, and YAML draft generator |
+| `@loopwright/taskpack` | [packages/taskpack](../../../packages/taskpack/) | Generic declarative `Taskpack` parser, compiler, OS sandbox backends, preflight/upstream staging, local `command.v1` gate, and turnkey execution (`local` and `github` policy profiles) |
+| `@loopwright/github-app` | [packages/github-app](../../../packages/github-app/) | GitHub webhook intake, collaborator permission checks, `InstallationTokenBroker`, `TenantAdmissionQueue`, streamed CAS PR publisher, `github-app.yaml` loader, and Action entrypoint |
+| `@loopwright/cli` | [packages/cli](../../../packages/cli/) | Local operator CLI (`init`, `check`, `digest sync`, `run --taskpack`, `run`, `resume`, `step`, `status`, `inspect`, `reconcile`, `closure`, `app-serve`), `--role-model` routing, and YAML draft generator |
 
 ## YAML-First Configuration Surfaces
 
@@ -41,7 +42,7 @@ Loopwright uses deterministic two-space Pretty YAML (YAML 1.2 core schema, rejec
 | --- | --- | --- |
 | `controller.draft.yaml` | `kind: ControllerConfig` (`apiVersion`, `kind`, `spec`; generated by `loopwright init`) | `@loopwright/cli`, `@loopwright/controller` — [Controller and Registry](../../../docs/configuration/controller-and-registry.md), [CLI](../../../docs/operations/cli.md), [Coding Agents](../../../docs/operations/coding-agents.md) |
 | `registry.draft.yaml` | `kind: TrustedRegistry` (`metadata.name` + SHA-256 pinned in `controller.draft.yaml` `spec.registry`) | `@loopwright/cli`, `@loopwright/controller` — [Controller and Registry](../../../docs/configuration/controller-and-registry.md) |
-| `.loopwright/taskpack.yaml` | `kind: Taskpack` (`metadata.name` + `spec.scope`, `spec.models`, optional `spec.roles` (`1..4`), `spec.sandbox`, `spec.decisions`, `spec.verification`, `spec.proposal`) | `@loopwright/github-app`, `@loopwright/taskpack-runner` — [Declarative Taskpack](../../../docs/walkthroughs/declarative-taskpack.md), [Taskpack](../../../docs/configuration/taskpack.md), [Coding Agents](../../../docs/operations/coding-agents.md) |
+| `.loopwright/taskpack.yaml` | `kind: Taskpack` (`metadata.name` + `spec.goal`, `spec.verification`, optional local `spec.triggers` / `spec.publication` / `spec.memory`, `spec.scope`, `spec.models`, `spec.roles`, `spec.sandbox`, `spec.decisions`) | `@loopwright/taskpack`, `@loopwright/github-app`, `@loopwright/taskpack-runner` — [Declarative Taskpack](../../../docs/walkthroughs/declarative-taskpack.md), [Taskpack](../../../docs/configuration/taskpack.md), [Coding Agents](../../../docs/operations/coding-agents.md) |
 | `github-app.yaml` | `kind: GitHubAppConfig` (`apiVersion`, `kind`, `spec`; `loadGitHubAppConfig`) | `@loopwright/github-app` — [GitHub App](../../../docs/operations/github-app.md) |
 | `decisions.yaml` | `kind: DecisionPolicy` (`apiVersion`, `kind`, `spec`; `loadDecisionPolicyFile`) | `@loopwright/decisions` — [Decision Routing](../../../docs/configuration/decision-routing.md) |
 | `examples/task.yaml` | `kind: TaskContract` (`apiVersion`, `kind`, `spec`; `loopwright check` / `loopwright run`) | `@loopwright/core`, `@loopwright/cli` — [Task Contract](../../../docs/configuration/task-contract.md) |

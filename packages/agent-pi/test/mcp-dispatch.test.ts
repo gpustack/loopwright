@@ -19,7 +19,7 @@ class Pipe extends EventEmitter {
 async function fixture() {
   const input = () => { const base = sessionInput(), task = { ...base.lock.spec.contract, spec: { ...base.lock.spec.contract.spec, roles: base.lock.spec.contract.spec.roles.map(role => ({ ...role, tools: ['mcp__workspace__read_file'] })) } }, lock = admitTask(task, { admissionId: 'admission-1', runId: 'run-1' }); assert.equal(lock.ok, true); if (!lock.ok) throw new Error('fixture lock'); return { ...base, lock: lock.value, policy: { ...base.policy, tools: ['mcp__workspace__read_file'], mcp: { ...base.policy.mcp, names: ['mcp__workspace__read_file'], effects: ['read_only' as const] } } }; };
   const f = await requestFixture(undefined, input), candidate = join(f.directory, 'candidate');
-  for (const artifact of f.input.candidate.artifacts) { await mkdir(join(candidate, artifact.name, '..'), { recursive: true }); await writeFile(join(candidate, artifact.name), artifact.bytes, { mode: 0o444 }); }
+  for (const artifact of f.input.candidate.artifacts) { await mkdir(join(candidate, artifact.name, '..'), { recursive: true }); if ('bytes' in artifact) await writeFile(join(candidate, artifact.name), artifact.bytes, { mode: 0o444 }); }
   const pipe = new Pipe(), faults: string[] = [], mcp = new Mcp(f.host, f.input, new Candidate(candidate, f.input), code => faults.push(code), { process: () => pipe });
   return { ...f, pipe, mcp, faults };
 }

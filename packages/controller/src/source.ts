@@ -1,11 +1,16 @@
-import { realpath, lstat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import {
   LIMITS,
+  OVERLAY_LIMITS,
   digestArtifact,
+  digestArtifactFromMetadata,
   identifyManifest,
   matchesScopePattern as coreMatchesScopePattern,
   resolveOverlayLimits,
+  validateRelativePath,
   validateScopePattern,
   type ArtifactManifest,
   type ArtifactRef,
@@ -13,7 +18,8 @@ import {
   type TaskContract,
 } from '@loopwright/core';
 import type { PiBaselineEntry } from '@loopwright/agent-pi';
-import { canonicalComponents } from './files.js';
+import { STREAM_CHUNK_BYTES, canonicalComponents } from './files.js';
+import type { CandidateFileEntry, CasCandidateFile } from './types.js';
 import { canonical, hash, integer, list, record, same, text } from './schema.js';
 import { ControllerFailure, refuse, type ControllerDiagnostic } from './errors.js';
 import {
@@ -24,7 +30,8 @@ import {
   type ParsedGitTreeEntry,
 } from './git-objects.js';
 import type { ControllerOwner } from './ownership.js';
-import { checkedRef, type ArtifactStore, type ArtifactReader } from './storage.js';
+import { checkedRef, type ArtifactStore, type ArtifactReader, type VerifiedCasSeal } from './storage.js';
+export type { VerifiedCasSeal };
 import { parsePrivateJson } from './parser.js';
 import type { WorkDeadline } from './deadlines.js';
 
@@ -49,7 +56,11 @@ export interface FrozenSource {
   readonly manifest: ArtifactManifest;
   readonly inventory: ArtifactRef;
   readonly workspace: ArtifactRef;
-  readonly artifacts: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly artifacts: readonly {
+    readonly name: string;
+    readonly bytes: Uint8Array;
+    readonly mode?: '100644' | '100755' | undefined;
+  }[];
   readonly baselineEntries?: readonly PiBaselineEntry[];
   readonly sourceTree?: ArtifactRef;
   readonly baselineProofs?: Readonly<Record<string, BaselineMerkleProof>>;
@@ -71,13 +82,10 @@ export function matchesScopePattern(pattern: string, name: string): boolean {
 }
 
 const HOST_ALWAYS_PROTECTED_PATTERNS: readonly string[] = [
-  '.claude/**',
-  'AGENTS.md',
-  'CLAUDE.md',
+  '.git/**',
 ];
-const HOST_WORKFLOW_PROTECTED_PATTERN = '.github/workflows/**';
 
-for (const pattern of [...HOST_ALWAYS_PROTECTED_PATTERNS, HOST_WORKFLOW_PROTECTED_PATTERN]) {
+for (const pattern of HOST_ALWAYS_PROTECTED_PATTERNS) {
   if (!validateScopePattern(pattern).ok) {
     throw new Error(`Invalid built-in host protected pattern: ${pattern}`);
   }
@@ -88,9 +96,27 @@ function matchesHostProtectedPattern(pattern: string, name: string): boolean {
   return !matched.ok || matched.value;
 }
 
-export function isHostProtectedPath(name: string, allowWorkflowWrites: boolean): boolean {
+export interface HostPathProtectionOptions {
+  readonly allowWorkflowWrites?: boolean | undefined;
+  readonly enforceGitHubWorkflowProtection?: boolean | undefined;
+}
+
+export function isHostProtectedPath(
+  name: string,
+  options: boolean | HostPathProtectionOptions = false,
+): boolean {
+  const allowWorkflowWrites = typeof options === 'boolean' ? options : options.allowWorkflowWrites === true;
+  const enforceGitHubWorkflowProtection =
+    typeof options === 'boolean' ? true : options.enforceGitHubWorkflowProtection !== false;
+  const segments = name.split('/');
+  if (!validateRelativePath(name).ok || segments.some(segment => segment.toLowerCase() === '.git')) {
+    return true;
+  }
   if (HOST_ALWAYS_PROTECTED_PATTERNS.some(pattern => matchesHostProtectedPattern(pattern, name))) return true;
-  if (!allowWorkflowWrites && matchesHostProtectedPattern(HOST_WORKFLOW_PROTECTED_PATTERN, name)) return true;
+  if (enforceGitHubWorkflowProtection && segments[0]?.toLowerCase() === '.github') {
+    if (!allowWorkflowWrites) return true;
+    if (segments.length < 3 || segments[1]?.toLowerCase() !== 'workflows') return true;
+  }
   return false;
 }
 
@@ -101,6 +127,7 @@ export interface OverlayManifestBounds {
   readonly manifestMaxBytes: number;
   readonly collectionLimit: number;
   readonly workspaceMaxBytes: number;
+  readonly v2WorkspaceJsonMaxBytes: number;
   readonly checkpointInputMaxBytes: number;
   readonly options: { readonly overlay: { readonly maxFiles: number; readonly maxBytes: number } } | undefined;
 }
@@ -109,17 +136,19 @@ export function overlayManifestBounds(overlay?: TaskContract['spec']['budgets'][
   const resolved = resolveOverlayLimits(overlay);
   if (!resolved.ok) refuse('CONFIG_SCHEMA', '/spec/task/spec/budgets/overlay', 'admission');
   const { maxFiles, maxBytes } = resolved.value;
-  const perFileMaxBytes = overlay === undefined ? 1_048_576 : Math.min(maxBytes, 33_554_432);
-  const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(20_971_520, 32_768 + (maxFiles - 128) * 4_608);
+  const perFileMaxBytes = overlay === undefined ? 1_048_576 : maxBytes;
+  const manifestMaxBytes = maxFiles <= 128 ? 32_768 : Math.min(83_886_080, 32_768 + (maxFiles - 128) * 4_608);
   const collectionLimit = Math.max(256, maxFiles);
   const workspaceMaxBytes =
     maxFiles <= 128 && maxBytes <= 4_194_304
       ? 8_388_608
-      : Math.ceil((maxBytes * 4) / 3) + maxFiles * 256 + 1_114_112;
+      : Math.min(100_663_296, Math.ceil((maxBytes * 4) / 3) + maxFiles * 256 + 1_114_112);
+  const v2WorkspaceJsonMaxBytes =
+    maxFiles <= 128 ? 1_048_576 : Math.min(33_554_432, 1_048_576 + (maxFiles - 128) * 2_048);
   const checkpointInputMaxBytes =
     overlay === undefined || maxFiles <= 128
       ? 40_960
-      : Math.min(2_097_152, 65_536 + (Math.min(maxFiles, 4096) - 128) * 4608);
+      : Math.min(8_388_608, 65_536 + (Math.min(maxFiles, 16_384) - 128) * 4_608);
   return {
     maxFiles,
     maxBytes,
@@ -127,6 +156,7 @@ export function overlayManifestBounds(overlay?: TaskContract['spec']['budgets'][
     manifestMaxBytes,
     collectionLimit,
     workspaceMaxBytes,
+    v2WorkspaceJsonMaxBytes,
     checkpointInputMaxBytes,
     options: overlay !== undefined ? { overlay: { maxFiles, maxBytes } } : undefined,
   };
@@ -316,12 +346,166 @@ export function parseSourceTree(
   return Object.freeze(entries);
 }
 
-export function assertCanonicalMinimalOverlay(
+export const VERIFIED_CAS_SEAL: unique symbol = Symbol('loopwright.verifiedCasSeal');
+
+const verifiedCasSealCache = new WeakMap<CasCandidateFile, VerifiedCasSeal>();
+
+export function attachVerifiedCasSeal(file: CasCandidateFile, seal: VerifiedCasSeal): CasCandidateFile {
+  const frozenSeal = Object.freeze({ ...seal });
+  verifiedCasSealCache.set(file, frozenSeal);
+  if (Object.isExtensible(file)) {
+    Object.defineProperty(file, VERIFIED_CAS_SEAL, {
+      value: frozenSeal,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+  }
+  return file;
+}
+
+function getVerifiedCasSeal(file: CasCandidateFile): VerifiedCasSeal | undefined {
+  const fromSymbol = (file as CasCandidateFile & { readonly [VERIFIED_CAS_SEAL]?: VerifiedCasSeal })[VERIFIED_CAS_SEAL];
+  return fromSymbol ?? verifiedCasSealCache.get(file);
+}
+
+async function verifyCasOverlayEntry(
+  file: CasCandidateFile,
+  expectedRef: ArtifactRef,
+  baselineOid: string | undefined,
+  objectFormat: 'sha1' | 'sha256',
+  phase: 'execution' | 'recovery',
+): Promise<void> {
+  const fail = (): never => refuse('RECOVERY_REQUIRED', '', phase);
+  if (
+    typeof file.blobPath !== 'string' ||
+    !isAbsolute(file.blobPath) ||
+    file.blobPath.length > 4096 ||
+    /[\0\r\n]/.test(file.blobPath) ||
+    file.byteLength !== expectedRef.byteLength ||
+    !same(file.digest, expectedRef.digest)
+  ) {
+    return fail();
+  }
+  const metaCheck = digestArtifactFromMetadata(expectedRef.name, {
+    digest: expectedRef.digest,
+    byteLength: expectedRef.byteLength,
+  });
+  if (!metaCheck.ok || !same(metaCheck.value, expectedRef)) return fail();
+
+  let before: Awaited<ReturnType<typeof lstat>>;
+  try {
+    before = await lstat(file.blobPath);
+  } catch {
+    return fail();
+  }
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    before.uid !== process.getuid?.() ||
+    (before.mode & 0o222) !== 0 ||
+    before.size !== expectedRef.byteLength ||
+    before.size > OVERLAY_LIMITS.maxMaxBytes
+  ) {
+    return fail();
+  }
+  let fh: FileHandle;
+  try {
+    fh = await open(file.blobPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return fail();
+  }
+  try {
+    const info = await fh.stat();
+    if (
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      info.dev !== before.dev ||
+      info.ino !== before.ino ||
+      info.size !== before.size ||
+      (info.mode & 0o222) !== 0
+    ) {
+      return fail();
+    }
+    const seal = getVerifiedCasSeal(file);
+    if (
+      seal !== undefined &&
+      seal.blobPath === file.blobPath &&
+      seal.dev === info.dev &&
+      seal.ino === info.ino &&
+      seal.size === info.size &&
+      seal.mtimeMs === info.mtimeMs &&
+      seal.ctimeMs === info.ctimeMs &&
+      seal.objectFormat === objectFormat &&
+      (baselineOid === undefined || seal.gitOid !== null)
+    ) {
+      if (seal.sha256 !== expectedRef.digest.hex) {
+        return fail();
+      }
+      if (baselineOid !== undefined && seal.gitOid === baselineOid) {
+        return fail();
+      }
+      return;
+    }
+
+    const sha256 = createHash('sha256');
+    const gitOidHasher = baselineOid !== undefined ? createHash(objectFormat).update(`blob ${info.size}\0`, 'utf8') : null;
+    const chunk = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, info.size)));
+    let offset = 0;
+    while (offset < info.size) {
+      const { bytesRead } = await fh.read(chunk, 0, Math.min(chunk.byteLength, info.size - offset), offset);
+      if (bytesRead <= 0) break;
+      const slice = chunk.subarray(0, bytesRead);
+      sha256.update(slice);
+      gitOidHasher?.update(slice);
+      offset += bytesRead;
+    }
+    const probe = Buffer.allocUnsafe(1);
+    const { bytesRead: extra } = await fh.read(probe, 0, 1, offset);
+    const after = await fh.stat();
+    const sha256Hex = sha256.digest('hex');
+    if (
+      extra !== 0 ||
+      offset !== info.size ||
+      !after.isFile() ||
+      after.nlink !== 1 ||
+      after.dev !== info.dev ||
+      after.ino !== info.ino ||
+      after.size !== info.size ||
+      after.mtimeMs !== info.mtimeMs ||
+      after.ctimeMs !== info.ctimeMs ||
+      (after.mode & 0o222) !== 0 ||
+      sha256Hex !== expectedRef.digest.hex
+    ) {
+      return fail();
+    }
+    const gitOid = gitOidHasher !== null ? gitOidHasher.digest('hex') : null;
+    if (gitOid !== null && gitOid === baselineOid) {
+      return fail();
+    }
+    attachVerifiedCasSeal(file, {
+      blobPath: file.blobPath,
+      dev: after.dev,
+      ino: after.ino,
+      size: after.size,
+      mtimeMs: after.mtimeMs,
+      ctimeMs: after.ctimeMs,
+      sha256: sha256Hex,
+      gitOid,
+      objectFormat,
+    });
+  } finally {
+    await fh.close();
+  }
+}
+
+export async function assertCanonicalMinimalOverlay(
   candidateManifest: ArtifactManifest,
-  candidateFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+  candidateFiles: readonly CandidateFileEntry[],
   source: FrozenSource,
   phase: 'execution' | 'recovery' = 'execution',
-): void {
+): Promise<void> {
   if (source.version === 1) {
     if (candidateManifest.spec.baseTree !== undefined || candidateManifest.spec.deleted !== undefined) {
       refuse('RECOVERY_REQUIRED', '', phase);
@@ -344,10 +528,10 @@ export function assertCanonicalMinimalOverlay(
   if (candidateFiles.length !== candidateManifest.spec.entries.length) {
     refuse('RECOVERY_REQUIRED', '', phase);
   }
-  const filesByPath = new Map<string, Uint8Array>();
+  const filesByPath = new Map<string, CandidateFileEntry>();
   for (const file of candidateFiles) {
     if (filesByPath.has(file.name)) refuse('RECOVERY_REQUIRED', '', phase);
-    filesByPath.set(file.name, file.bytes);
+    filesByPath.set(file.name, file);
   }
   const deletedSet = new Set(candidateManifest.spec.deleted);
   const survivingBaselineNorms = new Set<string>();
@@ -363,17 +547,23 @@ export function assertCanonicalMinimalOverlay(
     }
   }
   for (const entry of candidateManifest.spec.entries) {
-    const bytes = filesByPath.get(entry.name);
-    if (!bytes) refuse('RECOVERY_REQUIRED', '', phase);
-    const actual = digestArtifact(entry.name, bytes);
-    if (!actual.ok || !same(actual.value, entry)) refuse('RECOVERY_REQUIRED', '', phase);
+    const file = filesByPath.get(entry.name);
+    if (!file) refuse('RECOVERY_REQUIRED', '', phase);
     const baselineEntry = baselineByPath.get(entry.name);
-    if (baselineEntry !== undefined) {
-      if (deletedSet.has(entry.name)) refuse('RECOVERY_REQUIRED', '', phase);
-      if (gitObjectOid(sourceBaseTree.objectFormat, 'blob', bytes) === baselineEntry.oid) {
+    if (baselineEntry !== undefined && deletedSet.has(entry.name)) {
+      refuse('RECOVERY_REQUIRED', '', phase);
+    }
+    if ('bytes' in file) {
+      if ('blobPath' in file) refuse('RECOVERY_REQUIRED', '', phase);
+      const actual = digestArtifact(entry.name, file.bytes);
+      if (!actual.ok || !same(actual.value, entry)) refuse('RECOVERY_REQUIRED', '', phase);
+      if (baselineEntry !== undefined && gitObjectOid(sourceBaseTree.objectFormat, 'blob', file.bytes) === baselineEntry.oid) {
         refuse('RECOVERY_REQUIRED', '', phase);
       }
     } else {
+      await verifyCasOverlayEntry(file, entry, baselineEntry?.oid, sourceBaseTree.objectFormat, phase);
+    }
+    if (baselineEntry === undefined) {
       const norm = entry.name.normalize('NFC').toLowerCase();
       if (survivingBaselineNorms.has(norm) || survivingBaselineDirs.has(norm)) {
         refuse('RECOVERY_REQUIRED', '', phase);
@@ -482,8 +672,13 @@ export async function freezeSource(
   const MANIFEST_JSON_LIMIT = 32_768;
   const INVENTORY_JSON_LIMIT = 262_144;
   const totalBytes = descriptions.reduce((sum, item) => sum + item.byteLength, 0);
+  const overlayBudget = task.spec.budgets.overlay;
   let useClassic = false;
-  if (descriptions.length <= 128 && totalBytes <= 4_194_304) {
+  if (
+    descriptions.length <= 128
+    && totalBytes <= 4_194_304
+    && (overlayBudget === undefined || (overlayBudget.maxFiles <= 128 && overlayBudget.maxBytes <= 4_194_304))
+  ) {
     const freshDummyDigest = () => ({ algorithm: 'sha256' as const, hex: '0'.repeat(64) });
     const sizingRefs = descriptions.map(description => ({
       name: description.name,
@@ -532,7 +727,7 @@ export async function freezeSource(
   }
 
   if (useClassic) {
-    const files: { readonly name: string; readonly bytes: Uint8Array }[] = [];
+    const files: { readonly name: string; readonly bytes: Uint8Array; readonly mode: '100644' | '100755' }[] = [];
     const prospectiveEntries: { readonly name: string; readonly mode: string; readonly oid: string; readonly ref: ArtifactRef; readonly artifact: ArtifactRef }[] = [];
     let total = 0;
     for (const description of descriptions) {
@@ -548,7 +743,7 @@ export async function freezeSource(
       const artifactName = 'source-file-' + hash('loopwright.dev/controller/artifact/source-file/v1\0' + hash(bytes).hex).hex + '.bin';
       const artifactRef = digestArtifact(artifactName, bytes);
       if (!artifactRef.ok) refuse('ARTIFACT_INVALID', '', 'admission');
-      files.push({ name: description.name, bytes: new Uint8Array(bytes) });
+      files.push({ name: description.name, bytes: new Uint8Array(bytes), mode: description.mode });
       prospectiveEntries.push({ name: description.name, mode: description.mode, oid: description.oid, ref: ref.value, artifact: artifactRef.value });
     }
     const identified = identifyManifest({
@@ -576,6 +771,7 @@ export async function freezeSource(
             const entries = [];
             for (let i = 0; i < files.length; i++) {
               const artifact = await store.put('source-file', files[i]!.bytes);
+              await store.putCasBlobFromBytes(files[i]!.name, files[i]!.bytes);
               entries.push({ ...prospectiveEntries[i]!, artifact });
             }
             const manifest = identified.value.manifest;
@@ -701,7 +897,7 @@ export async function restoreSource(
       refuse('ARTIFACT_INVALID', '', 'recovery');
     }
     const entries = list(value.entries, '', 256).map(item => record(item, ['name', 'mode', 'oid', 'ref', 'artifact']));
-    const artifacts = [];
+    const artifacts: { readonly name: string; readonly bytes: Uint8Array; readonly mode: '100644' | '100755' }[] = [];
     let total = 0;
     if (
       !same(entries.map(entry => entry.ref), identified.value.manifest.spec.entries)
@@ -712,9 +908,10 @@ export async function restoreSource(
     const names = new Set<string>();
     for (const entry of entries) {
       const name = text(entry.name, '', 4096), ref = checkedRef(entry.ref), artifact = checkedRef(entry.artifact);
+      const entryMode = text(entry.mode);
       if (
         name !== ref.name
-        || !['100644', '100755'].includes(text(entry.mode))
+        || (entryMode !== '100644' && entryMode !== '100755')
         || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(text(entry.oid))
         || name.split('/').some(segment => segment.toLowerCase() === '.git' || segment.length > 255)
         || names.has(name.toLowerCase())
@@ -725,7 +922,7 @@ export async function restoreSource(
       names.add(name.toLowerCase());
       const bytes = await reader.read(artifact, 4_194_304), actual = digestArtifact(name, bytes);
       if (!actual.ok || !same(actual.value, ref)) refuse('ARTIFACT_INVALID', '', 'recovery');
-      artifacts.push({ name, bytes: new Uint8Array(bytes) });
+      artifacts.push({ name, bytes: new Uint8Array(bytes), mode: entryMode });
     }
     if (!same(parsePrivateJson(await reader.read(workspace, 65_536), 65_536), { version: 1, format: 'controller-passive-workspace', inventory, manifest: manifestRef })) {
       refuse('ARTIFACT_INVALID', '', 'recovery');

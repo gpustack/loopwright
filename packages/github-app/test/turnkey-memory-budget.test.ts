@@ -466,6 +466,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-p3b-llm-token-123456',
         },
       });
@@ -884,6 +885,7 @@ describe('turnkey @loopwright/memory window budgeting and large store merges', (
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
           LLM_TOKEN: 'sk-mcp-llm-token-123456',
           MCP_BEARER_TOKEN: 'mcp-secret-bearer-789',
         },

@@ -15,6 +15,7 @@
     "packages/controller",
     "packages/cli",
     "packages/taskpack-runner",
+    "packages/taskpack",
     "packages/github-app",
     "packages/memory",
     "packages/decisions"

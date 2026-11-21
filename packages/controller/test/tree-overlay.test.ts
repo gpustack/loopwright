@@ -467,8 +467,8 @@ test('T3 minimal-overlay invariants reject non-minimal overlays and adoptRoleCap
     });
     assert.equal(ghostDelManifest.ok, true);
     if (!ghostDelManifest.ok) throw new Error('expected ok');
-    assert.throws(
-      () => assertCanonicalMinimalOverlay(ghostDelManifest.value.manifest, [], frozen, 'recovery'),
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(ghostDelManifest.value.manifest, [], frozen, 'recovery'),
       (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'RECOVERY_REQUIRED' && err.diagnostic.phase === 'recovery',
     );
 
@@ -485,8 +485,8 @@ test('T3 minimal-overlay invariants reject non-minimal overlays and adoptRoleCap
     });
     assert.equal(noopEditManifest.ok, true);
     if (!noopEditManifest.ok) throw new Error('expected ok');
-    assert.throws(
-      () => assertCanonicalMinimalOverlay(noopEditManifest.value.manifest, [{ name: 'src/item-000.txt', bytes: unchangedBytes }], frozen, 'execution'),
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(noopEditManifest.value.manifest, [{ name: 'src/item-000.txt', bytes: unchangedBytes }], frozen, 'execution'),
       (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'RECOVERY_REQUIRED',
     );
 
@@ -499,8 +499,8 @@ test('T3 minimal-overlay invariants reject non-minimal overlays and adoptRoleCap
     });
     assert.equal(wrongBaseManifest.ok, true);
     if (!wrongBaseManifest.ok) throw new Error('expected ok');
-    assert.throws(
-      () => assertCanonicalMinimalOverlay(wrongBaseManifest.value.manifest, [], frozen, 'recovery'),
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(wrongBaseManifest.value.manifest, [], frozen, 'recovery'),
       (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'RECOVERY_REQUIRED',
     );
 
@@ -517,8 +517,8 @@ test('T3 minimal-overlay invariants reject non-minimal overlays and adoptRoleCap
     });
     assert.equal(collisionManifest.ok, true);
     if (!collisionManifest.ok) throw new Error('expected ok');
-    assert.throws(
-      () => assertCanonicalMinimalOverlay(collisionManifest.value.manifest, [{ name: 'src/ITEM-000.txt', bytes: caseCollisionBytes }], frozen, 'recovery'),
+    await assert.rejects(
+      assertCanonicalMinimalOverlay(collisionManifest.value.manifest, [{ name: 'src/ITEM-000.txt', bytes: caseCollisionBytes }], frozen, 'recovery'),
       (err: unknown) => err instanceof ControllerFailure && err.diagnostic.code === 'RECOVERY_REQUIRED',
     );
   } finally {

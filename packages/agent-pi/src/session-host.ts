@@ -75,7 +75,7 @@ export class RuntimeSession {
       this.#channel = new Channel(this.nonce, child.stdout, child.stdin); this.#snapshots = new SnapshotTransfer(this.#channel); this.#channel.on('failed', () => this.#fail());
       this.#channel.on('message', (message: ChannelMessage) => { void this.#receive(message).catch(() => this.#fail()); });
       await registerAttach(this.host, this.nonce, child.pid);
-      const restored = recoverSnapshot(this.host, this.input);
+      const restored = await recoverSnapshot(this.host, this.input);
       if (restored) {
         const accepted = this.#wait('restore-ready'); await this.#channel.send('restore-start', { selection: this.input.policy.selection, toolNames: this.input.policy.tools, sessionBytes: this.input.policy.limits.sessionBytes }); await accepted;
         async function* chunks() { yield restored!.native; } const complete = this.#wait('restore-complete', 90000); await this.#snapshots.send(1, chunks(), this.input.policy.limits.sessionBytes); await complete;

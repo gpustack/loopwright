@@ -117,7 +117,7 @@ test('scheduling: synthetic accounted execution with missing required capture re
 });
 test('scheduling: substituted candidate body bytes cannot be preserved by a no-effect budget label and unchanged original record counts', async () => {
   const fake = adapter(async () => {
-    const file = cycle.candidate.files[0]!; file.bytes[0] = 0;
+    const file = cycle.candidate.files[0]!; if (!('bytes' in file)) throw new Error('expected raw candidate file'); file.bytes[0] = 0;
     const actual = await f.context.artifacts.put('unit-substituted', Buffer.from(file.bytes), 4194304);
     await writeFile(join(f.context.directory, 'unit-substitution-input.json'), canonical({ version: 1, level: 'synthetic-private-adapter-no-SDK', name: file.name, original: cycle.candidate.manifest.spec.entries[0]!, candidate: cycle.candidate.ref, actual, retainedBeforeControllerValidation: true }), { mode: 0o600 });
     return { ok: true, value: blocked };

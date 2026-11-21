@@ -1,7 +1,7 @@
 import { Worker } from 'node:worker_threads';
-import { constants } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   bindSubject,
@@ -27,6 +27,7 @@ import {
   encodePacket,
   fileHash,
   inventoryEncodedBytes,
+  JSON_FILE_BYTES,
   maxPacketBytes,
   overlayProtocolBounds,
   ownedBytes,
@@ -47,12 +48,12 @@ import { parsePrivateJson } from './parser.js';
 import { ControllerFailure, refuse } from './errors.js';
 import { verifierOperationId, phaseCheckpointId, ProgressStore, validateProgress, journal } from './progress.js';
 import { sizeJob, VerifierSizingFailure, checkedRefusalRecord, type RefusalRecord } from './refusal-record.js';
-import type { CompiledPlan, VerifierSlot, VerifierRefusalRow } from './types.js';
+import type { CandidateFileEntry, CompiledPlan, VerifierSlot, VerifierRefusalRow } from './types.js';
 
 export interface ByteInventory {
   readonly manifest: ArtifactManifest;
   readonly ref: ArtifactRef;
-  readonly files: readonly { readonly name: string; readonly bytes: Uint8Array }[];
+  readonly files: readonly CandidateFileEntry[];
   readonly baselineProofs?: Readonly<Record<string, BaselineMerkleProof>> | undefined;
 }
 
@@ -74,27 +75,115 @@ interface Prepared {
 
 const preparedJobs = new WeakMap<PreparedVerification, Prepared>();
 
-function inventoryBytes(input: ByteInventory, overlay?: OverlayLimitsInput): ReadonlyMap<string, Uint8Array> {
+function validateInventoryAlignment(input: ByteInventory, overlay?: OverlayLimitsInput): ReadonlyMap<string, CandidateFileEntry> {
   const bounds = overlayProtocolBounds(overlay);
   descriptor(input.manifest, input.ref, overlay);
   const maxEntries = input.manifest.spec.baseTree !== undefined ? bounds.maxOverlayEntries : bounds.maxClassicEntries;
   if (
     input.files.length !== input.manifest.spec.entries.length ||
-    input.files.length > maxEntries ||
-    new Set(input.files.map(file => file.name)).size !== input.files.length
+    input.files.length > maxEntries
   ) {
     refuse('ARTIFACT_INVALID', '', 'verification');
   }
-  let total = 0;
-  const files = new Map<string, Uint8Array>();
-  for (const entry of input.manifest.spec.entries) {
-    const file = input.files.find(item => item.name === entry.name);
-    if (!file || (total += entry.byteLength) > bounds.maxTotalBytes) refuse('ARTIFACT_INVALID', '', 'verification');
-    const bytes = ownedBytes(file.bytes, bounds.maxTotalBytes);
-    if (bytes.byteLength !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
-    files.set(entry.name, bytes);
+  const byName = new Map<string, CandidateFileEntry>();
+  for (const file of input.files) {
+    if (byName.has(file.name)) refuse('ARTIFACT_INVALID', '', 'verification');
+    byName.set(file.name, file);
   }
-  return files;
+  let total = 0;
+  const validated = new Map<string, CandidateFileEntry>();
+  for (const entry of input.manifest.spec.entries) {
+    const file = byName.get(entry.name);
+    if (!file || (total += entry.byteLength) > bounds.maxTotalBytes) refuse('ARTIFACT_INVALID', '', 'verification');
+    if ('bytes' in file) {
+      if ('blobPath' in file) refuse('ARTIFACT_INVALID', '', 'verification');
+      const bytes = ownedBytes(file.bytes, bounds.maxTotalBytes);
+      if (bytes.byteLength !== entry.byteLength || !same(fileHash(bytes), entry.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+      validated.set(entry.name, { name: entry.name, bytes });
+    } else {
+      if (
+        typeof file.blobPath !== 'string' ||
+        !isAbsolute(file.blobPath) ||
+        file.blobPath.length > 4096 ||
+        /[\0\r\n]/.test(file.blobPath) ||
+        file.byteLength !== entry.byteLength ||
+        !same(file.digest, entry.digest)
+      ) {
+        refuse('ARTIFACT_INVALID', '', 'verification');
+      }
+      validated.set(entry.name, file);
+    }
+  }
+  return validated;
+}
+
+function resolveTargetOverlayFileSync(file: CandidateFileEntry): { readonly logicalBytes: number; readonly bytes: Uint8Array | null } {
+  if ('bytes' in file) {
+    return {
+      logicalBytes: file.bytes.byteLength,
+      bytes: file.bytes.byteLength > JSON_FILE_BYTES ? null : file.bytes,
+    };
+  }
+  if (file.byteLength > JSON_FILE_BYTES) {
+    return { logicalBytes: file.byteLength, bytes: null };
+  }
+  let before: ReturnType<typeof lstatSync>;
+  try {
+    before = lstatSync(file.blobPath);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  if (
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    before.uid !== process.getuid?.() ||
+    (before.mode & 0o222) !== 0 ||
+    before.size !== file.byteLength
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  let fd: number;
+  try {
+    fd = openSync(file.blobPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  try {
+    const info = fstatSync(fd);
+    if (
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      info.dev !== before.dev ||
+      info.ino !== before.ino ||
+      info.size !== file.byteLength ||
+      (info.mode & 0o222) !== 0
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    const raw = Buffer.alloc(info.size + 1);
+    let offset = 0;
+    while (offset < raw.length) {
+      const bytesRead = readSync(fd, raw, offset, raw.length - offset, offset);
+      if (bytesRead <= 0) break;
+      offset += bytesRead;
+    }
+    const after = fstatSync(fd);
+    if (
+      offset !== info.size ||
+      after.nlink !== 1 ||
+      after.size !== info.size ||
+      after.mtimeMs !== info.mtimeMs ||
+      after.ctimeMs !== info.ctimeMs
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    const slice = new Uint8Array(raw.buffer, raw.byteOffset, offset);
+    if (!same(fileHash(slice), file.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+    return { logicalBytes: slice.byteLength, bytes: slice };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 interface ValidatedProof {
@@ -169,8 +258,8 @@ export function prepareVerification(
   if (!slot || slot.handler.kind !== 'check') refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
   const overlay = lock.spec.contract.spec.budgets.overlay;
   const overlayOpts = overlay ? { overlay } : undefined;
-  const sourceFiles = inventoryBytes(source, overlay);
-  const files = inventoryBytes(candidate, overlay);
+  const sourceFiles = validateInventoryAlignment(source, overlay);
+  const files = validateInventoryAlignment(candidate, overlay);
   const subject = bindSubject(lock, candidate.manifest, overlayOpts);
   if (!subject.ok) refuse('ARTIFACT_INVALID', '', 'verification');
   if (
@@ -204,7 +293,7 @@ export function prepareVerification(
         : null;
 
     let expected: unknown = overlaySelected;
-    let selected: Uint8Array | undefined;
+    let selected: Uint8Array | null | undefined;
     let validatedProof: ValidatedProof | null = null;
 
     if (baseTree !== undefined && !overlaySelected) {
@@ -217,9 +306,13 @@ export function prepareVerification(
         jsonBytes = validatedProof.logicalBytes;
         merkle = validatedProof.merkle;
       }
+    } else if (overlaySelected) {
+      const resolved = resolveTargetOverlayFileSync(files.get(path)!);
+      selected = resolved.bytes;
+      jsonBytes = resolved.logicalBytes;
     } else {
-      selected = overlaySelected ? files.get(path) : undefined;
-      jsonBytes = selected?.byteLength ?? 0;
+      selected = undefined;
+      jsonBytes = 0;
     }
 
     parameters = {
@@ -232,7 +325,7 @@ export function prepareVerification(
     const targetBytes =
       validatedProof !== null
         ? 4 + validatedProof.blob.byteLength + 4 + validatedProof.trees.reduce((sum, tree) => sum + 4 + tree.byteLength, 0)
-        : 4 + (selected?.byteLength ?? 0);
+        : 4 + jsonBytes;
     const sizedPayloadBytes = firstInvBytes + secondInvBytes + targetBytes;
     const header = checkedHeader({
       version: 1,
@@ -289,22 +382,27 @@ export function prepareVerification(
     const candDeleted = (candidate.manifest.spec.deleted ?? []).includes(path);
 
     let baselineParam: Record<string, unknown>;
-    let baseOverlayBytes: Uint8Array | undefined;
+    let baseOverlayBytes: Uint8Array | null | undefined;
+    let hasBaseOverlay = false;
     let validatedProof: ValidatedProof | null = null;
     let baseLogicalBytes = 0;
 
     if (!baseTree) {
       if (sourceSelected !== null) {
-        baseOverlayBytes = sourceFiles.get(path)!;
+        const resolved = resolveTargetOverlayFileSync(sourceFiles.get(path)!);
+        baseOverlayBytes = resolved.bytes;
+        hasBaseOverlay = true;
         baselineParam = { kind: 'overlay', entry: sourceSelected };
-        baseLogicalBytes = baseOverlayBytes.byteLength;
+        baseLogicalBytes = resolved.logicalBytes;
       } else {
         baselineParam = { kind: 'missing' };
       }
     } else if (sourceSelected !== null) {
-      baseOverlayBytes = sourceFiles.get(path)!;
+      const resolved = resolveTargetOverlayFileSync(sourceFiles.get(path)!);
+      baseOverlayBytes = resolved.bytes;
+      hasBaseOverlay = true;
       baselineParam = { kind: 'overlay', entry: sourceSelected };
-      baseLogicalBytes = baseOverlayBytes.byteLength;
+      baseLogicalBytes = resolved.logicalBytes;
     } else if (sourceDeleted) {
       baselineParam = { kind: 'missing' };
     } else {
@@ -320,21 +418,26 @@ export function prepareVerification(
     }
 
     let candidateParam: Record<string, unknown>;
-    let candOverlayBytes: Uint8Array | undefined;
+    let candOverlayBytes: Uint8Array | null | undefined;
+    let hasCandOverlay = false;
     let candLogicalBytes = 0;
 
     if (!baseTree) {
       if (candSelected !== null) {
-        candOverlayBytes = files.get(path)!;
+        const resolved = resolveTargetOverlayFileSync(files.get(path)!);
+        candOverlayBytes = resolved.bytes;
+        hasCandOverlay = true;
         candidateParam = { kind: 'overlay', entry: candSelected };
-        candLogicalBytes = candOverlayBytes.byteLength;
+        candLogicalBytes = resolved.logicalBytes;
       } else {
         candidateParam = { kind: 'missing' };
       }
     } else if (candSelected !== null) {
-      candOverlayBytes = files.get(path)!;
+      const resolved = resolveTargetOverlayFileSync(files.get(path)!);
+      candOverlayBytes = resolved.bytes;
+      hasCandOverlay = true;
       candidateParam = { kind: 'overlay', entry: candSelected };
-      candLogicalBytes = candOverlayBytes.byteLength;
+      candLogicalBytes = resolved.logicalBytes;
     } else if (candDeleted) {
       candidateParam = { kind: 'deleted' };
     } else {
@@ -357,10 +460,10 @@ export function prepareVerification(
     const baseSectionBytes =
       validatedProof !== null
         ? 4 + validatedProof.blob.byteLength + 4 + validatedProof.trees.reduce((sum, tree) => sum + 4 + tree.byteLength, 0)
-        : baseOverlayBytes !== undefined
-          ? 4 + baseOverlayBytes.byteLength
+        : hasBaseOverlay
+          ? 4 + baseLogicalBytes
           : 0;
-    const candSectionBytes = candOverlayBytes !== undefined ? 4 + candOverlayBytes.byteLength : 0;
+    const candSectionBytes = hasCandOverlay ? 4 + candLogicalBytes : 0;
     const sizedPayloadBytes = firstInvBytes + secondInvBytes + baseSectionBytes + candSectionBytes;
 
     const header = checkedHeader({
@@ -394,13 +497,13 @@ export function prepareVerification(
     offset += secondInv.byteLength;
     if (validatedProof !== null) {
       offset = writeProofSection(payload, view, offset, validatedProof);
-    } else if (baseOverlayBytes !== undefined) {
+    } else if (baseOverlayBytes) {
       view.setUint32(offset, baseOverlayBytes.byteLength);
       offset += 4;
       payload.set(baseOverlayBytes, offset);
       offset += baseOverlayBytes.byteLength;
     }
-    if (candOverlayBytes !== undefined) {
+    if (candOverlayBytes) {
       view.setUint32(offset, candOverlayBytes.byteLength);
       offset += 4;
       payload.set(candOverlayBytes, offset);

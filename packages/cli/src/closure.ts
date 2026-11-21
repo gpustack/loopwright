@@ -17,7 +17,7 @@ export type ClosureCapabilityId =
 export type ClosureDisposition = 'closed_local' | 'deferred_owned' | 'blocked_external';
 export type ClosureEvidenceLevel = 'unit_and_integration' | 'controlled_local_qualification' | 'frozen_offline_parity' | 'unprovisioned_external';
 export type ClosureOwnerPackage = '@loopwright/core' | '@loopwright/state' | '@loopwright/agent-pi' | '@loopwright/controller' | '@loopwright/cli'
-  | '@loopwright/taskpack-runner' | '@loopwright/memory' | '@loopwright/github-app' | '@loopwright/decisions';
+  | '@loopwright/taskpack-runner' | '@loopwright/memory' | '@loopwright/taskpack' | '@loopwright/github-app' | '@loopwright/decisions';
 export type ClosureSubsystem = string;
 export interface ClosureCapabilityEntry {
   readonly id: ClosureCapabilityId;
@@ -85,7 +85,7 @@ export interface ClosureMatrixReport {
 const DISPOSITIONS: readonly ClosureDisposition[] = ['closed_local', 'deferred_owned', 'blocked_external'];
 const EVIDENCE_LEVELS: readonly ClosureEvidenceLevel[] = ['unit_and_integration', 'controlled_local_qualification', 'frozen_offline_parity', 'unprovisioned_external'];
 const STATUSES: readonly ClosureCapabilityEntry['verificationStatus'][] = ['passed', 'failed', 'blocked', 'not_run'];
-const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/github-app', '@loopwright/decisions'];
+const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/taskpack', '@loopwright/github-app', '@loopwright/decisions'];
 function text(value: unknown): string { return typeof value === 'string' ? value : ''; }
 function entryShapeErrors(entry: ClosureCapabilityEntry, path: string): ClosureDiagnostic[] {
   const errors: ClosureDiagnostic[] = [];
@@ -144,9 +144,9 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
   CLOSED('immutable-elapsed-clock-basis', 'Immutable elapsed clock basis', 'state-clock', '@loopwright/state', 'unit_and_integration',
     'Elapsed time derives from an immutable monotonic basis with bounded drift.',
     'Wall-clock alignment to external time authorities is out of scope.', ['packages/state/src/clock.ts', 'packages/state/test/clock.test.ts']),
-  CLOSED('qualified-host-clock-and-storage-profile', 'Qualified host clock and storage profile', 'host-qualification', '@loopwright/github-app', 'unit_and_integration',
+  CLOSED('qualified-host-clock-and-storage-profile', 'Qualified host clock and storage profile', 'host-qualification', '@loopwright/taskpack', 'unit_and_integration',
     'Host qualification refuses unqualified filesystems, unqualified platforms, and drifting clocks.',
-    'Deployed host qualification requires the deployed control plane.', ['packages/github-app/src/qualification.ts', 'packages/github-app/src/sandbox.ts', 'packages/github-app/test/token-broker-qualification.test.ts', 'packages/github-app/test/sandbox.test.ts']),
+    'Deployed host qualification requires the deployed control plane.', ['packages/taskpack/src/qualification.ts', 'packages/taskpack/src/sandbox.ts', 'packages/taskpack/test/qualification.test.ts', 'packages/taskpack/test/sandbox.test.ts']),
   CLOSED('state-interface-and-sqlite-limits', 'State interface and SQLite limits', 'state-store-interface', '@loopwright/state', 'unit_and_integration',
     'The retained store interface honors SQLite limits for pages, records, and reopen.',
     'Non-SQLite storage engines are out of scope.', ['packages/state/src/store.ts', 'packages/state/src/connection.ts', 'packages/state/test/store.test.ts']),
@@ -179,10 +179,10 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
     'A remote host loss with durable wake must retain fenced state across the outage.',
     'Local crash tests park owned children; remote loss stays unprovisioned.',
     'Provision a remote host with durable storage and run the wake qualification against it.', ['docs/contribute/state.md']),
-  EXTERNAL('interactive-mcp-oauth-browser-flow', 'Interactive MCP OAuth browser flow', 'interactive-oauth', '@loopwright/github-app', 'deferred_owned', 'blocked',
+  EXTERNAL('interactive-mcp-oauth-browser-flow', 'Interactive MCP OAuth browser flow', 'interactive-oauth', '@loopwright/taskpack', 'deferred_owned', 'blocked',
     'Interactive browser OAuth flows are refused pre-admission and stay deferred.',
     'No browser, loopback listener, or anonymous fallback exists in the control plane.',
-    'Approve an interactive OAuth qualification plan with a bound browser harness receipt.', ['packages/github-app/src/qualification.ts']),
+    'Approve an interactive OAuth qualification plan with a bound browser harness receipt.', ['packages/taskpack/src/qualification.ts']),
   EXTERNAL('deployed-github-app-and-webhook-ingress', 'Deployed GitHub App and webhook ingress', 'deployed-ingress', '@loopwright/github-app', 'blocked_external', 'not_run',
     'Deployed GitHub App webhook ingress must verify signatures under the deployed control plane.',
     'The loopback service double cannot prove deployed ingress.',

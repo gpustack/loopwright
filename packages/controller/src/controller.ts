@@ -2,17 +2,17 @@ import { mkdir, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { openPiAdapterV2, type PiAdapterV2, type PiHostV2, type PiOpenInputV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
+import { openPiAdapterV2, type PiAdapterV2, type PiCandidateArtifactInput, type PiHostV2, type PiOpenInputV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
 import { admitTask, bindSubject, identifyManifest, type ArtifactRef, type Digest, type StructuredFinding, type TaskLock } from '@loopwright/core';
 import { createLocalRun, type Authority, type LocalRunIdentity, type LocalRunStore } from '@loopwright/state';
 import { approvedState, selectRoleResources } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result, safeDiagnostic, type ControllerDiagnostic } from './errors.js';
-import { privateDirectory, ArtifactStore, checkedRef, stateValue } from './storage.js';
+import { privateDirectory, ArtifactStore, checkedRef, stateValue, streamVerifiedCasBlob } from './storage.js';
 import { ControllerOwner, bootIdentity } from './ownership.js';
-import { resolveStoreLeaseMs } from './retained.js';
+import { effectiveRunHostPolicy, hostProtectionFromPolicy, resolveStoreLeaseMs, validatePortPolicyFields } from './retained.js';
 export { resolveStoreLeaseMs };
-import { freezeSource, materializeBaseline, overlayManifestBounds, verifySource, type FrozenSource } from './source.js';
+import { freezeSource, materializeBaseline, overlayManifestBounds, verifySource, type FrozenSource, type HostPathProtectionOptions } from './source.js';
 import { ProgressStore, stableId, journal, type ProgressHead } from './progress.js';
 import { captureRole, adoptRoleCapture, nativeSessionId, type CapturedRole } from './capture.js';
 import {
@@ -21,6 +21,7 @@ import {
   isVerdictStep,
   normalizeSubmission,
   parseStepVerdict,
+  readSubmissionCandidateBytes,
   retainStepOutput,
   summarizeStepVerdictPreview,
   type CapturedStepOutput,
@@ -44,12 +45,15 @@ import type {
   AdvisoryDecisionPort,
   AdvisoryDecisionSource,
   CandidateDiffSummary,
+  CandidateFileEntry,
   CompiledPlan,
   ControllerAttempt,
+  ControllerPolicyProfile,
   ControllerProgress,
   CycleAlignmentRoute,
   CycleExecution,
   LoadedConfiguration,
+  PersistedHostPolicy,
   PlannedRole,
   RoleModelOverride,
   StepMcpServerMetadata,
@@ -85,6 +89,7 @@ export interface RunCycleInput { readonly configuration: LoadedConfiguration; re
 export interface RunDescriptor {
   readonly version: 1; readonly identity: LocalRunIdentity; readonly plan: ArtifactRef; readonly source: ArtifactRef; readonly sourceWorkspace: ArtifactRef;
   readonly configuration: { readonly configPath: string; readonly registryPath: string; readonly registrySha256: string; readonly roleModelOverrides?: readonly RoleModelOverride[] }; readonly repository: string;
+  readonly hostPolicy?: PersistedHostPolicy;
 }
 /** Trusted local observations and optional non-authoritative advisory hooks. */
 export interface ControllerPorts {
@@ -92,9 +97,17 @@ export interface ControllerPorts {
   readonly afterCheckpoint?: (phase: string, head: ProgressHead) => Promise<void>;
   readonly gateUrlOverrides?: Readonly<Record<string, string>>;
   readonly decisions?: AdvisoryDecisionPort;
-  readonly allowWorkflowWrites?: boolean;
+  readonly policyProfile?: ControllerPolicyProfile | undefined;
+  readonly allowWorkflowWrites?: boolean | undefined;
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>>;
   readonly mcpServers?: readonly StepMcpServerMetadata[];
+}
+function cycleHostProtection(context: CycleContext): HostPathProtectionOptions {
+  const persisted = effectiveRunHostPolicy(context.descriptor);
+  return hostProtectionFromPolicy({
+    policyProfile: context.ports.policyProfile ?? persisted.policyProfile,
+    allowWorkflowWrites: context.ports.allowWorkflowWrites ?? persisted.allowWorkflowWrites,
+  });
 }
 export function roleResourcesFor(loaded: LoadedConfiguration, plan: CompiledPlan, roleId: string) {
   const all = approvedState(loaded).resources;
@@ -114,7 +127,17 @@ async function exclusiveJson(path: string, value: unknown): Promise<void> {
 }
 export async function createCycle(input: RunCycleInput, ports: ControllerPorts): Promise<CycleContext> {
   const state = approvedState(input.configuration), compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error); const plan = compiled.value;
+  validatePortPolicyFields(ports, 'admission');
   validateGateUrlOverrides(ports.gateUrlOverrides, 'admission', input.configuration.registry.spec.gateEndpoints);
+  const hostPolicy: PersistedHostPolicy = freeze({
+    policyProfile: ports.policyProfile ?? 'local',
+    allowWorkflowWrites: ports.allowWorkflowWrites === true,
+  });
+  const effectivePorts: ControllerPorts = {
+    ...ports,
+    policyProfile: hostPolicy.policyProfile,
+    allowWorkflowWrites: hostPolicy.allowWorkflowWrites,
+  };
   const runId = id(input.runId), root = resolve(text(input.runRoot)), repository = resolve(text(input.repository)), directory = join(root, runId);
   const excluded = [repository, process.cwd(), ...state.input.untrustedRoots];
   await privateDirectory(root, excluded);
@@ -137,13 +160,13 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
       policy: { version: 1, leaseMs: resolveStoreLeaseMs(input.configuration, plan), cost: 'observe_only' }, binding: { coreApiVersion: 'loopwright.dev/v1alpha1', hostVersion: 's04-controller-v1', adapters,
         resourceVersion: plan.task.spec.trustedContext.revision, clockEpoch: 'boot.' + hash(await bootIdentity()).hex.slice(0, 40) } };
     const descriptor: RunDescriptor = { version: 1, identity, plan: planRef, source: source.inventory, sourceWorkspace: source.workspace,
-      configuration: { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256, ...(state.input.roleModelOverrides !== undefined ? { roleModelOverrides: state.input.roleModelOverrides } : {}) }, repository };
+      configuration: { configPath: state.input.configPath, registryPath: state.input.registryPath, registrySha256: state.input.registrySha256, ...(state.input.roleModelOverrides !== undefined ? { roleModelOverrides: state.input.roleModelOverrides } : {}) }, repository, hostPolicy };
     state.vault.assertClean(descriptor); await exclusiveJson(join(directory, 'run.json'), descriptor);
     store = stateValue(createLocalRun(identity)); const current = stateValue(store.inspect()), authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: current.owner.generation, expectedRevision: current.revision, mode: 'active' })).authority;
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, planRef, source.inventory);
     // lockRef is private provenance; source/plan remain the four-ref checkpoint roots.
     await artifacts.json('admission', { version: 1, lock: lockRef, source: source.inventory, plan: planRef }, 65536);
-    return { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports };
+    return { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports: effectivePorts };
   } catch (error) { if (store) stateValue(store.close()); if (owner) await owner.release(); throw error; }
 }
 export class Cycle {
@@ -314,7 +337,7 @@ export class Cycle {
     stepId: string,
     attemptId: string,
     candidateDigest: Digest,
-    files: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+    files: readonly CandidateFileEntry[],
     deleted: readonly string[],
   ): Promise<void> {
     const hook = this.context.ports.decisions?.triageCandidateDiff;
@@ -326,7 +349,9 @@ export class Cycle {
       const present = new Set(files.map(item => item.name));
       modifiedFiles = files.filter(file => {
         const baseBytes = baseByPath.get(file.name);
-        return baseBytes === undefined || !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
+        if (baseBytes === undefined) return true;
+        if ('bytes' in file) return !Buffer.from(baseBytes).equals(Buffer.from(file.bytes));
+        return baseBytes.byteLength !== file.byteLength || hash(baseBytes).hex !== file.digest.hex;
       });
       for (const base of this.context.source.artifacts) {
         if (!present.has(base.name)) effectiveDeleted.push(base.name);
@@ -342,9 +367,43 @@ export class Cycle {
     ].sort();
     let addedLines = 0;
     for (const file of modifiedFiles) {
-      let count = 0;
-      for (let i = 0; i < file.bytes.byteLength; i++) if (file.bytes[i] === 10) count++;
-      addedLines += file.bytes.byteLength > 0 ? Math.max(1, count) : 0;
+      if ('bytes' in file) {
+        if (file.bytes.byteLength === 0) continue;
+        if (file.bytes.byteLength > 262_144) {
+          addedLines += 1;
+          continue;
+        }
+        let count = 0;
+        for (let i = 0; i < file.bytes.byteLength; i++) if (file.bytes[i] === 10) count++;
+        addedLines += Math.max(1, count);
+      } else {
+        if (file.byteLength === 0) continue;
+        if (file.byteLength > 262_144) {
+          addedLines += 1;
+          continue;
+        }
+        let count = 0;
+        try {
+          await streamVerifiedCasBlob(
+            this.context.artifacts.directory,
+            {
+              name: file.name,
+              sha256: file.digest.hex,
+              byteLength: file.byteLength,
+              uri: 'cas://sha256/' + file.digest.hex,
+              path: file.blobPath,
+            },
+            chunk => {
+              for (let i = 0; i < chunk.byteLength; i++) if (chunk[i] === 10) count++;
+            },
+            'execution',
+          );
+          addedLines += Math.max(1, count);
+        } catch (error) {
+          if (error instanceof ControllerFailure) throw error;
+          addedLines += 1;
+        }
+      }
     }
     const summary: CandidateDiffSummary = freeze({
       changedFiles,
@@ -596,7 +655,7 @@ export class Cycle {
     repair: ControllerAttempt['repair'],
     originalInvalidRaw: ArtifactRef | null,
     ignoreArtifactPath: boolean,
-    previousFiles: readonly { readonly name: string; readonly bytes: Uint8Array }[],
+    previousFiles: readonly CandidateFileEntry[],
     expectedKind: 'submission' | 'verdict',
   ): Promise<CapturedStepOutput> {
     const { artifacts, plan } = this.context;
@@ -643,8 +702,18 @@ export class Cycle {
       else throw error;
     }
     if (failure) {
-      const selected = ignoreArtifactPath || plan.controls.submission.path === null ? undefined : captured.artifacts.find(file => file.name === plan.controls.submission.path)?.bytes;
-      failedRaw = repair === 'format' || selected === undefined ? captured.submission : await artifacts.put('submission', selected, 1048576);
+      const selectedFile = ignoreArtifactPath || plan.controls.submission.path === null
+        ? undefined
+        : captured.artifacts.find(file => file.name === plan.controls.submission.path);
+      let selectedBytes: Uint8Array | undefined;
+      if (selectedFile !== undefined) {
+        try {
+          selectedBytes = await readSubmissionCandidateBytes(selectedFile, artifacts, 'verification');
+        } catch {
+          selectedBytes = undefined;
+        }
+      }
+      failedRaw = repair === 'format' || selectedBytes === undefined ? captured.submission : await artifacts.put('submission', selectedBytes, 1048576);
     }
 
     const currentEpoch = this.draft.reworkEpoch ?? 0;
@@ -860,7 +929,7 @@ export class Cycle {
         const checkpoint = stateValue(store.getCheckpoint(prior.finished!.nativeCheckpointId!));
         if (same(checkpoint.subject.candidateDigest, this.draft.candidate.digest)) {
           const identified = identifyManifest(parsePrivateJson(await artifacts.read(checkedRef(wrapper.originalManifest), bounds.manifestMaxBytes), bounds.manifestMaxBytes, bounds.collectionLimit), bounds.options); if (!identified.ok) refuse('RECOVERY_REQUIRED', '', 'recovery'); nativeManifest = identified.value.manifest;
-          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.workspaceMaxBytes)) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 67108864) } };
+          restore = { checkpointId: checkpoint.checkpointId, workspace: { ref: checkpoint.workspace, bytes: await artifacts.read(checkpoint.workspace, Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes)) }, session: { ref: checkpoint.privateSession!, bytes: await artifacts.read(checkpoint.privateSession!, 67108864) } };
         }
       }
       if (purpose === 'compaction' && restore === null) refuse('CAPABILITY_UNSUPPORTED', '', 'execution');
@@ -873,8 +942,14 @@ export class Cycle {
       baseline = { directory: baselineDirectory, entries: this.context.source.baselineEntries ?? [] };
     }
     const host: PiHostV2 = { store, authority, directory: hostDirectory, artifactsDirectory: artifacts.directory, dockerExecutable: role.runtime.dockerExecutable, dockerSocket: role.runtime.dockerSocket, runtime: role.runtime.identity,
+      createCandidateStreamChecker: () => approvedState(loaded).vault.createStreamChecker(),
       ...approvedState(loaded).vault.bind({ runId: lock.spec.runId, roleId: role.roleId, stepId: nativeStepId, providerCredentialRef: role.providerCredentialRef, selection: role.policy.selection, mcp: role.policy.mcp }) };
-    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: this.candidate.files, ...(baseline ? { baseline } : {}) }, resources: roleResources, restore };
+    const piCandidateArtifacts: readonly PiCandidateArtifactInput[] = this.candidate.files.map(file =>
+      'bytes' in file
+        ? { name: file.name, bytes: file.bytes }
+        : { name: file.name, byteLength: file.byteLength, digest: file.digest, blobPath: file.blobPath },
+    );
+    const input: PiOpenInputV2 = { version: 2, lock, roleId: role.roleId, stepId: nativeStepId, sessionId, policy: role.policy, candidate: { manifest: nativeManifest, baseRevision: plan.task.spec.target.baseRevision, sourceRevision: plan.task.spec.target.sourceRevision, artifacts: piCandidateArtifacts, ...(baseline ? { baseline } : {}) }, resources: roleResources, restore };
     const release = await this.context.owner.holdLocalActivity(); let noEffectMcpAuth = false;
 let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: ArtifactRef | null = null; let structureFailure: ControllerDiagnostic['code'] | null;
     let noEffectBudget = false;
@@ -905,12 +980,12 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       noEffectMcpAuth = outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.error?.effect === 'none' && outcome.requestIds.length === 0 && outcome.operationIds.length === 0
         && outcome.providerTermination === 'none' && outcome.usage === 'none' && outcome.localCleanup === 'complete' && outcome.cleanupError === null;
       if (outcome.status === 'blocked' && outcome.error?.code === 'MCP_AUTHENTICATION_REQUIRED' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
-        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, this.context.ports.allowWorkflowWrites === true); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
+        this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, cycleHostProtection(this.context)); structureFailure = await this.completeCapture(attempt, captured); refuse('MCP_AUTHENTICATION_REQUIRED', '', 'execution', { piCode: 'MCP_AUTHENTICATION_REQUIRED', effect: outcome.error.effect }); }
       if (!noEffectBudget && outcome.status === 'failed' && outcome.error !== null && isBudgetRefusal(outcome.error) && outcome.error.effect === 'confirmed' && outcome.providerTermination === 'confirmed' && outcome.usage === 'complete' && outcome.localCleanup === 'complete' && outcome.cleanupError === null) {
         midSessionBudget = { piCode: outcome.error.code, stateCode: outcome.error.stateErrorCode };
       }
       if (outcome.status !== 'execution_settled' || outcome.providerTermination !== 'confirmed' || outcome.usage !== 'complete') refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: outcome.error?.code ?? null, effect: outcome.error?.effect ?? 'possible' });
-      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, this.context.ports.allowWorkflowWrites === true);
+      this.deadline.assert(); const captured = await captureRole(adapter, store, artifacts, lock, role, attempt, outcome, this.context.source, cycleHostProtection(this.context));
       if ((repair === 'format' || purpose === 'compaction') && !same(captured.digest, oldDigest)) refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'confirmed' });
       structureFailure = await this.completeCapture(attempt, captured);
       if (stateValue(store.inspect()).ledger.admittedCalls + delegatedCounts.modelCalls > lock.spec.contract.spec.budgets.maxModelCalls) {
@@ -960,7 +1035,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     if (!adopt) { await this.role(attempt.nodeId, attempt.repair, undefined, attempt); return; }
     const original = this.context.plan.roles.find(role => role.roleId === this.context.plan.orderedDAG.find(node => node.id === attempt.nodeId)!.roleId)!;
     const role = attempt.repair === 'format' ? { ...original, policy: formatPolicy(original.policy) } : original;
-    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt, undefined, this.context.source, this.context.ports.allowWorkflowWrites === true);
+    const captured = await adoptRoleCapture(this.context.store, this.context.artifacts, this.context.lock, role, attempt, undefined, this.context.source, cycleHostProtection(this.context));
     const failure = await this.completeCapture(attempt, captured);
     if (failure === 'SUBMISSION_AMBIGUOUS') refuse(failure, '', 'verification');
     if (failure === 'SUBMISSION_INVALID') await this.repairFormat(attempt.nodeId);
@@ -1291,6 +1366,7 @@ export function runCycleWithPorts(input: RunCycleInput, ports: ControllerPorts =
     if (fields.some(key => !['configuration', 'repository', 'runRoot', 'runId', 'signal', 'onEvent'].includes(key))) refuse('CONFIG_SCHEMA', '', 'admission');
     if (input.onEvent !== undefined && typeof input.onEvent !== 'function' || input.signal !== undefined && !(input.signal instanceof AbortSignal)) refuse('CONFIG_SCHEMA', '', 'admission');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'admission');
+    validatePortPolicyFields(ports, 'admission');
     if (input.signal?.aborted) refuse('CANCELLED', '', 'admission');
     const compiled = await compilePlan(input.configuration); if (!compiled.ok) throw new ControllerFailure(compiled.error);
     validateGateUrlOverrides(ports.gateUrlOverrides, 'admission', input.configuration.registry.spec.gateEndpoints);

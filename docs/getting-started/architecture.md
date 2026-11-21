@@ -29,12 +29,12 @@ Loopwright supports two distinct configuration and execution modes sharing one v
 
 | Dimension | Declarative taskpack | Managed controller |
 | --- | --- | --- |
-| Target user | Repository maintainers | Platform and security operators |
+| Target user | Repository maintainers and local CLI users | Platform and security operators |
 | Files authored | One `.loopwright/taskpack.yaml` in repo | Out-of-repo `registry.yaml` and `controller.yaml` |
 | Digest pinning | Compiled automatically by host | Pinned manually via SHA-256 (`--registry-sha256`) |
 | Execution graph | Single compiled author + check pipeline | Custom multi-step `agent` and `check` DAG |
-| Credential wiring | Mapped from Action or App environment | Explicit `credentialBindings` and path templates |
-| Key advantage | Zero boilerplate; turnkey triggers and PRs | Duty separation, custom gates/MCP, local CLI control |
+| Credential wiring | Mapped from local CLI, Action, or App environment | Explicit `credentialBindings` and path templates |
+| Key advantage | Zero boilerplate; local CLI or GitHub automation | Duty separation, custom gates/MCP, local CLI control |
 | Walkthrough | [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) | [Managed Controller](../walkthroughs/managed-controller.md) |
 
 ## Configuration surfaces
@@ -66,7 +66,9 @@ Deployment host qualification (`qualifyDeploymentHostProfile`) enforces these ba
 
 ## Trust boundaries
 
-Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local fixture proof never establishes live provider or production qualification, and unknown external effects remain unknown until reconciled.
+Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local runs enforce neutral `.git` and `<controlRoot>` protection while GitHub entrypoints enforce triggers, PR publication, and `.github/workflows/**` dual-key locks.
+
+Large overlays stream through SHA-256 verified CAS blob pointers (`1 MiB` chunks, up to `16,384` files and `16 GiB`) instead of inline base64 buffers. Local fixture proof never establishes live provider qualification, and unknown external effects stay unknown until reconciled.
 
 ---
 

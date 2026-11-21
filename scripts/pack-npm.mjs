@@ -15,6 +15,7 @@ const WORKSPACE_PACKAGES = [
   'taskpack-runner',
   'memory',
   'decisions',
+  'taskpack',
   'github-app',
   'cli'
 ];

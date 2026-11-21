@@ -8,7 +8,7 @@ import { approvedState, loadConfiguration } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner } from './ownership.js';
-import { admitRetainedRun, readRetained } from './retained.js';
+import { admitRetainedRun, readRetained, validatePortPolicyFields, validatePortsAgainstHostPolicy } from './retained.js';
 import { resumeCycleWithPorts } from './recovery.js';
 import { ArtifactStore, checkedRef, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
@@ -42,6 +42,7 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
     const fields = Object.keys(input); record(input, fields);
     if (fields.some(key => !['configuration', 'runRoot', 'runId', 'receipt', 'signal'].includes(key)) || input.signal !== undefined && !(input.signal instanceof AbortSignal)) refuse('CONFIG_SCHEMA', '', 'recovery');
     validateGateUrlOverrides(ports.gateUrlOverrides, 'recovery');
+    validatePortPolicyFields(ports, 'recovery');
     const receiptBytes = await readReceiptFile(input.receipt);
     let raw: unknown; try { raw = parsePrivateJson(receiptBytes, RECEIPT_BYTES); } catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
     const kind = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).kind : null;
@@ -65,13 +66,14 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
   }, 'recovery');
 }
 /** Shared retained-run admission for both reconciliation paths. */
-async function admit(input: ReconcileCycleInput, plan: import('./types.js').CompiledPlan) {
+async function admit(input: ReconcileCycleInput, plan: import('./types.js').CompiledPlan, ports: ControllerPorts) {
   const admitted = await admitRetainedRun({ runRoot: input.runRoot, runId: input.runId, configuration: input.configuration, phase: 'recovery' });
   if (!same(plan, admitted.plan)) refuse('RECOVERY_REQUIRED', '', 'recovery');
-  return admitted;
+  const effectivePorts = validatePortsAgainstHostPolicy(ports, admitted.hostPolicy, 'recovery');
+  return { ...admitted, effectivePorts };
 }
 async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, receiptBytes: Buffer, ports: ControllerPorts) {
-  const { directory, descriptor, lock } = await admit(input, plan);
+  const { directory, descriptor, lock, effectivePorts } = await admit(input, plan, ports);
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
   try {
     owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
@@ -188,7 +190,7 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     stateValue(store.release(authority)); authority = null;
     stateValue(store.close()); store = null;
     await owner.release(); owner = null;
-    const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, ports);
+    const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, effectivePorts);
     if (!execution.ok && execution.error.code === 'CAPABILITY_UNSUPPORTED') {
       return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'delegated_step_required' }) as ReconcileExecution;
     }
@@ -227,7 +229,7 @@ async function replaceMarker(path: string, value: unknown, vault: { assertClean:
 async function reconcilePublication(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, raw: unknown, ports: ControllerPorts) {
   const publication = plan.publication;
   if (publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
-  const { directory, descriptor, lock } = await admit(input, plan);
+  const { directory, descriptor, lock, effectivePorts } = await admit(input, plan, ports);
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
   try {
     owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
@@ -303,7 +305,7 @@ async function reconcilePublication(input: ReconcileCycleInput, state: ReturnTyp
       stateValue(store.release(authority)); authority = null;
       stateValue(store.close()); store = null;
       await owner.release(); owner = null;
-      const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, ports);
+      const execution = await resumeCycleWithPorts({ configuration: input.configuration, repository: descriptor.repository, runRoot: input.runRoot, runId: input.runId, ...(input.signal ? { signal: input.signal } : {}) }, effectivePorts);
       if (!execution.ok || execution.value.kind !== 'result') refuse('RECOVERY_REQUIRED', '', 'recovery');
       const status = execution.value.result.spec.status;
       if (status === 'reconcile_required') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;

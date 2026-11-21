@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { lstat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { OVERLAY_LIMITS } from '@loopwright/core';
 import { retainedFixture } from './progress-fixtures.js';
 import { cycleFixture } from './scheduling-fixtures.js';
 import { runCycleWithPorts } from '../src/controller.js';
+import { overlayManifestBounds } from '../src/source.js';
 import { JSON_FILE_BYTES } from '../src/verifier-protocol.js';
 import { canonical, hash } from '../src/schema.js';
 import type { ControllerProgress } from '../src/types.js';
@@ -46,4 +48,65 @@ test('v2 conservative refusal row envelopes fit unchanged progress/index/checkpo
     assert.ok(checkpointBound <= 40960); assert.equal(Math.max(...measurements.map(row => row.J)), 28); assert.ok(measurements.some(row => row.D === 64));
     await writeFile(join(f.directory, 'v2-codec-envelope-proof.json'), canonical({ version: 1, kind: 'conservative-codec-upper-envelope-only', authoritativeRows: false, checkpointBound, rows: measurements, maximumProgressBytes: Math.max(...measurements.map(row => row.progressBytes)), maximumIndexBytes: Math.max(...measurements.map(row => row.indexBytes)), checkpointCount: 0, modelCalls: 0 }), { mode: 0o600 });
   } finally { await f.close(); }
+});
+
+test('overlayManifestBounds and parsePrivateJson scale to 16,384 maxMaxFiles (32 MiB v2WorkspaceJson, 80 MiB manifest, 8 MiB checkpointInput) and cap workspaceMaxBytes at 96 MiB', async () => {
+  const { parsePrivateJson } = await import('../src/parser.js');
+  const { maxPacketBytes, overlayProtocolBounds } = await import('../src/verifier-protocol.js');
+  const f = await retainedFixture();
+  try {
+    const defBounds = overlayManifestBounds();
+    assert.equal(defBounds.perFileMaxBytes, 1_048_576);
+    assert.equal(defBounds.v2WorkspaceJsonMaxBytes, 1_048_576);
+    assert.equal(defBounds.workspaceMaxBytes, 8_388_608);
+    assert.equal(defBounds.checkpointInputMaxBytes, 40_960);
+
+    const bounds64M = overlayManifestBounds({ maxFiles: 512, maxBytes: 67_108_864 });
+    assert.equal(bounds64M.perFileMaxBytes, 67_108_864);
+    assert.ok(bounds64M.v2WorkspaceJsonMaxBytes > 1_048_576 && bounds64M.v2WorkspaceJsonMaxBytes <= 33_554_432);
+    assert.ok(bounds64M.workspaceMaxBytes <= 100_663_296);
+
+    const bounds256M = overlayManifestBounds({ maxFiles: 512, maxBytes: 268_435_456 });
+    assert.equal(bounds256M.perFileMaxBytes, 268_435_456);
+    assert.equal(bounds256M.v2WorkspaceJsonMaxBytes, bounds64M.v2WorkspaceJsonMaxBytes);
+    assert.equal(bounds256M.workspaceMaxBytes, 100_663_296);
+
+    assert.equal(OVERLAY_LIMITS.maxMaxFiles, 16_384);
+    const bounds16G = overlayManifestBounds({ maxFiles: OVERLAY_LIMITS.maxMaxFiles, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.equal(bounds16G.maxFiles, 16_384);
+    assert.equal(bounds16G.perFileMaxBytes, OVERLAY_LIMITS.maxMaxBytes);
+    assert.ok(bounds16G.manifestMaxBytes <= 83_886_080 && bounds16G.manifestMaxBytes > 20_971_520);
+    assert.equal(bounds16G.v2WorkspaceJsonMaxBytes, 33_554_432);
+    assert.equal(bounds16G.checkpointInputMaxBytes, 8_388_608);
+    assert.equal(bounds16G.workspaceMaxBytes, 100_663_296);
+
+    const proto16k = overlayProtocolBounds({ maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes });
+    assert.equal(proto16k.manifestMaxBytes, bounds16G.manifestMaxBytes);
+    assert.ok(proto16k.inventoryMaxBytes <= 83_886_080 && proto16k.inventoryMaxBytes > 20_971_520);
+    assert.ok(maxPacketBytes({ payloadKind: 'guard', overlay: { maxFiles: 16_384, maxBytes: OVERLAY_LIMITS.maxMaxBytes } }) <= 167_772_160);
+
+    // parsePrivateJson scales collectionLimit up to 65,536 and dynamic nodeLimit for 16,384-entry manifests/v2 captures
+    const wideDoc = {
+      format: 'delegated-capture.v2',
+      version: 2,
+      overlay: Array.from({ length: 16_384 }, (_, idx) => ({
+        name: `src/f-${idx}.ts`,
+        mode: '100644',
+        sha256: 'a'.repeat(64),
+        byteLength: 16,
+        blobRef: { name: `src/f-${idx}.ts`, byteLength: 16, digest: { algorithm: 'sha256', hex: 'a'.repeat(64) }, uri: `cas://sha256/${'a'.repeat(64)}` },
+      })),
+    };
+    const wideBytes = Buffer.from(JSON.stringify(wideDoc), 'utf8');
+    const parsedWide = parsePrivateJson(wideBytes, bounds16G.v2WorkspaceJsonMaxBytes, bounds16G.collectionLimit) as { overlay: unknown[] };
+    assert.equal(parsedWide.overlay.length, 16_384);
+    assert.throws(() => parsePrivateJson(Buffer.from('[]'), 1024, 65_537));
+
+    const stored = await f.artifacts.json('workspace', { format: 'delegated-capture.v2', version: 2, overlay: [] }, bounds16G.v2WorkspaceJsonMaxBytes);
+    assert.ok(stored.byteLength > 0);
+    const legacyStored = await f.artifacts.json('workspace', { format: 'delegated-capture.v1', version: 1, overlay: [] }, bounds16G.workspaceMaxBytes);
+    assert.ok(legacyStored.byteLength > 0);
+  } finally {
+    await f.close();
+  }
 });

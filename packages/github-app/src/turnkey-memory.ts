@@ -1,73 +1,68 @@
 import { randomBytes } from 'node:crypto';
 import { constants as fsConstants, existsSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { validateDocument } from '@loopwright/core';
+import { dirname, join } from 'node:path';
 import {
-  applyMemoryProposalCAS,
   canonical as canonicalMemory,
   DEFAULT_MEMORY_MAX_ENTRIES,
   DEFAULT_MEMORY_TTL_DAYS,
   digestEqual,
-  finalizeRunMemory,
   isMemoryManagedPath,
   loadMemoryStore,
   MAX_MEMORY_ENTRY_FILE_BYTES,
   MAX_MEMORY_INDEX_FILE_BYTES,
   MemoryDiagnosticError,
   resolveSettledCycleContext,
-  type MemoryCASResult,
   type MemoryEntry,
   type MemoryFinalizerConfig,
-  type MemoryProposal,
-  type MemoryStoreIndex,
-  type ResolvedSettledCycleContext,
-  type SeparateMemoryPullRequestSpec,
 } from '@loopwright/memory';
-import { sanitizeReportText } from './output-format.js';
 import {
-  compileScopePatterns,
-  resolveManifestControlRoot,
-  resolveTaskpackMemoryLocation,
-} from './taskpack.js';
-import { assertCleanArtifact, SecretScrubber } from './token-broker.js';
-import {
+  applyAndValidateTurnkeyMemoryCAS,
+  assertCleanArtifact,
+  buildCleanGitEnv,
+  buildEmptyMemorySummary,
   buildGitAuthEnv,
-  CONTROLLER_ID_PATTERN,
+  buildUpstreamMemoryVersions,
+  COMMIT_SHA_PATTERN,
+  DEFAULT_GIT_COMMIT_IDENTITY,
   execGit,
   execGitDetailed,
+  fetchBoundedText,
+  finalizeLocalTurnkeyMemory,
+  finalizeTurnkeyProposal,
   hasSymlinkAtOrAbove,
+  isPlainRecord,
   listTreeEntriesAtRevision,
   MAX_REASON_CODEPOINTS,
+  readRegularJsonBounded,
   removePathsFromIndex,
+  REPOSITORY_FULL_NAME_PATTERN,
+  resolveManifestControlRoot,
+  resolveSafeRunDirectory,
+  resolveTaskpackMemoryLocation,
+  resolveVerifiedSettledRun,
   SAFE_BRANCH_PATTERN,
+  sanitizeReportText,
+  scrubTurnkeyReason,
+  SecretScrubber,
   stageEntriesInIndex,
   truncateCodePoints,
-} from './turnkey.js';
-import {
-  GitHubAppError,
-  PROTECTED_AUTOMATION_PATHS,
-  REPOSITORY_FULL_NAME_PATTERN,
+  validateGitCommitIdentity,
+  validateGitRemoteSource,
+  verifyDescriptorAndBudgetSkip,
+  verifyRetainedRunDescriptorIfPresent,
+  type ExpectedSettledRunBindings,
   type GitCommitIdentity,
+  type ManagedPullRequestInfo,
   type TargetMatrixCell,
   type TaskpackManifest,
   type TaskpackUpstreamRecord,
   type TurnkeyMemorySummary,
-} from './types.js';
-import {
-  buildCleanGitEnv,
-  buildUpstreamMemoryVersions,
-  COMMIT_SHA_PATTERN,
-  DEFAULT_GIT_COMMIT_IDENTITY,
-  fetchBoundedText,
-  findOpenMemoryPullRequest,
-  isPlainRecord,
-  type ManagedPullRequestInfo,
   type UpstreamAcquisitionRecord,
-  validateGitCommitIdentity,
-  validateGitRemoteSource,
-} from './upstreams.js';
+} from '@loopwright/taskpack';
+import { GitHubAppError } from './types.js';
+import { findOpenMemoryPullRequest } from './upstreams.js';
 
 export interface FinalizeAndPublishTurnkeyMemoryOptions {
   readonly runRoot: string;
@@ -96,44 +91,6 @@ const MAX_MANAGED_MEMORY_FILES = 2_049;
 const MAX_MEMORY_INDEX_BLOB_BYTES = MAX_MEMORY_INDEX_FILE_BYTES;
 const MAX_MEMORY_ENTRY_BLOB_BYTES = MAX_MEMORY_ENTRY_FILE_BYTES;
 
-function buildMemoryProtectedPaths(
-  manifest: TaskpackManifest,
-  controlRoot: string,
-  manifestPath: string | undefined,
-): { readonly protectedPaths: readonly string[]; readonly compilerAutoMemoryProtected: readonly string[] } {
-  const userProtectedPatterns = compileScopePatterns(manifest.spec.scope.protected, 'protected');
-  const userProtectedSet = new Set<string>(userProtectedPatterns);
-  const declaredCommandScripts = manifest.spec.verification.localChecks.flatMap(check =>
-    check.implementation === 'command.v1' && typeof check.parameters?.['script'] === 'string' && check.parameters['script'].length > 0
-      ? [check.parameters['script']]
-      : [],
-  );
-  const protectedPaths = [
-    ...new Set([
-      '.github',
-      '.github/**',
-      ...PROTECTED_AUTOMATION_PATHS.flatMap(entry => [entry, `${entry}/**`]),
-      `${controlRoot}/policies`,
-      `${controlRoot}/policies/**`,
-      `${controlRoot}/checks`,
-      `${controlRoot}/checks/**`,
-      `${controlRoot}/taskpack.yaml`,
-      `${controlRoot}/taskpack.yml`,
-      `${controlRoot}/taskpack.json`,
-      ...(manifestPath !== undefined ? [manifestPath] : []),
-      ...(manifest.spec.instructions ?? []),
-      ...declaredCommandScripts,
-      ...userProtectedPatterns,
-    ]),
-  ];
-  const compilerAutoMemoryProtected = [
-    `${controlRoot}/**`,
-    `${controlRoot}/memory/**`,
-    `${manifest.spec.memory.directory}/**`,
-  ].filter(pattern => !userProtectedSet.has(pattern));
-  return { protectedPaths, compilerAutoMemoryProtected };
-}
-
 interface PerRunMemoryReceipt {
   readonly version: 1;
   readonly state: 'uncertain' | 'completed';
@@ -151,81 +108,6 @@ interface PerRunMemoryReceipt {
   readonly pullRequestNumber: number | null;
   readonly reason: string | null;
   readonly updatedAtMs: number;
-}
-
-async function resolveSafeRunDirectory(
-  runRoot: string,
-  runId: string,
-  createIfMissing: boolean,
-): Promise<string | null> {
-  if (!CONTROLLER_ID_PATTERN.test(runId) || runId.length > 128) {
-    throw new GitHubAppError('ACTION_INPUT_INVALID', `invalid runId "${runId}" for memory publication receipt`);
-  }
-  const absRoot = resolve(runRoot);
-  const rootStats = await lstat(absRoot).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === 'ENOENT') return null;
-    throw err;
-  });
-  if (rootStats === null) {
-    if (!createIfMissing) return null;
-    await mkdir(absRoot, { recursive: true, mode: 0o700 });
-  } else if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
-    throw new GitHubAppError('ACTION_INPUT_INVALID', 'runRoot must be a non-symlink directory');
-  }
-  const runDir = join(absRoot, runId);
-  const runStats = await lstat(runDir).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === 'ENOENT') return null;
-    throw err;
-  });
-  if (runStats === null) {
-    if (!createIfMissing) return null;
-    await mkdir(runDir, { mode: 0o700 });
-    return runDir;
-  }
-  if (runStats.isSymbolicLink() || !runStats.isDirectory()) {
-    throw new GitHubAppError('ACTION_INPUT_INVALID', 'run directory must be a non-symlink directory');
-  }
-  return runDir;
-}
-
-async function readRegularJsonBounded(
-  filePath: string,
-  maxBytes: number,
-  label: string,
-): Promise<{ readonly exists: false } | { readonly exists: true; readonly value: unknown }> {
-  const handle = await open(
-    filePath,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0),
-  ).catch(
-    (err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return null;
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `unable to open ${label}: ${err.code ?? err.message}`);
-    },
-  );
-  if (handle === null) return { exists: false };
-  try {
-    const st = await handle.stat();
-    if (!st.isFile()) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `${label} is not a regular file`);
-    }
-    if (st.size === 0 || st.size > maxBytes) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `corrupt ${label}; manual reconciliation required`);
-    }
-    const buf = Buffer.alloc(st.size);
-    let offset = 0;
-    while (offset < st.size) {
-      const { bytesRead } = await handle.read(buf, offset, st.size - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    try {
-      return { exists: true, value: JSON.parse(buf.subarray(0, offset).toString('utf8')) };
-    } catch {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `corrupt ${label}; manual reconciliation required`);
-    }
-  } finally {
-    await handle.close();
-  }
 }
 
 function parsePerRunMemoryReceipt(parsed: unknown): PerRunMemoryReceipt {
@@ -567,7 +449,6 @@ async function isSquashOrRebaseMergedMemoryBranch(options: {
       }
     }
 
-    // Check entries deleted on remoteMemStore relative to branchBaseStore (direct deletion on retire/eviction).
     for (const baseEntry of branchBaseStore.entries) {
       if (remoteCurrentById.has(baseEntry.id)) continue;
       hasRemoteChanges = true;
@@ -581,7 +462,6 @@ async function isSquashOrRebaseMergedMemoryBranch(options: {
       remoteRetiredById.set(row.entry.id, row);
     }
 
-    // Preserve legacy index.retired verification for pre-compaction memory branches.
     for (const row of remoteMemStore.retired) {
       const priorRetired = branchBaseRetiredById.get(row.entry.id);
       if (priorRetired !== undefined && canonicalMemory(priorRetired) === canonicalMemory(row)) {
@@ -605,7 +485,6 @@ async function isSquashOrRebaseMergedMemoryBranch(options: {
       }
     }
 
-    // Check legacy index.retired rows removed on remoteMemStore relative to branchBaseStore (full or partial compaction).
     for (const baseRetired of branchBaseStore.retired) {
       if (remoteRetiredById.has(baseRetired.entry.id)) continue;
       hasRemoteChanges = true;
@@ -762,330 +641,14 @@ function validateMemoryPullRequestApiResponse(
   return { ok: true, prNumber, prUrl };
 }
 
-function validateRetainedSettledRunBindings(
-  settled: Pick<ResolvedSettledCycleContext, 'lock' | 'result'> & { readonly incident?: ResolvedSettledCycleContext['incident'] },
-  expected: {
-    readonly runId: string;
-    readonly repositoryFullName: string;
-    readonly taskpack: string;
-    readonly baseRevision: string;
-  },
-): string | null {
-  if (settled.lock.spec.runId !== expected.runId) {
-    return `MEMORY_SCOPE_VIOLATION: retained run lock runId "${settled.lock.spec.runId}" does not match "${expected.runId}"`;
-  }
-  const lockedTarget = settled.lock.spec.contract.spec.target;
-  if (lockedTarget.repository !== expected.repositoryFullName) {
-    return `MEMORY_SCOPE_VIOLATION: retained run repository "${lockedTarget.repository}" does not match publication repository "${expected.repositoryFullName}"`;
-  }
-  if (settled.lock.spec.contract.spec.taskpack !== expected.taskpack) {
-    return `MEMORY_SCOPE_VIOLATION: retained run taskpack "${settled.lock.spec.contract.spec.taskpack}" does not match "${expected.taskpack}"`;
-  }
-  if (lockedTarget.baseRevision.toLowerCase() !== expected.baseRevision.toLowerCase()) {
-    return `MEMORY_SCOPE_VIOLATION: retained run baseRevision "${lockedTarget.baseRevision}" does not match "${expected.baseRevision}"`;
-  }
-  if (settled.result !== null) {
-    const subject = settled.result.spec.subject;
-    if (
-      subject.lockHash.hex !== settled.lock.spec.lockHash.hex
-      || subject.contractHash.hex !== settled.lock.spec.contractHash.hex
-      || subject.repository !== expected.repositoryFullName
-      || subject.baseRevision.toLowerCase() !== expected.baseRevision.toLowerCase()
-    ) {
-      return 'MEMORY_SCOPE_VIOLATION: retained RunResult subject does not match retained TaskLock and publication target';
-    }
-  }
-  if (settled.incident !== undefined && settled.incident !== null) {
-    if (
-      settled.incident.runId !== expected.runId
-      || settled.incident.lockHash.algorithm !== settled.lock.spec.lockHash.algorithm
-      || settled.incident.lockHash.hex !== settled.lock.spec.lockHash.hex
-    ) {
-      return 'MEMORY_SCOPE_VIOLATION: retained ControllerIncident does not match retained TaskLock';
-    }
-  }
-  return null;
-}
-
-async function verifyRetainedRunDescriptorIfPresent(
-  runRoot: string,
-  expected: {
-    readonly runId: string;
-    readonly repositoryFullName: string;
-    readonly taskpack: string;
-    readonly baseRevision: string;
-  },
-): Promise<string | null> {
-  const runDir = await resolveSafeRunDirectory(runRoot, expected.runId, false);
-  if (runDir === null) return null;
-  let rawRunJson: Awaited<ReturnType<typeof readRegularJsonBounded>>;
-  try {
-    rawRunJson = await readRegularJsonBounded(join(runDir, 'run.json'), 2 * 1024 * 1024, 'run.json');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return `MEMORY_SCHEMA_INVALID: ${msg}`;
-  }
-  if (!rawRunJson.exists) return null;
-  if (!isPlainRecord(rawRunJson.value) || !isPlainRecord(rawRunJson.value['identity'])) {
-    return 'MEMORY_SCHEMA_INVALID: retained run.json carries no valid identity record';
-  }
-  const lockDoc = validateDocument(rawRunJson.value['identity']['lock'], 'TaskLock');
-  if (!lockDoc.ok) {
-    return 'MEMORY_SCHEMA_INVALID: retained run.json carries no valid TaskLock';
-  }
-  return validateRetainedSettledRunBindings({ lock: lockDoc.value, result: null }, expected);
-}
-
-interface ExpectedSettledRunBindings {
-  readonly runId: string;
-  readonly repositoryFullName: string;
-  readonly taskpack: string;
-  readonly baseRevision: string;
-}
-
-function scrubTurnkeyReason(raw: string, scrubber: SecretScrubber): string {
-  return truncateCodePoints(
-    sanitizeReportText(raw, { scrub: text => scrubber.scrub(text), singleLine: true }),
-    MAX_REASON_CODEPOINTS,
-  );
-}
-
-function buildEmptyMemorySummary(
-  directory: string,
-  status: TurnkeyMemorySummary['status'],
-  reason: string | null,
-  overrides?: Partial<TurnkeyMemorySummary>,
-): TurnkeyMemorySummary {
-  return Object.freeze({
-    status,
-    directory,
-    proposalId: null,
-    entryCount: 0,
-    rebased: false,
-    branchName: null,
-    pullRequestUrl: null,
-    pullRequestNumber: null,
-    reason,
-    ...overrides,
-  });
-}
-
-async function verifyDescriptorAndBudgetSkip(options: {
-  readonly runRoot: string;
-  readonly runId: string;
-  readonly repositoryRoot: string;
-  readonly expectedBindings: ExpectedSettledRunBindings;
-  readonly finalizerConfig: MemoryFinalizerConfig;
-  readonly memoryDirectory: string;
-  readonly scrubber: SecretScrubber;
-}): Promise<TurnkeyMemorySummary | null> {
-  const { runRoot, runId, repositoryRoot, expectedBindings, finalizerConfig, memoryDirectory, scrubber } = options;
-  const earlyMismatch = await verifyRetainedRunDescriptorIfPresent(runRoot, expectedBindings);
-  if (earlyMismatch !== null) {
-    return buildEmptyMemorySummary(memoryDirectory, 'refused', scrubTurnkeyReason(earlyMismatch, scrubber));
-  }
-  if (finalizerConfig.onNoModelBudget === 'skip') {
-    const skipped = await finalizeRunMemory({
-      context: { kind: 'run_directory', runRoot, runId, repository: repositoryRoot },
-      config: { ...finalizerConfig, onNoModelBudget: 'skip' },
-    });
-    return buildEmptyMemorySummary(
-      memoryDirectory,
-      'skipped',
-      scrubber.scrub(skipped.reason ?? 'no_model_budget_skipped'),
-    );
-  }
-  return null;
-}
-
-async function resolveVerifiedSettledRun(options: {
-  readonly runRoot: string;
-  readonly runId: string;
-  readonly repository: string;
-  readonly expectedBindings: ExpectedSettledRunBindings;
-  readonly memoryDirectory: string;
-  readonly scrubber: SecretScrubber;
-}): Promise<
-  | { readonly ok: true; readonly settled: ResolvedSettledCycleContext }
-  | { readonly ok: false; readonly summary: TurnkeyMemorySummary }
-> {
-  const { runRoot, runId, repository, expectedBindings, memoryDirectory, scrubber } = options;
-  const settled = await resolveSettledCycleContext({
-    kind: 'run_directory',
-    runRoot,
-    runId,
-    repository,
-  });
-  const bindingMismatch = validateRetainedSettledRunBindings(settled, expectedBindings);
-  if (bindingMismatch !== null) {
-    return {
-      ok: false,
-      summary: buildEmptyMemorySummary(memoryDirectory, 'refused', scrubTurnkeyReason(bindingMismatch, scrubber)),
-    };
-  }
-  if (settled.result?.spec.status === 'reconcile_required') {
-    return {
-      ok: false,
-      summary: buildEmptyMemorySummary(memoryDirectory, 'skipped', 'primary_run_reconcile_required'),
-    };
-  }
-  return { ok: true, settled };
-}
-
-async function finalizeTurnkeyProposal(options: {
-  readonly runRoot: string;
-  readonly runId: string;
-  readonly repository: string;
-  readonly baseStore: MemoryStoreIndex;
-  readonly finalizerConfig: MemoryFinalizerConfig;
-  readonly memoryDirectory: string;
-  readonly scrubber: SecretScrubber;
-}): Promise<
-  | { readonly ok: true; readonly proposal: MemoryProposal }
-  | { readonly ok: false; readonly summary: TurnkeyMemorySummary; readonly proposal: MemoryProposal | null }
-> {
-  const { runRoot, runId, repository, baseStore, finalizerConfig, memoryDirectory, scrubber } = options;
-  const finalized = await finalizeRunMemory({
-    context: { kind: 'run_directory', runRoot, runId, repository },
-    config: finalizerConfig,
-  });
-  if (finalized.status === 'unavailable' || finalized.proposal === null) {
-    return {
-      ok: false,
-      proposal: null,
-      summary: buildEmptyMemorySummary(
-        memoryDirectory,
-        'failed',
-        scrubber.scrub(finalized.reason ?? 'memory finalization unavailable'),
-      ),
-    };
-  }
-  if (finalized.proposal.operations.length === 0 && baseStore.retired.length === 0) {
-    return {
-      ok: false,
-      proposal: finalized.proposal,
-      summary: buildEmptyMemorySummary(
-        memoryDirectory,
-        'no_entries',
-        'no deterministic memory entries produced for this run',
-        { proposalId: finalized.proposal.proposalId },
-      ),
-    };
-  }
-  return { ok: true, proposal: finalized.proposal };
-}
-
-async function applyAndValidateTurnkeyMemoryCAS(options: {
-  readonly repository: string;
-  readonly taskpack: string;
-  readonly proposal: MemoryProposal;
-  readonly settled: ResolvedSettledCycleContext;
-  readonly scrubber: SecretScrubber;
-  readonly manifest: TaskpackManifest;
-  readonly controlRoot: string;
-  readonly manifestPath: string | undefined;
-  readonly memoryRoot: string;
-  readonly memoryDirectory: string;
-  readonly targetBranch: string;
-  readonly currentRevision: string;
-  readonly baseStore: MemoryStoreIndex;
-  readonly nowMs: number;
-  readonly maxEntries: number;
-  readonly outsideScopeReason: string;
-}): Promise<
-  | { readonly ok: true; readonly rebased: boolean; readonly pullRequest: SeparateMemoryPullRequestSpec }
-  | { readonly ok: false; readonly rebased: boolean; readonly summary: TurnkeyMemorySummary }
-> {
-  const {
-    repository,
-    taskpack,
-    proposal,
-    settled,
-    scrubber,
-    manifest,
-    controlRoot,
-    manifestPath,
-    memoryRoot,
-    memoryDirectory,
-    targetBranch,
-    currentRevision,
-    baseStore,
-    nowMs,
-    maxEntries,
-    outsideScopeReason,
-  } = options;
-  const { protectedPaths, compilerAutoMemoryProtected } = buildMemoryProtectedPaths(manifest, controlRoot, manifestPath);
-  const casResult: MemoryCASResult = await applyMemoryProposalCAS({
-    repository,
-    taskpack,
-    proposal,
-    lock: settled.lock,
-    result: settled.result,
-    incident: settled.incident,
-    evidence: settled.evidence,
-    artifacts: settled.inventory,
-    candidateDigest: settled.result?.spec.subject.candidateDigest ?? null,
-    secretValues: scrubber.secretValues,
-    memoryRoot,
-    memoryWritable: [manifest.spec.memory.directory],
-    protectedPaths,
-    exemptContractProtectedPatterns: compilerAutoMemoryProtected,
-    targetBranch,
-    currentRevision,
-    baseStore,
-    allowRebase: true,
-    nowMs,
-    maxEntries,
-  });
-  if (!casResult.applied || casResult.pullRequest === null) {
-    const diagText = casResult.refusal?.diagnostics
-      .map(diag => `${diag.code} at ${diag.path}: ${diag.detail}`)
-      .join('; ') ?? 'memory CAS refused proposal';
-    return {
-      ok: false,
-      rebased: casResult.rebased,
-      summary: buildEmptyMemorySummary(memoryDirectory, 'refused', scrubber.scrub(diagText), {
-        proposalId: proposal.proposalId,
-        rebased: casResult.rebased,
-      }),
-    };
-  }
-  if (
-    casResult.pullRequest.excludesCodeCandidatePaths !== true
-    || casResult.pullRequest.modifiedFiles.some(file => !isMemoryManagedPath(taskpack, file.path, memoryRoot))
-  ) {
-    return {
-      ok: false,
-      rebased: casResult.rebased,
-      summary: buildEmptyMemorySummary(memoryDirectory, 'refused', outsideScopeReason, {
-        proposalId: proposal.proposalId,
-        rebased: casResult.rebased,
-      }),
-    };
-  }
-  if (casResult.pullRequest.modifiedFiles.length === 0) {
-    return {
-      ok: false,
-      rebased: casResult.rebased,
-      summary: buildEmptyMemorySummary(memoryDirectory, 'no_entries', 'memory store already matches proposed state', {
-        proposalId: proposal.proposalId,
-        rebased: casResult.rebased,
-      }),
-    };
-  }
-  return { ok: true, rebased: casResult.rebased, pullRequest: casResult.pullRequest };
-}
-
 /**
  * Fault-isolated post-settlement memory finalization and 5-gate CAS application.
  *
  * - `apply: 'separate-pull-request'` clones into an isolated scratch directory and
  *   publishes `loopwright/memory/<taskpack>/<targetBranch>` without mutating
  *   `repositoryRoot`, `.git/worktrees`, primary `RunResult`, or the candidate PR branch.
- * - `apply: 'local-only'` intentionally updates `<repositoryRoot>/<memoryDirectory>` in
- *   place after candidate execution and publication have already settled, leaving `.git`
- *   refs and remote branches untouched.
- * - `apply: 'disabled'` returns `'skipped'` (`'memory_apply_disabled'`) without side effects.
+ * - `apply: 'local-only'` and `apply: 'disabled'` delegate to `@loopwright/taskpack`
+ *   under `policyProfile: 'github'`.
  */
 export async function finalizeAndPublishTurnkeyMemory(
   options: FinalizeAndPublishTurnkeyMemoryOptions,
@@ -1107,18 +670,9 @@ export async function finalizeAndPublishTurnkeyMemory(
     memoryDirectory = resolvedLocation.memoryDirectory;
     const { manifestPath } = resolveManifestControlRoot(options.manifest, options.taskpackPath);
     const taskpack = options.manifest.metadata.name;
-    const targetBranch = options.manifest.spec.publication.targetBranch;
+    const targetBranch = options.manifest.spec.publication.targetBranch ?? 'main';
     const memoryBranch = `loopwright/memory/${taskpack}/${targetBranch}`;
     const memoryApply = options.manifest.spec.memory.apply;
-    const ttlDays = options.manifest.spec.memory.ttlDays ?? DEFAULT_MEMORY_TTL_DAYS;
-    const ttlMs = ttlDays * MS_PER_DAY;
-    const maxEntries = options.manifest.spec.memory.maxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES;
-    const checkCodeFingerprint = options.manifest.spec.memory.checkCodeFingerprint === true;
-    const checkUpstreamVersions = options.manifest.spec.memory.checkUpstreamVersions === true;
-    const manifestMatrix = options.manifest.spec.target?.matrix;
-    const targetMatrix = options.targetMatrix !== undefined
-      ? options.targetMatrix
-      : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
 
     if (memoryApply === 'disabled') {
       return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'memory_apply_disabled');
@@ -1128,9 +682,36 @@ export async function finalizeAndPublishTurnkeyMemory(
       return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'repositoryFullName is not an org/repo slug');
     }
 
+    if (memoryApply === 'local-only') {
+      return await finalizeLocalTurnkeyMemory({
+        runRoot: options.runRoot,
+        runId: options.runId,
+        repositoryRoot: options.repositoryRoot,
+        repositoryFullName: options.repositoryFullName,
+        manifest: options.manifest,
+        taskpackPath: options.taskpackPath,
+        baseRevision: options.baseRevision,
+        policyProfile: 'github',
+        upstreamRecords: options.upstreamRecords,
+        targetMatrix: options.targetMatrix,
+        scrubber,
+        nowMs,
+      });
+    }
+
     if (!COMMIT_SHA_PATTERN.test(options.baseRevision)) {
       return buildEmptyMemorySummary(memoryDirectory, 'failed', 'baseRevision is not a 40-hex commit SHA');
     }
+
+    const ttlDays = options.manifest.spec.memory.ttlDays ?? DEFAULT_MEMORY_TTL_DAYS;
+    const ttlMs = ttlDays * MS_PER_DAY;
+    const maxEntries = options.manifest.spec.memory.maxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES;
+    const checkCodeFingerprint = options.manifest.spec.memory.checkCodeFingerprint === true;
+    const checkUpstreamVersions = options.manifest.spec.memory.checkUpstreamVersions === true;
+    const manifestMatrix = options.manifest.spec.target?.matrix;
+    const targetMatrix = options.targetMatrix !== undefined
+      ? options.targetMatrix
+      : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
 
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,
@@ -1153,75 +734,6 @@ export async function finalizeAndPublishTurnkeyMemory(
       targetMatrix,
       upstreamVersions: buildUpstreamMemoryVersions(options.upstreamRecords as readonly UpstreamAcquisitionRecord[] | undefined),
     };
-
-    if (memoryApply === 'local-only') {
-      // Intentional contract: post-settlement local-only mode persists index.json and
-      // entries/*.md (including unlinking retired entries) directly under
-      // <repositoryRoot>/<memoryDirectory> without creating commits or remote branches.
-      const localBaseStore = (await loadMemoryStore(options.repositoryRoot, taskpack, options.repositoryFullName, memoryRoot)).index;
-      const preSkip = await verifyDescriptorAndBudgetSkip({
-        runRoot: options.runRoot,
-        runId: options.runId,
-        repositoryRoot: options.repositoryRoot,
-        expectedBindings,
-        finalizerConfig,
-        memoryDirectory,
-        scrubber,
-      });
-      if (preSkip !== null) return preSkip;
-
-      const settledOutcome = await resolveVerifiedSettledRun({
-        runRoot: options.runRoot,
-        runId: options.runId,
-        repository: options.repositoryRoot,
-        expectedBindings,
-        memoryDirectory,
-        scrubber,
-      });
-      if (!settledOutcome.ok) return settledOutcome.summary;
-
-      const finalizedOutcome = await finalizeTurnkeyProposal({
-        runRoot: options.runRoot,
-        runId: options.runId,
-        repository: options.repositoryRoot,
-        baseStore: localBaseStore,
-        finalizerConfig,
-        memoryDirectory,
-        scrubber,
-      });
-      if (finalizedOutcome.proposal !== null) {
-        trackedProposalId = finalizedOutcome.proposal.proposalId;
-        trackedEntryCount = finalizedOutcome.proposal.operations.length;
-      }
-      if (!finalizedOutcome.ok) return finalizedOutcome.summary;
-
-      const localCasOutcome = await applyAndValidateTurnkeyMemoryCAS({
-        repository: options.repositoryRoot,
-        taskpack,
-        proposal: finalizedOutcome.proposal,
-        settled: settledOutcome.settled,
-        scrubber,
-        manifest: options.manifest,
-        controlRoot,
-        manifestPath,
-        memoryRoot,
-        memoryDirectory,
-        targetBranch,
-        currentRevision: options.baseRevision,
-        baseStore: localBaseStore,
-        nowMs,
-        maxEntries,
-        outsideScopeReason: 'memory proposal touched paths outside the managed memory directory',
-      });
-      trackedRebased = localCasOutcome.rebased;
-      if (!localCasOutcome.ok) return localCasOutcome.summary;
-
-      return buildEmptyMemorySummary(memoryDirectory, 'local_only', null, {
-        proposalId: finalizedOutcome.proposal.proposalId,
-        entryCount: finalizedOutcome.proposal.operations.length,
-        rebased: localCasOutcome.rebased,
-      });
-    }
 
     // 0. Check per-run publication receipt before any replay or external mutation.
     let existingReceipt: PerRunMemoryReceipt | null = null;
@@ -1282,8 +794,7 @@ export async function finalizeAndPublishTurnkeyMemory(
       });
     }
 
-    // 1. Validate working-tree memory path segments on repositoryRoot before cloning so
-    //    untracked or working-tree symlinks/case-aliases under custom memoryRoot are refused immediately.
+    // 1. Validate working-tree memory path segments on repositoryRoot before cloning.
     await loadMemoryStore(options.repositoryRoot, taskpack, options.repositoryFullName, memoryRoot);
 
     // 2. Verify retained run descriptor and respect manifest.spec.memory.onNoModelBudget === 'skip'.
@@ -1391,8 +902,6 @@ export async function finalizeAndPublishTurnkeyMemory(
         && memoryBranchSafe
         && resolvedRemote !== undefined;
 
-      // Establish remote targetBranch tip before inspecting open memory PRs, pinning remote lease, or running CAS.
-      // When publishing remotely, target-fetch failure MUST abort publication rather than silently falling back to baseRevision.
       let currentTargetTip = options.baseRevision;
       if (canPublishRemote && resolvedRemote !== undefined) {
         if (!targetBranchSafe) {
@@ -1470,7 +979,6 @@ export async function finalizeAndPublishTurnkeyMemory(
         }
       }
 
-      // Pin expected remote head OID ONCE before reading base store or running CAS.
       let openMemoryPr: ManagedPullRequestInfo | null = null;
       let expectedRemoteOid = '';
       let openMemoryManagedFiles: readonly { readonly path: string; readonly bytes: Buffer }[] | null = null;
@@ -1726,6 +1234,7 @@ export async function finalizeAndPublishTurnkeyMemory(
         nowMs,
         maxEntries,
         outsideScopeReason: 'memory pull request specification touched paths outside the managed memory directory',
+        policyProfile: 'github',
       });
       trackedRebased = casResult.rebased;
       if (!casResult.ok) return casResult.summary;

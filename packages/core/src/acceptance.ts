@@ -5,7 +5,7 @@ import {
   type Infer, type MetricsMap, type MetricValue, type StructuredFinding,
 } from './contracts.js';
 import { DIAGNOSTIC_CODES, attempt, fail, type Diagnostic, type Result } from './diagnostics.js';
-import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifact } from './artifacts.js';
+import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifactInput } from './artifacts.js';
 import { claimSchema, evidenceSchema, type Evidence, type SubmittedCheck } from './evidence.js';
 import { unique } from './graph.js';
 import { deriveSubject, lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
@@ -142,7 +142,7 @@ export function verificationSchema(input: Json, path = ''): VerificationResult {
 }
 export function evaluateValidated(
   input: EvaluationInput,
-  artifacts: readonly ResolvedArtifact[],
+  artifacts: readonly ResolvedArtifactInput[],
   claimsPath: string,
   options?: OverlayLimitOptions,
 ): VerificationResult {
@@ -180,6 +180,16 @@ export function evaluateValidated(
     if (evidence && (evidence.spec.checkId !== claim.checkId || evidence.spec.observedStatus !== claim.status)) fail('EVIDENCE_CONTRADICTORY', `${claimsPath}/${index}/evidenceId`, claim.checkId);
   });
   const inventory = resolveInventory(artifacts, effectiveOverlay ? { overlay: effectiveOverlay } : undefined);
+  if (effectiveOverlay !== undefined && manifest.spec.baseTree !== undefined) {
+    let candidateOverlayTotal = 0;
+    for (let index = 0; index < manifest.spec.entries.length; index++) {
+      const entry = manifest.spec.entries[index]!;
+      if (entry.byteLength > effectiveOverlay.maxBytes - candidateOverlayTotal) {
+        fail('LIMIT_RESOLVED_BYTES', `/trusted/candidateManifest/spec/entries/${index}`);
+      }
+      candidateOverlayTotal += entry.byteLength;
+    }
+  }
   const candidateIssue = artifactIssue(manifest.spec.entries, inventory, '/trusted/candidateManifest/spec/entries');
   const issues = new Map(eligibleEvidence.map((evidence, index) => [evidence.metadata.id,
     artifactIssue(evidence.spec.artifacts, inventory, `/trusted/eligibleEvidence/${index}/spec/artifacts`)]));
@@ -247,7 +257,7 @@ export function evaluateValidated(
 }
 export function evaluateAcceptance(
   input: unknown,
-  artifacts: readonly ResolvedArtifact[],
+  artifacts: readonly ResolvedArtifactInput[],
   options?: OverlayLimitOptions,
 ): Result<VerificationResult> {
   return attempt(() => {

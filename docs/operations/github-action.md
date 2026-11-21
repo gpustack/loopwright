@@ -57,24 +57,24 @@ jobs:
 
 ## Execution and publication
 
-A live Action resolves repository identity and revisions, authorizes the actor, initializes `SecretScrubber`, runs `spec.preflight` if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires `spec.decisions` into `ControllerPorts.decisions`, and runs the controller.
+A live Action enforces `policyProfile: github` (persisted in `run.json` across recovery), validates event eligibility against declared `spec.triggers` strictly **before** `spec.preflight`, resolves repository identity and revisions, authorizes the actor, initializes `SecretScrubber`, runs `spec.preflight` if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires `spec.decisions` into `ControllerPorts.decisions`, and runs the controller.
 
 | Stage | Behavior |
 | --- | --- |
-| Preflight | Runs `spec.preflight.script` strictly after actor authorization and scrubber setup, stripping Loopwright, GitHub, and provider secrets |
+| Preflight | Validates `spec.triggers` first, then runs `spec.preflight.script` after actor auth and scrubber setup, stripping Loopwright, GitHub, and provider secrets |
 | Discover | Resolves upstreams, `upstreamGroups` lockstep holds (`held_back`), or `upstream-records`; `mode: auto` routes `no_change` to check-only checks |
-| Execute | Authors a candidate in sandboxed steps and verifies scope and local or external checks; eligible failures can enter bounded repair or `rejectTo` rework |
-| Publish | For `pull_request` mode, creates or updates a managed PR after verification |
+| Execute | Authors a candidate in sandboxed steps with CAS blob pointers and verifies scope and local or external checks; eligible failures can enter bounded repair or `rejectTo` rework |
+| Publish | For `pull_request` mode, streams verified CAS blobs into a managed PR after verification |
 
 Pass `source-revision` when preflight stages writable files onto a commit separate from `GITHUB_SHA`. Local checks and publication keep protected and non-writable files at `GITHUB_SHA`, and squash writable changes onto a commit parented on `GITHUB_SHA`.
 
-Native publication uses a detached `git worktree`, a signed-off diff-only commit, and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
+Native publication opens each verified CAS blob once (`O_RDONLY | O_NOFOLLOW`, `nlink === 1`), streams `1 MiB` chunks into `git hash-object -w --stdin` while verifying SHA-256 and Git blob OID, and commits via a temporary `GIT_INDEX_FILE` with DCO sign-off and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
 
 Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `local-only`, or `disabled`) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs by default (`publishOnFailure: false`) and add `[skip ci]` before the DCO trailer (`skipCi: true`). Memory errors or skipped updates never block primary task completion.
 
 Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script's parent directory read-only with whole-tree SHA-256 verification and exposing `$LOOPWRIGHT_BASE_DIR`, `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`. If a check opts into a GitHub token, grant that token only the permissions the check may use.
 
-On GitHub Actions, an omitted `spec.sandbox` selects `direct-dedicated`. This uses host process isolation, not a container security boundary. The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`. See [Sandbox Backends](../configuration/sandbox-backends.md) for isolation tradeoffs.
+On GitHub-hosted Actions runners (`GITHUB_ACTIONS=true` and `RUNNER_ENVIRONMENT=github-hosted`), an omitted `spec.sandbox` selects `direct-dedicated`. Self-hosted runners negotiate host OS sandboxes instead. The turnkey host session supports `macos-seatbelt`, `linux-bwrap`, `linux-landlock`, and `direct-dedicated`, and blocks `docker`. See [Sandbox Backends](../configuration/sandbox-backends.md) for isolation tradeoffs.
 
 Protected paths override writable paths. `.github/workflows/**` stays write-protected unless both `spec.execution.capabilities.allowWorkflowWrites: true` and `allow-workflow-writes: 'true'` are set. See [Taskpack](../configuration/taskpack.md) for full manifest fields.
 
@@ -168,7 +168,7 @@ Reports include usage provenance when available. Output is scrubbed and workflow
 
 ## Triggers
 
-Intake supports schedule, manual dispatch, repository dispatch, release, issue comment, and pull request review events, subject to taskpack policy. Pass the event name and payload explicitly as shown above. Comment commands also require actor authorization.
+Intake enforces `spec.triggers` strictly before `spec.preflight` or execution. Omitted or disabled triggers reject `schedule`, `workflow_dispatch`, `release`, `repository_dispatch`, and comment events fail-closed. Pass the event name and payload explicitly as shown above; comment commands also require actor authorization.
 
 Install a workflow in each consumer repository. For centralized webhook intake and token brokering, see [GitHub App](github-app.md).
 
