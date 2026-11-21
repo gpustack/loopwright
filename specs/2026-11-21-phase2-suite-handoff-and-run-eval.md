@@ -401,7 +401,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `@loopwright/taskpack` validates `TaskpackSuite` (`1..32` `O_NOFOLLOW` domains, acyclic stages, prefix-disjoint `headBranchPrefix`, and suite-wide protected union `<= 128`) with zero `@loopwright/github-app` imports. Schedule, comment, and `baseRevision` stage probes return `eligible`, `deferred`, or `blocked` deterministically.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack`
 
-- [ ] **T5 · Pi adapter subset resource preflight and snapshot restore compatibility**
+- [x] **T5 · Pi adapter subset resource preflight and snapshot restore compatibility**
       Blocked by: T2
       Owns: `packages/agent-pi/**`
       Gate: review

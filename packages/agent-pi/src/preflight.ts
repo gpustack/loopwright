@@ -9,7 +9,18 @@ import { checkOwnerAndMode, RAW_AGGREGATE_MAX_BYTES, RAW_ARTIFACT_MAX_BYTES, ver
 import { PiFailure, refuse } from './errors.js';
 import { sameIdentity, validateDigest, validatePolicy } from './policy.js';
 import { PREAMBLE_IDENTITY, decodePromptResourceUtf8, systemPrompt } from './resources.js';
-import type { PiBaselineEntry, PiCandidateArtifactInput, PiCandidateBaseline, PiCandidateBlobArtifact, PiOpenInput } from './types.js';
+import type { PiBaselineEntry, PiCandidateArtifactInput, PiCandidateBaseline, PiCandidateBlobArtifact, PiOpenInput, ResourceIdentity } from './types.js';
+
+function toResourceIdentity(
+  resource: Pick<ResourceIdentity, 'id' | 'kind' | 'path' | 'digest'>,
+): ResourceIdentity {
+  return {
+    id: resource.id,
+    kind: resource.kind,
+    path: resource.path,
+    digest: resource.digest,
+  };
+}
 const typedArray = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const intrinsic = (name: string) => Object.getOwnPropertyDescriptor(typedArray, name)!.get!;
 function byteView(input: unknown, path: string): Uint8Array {
@@ -292,7 +303,8 @@ export interface StructuralPreparedInput {
   readonly policy: ReturnType<typeof validatePolicy>;
   readonly manifest: import('@loopwright/core').ArtifactManifest;
   readonly overlayLimits: ReturnType<typeof resolveCandidateOverlayLimits>;
-  readonly admittedResources: readonly import('@loopwright/core').TaskContract['spec']['trustedContext']['resources'][number][];
+  readonly admittedResources: readonly ResourceIdentity[];
+  readonly requiredResourceIds: ReadonlySet<string>;
   readonly baselineCtx: SnapshottedBaselineContext | undefined;
   readonly baseTreeFormat: 'sha1' | 'sha256' | undefined;
   readonly blobChecks: readonly PendingBlobVerification[];
@@ -467,19 +479,22 @@ export function validateStructuralInputWithPolicy(
     (owned.restore.session as { bytes: Uint8Array }).bytes = sessionCopy;
   }
 
-  let admittedResources: readonly (typeof contract.trustedContext.resources)[number][];
+  let admittedResources: readonly ResourceIdentity[];
   if (role.resourceIds === undefined) {
-    const expected = [PREAMBLE_IDENTITY, ...contract.trustedContext.resources];
-    if (!sameIdentity(policy.resources, expected) || owned.resources.length !== contract.trustedContext.resources.length) refuse('RESOURCE_MISMATCH', '/resources');
-    admittedResources = contract.trustedContext.resources;
+    const contractResourceIdentities = contract.trustedContext.resources.map(toResourceIdentity);
+    const expected = [PREAMBLE_IDENTITY, ...contractResourceIdentities];
+    if (!sameIdentity(policy.resources, expected) || owned.resources.length > contractResourceIdentities.length) {
+      refuse('RESOURCE_MISMATCH', '/resources');
+    }
+    admittedResources = contractResourceIdentities;
   } else {
     const allowedIds = new Set(role.resourceIds);
-    const byId = new Map(contract.trustedContext.resources.map(item => [item.id, item] as const));
+    const byId = new Map(contract.trustedContext.resources.map(item => [item.id, toResourceIdentity(item)] as const));
     if (policy.resources.length !== 1 + allowedIds.size || !sameIdentity(policy.resources[0], PREAMBLE_IDENTITY)) {
       refuse('RESOURCE_MISMATCH', '/resources');
     }
     const seenResourceIds = new Set<string>();
-    const resolvedRoleResources: (typeof contract.trustedContext.resources)[number][] = [];
+    const resolvedRoleResources: ResourceIdentity[] = [];
     for (const entry of policy.resources.slice(1)) {
       if (!allowedIds.has(entry.id) || seenResourceIds.has(entry.id)) refuse('RESOURCE_MISMATCH', '/resources');
       const admitted = byId.get(entry.id);
@@ -487,9 +502,20 @@ export function validateStructuralInputWithPolicy(
       seenResourceIds.add(entry.id);
       resolvedRoleResources.push(admitted);
     }
-    if (owned.resources.length !== resolvedRoleResources.length) refuse('RESOURCE_MISMATCH', '/resources');
+    if (owned.resources.length > resolvedRoleResources.length) refuse('RESOURCE_MISMATCH', '/resources');
     admittedResources = resolvedRoleResources;
   }
+
+  const unconditionalIds = new Set(
+    contract.trustedContext.resources
+      .filter(item => item.when === undefined)
+      .map(item => item.id),
+  );
+  const requiredResourceIds = new Set(
+    admittedResources
+      .filter(item => unconditionalIds.has(item.id))
+      .map(item => item.id),
+  );
 
   const validateBytes = (ref: import('@loopwright/core').ArtifactRef, bytes: Uint8Array, path: string) => {
     const actual = digestArtifact(ref.name, bytes); if (!actual.ok || !sameIdentity(actual.value, ref)) refuse('RESOURCE_MISMATCH', path);
@@ -554,6 +580,7 @@ export function validateStructuralInputWithPolicy(
     manifest: manifest.value,
     overlayLimits,
     admittedResources,
+    requiredResourceIds,
     baselineCtx,
     baseTreeFormat,
     blobChecks,
@@ -571,7 +598,7 @@ function finalizePreparedInput(
   ctx: StructuralPreparedInput,
   verifiedBlobOids: ReadonlyMap<string, string>,
 ): PiOpenInput {
-  const { owned, lock, policy, manifest, admittedResources, baselineCtx, candidateLogicalBytes, validateBytes } = ctx;
+  const { owned, lock, policy, manifest, admittedResources, requiredResourceIds, baselineCtx, candidateLogicalBytes, validateBytes } = ctx;
   let frozenBaseline: PiCandidateBaseline | undefined;
   if (manifest.spec.baseTree !== undefined) {
     if (baselineCtx === undefined) refuse('INPUT_INVALID', '/candidate/baseline');
@@ -585,12 +612,37 @@ function finalizePreparedInput(
     );
   }
 
+  const admittedIndexById = new Map<string, number>();
+  admittedResources.forEach((admitted, index) => {
+    admittedIndexById.set(admitted.id, index);
+  });
+  const mountedIds = new Set<string>();
+  let lastAdmittedIndex = -1;
   owned.resources.forEach((resource, offset) => {
-    const admitted = admittedResources[offset]!;
-    if (resource.id !== admitted.id || resource.kind !== admitted.kind || resource.ref.name !== admitted.path || !sameIdentity(resource.ref.digest, admitted.digest)) refuse('RESOURCE_MISMATCH', '/resources/' + offset);
+    if (typeof resource.id !== 'string') refuse('RESOURCE_MISMATCH', '/resources/' + offset);
+    const admittedIndex = admittedIndexById.get(resource.id);
+    if (admittedIndex === undefined || admittedIndex <= lastAdmittedIndex) {
+      refuse('RESOURCE_MISMATCH', '/resources/' + offset);
+    }
+    const admitted = admittedResources[admittedIndex]!;
+    if (
+      !resource.ref
+      || typeof resource.ref !== 'object'
+      || Array.isArray(resource.ref)
+      || resource.kind !== admitted.kind
+      || resource.ref.name !== admitted.path
+      || !sameIdentity(resource.ref.digest, admitted.digest)
+    ) {
+      refuse('RESOURCE_MISMATCH', '/resources/' + offset);
+    }
+    lastAdmittedIndex = admittedIndex;
+    mountedIds.add(resource.id);
     validateBytes(resource.ref, resource.bytes, '/resources/' + offset);
     decodePromptResourceUtf8(resource.bytes, '/resources/' + offset);
   });
+  for (const requiredId of requiredResourceIds) {
+    if (!mountedIds.has(requiredId)) refuse('RESOURCE_MISMATCH', '/resources');
+  }
   if (owned.restore) { id(owned.restore.checkpointId, '/restore/checkpointId'); validateBytes(owned.restore.workspace.ref, owned.restore.workspace.bytes, '/restore/workspace'); validateBytes(owned.restore.session.ref, owned.restore.session.bytes, '/restore/session'); }
   const resourcesBytes = owned.resources.reduce((sum, resource) => sum + resource.bytes.byteLength, 0);
   const restoreBytes = owned.restore ? owned.restore.workspace.bytes.byteLength + owned.restore.session.bytes.byteLength : 0;
