@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
+import { promisify } from 'node:util';
 import {
   applyMemoryProposalCAS,
   loadMemoryStore,
@@ -354,5 +356,130 @@ describe('memory PR title and Markdown body formatting', () => {
       ].join('\n'),
     );
     assert.equal(unifiedFileDiff('.loopwright/memory/demo/entries/entry.old.md', null, null), '');
+  });
+
+  it('preserves EOF-newline state in unifiedFileDiff and passes git apply across transitions', async () => {
+    const execFileAsync = promisify(execFile);
+    const relPath = '.loopwright/memory/demo/index.json';
+    const cases: readonly {
+      readonly name: string;
+      readonly before: string | null;
+      readonly after: string | null;
+      readonly expectedDiff?: string;
+    }[] = [
+      {
+        name: 'no-LF -> LF',
+        before: '{"a":1}',
+        after: '{"a":1}\n',
+        expectedDiff: [
+          `--- a/${relPath}`,
+          `+++ b/${relPath}`,
+          '@@ -1,1 +1,1 @@',
+          '-{"a":1}',
+          '\\ No newline at end of file',
+          '+{"a":1}',
+          '',
+        ].join('\n'),
+      },
+      {
+        name: 'LF -> no-LF',
+        before: '{"a":1}\n',
+        after: '{"a":1}',
+        expectedDiff: [
+          `--- a/${relPath}`,
+          `+++ b/${relPath}`,
+          '@@ -1,1 +1,1 @@',
+          '-{"a":1}',
+          '+{"a":1}',
+          '\\ No newline at end of file',
+          '',
+        ].join('\n'),
+      },
+      {
+        name: 'both no-LF with changed line',
+        before: 'line1\nline2',
+        after: 'line1\nline3',
+        expectedDiff: [
+          `--- a/${relPath}`,
+          `+++ b/${relPath}`,
+          '@@ -1,2 +1,2 @@',
+          ' line1',
+          '-line2',
+          '\\ No newline at end of file',
+          '+line3',
+          '\\ No newline at end of file',
+          '',
+        ].join('\n'),
+      },
+      {
+        name: 'both no-LF with unchanged EOF line in context',
+        before: 'a\nb\nc\nd\ne',
+        after: 'a\nX\nc\nd\ne',
+      },
+      {
+        name: 'new file no-LF',
+        before: null,
+        after: '{"new":true}',
+        expectedDiff: [
+          '--- /dev/null',
+          `+++ b/${relPath}`,
+          '@@ -0,0 +1,1 @@',
+          '+{"new":true}',
+          '\\ No newline at end of file',
+          '',
+        ].join('\n'),
+      },
+      {
+        name: 'new file LF',
+        before: null,
+        after: '{"new":true}\n',
+      },
+      {
+        name: 'deleted file no-LF',
+        before: '{"old":true}',
+        after: null,
+        expectedDiff: [
+          `--- a/${relPath}`,
+          '+++ /dev/null',
+          '@@ -1,1 +0,0 @@',
+          '-{"old":true}',
+          '\\ No newline at end of file',
+          '',
+        ].join('\n'),
+      },
+    ];
+
+    assert.equal(unifiedFileDiff(relPath, 'same', 'same'), '');
+    assert.equal(unifiedFileDiff(relPath, 'same\n', 'same\n'), '');
+
+    const repo = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-diff-apply-'));
+    try {
+      await execFileAsync('git', ['init'], { cwd: repo });
+      for (const testCase of cases) {
+        const patch = unifiedFileDiff(relPath, testCase.before, testCase.after);
+        assert.notEqual(patch, '', `${testCase.name} must emit a non-empty patch`);
+        if (testCase.expectedDiff !== undefined) {
+          assert.equal(patch, testCase.expectedDiff, testCase.name);
+        }
+        const target = join(repo, relPath);
+        await rm(target, { force: true });
+        if (testCase.before !== null) {
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, testCase.before, 'utf8');
+        }
+        const patchFile = join(repo, 'test.patch');
+        await writeFile(patchFile, patch, 'utf8');
+        await execFileAsync('git', ['apply', '--check', '--whitespace=nowarn', patchFile], { cwd: repo });
+        await execFileAsync('git', ['apply', '--whitespace=nowarn', patchFile], { cwd: repo });
+        if (testCase.after === null) {
+          await assert.rejects(() => readFile(target, 'utf8'), /ENOENT/);
+        } else {
+          const applied = await readFile(target, 'utf8');
+          assert.equal(applied, testCase.after, `${testCase.name} git apply result`);
+        }
+      }
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 });

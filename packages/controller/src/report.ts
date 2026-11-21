@@ -1,4 +1,5 @@
 import type { StructuredFinding, UsageSummary } from '@loopwright/core';
+import type { RunEvalCostCompleteness, RunEvalReport } from './run-eval.js';
 
 export const REPORT_OUTPUT_FORMATS = Object.freeze(['json', 'github-step-summary', 'markdown', 'text'] as const);
 export type ReportOutputFormat = (typeof REPORT_OUTPUT_FORMATS)[number];
@@ -51,6 +52,7 @@ export interface RunReportInput {
   readonly usage?: UsageSummary | null | undefined;
   readonly elapsedMs?: number | null | undefined;
   readonly externalUrl?: string | null | undefined;
+  readonly runEval?: RunEvalReport | null | undefined;
   readonly scrub?: ((text: string) => string) | undefined;
 }
 
@@ -279,6 +281,110 @@ function formatMcpServersSummary(servers: readonly ReportMcpServerInfo[], clean:
     .join('; ');
 }
 
+function sanitizeRunEvalPayload(runEval: RunEvalReport, clean: (text: string) => string): RunEvalReport {
+  return {
+    schemaVersion: runEval.schemaVersion,
+    runId: clean(runEval.runId),
+    status: runEval.status !== null ? clean(runEval.status) : null,
+    journalRevision: runEval.journalRevision,
+    toolTelemetry: runEval.toolTelemetry,
+    toolRepeats: {
+      items: runEval.toolRepeats.items.map(item => ({
+        roleId: clean(item.roleId),
+        stepId: clean(item.stepId),
+        tool: clean(item.tool),
+        target: clean(item.target),
+        count: item.count,
+      })),
+      totalFailingCalls: runEval.toolRepeats.totalFailingCalls,
+      circuitBreaker: runEval.toolRepeats.circuitBreaker,
+    },
+    pingPong: { ...runEval.pingPong },
+    repairConvergence: {
+      attempts: { ...runEval.repairConvergence.attempts },
+      unchangedDigestRepairs: runEval.repairConvergence.unchangedDigestRepairs,
+      initialFailingChecks: runEval.repairConvergence.initialFailingChecks,
+      finalFailingChecks: runEval.repairConvergence.finalFailingChecks,
+      failingCheckDelta: runEval.repairConvergence.failingCheckDelta,
+      converged: runEval.repairConvergence.converged,
+    },
+    breakdown: {
+      byStep: runEval.breakdown.byStep.map(row => ({
+        stepId: clean(row.stepId),
+        roleId: row.roleId !== null ? clean(row.roleId) : null,
+        tokens: { ...row.tokens },
+        costMicrousd: row.costMicrousd,
+        costCompleteness: row.costCompleteness,
+        modelCalls: row.modelCalls,
+        toolCalls: row.toolCalls,
+        elapsedMs: row.elapsedMs,
+      })),
+      byRole: runEval.breakdown.byRole.map(row => ({
+        roleId: clean(row.roleId),
+        tokens: { ...row.tokens },
+        costMicrousd: row.costMicrousd,
+        costCompleteness: row.costCompleteness,
+        modelCalls: row.modelCalls,
+        toolCalls: row.toolCalls,
+        elapsedMs: row.elapsedMs,
+      })),
+      totals: {
+        tokens: { ...runEval.breakdown.totals.tokens },
+        costMicrousd: runEval.breakdown.totals.costMicrousd,
+        costCompleteness: runEval.breakdown.totals.costCompleteness,
+        modelCalls: runEval.breakdown.totals.modelCalls,
+        toolCalls: runEval.breakdown.totals.toolCalls,
+        elapsedMs: runEval.breakdown.totals.elapsedMs,
+      },
+    },
+    suggestions: runEval.suggestions.map(item => ({
+      autoApplied: false as const,
+      code: clean(item.code),
+      severity: item.severity,
+      summary: clean(item.summary),
+      evidence: clean(item.evidence),
+    })),
+  };
+}
+
+function formatEvalCost(costMicrousd: number | null, completeness: RunEvalCostCompleteness): string {
+  if (costMicrousd === null || completeness === 'unavailable') return 'unavailable';
+  const formatted = `$${formatCostUsd(costMicrousd)}`;
+  return completeness === 'partial' ? `>= ${formatted} (partial)` : formatted;
+}
+
+function formatEvalTokens(tokens: { readonly input: number; readonly output: number; readonly total: number }): string {
+  return `${formatTokenCount(tokens.total)} (${formatTokenCount(tokens.input)} in / ${formatTokenCount(tokens.output)} out)`;
+}
+
+function formatEvalElapsed(elapsedMs: number | null): string {
+  return elapsedMs !== null ? formatDurationMs(elapsedMs) : 'unavailable';
+}
+
+function formatToolRepeatsSummary(runEval: RunEvalReport, clean: (text: string) => string): string {
+  if (runEval.toolRepeats.items.length === 0) {
+    return `none (failingCalls=${runEval.toolRepeats.totalFailingCalls})`;
+  }
+  const preview = runEval.toolRepeats.items
+    .slice(0, 3)
+    .map(item => `${clean(item.roleId)}/${clean(item.stepId)} ${clean(item.tool)} ${clean(item.target)} x${item.count}`)
+    .join('; ');
+  return `${runEval.toolRepeats.items.length} repeated (${preview})`;
+}
+
+function formatPingPongSummary(runEval: RunEvalReport): string {
+  const pp = runEval.pingPong;
+  if (!pp.detected) return 'none';
+  return `detected (oscillations=${pp.checkOscillations}, identicalRepeats=${pp.repeatedFailureSignatures}, digestCycles=${pp.digestCycles}, repeatedReworks=${pp.repeatedReworks})`;
+}
+
+function formatRepairConvergenceSummary(runEval: RunEvalReport): string {
+  const rc = runEval.repairConvergence;
+  const convergedLabel = rc.converged === null ? 'in_progress' : String(rc.converged);
+  const deltaLabel = rc.failingCheckDelta === null ? 'n/a' : rc.failingCheckDelta > 0 ? `+${rc.failingCheckDelta}` : String(rc.failingCheckDelta);
+  return `converged=${convergedLabel}, attempts(ordinary=${rc.attempts.ordinary}, format=${rc.attempts.format}, implementation=${rc.attempts.implementation}, rework=${rc.attempts.rework}), unchangedDigestRepairs=${rc.unchangedDigestRepairs}, failingCheckDelta=${deltaLabel}`;
+}
+
 /** Render a sanitized, deterministic run report in JSON, Markdown/Step Summary, or plain text format. */
 export function formatRunReport(input: RunReportInput, format: ReportOutputFormat): string {
   const usage = input.usage ?? null;
@@ -364,6 +470,9 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
       elapsedMs: input.elapsedMs ?? null,
       formattedElapsed: input.elapsedMs != null ? formatDurationMs(input.elapsedMs) : null,
       externalUrl: input.externalUrl != null ? clean(input.externalUrl) : null,
+      ...(input.runEval !== undefined
+        ? { runEval: input.runEval !== null ? sanitizeRunEvalPayload(input.runEval, clean) : null }
+        : {}),
     };
     return JSON.stringify(payload);
   }
@@ -432,6 +541,45 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
         lines.push(`| ${cell(finding.severity)} | ${loc === '-' ? '-' : cell(loc)} | ${cell(finding.title)} | ${cell(finding.evidence)} |`);
       }
     }
+    if (input.runEval != null) {
+      const ev = input.runEval;
+      lines.push(
+        '',
+        '### Run Health',
+        '',
+        '| Metric | Value |',
+        '| --- | --- |',
+        `| Tool Telemetry | ${cell(ev.toolTelemetry)} |`,
+        `| Circuit Breaker | ${cell(ev.toolRepeats.circuitBreaker)} |`,
+        `| Repeated Failing Tools | ${formatToolRepeatsSummary(ev, cell)} |`,
+        `| Ping-Pong | ${cell(formatPingPongSummary(ev))} |`,
+        `| Repair Convergence | ${cell(formatRepairConvergenceSummary(ev))} |`,
+      );
+      if (ev.breakdown.byRole.length > 0) {
+        lines.push('', '#### Breakdown by Role', '', '| Role | Tokens | Cost (USD) | Model Calls | Tool Calls | Elapsed |', '| --- | --- | --- | --- | --- | --- |');
+        for (const row of ev.breakdown.byRole) {
+          lines.push(
+            `| ${cell(row.roleId)} | ${cell(formatEvalTokens(row.tokens))} | ${cell(formatEvalCost(row.costMicrousd, row.costCompleteness))} | ${row.modelCalls} | ${row.toolCalls} | ${cell(formatEvalElapsed(row.elapsedMs))} |`,
+          );
+        }
+      }
+      if (ev.breakdown.byStep.length > 0) {
+        lines.push('', '#### Breakdown by Step', '', '| Step | Role | Tokens | Cost (USD) | Model Calls | Tool Calls | Elapsed |', '| --- | --- | --- | --- | --- | --- | --- |');
+        for (const row of ev.breakdown.byStep) {
+          lines.push(
+            `| ${cell(row.stepId)} | ${row.roleId !== null ? cell(row.roleId) : '-'} | ${cell(formatEvalTokens(row.tokens))} | ${cell(formatEvalCost(row.costMicrousd, row.costCompleteness))} | ${row.modelCalls} | ${row.toolCalls} | ${cell(formatEvalElapsed(row.elapsedMs))} |`,
+          );
+        }
+      }
+      if (ev.suggestions.length > 0) {
+        lines.push('', '#### Tuning Suggestions (advisory, autoApplied: false)', '');
+        for (const suggestion of ev.suggestions) {
+          lines.push(
+            `- [${cell(suggestion.severity)}] \`${cell(suggestion.code)}\`: ${cell(suggestion.summary)} (${cell(suggestion.evidence)}) [autoApplied: false]`,
+          );
+        }
+      }
+    }
     return lines.join('\n');
   }
 
@@ -486,6 +634,40 @@ export function formatRunReport(input: RunReportInput, format: ReportOutputForma
     }
     if (input.externalUrl != null && input.externalUrl.length > 0) lines.push(`External URL: ${cleanLine(input.externalUrl)}`);
     if (input.elapsedMs != null) lines.push(`Elapsed: ${formatDurationMs(input.elapsedMs)}`);
+    if (input.runEval != null) {
+      const ev = input.runEval;
+      lines.push('Run Health:');
+      lines.push(`- Tool telemetry: ${cleanLine(ev.toolTelemetry)} (circuitBreaker=${cleanLine(ev.toolRepeats.circuitBreaker)})`);
+      lines.push(`- Repeated failing tools: ${formatToolRepeatsSummary(ev, cleanLine)}`);
+      lines.push(`- Ping-pong: ${cleanLine(formatPingPongSummary(ev))}`);
+      lines.push(`- Repair convergence: ${cleanLine(formatRepairConvergenceSummary(ev))}`);
+      if (ev.breakdown.byRole.length > 0) {
+        const roleSummaries = ev.breakdown.byRole
+          .map(
+            row =>
+              `${cleanLine(row.roleId)} [tokens=${formatEvalTokens(row.tokens)}, cost=${formatEvalCost(row.costMicrousd, row.costCompleteness)}, modelCalls=${row.modelCalls}, toolCalls=${row.toolCalls}, elapsed=${formatEvalElapsed(row.elapsedMs)}]`,
+          )
+          .join('; ');
+        lines.push(`- By role: ${roleSummaries}`);
+      }
+      if (ev.breakdown.byStep.length > 0) {
+        const stepSummaries = ev.breakdown.byStep
+          .map(
+            row =>
+              `${cleanLine(row.stepId)}${row.roleId !== null ? `(${cleanLine(row.roleId)})` : ''} [tokens=${formatEvalTokens(row.tokens)}, cost=${formatEvalCost(row.costMicrousd, row.costCompleteness)}, modelCalls=${row.modelCalls}, toolCalls=${row.toolCalls}, elapsed=${formatEvalElapsed(row.elapsedMs)}]`,
+          )
+          .join('; ');
+        lines.push(`- By step: ${stepSummaries}`);
+      }
+      if (ev.suggestions.length > 0) {
+        lines.push('- Suggestions (autoApplied=false):');
+        for (const suggestion of ev.suggestions) {
+          lines.push(
+            `  - [${cleanLine(suggestion.severity)}] ${cleanLine(suggestion.code)}: ${cleanLine(suggestion.summary)} (${cleanLine(suggestion.evidence)}) [autoApplied=false]`,
+          );
+        }
+      }
+    }
     return lines.join('\n');
   }
 

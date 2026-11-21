@@ -1,6 +1,8 @@
 import { dirname, extname, join, resolve } from 'node:path';
+import { loadTaskpackSuite, type LoadedTaskpackSuite } from '@loopwright/taskpack';
 import { normalizeRelativePath, parseTaskpackDocument, type Json } from './schema.js';
 import { MULTI_TENANT_HOST_POLICY, startGitHubAppControlPlane, type ControlPlaneHandle } from './service.js';
+import { DEFAULT_GITHUB_API_BASE_URL, validateGitHubApiBaseUrl } from './suite-pr-lookup.js';
 import { loadDeclarativeTaskpack } from './taskpack.js';
 import { createGitHubRestTokenTransport, InstallationTokenBroker, SecretScrubber } from './token-broker.js';
 import { readBoundedRegularFile } from './yaml.js';
@@ -28,19 +30,7 @@ const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function validateApiBaseUrl(rawUrl: string): void {
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    configInvalid('spec.apiBaseUrl must be a valid URL', '/spec/apiBaseUrl');
-  }
-  const isLoopback = url.hostname === '127.0.0.1'
-    || url.hostname === 'localhost'
-    || url.hostname === '[::1]'
-    || url.hostname === '::1';
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopback)) {
-    configInvalid('spec.apiBaseUrl must use https:// (or loopback http:// for local tests)', '/spec/apiBaseUrl');
-  }
+  validateGitHubApiBaseUrl(rawUrl, 'GITHUB_APP_CONFIG_INVALID', '/spec/apiBaseUrl');
 }
 
 function configInvalid(message: string, path: string | null = '/'): never {
@@ -99,7 +89,7 @@ export function parseGitHubAppConfigDocument(bytes: Uint8Array, format: 'yaml' |
 
   const spec = requireObject(root['spec'], '/spec', [
     'appId', 'webhookSecretEnv', 'privateKeyEnv', 'apiBaseUrl',
-    'listen', 'tokenTtlSeconds', 'maxPayloadBytes', 'taskpackPath', 'operatorAllowlist',
+    'listen', 'tokenTtlSeconds', 'maxPayloadBytes', 'taskpackPath', 'suitePath', 'operatorAllowlist',
   ]);
   const rawAppId = spec['appId'];
   const appId = typeof rawAppId === 'number' && Number.isSafeInteger(rawAppId) && rawAppId > 0
@@ -128,6 +118,7 @@ export function parseGitHubAppConfigDocument(bytes: Uint8Array, format: 'yaml' |
     tokenTtlSeconds?: number;
     maxPayloadBytes?: number;
     taskpackPath?: string;
+    suitePath?: string;
     operatorAllowlist?: readonly string[];
   } = { appId, webhookSecretEnv, privateKeyEnv };
 
@@ -174,12 +165,24 @@ export function parseGitHubAppConfigDocument(bytes: Uint8Array, format: 'yaml' |
     specObj.maxPayloadBytes = requireInteger(spec['maxPayloadBytes'], '/spec/maxPayloadBytes', 1_024, 26_214_400);
   }
 
-  if (spec['taskpackPath'] !== undefined) {
+  if (Object.hasOwn(spec, 'taskpackPath') && spec['taskpackPath'] !== undefined) {
     try {
       specObj.taskpackPath = normalizeRelativePath(spec['taskpackPath'], '/spec/taskpackPath');
     } catch (error) {
       if (error instanceof GitHubAppError) configInvalid(error.message, '/spec/taskpackPath');
       configInvalid('invalid spec.taskpackPath', '/spec/taskpackPath');
+    }
+  }
+
+  if (Object.hasOwn(spec, 'suitePath') && spec['suitePath'] !== undefined) {
+    if (specObj.taskpackPath !== undefined) {
+      configInvalid('spec.taskpackPath and spec.suitePath are mutually exclusive', '/spec/suitePath');
+    }
+    try {
+      specObj.suitePath = normalizeRelativePath(spec['suitePath'], '/spec/suitePath');
+    } catch (error) {
+      if (error instanceof GitHubAppError) configInvalid(error.message, '/spec/suitePath');
+      configInvalid('invalid spec.suitePath', '/spec/suitePath');
     }
   }
 
@@ -294,6 +297,7 @@ export async function startConfiguredGitHubApp(
 
   const repoRoot = resolve(options?.repoRoot ?? dirname(resolve(configPath)));
   let manifest: TaskpackManifest | undefined;
+  let suite: LoadedTaskpackSuite | undefined;
   let taskpackId: string | undefined;
   let commentPrefixes: readonly string[] | undefined;
   let commentCommands: readonly TaskpackCommentCommand[] | undefined;
@@ -316,6 +320,22 @@ export async function startConfiguredGitHubApp(
     taskpackId = manifest.metadata.name;
     commentPrefixes = manifest.spec.triggers.commentPrefixes;
     commentCommands = manifest.spec.triggers.commentCommands;
+  } else if (loaded.document.spec.suitePath !== undefined) {
+    try {
+      suite = await loadTaskpackSuite({
+        repositoryRoot: repoRoot,
+        suitePath: loaded.document.spec.suitePath,
+        policyProfile: 'github',
+        hostPolicy: MULTI_TENANT_HOST_POLICY,
+        enforceHostAuthority: true,
+      });
+    } catch (error) {
+      throw new GitHubAppError(
+        'GITHUB_APP_CONFIG_INVALID',
+        error instanceof Error ? error.message : 'invalid suitePath',
+        '/spec/suitePath',
+      );
+    }
   }
 
   const operatorAllowlist = loaded.document.spec.operatorAllowlist
@@ -330,6 +350,10 @@ export async function startConfiguredGitHubApp(
     tokenBroker,
     scrubber,
     manifest,
+    suite,
+    ...(suite !== undefined ? { repositoryRoot: repoRoot } : {}),
+    apiBaseUrl: loaded.document.spec.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL,
+    fetchImpl: options?.fetchImpl,
     taskpackId,
     commentPrefixes,
     commentCommands,

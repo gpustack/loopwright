@@ -1,11 +1,22 @@
-import { constants, existsSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
-import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
+import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
 import { clampMemoryMaxEntries, compareEntriesForEviction, computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
-import type { MemoryBudgetLedger, MemoryCuratorRequest, MemoryEntry, MemoryEvidenceRef, MemoryFinalizerConfig, MemoryFinalizerInput, MemoryFinalizerOutcome, MemoryOperation, MemoryProposal, SettledCycleContext } from './types.js';
+import type {
+  MemoryBudgetLedger,
+  MemoryCuratorRequest,
+  MemoryEntry,
+  MemoryEvidenceRef,
+  MemoryFinalizerConfig,
+  MemoryFinalizerInput,
+  MemoryFinalizerOutcome,
+  MemoryOperation,
+  MemoryProposal,
+  SettledCycleContext,
+} from './types.js';
 
 const PROOF_FILE_LIMIT = 256;
 const MAX_PROPOSAL_OPERATIONS = 256;
@@ -508,10 +519,15 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       maxEntries: config.maxEntries,
     });
     const changed: { readonly path: string; readonly before: string | null; readonly after: string | null }[] = [];
-    const indexBefore = canonical(loaded.index), indexAfter = canonical(projected.index);
-    if (indexBefore !== indexAfter) {
-      const indexExisted = existsSync(join(resolve(settled.repository), directory, 'index.json'));
-      changed.push({ path: `${directory}/index.json`, before: indexExisted ? indexBefore : null, after: indexAfter });
+    const indexRelPath = `${directory}/index.json`;
+    const priorIndexBytes = loaded.indexBytes;
+    const indexBefore = priorIndexBytes === null ? null : Buffer.from(priorIndexBytes).toString('utf8');
+    const indexAfter = serializeMemoryStoreIndex(projected.index, indexRelPath);
+    const indexChanged = priorIndexBytes === null
+      ? canonical(loaded.index) !== canonical(projected.index) || operations.length > 0
+      : indexBefore !== indexAfter;
+    if (indexChanged) {
+      changed.push({ path: indexRelPath, before: indexBefore, after: indexAfter });
     }
     for (const [id, bytes] of projected.entryFiles) {
       const after = Buffer.from(bytes).toString('utf8');

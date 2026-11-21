@@ -1,12 +1,38 @@
-import type { Digest, OverlayLimits, ReworkPolicy, TaskContract } from '@loopwright/core';
+import type {
+  Digest,
+  OverlayLimits,
+  ResourceActivationPhase,
+  ResourceActivationRule,
+  ReworkPolicy,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
+  TaskContract,
+} from '@loopwright/core';
 import type { ClockBasis, ClockSample } from '@loopwright/state';
 import type {
   PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi,
 } from '@loopwright/agent-pi';
 import type { openPiHostSessionAdapterV2 } from '@loopwright/agent-pi/host-session';
-import type { ControllerConfiguration, TrustedRegistry } from '@loopwright/controller';
+import type { ControllerConfiguration, RunEvalReport, TrustedRegistry } from '@loopwright/controller';
 
-export type { ClockBasis, ClockSample, PiCustomModelCompat, PiCustomProviderConfig, PiModelCost, PiModelSelection, PiSamplingParams, PiThinkingLevel, PiWireApi };
+export type {
+  ClockBasis,
+  ClockSample,
+  PiCustomModelCompat,
+  PiCustomProviderConfig,
+  PiModelCost,
+  PiModelSelection,
+  PiSamplingParams,
+  PiThinkingLevel,
+  PiWireApi,
+  ResourceActivationPhase,
+  ResourceActivationRule,
+  RunEvalReport,
+  StepHandoffSelect,
+  StepHandoffSelector,
+  StepHandoffSource,
+};
 
 /** Closed set of matchable failure codes for @loopwright/taskpack (and drop-in superset for @loopwright/github-app). */
 export const TASKPACK_ERROR_CODES = Object.freeze([
@@ -26,15 +52,27 @@ export const TASKPACK_ERROR_CODES = Object.freeze([
 ] as const);
 export type TaskpackErrorCode = typeof TASKPACK_ERROR_CODES[number];
 
-/** Explicit, matchable failure carrying the offending manifest or request path when known. */
+export interface TaskpackErrorOptions {
+  readonly reason?: string | undefined;
+  readonly cause?: unknown;
+}
+
+/** Explicit, matchable failure carrying the offending manifest or request path (and optional machine reason) when known. */
 export class TaskpackError extends Error {
   readonly code: TaskpackErrorCode;
   readonly path: string | null;
-  constructor(code: TaskpackErrorCode, message: string, path: string | null = null) {
-    super(message);
+  readonly reason: string | null;
+  constructor(
+    code: TaskpackErrorCode,
+    message: string,
+    path: string | null = null,
+    options?: TaskpackErrorOptions,
+  ) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'TaskpackError';
     this.code = code;
     this.path = path;
+    this.reason = options?.reason ?? null;
   }
 }
 
@@ -125,7 +163,15 @@ export interface TaskpackStepDeclaration {
   readonly check?: string | undefined;
   readonly dependsOn: readonly string[];
   readonly onRework?: ReworkPolicy | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
+
+export interface TaskpackConditionalResourceEntry {
+  readonly path: string;
+  readonly when?: ResourceActivationRule | undefined;
+}
+
+export type TaskpackResourceEntry = string | TaskpackConditionalResourceEntry;
 
 export interface TaskpackProposalDeclaration {
   readonly path: string;
@@ -341,11 +387,12 @@ export interface TaskpackRoleDeclaration {
   readonly thinking?: string | undefined;
   readonly tools?: readonly TaskpackToolName[] | undefined;
   readonly dependsOn?: readonly string[] | undefined;
-  readonly instructions?: readonly string[] | undefined;
-  readonly skills?: readonly string[] | undefined;
+  readonly instructions?: readonly TaskpackResourceEntry[] | undefined;
+  readonly skills?: readonly TaskpackResourceEntry[] | undefined;
   readonly prompt?: string | undefined;
   readonly mcpServers?: readonly string[] | undefined;
   readonly models?: readonly string[] | undefined;
+  readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
 
 export type TaskpackMemoryApplyMode = 'separate-pull-request' | 'local-only' | 'disabled';
@@ -395,8 +442,8 @@ export interface TaskpackTriggersDeclaration {
 export interface TaskpackManifestSpecBase<TCheck> {
   readonly goal: { readonly candidate: string; readonly noChange: string };
   readonly scope: { readonly writable: readonly string[]; readonly protected: readonly string[] };
-  readonly instructions?: readonly string[] | undefined;
-  readonly skills?: readonly string[] | undefined;
+  readonly instructions?: readonly TaskpackResourceEntry[] | undefined;
+  readonly skills?: readonly TaskpackResourceEntry[] | undefined;
   readonly execution?: TaskpackExecutionDeclaration | undefined;
   readonly preflight?: TaskpackPreflightDeclaration | undefined;
   readonly vars?: Readonly<Record<string, string>> | undefined;
@@ -408,6 +455,7 @@ export interface TaskpackManifestSpecBase<TCheck> {
   readonly publication: TaskpackPublicationDeclaration;
   readonly memory: TaskpackMemoryDeclaration;
   readonly triggers: TaskpackTriggersDeclaration;
+  readonly baselineAlignment?: BaselineAlignmentConfig | undefined;
   readonly sandbox?: TaskpackSandboxDeclaration | undefined;
   readonly decisions?: TaskpackDecisionsDeclaration | undefined;
   readonly models?: readonly TaskpackModelDeclaration[] | undefined;
@@ -686,6 +734,7 @@ export interface CompiledInstructionResource {
   readonly bytes: Buffer;
   readonly digest: Digest;
   readonly mode?: number | undefined;
+  readonly when?: ResourceActivationRule | undefined;
 }
 
 export interface CompiledLocalCommandGate {
@@ -709,6 +758,7 @@ export interface CompiledLocalCommandGate {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly allowPrivileged?: boolean | undefined;
+  readonly baselineConflictGuardOnly?: boolean | undefined;
 }
 
 export interface HostTaskpackBindings {
@@ -721,6 +771,10 @@ export interface HostTaskpackBindings {
   readonly taskpackPath?: string | undefined;
   readonly baseRevision: string;
   readonly sourceRevision: string;
+  readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
+  readonly baselineAlignmentResult?: BaselineAlignmentResult | undefined;
+  readonly baselineConflictResource?: BaselineConflictContextResource | undefined;
+  readonly enableBaselineConflictGate?: boolean | undefined;
   readonly targetMatrix?: readonly TargetMatrixCell[] | null | undefined;
   readonly roleSelection?: HostRoleSelection | undefined;
   readonly candidateIndex?: number | undefined;
@@ -785,6 +839,9 @@ export interface CompiledTaskpack {
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly policyProfile?: PolicyProfile | undefined;
+  readonly baselineAlignment?: ResolvedBaselineAlignmentConfig | undefined;
+  readonly extractedConflictPaths?: readonly string[] | undefined;
+  readonly watchedPaths?: readonly string[] | undefined;
   readonly circuitBreakerLimits?: {
     readonly maxTurns?: number | undefined;
     readonly maxRepairTurns?: number | undefined;
@@ -964,6 +1021,7 @@ export interface ActionEntrypointInput {
   readonly repositoryFullName: string;
   readonly baseRevision: string;
   readonly sourceRevision?: string | undefined;
+  readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
   readonly mode: 'candidate' | 'no-change' | 'auto';
   readonly allowPrivilegedExecution?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
@@ -1071,6 +1129,346 @@ export type ActionEntrypointResult =
     readonly delegateOutcome: { readonly ok: boolean; readonly detail: string } | null;
     readonly memory?: TurnkeyMemorySummary | undefined;
   };
+
+// ---------------------------------------------------------------------------
+// Multi-domain TaskpackSuite (.loopwright/suite.yaml) & staged promotion
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_TASKPACK_SUITE_PATH = '.loopwright/suite.yaml' as const;
+export const TASKPACK_SUITE_MANIFEST_BYTES = 65_536;
+export const MAX_SUITE_DOMAINS = 32;
+export const MAX_SUITE_STAGES = 16;
+export const MAX_SUITE_STAGE_READINESS_PROBES = 16;
+export const MAX_SUITE_STAGE_VERSION_BLOB_BYTES = 1_048_576;
+
+export const SUITE_STAGE_READINESS_PROBE_KINDS = Object.freeze([
+  'github-release',
+  'http-json',
+  'git-tag',
+  'git-commit',
+] as const);
+export type SuiteStageReadinessProbeKind = typeof SUITE_STAGE_READINESS_PROBE_KINDS[number];
+
+export interface SuiteVersionFromSelector {
+  readonly domain: string;
+  readonly path: string;
+  readonly jsonPointer?: string | undefined;
+}
+
+export interface SuiteStageReadinessProbe {
+  readonly id?: string | undefined;
+  readonly kind: SuiteStageReadinessProbeKind;
+  readonly source: string;
+  readonly versionFrom?: SuiteVersionFromSelector | undefined;
+  readonly expectedVersion?: string | undefined;
+  readonly ref?: string | undefined;
+  readonly tagPrefix?: string | undefined;
+  readonly jsonPointer?: string | undefined;
+  readonly versionPath?: string | undefined;
+  readonly allowPrerelease?: boolean | undefined;
+}
+
+export interface TaskpackSuiteStageDeclaration {
+  readonly id: string;
+  readonly dependsOn: readonly string[];
+  readonly readiness: readonly SuiteStageReadinessProbe[];
+}
+
+export type TaskpackSuiteDomainMatrix =
+  | readonly TargetMatrixCell[]
+  | Readonly<Record<string, string | number | boolean>>;
+
+export interface TaskpackSuiteDomainDeclaration {
+  readonly id: string;
+  readonly taskpack: string;
+  readonly enabled: boolean;
+  readonly schedules?: readonly string[] | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+}
+
+export interface TaskpackSuiteManifest {
+  readonly apiVersion: typeof TASKPACK_MANIFEST_API_VERSION;
+  readonly kind: 'TaskpackSuite';
+  readonly metadata: { readonly name: string };
+  readonly suitePath?: string | undefined;
+  readonly controlRoot?: string | undefined;
+  readonly spec: {
+    readonly domains: readonly TaskpackSuiteDomainDeclaration[];
+    readonly stages: readonly TaskpackSuiteStageDeclaration[];
+  };
+}
+
+export interface LoadedTaskpackSuiteDomain {
+  readonly id: string;
+  readonly taskpackPath: string;
+  readonly taskpackName: string;
+  readonly controlRoot: string;
+  readonly manifestSha256: string;
+  readonly enabled: boolean;
+  readonly schedules?: readonly string[] | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+  readonly manifest: TaskpackManifest;
+  readonly protectedPaths: readonly string[];
+}
+
+export interface LoadedTaskpackSuite {
+  readonly manifest: TaskpackSuiteManifest;
+  readonly suitePath: string;
+  readonly controlRoot: string;
+  readonly suiteSha256: string;
+  readonly suiteProtectedPaths: readonly string[];
+  readonly stageOrder: readonly string[];
+  readonly domains: readonly LoadedTaskpackSuiteDomain[];
+}
+
+export type SuiteDisposition = 'eligible' | 'deferred' | 'blocked' | 'ignored';
+
+export interface SuiteStageProbeEvaluation {
+  readonly stageId: string;
+  readonly probeIndex: number;
+  readonly probeId?: string | undefined;
+  readonly kind: SuiteStageReadinessProbeKind;
+  readonly source: string;
+  readonly disposition: 'eligible' | 'deferred' | 'blocked';
+  readonly expectedVersion?: string | undefined;
+  readonly observedVersion?: string | undefined;
+  readonly reason: string;
+  readonly detail?: string | undefined;
+}
+
+export interface SuiteMatrixCell {
+  readonly domainId: string;
+  readonly taskpackPath: string;
+  readonly taskpackName: string;
+  readonly manifestSha256: string;
+  readonly controlRoot: string;
+  readonly baseRevision: string;
+  readonly headSha?: string | undefined;
+  readonly stage?: string | undefined;
+  readonly matrix?: TaskpackSuiteDomainMatrix | undefined;
+  readonly protectedPaths: readonly string[];
+}
+
+export interface SuiteDomainResolution extends SuiteMatrixCell {
+  readonly disposition: 'eligible' | 'deferred' | 'blocked';
+  readonly reason: string;
+  readonly detail?: string | undefined;
+  readonly code?: TaskpackErrorCode | undefined;
+  readonly probes?: readonly SuiteStageProbeEvaluation[] | undefined;
+}
+
+export interface ParsedSuiteCommentCommand {
+  readonly prefix: string;
+  readonly domainId?: string | undefined;
+  readonly command: TaskpackCommentCommand;
+  readonly guidance: string;
+}
+
+export interface SuiteResolutionResult {
+  readonly suiteName: string;
+  readonly suitePath: string;
+  readonly suiteSha256: string;
+  readonly eventName: string;
+  readonly baseRevision: string;
+  readonly disposition: SuiteDisposition;
+  readonly reason: string;
+  readonly detail?: string | undefined;
+  readonly code?: TaskpackErrorCode | undefined;
+  readonly validDomainIds: readonly string[];
+  readonly suiteProtectedPaths: readonly string[];
+  readonly comment?: ParsedSuiteCommentCommand | undefined;
+  readonly cells: readonly SuiteDomainResolution[];
+  readonly eligibleCells: readonly SuiteMatrixCell[];
+  readonly matrix: { readonly include: readonly SuiteMatrixCell[] };
+}
+
+// ---------------------------------------------------------------------------
+// Baseline 3-way conflict alignment, shared carry tree, and candidate inspection
+// ---------------------------------------------------------------------------
+
+export const BASELINE_ALIGNMENT_POLICIES = Object.freeze([
+  'off',
+  'fail-fast',
+  'extract-context',
+] as const);
+export type BaselineAlignmentPolicy = typeof BASELINE_ALIGNMENT_POLICIES[number];
+
+export const DEFAULT_BASELINE_ALIGNMENT_POLICY: BaselineAlignmentPolicy = 'off';
+export const DEFAULT_BASELINE_MAX_CONFLICT_FILES = 16;
+export const MIN_BASELINE_MAX_CONFLICT_FILES = 1;
+export const MAX_BASELINE_MAX_CONFLICT_FILES = 64;
+export const DEFAULT_BASELINE_MAX_CONFLICT_BYTES = 65_536;
+export const MIN_BASELINE_MAX_CONFLICT_BYTES = 1_024;
+export const MAX_BASELINE_MAX_CONFLICT_BYTES = 262_144;
+
+export const BASELINE_CONFLICT_REASON = 'baseline_merge_conflict' as const;
+export const BASELINE_CONFLICT_RESOURCE_ID = 'baseline-conflict-context' as const;
+export const BASELINE_CONFLICT_RESOURCE_PATH = '.loopwright-baseline/conflicts.json' as const;
+
+export interface BaselineAlignmentConfig {
+  readonly policy: BaselineAlignmentPolicy;
+  readonly maxConflictFiles?: number | undefined;
+  readonly maxConflictBytes?: number | undefined;
+}
+
+export interface ResolvedBaselineAlignmentConfig {
+  readonly policy: BaselineAlignmentPolicy;
+  readonly maxConflictFiles: number;
+  readonly maxConflictBytes: number;
+}
+
+export type BaselineAlignmentOverride = BaselineAlignmentPolicy | BaselineAlignmentConfig;
+
+export interface BaselineConflictHunk {
+  readonly index: number;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly block: string;
+}
+
+export type BaselineConflictKind = 'content' | 'add_add' | 'modify_delete' | 'delete_modify';
+
+export interface ExtractedBaselineConflictFile {
+  readonly path: string;
+  readonly conflictKind: BaselineConflictKind;
+  readonly baseSha256: string | null;
+  readonly targetSha256: string | null;
+  readonly sourceSha256: string | null;
+  readonly byteLength: number;
+  readonly hunks: readonly BaselineConflictHunk[];
+}
+
+export interface BaselineConflictContextDocument {
+  readonly version: 1;
+  readonly baseRevision: string;
+  readonly sourceRevision: string;
+  readonly mergeBase: string | null;
+  readonly conflictCount: number;
+  readonly totalHunkBytes: number;
+  readonly conflicts: readonly ExtractedBaselineConflictFile[];
+}
+
+export interface BaselineConflictContextResource {
+  readonly id: typeof BASELINE_CONFLICT_RESOURCE_ID;
+  readonly kind: 'document';
+  readonly path: string;
+  readonly bytes: Buffer;
+  readonly sha256: string;
+  readonly byteLength: number;
+  readonly document: BaselineConflictContextDocument;
+  readonly extractedPaths: readonly string[];
+}
+
+export type BaselineAlignmentResult =
+  | {
+    readonly disposition: 'clean';
+    readonly status: 'same_revision' | 'merged_clean';
+    readonly policy: ResolvedBaselineAlignmentConfig;
+    readonly baseRevision: string;
+    readonly sourceRevision: string;
+    readonly mergeBase: string | null;
+    readonly mergedTreeOid: string | null;
+    readonly carryRemovals: readonly string[];
+    readonly carryUpdates: readonly CarryDeltaEntry[];
+    readonly conflictPaths: readonly string[];
+    readonly conflicts: readonly ExtractedBaselineConflictFile[];
+    readonly conflictResource: null;
+  }
+  | {
+    readonly disposition: 'extracted';
+    readonly status: 'conflicts_extracted';
+    readonly policy: ResolvedBaselineAlignmentConfig;
+    readonly baseRevision: string;
+    readonly sourceRevision: string;
+    readonly mergeBase: string | null;
+    readonly mergedTreeOid: string | null;
+    readonly carryRemovals: readonly string[];
+    readonly carryUpdates: readonly CarryDeltaEntry[];
+    readonly conflictPaths: readonly string[];
+    readonly conflicts: readonly ExtractedBaselineConflictFile[];
+    readonly conflictResource: BaselineConflictContextResource;
+  }
+  | {
+    readonly disposition: 'unmerged_off';
+    readonly status: 'conflicts_unmerged';
+    readonly policy: ResolvedBaselineAlignmentConfig;
+    readonly baseRevision: string;
+    readonly sourceRevision: string;
+    readonly mergeBase: string | null;
+    readonly mergedTreeOid: string | null;
+    readonly carryRemovals: readonly string[];
+    readonly carryUpdates: readonly CarryDeltaEntry[];
+    readonly conflictPaths: readonly string[];
+    readonly conflicts: readonly ExtractedBaselineConflictFile[];
+    readonly conflictResource: null;
+  }
+  | {
+    readonly disposition: 'blocked';
+    readonly status: 'blocked';
+    readonly reason: typeof BASELINE_CONFLICT_REASON;
+    readonly detail: string;
+    readonly policy: ResolvedBaselineAlignmentConfig;
+    readonly baseRevision: string;
+    readonly sourceRevision: string;
+    readonly mergeBase: string | null;
+    readonly mergedTreeOid: null;
+    readonly carryRemovals: readonly string[];
+    readonly carryUpdates: readonly CarryDeltaEntry[];
+    readonly conflictPaths: readonly string[];
+    readonly conflicts: readonly ExtractedBaselineConflictFile[];
+    readonly conflictResource: null;
+  };
+
+/** Scope view accepted by candidate write checks — either a compiled `TaskContract` or compiled scope pattern arrays. */
+export interface CandidateScopeSnapshot {
+  readonly contract?: TaskContract | undefined;
+  readonly writablePaths?: readonly string[] | undefined;
+  readonly protectedPaths: readonly string[];
+}
+
+export interface GitTreeEntry {
+  readonly mode: string;
+  readonly type: string;
+  readonly oid: string;
+}
+
+export interface CarryDeltaEntry {
+  readonly path: string;
+  readonly mode: '100644' | '100755';
+  readonly oid: string;
+  readonly byteLength?: number | undefined;
+  readonly sha256?: string | undefined;
+  readonly bytes?: Uint8Array | undefined;
+}
+
+export type InspectedCandidateFile =
+  | {
+    readonly kind: 'cas';
+    readonly name: string;
+    readonly mode: '100644' | '100755';
+    readonly sha256: string;
+    readonly byteLength: number;
+    readonly uri: string;
+    readonly canonicalBlobPath: string;
+  }
+  | {
+    readonly kind: 'inline';
+    readonly name: string;
+    readonly mode?: '100644' | '100755' | undefined;
+    readonly bytes: Buffer;
+  };
+
+export interface InspectedCandidateSnapshot {
+  readonly lock: Record<string, unknown>;
+  readonly contract: import('@loopwright/core').TaskContract;
+  readonly protectedPaths: readonly string[];
+  readonly baseRevision: string;
+  readonly sourceRevision: string;
+  readonly manifest: import('@loopwright/core').ArtifactManifest;
+  readonly files: readonly InspectedCandidateFile[];
+}
 
 /** Re-exported utility type so consumers can name a digest without importing core directly. */
 export type { Digest };

@@ -15,6 +15,19 @@ inputs:
     description: 'Path to the declarative taskpack manifest inside the target repository.'
     required: false
     default: '.loopwright/taskpack.yaml'
+  suite-path:
+    description: 'Optional path to a declarative TaskpackSuite manifest inside the target repository (e.g. .loopwright/suite.yaml).'
+    required: false
+  domain:
+    description: 'Optional target domain identifier within the TaskpackSuite manifest.'
+    required: false
+  resolve-suite-only:
+    description: "Resolve TaskpackSuite eligibility and emit the matrix output without executing a taskpack run when 'true'."
+    required: false
+    default: 'false'
+  baseline-alignment:
+    description: "Optional baseline alignment policy override ('off', 'fail-fast', or 'extract-context')."
+    required: false
   mode:
     description: "Cycle mode: 'auto', 'candidate', or 'no-change'."
     required: false
@@ -154,6 +167,9 @@ outputs:
   cost-usd:
     description: 'Formatted USD cost when reported or estimated by the model catalog.'
     value: ${{ steps.loopwright-entrypoint.outputs.cost-usd }}
+  matrix:
+    description: 'Deterministic JSON matrix ({ include: [...] }) emitted when suite resolution runs.'
+    value: ${{ steps.loopwright-entrypoint.outputs.matrix }}
 
 runs:
   using: 'composite'
@@ -167,6 +183,10 @@ runs:
       shell: bash
       env:
         INPUT_TASKPACK-PATH: ${{ inputs.taskpack-path }}
+        INPUT_SUITE-PATH: ${{ inputs.suite-path }}
+        INPUT_DOMAIN: ${{ inputs.domain }}
+        INPUT_RESOLVE-SUITE-ONLY: ${{ inputs.resolve-suite-only }}
+        INPUT_BASELINE-ALIGNMENT: ${{ inputs.baseline-alignment }}
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_ALLOW-PRIVILEGED-EXECUTION: ${{ inputs.allow-privileged-execution }}
         INPUT_ALLOW-WORKFLOW-WRITES: ${{ inputs.allow-workflow-writes }}

@@ -149,7 +149,7 @@ export const mediaType: Schema<string> = (value, path) => {
   return mime;
 };
 
-const FORBIDDEN_METRIC_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 export type MetricValue = number | string | boolean;
 export type MetricsMap = Readonly<Record<string, MetricValue>>;
@@ -161,7 +161,7 @@ export function metricsSchema(value: Json, path: string): MetricsMap {
   for (const key of keys) {
     if (
       key.length < 1 || key.length > LIMITS.metricKey
-      || FORBIDDEN_METRIC_KEYS.has(key)
+      || FORBIDDEN_PROTOTYPE_KEYS.has(key)
       || !/^[A-Za-z_][A-Za-z0-9._-]*$/.test(key)
     ) {
       fail('IDENTIFIER_INVALID', path);
@@ -216,6 +216,152 @@ export const reworkPolicySchema = record({
 });
 export type ReworkPolicy = Infer<typeof reworkPolicySchema>;
 
+function uniqueArrayOf<T extends string>(schema: Schema<T>, min: number, max: number): Schema<readonly T[]> {
+  const base = arrayOf(schema, min, max);
+  return (value, path) => {
+    const items = base(value, path);
+    unique(items, path);
+    return items;
+  };
+}
+
+const handoffHeadingSchema: Schema<string> = (value, path) => {
+  const raw = text(1, LIMITS.handoffHeading)(value, path);
+  if (/[\r\n\0\p{C}]/u.test(raw) || raw.trim().length === 0) fail('VALUE_RANGE', path);
+  const trimmed = raw.trim();
+  const headingBody = /^(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/.exec(trimmed)?.[2] ?? trimmed;
+  const cleaned = headingBody.replace(/[ \t]+$/, '');
+  const title = /^#+$/.test(cleaned) ? '' : cleaned.replace(/[ \t]+#+$/, '').trim();
+  if (title.length === 0) fail('VALUE_RANGE', path);
+  return raw;
+};
+
+const jsonPointerSchema: Schema<string> = (value, path) => {
+  const pointer = text(0, LIMITS.handoffPointer)(value, path);
+  if (/[\0\r\n\p{C}]/u.test(pointer)) fail('VALUE_RANGE', path);
+  if (pointer === '') return pointer;
+  if (!pointer.startsWith('/')) fail('VALUE_RANGE', path);
+  const rawSegments = pointer.slice(1).split('/');
+  if (rawSegments.length > LIMITS.segments) fail('VALUE_RANGE', path);
+  for (const segment of rawSegments) {
+    let decoded = '';
+    for (let i = 0; i < segment.length; i++) {
+      const ch = segment[i]!;
+      if (ch === '~') {
+        const next = segment[i + 1];
+        if (next === '0') {
+          decoded += '~';
+          i++;
+        } else if (next === '1') {
+          decoded += '/';
+          i++;
+        } else {
+          fail('VALUE_RANGE', path);
+        }
+      } else {
+        decoded += ch;
+      }
+    }
+    if (FORBIDDEN_PROTOTYPE_KEYS.has(decoded)) fail('VALUE_RANGE', path);
+  }
+  return pointer;
+};
+
+const handoffArtifactSourceSchema = record({
+  kind: enumeration('artifact'),
+  path: nameSchema,
+});
+const handoffSubmissionSourceSchema = record({
+  kind: enumeration('submission'),
+});
+const handoffVerdictSourceSchema = record({
+  kind: enumeration('verdict'),
+});
+export type StepHandoffSource =
+  | Infer<typeof handoffArtifactSourceSchema>
+  | Infer<typeof handoffSubmissionSourceSchema>
+  | Infer<typeof handoffVerdictSourceSchema>;
+export const stepHandoffSourceSchema: Schema<StepHandoffSource> = (value, path) => {
+  const input = object(value, path);
+  if (!Object.hasOwn(input, 'kind')) fail('FIELD_REQUIRED', `${path}/kind`);
+  const kind = input.kind;
+  if (typeof kind !== 'string') fail('VALUE_TYPE', `${path}/kind`);
+  if (kind === 'artifact') return handoffArtifactSourceSchema(input, path);
+  if (kind === 'submission') return handoffSubmissionSourceSchema(input, path);
+  if (kind === 'verdict') return handoffVerdictSourceSchema(input, path);
+  fail('VALUE_ENUM', `${path}/kind`);
+};
+
+const handoffMarkdownHeadingSelectSchema = record({
+  kind: enumeration('markdown_heading'),
+  heading: handoffHeadingSchema,
+  includeSubheadings: optional(boolean),
+});
+const handoffJsonPointerSelectSchema = record({
+  kind: enumeration('json_pointer'),
+  pointers: uniqueArrayOf(jsonPointerSchema, 1, LIMITS.handoffPointers),
+});
+const handoffFullSelectSchema = record({
+  kind: enumeration('full'),
+});
+export type StepHandoffSelect =
+  | Infer<typeof handoffMarkdownHeadingSelectSchema>
+  | Infer<typeof handoffJsonPointerSelectSchema>
+  | Infer<typeof handoffFullSelectSchema>;
+export const stepHandoffSelectSchema: Schema<StepHandoffSelect> = (value, path) => {
+  const input = object(value, path);
+  if (!Object.hasOwn(input, 'kind')) fail('FIELD_REQUIRED', `${path}/kind`);
+  const kind = input.kind;
+  if (typeof kind !== 'string') fail('VALUE_TYPE', `${path}/kind`);
+  if (kind === 'markdown_heading') return handoffMarkdownHeadingSelectSchema(input, path);
+  if (kind === 'json_pointer') return handoffJsonPointerSelectSchema(input, path);
+  if (kind === 'full') return handoffFullSelectSchema(input, path);
+  fail('VALUE_ENUM', `${path}/kind`);
+};
+
+export const stepHandoffSelectorSchema = record({
+  id: optional(identifier),
+  fromStep: identifier,
+  source: stepHandoffSourceSchema,
+  select: stepHandoffSelectSchema,
+  maxBytes: optional(integer(LIMITS.handoffMinBytes, LIMITS.handoffMaxBytes)),
+  required: optional(boolean),
+});
+export type StepHandoffSelector = Infer<typeof stepHandoffSelectorSchema>;
+
+const resourceExtensionSchema: Schema<string> = (value, path) => {
+  const ext = text(2, LIMITS.ruleExtension)(value, path);
+  if (!/^\.[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/.test(ext)) fail('VALUE_RANGE', path);
+  return ext;
+};
+
+const failureCodeSchema: Schema<string> = (value, path) => {
+  const codeValue = text(1, LIMITS.ruleFailureCode)(value, path);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(codeValue)) fail('IDENTIFIER_INVALID', path);
+  return codeValue;
+};
+
+export const resourceActivationPhase = enumeration('author', 'review', 'repair', 'rework');
+export type ResourceActivationPhase = Infer<typeof resourceActivationPhase>;
+
+const resourceActivationRuleShape = record({
+  changedPaths: optional(uniqueArrayOf(pattern, 1, LIMITS.ruleChangedPaths)),
+  extensions: optional(uniqueArrayOf(resourceExtensionSchema, 1, LIMITS.ruleExtensions)),
+  phases: optional(uniqueArrayOf(resourceActivationPhase, 1, LIMITS.rulePhases)),
+  failedChecks: optional(uniqueArrayOf(identifier, 1, LIMITS.ruleFailedChecks)),
+  failureCodes: optional(uniqueArrayOf(failureCodeSchema, 1, LIMITS.ruleFailureCodes)),
+});
+export type ResourceActivationRule = Infer<typeof resourceActivationRuleShape>;
+export const resourceActivationRuleSchema: Schema<ResourceActivationRule> = (value, path) => {
+  const parsed = resourceActivationRuleShape(value, path);
+  if (Object.keys(parsed).length === 0) fail('VALUE_RANGE', path);
+  return parsed;
+};
+
+function isCompactionUses(uses: string): boolean {
+  return uses === 'pi.compact.v1';
+}
+
 export function document<const K extends string, T>(kind: K, spec: Schema<T>) {
   const shape = record({ apiVersion: enumeration(API_VERSION), kind: enumeration(kind), metadata: record({ id: identifier }), spec });
   return (value: Json, path: string): Infer<typeof shape> => {
@@ -264,11 +410,13 @@ const taskShape = configDocument('TaskContract', record({
   }), 1, LIMITS.roles),
   trustedContext: record({ revision, discovery: enumeration('disabled'), resources: arrayOf(record({
     id: identifier, kind: enumeration('instruction', 'skill', 'document'), path: nameSchema, digest: digestSchema,
+    when: optional(resourceActivationRuleSchema),
   }), 0, LIMITS.resources) }),
   budgets,
   steps: arrayOf(record({ id: identifier, kind: enumeration('agent', 'check'), uses: identifier,
     roleId: nullable(identifier), dependsOn: arrayOf(identifier),
     onRework: optional(reworkPolicySchema),
+    handoffs: optional(arrayOf(stepHandoffSelectorSchema, 1, LIMITS.handoffsPerStep)),
   }), 1),
   acceptance: record({ required: arrayOf(identifier, 1, LIMITS.checks), checks: arrayOf(record({
     id: identifier, allowedEvidenceLevels: arrayOf(evidenceLevel, 1, 5),
@@ -317,17 +465,41 @@ export function contractSchema(input: Json, path = ''): TaskContract {
     });
   });
   const roleIds = new Set(spec.roles.map(role => role.id));
-  const stepIds = new Set(spec.steps.map(step => step.id));
+  const stepById = new Map(spec.steps.map(step => [step.id, step] as const));
   spec.steps.forEach((step, index) => {
     if (step.roleId === null ? step.kind === 'agent' : !roleIds.has(step.roleId)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/roleId`);
-    if (step.onRework !== undefined && !stepIds.has(step.onRework.rejectTo)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/onRework/rejectTo`);
+    if (step.onRework !== undefined && !stepById.has(step.onRework.rejectTo)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/onRework/rejectTo`);
+    if (step.handoffs !== undefined) {
+      if (step.kind !== 'agent' || isCompactionUses(step.uses)) fail('FIELD_UNKNOWN', `${stepsPath}/${index}/handoffs`);
+      const seenHandoffIds = new Set<string>();
+      let aggregateBytes = 0;
+      step.handoffs.forEach((handoff, handoffIndex) => {
+        const handoffPath = `${stepsPath}/${index}/handoffs/${handoffIndex}`;
+        const effectiveHandoffId = handoff.id ?? `handoff-${handoffIndex + 1}`;
+        if (seenHandoffIds.has(effectiveHandoffId)) fail('DUPLICATE_ID', `${handoffPath}/id`);
+        seenHandoffIds.add(effectiveHandoffId);
+        aggregateBytes += handoff.maxBytes ?? LIMITS.handoffDefaultBytes;
+        if (aggregateBytes > LIMITS.handoffAggregateBytes) fail('VALUE_RANGE', handoffPath);
+        const fromStep = stepById.get(handoff.fromStep);
+        if (fromStep === undefined) fail('REFERENCE_UNKNOWN', `${handoffPath}/fromStep`);
+        if (fromStep.kind !== 'agent' && handoff.source.kind === 'artifact') {
+          fail('VALUE_ENUM', `${handoffPath}/source/kind`);
+        }
+      });
+    }
   });
   validateGraph(spec.steps, stepsPath);
   const dependenciesByStep = new Map(spec.steps.map(step => [step.id, step.dependsOn] as const));
   spec.steps.forEach((step, index) => {
-    if (step.onRework !== undefined) {
-      const ancestors = strictAncestors(step.id, dependenciesByStep);
-      if (!ancestors.has(step.onRework.rejectTo)) fail('GRAPH_CYCLE', `${stepsPath}/${index}/onRework/rejectTo`);
+    if (step.onRework === undefined && step.handoffs === undefined) return;
+    const ancestors = strictAncestors(step.id, dependenciesByStep);
+    if (step.onRework !== undefined && !ancestors.has(step.onRework.rejectTo)) {
+      fail('GRAPH_CYCLE', `${stepsPath}/${index}/onRework/rejectTo`);
+    }
+    if (step.handoffs !== undefined) {
+      step.handoffs.forEach((handoff, handoffIndex) => {
+        if (!ancestors.has(handoff.fromStep)) fail('GRAPH_CYCLE', `${stepsPath}/${index}/handoffs/${handoffIndex}/fromStep`);
+      });
     }
   });
   const budget = spec.budgets;

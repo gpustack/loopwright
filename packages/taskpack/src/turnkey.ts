@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants as fsConstants, existsSync, lstatSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
-import { chmod, link, lstat, mkdir, mkdtemp, open, opendir, readdir, readFile, realpath, rename, rm, unlink, type FileHandle } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, open, opendir, readdir, readFile, realpath, rename, rm, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createNetServer, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -28,30 +28,53 @@ import {
   type AdvisoryDecisionPort,
   type ControllerPorts,
   type ReportCheckItem,
+  type RunEvalReport,
   type StepMcpServerMetadata,
 } from '@loopwright/controller';
 import {
   bindSubject,
   digestArtifact,
-  isWritablePath,
   LIMITS,
-  matchesScopePattern,
   OVERLAY_LIMITS,
   validateDocument,
   validateRelativePath,
-  type ArtifactManifest,
   type BaseTreeAnchor,
   type MetricsMap,
   type MetricValue,
   type StructuredFinding,
-  type TaskContract,
   type UsageSummary,
 } from '@loopwright/core';
 import { DECISION_PROVIDER_API_KEY_ENV, type DecisionTransport } from '@loopwright/decisions';
 import { reopenLocalRun, type LocalRunIdentity, type PageCursor } from '@loopwright/state';
+import {
+  alignBaselineRevisions,
+  assertExtractedConflictsResolved,
+  computeThreeWaySourceRevisionCarryDelta,
+  filterModifiedCandidateOverlayFiles,
+  hasSymlinkAtOrAbove,
+  isAllowedCandidateWrite,
+  isProtectedCandidatePath,
+  listTreeEntriesAtRevision,
+  MAX_GIT_LIST_BYTES,
+  mergeCandidateOverlayWithCarry,
+  normalizeCandidateRelativePath,
+  resolveReadOnlyAlternateObjectDirs,
+  verifyCandidateBaselinePrePublication,
+  type BaselineAlignmentResult,
+} from './baseline-align.js';
 import { computeDirectoryTreeDigest } from './digests.js';
-import { LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV } from './models-config.js';
-import { sanitizeReportText } from './output-format.js';
+import {
+  loadPiModelsJson,
+  LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV,
+  resolveTaskpackModelCandidates,
+  selectHealthyModelCandidate,
+} from './models-config.js';
+import {
+  sanitizeReportText,
+  writeActionOutputSinks,
+  type ReportOutputFormat,
+  type RunReportInput,
+} from './output-format.js';
 import {
   collectManifestSecretEnvNames,
   formatWorkspaceResourcesManifest,
@@ -61,7 +84,12 @@ import {
   STREAM_CHUNK_BYTES,
   type RunTaskpackPreflightResult,
 } from './preflight.js';
-import { IDENTIFIER_PATTERN, normalizeRelativePath } from './schema.js';
+import {
+  IDENTIFIER_PATTERN,
+  normalizeRelativePath,
+  parseBaselineAlignmentPolicy,
+  resolveBaselineAlignmentConfig,
+} from './schema.js';
 import {
   compileLinuxSeccompBpfBinary,
   DEFAULT_DENIED_HOME_SUBPATHS,
@@ -91,12 +119,18 @@ import {
   REPOSITORY_FULL_NAME_PATTERN,
   TaskpackError,
   type ActionDelegateOutcome,
+  type BaselineAlignmentOverride,
+  type CarryDeltaEntry,
   type CompiledLocalCommandGate,
   type ExecutionHostPolicy,
+  type GitTreeEntry,
   type HostGateEndpointPlan,
   type HostPublicationEndpointPlan,
+  type InspectedCandidateFile,
+  type InspectedCandidateSnapshot,
   type PolicyProfile,
   type SandboxNetworkMode,
+  type TaskpackManifest,
   type TaskpackUpstreamRecord,
   type TurnkeyMemorySummary,
   type WrittenCompiledTaskpack,
@@ -125,12 +159,30 @@ export interface TurnkeyCycleAttemptSummary {
   readonly checks: readonly ReportCheckItem[];
   readonly elapsedMs: number;
   readonly retryableProviderFailure: boolean;
+  readonly runEval: RunEvalReport | null;
+  readonly report: RunReportInput;
 }
 
-export { CANONICAL_TASKPACK_STEP_GATE_URL };
+export {
+  CANONICAL_TASKPACK_STEP_GATE_URL,
+  hasSymlinkAtOrAbove,
+  isAllowedCandidateWrite,
+  isProtectedCandidatePath,
+  listTreeEntriesAtRevision,
+  MAX_GIT_LIST_BYTES,
+  mergeCandidateOverlayWithCarry,
+  normalizeCandidateRelativePath,
+  parseBaselineAlignmentPolicy,
+  verifyCandidateBaselinePrePublication,
+};
+export type {
+  CarryDeltaEntry,
+  GitTreeEntry,
+  InspectedCandidateFile,
+  InspectedCandidateSnapshot,
+};
 
 const MAX_REQUEST_BODY_BYTES = 262_144;
-export const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 const MAX_SCRIPT_BYTES = 262_144;
 const MAX_STDIO_BYTES = 1_048_576;
 export const MAX_REASON_CODEPOINTS = 256;
@@ -303,94 +355,6 @@ function writePlainJsonResponse(res: ServerResponse, statusCode: number, payload
     'content-length': String(body.byteLength),
   });
   res.end(body);
-}
-
-export type InspectedCandidateFile =
-  | {
-    readonly kind: 'cas';
-    readonly name: string;
-    readonly mode: '100644' | '100755';
-    readonly sha256: string;
-    readonly byteLength: number;
-    readonly uri: string;
-    readonly canonicalBlobPath: string;
-  }
-  | {
-    readonly kind: 'inline';
-    readonly name: string;
-    readonly mode?: '100644' | '100755' | undefined;
-    readonly bytes: Buffer;
-  };
-
-export interface InspectedCandidateSnapshot {
-  readonly lock: Record<string, unknown>;
-  readonly contract: TaskContract;
-  readonly protectedPaths: readonly string[];
-  readonly baseRevision: string;
-  readonly sourceRevision: string;
-  readonly manifest: ArtifactManifest;
-  readonly files: readonly InspectedCandidateFile[];
-}
-
-function normalizeProtectedPrefix(protectedEntry: string): string {
-  const withoutGlob = protectedEntry.endsWith('/**') ? protectedEntry.slice(0, -3) : protectedEntry;
-  return withoutGlob.replace(/\/+$/, '');
-}
-
-export function isProtectedCandidatePath(name: string, protectedPaths: readonly string[]): boolean {
-  for (const protectedEntry of protectedPaths) {
-    if (protectedEntry === '**') return true;
-    const directMatch = matchesScopePattern(protectedEntry, name);
-    if (directMatch.ok && directMatch.value) return true;
-    const clean = normalizeProtectedPrefix(protectedEntry);
-    if (clean.length === 0) continue;
-    if (!clean.includes('*') && !clean.includes('?')) {
-      if (name === clean || name.startsWith(`${clean}/`)) {
-        return true;
-      }
-    } else {
-      const subtreeMatch = matchesScopePattern(`${clean}/**`, name);
-      if (subtreeMatch.ok && subtreeMatch.value) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-export function isAllowedCandidateWrite(
-  name: string,
-  snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
-): boolean {
-  if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
-    return false;
-  }
-  const lowerName = name.normalize('NFC').toLowerCase();
-  const lowerProtected = snapshot.protectedPaths.map(entry => entry.normalize('NFC').toLowerCase());
-  if (isProtectedCandidatePath(lowerName, lowerProtected)) {
-    return false;
-  }
-  const writableCheck = isWritablePath(snapshot.contract, name);
-  return writableCheck.ok && writableCheck.value === true;
-}
-
-export function normalizeCandidateRelativePath(name: string): string {
-  if (
-    typeof name !== 'string'
-    || name.length === 0
-    || name.includes('\0')
-    || name.includes('\\')
-    || name.startsWith('/')
-  ) {
-    throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate relative file path "${name}"`);
-  }
-  const parts = name.split('/');
-  for (const part of parts) {
-    if (part.length === 0 || part === '.' || part === '..') {
-      throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate path segment in "${name}"`);
-    }
-  }
-  return name;
 }
 
 export async function inspectAndVerifyCandidate(
@@ -4686,6 +4650,7 @@ export interface LocalCommandGateServerOptions {
   readonly checkStagedDir?: string | null | undefined;
   readonly syncWaitMs?: number | undefined;
   readonly disableReflink?: boolean | undefined;
+  readonly extractedConflictPaths?: readonly string[] | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
 }
 
@@ -5066,6 +5031,106 @@ export async function startLocalCommandGateServer(
           await mkdir(scratchHome, { mode: 0o700 });
           await mkdir(scratchTmp, { mode: 0o700 });
 
+          if (gate.baselineConflictGuardOnly === true) {
+            const snapshot = await inspectAndVerifyCandidate(options.runRoot, runId, candidateDigest, workDir);
+            const gitEnv = buildCleanGitEnv();
+            const deletedPaths = snapshot.manifest.spec.deleted ?? [];
+            if (snapshot.manifest.spec.baseTree !== undefined) {
+              await verifyBaseTreeAnchor(
+                options.repositoryRoot,
+                snapshot.manifest.spec.baseTree,
+                gitEnv,
+                snapshot.sourceRevision,
+              );
+              for (const file of snapshot.files) {
+                if (!isAllowedCandidateWrite(file.name, snapshot)) {
+                  throw new TaskpackError(
+                    'TASKPACK_SCOPE_VIOLATION',
+                    `candidate overlay file "${file.name}" is outside writable scope`,
+                  );
+                }
+              }
+              for (const rawDeleted of deletedPaths) {
+                const deletedName = normalizeCandidateRelativePath(rawDeleted);
+                if (!isAllowedCandidateWrite(deletedName, snapshot)) {
+                  throw new TaskpackError(
+                    'TASKPACK_SCOPE_VIOLATION',
+                    `candidate deleted path "${deletedName}" is outside writable scope`,
+                  );
+                }
+              }
+            }
+            let guardBaseTreeMap: ReadonlyMap<string, GitTreeEntry> | undefined;
+            let guardSourceTreeMap: ReadonlyMap<string, GitTreeEntry> | undefined;
+            if (snapshot.sourceRevision !== snapshot.baseRevision) {
+              guardBaseTreeMap = await listTreeEntriesAtRevision(options.repositoryRoot, snapshot.baseRevision, gitEnv);
+              guardSourceTreeMap = await listTreeEntriesAtRevision(options.repositoryRoot, snapshot.sourceRevision, gitEnv);
+            }
+            let overlayFilesToCheck: readonly InspectedCandidateFile[] = snapshot.manifest.spec.baseTree !== undefined
+              ? snapshot.files
+              : snapshot.files.filter(file => isAllowedCandidateWrite(file.name, snapshot));
+            const effectiveDeletedPaths: string[] = [];
+            if (snapshot.manifest.spec.baseTree !== undefined) {
+              for (const rawDeleted of deletedPaths) {
+                effectiveDeletedPaths.push(normalizeCandidateRelativePath(rawDeleted));
+              }
+            } else if (
+              snapshot.sourceRevision !== snapshot.baseRevision
+              && guardBaseTreeMap !== undefined
+              && guardSourceTreeMap !== undefined
+            ) {
+              overlayFilesToCheck = await filterModifiedCandidateOverlayFiles(snapshot.files, snapshot, guardSourceTreeMap);
+              const candidateNames = new Set(snapshot.files.map(file => file.name));
+              for (const [sourceName, sourceEntry] of guardSourceTreeMap.entries()) {
+                if (sourceEntry.mode !== '100644' && sourceEntry.mode !== '100755') continue;
+                if (
+                  !candidateNames.has(sourceName)
+                  && isAllowedCandidateWrite(sourceName, snapshot)
+                  && !hasSymlinkAtOrAbove(sourceName, guardBaseTreeMap, guardSourceTreeMap)
+                ) {
+                  effectiveDeletedPaths.push(sourceName);
+                }
+              }
+            }
+            const guardRealRepoRoot = await realpath(options.repositoryRoot);
+            const guardAlternateDirs = await resolveReadOnlyAlternateObjectDirs(guardRealRepoRoot);
+            const guardCarryDelta = await computeThreeWaySourceRevisionCarryDelta({
+              repositoryRoot: options.repositoryRoot,
+              baseRevision: snapshot.baseRevision,
+              sourceRevision: snapshot.sourceRevision,
+              snapshot,
+              baseEntries: guardBaseTreeMap,
+              sourceEntries: guardSourceTreeMap,
+              candidateFiles: overlayFilesToCheck,
+              candidateDeletedPaths: effectiveDeletedPaths,
+              extractedConflictPaths: options.extractedConflictPaths,
+              alternateObjectDirs: guardAlternateDirs,
+              scratchRoot: workDir,
+              gitEnv,
+              scrubber,
+              onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
+            });
+            await mergeCandidateOverlayWithCarry({
+              repositoryRoot: options.repositoryRoot,
+              baseRevision: snapshot.baseRevision,
+              sourceRevision: snapshot.sourceRevision,
+              snapshot,
+              overlayFiles: overlayFilesToCheck,
+              candidateDeletedPaths: effectiveDeletedPaths,
+              carryUpdates: guardCarryDelta.carryUpdates,
+              baseEntries: guardBaseTreeMap,
+              sourceEntries: guardSourceTreeMap,
+              extractedConflictPaths: guardCarryDelta.resolvedConflictPaths,
+              alternateObjectDirs: guardAlternateDirs,
+              scratchRoot: workDir,
+              scrubber,
+              onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
+            });
+            options.onLog?.(scrubber.scrub(`check ${gate.checkId}: passed baseline conflict guard`));
+            recordSettled(newJob, 'approved', null);
+            return;
+          }
+
           const scriptCopyPath = await verifyAndStageCommandScriptDir(
             options.repositoryRoot,
             gate,
@@ -5128,33 +5193,11 @@ export async function startLocalCommandGateServer(
               snapshot.protectedPaths,
             );
             const sourceRegularByPath = new Map(sourceRegularEntries.map(entry => [entry.path, entry] as const));
-            const { carryRemovals, carryUpdates } = computeAllowedSourceRevisionCarryDelta(
-              snapshot,
-              baseTreeMap,
-              sourceTreeMap,
-            );
 
-            const effectiveBaseline = new Map<string, BaselineRegularEntry>(
-              baseRegularEntries.map(entry => [entry.path, entry] as const),
-            );
-            await applyCarryDeltaToEffectiveBaseline(
-              options.repositoryRoot,
-              effectiveBaseline,
-              sourceRegularByPath,
-              carryRemovals,
-              carryUpdates,
-              gitEnv,
-            );
-
-            const baselineModes = new Map<string, '100644' | '100755'>();
-            for (const entry of effectiveBaseline.values()) {
-              baselineModes.set(entry.path, entry.mode);
-            }
-
-            const overlayFilesToMaterialize = snapshot.manifest.spec.baseTree !== undefined
+            const writableCandidateFiles = snapshot.manifest.spec.baseTree !== undefined
               ? snapshot.files
               : snapshot.files.filter(file => isAllowedCandidateWrite(file.name, snapshot));
-            for (const file of overlayFilesToMaterialize) {
+            for (const file of writableCandidateFiles) {
               if (hasSymlinkAtOrAbove(file.name, baseTreeMap, sourceTreeMap)) {
                 throw new TaskpackError(
                   'ACTION_INPUT_INVALID',
@@ -5162,6 +5205,9 @@ export async function startLocalCommandGateServer(
                 );
               }
             }
+            const overlayFilesToMaterialize: readonly InspectedCandidateFile[] = snapshot.manifest.spec.baseTree !== undefined
+              ? writableCandidateFiles
+              : await filterModifiedCandidateOverlayFiles(writableCandidateFiles, snapshot, sourceTreeMap);
 
             const effectiveDeletedPaths: string[] = [];
             if (snapshot.manifest.spec.baseTree !== undefined) {
@@ -5191,11 +5237,78 @@ export async function startLocalCommandGateServer(
               }
             }
 
-            const deletedSet = new Set(effectiveDeletedPaths);
-            const overlayNames = new Set(overlayFilesToMaterialize.map(file => file.name));
-            const toMaterialize = Array.from(effectiveBaseline.values()).filter(
-              entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path),
+            const commandRealRepoRoot = await realpath(options.repositoryRoot);
+            const commandAlternateDirs = await resolveReadOnlyAlternateObjectDirs(commandRealRepoRoot);
+            const { carryRemovals, carryUpdates, resolvedConflictPaths } = await computeThreeWaySourceRevisionCarryDelta({
+              repositoryRoot: options.repositoryRoot,
+              baseRevision: snapshot.baseRevision,
+              sourceRevision: snapshot.sourceRevision,
+              snapshot,
+              baseEntries: baseTreeMap,
+              sourceEntries: sourceTreeMap,
+              candidateFiles: overlayFilesToMaterialize,
+              candidateDeletedPaths: effectiveDeletedPaths,
+              extractedConflictPaths: options.extractedConflictPaths,
+              alternateObjectDirs: commandAlternateDirs,
+              scratchRoot: workDir,
+              gitEnv,
+              scrubber,
+              onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
+            });
+
+            const reconciledOverlayFiles = await mergeCandidateOverlayWithCarry({
+              repositoryRoot: options.repositoryRoot,
+              baseRevision: snapshot.baseRevision,
+              sourceRevision: snapshot.sourceRevision,
+              snapshot,
+              overlayFiles: overlayFilesToMaterialize,
+              candidateDeletedPaths: effectiveDeletedPaths,
+              carryUpdates,
+              baseEntries: baseTreeMap,
+              sourceEntries: sourceTreeMap,
+              extractedConflictPaths: resolvedConflictPaths,
+              alternateObjectDirs: commandAlternateDirs,
+              scratchRoot: workDir,
+              scrubber,
+              onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
+            });
+
+            const effectiveBaseline = new Map<string, BaselineRegularEntry>(
+              baseRegularEntries.map(entry => [entry.path, entry] as const),
             );
+            await applyCarryDeltaToEffectiveBaseline(
+              options.repositoryRoot,
+              effectiveBaseline,
+              sourceRegularByPath,
+              carryRemovals,
+              carryUpdates,
+              gitEnv,
+            );
+
+            const baselineModes = new Map<string, '100644' | '100755'>();
+            for (const entry of effectiveBaseline.values()) {
+              baselineModes.set(entry.path, entry.mode);
+            }
+
+            const mergedCarryBytesByPath = new Map(
+              carryUpdates.filter(u => u.bytes !== undefined).map(u => [u.path, u] as const),
+            );
+            const deletedSet = new Set(effectiveDeletedPaths);
+            const overlayNames = new Set(reconciledOverlayFiles.map(file => file.name));
+            const toMaterialize = Array.from(effectiveBaseline.values()).filter(
+              entry => !deletedSet.has(entry.path) && !overlayNames.has(entry.path) && !mergedCarryBytesByPath.has(entry.path),
+            );
+            const synthesizedCarryFiles: InspectedCandidateFile[] = [];
+            for (const [carryPath, carryEntry] of mergedCarryBytesByPath.entries()) {
+              if (!deletedSet.has(carryPath) && !overlayNames.has(carryPath) && carryEntry.bytes !== undefined) {
+                synthesizedCarryFiles.push({
+                  kind: 'inline',
+                  name: carryPath,
+                  mode: carryEntry.mode,
+                  bytes: Buffer.from(carryEntry.bytes),
+                });
+              }
+            }
             const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
             baseDir = await getOrMaterializeBaseDir(
               snapshot.baseRevision,
@@ -5211,9 +5324,20 @@ export async function startLocalCommandGateServer(
               candidateDir,
               Math.max(60_000, gate.timeoutSeconds * 1000),
             );
-            await materializeOverlayCandidateFiles(candidateDir, overlayFilesToMaterialize, baselineModes, disableReflink);
+            if (synthesizedCarryFiles.length > 0) {
+              await materializeOverlayCandidateFiles(candidateDir, synthesizedCarryFiles, baselineModes, disableReflink);
+            }
+            await materializeOverlayCandidateFiles(candidateDir, reconciledOverlayFiles, baselineModes, disableReflink);
             await assertDeletedPathsAbsent(candidateDir, effectiveDeletedPaths, overlayNames);
           } else if (snapshot.manifest.spec.baseTree !== undefined) {
+            if (options.extractedConflictPaths !== undefined && options.extractedConflictPaths.length > 0) {
+              await assertExtractedConflictsResolved({
+                extractedConflictPaths: options.extractedConflictPaths,
+                snapshot,
+                candidateFiles: snapshot.files,
+                candidateDeletedPaths: deletedPaths,
+              });
+            }
             const baselineEntries = await listBaselineRegularEntries(
               options.repositoryRoot,
               snapshot.manifest.spec.baseTree.commitOid,
@@ -5245,6 +5369,14 @@ export async function startLocalCommandGateServer(
             await materializeOverlayCandidateFiles(candidateDir, snapshot.files, baselineModes, disableReflink);
             await assertDeletedPathsAbsent(candidateDir, deletedPaths, overlayNames);
           } else {
+            if (options.extractedConflictPaths !== undefined && options.extractedConflictPaths.length > 0) {
+              await assertExtractedConflictsResolved({
+                extractedConflictPaths: options.extractedConflictPaths,
+                snapshot,
+                candidateFiles: snapshot.files,
+                candidateDeletedPaths: deletedPaths,
+              });
+            }
             await materializeCandidateFiles(candidateDir, snapshot.files, disableReflink);
             if (existsSync(join(options.repositoryRoot, '.git')) && COMMIT_SHA_PATTERN.test(snapshot.baseRevision)) {
               const baselineEntries = await listBaselineRegularEntries(
@@ -5532,73 +5664,6 @@ export async function startLocalCommandGateServer(
   };
 }
 
-export interface GitTreeEntry {
-  readonly mode: string;
-  readonly type: string;
-  readonly oid: string;
-}
-
-export async function listTreeEntriesAtRevision(
-  repositoryRoot: string,
-  revision: string,
-  env: Record<string, string>,
-): Promise<ReadonlyMap<string, GitTreeEntry>> {
-  const stdout = await execGit(
-    repositoryRoot,
-    ['ls-tree', '-r', '-z', '--full-tree', revision],
-    { env, maxStdoutBytes: MAX_GIT_LIST_BYTES, timeoutMs: 30_000 },
-  );
-  if (stdout.byteLength > 0 && stdout.at(-1) !== 0) {
-    throw new TaskpackError('ACTION_INPUT_INVALID', 'git ls-tree output exceeded boundary');
-  }
-  const entries = new Map<string, GitTreeEntry>();
-  const parts = (stdout.byteLength > 0 ? new TextDecoder('utf-8', { fatal: true }).decode(stdout) : '').split('\0');
-  for (const part of parts) {
-    if (part.length === 0) continue;
-    const tabIdx = part.indexOf('\t');
-    if (tabIdx <= 0) continue;
-    const meta = part.slice(0, tabIdx);
-    const path = part.slice(tabIdx + 1);
-    const fields = meta.split(' ');
-    const mode = fields[0];
-    const type = fields[1];
-    const oid = fields[2];
-    if (mode !== undefined && type !== undefined && oid !== undefined) {
-      entries.set(path, { mode, type, oid });
-    }
-  }
-  return entries;
-}
-
-function isSpecialGitTreeEntry(entry: GitTreeEntry | undefined): boolean {
-  return entry?.mode === '120000' || entry?.mode === '160000';
-}
-
-export function hasSymlinkAtOrAbove(
-  path: string,
-  baseEntries: ReadonlyMap<string, GitTreeEntry>,
-  sourceEntries: ReadonlyMap<string, GitTreeEntry>,
-): boolean {
-  if (isSpecialGitTreeEntry(baseEntries.get(path)) || isSpecialGitTreeEntry(sourceEntries.get(path))) {
-    return true;
-  }
-  let slash = path.indexOf('/');
-  while (slash !== -1) {
-    const prefix = path.slice(0, slash);
-    if (isSpecialGitTreeEntry(baseEntries.get(prefix)) || isSpecialGitTreeEntry(sourceEntries.get(prefix))) {
-      return true;
-    }
-    slash = path.indexOf('/', slash + 1);
-  }
-  return false;
-}
-
-export interface CarryDeltaEntry {
-  readonly path: string;
-  readonly mode: '100644' | '100755';
-  readonly oid: string;
-}
-
 export function computeAllowedSourceRevisionCarryDelta(
   snapshot: Pick<InspectedCandidateSnapshot, 'contract' | 'protectedPaths'>,
   baseEntries: ReadonlyMap<string, GitTreeEntry>,
@@ -5649,7 +5714,11 @@ export async function applyCarryDeltaToEffectiveBaseline(
     const cleanCarryPath = validateBaselineGitPath(update.path);
     const existing = sourceRegularByPath.get(cleanCarryPath);
     let byteLength: number;
-    if (existing !== undefined) {
+    if (update.byteLength !== undefined) {
+      byteLength = update.byteLength;
+    } else if (update.bytes !== undefined) {
+      byteLength = update.bytes.byteLength;
+    } else if (existing !== undefined && existing.oid === update.oid) {
       byteLength = existing.byteLength;
     } else {
       let sizeRaw: string;
@@ -5737,10 +5806,40 @@ export interface TurnkeyCycleDelegateOptions {
   readonly decisions?: AdvisoryDecisionPort | undefined;
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly outputFormats?: readonly ReportOutputFormat[] | undefined;
+  readonly stepSummaryPath?: string | undefined;
+  readonly githubOutputPath?: string | undefined;
+  readonly onTurnkeyReport?: ((report: RunReportInput) => void) | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
   readonly onAttemptSettled?: ((summary: TurnkeyCycleAttemptSummary) => void) | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly openHostSessionAdapter?: typeof openPiHostSessionAdapterV2 | undefined;
+}
+
+export function buildTurnkeyRunReportInput(input: {
+  readonly runId: string;
+  readonly status: string;
+  readonly reasonCode: string | null;
+  readonly detail: string;
+  readonly checks: readonly ReportCheckItem[];
+  readonly usage: UsageSummary | null;
+  readonly elapsedMs: number;
+  readonly externalUrl: string | null;
+  readonly runEval: RunEvalReport | null;
+  readonly scrubber: SecretScrubber;
+}): RunReportInput {
+  return {
+    runId: input.runId,
+    status: input.status,
+    reasonCode: input.reasonCode,
+    detail: input.detail,
+    checks: input.checks,
+    usage: input.usage,
+    elapsedMs: input.elapsedMs,
+    externalUrl: input.externalUrl,
+    runEval: input.runEval,
+    scrub: text => input.scrubber.scrub(text),
+  };
 }
 
 export function isRetryablePerRequestTimeout(input: {
@@ -6135,6 +6234,9 @@ export async function executeTurnkeyCycle(
       ...(effectivePolicyProfile !== undefined ? { policyProfile: effectivePolicyProfile } : {}),
       ...(effectiveAllowWorkflowWrites !== undefined ? { allowWorkflowWrites: effectiveAllowWorkflowWrites } : {}),
       ...(options.taskpack.roleMcpServers !== undefined ? { roleMcpServers: options.taskpack.roleMcpServers } : {}),
+      ...(options.taskpack.watchedPaths !== undefined && options.taskpack.watchedPaths.length > 0
+        ? { watchedPaths: options.taskpack.watchedPaths }
+        : {}),
       ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {}),
       ...(options.decisions !== undefined ? { decisions: options.decisions } : {}),
       openAdapter: async (host: OpenAdapterHost, adapterInput: OpenAdapterInput) => {
@@ -6429,6 +6531,7 @@ export async function executeTurnkeyCycle(
       : (cycleOutcome.code === 'CANCELLED' ? 'cancelled' : 'failed');
     let externalUrl: string | null = null;
     let usage: UsageSummary | null = null;
+    let runEval: RunEvalReport | null = null;
     let inspectedLedger: {
       readonly formatRepairs: number;
       readonly implementationRepairs: number;
@@ -6452,6 +6555,7 @@ export async function executeTurnkeyCycle(
           }
           externalUrl = inspected.value.externalUrl;
           usage = inspected.value.usage;
+          runEval = inspected.value.runEval;
           if (inspected.value.status.currentState !== null) {
             inspectedLedger = {
               formatRepairs: inspected.value.status.currentState.ledger.formatRepairs,
@@ -6544,6 +6648,19 @@ export async function executeTurnkeyCycle(
       && (observedRetryablePiFailure || retryableTimeout)
       && !extraInfo.externalWriteDispatched;
 
+    const report = buildTurnkeyRunReportInput({
+      runId: attemptRunId,
+      status: inspectedStatus,
+      reasonCode: cycleOutcome.code,
+      detail: effectiveDetail,
+      checks: extraInfo.checks,
+      usage,
+      elapsedMs,
+      externalUrl,
+      runEval,
+      scrubber,
+    });
+
     const summary: TurnkeyCycleAttemptSummary = {
       attemptSeq: options.attemptSeq,
       attemptRunId,
@@ -6556,15 +6673,38 @@ export async function executeTurnkeyCycle(
       checks: extraInfo.checks,
       elapsedMs,
       retryableProviderFailure,
+      runEval,
+      report,
     };
     options.onLog?.(scrubber.scrub(
       `attempt ${summary.attemptRunId}: ${summary.status} in ${formatDurationMs(summary.elapsedMs)}${summary.externalUrl ? ` — PR ${summary.externalUrl}` : ''}${!summary.ok ? ` (${summary.detail})` : ''}`,
     ));
+    options.onTurnkeyReport?.(report);
     options.onAttemptSettled?.(summary);
 
     let memory: TurnkeyMemorySummary | undefined;
     if (options.memoryFinalizer !== undefined) {
       memory = await options.memoryFinalizer({ runRoot, runId: attemptRunId, summary });
+    }
+    if (
+      (options.outputFormats !== undefined && options.outputFormats.length > 0)
+      || options.stepSummaryPath !== undefined
+      || options.githubOutputPath !== undefined
+    ) {
+      await writeActionOutputSinks({
+        formats: options.outputFormats ?? Object.freeze(['json'] as const),
+        report,
+        memory,
+        stepSummaryPath: options.stepSummaryPath,
+        githubOutputPath: options.githubOutputPath,
+        actionResultJson: JSON.stringify({
+          status: summary.status,
+          runId: summary.attemptRunId,
+          detail: scrubber.scrub(summary.detail),
+          externalUrl: summary.externalUrl,
+        }),
+        scrubber,
+      });
     }
 
     return {
@@ -6608,6 +6748,9 @@ export interface StageTaskpackForStepOptions {
   readonly repositoryRoot: string;
   readonly runRoot: string;
   readonly runId: string;
+  readonly baseRevision?: string | undefined;
+  readonly sourceRevision?: string | undefined;
+  readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
   readonly mode?: 'candidate' | 'no-change' | undefined;
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly policyProfile?: PolicyProfile | undefined;
@@ -6635,6 +6778,8 @@ export interface StagedTaskpackForStep {
   readonly checkStagedDir?: string | null | undefined;
   readonly workspaceStagedDir?: string | null | undefined;
   readonly digests?: Readonly<Record<string, string>> | undefined;
+  readonly extractedConflictPaths?: readonly string[] | undefined;
+  readonly watchedPaths?: readonly string[] | undefined;
 }
 
 export interface OpenStagedTaskpackStepGateOptions {
@@ -6654,7 +6799,7 @@ export interface StagedTaskpackStepGateHandle {
   readonly roleMcpServers?: Readonly<Record<string, readonly string[]>> | undefined;
   readonly mcpServers?: readonly StepMcpServerMetadata[] | undefined;
   readonly decisions?: AdvisoryDecisionPort | undefined;
-  readonly ports?: Pick<ControllerPorts, 'gateUrlOverrides' | 'policyProfile' | 'allowWorkflowWrites' | 'roleMcpServers' | 'mcpServers' | 'decisions'> | undefined;
+  readonly ports?: Pick<ControllerPorts, 'gateUrlOverrides' | 'policyProfile' | 'allowWorkflowWrites' | 'roleMcpServers' | 'mcpServers' | 'decisions' | 'watchedPaths'> | undefined;
   readonly serverUrl?: string | undefined;
   close(): Promise<void>;
 }
@@ -6679,6 +6824,8 @@ const STAGED_SECRETS_KEYS: ReadonlySet<string> = new Set([
   'checkStagedDir',
   'workspaceStagedDir',
   'digests',
+  'extractedConflictPaths',
+  'watchedPaths',
 ]);
 const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'checkId',
@@ -6701,6 +6848,7 @@ const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'timeoutSeconds',
   'allowReadOnlyGitHubToken',
   'env',
+  'baselineConflictGuardOnly',
 ]);
 
 async function assertOwnedPrivateDirectory(dirPath: string): Promise<void> {
@@ -6942,6 +7090,7 @@ async function readAndValidateStagedTaskpackSecrets(
       ...(typeof gate['allowCheckNetwork'] === 'boolean' ? { allowCheckNetwork: gate['allowCheckNetwork'] } : {}),
       ...(rawGateNetworkMode !== undefined ? { networkMode: rawGateNetworkMode } : {}),
       ...(typeof gate['allowPrivileged'] === 'boolean' ? { allowPrivileged: gate['allowPrivileged'] } : {}),
+      ...(typeof gate['baselineConflictGuardOnly'] === 'boolean' ? { baselineConflictGuardOnly: gate['baselineConflictGuardOnly'] } : {}),
       timeoutSeconds: gate['timeoutSeconds'],
       env: Object.freeze([...(gate['env'] as string[])]),
       allowReadOnlyGitHubToken: gate['allowReadOnlyGitHubToken'],
@@ -6999,6 +7148,34 @@ async function readAndValidateStagedTaskpackSecrets(
     }
     digests = Object.freeze(cleanDigests);
   }
+  let extractedConflictPaths: readonly string[] | undefined;
+  if (parsed['extractedConflictPaths'] !== undefined) {
+    if (!Array.isArray(parsed['extractedConflictPaths']) || parsed['extractedConflictPaths'].length > 64) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack extractedConflictPaths is invalid');
+    }
+    const cleanConflictPaths: string[] = [];
+    for (const item of parsed['extractedConflictPaths']) {
+      if (typeof item !== 'string') {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack extractedConflictPaths entry is invalid');
+      }
+      cleanConflictPaths.push(normalizeCandidateRelativePath(item));
+    }
+    extractedConflictPaths = Object.freeze(cleanConflictPaths);
+  }
+  let watchedPaths: readonly string[] | undefined;
+  if (parsed['watchedPaths'] !== undefined) {
+    if (!Array.isArray(parsed['watchedPaths']) || parsed['watchedPaths'].length > LIMITS.patterns) {
+      throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack watchedPaths is invalid');
+    }
+    const cleanWatchedPaths: string[] = [];
+    for (const item of parsed['watchedPaths']) {
+      if (typeof item !== 'string' || item.trim().length === 0) {
+        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack watchedPaths entry is invalid');
+      }
+      cleanWatchedPaths.push(item.trim());
+    }
+    watchedPaths = Object.freeze(cleanWatchedPaths);
+  }
 
   return {
     stageDir,
@@ -7016,6 +7193,8 @@ async function readAndValidateStagedTaskpackSecrets(
     ...(checkStagedDir !== undefined ? { checkStagedDir } : {}),
     ...(workspaceStagedDir !== undefined ? { workspaceStagedDir } : {}),
     ...(digests !== undefined ? { digests } : {}),
+    ...(extractedConflictPaths !== undefined ? { extractedConflictPaths } : {}),
+    ...(watchedPaths !== undefined ? { watchedPaths } : {}),
   };
 }
 
@@ -7204,30 +7383,59 @@ export async function stageTaskpackForStep(
       ? envRepo
       : 'local/repo';
 
-    let baseRevision = 'HEAD';
-    const envGithubSha = matchesGithubWorkspace ? runtimeEnv['GITHUB_SHA']?.trim() : undefined;
-    if (envGithubSha !== undefined && envGithubSha.length > 0) {
-      if (COMMIT_SHA_PATTERN.test(envGithubSha)) {
-        const existsInRepo = await execGit(
-          realRepositoryRoot,
-          ['rev-parse', '--verify', '--quiet', '--end-of-options', `${envGithubSha.toLowerCase()}^{commit}`],
-          { env: buildCleanGitEnv(), timeoutMs: 5_000 },
-        ).then(() => true, () => false);
-        if (existsInRepo) {
-          baseRevision = envGithubSha.toLowerCase();
+    let baseRevision = options.baseRevision?.trim() || 'HEAD';
+    if (options.baseRevision === undefined) {
+      const envGithubSha = matchesGithubWorkspace ? runtimeEnv['GITHUB_SHA']?.trim() : undefined;
+      if (envGithubSha !== undefined && envGithubSha.length > 0) {
+        if (COMMIT_SHA_PATTERN.test(envGithubSha)) {
+          const existsInRepo = await execGit(
+            realRepositoryRoot,
+            ['rev-parse', '--verify', '--quiet', '--end-of-options', `${envGithubSha.toLowerCase()}^{commit}`],
+            { env: buildCleanGitEnv(), timeoutMs: 5_000 },
+          ).then(() => true, () => false);
+          if (existsInRepo) {
+            baseRevision = envGithubSha.toLowerCase();
+          }
+        } else {
+          baseRevision = envGithubSha;
         }
-      } else {
-        baseRevision = envGithubSha;
       }
     }
 
+    const explicitSourceRevision = options.sourceRevision?.trim();
     const resolvedRepo = await resolveRepositoryAndRevisions({
       repositoryRoot: realRepositoryRoot,
       repositoryFullName,
       baseRevision,
+      sourceRevision: explicitSourceRevision,
+      preserveExplicitSourceRevision: explicitSourceRevision !== undefined && explicitSourceRevision.length > 0,
       eventName: 'workflow_dispatch',
       scrubber,
     });
+
+    let stepAlignment: BaselineAlignmentResult | null = null;
+    if (mode === 'candidate' && resolvedRepo.sourceRevision !== resolvedRepo.baseRevision) {
+      stepAlignment = await alignBaselineRevisions({
+        repositoryRoot: realRepositoryRoot,
+        baseRevision: resolvedRepo.baseRevision,
+        sourceRevision: resolvedRepo.sourceRevision,
+        manifest,
+        taskpackPath: relativeTaskpackPath,
+        policyProfile,
+        hostPolicy,
+        baselineAlignment: options.baselineAlignment,
+        scrubber,
+        scratchRoot: realRunRoot,
+      });
+      if (stepAlignment.disposition === 'blocked') {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          stepAlignment.detail,
+          '/spec/baselineAlignment',
+          { reason: stepAlignment.reason },
+        );
+      }
+    }
 
     let upstreamRecords: readonly TaskpackUpstreamRecord[] = preflightResult?.upstreams ?? [];
     if (options.upstreamRecordsJson !== undefined) {
@@ -7256,8 +7464,12 @@ export async function stageTaskpackForStep(
     const commandChecks = mode === 'candidate'
       ? manifest.spec.verification.localChecks.filter(check => check.implementation === 'command.v1')
       : [];
+    const enableBaselineConflictGate = mode === 'candidate' && (
+      stepAlignment?.conflictResource != null
+      || stepAlignment?.disposition === 'unmerged_off'
+    );
     const gateEndpoints: HostGateEndpointPlan[] = [];
-    if (commandChecks.length > 0) {
+    if (commandChecks.length > 0 || enableBaselineConflictGate) {
       let maxTimeoutSeconds = effectiveStepLimits.commandTimeoutSeconds ?? 30;
       for (const check of commandChecks) {
         const rawTimeout = check.parameters?.['timeoutSeconds'];
@@ -7330,6 +7542,10 @@ export async function stageTaskpackForStep(
       upstreamRecords,
       preflightPromptResources: preflightResult?.promptResources,
       preflightWorkspaceResources: preflightResult?.workspaceResources,
+      baselineAlignment: options.baselineAlignment,
+      baselineAlignmentResult: stepAlignment ?? undefined,
+      baselineConflictResource: stepAlignment?.conflictResource ?? undefined,
+      enableBaselineConflictGate,
       scrubber,
     });
 
@@ -7410,6 +7626,8 @@ export async function stageTaskpackForStep(
         ...(persistentCheckStagedDir !== null ? { checkStagedDir: persistentCheckStagedDir } : {}),
         ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
         ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
+        ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
+        ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
       }, null, 2)}\n`,
       'utf8',
     );
@@ -7431,6 +7649,8 @@ export async function stageTaskpackForStep(
       ...(persistentCheckStagedDir !== null ? { checkStagedDir: persistentCheckStagedDir } : {}),
       ...(persistentWorkspaceStagedDir !== null ? { workspaceStagedDir: persistentWorkspaceStagedDir } : {}),
       ...(compiled.digests !== undefined ? { digests: compiled.digests } : {}),
+      ...(compiled.extractedConflictPaths !== undefined ? { extractedConflictPaths: compiled.extractedConflictPaths } : {}),
+      ...(compiled.watchedPaths !== undefined && compiled.watchedPaths.length > 0 ? { watchedPaths: compiled.watchedPaths } : {}),
     };
   } finally {
     await preflightResult?.cleanup().catch(() => undefined);
@@ -7604,6 +7824,7 @@ export async function openStagedTaskpackStepGate(
       ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
       ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
       ...(decisions !== undefined ? { decisions } : {}),
+      ...(staged.watchedPaths !== undefined && staged.watchedPaths.length > 0 ? { watchedPaths: staged.watchedPaths } : {}),
     });
     return {
       staged,
@@ -7629,6 +7850,7 @@ export async function openStagedTaskpackStepGate(
     scrubber: stepScrubber,
     checkStagedDir: staged.checkStagedDir,
     forbiddenEnvNames,
+    extractedConflictPaths: staged.extractedConflictPaths,
   });
   const gateUrlOverrides = Object.freeze({ [LOCAL_COMMAND_GATE_ENDPOINT_ID]: server.url });
   const ports = Object.freeze({
@@ -7638,6 +7860,7 @@ export async function openStagedTaskpackStepGate(
     ...(staged.roleMcpServers !== undefined ? { roleMcpServers: staged.roleMcpServers } : {}),
     ...(staged.mcpServers !== undefined ? { mcpServers: staged.mcpServers } : {}),
     ...(decisions !== undefined ? { decisions } : {}),
+    ...(staged.watchedPaths !== undefined && staged.watchedPaths.length > 0 ? { watchedPaths: staged.watchedPaths } : {}),
   });
 
   return {
@@ -7653,4 +7876,418 @@ export async function openStagedTaskpackStepGate(
     serverUrl: server.url,
     close: () => server.close(),
   };
+}
+
+export interface RunTurnkeyTaskpackOptions {
+  readonly manifest?: TaskpackManifest | undefined;
+  readonly taskpackPath?: string | undefined;
+  readonly repositoryRoot: string;
+  readonly repositoryFullName?: string | undefined;
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly baseRevision: string;
+  readonly sourceRevision?: string | undefined;
+  readonly mode?: 'candidate' | 'no-change' | undefined;
+  readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
+  readonly policyProfile?: PolicyProfile | undefined;
+  readonly modelsJsonPath?: string | undefined;
+  readonly probeFetch?: typeof globalThis.fetch | undefined;
+  readonly probeTotalTimeoutMs?: number | undefined;
+  readonly probeCandidateTimeoutMs?: number | undefined;
+  readonly forceModelProbe?: boolean | undefined;
+  readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
+  readonly scrubber?: SecretScrubber | undefined;
+  readonly outputFormats?: readonly ReportOutputFormat[] | undefined;
+  readonly stepSummaryPath?: string | undefined;
+  readonly githubOutputPath?: string | undefined;
+  readonly onTurnkeyReport?: ((report: RunReportInput) => void) | undefined;
+  readonly onLog?: ((line: string) => void) | undefined;
+  readonly openHostSessionAdapter?: typeof openPiHostSessionAdapterV2 | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface RunTurnkeyTaskpackResult {
+  readonly kind: 'completed' | 'no_change' | 'blocked' | 'failed';
+  readonly status: string;
+  readonly reason: string | null;
+  readonly detail: string;
+  readonly alignment: BaselineAlignmentResult;
+  readonly summary: TurnkeyCycleAttemptSummary;
+  readonly report: RunReportInput;
+  readonly taskpack: WrittenCompiledTaskpack | null;
+}
+
+/**
+ * Turnkey Taskpack runner orchestrating pre-probe isolated 3-way baseline alignment,
+ * model candidate readiness probing, `command.v1` / baseline-conflict gate verification,
+ * and `RunEval` report sink emission.
+ *
+ * Baseline alignment runs strictly BEFORE `selectHealthyModelCandidate` / `probeModelCandidate`,
+ * so `fail-fast` conflicts halt as `blocked` (`reason: 'baseline_merge_conflict'`) with ZERO
+ * provider health probes or model requests.
+ */
+export async function runTurnkeyTaskpack(
+  options: RunTurnkeyTaskpackOptions,
+): Promise<RunTurnkeyTaskpackResult> {
+  const startedMs = performance.now();
+  const normalizedRunId = normalizeControllerRunId(options.runId);
+  const realRepositoryRoot = await realpath(options.repositoryRoot);
+  const resolvedRunRoot = resolve(options.runRoot);
+  await mkdir(resolvedRunRoot, { recursive: true, mode: 0o700 });
+  await chmod(resolvedRunRoot, 0o700);
+  const realRunRoot = await realpath(resolvedRunRoot);
+  if (insideRoot(realRunRoot, realRepositoryRoot) || insideRoot(realRepositoryRoot, realRunRoot)) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', 'runRoot must live outside the target repository checkout');
+  }
+
+  const runtimeEnv = options.runtimeEnv ?? process.env;
+  const scrubber = options.scrubber ?? new SecretScrubber();
+  for (const key of [
+    'GITHUB_TOKEN',
+    'GH_TOKEN',
+    'INPUT_GITHUB-TOKEN',
+    'LOOPWRIGHT_PROVIDER_TOKEN',
+    ...Object.values(STANDARD_PI_PROVIDER_ENV),
+  ]) {
+    const val = runtimeEnv[key];
+    if (typeof val === 'string' && val.trim().length > 0) {
+      for (const piece of val.split(',')) {
+        if (piece.trim().length > 0) scrubber.register(piece.trim());
+      }
+    }
+  }
+
+  const policyProfile: PolicyProfile = options.policyProfile ?? options.hostPolicy?.policyProfile ?? 'local';
+  const hostPolicy: ExecutionHostPolicy = {
+    policyProfile,
+    allowPrivileged: options.hostPolicy?.allowPrivileged ?? false,
+    allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? false,
+  };
+  const mode = options.mode ?? 'candidate';
+  const repositoryFullName = options.repositoryFullName ?? 'local/repo';
+
+  let relativeTaskpackPath: string | undefined;
+  let manifest: TaskpackManifest;
+  if (options.manifest !== undefined) {
+    manifest = options.manifest;
+    relativeTaskpackPath = options.taskpackPath !== undefined
+      ? normalizeRelativePath(options.taskpackPath, '/')
+      : undefined;
+  } else {
+    const rawManifestPath = options.taskpackPath ?? '.loopwright/taskpack.yaml';
+    const manifestFull = isAbsolute(rawManifestPath)
+      ? resolve(rawManifestPath)
+      : join(realRepositoryRoot, rawManifestPath);
+    const rel = relative(realRepositoryRoot, manifestFull);
+    if (rel.length === 0 || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new TaskpackError('TASKPACK_MANIFEST_INVALID', 'taskpack manifest escapes the repository root', '/');
+    }
+    relativeTaskpackPath = normalizeRelativePath(rel.split(sep).join('/'), '/');
+    manifest = await loadDeclarativeTaskpack({
+      manifestPath: relativeTaskpackPath,
+      repositoryRoot: realRepositoryRoot,
+      policyProfile,
+      hostPolicy,
+    });
+  }
+
+  if (manifest.spec.preflight !== undefined) {
+    throw new TaskpackError(
+      'TASKPACK_MANIFEST_INVALID',
+      'runTurnkeyTaskpack does not support spec.preflight; use stageTaskpackForStep or the Action runner',
+      '/spec/preflight',
+    );
+  }
+  if (manifest.spec.upstreams.length > 0) {
+    throw new TaskpackError(
+      'TASKPACK_MANIFEST_INVALID',
+      'runTurnkeyTaskpack does not support spec.upstreams discovery; use stageTaskpackForStep or the Action runner',
+      '/spec/upstreams',
+    );
+  }
+  if (manifest.spec.memory.apply !== 'disabled') {
+    throw new TaskpackError(
+      'TASKPACK_MANIFEST_INVALID',
+      'runTurnkeyTaskpack does not support active spec.memory compaction; set spec.memory.apply to "disabled"',
+      '/spec/memory/apply',
+    );
+  }
+  if (manifest.spec.decisions?.enabled === true) {
+    throw new TaskpackError(
+      'TASKPACK_MANIFEST_INVALID',
+      'runTurnkeyTaskpack does not support spec.decisions routing',
+      '/spec/decisions/enabled',
+    );
+  }
+  if ((manifest.spec.mcp?.servers.length ?? 0) > 0) {
+    throw new TaskpackError(
+      'TASKPACK_MANIFEST_INVALID',
+      'runTurnkeyTaskpack does not support spec.mcp servers',
+      '/spec/mcp/servers',
+    );
+  }
+
+  const resolvedRepo = await resolveRepositoryAndRevisions({
+    repositoryRoot: realRepositoryRoot,
+    repositoryFullName,
+    baseRevision: options.baseRevision,
+    sourceRevision: options.sourceRevision,
+    preserveExplicitSourceRevision: options.sourceRevision !== undefined,
+    eventName: 'workflow_dispatch',
+    scrubber,
+  });
+
+  const effectiveAlignmentPolicy = resolveBaselineAlignmentConfig(
+    manifest.spec.baselineAlignment,
+    options.baselineAlignment,
+  );
+
+  // 1. Pre-probe isolated 3-way baseline alignment (BEFORE any model candidate health probe or LLM call!)
+  const alignment = mode === 'candidate'
+    ? await alignBaselineRevisions({
+      repositoryRoot: realRepositoryRoot,
+      baseRevision: resolvedRepo.baseRevision,
+      sourceRevision: resolvedRepo.sourceRevision,
+      manifest,
+      taskpackPath: relativeTaskpackPath,
+      policyProfile,
+      hostPolicy,
+      baselineAlignment: effectiveAlignmentPolicy,
+      scrubber,
+      scratchRoot: realRunRoot,
+      onLog: options.onLog,
+    })
+    : Object.freeze({
+      disposition: 'clean' as const,
+      status: 'same_revision' as const,
+      policy: effectiveAlignmentPolicy,
+      baseRevision: resolvedRepo.baseRevision,
+      sourceRevision: resolvedRepo.sourceRevision,
+      mergeBase: resolvedRepo.baseRevision,
+      mergedTreeOid: null,
+      carryRemovals: Object.freeze([]),
+      carryUpdates: Object.freeze([]),
+      conflictPaths: Object.freeze([]),
+      conflicts: Object.freeze([]),
+      conflictResource: null,
+    });
+
+  if (alignment.disposition === 'blocked') {
+    const elapsedMs = Math.max(1, Math.round(performance.now() - startedMs));
+    const report = buildTurnkeyRunReportInput({
+      runId: normalizedRunId,
+      status: 'blocked',
+      reasonCode: alignment.reason,
+      detail: alignment.detail,
+      checks: Object.freeze([]),
+      usage: null,
+      elapsedMs,
+      externalUrl: null,
+      runEval: null,
+      scrubber,
+    });
+    const summary: TurnkeyCycleAttemptSummary = {
+      attemptSeq: 0,
+      attemptRunId: normalizedRunId,
+      ok: false,
+      status: 'blocked',
+      reasonCode: alignment.reason,
+      detail: alignment.detail,
+      externalUrl: null,
+      usage: null,
+      checks: Object.freeze([]),
+      elapsedMs,
+      retryableProviderFailure: false,
+      runEval: null,
+      report,
+    };
+    options.onTurnkeyReport?.(report);
+    if (
+      (options.outputFormats !== undefined && options.outputFormats.length > 0)
+      || options.stepSummaryPath !== undefined
+      || options.githubOutputPath !== undefined
+    ) {
+      await writeActionOutputSinks({
+        formats: options.outputFormats ?? Object.freeze(['json'] as const),
+        report,
+        stepSummaryPath: options.stepSummaryPath,
+        githubOutputPath: options.githubOutputPath,
+        actionResultJson: JSON.stringify({
+          status: 'blocked',
+          runId: normalizedRunId,
+          reason: alignment.reason,
+          detail: scrubber.scrub(alignment.detail),
+          externalUrl: null,
+        }),
+        scrubber,
+      });
+    }
+    return {
+      kind: 'blocked',
+      status: 'blocked',
+      reason: alignment.reason,
+      detail: alignment.detail,
+      alignment,
+      summary,
+      report,
+      taskpack: null,
+    };
+  }
+
+  // 2. Model candidate resolution & health probe (reached ONLY when baseline alignment is not blocked)
+  const modelsConfig = options.modelsJsonPath !== undefined
+    ? await loadPiModelsJson(options.modelsJsonPath)
+    : undefined;
+  const envLimits = parseLoopwrightEnvLimits(runtimeEnv);
+  const actionInputLimits = parseActionInputLimits(runtimeEnv);
+  const modelCandidates = resolveTaskpackModelCandidates(
+    manifest,
+    {
+      mode,
+      repository: repositoryFullName,
+      baseRevision: resolvedRepo.baseRevision,
+      sourceRevision: resolvedRepo.sourceRevision,
+      budgets: DEFAULT_HOST_BUDGETS,
+      modelsJsonPath: options.modelsJsonPath,
+    },
+    { modelsConfig, env: runtimeEnv, scrubber },
+  );
+  const selectedModel = await selectHealthyModelCandidate(modelCandidates, {
+    fetchImpl: options.probeFetch,
+    totalTimeoutMs: options.probeTotalTimeoutMs,
+    perCandidateTimeoutMs: options.probeCandidateTimeoutMs,
+    forceProbe: options.forceModelProbe,
+    scrubber,
+  });
+
+  const hasDeclaredCommandChecks = mode === 'candidate'
+    && manifest.spec.verification.localChecks.some(c => c.implementation === 'command.v1');
+  const enableBaselineConflictGate = mode === 'candidate'
+    && (alignment.conflictResource !== null || alignment.disposition === 'unmerged_off');
+  const needsGateServer = hasDeclaredCommandChecks || enableBaselineConflictGate;
+  const gateSigningSecret = needsGateServer ? randomBytes(32).toString('hex') : undefined;
+  if (gateSigningSecret !== undefined) {
+    scrubber.register(gateSigningSecret);
+  }
+
+  const baseCompileBindings = {
+    mode,
+    hostPolicy,
+    repository: repositoryFullName,
+    repositoryRoot: realRepositoryRoot,
+    taskpackPath: relativeTaskpackPath,
+    baseRevision: resolvedRepo.baseRevision,
+    sourceRevision: resolvedRepo.sourceRevision,
+    budgets: DEFAULT_HOST_BUDGETS,
+    limits: actionInputLimits,
+    envLimits,
+    modelsJsonPath: options.modelsJsonPath,
+    candidateIndex: selectedModel.selected.index,
+    credentialEnvMap: {
+      provider: selectedModel.selected.providerEnvName,
+      ...(needsGateServer ? { localCommandGate: DEFAULT_LOCAL_COMMAND_GATE_ENV } : {}),
+    },
+    baselineAlignment: effectiveAlignmentPolicy,
+    baselineAlignmentResult: alignment,
+    baselineConflictResource: alignment.conflictResource ?? undefined,
+    enableBaselineConflictGate,
+    scrubber,
+  };
+
+  let compiled = await compileDeclarativeTaskpack(manifest, baseCompileBindings);
+  let gateServer: LocalCommandGateServer | null = null;
+
+  try {
+    if ((compiled.localCommandGates?.length ?? 0) > 0) {
+      gateServer = await startLocalCommandGateServer({
+        runRoot: realRunRoot,
+        repositoryRoot: realRepositoryRoot,
+        gates: compiled.localCommandGates!,
+        signingSecret: gateSigningSecret,
+        runtimeEnv,
+        scrubber,
+        extractedConflictPaths: compiled.extractedConflictPaths,
+        onLog: options.onLog,
+      });
+      compiled = await compileDeclarativeTaskpack(manifest, {
+        ...baseCompileBindings,
+        gateEndpoints: [gateServer.endpointPlan],
+      });
+    }
+
+    const trustedDirectory = join(realRunRoot, `lw-trusted-${normalizedRunId}`);
+    const registryDirectory = join(trustedDirectory, 'registry');
+    const configDirectory = join(trustedDirectory, 'config');
+    await mkdir(registryDirectory, { recursive: true, mode: 0o700 });
+    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+    await chmod(trustedDirectory, 0o700);
+    await chmod(registryDirectory, 0o700);
+    await chmod(configDirectory, 0o700);
+
+    if (compiled.instructionResources !== undefined && compiled.instructionResources.length > 0) {
+      await stageCompiledInstructionResources(registryDirectory, compiled.instructionResources);
+    }
+    const registryPath = join(registryDirectory, 'registry.yaml');
+    const configPath = join(configDirectory, 'config.yaml');
+    const configBytes = Buffer.from(serializePrettyYaml(compiled.config), 'utf8');
+    await writeFile(registryPath, compiled.registryBytes, { mode: 0o600 });
+    await writeFile(configPath, configBytes, { mode: 0o600 });
+
+    const written: WrittenCompiledTaskpack = {
+      ...compiled,
+      configBytes,
+      trustedDirectory,
+      registryPath,
+      configPath,
+    };
+
+    const ephemeralEnv: Record<string, string> = {
+      ...(gateSigningSecret !== undefined ? { [DEFAULT_LOCAL_COMMAND_GATE_ENV]: gateSigningSecret } : {}),
+      ...(selectedModel.selected.token !== undefined
+        ? {
+          [LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV]: selectedModel.selected.token,
+          [selectedModel.selected.providerEnvName]: selectedModel.selected.token,
+        }
+        : {}),
+    };
+
+    const cycleSummary = await executeTurnkeyCycle({
+      runId: normalizedRunId,
+      attemptSeq: 0,
+      repositoryRoot: realRepositoryRoot,
+      taskpack: written,
+      runtimeEnv,
+      ephemeralEnv,
+      scrubber,
+      policyProfile,
+      allowWorkflowWrites: compiled.allowWorkflowWrites,
+      outputFormats: options.outputFormats,
+      stepSummaryPath: options.stepSummaryPath,
+      githubOutputPath: options.githubOutputPath,
+      onTurnkeyReport: options.onTurnkeyReport,
+      onLog: options.onLog,
+      openHostSessionAdapter: options.openHostSessionAdapter,
+      signal: options.signal,
+    });
+
+    const kind: RunTurnkeyTaskpackResult['kind'] = cycleSummary.ok
+      ? (cycleSummary.status === 'no_change' ? 'no_change' : 'completed')
+      : (cycleSummary.status === 'blocked' ? 'blocked' : 'failed');
+
+    return {
+      kind,
+      status: cycleSummary.status,
+      reason: cycleSummary.reasonCode,
+      detail: cycleSummary.detail,
+      alignment,
+      summary: cycleSummary,
+      report: cycleSummary.report,
+      taskpack: written,
+    };
+  } finally {
+    if (gateServer !== null) {
+      await gateServer.close();
+    }
+  }
 }

@@ -429,3 +429,81 @@ test('cli: main.ts has zero top-level @loopwright/github-app imports and exports
     assert.equal(typeof taskpackExitCode(code), 'number');
   }
 });
+
+test('cli: parseArguments validates suite check|resolve and --baseline-alignment / --source-revision bounds', () => {
+  const common = ['--config', '/config', '--registry', '/registry', '--registry-sha256', 'a'.repeat(64)];
+  const runTarget = ['--repo', '/repo', '--run-root', '/runs', '--run-id', 'tp-1'];
+
+  // Valid suite check & resolve shapes
+  const checkMin = parseArguments(['suite', 'check', '--suite', '.loopwright/suite.yaml']);
+  assert.equal(checkMin.command, 'suite');
+  assert.equal(checkMin.suiteAction, 'check');
+  assert.equal(checkMin.values.get('suite'), '.loopwright/suite.yaml');
+
+  const checkFull = parseArguments(['suite', 'check', '--suite', '.loopwright/suite.yaml', '--repo', '/repo', '--verify-digests', '--json']);
+  assert.equal(checkFull.suiteAction, 'check');
+  assert.equal(checkFull.values.get('repo'), '/repo');
+  assert.equal(checkFull.flags.has('verify-digests'), true);
+  assert.equal(checkFull.flags.has('json'), true);
+
+  const resolveFull = parseArguments([
+    'suite', 'resolve', '--suite', '.loopwright/suite.yaml', '--repo', '/repo',
+    '--event', 'issue_comment', '--schedule', 'nightly', '--comment-body', '/loopwright retry',
+    '--pr-head-ref', 'loopwright/docs/main', '--pr-base-ref', 'main', '--domain', 'docs', '--json',
+  ]);
+  assert.equal(resolveFull.command, 'suite');
+  assert.equal(resolveFull.suiteAction, 'resolve');
+  assert.equal(resolveFull.values.get('domain'), 'docs');
+  assert.equal(resolveFull.values.get('pr-head-ref'), 'loopwright/docs/main');
+  assert.equal(resolveFull.flags.has('json'), true);
+
+  // Valid --baseline-alignment and --source-revision on run --taskpack and step next --taskpack
+  for (const policy of ['off', 'fail-fast', 'extract-context'] as const) {
+    const parsedRun = parseArguments([
+      'run', '--taskpack', '.loopwright/taskpack.yaml', ...runTarget,
+      '--baseline-alignment', policy, '--source-revision', 'a'.repeat(40),
+    ]);
+    assert.equal(parsedRun.values.get('baseline-alignment'), policy);
+    assert.equal(parsedRun.values.get('source-revision'), 'a'.repeat(40));
+
+    const parsedDry = parseArguments([
+      'run', '--dry-run', '--taskpack', '.loopwright/taskpack.yaml', '--repo', '/repo',
+      '--baseline-alignment', policy,
+    ]);
+    assert.equal(parsedDry.values.get('baseline-alignment'), policy);
+
+    const parsedStep = parseArguments([
+      'step', 'next', '--run-root', '/runs', '--run-id', 'tp-1',
+      '--taskpack', '.loopwright/taskpack.yaml', '--repo', '/repo',
+      '--baseline-alignment', policy, '--source-revision', 'HEAD~1',
+    ]);
+    assert.equal(parsedStep.values.get('baseline-alignment'), policy);
+    assert.equal(parsedStep.values.get('source-revision'), 'HEAD~1');
+  }
+
+  // Invalid suite commands and invalid --baseline-alignment / --source-revision combinations
+  for (const invalid of [
+    ['suite'],
+    ['suite', 'unknown', '--suite', '.loopwright/suite.yaml'],
+    ['suite', 'check'],
+    ['suite', 'check', '--suite', '   '],
+    ['suite', 'check', '--suite', '.loopwright/suite.yaml', '--repo', '   '],
+    ['suite', 'check', '--suite', '.loopwright/suite.yaml', '--event', 'schedule'],
+    ['suite', 'resolve'],
+    ['suite', 'resolve', '--suite', '.loopwright/suite.yaml', '--verify-digests'],
+    ['suite', 'resolve', '--suite', '.loopwright/suite.yaml', '--domain', '   '],
+    ['suite', 'resolve', '--suite', '.loopwright/suite.yaml', '--bogus', '1'],
+    ['run', ...common, ...runTarget, '--baseline-alignment', 'fail-fast'],
+    ['run', ...common, ...runTarget, '--source-revision', 'HEAD'],
+    ['run', '--taskpack', 'tp.yaml', ...runTarget, '--baseline-alignment', 'merge'],
+    ['run', '--taskpack', 'tp.yaml', ...runTarget, '--source-revision', '-bad'],
+    ['run', '--taskpack', 'tp.yaml', ...runTarget, '--source-revision', 'bad rev'],
+    ['step', 'next', '--run-root', '/runs', '--run-id', 'tp-1', '--repo', '/repo', '--baseline-alignment', 'fail-fast'],
+    ['step', 'next', '--run-root', '/runs', '--run-id', 'tp-1', ...common, '--repo', '/repo', '--baseline-alignment', 'off'],
+    ['step', 'next', '--run-root', '/runs', '--run-id', 'tp-1', '--taskpack', 'tp.yaml', '--repo', '/repo', '--baseline-alignment', 'invalid'],
+    ['step', 'next', '--run-root', '/runs', '--run-id', 'tp-1', '--taskpack', 'tp.yaml', '--repo', '/repo', '--source-revision', '   '],
+    ['step', 'submit', '--run-root', '/runs', '--run-id', 'tp-1', '--lease', 'tok', '--baseline-alignment', 'off'],
+  ]) {
+    assert.throws(() => parseArguments(invalid), UsageError, `expected UsageError for ${JSON.stringify(invalid)}`);
+  }
+});

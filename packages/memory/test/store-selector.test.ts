@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { Digest, TaskContract } from '@loopwright/core';
-import { canonical, storeDigestOf } from '../src/schema.js';
+import { canonical, serializeMemoryStoreIndex, storeDigestOf } from '../src/schema.js';
 import {
   computeCodeFingerprint,
   DEFAULT_MEMORY_MAX_ENTRIES,
@@ -19,6 +19,7 @@ import {
   loadMemoryStore,
   matchScopePattern,
   MAX_MEMORY_ENTRY_FILE_BYTES,
+  MAX_MEMORY_INDEX_BLOB_BYTES,
   MAX_MEMORY_INDEX_FILE_BYTES,
   MEMORY_ROOT,
   projectMemoryStore,
@@ -78,15 +79,24 @@ const cleanups: Promise<void>[] = [];
 after(() => { return Promise.allSettled(cleanups); });
 
 describe('memory store layout', () => {
-  it('round-trips an index and its entry files', async () => {
+  it('round-trips an index and its entry files both with and without a trailing newline without storeDigest mismatch', async () => {
     await withSandbox(async root => {
       const entry = makeEntry();
       const index = await writeStore(root, 'demo', [entry]);
-      const loaded = await loadMemoryStore(root, 'demo', 'org/repo');
-      assert.equal(loaded.index.entries.length, 1);
-      assert.equal(loaded.index.storeDigest.hex, index.storeDigest.hex);
-      assert.ok(loaded.entryFiles.has('entry.alpha'));
-      assert.equal(canonical(loaded.index.entries[0]!), canonical(entry));
+      const loadedNoLf = await loadMemoryStore(root, 'demo', 'org/repo');
+      assert.equal(loadedNoLf.index.entries.length, 1);
+      assert.equal(loadedNoLf.index.storeDigest.hex, index.storeDigest.hex);
+      assert.ok(loadedNoLf.entryFiles.has('entry.alpha'));
+      assert.equal(canonical(loadedNoLf.index.entries[0]!), canonical(entry));
+
+      await writeFile(
+        join(root, '.loopwright', 'memory', 'demo', 'index.json'),
+        Buffer.from(`${canonical(index)}\n`),
+        { mode: 0o600 },
+      );
+      const loadedWithLf = await loadMemoryStore(root, 'demo', 'org/repo');
+      assert.equal(loadedWithLf.index.storeDigest.hex, index.storeDigest.hex);
+      assert.equal(canonical(loadedWithLf.index), canonical(loadedNoLf.index));
     });
   });
 
@@ -252,6 +262,45 @@ describe('memory store layout', () => {
     assert.equal(DEFAULT_MEMORY_MAX_PROMPT_BYTES, 16_384);
     assert.equal(MAX_MEMORY_ENTRY_FILE_BYTES, 65_536);
     assert.equal(MAX_MEMORY_INDEX_FILE_BYTES, 2_097_152);
+    assert.equal(MAX_MEMORY_INDEX_BLOB_BYTES, 2_097_152);
+
+    // Exact MAX_MEMORY_INDEX_BLOB_BYTES boundary inclusive of trailing '\n' (single-pass construction)
+    const emptyLen = Buffer.byteLength(canonical(await buildStore([])), 'utf8');
+    const sampleA = makeEntry({ id: 'entry.pad.0000', claimKey: 'claim.pad.0000', claim: 'x'.repeat(2000) });
+    const sampleB = makeEntry({ id: 'entry.pad.0001', claimKey: 'claim.pad.0001', claim: 'x'.repeat(2000) });
+    const oneEntryLen = Buffer.byteLength(canonical(await buildStore([sampleA])), 'utf8');
+    const twoEntryLen = Buffer.byteLength(canonical(await buildStore([sampleA, sampleB])), 'utf8');
+    const perEntryBytes = twoEntryLen - oneEntryLen;
+    const fillerCount = Math.floor((MAX_MEMORY_INDEX_BLOB_BYTES - 1500 - emptyLen) / perEntryBytes);
+    const fillerEntries: MemoryEntry[] = Array.from({ length: fillerCount }, (_, i) => {
+      const suffix = String(i).padStart(4, '0');
+      return makeEntry({ id: `entry.pad.${suffix}`, claimKey: `claim.pad.${suffix}`, claim: 'x'.repeat(2000) });
+    });
+    const baseLen = Buffer.byteLength(canonical(await buildStore(fillerEntries)), 'utf8');
+    const probe = makeEntry({ id: 'entry.pad.last', claimKey: 'claim.pad.last', claim: 'z' });
+    const withProbeLen = Buffer.byteLength(canonical(await buildStore([...fillerEntries, probe])), 'utf8');
+    const addedOverhead = withProbeLen - baseLen - 1;
+    const exactClaimLen = MAX_MEMORY_INDEX_BLOB_BYTES - 1 - baseLen - addedOverhead;
+    assert.ok(exactClaimLen >= 1 && exactClaimLen <= 4096, `unexpected exactClaimLen ${exactClaimLen}`);
+
+    const exactFitIndex = await buildStore([
+      ...fillerEntries,
+      makeEntry({ id: 'entry.pad.last', claimKey: 'claim.pad.last', claim: 'z'.repeat(exactClaimLen) }),
+    ]);
+    assert.equal(Buffer.byteLength(canonical(exactFitIndex), 'utf8'), MAX_MEMORY_INDEX_BLOB_BYTES - 1);
+    const serializedFit = serializeMemoryStoreIndex(exactFitIndex);
+    assert.equal(Buffer.byteLength(serializedFit, 'utf8'), MAX_MEMORY_INDEX_BLOB_BYTES);
+    assert.equal(serializedFit.endsWith('\n'), true);
+
+    const overflowWithLfIndex = await buildStore([
+      ...fillerEntries,
+      makeEntry({ id: 'entry.pad.last', claimKey: 'claim.pad.last', claim: 'z'.repeat(exactClaimLen + 1) }),
+    ]);
+    assert.equal(Buffer.byteLength(canonical(overflowWithLfIndex), 'utf8'), MAX_MEMORY_INDEX_BLOB_BYTES);
+    assert.throws(
+      () => serializeMemoryStoreIndex(overflowWithLfIndex),
+      /MEMORY_SCHEMA_INVALID.*serialized index byte length 2097153 exceeds maximum 2097152/,
+    );
 
     await withSandbox(async root => {
       const entry = makeEntry();

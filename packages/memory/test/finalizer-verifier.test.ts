@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -1106,6 +1106,79 @@ describe('five-gate proposal verifier', () => {
       });
       assert.equal(outcome.status, 'unavailable');
       assert.match(outcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+    });
+  });
+
+  it('emits LF-terminated index.json diffs and handles legacy no-LF preimages with or without entry changes', async () => {
+    const completed = await buildRun('completed', 'run.lf.completed');
+    const noChange = await buildRun('no_change', 'run.lf.nochange');
+    await withSandbox(async root => {
+      // Seed a legacy no-LF store with an existing fact entry on disk
+      const legacyEntry: MemoryEntry = {
+        version: 1,
+        id: 'entry.legacy',
+        claimKey: 'claim.legacy',
+        claim: 'Legacy verified fact.',
+        kind: 'fact',
+        scope: { taskpack: 'demo', repository: 'org/repo', paths: ['src/**'], targetMatrix: null },
+        sourceRef: { runId: 'run.legacy', lockHash: completed.lock.spec.lockHash, candidateDigest: completed.result.spec.subject.candidateDigest },
+        sourceDigest: { algorithm: 'sha256', hex: hexText('legacy-source') },
+        verifiedAtMs: 1000,
+        validFor: { baseRevision: BASE_REVISION, sourceRevision: SOURCE_REVISION, codeFingerprint: { algorithm: 'sha256', hex: '0'.repeat(64) }, upstreamVersions: { npm: '1.0.0' } },
+        expiresAtMs: 99_999,
+        supersedes: [],
+        evidenceRefs: [{ evidenceId: 'evidence.check.one', checkId: 'check.one', level: 'local_execution', observedStatus: 'passed', artifact: completed.artifactRefs[1]! }],
+      };
+      const base = { version: 1 as const, taskpack: 'demo', repository: 'org/repo', updatedAtMs: 1000, entries: [legacyEntry], retired: [] };
+      const legacyIndex: MemoryStoreIndex = { ...base, storeDigest: storeDigestOf(base) };
+      const memDir = join(root, MEMORY_ROOT, 'demo');
+      await mkdir(join(memDir, 'entries'), { recursive: true, mode: 0o700 });
+      await writeFile(join(memDir, 'entries', `${legacyEntry.id}.md`), entryFileBytes(legacyEntry), { mode: 0o600 });
+      await writeFile(join(memDir, 'index.json'), canonical(legacyIndex), { mode: 0o600 });
+
+      // 1. no_change run with 0 operations still emits a trailing-LF migration diff with \ No newline at end of file
+      const newlineOnlyOutcome = await finalize(noChange, root, finalizerConfig());
+      assert.equal(newlineOnlyOutcome.status, 'proposed');
+      assert.deepEqual(newlineOnlyOutcome.proposal!.operations, []);
+      assert.equal(
+        newlineOnlyOutcome.patch,
+        [
+          '--- a/.loopwright/memory/demo/index.json',
+          '+++ b/.loopwright/memory/demo/index.json',
+          '@@ -1,1 +1,1 @@',
+          `-${canonical(legacyIndex)}`,
+          '\\ No newline at end of file',
+          `+${canonical(legacyIndex)}`,
+          '',
+        ].join('\n'),
+      );
+
+      // 2. completed run updating entries against legacy no-LF index.json emits \ No newline at end of file
+      const updatedOutcome = await finalize(completed, root, finalizerConfig());
+      assert.equal(updatedOutcome.status, 'proposed');
+      assert.ok(updatedOutcome.patch!.includes('--- a/.loopwright/memory/demo/index.json\n+++ b/.loopwright/memory/demo/index.json\n'));
+      assert.ok(updatedOutcome.patch!.includes('\\ No newline at end of file\n+'));
+
+      // 3. Once on-disk index.json already has trailing \n, no_change with 0 operations emits empty patch
+      await writeFile(join(memDir, 'index.json'), `${canonical(legacyIndex)}\n`, { mode: 0o600 });
+      const cleanNoChange = await finalize(noChange, root, finalizerConfig());
+      assert.equal(cleanNoChange.status, 'proposed');
+      assert.equal(cleanNoChange.patch, '');
+
+      // 4. Symlinked or hard-linked index.json on disk fails closed in finalizeRunMemory
+      const outside = join(root, 'outside-index.json');
+      await writeFile(outside, `${canonical(legacyIndex)}\n`, { mode: 0o600 });
+      await rm(join(memDir, 'index.json'));
+      await symlink(outside, join(memDir, 'index.json'));
+      const symlinkOutcome = await finalize(completed, root, finalizerConfig());
+      assert.equal(symlinkOutcome.status, 'unavailable');
+      assert.match(symlinkOutcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
+
+      await rm(join(memDir, 'index.json'));
+      await link(outside, join(memDir, 'index.json'));
+      const hardlinkOutcome = await finalize(completed, root, finalizerConfig());
+      assert.equal(hardlinkOutcome.status, 'unavailable');
+      assert.match(hardlinkOutcome.reason ?? '', /MEMORY_SCHEMA_INVALID/);
     });
   });
 });

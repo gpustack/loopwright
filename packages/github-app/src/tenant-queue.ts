@@ -9,6 +9,7 @@ import {
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const MONOTONIC_PATTERN = /^[0-9]{1,20}$/;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 const DEFAULT_MAX_PENDING_PER_GROUP = 100;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
 const DRIFT_LIMIT_MS = 1_000n;
@@ -97,6 +98,7 @@ export class TenantAdmissionQueue {
   readonly #runRoot: string;
   #leaseEpoch = 0;
   #counter = 0;
+  #onLeaseExpired?: ((item: QueueItem) => void) | undefined;
 
   constructor(options: TenantAdmissionQueueOptions = {}) {
     const maxPending = options.maxPendingPerGroup ?? DEFAULT_MAX_PENDING_PER_GROUP;
@@ -110,6 +112,11 @@ export class TenantAdmissionQueue {
     this.#maxPendingPerGroup = maxPending;
     this.#leaseDurationMs = leaseDuration;
     this.#runRoot = options.runRoot ?? '';
+  }
+
+  /** Register a listener invoked whenever an active lease expires into `reconcile_required`. */
+  setOnLeaseExpiredListener(listener: ((item: QueueItem) => void) | undefined): void {
+    this.#onLeaseExpired = listener;
   }
 
   #requireItem(tenant: TenantIdentity, queueItemId: string): QueueItem {
@@ -137,12 +144,22 @@ export class TenantAdmissionQueue {
     return count;
   }
 
+  #expireToReconcileRequired(item: QueueItem): void {
+    const wasLeased = item.state === 'leased';
+    item.state = 'reconcile_required';
+    item.reconcileEffect = 'reconcile_required';
+    item.lease = null;
+    if (wasLeased) {
+      this.#onLeaseExpired?.(copyItem(item));
+    }
+  }
+
   /** Transition leases whose monotonic expiry passed; expired items enter reconcile_required. */
   #sweepExpired(now: ClockSample): void {
     const nowMono = monotonic(now.monotonicMs);
     for (const item of this.#items.values()) {
       if (item.state === 'leased' && item.lease !== null && nowMono >= monotonic(item.lease.notAfterMonotonicMs)) {
-        item.state = 'reconcile_required';
+        this.#expireToReconcileRequired(item);
       }
     }
   }
@@ -151,6 +168,12 @@ export class TenantAdmissionQueue {
     validateTenantIdentity(tenant);
     validateRevision(input.baseRevision, 'baseRevision');
     if (!(_instanceOfKind(input.kind))) queueError('QUEUE_STATE_INVALID', `unsupported queue item kind`);
+    if (input.domainId !== undefined && (typeof input.domainId !== 'string' || !IDENTIFIER_PATTERN.test(input.domainId))) {
+      queueError('QUEUE_STATE_INVALID', 'domainId must be a lowercase identifier');
+    }
+    if (input.manifestDigest !== undefined && (typeof input.manifestDigest !== 'string' || !SHA256_HEX_PATTERN.test(input.manifestDigest))) {
+      queueError('QUEUE_STATE_INVALID', 'manifestDigest must be a 64-hex SHA-256 digest');
+    }
     let command: TaskpackReviseCommand | null = null;
     if (input.kind === 'revise') {
       const candidate = input.command;
@@ -179,7 +202,10 @@ export class TenantAdmissionQueue {
     const item: QueueItem = {
       queueItemId, runId: `run-${queueItemId}`, tenant: { ...tenant }, kind: input.kind,
       baseRevision: input.baseRevision, command, payloadDigest: input.payloadDigest ?? null,
-      deliveryId: input.deliveryId ?? null, enqueuedAtMs: nowMs,
+      deliveryId: input.deliveryId ?? null,
+      ...(input.domainId !== undefined ? { domainId: input.domainId } : {}),
+      ...(input.manifestDigest !== undefined ? { manifestDigest: input.manifestDigest } : {}),
+      enqueuedAtMs: nowMs,
       state: 'pending', cancelReason: null, reconcileEffect: null, lease: null,
     };
     this.#items.set(queueItemId, item);
@@ -211,6 +237,8 @@ export class TenantAdmissionQueue {
       return {
         leaseEpoch: lease.leaseEpoch, workerId, queueItemId: item.queueItemId, runId: item.runId,
         notAfterMonotonicMs: lease.notAfterMonotonicMs,
+        ...(item.domainId !== undefined ? { domainId: item.domainId } : {}),
+        ...(item.manifestDigest !== undefined ? { manifestDigest: item.manifestDigest } : {}),
       };
     }
     void seenGroups;
@@ -247,6 +275,8 @@ export class TenantAdmissionQueue {
     return {
       leaseEpoch: lease.leaseEpoch, workerId, queueItemId: item.queueItemId, runId: item.runId,
       notAfterMonotonicMs: lease.notAfterMonotonicMs,
+      ...(item.domainId !== undefined ? { domainId: item.domainId } : {}),
+      ...(item.manifestDigest !== undefined ? { manifestDigest: item.manifestDigest } : {}),
     };
   }
 
@@ -261,6 +291,11 @@ export class TenantAdmissionQueue {
     return copyItem(item);
   }
 
+  /** Revalidate that an existing lease grant is still active, unrevoked, and unexpired. */
+  assertActiveLease(tenant: TenantIdentity, queueItemId: string, leaseEpoch: number, workerId: string, nowSample: ClockSample): QueueItem {
+    return copyItem(this.#requireActiveLease(tenant, queueItemId, leaseEpoch, workerId, nowSample));
+  }
+
   reconcileExpiredLease(tenant: TenantIdentity, queueItemId: string, effect: ExpiredLeaseEffect, nowSample: ClockSample): QueueItem {
     const item = this.#requireItem(tenant, queueItemId);
     const now = validateSample(nowSample, 'reconcile clock sample');
@@ -269,12 +304,23 @@ export class TenantAdmissionQueue {
     }
     const expired = item.lease !== null && monotonic(now.monotonicMs) >= monotonic(item.lease.notAfterMonotonicMs);
     if (item.state === 'reconcile_required' || (item.state === 'leased' && expired)) {
-      item.state = effect === 'not_executed' ? 'pending' : 'reconcile_required';
-      item.reconcileEffect = effect;
-      item.lease = null;
+      if (effect === 'reconcile_required') {
+        this.#expireToReconcileRequired(item);
+      } else {
+        item.state = 'pending';
+        item.reconcileEffect = effect;
+        item.lease = null;
+      }
       return copyItem(item);
     }
     queueError('QUEUE_STATE_INVALID', `queue item ${queueItemId} has no expired lease to reconcile`);
+  }
+
+  getItem(tenant: TenantIdentity, queueItemId: string): QueueItem | null {
+    validateTenantIdentity(tenant);
+    const item = this.#items.get(queueItemId);
+    if (item === undefined || !sameTenant(item.tenant, tenant)) return null;
+    return copyItem(item);
   }
 
   inspectTenantQueue(tenant: TenantIdentity): { readonly counts: QueueCounts; readonly items: readonly QueueItem[] } {
@@ -299,62 +345,104 @@ export class TenantAdmissionQueue {
     return { runRoot: this.#runRoot, runDirectory, receiptPath: join(runDirectory, item.runId, 'receipt.json') };
   }
 
-  revokeTenantScope(tenant: TenantIdentity): { readonly cancelled: number; readonly fenced: boolean } {
+  revokeTenantScope(tenant: TenantIdentity): {
+    readonly cancelled: number;
+    readonly fenced: boolean;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     validateTenantIdentity(tenant);
     let cancelled = 0, fenced = false;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (!sameTenant(item.tenant, tenant)) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced = true;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 
-  revokeInstallationScope(installationId: number): { readonly cancelled: number; readonly fenced: number } {
+  revokeInstallationScope(installationId: number): {
+    readonly cancelled: number;
+    readonly fenced: number;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     if (typeof installationId !== 'number' || !Number.isSafeInteger(installationId) || installationId <= 0) {
       queueError('TENANT_IDENTITY_INVALID', 'installationId must be a positive integer');
     }
     let cancelled = 0, fenced = 0;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (item.tenant.installationId !== installationId) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced += 1;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 
   /** Revoke only the tenants of `installationId` whose repositoryId is listed (installation_repositories.removed). */
-  revokeRepositoryScope(installationId: number, repositoryIds: readonly number[]): { readonly cancelled: number; readonly fenced: number } {
+  revokeRepositoryScope(installationId: number, repositoryIds: readonly number[]): {
+    readonly cancelled: number;
+    readonly fenced: number;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     if (typeof installationId !== 'number' || !Number.isSafeInteger(installationId) || installationId <= 0
       || !Array.isArray(repositoryIds) || repositoryIds.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)) {
       queueError('TENANT_IDENTITY_INVALID', 'revokeRepositoryScope requires a positive installationId and positive repositoryIds');
     }
     const removed = new Set(repositoryIds);
     let cancelled = 0, fenced = 0;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (item.tenant.installationId !== installationId || !removed.has(item.tenant.repositoryId)) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced += 1;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 }
 

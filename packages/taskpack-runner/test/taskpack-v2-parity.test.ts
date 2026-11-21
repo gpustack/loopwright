@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { promisify } from 'node:util';
-import { compilePlan, loadTrustedConfiguration, runCycleWithPorts } from '@loopwright/controller';
+import { compilePlan, inspectRun, loadTrustedConfiguration, runCycleWithPorts } from '@loopwright/controller';
 import { isWritablePath, OVERLAY_LIMITS } from '@loopwright/core';
 import {
   RUNNER_ALWAYS_PROTECTED_PATHS,
@@ -606,6 +606,15 @@ describe('Taskpack 2.0 runner parity alignment', () => {
       assert.deepEqual(deniedGateRow?.findings?.map(f => ({ ...f })), [
         { title: 'Missing proposal', severity: 'high', evidence: '.autosync/proposal.json was absent' },
       ]);
+
+      const inspectedDeny = await inspectRun({ runRoot: paths.runRoot, runId: denyRunId });
+      assert.equal(inspectedDeny.ok, true);
+      if (!inspectedDeny.ok) throw new Error('expected inspectRun ok');
+      assert.notEqual(inspectedDeny.value.runEval, null);
+      assert.ok(inspectedDeny.value.runEval!.breakdown.byStep.length >= 1);
+      for (const suggestion of inspectedDeny.value.runEval!.suggestions) {
+        assert.equal(suggestion.autoApplied, false);
+      }
     });
   });
 

@@ -39,6 +39,7 @@ export interface GitHubAppConfigDocument {
     readonly tokenTtlSeconds?: number | undefined;
     readonly maxPayloadBytes?: number | undefined;
     readonly taskpackPath?: string | undefined;
+    readonly suitePath?: string | undefined;
     readonly operatorAllowlist?: readonly string[] | undefined;
   };
 }
@@ -146,6 +147,8 @@ export interface QueueItem {
   readonly command: TaskpackReviseCommand | null;
   readonly payloadDigest: string | null;
   readonly deliveryId: string | null;
+  readonly domainId?: string | undefined;
+  readonly manifestDigest?: string | undefined;
   readonly enqueuedAtMs: number;
   state: QueueItemState;
   cancelReason: string | null;
@@ -160,6 +163,8 @@ export type EnqueueInput = {
   readonly command?: TaskpackReviseCommand | undefined;
   readonly payloadDigest?: string | undefined;
   readonly deliveryId?: string | undefined;
+  readonly domainId?: string | undefined;
+  readonly manifestDigest?: string | undefined;
 };
 
 export type EnqueueOutcome =
@@ -172,6 +177,8 @@ export interface LeaseGrant {
   readonly queueItemId: string;
   readonly runId: string;
   readonly notAfterMonotonicMs: string;
+  readonly domainId?: string | undefined;
+  readonly manifestDigest?: string | undefined;
 }
 
 export interface TenantRunPaths {

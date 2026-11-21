@@ -43,7 +43,9 @@ export {
   serializeActionResultSummary,
   type CommentEvaluationOptions,
   type CreateTaskpackDecisionPortOptions,
+  type SuiteActionEntrypointResult,
   type TurnkeyActionEntrypointInput,
+  type TurnkeyActionEntrypointResult,
   type TurnkeyActionExecutionReport,
 } from './action.js';
 export {

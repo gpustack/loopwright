@@ -29,9 +29,10 @@ Generic declarative `Taskpack` execution lives in `@loopwright/taskpack` (`packa
 | `github-app/src/tenant-queue.ts` | `TenantAdmissionQueue`: tenant partitioning, concurrency 1, lease-epoch fencing |
 | `github-app/src/token-broker.ts` | RS256 App JWTs and `InstallationTokenBroker` paired with `taskpack` `SecretScrubber` |
 | `github-app/src/action.ts` | `runGitHubActionEntrypoint` (`policyProfile: 'github'`) and `INPUT_*` CLI shim |
-| `github-app/src/publisher.ts` | Single-fd `1 MiB` streaming CAS PR publisher (`git hash-object -w --stdin`) |
+| `github-app/src/publisher.ts` | Single-fd `1 MiB` streaming CAS PR publisher with 3-way carry and conflict guards |
+| `github-app/src/suite-pr-lookup.ts` | Authenticated `issue_comment` PR branch ownership and same-repo verification |
 | `github-app/src/turnkey-memory.ts` | Post-settlement `separate-pull-request` CAS memory publication |
-| `github-app/src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver and `MULTI_TENANT_HOST_POLICY` |
+| `github-app/src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver, suite routing, and `MULTI_TENANT_HOST_POLICY` |
 
 Repository CI/CD runs from `.github/workflows/`. Configure consumer workflows separately and review the [Action limits](../operations/github-action.md).
 
@@ -152,7 +153,9 @@ For live execution, `runActionCli` discovers upstreams and wires the turnkey del
 `packages/taskpack/src/turnkey.ts` runs `command.v1` through a loopback HMAC gate, resolving canonical `cas://sha256/<hex>` blobs under `<artifactsDir>/blobs/sha256/<hex>` and projecting them via single-descriptor `1 MiB` streaming (`O_NOFOLLOW`, `nlink === 1`, SHA-256 verified). Hybrid `mountReadOnlyGit` stages a sanitized `.git` skeleton (excluding `config`, `credentials`, and `hooks`) with `--ro-bind` (Linux `bwrap`/`docker`) or read-only `1 MiB` streaming (Seatbelt/Landlock) for `.git/objects`.
 
 `packages/github-app/src/publisher.ts` builds commits with a temporary `GIT_INDEX_FILE`.
-It opens each CAS blob once (`O_RDONLY | O_NOFOLLOW`, `nlink === 1`), verifies SHA-256 in `1 MiB` chunks, passes the file descriptor to `git -c core.bigFileThreshold=1m hash-object -w --stdin`, and commits via `read-tree`, `update-index`, `write-tree`, and `commit-tree`.
+It consumes shared 3-way merged carry blobs (`ensureCarryBlobsInGitObjectStore`) and enforces extracted baseline conflict resolution (`verifyCandidateBaselinePrePublication`, `hasBaselineConflictResource`).
+
+It opens each CAS blob once (`O_RDONLY | O_NOFOLLOW`, `nlink === 1`), verifies SHA-256 in `1 MiB` chunks, and commits via `read-tree`, `update-index`, `write-tree`, and `commit-tree`.
 Publication uses `--force-with-lease`; the cycle uses `openPiHostSessionAdapterV2` and `output-format.ts` emits reports (`pr-url`, `memory-pr-url`).
 
 Before authoring, `compileDeclarativeTaskpack` runs `selectActiveMemory` on `spec.memory.directory`.
@@ -182,13 +185,10 @@ Intake checks the webhook signature before event processing. Comment commands us
 
 `createGitHubRestTokenTransport` provides the GitHub REST token transport. `startConfiguredGitHubApp` starts the configured service only when `spec.listen.enabled === true`.
 
-`startGitHubAppControlPlane` binds loopback-only HTTP and serves:
+`startGitHubAppControlPlane` binds loopback-only HTTP, supports single-taskpack (`manifest` / `taskpackPath`) or multi-domain `TaskpackSuite` (`suite` / `suitePath`, mutually exclusive) routing, and serves:
 
-- `POST /webhooks/github` — verifies `X-Hub-Signature-256` with `crypto.timingSafeEqual` over the raw
-  bytes, deduplicates `X-GitHub-Delivery` (failed deliveries retry on redelivery, payload mismatches fail
-  closed), parses comment and review commands for authorized actors, and enqueues actionable triggers.
-- `POST /tenants/:installationId/:repositoryId/:taskpackId/lease` — leases the next pending item with a
-  monotonic `leaseEpoch` plus a single-repository `'read_only'` installation token.
+- `POST /webhooks/github` — verifies `X-Hub-Signature-256` with `crypto.timingSafeEqual` over raw bytes, deduplicates `X-GitHub-Delivery` across multi-domain suite fan-out, runs `verifySuiteCommentPullRequest` on `issue_comment` events to enforce same-repo PR ownership, and enqueues actionable triggers.
+- `POST /tenants/:installationId/:repositoryId/:taskpackId/lease` — leases the next pending item with a monotonic `leaseEpoch`, per-domain manifest SHA-256 binding, suite-wide mandatory protected union enforcement, and a single-repository `'read_only'` installation token.
 - `POST /tenants/:installationId/:repositoryId/:taskpackId/settle` — settles the leased item
   (`completed`, `failed`, `blocked`, `reconcile_required`) and updates the delivery store.
 - `GET /healthz` — `{ ok: true }` with queue and delivery summary counts.

@@ -8,6 +8,7 @@ export const DEFAULT_MEMORY_MAX_PROMPT_ENTRIES = 32;
 export const DEFAULT_MEMORY_MAX_PROMPT_BYTES = 16_384;
 export const MAX_MEMORY_ENTRY_FILE_BYTES = 65_536;
 export const MAX_MEMORY_INDEX_FILE_BYTES = 2_097_152;
+export const MAX_MEMORY_INDEX_BLOB_BYTES = MAX_MEMORY_INDEX_FILE_BYTES;
 
 export type MemoryEntryKind = 'fact' | 'failure_observation' | 'invariant';
 

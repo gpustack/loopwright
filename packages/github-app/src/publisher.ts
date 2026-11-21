@@ -10,11 +10,12 @@ import {
   assertNoSymlinkSegments,
   buildGitAuthEnv,
   COMMIT_SHA_PATTERN,
-  computeAllowedSourceRevisionCarryDelta,
   CONTROLLER_ID_PATTERN,
   DEFAULT_GIT_COMMIT_IDENTITY,
+  ensureCarryBlobsInGitObjectStore,
   execGit,
   fetchBoundedText,
+  hasBaselineConflictResource,
   hasSymlinkAtOrAbove,
   insideRoot,
   inspectAndVerifyCandidate,
@@ -33,10 +34,12 @@ import {
   validateGitCommitIdentity,
   validateGitRemoteSource,
   verifyBaseTreeAnchor,
+  verifyCandidateBaselinePrePublication,
   type CarryDeltaEntry,
   type GitCommitIdentity,
   type HostPublicationEndpointPlan,
   type InspectedCandidateFile,
+  type InspectedCandidateSnapshot,
   type ManagedPullRequestInfo,
 } from '@loopwright/taskpack';
 import { GitHubAppError } from './types.js';
@@ -60,6 +63,7 @@ export interface NativePullRequestPublisherOptions {
   readonly authToken?: string | undefined;
   readonly host?: string | undefined;
   readonly scratchRoot?: string | undefined;
+  readonly extractedConflictPaths?: readonly string[] | undefined;
 }
 
 export interface NativePullRequestPublisherServer {
@@ -1292,24 +1296,58 @@ export async function startNativePullRequestPublisherServer(
         ? baseEntries
         : await listTreeEntriesAtRevision(options.repositoryRoot, sourceRevision, gitEnv);
 
+      for (const file of snapshot.files) {
+        if (!isAllowedCandidateWrite(file.name, snapshot)) {
+          continue;
+        }
+        if (hasSymlinkAtOrAbove(file.name, baseEntries, sourceEntries)) {
+          throw new GitHubAppError(
+            'ACTION_INPUT_INVALID',
+            'Refusing to overwrite symlinked candidate path during native PR publication.',
+          );
+        }
+      }
+
+      const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
+      const oidPattern = objectFormat === 'sha1' ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
       const carriedUpdatesByPath = new Map<string, CarryDeltaEntry>();
       let carryRemovalsList: readonly string[] = [];
-      if (sourceRevision !== baseRevision) {
-        const { carryRemovals, carryUpdates } = computeAllowedSourceRevisionCarryDelta(
-          snapshot,
-          baseEntries,
-          sourceEntries,
-        );
-        carryRemovalsList = carryRemovals;
-        if (carryRemovals.length > 0) {
-          await removePathsFromIndex(options.repositoryRoot, indexFile, carryRemovals, gitEnv);
+      let filesToStageInput: readonly InspectedCandidateFile[] = snapshot.files;
+      if (
+        sourceRevision !== baseRevision
+        || (options.extractedConflictPaths?.length ?? 0) > 0
+        || hasBaselineConflictResource(snapshot.contract)
+      ) {
+        const effectiveSnapshot: InspectedCandidateSnapshot = (
+          snapshot.baseRevision === baseRevision && snapshot.sourceRevision === sourceRevision
+        )
+          ? snapshot
+          : { ...snapshot, baseRevision, sourceRevision };
+        const prePub = await verifyCandidateBaselinePrePublication({
+          repositoryRoot: options.repositoryRoot,
+          snapshot: effectiveSnapshot,
+          extractedConflictPaths: options.extractedConflictPaths,
+          scratchRoot: workRoot,
+          gitEnv,
+          scrubber,
+        });
+        carryRemovalsList = prePub.carryRemovals;
+        if (prePub.carryRemovals.length > 0) {
+          await removePathsFromIndex(options.repositoryRoot, indexFile, prePub.carryRemovals, gitEnv);
         }
-        if (carryUpdates.length > 0) {
-          await stageEntriesInIndex(options.repositoryRoot, indexFile, carryUpdates, gitEnv);
-          for (const entry of carryUpdates) {
+        if (prePub.carryUpdates.length > 0) {
+          await ensureCarryBlobsInGitObjectStore({
+            repositoryRoot: options.repositoryRoot,
+            carryUpdates: prePub.carryUpdates,
+            objectFormat,
+            gitEnv,
+          });
+          await stageEntriesInIndex(options.repositoryRoot, indexFile, prePub.carryUpdates, gitEnv);
+          for (const entry of prePub.carryUpdates) {
             carriedUpdatesByPath.set(entry.path, entry);
           }
         }
+        filesToStageInput = prePub.reconciledOverlayFiles;
       }
 
       let cleanProposalPath: string | undefined;
@@ -1321,22 +1359,13 @@ export async function startNativePullRequestPublisherServer(
         }
       }
 
-      const objectFormat = snapshot.manifest.spec.baseTree?.objectFormat ?? 'sha1';
-      const oidPattern = objectFormat === 'sha1' ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
-      const candidateNames = new Set<string>();
+      const candidateNames = new Set<string>(snapshot.files.map(file => file.name));
       const stagedFiles: Array<{ readonly path: string; readonly mode: '100644' | '100755'; readonly oid: string }> = [];
       let candidateProposalBytes: Uint8Array | undefined;
 
-      for (const file of snapshot.files) {
-        candidateNames.add(file.name);
+      for (const file of filesToStageInput) {
         if (!isAllowedCandidateWrite(file.name, snapshot)) {
           continue;
-        }
-        if (hasSymlinkAtOrAbove(file.name, baseEntries, sourceEntries)) {
-          throw new GitHubAppError(
-            'ACTION_INPUT_INVALID',
-            'Refusing to overwrite symlinked candidate path during native PR publication.',
-          );
         }
 
         const isTargetProposal = cleanProposalPath !== undefined && file.name === cleanProposalPath;

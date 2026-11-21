@@ -475,6 +475,9 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
 
       const memoryClone1 = join(work, 'clone-mem-1');
       await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, memoryClone1]);
+      const memIndexBytes1 = await readFile(join(memoryClone1, '.auto-sync', 'memory', 'auto-sync', 'index.json'));
+      assert.equal(memIndexBytes1.at(-1), 0x0a, 'committed memory PR index.json must end with trailing LF');
+      assert.notEqual(memIndexBytes1.at(-2), 0x0a, 'committed memory PR index.json must end with a single LF');
       const memDiffPaths1 = (await git(memoryClone1, ['diff', '--name-only', mainSha, 'HEAD'])).split('\n').filter(Boolean);
       assert.equal(memDiffPaths1.length >= 3, true);
       assert.equal(memDiffPaths1.every(p => p.startsWith('.auto-sync/memory/auto-sync/')), true);
@@ -553,6 +556,9 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       const memoryClone2 = join(work, 'clone-mem-2');
       await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, memoryClone2]);
       assert.equal(await git(memoryClone2, ['rev-parse', 'HEAD^']), mainSha);
+      const memIndexBytes2 = await readFile(join(memoryClone2, '.auto-sync', 'memory', 'auto-sync', 'index.json'));
+      assert.equal(memIndexBytes2.at(-1), 0x0a, 'updated memory PR index.json must end with trailing LF');
+      assert.notEqual(memIndexBytes2.at(-2), 0x0a, 'updated memory PR index.json must end with a single LF');
       const loadedOnBranch = await loadMemoryStore(memoryClone2, 'auto-sync', 'acme/repo', '.auto-sync/memory');
       assert.equal(loadedOnBranch.index.entries.some(e => e.kind === 'fact' && e.claimKey === 'claim.check.proposal-json'), true);
       assert.equal(
@@ -1393,6 +1399,9 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
 
       const memClone = join(work, 'mem-clone');
       await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, memClone]);
+      const incidentIndexBytes = await readFile(join(memClone, '.auto-sync', 'memory', 'auto-sync', 'index.json'));
+      assert.equal(incidentIndexBytes.at(-1), 0x0a, 'incident memory PR index.json must end with trailing LF');
+      assert.notEqual(incidentIndexBytes.at(-2), 0x0a);
       const loadedStore = await loadMemoryStore(memClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
       assert.equal(loadedStore.index.entries.length, 1);
       assert.equal(loadedStore.index.entries[0]?.kind, 'failure_observation');
@@ -1720,6 +1729,9 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
 
       const cleanupClone = join(work, 'cleanup-clone');
       await git(work, ['clone', '--branch', 'loopwright/memory/auto-sync/main', bareRemote, cleanupClone]);
+      const cleanupIndexBytes = await readFile(join(cleanupClone, '.auto-sync', 'memory', 'auto-sync', 'index.json'));
+      assert.equal(cleanupIndexBytes.at(-1), 0x0a, 'cleanup memory PR index.json must end with trailing LF');
+      assert.notEqual(cleanupIndexBytes.at(-2), 0x0a);
       const cleanupStore = await loadMemoryStore(cleanupClone, 'auto-sync', 'acme/repo', '.auto-sync/memory');
       assert.equal(cleanupStore.index.entries.length, 0);
       assert.equal(cleanupStore.index.retired.length, 0);

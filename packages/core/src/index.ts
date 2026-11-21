@@ -1,11 +1,13 @@
 export { API_VERSION } from './boundary.js';
-export { LIMITS, OVERLAY_LIMITS, type OverlayLimits, type OverlayLimitsInput, type OverlayLimitOptions } from './limits.js';
+export { LIMITS, OVERLAY_LIMITS, HANDOFF_LIMITS, type OverlayLimits, type OverlayLimitsInput, type OverlayLimitOptions } from './limits.js';
 export { DIAGNOSTIC_CODES, type DiagnosticCode, type Diagnostic, type Result } from './diagnostics.js';
 export { matchesScopePattern, validateScopePattern, validateRelativePath } from './scope.js';
 export {
   isWritablePath, resolveOverlayLimits,
   type TaskContract, type ReworkPolicy, type Digest, type ArtifactRef, type EvidenceLevel, type CheckStatus,
   type MetricValue, type MetricsMap, type FindingSeverity, type StructuredFinding,
+  type StepHandoffSource, type StepHandoffSelect, type StepHandoffSelector,
+  type ResourceActivationPhase, type ResourceActivationRule,
 } from './contracts.js';
 export { admitTask, identifyManifest, bindSubject, type TaskLock, type Subject } from './identity.js';
 export {

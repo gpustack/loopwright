@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
+import { promisify } from 'node:util';
 import type { TaskContract } from '@loopwright/core';
 import { applyMemoryProposalCAS } from '../src/cas.js';
 import { canonical, memoryProposalSchema, renderEntryMarkdown, storeDigestOf } from '../src/schema.js';
@@ -355,6 +358,81 @@ describe('compare-and-swap store update', () => {
       const reloaded = await loadMemoryStore(root, TASKPACK, 'org/repo');
       assert.deepEqual(reloaded.index.entries.map(entry => entry.id), ['entry.inv', 'entry.proposed']);
       assert.deepEqual(await readdir(join(root, MEMORY_ROOT, TASKPACK, 'entries')), ['entry.inv.md', 'entry.proposed.md']);
+    });
+  });
+
+  it('terminates index.json, MemoryModifiedFile.content, and .cas.lock with a single trailing LF', async () => {
+    const fixture = await buildRun('completed');
+    await withSandbox(async root => {
+      const baseIndex = (await loadMemoryStore(root, TASKPACK, 'org/repo')).index;
+      const proposal = buildProposal(fixture, baseIndex.storeDigest, [{ kind: 'upsert', entry: proposedEntry(fixture) }]);
+      let observedLockBytes: Buffer | null = null;
+      const result = await applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex, {
+        faultInjectionHook: async () => {
+          observedLockBytes = await readFile(join(root, MEMORY_ROOT, TASKPACK, '.cas.lock'));
+        },
+      }));
+      assert.equal(result.applied, true);
+      assert.ok(observedLockBytes !== null);
+      const lockText = (observedLockBytes as Buffer).toString('utf8');
+      assert.equal(lockText.endsWith('\n'), true, '.cas.lock must end with LF');
+      assert.equal(lockText.endsWith('\n\n'), false, '.cas.lock must end with a single LF');
+
+      const indexBytes = await readFile(join(root, MEMORY_ROOT, TASKPACK, 'index.json'));
+      assert.equal(indexBytes[indexBytes.length - 1], 0x0a, 'on-disk index.json must end with 0x0a');
+      assert.notEqual(indexBytes[indexBytes.length - 2], 0x0a, 'on-disk index.json must end with a single 0x0a');
+
+      const indexModified = result.pullRequest!.modifiedFiles.find(file => file.path === `${MEMORY_ROOT}/${TASKPACK}/index.json`);
+      assert.ok(indexModified !== undefined);
+      assert.equal(indexModified.content.endsWith('\n'), true);
+      assert.equal(indexModified.content.endsWith('\n\n'), false);
+      assert.equal(indexModified.sha256, createHash('sha256').update(indexModified.content, 'utf8').digest('hex'));
+      assert.ok(indexBytes.equals(Buffer.from(indexModified.content, 'utf8')));
+    });
+  });
+
+  it('migrates a legacy no-LF index.json with a git-apply-valid diff and rolls back byte-identically on fault', async () => {
+    const execFileAsync = promisify(execFile);
+    const fixture = await buildRun('completed');
+    await withSandbox(async root => {
+      const baseEntry = seededEntry();
+      const baseIndex = await seedStore(root, [baseEntry]);
+      const indexPath = join(root, MEMORY_ROOT, TASKPACK, 'index.json');
+      const legacyNoLfBytes = await readFile(indexPath);
+      assert.notEqual(legacyNoLfBytes[legacyNoLfBytes.length - 1], 0x0a);
+
+      // Copy legacy preimage into a separate git repo to verify git apply compatibility of the emitted patch
+      const gitRepo = await mkdtemp(join(await realpath(tmpdir()), 'loopwright-cas-gitapply-'));
+      try {
+        await execFileAsync('git', ['init'], { cwd: gitRepo });
+        await mkdir(join(gitRepo, MEMORY_ROOT, TASKPACK, 'entries'), { recursive: true });
+        await writeFile(join(gitRepo, MEMORY_ROOT, TASKPACK, 'entries', 'entry.base.md'), entryFileBytes(baseEntry), { mode: 0o600 });
+        await writeFile(join(gitRepo, MEMORY_ROOT, TASKPACK, 'index.json'), legacyNoLfBytes, { mode: 0o600 });
+
+        const proposal = buildProposal(fixture, baseIndex.storeDigest, supersedeOperations(fixture));
+
+        // 1. Mid-way fault restores exact legacy no-LF bytes byte-identically
+        await assert.rejects(() => applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex, {
+          faultInjectionHook: () => { throw new Error('injected fault'); },
+        })), /injected fault/);
+        const rolledBackBytes = await readFile(indexPath);
+        assert.ok(rolledBackBytes.equals(legacyNoLfBytes), 'rollback must restore legacy no-LF index.json byte-identically');
+
+        // 2. Successful apply emits \ No newline at end of file diff and applies cleanly via git apply
+        const applied = await applyMemoryProposalCAS(casInput(root, fixture, proposal, baseIndex));
+        assert.equal(applied.applied, true);
+        assert.ok(applied.pullRequest!.patch.includes('\\ No newline at end of file\n+'));
+        const patchFile = join(gitRepo, 'cas.patch');
+        await writeFile(patchFile, applied.pullRequest!.patch, 'utf8');
+        await execFileAsync('git', ['apply', '--check', '--whitespace=nowarn', patchFile], { cwd: gitRepo });
+        await execFileAsync('git', ['apply', '--whitespace=nowarn', patchFile], { cwd: gitRepo });
+        const appliedOnDisk = await readFile(indexPath);
+        const gitAppliedIndex = await readFile(join(gitRepo, MEMORY_ROOT, TASKPACK, 'index.json'));
+        assert.ok(gitAppliedIndex.equals(appliedOnDisk));
+        assert.equal(appliedOnDisk[appliedOnDisk.length - 1], 0x0a);
+      } finally {
+        await rm(gitRepo, { recursive: true, force: true });
+      }
     });
   });
 });

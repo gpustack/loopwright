@@ -1,12 +1,20 @@
 import { posix } from 'node:path';
 import {
+  HANDOFF_LIMITS,
+  isWritablePath,
   LIMITS,
   OVERLAY_LIMITS,
   matchesScopePattern,
   resolveOverlayLimits,
+  validateRelativePath,
   validateScopePattern,
   type OverlayLimits,
+  type ResourceActivationPhase,
+  type ResourceActivationRule,
   type ReworkPolicy,
+  type StepHandoffSelect,
+  type StepHandoffSelector,
+  type StepHandoffSource,
 } from '@loopwright/core';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { DECISION_PROVIDER_API_KEY_ENV } from '@loopwright/decisions';
@@ -16,12 +24,19 @@ import {
   DEFAULT_MEMORY_TTL_DAYS,
 } from '@loopwright/memory';
 import {
+  BASELINE_ALIGNMENT_POLICIES, DEFAULT_BASELINE_ALIGNMENT_POLICY,
+  DEFAULT_BASELINE_MAX_CONFLICT_BYTES, DEFAULT_BASELINE_MAX_CONFLICT_FILES,
   DEFAULT_COMMENT_PREFIXES, GITHUB_PROTECTED_AUTOMATION_PATHS, LOCAL_PROTECTED_AUTOMATION_PATHS,
-  LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_STEP_REWORKS, MAX_TASKPACK_ROLES, MAX_TASKPACK_STEPS,
+  LOCAL_COMMAND_GATE_ENDPOINT_ID, MAX_BASELINE_MAX_CONFLICT_BYTES, MAX_BASELINE_MAX_CONFLICT_FILES,
+  MAX_STEP_REWORKS, MAX_TASKPACK_ROLES, MAX_TASKPACK_STEPS,
+  MIN_BASELINE_MAX_CONFLICT_BYTES, MIN_BASELINE_MAX_CONFLICT_FILES,
   MULTI_TENANT_HOST_POLICY, TASKPACK_COMMENT_COMMANDS, TASKPACK_MANIFEST_API_VERSION,
   TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS, TASKPACK_TOOL_NAMES, TaskpackError,
+  type BaselineAlignmentConfig, type BaselineAlignmentOverride, type BaselineAlignmentPolicy,
+  type CandidateScopeSnapshot,
   type ExecutionHostPolicy, type PolicyProfile,
-  type ResolvedTaskpackExecutionCapabilities, type SandboxBackendId, type SandboxCapability,
+  type ResolvedBaselineAlignmentConfig, type ResolvedTaskpackExecutionCapabilities,
+  type SandboxBackendId, type SandboxCapability,
   type SandboxNetworkMode, type TargetMatrixCell,
   type TaskpackCheckParameterValue, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy,
   type TaskpackDecisionProviderKind, type TaskpackDecisionsDeclaration, type TaskpackDecisionTriageRule,
@@ -33,7 +48,7 @@ import {
   type TaskpackMcpServerDeclaration, type TaskpackMemoryApplyMode, type TaskpackMemoryDeclaration,
   type TaskpackMemoryNoBudgetMode, type TaskpackModelDeclaration, type TaskpackOutputDeclaration,
   type TaskpackOutputFormat, type TaskpackPreflightDeclaration, type TaskpackProposalDeclaration,
-  type TaskpackPublicationDeclaration, type TaskpackRoleDeclaration, type TaskpackRolePurpose,
+  type TaskpackPublicationDeclaration, type TaskpackResourceEntry, type TaskpackRoleDeclaration, type TaskpackRolePurpose,
   type TaskpackSandboxDeclaration, type TaskpackStdioMcpServerDeclaration, type TaskpackStepDeclaration,
   type TaskpackStepKind, type TaskpackSubmissionDeclaration, type TaskpackTargetDeclaration,
   type TaskpackToolName, type TaskpackTriggersDeclaration, type TaskpackUpstreamDescriptor,
@@ -818,17 +833,60 @@ function writableScopeCoversPath(
   return false;
 }
 
+/** Extract the repository-relative path from a plain string or conditional resource entry. */
+export function resolveTaskpackResourcePath(entry: TaskpackResourceEntry): string {
+  return typeof entry === 'string' ? entry : entry.path;
+}
+
+/** Extract repository-relative paths from a list of plain string or conditional resource entries. */
+export function extractTaskpackResourcePaths(
+  entries: readonly TaskpackResourceEntry[] | undefined,
+): readonly string[] {
+  if (entries === undefined || entries.length === 0) return Object.freeze([]);
+  return Object.freeze(entries.map(resolveTaskpackResourcePath));
+}
+
+/** Extract the optional `when` activation rule from a plain string or conditional resource entry. */
+export function resolveTaskpackResourceWhen(
+  entry: TaskpackResourceEntry,
+): ResourceActivationRule | undefined {
+  return typeof entry === 'string' ? undefined : entry.when;
+}
+
+/** Deterministic canonical key for comparing two optional `ResourceActivationRule` predicates. */
+export function canonicalizeResourceActivationRule(
+  when: ResourceActivationRule | undefined,
+): string {
+  if (when === undefined) return 'UNCONDITIONAL';
+  const normalized: Record<string, readonly string[]> = {};
+  if (when.changedPaths !== undefined) normalized['changedPaths'] = [...when.changedPaths].sort();
+  if (when.extensions !== undefined) normalized['extensions'] = [...when.extensions].sort();
+  if (when.phases !== undefined) normalized['phases'] = [...when.phases].sort();
+  if (when.failedChecks !== undefined) normalized['failedChecks'] = [...when.failedChecks].sort();
+  if (when.failureCodes !== undefined) normalized['failureCodes'] = [...when.failureCodes].sort();
+  return JSON.stringify(normalized);
+}
+
+function resolveUntrustedResourceEntryPath(entry: unknown, diagPath: string): string {
+  if (typeof entry === 'string') return normalizeRelativePath(entry, diagPath);
+  if (isPlainObjectRecord(entry) && Object.hasOwn(entry, 'path')) {
+    return normalizeRelativePath(entry['path'], `${diagPath}/path`);
+  }
+  manifestInvalid('resource entry must be a relative path string or { path, when } object', diagPath);
+}
+
 export interface EffectiveProtectedPathsOptions {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly controlRoot?: string | undefined;
   readonly manifestPath?: string | undefined;
   readonly digestsLockfile?: string | undefined;
-  readonly instructions?: readonly string[] | undefined;
-  readonly skills?: readonly string[] | undefined;
+  readonly instructions?: readonly TaskpackResourceEntry[] | undefined;
+  readonly skills?: readonly TaskpackResourceEntry[] | undefined;
   readonly preflightScript?: string | undefined;
   readonly commandScripts?: readonly string[] | undefined;
   readonly toolchainPaths?: readonly string[] | undefined;
   readonly proposalPath?: string | undefined;
+  readonly extraProtectedPaths?: readonly string[] | undefined;
   readonly controlRootSiblings?: readonly string[] | undefined;
   readonly priorityControlRootSiblings?: readonly string[] | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
@@ -873,11 +931,14 @@ function explicitProtectedPathsWithoutControlRoot(
   ]);
   if (options.manifestPath !== undefined) baseSet.add(options.manifestPath);
   if (options.digestsLockfile !== undefined) baseSet.add(options.digestsLockfile);
+  if (options.extraProtectedPaths !== undefined) {
+    for (const extra of options.extraProtectedPaths) baseSet.add(extra);
+  }
   if (options.instructions !== undefined) {
-    for (const instruction of options.instructions) baseSet.add(instruction);
+    for (const instruction of options.instructions) baseSet.add(resolveTaskpackResourcePath(instruction));
   }
   if (options.skills !== undefined) {
-    for (const skill of options.skills) baseSet.add(skill);
+    for (const skill of options.skills) baseSet.add(resolveTaskpackResourcePath(skill));
   }
   if (options.preflightScript !== undefined) baseSet.add(options.preflightScript);
   if (options.commandScripts !== undefined) {
@@ -988,14 +1049,14 @@ export function resolveEffectiveProtectedPaths(
 ): readonly string[] {
   const controlRoot = options.controlRoot ?? manifest.controlRoot ?? '.loopwright';
   const manifestPath = options.manifestPath ?? manifest.manifestPath;
-  const instructions = options.instructions ?? [
+  const instructions = extractTaskpackResourcePaths(options.instructions ?? [
     ...(manifest.spec.instructions ?? []),
     ...(manifest.spec.roles ?? []).flatMap(role => role.instructions ?? []),
-  ];
-  const skills = options.skills ?? [
+  ]);
+  const skills = extractTaskpackResourcePaths(options.skills ?? [
     ...(manifest.spec.skills ?? []),
     ...(manifest.spec.roles ?? []).flatMap(role => role.skills ?? []),
-  ];
+  ]);
   const commandScripts = options.commandScripts ?? manifest.spec.verification.localChecks
     .filter(c => c.implementation === 'command.v1')
     .map(c => c.parameters?.['script'])
@@ -1097,6 +1158,7 @@ export function assertManifestScopeInvariants(
     readonly manifestPath?: string | undefined;
     readonly policyProfile?: PolicyProfile | undefined;
     readonly commandScripts?: readonly string[] | undefined;
+    readonly extraProtectedPaths?: readonly string[] | undefined;
     readonly controlRootSiblings?: readonly string[] | undefined;
     readonly priorityControlRootSiblings?: readonly string[] | undefined;
     readonly githubSiblings?: readonly string[] | undefined;
@@ -1142,15 +1204,15 @@ export function assertManifestScopeInvariants(
   ));
   const manifestProtectedSet = new Set(manifestProtected);
   const instructions = [
-    ...(manifest.spec.instructions?.map((entry, index) => normalizeRelativePath(entry, `/spec/instructions/${index}`)) ?? []),
+    ...(manifest.spec.instructions?.map((entry, index) => resolveUntrustedResourceEntryPath(entry, `/spec/instructions/${index}`)) ?? []),
     ...(manifest.spec.roles?.flatMap((role, rIdx) => (
-      role.instructions?.map((entry, iIdx) => normalizeRelativePath(entry, `/spec/roles/${rIdx}/instructions/${iIdx}`)) ?? []
+      role.instructions?.map((entry, iIdx) => resolveUntrustedResourceEntryPath(entry, `/spec/roles/${rIdx}/instructions/${iIdx}`)) ?? []
     )) ?? []),
   ];
   const skills = [
-    ...(manifest.spec.skills?.map((entry, index) => normalizeRelativePath(entry, `/spec/skills/${index}`)) ?? []),
+    ...(manifest.spec.skills?.map((entry, index) => resolveUntrustedResourceEntryPath(entry, `/spec/skills/${index}`)) ?? []),
     ...(manifest.spec.roles?.flatMap((role, rIdx) => (
-      role.skills?.map((entry, sIdx) => normalizeRelativePath(entry, `/spec/roles/${rIdx}/skills/${sIdx}`)) ?? []
+      role.skills?.map((entry, sIdx) => resolveUntrustedResourceEntryPath(entry, `/spec/roles/${rIdx}/skills/${sIdx}`)) ?? []
     )) ?? []),
   ];
   const preflightScript = manifest.spec.preflight !== undefined
@@ -1222,6 +1284,9 @@ export function assertManifestScopeInvariants(
     }
   }
 
+  const extraProtectedPaths = options.extraProtectedPaths?.map((entry, idx) => (
+    normalizeScopePattern(entry, `/extraProtectedPaths/${idx}`)
+  ));
   const protectedOptions: EffectiveProtectedPathsOptions = {
     policyProfile,
     controlRoot,
@@ -1233,6 +1298,7 @@ export function assertManifestScopeInvariants(
     commandScripts,
     toolchainPaths: relativeToolchainPaths.length > 0 ? relativeToolchainPaths : undefined,
     proposalPath,
+    extraProtectedPaths,
     controlRootSiblings: options.controlRootSiblings,
     priorityControlRootSiblings: options.priorityControlRootSiblings,
     allowWorkflowWrites,
@@ -1684,23 +1750,506 @@ export interface ValidateTaskpackManifestOptions {
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly enforceHostAuthority?: boolean | undefined;
   readonly githubSiblings?: readonly string[] | undefined;
+  readonly extraProtectedPaths?: readonly string[] | undefined;
+}
+
+/**
+ * Validate a non-root RFC 6901 JSON Pointer (`1..256` chars, `1..32` segments),
+ * decode `~1` (`/`) and `~0` (`~`), and reject prototype-chain segments (`__proto__`, `constructor`, `prototype`).
+ */
+export function validateRfc6901JsonPointer(value: unknown, path: string): readonly string[] {
+  const text = requireString(value, path, 1, 256);
+  const rfc6901PointerPattern = /^(?:\/(?:[^~/]|~[01])*)+$/;
+  if (!rfc6901PointerPattern.test(text)) {
+    manifestInvalid(`invalid RFC 6901 JSON Pointer "${text}"`, path);
+  }
+  const rawSegments = text.slice(1).split('/');
+  if (rawSegments.length < 1 || rawSegments.length > 32) {
+    manifestInvalid('RFC 6901 JSON Pointer must contain 1..32 segments', path);
+  }
+  const decodedSegments = rawSegments.map(seg => {
+    const decoded = seg.replace(/~1/g, '/').replace(/~0/g, '~');
+    if (FORBIDDEN_KEYS.has(decoded)) {
+      manifestInvalid(`RFC 6901 JSON Pointer must not reference forbidden property "${decoded}"`, path);
+    }
+    return decoded;
+  });
+  return Object.freeze(decodedSegments);
+}
+
+/**
+ * True when two `headBranchPrefix` values on the same `targetBranch` collide (either one is a
+ * string prefix of the other or one stripped Git ref path covers the other).
+ */
+export function headBranchPrefixesCollide(prefixA: string, prefixB: string): boolean {
+  if (prefixA.startsWith(prefixB) || prefixB.startsWith(prefixA)) {
+    return true;
+  }
+  const stripA = prefixA.replace(/\/+$/, '');
+  const stripB = prefixB.replace(/\/+$/, '');
+  return stripA.length === 0 || stripB.length === 0 || pathCoveredBy(stripA, stripB) || pathCoveredBy(stripB, stripA);
+}
+
+/** True when a `writable` scope pattern could overlap a mandatory protected path or subtree. */
+export function writableOverlapsMandatoryProtected(
+  writablePattern: string,
+  protectedEntry: string,
+  allowWorkflowWrites = false,
+  isBuiltInProtected = false,
+): boolean {
+  return writableEntryOverlapsProtected(writablePattern, protectedEntry, allowWorkflowWrites, isBuiltInProtected);
+}
+
+export interface ManifestControlPlanePathsSummary {
+  readonly controlRoot: string;
+  readonly manifestPath?: string | undefined;
+  readonly carvedOutProposalPath?: string | undefined;
+  readonly explicitWithoutControlRoot: readonly string[];
+  readonly compactMandatoryPaths: readonly string[];
+}
+
+/**
+ * Collect mandatory control-plane paths declared by a validated domain manifest (excluding user
+ * `spec.scope.protected` exclusions so peer domains can still own disjoint writable trees).
+ */
+export function collectManifestControlPlanePaths(
+  manifest: TaskpackManifest | TaskpackV2Manifest,
+  options: EffectiveProtectedPathsOptions = {},
+): ManifestControlPlanePathsSummary {
+  const policyProfile = resolvePolicyProfile(options.policyProfile, undefined);
+  const controlRoot = options.controlRoot ?? manifest.controlRoot ?? '.loopwright';
+  const manifestPath = options.manifestPath ?? manifest.manifestPath;
+  const allowWorkflowWrites = policyProfile === 'github' && options.allowWorkflowWrites === true;
+  const instructions = extractTaskpackResourcePaths(options.instructions ?? [
+    ...(manifest.spec.instructions ?? []),
+    ...(manifest.spec.roles ?? []).flatMap(role => role.instructions ?? []),
+  ]);
+  const skills = extractTaskpackResourcePaths(options.skills ?? [
+    ...(manifest.spec.skills ?? []),
+    ...(manifest.spec.roles ?? []).flatMap(role => role.skills ?? []),
+  ]);
+  const preflightScript = options.preflightScript ?? manifest.spec.preflight?.script;
+  const digestsLockfile = options.digestsLockfile ?? manifest.spec.execution?.digests.lockfile;
+  const commandScripts = options.commandScripts ?? manifest.spec.verification.localChecks
+    .filter(c => c.implementation === 'command.v1')
+    .map(c => c.parameters?.['script'])
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const toolchainPaths = options.toolchainPaths ?? manifest.spec.verification.localChecks
+    .flatMap(c => (
+      c.implementation === 'command.v1' && Array.isArray(c.parameters?.['toolchainPaths'])
+        ? c.parameters['toolchainPaths'].filter((entry): entry is string => typeof entry === 'string' && entry.length > 0 && !entry.startsWith('/'))
+        : []
+    ));
+  const proposalPath = options.proposalPath ?? manifest.spec.proposal?.path;
+  const effectiveOpts: EffectiveProtectedPathsOptions = {
+    ...options,
+    policyProfile,
+    controlRoot,
+    manifestPath,
+    digestsLockfile,
+    instructions: instructions.length > 0 ? instructions : undefined,
+    skills: skills.length > 0 ? skills : undefined,
+    preflightScript,
+    commandScripts: commandScripts.length > 0 ? commandScripts : undefined,
+    toolchainPaths: toolchainPaths.length > 0 ? toolchainPaths : undefined,
+    proposalPath,
+    allowWorkflowWrites,
+  };
+  const explicitWithManifest = explicitProtectedPathsWithoutControlRoot(manifest.spec.scope.protected, effectiveOpts);
+  const explicitWithoutControlRoot = explicitProtectedPathsWithoutControlRoot([], effectiveOpts);
+  const carvedOut = canCarveOutControlRootProposal(proposalPath, controlRoot, explicitWithManifest)
+    && isControlRootProposalWritableAllowed(proposalPath, manifest.spec.scope.writable, controlRoot, explicitWithManifest);
+
+  const compact = new Set<string>([
+    ...automationPathsFor(policyProfile, allowWorkflowWrites),
+    controlRoot,
+  ]);
+  if (manifestPath !== undefined) compact.add(manifestPath);
+  if (digestsLockfile !== undefined && !pathCoveredBy(digestsLockfile, controlRoot)) {
+    compact.add(digestsLockfile);
+  }
+  for (const instruction of instructions) compact.add(instruction);
+  for (const skill of skills) compact.add(skill);
+  if (preflightScript !== undefined && !pathCoveredBy(preflightScript, controlRoot)) {
+    compact.add(preflightScript);
+  }
+  for (const script of commandScripts) {
+    if (!pathCoveredBy(script, controlRoot)) compact.add(script);
+    const parentDir = commandScriptOutsideParentDir(script, controlRoot);
+    if (parentDir !== undefined) compact.add(parentDir);
+  }
+  for (const entry of toolchainPaths) {
+    if (!entry.startsWith('/') && !pathCoveredBy(entry, controlRoot)) compact.add(entry);
+  }
+  if (policyProfile === 'github' && allowWorkflowWrites && options.githubSiblings !== undefined) {
+    for (const sibling of options.githubSiblings) {
+      if (!isWorkflowSubpathCaseInsensitive(sibling)) compact.add(sibling);
+    }
+  }
+
+  return Object.freeze({
+    controlRoot,
+    ...(manifestPath !== undefined ? { manifestPath } : {}),
+    ...(carvedOut && proposalPath !== undefined ? { carvedOutProposalPath: proposalPath } : {}),
+    explicitWithoutControlRoot,
+    compactMandatoryPaths: Object.freeze([...compact]),
+  });
 }
 
 function isValidCredentialRef(value: string): boolean {
   return value.length <= 64 && (IDENTIFIER_PATTERN.test(value) || COMMAND_ENV_NAME_PATTERN.test(value));
 }
 
-function validateRelativePathOrList(
+const RESOURCE_EXTENSION_PATTERN = /^\.[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)*$/;
+const RULE_FAILURE_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const RESOURCE_ACTIVATION_PHASES: readonly ResourceActivationPhase[] = Object.freeze([
+  'author',
+  'review',
+  'repair',
+  'rework',
+]);
+
+function validateResourceActivationRule(raw: unknown, path: string): ResourceActivationRule {
+  const rec = requireObject(raw, path, [
+    'changedPaths',
+    'extensions',
+    'phases',
+    'failedChecks',
+    'failureCodes',
+  ]);
+  const out: {
+    changedPaths?: readonly string[];
+    extensions?: readonly string[];
+    phases?: readonly ResourceActivationPhase[];
+    failedChecks?: readonly string[];
+    failureCodes?: readonly string[];
+  } = {};
+
+  if (Object.hasOwn(rec, 'changedPaths') && rec['changedPaths'] !== undefined) {
+    const rawPatterns = requireStringList(rec['changedPaths'], `${path}/changedPaths`, 1, LIMITS.ruleChangedPaths);
+    const validated: string[] = [];
+    for (const [idx, item] of rawPatterns.entries()) {
+      const itemPath = `${path}/changedPaths/${idx}`;
+      if (item.length === 0 || item.length > LIMITS.path) {
+        manifestInvalid(`changedPaths entry must be 1..${LIMITS.path} characters`, itemPath);
+      }
+      const checked = validateScopePattern(item);
+      if (!checked.ok) {
+        manifestInvalid(`invalid changedPaths pattern "${item}": ${checked.errors[0]?.code ?? 'PATTERN_UNSUPPORTED'}`, itemPath);
+      }
+      validated.push(checked.value);
+    }
+    out.changedPaths = Object.freeze(validated);
+  }
+
+  if (Object.hasOwn(rec, 'extensions') && rec['extensions'] !== undefined) {
+    const rawExts = requireStringList(rec['extensions'], `${path}/extensions`, 1, LIMITS.ruleExtensions);
+    const validated: string[] = [];
+    for (const [idx, item] of rawExts.entries()) {
+      const itemPath = `${path}/extensions/${idx}`;
+      if (item.length < 2 || item.length > LIMITS.ruleExtension || !RESOURCE_EXTENSION_PATTERN.test(item)) {
+        manifestInvalid(`invalid extension "${item}" (expected lowercase ".ext" suffix of 2..${LIMITS.ruleExtension} characters)`, itemPath);
+      }
+      validated.push(item);
+    }
+    out.extensions = Object.freeze(validated);
+  }
+
+  if (Object.hasOwn(rec, 'phases') && rec['phases'] !== undefined) {
+    const rawPhases = requireStringList(rec['phases'], `${path}/phases`, 1, LIMITS.rulePhases);
+    const validated: ResourceActivationPhase[] = [];
+    for (const [idx, item] of rawPhases.entries()) {
+      const itemPath = `${path}/phases/${idx}`;
+      if (!(RESOURCE_ACTIVATION_PHASES as readonly string[]).includes(item)) {
+        manifestInvalid(`unsupported activation phase "${item}" (expected one of ${RESOURCE_ACTIVATION_PHASES.join(', ')})`, itemPath);
+      }
+      validated.push(item as ResourceActivationPhase);
+    }
+    out.phases = Object.freeze(validated);
+  }
+
+  if (Object.hasOwn(rec, 'failedChecks') && rec['failedChecks'] !== undefined) {
+    const rawChecks = requireStringList(rec['failedChecks'], `${path}/failedChecks`, 1, LIMITS.ruleFailedChecks);
+    const validated: string[] = [];
+    for (const [idx, item] of rawChecks.entries()) {
+      validated.push(requireIdentifier(item, `${path}/failedChecks/${idx}`));
+    }
+    out.failedChecks = Object.freeze(validated);
+  }
+
+  if (Object.hasOwn(rec, 'failureCodes') && rec['failureCodes'] !== undefined) {
+    const rawCodes = requireStringList(rec['failureCodes'], `${path}/failureCodes`, 1, LIMITS.ruleFailureCodes);
+    const validated: string[] = [];
+    for (const [idx, item] of rawCodes.entries()) {
+      const itemPath = `${path}/failureCodes/${idx}`;
+      if (item.length < 1 || item.length > LIMITS.ruleFailureCode || !RULE_FAILURE_CODE_PATTERN.test(item)) {
+        manifestInvalid(`invalid failure code "${item}"`, itemPath);
+      }
+      validated.push(item);
+    }
+    out.failureCodes = Object.freeze(validated);
+  }
+
+  if (
+    out.changedPaths === undefined
+    && out.extensions === undefined
+    && out.phases === undefined
+    && out.failedChecks === undefined
+    && out.failureCodes === undefined
+  ) {
+    manifestInvalid('conditional "when" rule must specify at least one predicate', path);
+  }
+
+  return Object.freeze(out);
+}
+
+function validateResourceEntry(value: unknown, path: string): TaskpackResourceEntry {
+  if (typeof value === 'string') {
+    return normalizeRelativePath(value, path);
+  }
+  const rec = requireObject(value, path, ['path', 'when']);
+  if (!Object.hasOwn(rec, 'path')) {
+    manifestInvalid('resource entry object requires "path"', `${path}/path`);
+  }
+  const normalizedPath = normalizeRelativePath(rec['path'], `${path}/path`);
+  if (!Object.hasOwn(rec, 'when') || rec['when'] === undefined) {
+    return normalizedPath;
+  }
+  const when = validateResourceActivationRule(rec['when'], `${path}/when`);
+  return Object.freeze({ path: normalizedPath, when });
+}
+
+function validateResourceEntryOrList(
   value: unknown,
   path: string,
-): readonly string[] {
-  if (typeof value === 'string') {
-    return Object.freeze([normalizeRelativePath(value, path)]);
+): readonly TaskpackResourceEntry[] {
+  if (typeof value === 'string' || isPlainObjectRecord(value)) {
+    return Object.freeze([validateResourceEntry(value, path)]);
   }
-  return Object.freeze(
-    requireStringList(value, path, 1, 16)
-      .map((entry, idx) => normalizeRelativePath(entry, `${path}/${idx}`)),
-  );
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) {
+    manifestInvalid('expected a resource path/object or an array of 1..16 resource entries', path);
+  }
+  const seenPaths = new Set<string>();
+  const entries: TaskpackResourceEntry[] = [];
+  for (const [idx, item] of value.entries()) {
+    const itemPath = `${path}/${idx}`;
+    const parsed = validateResourceEntry(item, itemPath);
+    const normalizedPath = resolveTaskpackResourcePath(parsed);
+    if (seenPaths.has(normalizedPath)) {
+      manifestInvalid('duplicate list entry', path);
+    }
+    seenPaths.add(normalizedPath);
+    entries.push(parsed);
+  }
+  return Object.freeze(entries);
+}
+
+function validateHandoffHeading(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > HANDOFF_LIMITS.maxHeadingChars) {
+    manifestInvalid(`handoff heading must be a string of 1..${HANDOFF_LIMITS.maxHeadingChars} characters`, path);
+  }
+  if (/[\r\n\0\p{C}]/u.test(value) || value.trim().length === 0) {
+    manifestInvalid('handoff heading must be a non-empty single-line string without control characters', path);
+  }
+  const trimmed = value.trim();
+  const headingBody = /^(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/.exec(trimmed)?.[2] ?? trimmed;
+  const cleaned = headingBody.replace(/[ \t]+$/, '');
+  const title = /^#+$/.test(cleaned) ? '' : cleaned.replace(/[ \t]+#+$/, '').trim();
+  if (title.length === 0) {
+    manifestInvalid('handoff heading must contain non-empty heading text', path);
+  }
+  return value;
+}
+
+function validateHandoffJsonPointer(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.length > HANDOFF_LIMITS.maxPointerChars) {
+    manifestInvalid(`handoff JSON pointer must be a string of 0..${HANDOFF_LIMITS.maxPointerChars} characters`, path);
+  }
+  if (/[\0\r\n\p{C}]/u.test(value)) {
+    manifestInvalid('handoff JSON pointer contains forbidden control characters', path);
+  }
+  if (value === '') return value;
+  if (!value.startsWith('/')) {
+    manifestInvalid(`invalid RFC 6901 JSON Pointer "${value}"`, path);
+  }
+  const rawSegments = value.slice(1).split('/');
+  if (rawSegments.length > LIMITS.segments) {
+    manifestInvalid(`handoff JSON pointer exceeds ${LIMITS.segments} segments`, path);
+  }
+  for (const segment of rawSegments) {
+    let decoded = '';
+    for (let i = 0; i < segment.length; i += 1) {
+      const ch = segment[i]!;
+      if (ch === '~') {
+        const next = segment[i + 1];
+        if (next === '0') {
+          decoded += '~';
+          i += 1;
+        } else if (next === '1') {
+          decoded += '/';
+          i += 1;
+        } else {
+          manifestInvalid(`invalid RFC 6901 escape in JSON Pointer "${value}"`, path);
+        }
+      } else {
+        decoded += ch;
+      }
+    }
+    if (FORBIDDEN_KEYS.has(decoded)) {
+      manifestInvalid(`handoff JSON pointer must not reference forbidden property "${decoded}"`, path);
+    }
+  }
+  return value;
+}
+
+function validateHandoffSelectors(raw: unknown, path: string): readonly StepHandoffSelector[] {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > HANDOFF_LIMITS.maxPerStep) {
+    manifestInvalid(`handoffs must contain 1..${HANDOFF_LIMITS.maxPerStep} selectors`, path);
+  }
+  const seenIds = new Set<string>();
+  const selectors: StepHandoffSelector[] = [];
+  let aggregateBytes = 0;
+
+  for (const [idx, item] of raw.entries()) {
+    const itemPath = `${path}/${idx}`;
+    const rec = requireObject(item, itemPath, ['id', 'fromStep', 'source', 'select', 'maxBytes', 'required']);
+
+    let id: string | undefined;
+    if (Object.hasOwn(rec, 'id') && rec['id'] !== undefined) {
+      id = requireIdentifier(rec['id'], `${itemPath}/id`);
+    }
+    const effectiveId = id ?? `handoff-${idx + 1}`;
+    if (seenIds.has(effectiveId)) {
+      manifestInvalid(`duplicate handoff selector id "${effectiveId}"`, `${itemPath}/id`);
+    }
+    seenIds.add(effectiveId);
+
+    if (!Object.hasOwn(rec, 'fromStep')) {
+      manifestInvalid('handoff selector requires "fromStep"', `${itemPath}/fromStep`);
+    }
+    const fromStep = requireIdentifier(rec['fromStep'], `${itemPath}/fromStep`);
+
+    if (!Object.hasOwn(rec, 'source')) {
+      manifestInvalid('handoff selector requires "source"', `${itemPath}/source`);
+    }
+    const rawSource = rec['source'];
+    if (!isPlainObjectRecord(rawSource)) {
+      manifestInvalid('handoff source must be an object', `${itemPath}/source`);
+    }
+    if (!Object.hasOwn(rawSource, 'kind') || typeof rawSource['kind'] !== 'string') {
+      manifestInvalid('handoff source requires string "kind"', `${itemPath}/source/kind`);
+    }
+    let source: StepHandoffSource;
+    const sourceKind = rawSource['kind'];
+    if (sourceKind === 'artifact') {
+      const artifactSrc = requireObject(rawSource, `${itemPath}/source`, ['kind', 'path']);
+      if (!Object.hasOwn(artifactSrc, 'path') || typeof artifactSrc['path'] !== 'string') {
+        manifestInvalid('artifact handoff source requires string "path"', `${itemPath}/source/path`);
+      }
+      const checkedPath = validateRelativePath(artifactSrc['path']);
+      if (!checkedPath.ok) {
+        manifestInvalid(`invalid handoff artifact path "${artifactSrc['path']}"`, `${itemPath}/source/path`);
+      }
+      source = Object.freeze({ kind: 'artifact' as const, path: checkedPath.value });
+    } else if (sourceKind === 'submission') {
+      requireObject(rawSource, `${itemPath}/source`, ['kind']);
+      source = Object.freeze({ kind: 'submission' as const });
+    } else if (sourceKind === 'verdict') {
+      requireObject(rawSource, `${itemPath}/source`, ['kind']);
+      source = Object.freeze({ kind: 'verdict' as const });
+    } else {
+      manifestInvalid(`unsupported handoff source kind "${sourceKind}"`, `${itemPath}/source/kind`);
+    }
+
+    if (!Object.hasOwn(rec, 'select')) {
+      manifestInvalid('handoff selector requires "select"', `${itemPath}/select`);
+    }
+    const rawSelect = rec['select'];
+    if (!isPlainObjectRecord(rawSelect)) {
+      manifestInvalid('handoff select must be an object', `${itemPath}/select`);
+    }
+    if (!Object.hasOwn(rawSelect, 'kind') || typeof rawSelect['kind'] !== 'string') {
+      manifestInvalid('handoff select requires string "kind"', `${itemPath}/select/kind`);
+    }
+    let select: StepHandoffSelect;
+    const selectKind = rawSelect['kind'];
+    if (selectKind === 'markdown_heading') {
+      const mdSelect = requireObject(rawSelect, `${itemPath}/select`, ['kind', 'heading', 'includeSubheadings']);
+      if (!Object.hasOwn(mdSelect, 'heading')) {
+        manifestInvalid('markdown_heading select requires "heading"', `${itemPath}/select/heading`);
+      }
+      const heading = validateHandoffHeading(mdSelect['heading'], `${itemPath}/select/heading`);
+      const includeSubheadings = Object.hasOwn(mdSelect, 'includeSubheadings') && mdSelect['includeSubheadings'] !== undefined
+        ? requireBoolean(mdSelect['includeSubheadings'], `${itemPath}/select/includeSubheadings`)
+        : undefined;
+      select = Object.freeze({
+        kind: 'markdown_heading' as const,
+        heading,
+        ...(includeSubheadings === undefined ? {} : { includeSubheadings }),
+      });
+    } else if (selectKind === 'json_pointer') {
+      const jpSelect = requireObject(rawSelect, `${itemPath}/select`, ['kind', 'pointers']);
+      if (!Object.hasOwn(jpSelect, 'pointers') || !Array.isArray(jpSelect['pointers'])) {
+        manifestInvalid(`json_pointer select requires 1..${HANDOFF_LIMITS.maxPointers} pointers`, `${itemPath}/select/pointers`);
+      }
+      const rawPointers = jpSelect['pointers'];
+      if (rawPointers.length < 1 || rawPointers.length > HANDOFF_LIMITS.maxPointers) {
+        manifestInvalid(`json_pointer select requires 1..${HANDOFF_LIMITS.maxPointers} pointers`, `${itemPath}/select/pointers`);
+      }
+      const seenPointers = new Set<string>();
+      const pointers: string[] = [];
+      for (const [pIdx, pVal] of rawPointers.entries()) {
+        const ptr = validateHandoffJsonPointer(pVal, `${itemPath}/select/pointers/${pIdx}`);
+        if (seenPointers.has(ptr)) {
+          manifestInvalid(`duplicate handoff JSON pointer "${ptr}"`, `${itemPath}/select/pointers/${pIdx}`);
+        }
+        seenPointers.add(ptr);
+        pointers.push(ptr);
+      }
+      select = Object.freeze({
+        kind: 'json_pointer' as const,
+        pointers: Object.freeze(pointers),
+      });
+    } else if (selectKind === 'full') {
+      requireObject(rawSelect, `${itemPath}/select`, ['kind']);
+      select = Object.freeze({ kind: 'full' as const });
+    } else {
+      manifestInvalid(`unsupported handoff select kind "${selectKind}"`, `${itemPath}/select/kind`);
+    }
+
+    let maxBytes: number | undefined;
+    if (Object.hasOwn(rec, 'maxBytes') && rec['maxBytes'] !== undefined) {
+      maxBytes = requireSafeIntInRange(
+        rec['maxBytes'],
+        `${itemPath}/maxBytes`,
+        HANDOFF_LIMITS.minBytes,
+        HANDOFF_LIMITS.maxBytes,
+      );
+    }
+    aggregateBytes += maxBytes ?? HANDOFF_LIMITS.defaultBytes;
+    if (aggregateBytes > HANDOFF_LIMITS.maxAggregateBytes) {
+      manifestInvalid(
+        `aggregate handoff maxBytes (${aggregateBytes}) exceeds ${HANDOFF_LIMITS.maxAggregateBytes} bytes`,
+        itemPath,
+      );
+    }
+
+    let required: boolean | undefined;
+    if (Object.hasOwn(rec, 'required') && rec['required'] !== undefined) {
+      required = requireBoolean(rec['required'], `${itemPath}/required`);
+    }
+
+    selectors.push(Object.freeze({
+      ...(id === undefined ? {} : { id }),
+      fromStep,
+      source,
+      select,
+      ...(maxBytes === undefined ? {} : { maxBytes }),
+      ...(required === undefined ? {} : { required }),
+    }));
+  }
+
+  return Object.freeze(selectors);
 }
 
 function validateToolchainPath(value: unknown, path: string): string {
@@ -1738,6 +2287,146 @@ function validateVersionPath(value: unknown, path: string): string {
     }
   }
   return text;
+}
+
+function parseBaselineAlignmentObject(
+  raw: unknown,
+  path: string,
+  errorCode: 'TASKPACK_MANIFEST_INVALID' | 'ACTION_INPUT_INVALID',
+  defaults: ResolvedBaselineAlignmentConfig,
+): ResolvedBaselineAlignmentConfig {
+  function fail(message: string, fieldPath = path): never {
+    throw new TaskpackError(errorCode, message, fieldPath);
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    fail('expected an object');
+  }
+  const proto: unknown = Object.getPrototypeOf(raw);
+  if (proto !== Object.prototype && proto !== null) {
+    fail('expected an object');
+  }
+  const record = raw as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (
+      !Object.hasOwn(record, key)
+      || FORBIDDEN_KEYS.has(key)
+      || (key !== 'policy' && key !== 'maxConflictFiles' && key !== 'maxConflictBytes')
+    ) {
+      fail(`unknown field "${key}"`);
+    }
+  }
+
+  let policy: BaselineAlignmentPolicy = defaults.policy;
+  if (Object.hasOwn(record, 'policy') && record['policy'] !== undefined) {
+    const rawPolicy = record['policy'];
+    if (typeof rawPolicy !== 'string' || !(BASELINE_ALIGNMENT_POLICIES as readonly string[]).includes(rawPolicy)) {
+      fail('spec.baselineAlignment.policy must be "off", "fail-fast", or "extract-context"', `${path}/policy`);
+    }
+    policy = rawPolicy as BaselineAlignmentPolicy;
+  }
+
+  let maxConflictFiles: number = defaults.maxConflictFiles;
+  if (Object.hasOwn(record, 'maxConflictFiles') && record['maxConflictFiles'] !== undefined) {
+    const rawMaxFiles = record['maxConflictFiles'];
+    if (typeof rawMaxFiles !== 'number') {
+      fail(
+        `spec.baselineAlignment.maxConflictFiles must be an integer in [${MIN_BASELINE_MAX_CONFLICT_FILES}, ${MAX_BASELINE_MAX_CONFLICT_FILES}]`,
+        `${path}/maxConflictFiles`,
+      );
+    }
+    const numMaxFiles: number = rawMaxFiles;
+    if (
+      !Number.isSafeInteger(numMaxFiles)
+      || Object.is(numMaxFiles, -0)
+      || numMaxFiles < MIN_BASELINE_MAX_CONFLICT_FILES
+      || numMaxFiles > MAX_BASELINE_MAX_CONFLICT_FILES
+    ) {
+      fail(
+        `spec.baselineAlignment.maxConflictFiles must be an integer in [${MIN_BASELINE_MAX_CONFLICT_FILES}, ${MAX_BASELINE_MAX_CONFLICT_FILES}]`,
+        `${path}/maxConflictFiles`,
+      );
+    }
+    maxConflictFiles = numMaxFiles;
+  }
+
+  let maxConflictBytes: number = defaults.maxConflictBytes;
+  if (Object.hasOwn(record, 'maxConflictBytes') && record['maxConflictBytes'] !== undefined) {
+    const rawMaxBytes = record['maxConflictBytes'];
+    if (typeof rawMaxBytes !== 'number') {
+      fail(
+        `spec.baselineAlignment.maxConflictBytes must be an integer in [${MIN_BASELINE_MAX_CONFLICT_BYTES}, ${MAX_BASELINE_MAX_CONFLICT_BYTES}]`,
+        `${path}/maxConflictBytes`,
+      );
+    }
+    const numMaxBytes: number = rawMaxBytes;
+    if (
+      !Number.isSafeInteger(numMaxBytes)
+      || Object.is(numMaxBytes, -0)
+      || numMaxBytes < MIN_BASELINE_MAX_CONFLICT_BYTES
+      || numMaxBytes > MAX_BASELINE_MAX_CONFLICT_BYTES
+    ) {
+      fail(
+        `spec.baselineAlignment.maxConflictBytes must be an integer in [${MIN_BASELINE_MAX_CONFLICT_BYTES}, ${MAX_BASELINE_MAX_CONFLICT_BYTES}]`,
+        `${path}/maxConflictBytes`,
+      );
+    }
+    maxConflictBytes = numMaxBytes;
+  }
+
+  return Object.freeze({ policy, maxConflictFiles, maxConflictBytes });
+}
+
+/** Validate `spec.baselineAlignment` (`off | fail-fast | extract-context`, file/byte bounds, null-prototype-safe closed keys). */
+export function validateBaselineAlignmentDeclaration(
+  raw: unknown,
+  path = '/spec/baselineAlignment',
+): ResolvedBaselineAlignmentConfig {
+  return parseBaselineAlignmentObject(raw, path, 'TASKPACK_MANIFEST_INVALID', {
+    policy: DEFAULT_BASELINE_ALIGNMENT_POLICY,
+    maxConflictFiles: DEFAULT_BASELINE_MAX_CONFLICT_FILES,
+    maxConflictBytes: DEFAULT_BASELINE_MAX_CONFLICT_BYTES,
+  });
+}
+
+/** Parse a CLI/Action runtime baseline alignment policy string (`off | fail-fast | extract-context`). */
+export function parseBaselineAlignmentPolicy(
+  raw: unknown,
+  path = '/baselineAlignment',
+): BaselineAlignmentPolicy {
+  if (typeof raw !== 'string' || !(BASELINE_ALIGNMENT_POLICIES as readonly string[]).includes(raw)) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      'baselineAlignment policy must be "off", "fail-fast", or "extract-context"',
+      path,
+    );
+  }
+  return raw as BaselineAlignmentPolicy;
+}
+
+/** Resolve effective `ResolvedBaselineAlignmentConfig` from manifest declaration plus optional CLI/Action runtime override. */
+export function resolveBaselineAlignmentConfig(
+  manifestConfig?: BaselineAlignmentConfig | undefined,
+  override?: BaselineAlignmentOverride | undefined,
+): ResolvedBaselineAlignmentConfig {
+  const base: ResolvedBaselineAlignmentConfig = manifestConfig !== undefined
+    ? validateBaselineAlignmentDeclaration(manifestConfig, '/spec/baselineAlignment')
+    : Object.freeze({
+      policy: DEFAULT_BASELINE_ALIGNMENT_POLICY,
+      maxConflictFiles: DEFAULT_BASELINE_MAX_CONFLICT_FILES,
+      maxConflictBytes: DEFAULT_BASELINE_MAX_CONFLICT_BYTES,
+    });
+  if (override === undefined) {
+    return base;
+  }
+  if (typeof override === 'string') {
+    const policy = parseBaselineAlignmentPolicy(override, '/baselineAlignment');
+    return Object.freeze({
+      policy,
+      maxConflictFiles: base.maxConflictFiles,
+      maxConflictBytes: base.maxConflictBytes,
+    });
+  }
+  return parseBaselineAlignmentObject(override, '/baselineAlignment', 'ACTION_INPUT_INVALID', base);
 }
 
 function validateExecutionSection(
@@ -1796,8 +2485,26 @@ function validateExecutionSection(
   return Object.freeze({ mode, capabilities, digests });
 }
 
+function collectStrictAncestors(
+  startId: string,
+  getDeps: (id: string) => readonly string[] | undefined,
+): ReadonlySet<string> {
+  const visited = new Set<string>();
+  const stack = [...(getDeps(startId) ?? [])];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    for (const parent of getDeps(current) ?? []) {
+      stack.push(parent);
+    }
+  }
+  return visited;
+}
+
 function validateStepsDag(
   rawSteps: unknown,
+  roles: readonly TaskpackRoleDeclaration[],
   roleById: ReadonlyMap<string, TaskpackRoleDeclaration>,
   checkIds: ReadonlySet<string>,
   executionMode: 'pi' | 'delegated' | undefined,
@@ -1811,7 +2518,7 @@ function validateStepsDag(
 
   for (const [idx, item] of rawSteps.entries()) {
     const sPath = `/spec/steps/${idx}`;
-    const rawStep = requireObject(item, sPath, ['id', 'kind', 'role', 'check', 'dependsOn', 'onRework']);
+    const rawStep = requireObject(item, sPath, ['id', 'kind', 'role', 'check', 'dependsOn', 'onRework', 'handoffs']);
     const id = requireIdentifier(rawStep['id'], `${sPath}/id`);
     if (stepIds.has(id)) manifestInvalid(`duplicate step id "${id}"`, `${sPath}/id`);
     if (reservedStepIds.has(id)) manifestInvalid(`step id "${id}" is reserved`, `${sPath}/id`);
@@ -1877,6 +2584,14 @@ function validateStepsDag(
       onRework = Object.freeze({ rejectTo, maxReworks });
     }
 
+    let handoffs: readonly StepHandoffSelector[] | undefined;
+    if (Object.hasOwn(rawStep, 'handoffs') && rawStep['handoffs'] !== undefined) {
+      if (kind !== 'agent') {
+        manifestInvalid(`step "${id}" of kind "${kind}" must not declare handoffs`, `${sPath}/handoffs`);
+      }
+      handoffs = validateHandoffSelectors(rawStep['handoffs'], `${sPath}/handoffs`);
+    }
+
     steps.push(Object.freeze({
       id,
       kind,
@@ -1884,6 +2599,7 @@ function validateStepsDag(
       ...(check === undefined ? {} : { check }),
       dependsOn,
       ...(onRework === undefined ? {} : { onRework }),
+      ...(handoffs === undefined ? {} : { handoffs }),
     }));
   }
 
@@ -1918,19 +2634,35 @@ function validateStepsDag(
   };
   for (const step of steps) dfsCycle(step.id);
 
-  const strictAncestors = (startId: string): ReadonlySet<string> => {
-    const visited = new Set<string>();
-    const stack = [...stepById.get(startId)!.dependsOn];
-    while (stack.length > 0) {
-      const current = stack.pop()!;
-      if (visited.has(current)) continue;
-      visited.add(current);
-      for (const parent of stepById.get(current)!.dependsOn) {
-        stack.push(parent);
+  const strictAncestors = (startId: string): ReadonlySet<string> => (
+    collectStrictAncestors(startId, id => stepById.get(id)?.dependsOn)
+  );
+
+  for (const [roleIdx, roleDecl] of roles.entries()) {
+    if (roleDecl.handoffs === undefined) continue;
+    for (const [hIdx, handoff] of roleDecl.handoffs.entries()) {
+      const diagPath = `/spec/roles/${roleIdx}/handoffs/${hIdx}/fromStep`;
+      const sourceStep = stepById.get(handoff.fromStep);
+      if (sourceStep === undefined) {
+        manifestInvalid(
+          `role "${roleDecl.id}" handoff fromStep references unknown step "${handoff.fromStep}"`,
+          diagPath,
+        );
+      }
+      if (sourceStep.kind === 'compact') {
+        manifestInvalid(
+          `role "${roleDecl.id}" handoff fromStep "${handoff.fromStep}" must not reference a compact step`,
+          diagPath,
+        );
+      }
+      if (sourceStep.kind === 'check' && handoff.source.kind === 'artifact') {
+        manifestInvalid(
+          `role "${roleDecl.id}" handoff fromStep "${handoff.fromStep}" is a check step and cannot supply an artifact handoff`,
+          `/spec/roles/${roleIdx}/handoffs/${hIdx}/source/kind`,
+        );
       }
     }
-    return visited;
-  };
+  }
 
   for (const [idx, step] of steps.entries()) {
     if (step.onRework !== undefined) {
@@ -1948,6 +2680,45 @@ function validateStepsDag(
           `step "${step.id}" onRework.rejectTo "${step.onRework.rejectTo}" must target an agent step with role purpose "task"`,
           `/spec/steps/${idx}/onRework/rejectTo`,
         );
+      }
+    }
+    if (step.kind === 'agent') {
+      const inheritedRoleHandoffs = step.handoffs === undefined && step.role !== undefined
+        ? roleById.get(step.role)?.handoffs
+        : undefined;
+      const effectiveHandoffs = step.handoffs ?? inheritedRoleHandoffs;
+      if (effectiveHandoffs !== undefined) {
+        const ancestors = strictAncestors(step.id);
+        for (const [hIdx, handoff] of effectiveHandoffs.entries()) {
+          const diagPath = step.handoffs !== undefined
+            ? `/spec/steps/${idx}/handoffs/${hIdx}/fromStep`
+            : `/spec/steps/${idx}/role`;
+          const sourceStep = stepById.get(handoff.fromStep);
+          if (sourceStep === undefined) {
+            manifestInvalid(
+              `step "${step.id}" handoff fromStep references unknown step "${handoff.fromStep}"`,
+              diagPath,
+            );
+          }
+          if (handoff.fromStep === step.id || !ancestors.has(handoff.fromStep)) {
+            manifestInvalid(
+              `step "${step.id}" handoff fromStep "${handoff.fromStep}" must be a strict ancestor in spec.steps`,
+              diagPath,
+            );
+          }
+          if (sourceStep.kind === 'compact') {
+            manifestInvalid(
+              `step "${step.id}" handoff fromStep "${handoff.fromStep}" must not reference a compact step`,
+              diagPath,
+            );
+          }
+          if (sourceStep.kind === 'check' && handoff.source.kind === 'artifact') {
+            manifestInvalid(
+              `step "${step.id}" handoff fromStep "${handoff.fromStep}" is a check step and cannot supply an artifact handoff`,
+              step.handoffs !== undefined ? `/spec/steps/${idx}/handoffs/${hIdx}/source/kind` : diagPath,
+            );
+          }
+        }
       }
     }
     if (step.kind === 'compact') {
@@ -1985,7 +2756,7 @@ function validateTaskpackManifestInternal(
   const rawSpecBeforeInterp = requireObject(rawRoot['spec'], '/spec', [
     'goal', 'scope', 'instructions', 'skills', 'execution', 'preflight', 'vars', 'target',
     'upstreams', 'upstreamGroups', 'proposal', 'submission', 'verification',
-    'publication', 'memory', 'triggers', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'roles', 'steps', 'output',
+    'publication', 'memory', 'triggers', 'baselineAlignment', 'sandbox', 'decisions', 'models', 'mcp', 'limits', 'roles', 'steps', 'output',
   ]);
   const vars: Readonly<Record<string, string>> | undefined = rawSpecBeforeInterp['vars'] === undefined
     ? undefined
@@ -2024,10 +2795,10 @@ function validateTaskpackManifestInternal(
 
   const instructions = spec['instructions'] === undefined
     ? undefined
-    : validateRelativePathOrList(spec['instructions'], '/spec/instructions');
+    : validateResourceEntryOrList(spec['instructions'], '/spec/instructions');
   const skills = spec['skills'] === undefined
     ? undefined
-    : validateRelativePathOrList(spec['skills'], '/spec/skills');
+    : validateResourceEntryOrList(spec['skills'], '/spec/skills');
 
   let writable: readonly string[] = [];
   let manifestProtected: readonly string[] = [];
@@ -2609,7 +3380,14 @@ function validateTaskpackManifestInternal(
     };
     const validateHeadBranchPrefix = (val: unknown): string => {
       const hbp = requireString(val, '/spec/publication/headBranchPrefix', 1, 64);
-      if (hbp.includes('//') || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/.test(hbp.replace(/\/$/, ''))) {
+      const trimmed = hbp.replace(/\/$/, '');
+      const segments = trimmed.split('/');
+      if (
+        hbp.includes('//')
+        || hbp.startsWith('/')
+        || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,62}$/.test(trimmed)
+        || segments.some(seg => seg.length === 0 || seg === '.' || seg === '..' || seg.startsWith('.') || seg.endsWith('.lock'))
+      ) {
         manifestInvalid('headBranchPrefix is not a valid branch prefix', '/spec/publication/headBranchPrefix');
       }
       return hbp;
@@ -2788,6 +3566,11 @@ function validateTaskpackManifestInternal(
       '/spec/triggers',
     );
   }
+
+  const baselineAlignment: ResolvedBaselineAlignmentConfig | undefined =
+    Object.hasOwn(spec, 'baselineAlignment') && spec['baselineAlignment'] !== undefined
+      ? validateBaselineAlignmentDeclaration(spec['baselineAlignment'], '/spec/baselineAlignment')
+      : undefined;
 
   let sandbox: TaskpackSandboxDeclaration | undefined;
   if (spec['sandbox'] !== undefined) {
@@ -3046,8 +3829,8 @@ function validateTaskpackManifestInternal(
   const mcpServerById = new Map<string, TaskpackMcpServerDeclaration>(mcp?.servers.map(s => [s.id, s]) ?? []);
   let roles: readonly TaskpackRoleDeclaration[] | undefined;
   const roleById = new Map<string, TaskpackRoleDeclaration>();
-  const allRoleInstructions: string[] = [];
-  const allRoleSkills: string[] = [];
+  const allRoleInstructions: TaskpackResourceEntry[] = [];
+  const allRoleSkills: TaskpackResourceEntry[] = [];
   if (spec['roles'] !== undefined) {
     const rawRoles = spec['roles'];
     if (!Array.isArray(rawRoles) || rawRoles.length < 1 || rawRoles.length > MAX_TASKPACK_ROLES) {
@@ -3066,7 +3849,7 @@ function validateTaskpackManifestInternal(
       const rPath = `/spec/roles/${idx}`;
       const rawRole = requireObject(item, rPath, [
         'id', 'purpose', 'provider', 'model', 'thinking', 'tools', 'dependsOn',
-        'instructions', 'skills', 'prompt', 'mcpServers', 'models',
+        'instructions', 'skills', 'prompt', 'mcpServers', 'models', 'handoffs',
       ]);
       const roleId = requireIdentifier(rawRole['id'], `${rPath}/id`);
       if (roleIds.has(roleId)) manifestInvalid(`duplicate role id "${roleId}"`, `${rPath}/id`);
@@ -3130,12 +3913,12 @@ function validateTaskpackManifestInternal(
 
       const roleInstructions = rawRole['instructions'] === undefined
         ? undefined
-        : validateRelativePathOrList(rawRole['instructions'], `${rPath}/instructions`);
+        : validateResourceEntryOrList(rawRole['instructions'], `${rPath}/instructions`);
       if (roleInstructions !== undefined) allRoleInstructions.push(...roleInstructions);
 
       const roleSkills = rawRole['skills'] === undefined
         ? undefined
-        : validateRelativePathOrList(rawRole['skills'], `${rPath}/skills`);
+        : validateResourceEntryOrList(rawRole['skills'], `${rPath}/skills`);
       if (roleSkills !== undefined) allRoleSkills.push(...roleSkills);
 
       const prompt = rawRole['prompt'] === undefined
@@ -3171,6 +3954,11 @@ function validateTaskpackManifestInternal(
         roleModels = Object.freeze(rawRoleModels.map((m, mIdx) => requireLabel(m, `${rPath}/models/${mIdx}`)));
       }
 
+      let roleHandoffs: readonly StepHandoffSelector[] | undefined;
+      if (Object.hasOwn(rawRole, 'handoffs') && rawRole['handoffs'] !== undefined) {
+        roleHandoffs = validateHandoffSelectors(rawRole['handoffs'], `${rPath}/handoffs`);
+      }
+
       roleIndexById.set(roleId, idx);
       const roleDecl: TaskpackRoleDeclaration = Object.freeze({
         id: roleId,
@@ -3185,6 +3973,7 @@ function validateTaskpackManifestInternal(
         ...(prompt === undefined ? {} : { prompt }),
         ...(mcpServers === undefined ? {} : { mcpServers }),
         ...(roleModels === undefined ? {} : { models: roleModels }),
+        ...(roleHandoffs === undefined ? {} : { handoffs: roleHandoffs }),
       });
       roleById.set(roleId, roleDecl);
       return roleDecl;
@@ -3193,14 +3982,75 @@ function validateTaskpackManifestInternal(
     roles = Object.freeze(parsedRoles);
   }
 
+  // Enforce manifest-wide consistency for same-path resource `when` predicates (preserving first-wins cross-kind dedup).
+  const declaredResourceByPath = new Map<
+    string,
+    { readonly whenKey: string; readonly firstPath: string }
+  >();
+  const registerManifestResource = (
+    entry: TaskpackResourceEntry,
+    diagPath: string,
+  ): void => {
+    const normalizedPath = resolveTaskpackResourcePath(entry);
+    const whenKey = canonicalizeResourceActivationRule(resolveTaskpackResourceWhen(entry));
+    const prior = declaredResourceByPath.get(normalizedPath);
+    if (prior === undefined) {
+      declaredResourceByPath.set(normalizedPath, { whenKey, firstPath: diagPath });
+      return;
+    }
+    if (prior.whenKey !== whenKey) {
+      manifestInvalid(
+        `conflicting "when" predicate for resource path "${normalizedPath}" (previously declared at ${prior.firstPath})`,
+        diagPath,
+      );
+    }
+  };
+  for (const [idx, entry] of (instructions ?? []).entries()) {
+    registerManifestResource(entry, `/spec/instructions/${idx}`);
+  }
+  for (const [idx, entry] of (skills ?? []).entries()) {
+    registerManifestResource(entry, `/spec/skills/${idx}`);
+  }
+  for (const [rIdx, role] of (roles ?? []).entries()) {
+    for (const [iIdx, entry] of (role.instructions ?? []).entries()) {
+      registerManifestResource(entry, `/spec/roles/${rIdx}/instructions/${iIdx}`);
+    }
+    for (const [sIdx, entry] of (role.skills ?? []).entries()) {
+      registerManifestResource(entry, `/spec/roles/${rIdx}/skills/${sIdx}`);
+    }
+  }
+
   let steps: readonly TaskpackStepDeclaration[] | undefined;
   if (spec['steps'] !== undefined) {
-    steps = validateStepsDag(spec['steps'], roleById, checkIds, options.executionMode);
+    steps = validateStepsDag(spec['steps'], roles ?? [], roleById, checkIds, options.executionMode);
+  } else if (roles !== undefined) {
+    for (const [rIdx, role] of roles.entries()) {
+      if (role.handoffs === undefined) continue;
+      const ancestors = collectStrictAncestors(role.id, id => roleById.get(id)?.dependsOn);
+      for (const [hIdx, handoff] of role.handoffs.entries()) {
+        const diagPath = `/spec/roles/${rIdx}/handoffs/${hIdx}/fromStep`;
+        if (!roleById.has(handoff.fromStep)) {
+          manifestInvalid(
+            `role "${role.id}" handoff fromStep references unknown role "${handoff.fromStep}"`,
+            diagPath,
+          );
+        }
+        if (handoff.fromStep === role.id || !ancestors.has(handoff.fromStep)) {
+          manifestInvalid(
+            `role "${role.id}" handoff fromStep "${handoff.fromStep}" must be a strict ancestor in spec.roles`,
+            diagPath,
+          );
+        }
+      }
+    }
   }
 
   // Final effective protected-path check including command scripts, preflight script, lockfile, toolchainPaths, and per-role assets.
   const combinedInstructions = [...(instructions ?? []), ...allRoleInstructions];
   const combinedSkills = [...(skills ?? []), ...allRoleSkills];
+  const extraProtectedPaths = options.extraProtectedPaths?.map((entry, idx) => (
+    normalizeScopePattern(entry, `/extraProtectedPaths/${idx}`)
+  ));
   const finalProtected = resolveProtectedPathSets(manifestProtected, {
     policyProfile,
     controlRoot,
@@ -3212,6 +4062,7 @@ function validateTaskpackManifestInternal(
     commandScripts,
     toolchainPaths: relativeToolchainPaths.length > 0 ? relativeToolchainPaths : undefined,
     proposalPath,
+    extraProtectedPaths,
     allowWorkflowWrites,
     githubSiblings: options.githubSiblings,
   });
@@ -3321,6 +4172,7 @@ function validateTaskpackManifestInternal(
     publication: publicationRecord,
     memory: memoryRecord,
     triggers: triggersRecord,
+    ...(baselineAlignment === undefined ? {} : { baselineAlignment }),
     ...(sandbox === undefined ? {} : { sandbox }),
     ...(decisions === undefined ? {} : { decisions }),
     ...(models === undefined ? {} : { models }),
@@ -3378,4 +4230,122 @@ export function validateTaskpackManifest(value: Json, options: ValidateTaskpackM
     manifestInvalid('spec.proposal is required', '/spec/proposal');
   }
   return v2 as unknown as TaskpackManifestWithProposal;
+}
+
+// ---------------------------------------------------------------------------
+// Shared candidate path & scope pattern helpers
+// ---------------------------------------------------------------------------
+
+/** Compile manifest `writable` or `protected` path entries into `@loopwright/core` scope patterns. */
+export function compileScopePatterns(
+  entries: readonly string[] | undefined,
+  mode: 'writable' | 'protected',
+  options?: { readonly exactEntries?: ReadonlySet<string> | undefined },
+): readonly string[] {
+  if (entries === undefined || entries.length === 0) {
+    return mode === 'writable' ? Object.freeze(['**']) : Object.freeze([]);
+  }
+  const exactEntries = options?.exactEntries;
+  const compiled: string[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const diagPath = `/spec/scope/${mode}/${index}`;
+    const check = validateScopePattern(entry);
+    if (!check.ok) {
+      manifestInvalid(`invalid scope pattern "${entry}": ${check.errors[0]?.code ?? 'PATTERN_UNSUPPORTED'}`, diagPath);
+    }
+    if (mode === 'writable') {
+      compiled.push(check.value);
+    } else if (
+      exactEntries?.has(check.value)
+      || check.value === '**'
+      || check.value.endsWith('/**')
+      || check.value.includes('*')
+      || check.value.includes('?')
+      || check.value.length > LIMITS.path - 3
+    ) {
+      compiled.push(check.value);
+    } else {
+      compiled.push(`${check.value}/**`);
+    }
+  }
+  return Object.freeze([...new Set(compiled)]);
+}
+
+function normalizeProtectedCandidatePrefix(protectedEntry: string): string {
+  const withoutGlob = protectedEntry.endsWith('/**') ? protectedEntry.slice(0, -3) : protectedEntry;
+  return withoutGlob.replace(/\/+$/, '');
+}
+
+/** True when `name` matches or sits beneath any entry in `protectedPaths`. */
+export function isProtectedCandidatePath(name: string, protectedPaths: readonly string[]): boolean {
+  for (const protectedEntry of protectedPaths) {
+    if (protectedEntry === '**') return true;
+    const directMatch = matchesScopePattern(protectedEntry, name);
+    if (directMatch.ok && directMatch.value) return true;
+    const clean = normalizeProtectedCandidatePrefix(protectedEntry);
+    if (clean.length === 0) continue;
+    if (!clean.includes('*') && !clean.includes('?')) {
+      if (name === clean || name.startsWith(`${clean}/`)) {
+        return true;
+      }
+    } else {
+      const subtreeMatch = matchesScopePattern(`${clean}/**`, name);
+      if (subtreeMatch.ok && subtreeMatch.value) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** True when `name` is outside `protectedPaths` (including NFC case-insensitive checks) and within `writable` scope. */
+export function isAllowedCandidateWrite(
+  name: string,
+  snapshot: CandidateScopeSnapshot,
+): boolean {
+  if (isProtectedCandidatePath(name, snapshot.protectedPaths)) {
+    return false;
+  }
+  const lowerName = name.normalize('NFC').toLowerCase();
+  const lowerProtected = snapshot.protectedPaths.map(entry => entry.normalize('NFC').toLowerCase());
+  if (isProtectedCandidatePath(lowerName, lowerProtected)) {
+    return false;
+  }
+  if (snapshot.contract !== undefined) {
+    const writableCheck = isWritablePath(snapshot.contract, name);
+    return writableCheck.ok && writableCheck.value === true;
+  }
+  if (snapshot.writablePaths !== undefined) {
+    if (!validateRelativePath(name).ok) return false;
+    const isProt = snapshot.protectedPaths.some(pattern => {
+      const res = matchesScopePattern(pattern, name);
+      return res.ok && res.value;
+    });
+    if (isProt) return false;
+    return snapshot.writablePaths.some(pattern => {
+      const res = matchesScopePattern(pattern, name);
+      return res.ok && res.value;
+    });
+  }
+  return false;
+}
+
+/** Validate a non-empty POSIX candidate relative path without NUL, backslashes, leading `/`, `.`, or `..`. */
+export function normalizeCandidateRelativePath(name: string): string {
+  if (
+    typeof name !== 'string'
+    || name.length === 0
+    || name.includes('\0')
+    || name.includes('\\')
+    || name.startsWith('/')
+  ) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate relative file path "${name}"`);
+  }
+  const parts = name.split('/');
+  for (const part of parts) {
+    if (part.length === 0 || part === '.' || part === '..') {
+      throw new TaskpackError('ACTION_INPUT_INVALID', `invalid candidate path segment in "${name}"`);
+    }
+  }
+  return name;
 }

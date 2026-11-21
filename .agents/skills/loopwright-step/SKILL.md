@@ -12,7 +12,7 @@ Drive bounded Loopwright pipelines from an OAuth-backed host coding agent with z
 
 ## When to Use
 
-- Run a [Taskpack](https://docs.gpustack.ai/loopwright/latest/docs/configuration/taskpack/) (`--taskpack` — compiles manifest roles as `adapter: delegated` with `publication.mode: disabled` and a pinned `HEAD` commit OID) or [ControllerConfig](https://docs.gpustack.ai/loopwright/latest/docs/configuration/controller-and-registry/) (`--config`, `--registry`, `--registry-sha256` with explicit `adapter: delegated` role profiles; set `publication.mode: disabled` and pin `target.sourceRevision` to `git rev-parse HEAD` for local-only runs).
+- Run a [Taskpack](https://docs.gpustack.ai/loopwright/latest/docs/configuration/taskpack/) (`--taskpack` — compiles manifest roles as `adapter: delegated` with `publication.mode: disabled`, optional `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, and a pinned `HEAD` commit OID) or [ControllerConfig](https://docs.gpustack.ai/loopwright/latest/docs/configuration/controller-and-registry/) (`--config`, `--registry`, `--registry-sha256` with explicit `adapter: delegated` role profiles; set `publication.mode: disabled` and pin `target.sourceRevision` to `git rev-parse HEAD` for local-only runs).
 - Override role model bindings at admission without editing YAML using `--role-model <roleId>=<provider>/<model>[:<thinking>]` (up to 8 flags, persisted in `run.json`, total CLI `argv <= 64`).
 - Keep `--run-root` strictly disjoint from `--repo` (neither inside nor containing `--repo`, with zero symlink path components — resolve `pwd -P` on macOS `/tmp` or `/var`) so materialized workspaces (`<runRoot>/workspaces/<runId>/<attemptId>/`) never pollute the repository checkout.
 
@@ -23,7 +23,7 @@ Drive bounded Loopwright pipelines from an OAuth-backed host coding agent with z
 Start a Declarative Taskpack run (`--mode candidate|no-change` optional):
 
 ```bash
-loopwright step next --taskpack .loopwright/taskpack.yaml --repo <repo-dir> --run-root <outside-dir> --run-id <id> [--role-model <roleId>=<provider>/<model>[:<thinking>]] [--mode candidate|no-change] --json
+loopwright step next --taskpack .loopwright/taskpack.yaml --repo <repo-dir> --run-root <outside-dir> --run-id <id> [--role-model <roleId>=<provider>/<model>[:<thinking>]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision <rev>] --json
 ```
 
 Start a Managed Controller run (pin `target.sourceRevision` in `<controller.yaml>` to `git rev-parse HEAD`):
@@ -69,7 +69,7 @@ loopwright step submit --run-root <outside-dir> --run-id <id> --lease <leaseToke
 
 `step submit` captures the diff, runs independent checks (`scope.v1`, `json-artifact.v1`, `no-change.v1`, `command.v1`), and returns either the next `StepYield` (`kind: "step"`) or the terminal run envelope (`kind: "result"` with `data.result.spec.status`, or `kind: "incident"`).
 
-- **Lease rules**: Duplicate `step next` while parked fails with `OWNER_BUSY` (exit `7`). Pass `loopwright step next --run-root <dir> --run-id <id> --reissue-lease --json` ONLY if a leased worker died and lost its token. Stale or replayed tokens fail with `AUTHORITY_REFUSED` (exit `7`).
+- **Lease rules**: Duplicate `step next` while parked fails with `OWNER_BUSY` (exit `7`). Pass `loopwright step next --run-root <dir> --run-id <id> --reissue-lease --json` ONLY if a leased worker died and lost its token (CAS-backed handoff and rule `contextFiles` reconstruct automatically). Stale or replayed tokens fail with `AUTHORITY_REFUSED` (exit `7`).
 - **Pre-commit preservation**: Symlink (`O_NOFOLLOW`), hardlink (`nlink === 1`), size-ceiling, and read-only/`format` invariance checks run before mutating state, preserving `candidateDir` and the lease so you can remediate and re-submit.
 
 To abort an active or parked run cleanly (removing staged workspaces and settling `cancelled`, exit `130`):
@@ -82,7 +82,7 @@ loopwright step cancel --run-root <outside-dir> --run-id <id> --json
 
 `step next --taskpack` sets `publication.mode: disabled` and pins `target.sourceRevision` to `HEAD`'s commit OID automatically (for local-only Managed Controller runs, set `publication.mode: disabled` and pin `target.sourceRevision` to `git rev-parse HEAD` in `controller.yaml`), and **terminal `step submit` deletes `<runRoot>/workspaces/<runId>` (`candidateDir`)** while preserving verified state under `<runRoot>/<runId>`.
 
-Once the run settles `completed`, export the digest-checked bundle to a **non-existent** `--output` path inside an existing parent directory (`loopwright inspect` creates `--output` with mode `0700` and rejects pre-existing directories):
+Once the run settles `completed`, export the digest-checked bundle (including `run-eval.json` run health diagnostics) to a **non-existent** `--output` path inside an existing parent directory (`loopwright inspect` creates `--output` with mode `0700` and rejects pre-existing directories):
 
 ```bash
 INSPECT_DIR="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/loopwright-inspect.XXXXXX")" && pwd -P)/bundle"

@@ -89,10 +89,9 @@ The adapter does not read environment credentials, refresh an auth store, open a
 
 The [public type source](../../packages/agent-pi/src/types.ts) and [specification](../../specs/2026-11-05-isolated-pi-adapter.md#host-contract-and-enforcement) define every required policy field, fixed preamble identity and limit. There is no default permissive policy builder.
 
-RuntimeIdentity binds the SDK integrity, SHA256 of exact package-lock bytes, derived image ID, canonical restrictions digest and
-Linux arm64 profile. A trusted operator freezes these after image qualification. Hashes and paths supplied by a repository
-cannot establish that trust. Frozen resources must contain exactly the built-in preamble followed by admitted context resources.
-The matching resource bytes enter context as literal data and cannot install extensions or widen tools.
+RuntimeIdentity binds the SDK integrity, SHA256 of exact package-lock bytes, derived image ID, canonical restrictions digest and Linux arm64 profile. A trusted operator freezes these after image qualification; repository hashes and paths cannot establish that trust.
+
+`preflight.ts` strips optional `when` predicates (`toResourceIdentity`) and admits an ordered verified subset of `PiOpenInput.resources` within `maxRequestBytes` (`RESOURCE_MISMATCH` on duplicates or drift). Keeping the full 4-field policy list pinned preserves `nativeSessionId` and `recoverSnapshot` digests across repairs and compaction; admitted bytes enter as literal data.
 
 ## Commands and outcomes
 

@@ -119,22 +119,40 @@ export function emptyMemoryStoreIndex(taskpack: string, repository: string, nowM
 export interface LoadedMemoryStore {
   readonly index: MemoryStoreIndex;
   readonly entryFiles: ReadonlyMap<string, Uint8Array>;
+  readonly indexBytes: Uint8Array | null;
 }
 async function readRegularFile(path: string, label: string, maxBytes: number): Promise<Uint8Array> {
-  const stats = await lstat(path);
+  const bytes = await readOptionalRegularFileNoFollow(path, label, maxBytes);
+  if (bytes === null) {
+    const error = new Error(`ENOENT: no such file or directory, open '${path}'`) as NodeJS.ErrnoException;
+    error.code = 'ENOENT';
+    throw error;
+  }
+  return bytes;
+}
+/** Reads an optional regular file with O_NOFOLLOW, hardlink rejection (`nlink === 1`), and byte limit enforcement. */
+export async function readOptionalRegularFileNoFollow(filePath: string, label: string, maxBytes: number): Promise<Buffer | null> {
+  const stats = await lstat(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (stats === null) return null;
   if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', label, 'symbolic links are refused in the memory store');
   if (!stats.isFile()) fail('MEMORY_SCHEMA_INVALID', label, 'expected a regular file');
+  if (stats.nlink !== 1) fail('MEMORY_SCHEMA_INVALID', label, 'hard-linked files are refused in the memory store');
   if (stats.size > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    handle = await open(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
     const fdStats = await handle.stat();
     if (!fdStats.isFile()) fail('MEMORY_SCHEMA_INVALID', label, 'expected a regular file');
+    if (fdStats.nlink !== 1) fail('MEMORY_SCHEMA_INVALID', label, 'hard-linked files are refused in the memory store');
     if (fdStats.size > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
     const bytes = await handle.readFile();
     if (bytes.byteLength > maxBytes) fail('MEMORY_SCHEMA_INVALID', label, 'memory file exceeds maximum byte bound');
     return bytes;
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
       fail('MEMORY_SCHEMA_INVALID', label, 'symbolic links are refused in the memory store');
     }
@@ -187,7 +205,7 @@ export async function loadMemoryStore(
     if (error.code === 'ENOENT') return null;
     throw error;
   });
-  if (repoStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+  if (repoStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
   if (repoStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'symbolic links are refused in the memory store');
   if (!repoStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', '/repository', 'expected a directory');
   let cursor = root;
@@ -197,23 +215,23 @@ export async function loadMemoryStore(
     cursor = join(cursor, segment);
     relCursor = relCursor.length === 0 ? segment : `${relCursor}/${segment}`;
     const exactExists = await assertNoCaseAliasSibling(parentDir, segment, relCursor);
-    if (!exactExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+    if (!exactExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
     const segStats = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return null;
       throw error;
     });
-    if (segStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+    if (segStats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
     if (segStats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'symbolic links are refused in the memory store');
     if (!segStats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', relCursor, 'expected a directory');
   }
   const memoryRootDir = cursor;
   const directory = join(memoryRootDir, taskpack);
   const taskpackExists = await assertNoCaseAliasSibling(memoryRootDir, taskpack, dirLabel);
-  if (!taskpackExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+  if (!taskpackExists) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
   const stats = await lstat(directory).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return null; throw error;
   });
-  if (stats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+  if (stats === null) return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
   if (stats.isSymbolicLink()) fail('MEMORY_SCHEMA_INVALID', dirLabel, 'symbolic links are refused in the memory store');
   if (!stats.isDirectory()) fail('MEMORY_SCHEMA_INVALID', dirLabel, 'expected a directory');
   await refuseForbiddenNames(memoryRootDir, normalizedRoot);
@@ -241,7 +259,7 @@ export async function loadMemoryStore(
     }
     const existing = entriesStats === null ? [] : await readdir(entriesDirectory);
     if (existing.length > 0) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'entry files exist without an index');
-    return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map() };
+    return { index: emptyMemoryStoreIndex(taskpack, repositorySlug, 0), entryFiles: new Map(), indexBytes: null };
   }
   let parsedIndex: unknown;
   try { parsedIndex = JSON.parse(Buffer.from(indexBytes).toString('utf8')); } catch { fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json`, 'index is not JSON'); }
@@ -249,7 +267,7 @@ export async function loadMemoryStore(
   if (index.taskpack !== taskpack) fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/index.json/taskpack`, 'index taskpack does not match directory');
   if (entriesStats === null) {
     if (index.entries.length === 0) {
-      return Object.freeze({ index, entryFiles: new Map() });
+      return Object.freeze({ index, entryFiles: new Map(), indexBytes });
     }
     fail('MEMORY_SCHEMA_INVALID', `${dirLabel}/entries`, 'entries directory missing');
   }
@@ -315,7 +333,7 @@ export async function loadMemoryStore(
     ...[...activeById].map(([id, row]) => markIndexedEntry(id, row, `${dirLabel}/entries/${id}.md`, false)),
     ...[...retiredById].map(([id, row]) => markIndexedEntry(id, row, `${dirLabel}/entries/${id}.md`, true)),
   ]);
-  return Object.freeze({ index, entryFiles });
+  return Object.freeze({ index, entryFiles, indexBytes });
 }
 
 export interface CodeFingerprintEntry { readonly path: string; readonly sha256: string; readonly byteLength: number }

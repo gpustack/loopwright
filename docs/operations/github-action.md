@@ -37,6 +37,10 @@ jobs:
         id: loopwright
         with:
           taskpack-path: .loopwright/taskpack.yaml # Optional
+          suite-path: .loopwright/suite.yaml # Optional multi-domain suite
+          domain: docs # Optional suite domain ID
+          resolve-suite-only: 'false' # Optional matrix resolution only
+          baseline-alignment: 'off' # Optional (off, fail-fast, extract-context)
           mode: auto # Optional (auto, candidate, or no-change)
           allow-privileged-execution: 'false' # Optional dual-key host unlock
           allow-workflow-writes: 'false' # Optional dual-key workflow write unlock
@@ -51,20 +55,25 @@ jobs:
 ```
 
 - **Mode `auto`**: Runs `spec.preflight` or upstream discovery, dispatches `candidate` when updates exist or `force` is `'true'`, and compiles a check-only `no-change` run with zero agent model calls when settled.
+- **Suite matrix**: Pass `suite-path` with `resolve-suite-only: 'true'` to emit `outputs.matrix` (`{ include: [...] }`), then run each matrix job with `domain: ${{ matrix.domainId }}` for per-job revalidation.
+- **Comment checkout**: Workflows triggered on `issue_comment` should fetch the PR head commit when running candidate checkout (`Suite` lookup verifies `head.repo.full_name`, `base.ref`, `head.ref`, and `head.sha`).
 - **Dual-key authority**: Even under `spec.execution.mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'`. Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writes: 'true'`.
 - **Provider**: Set the token variable for the selected model, not necessarily `ZAI_API_KEY`.
 - **Runtime**: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.
 
 ## Execution and publication
 
-A live Action enforces `policyProfile: github` (persisted in `run.json` across recovery), validates event eligibility against declared `spec.triggers` strictly **before** `spec.preflight`, resolves repository identity and revisions, authorizes the actor, initializes `SecretScrubber`, runs `spec.preflight` if configured, and looks for an existing managed PR. It compiles trusted artifacts outside the checkout, wires `spec.decisions` into `ControllerPorts.decisions`, and runs the controller.
+A live Action enforces `policyProfile: github` (persisted in `run.json`), validates `spec.triggers` strictly **before** `spec.preflight`, resolves repository identity and revisions, authorizes the actor, initializes `SecretScrubber`, runs `spec.preflight`, and checks for an existing managed PR.
+
+When `suite-path` is set, intake resolves `.loopwright/suite.yaml` (verifying PR ownership via GitHub API on `issue_comment` and refusing cross-fork PRs or domain conflicts), enforces the suite-wide protected union, and revalidates domain eligibility per matrix job before compiling outside the checkout.
 
 | Stage | Behavior |
 | --- | --- |
-| Preflight | Validates `spec.triggers` first, then runs `spec.preflight.script` after actor auth and scrubber setup, stripping Loopwright, GitHub, and provider secrets |
+| Preflight | Validates `spec.triggers` (and `suite-path` domain/stage probes) first, then runs `spec.preflight.script` after actor auth and scrubber setup |
+| Align | When `sourceRevision !== baseRevision`, runs isolated 3-way `git merge-tree` (`fail-fast` blocks conflicts; `extract-context` stages scrubbed hunks) before model probes |
 | Discover | Resolves upstreams, `upstreamGroups` lockstep holds (`held_back`), or `upstream-records`; `mode: auto` routes `no_change` to check-only checks |
 | Execute | Authors a candidate in sandboxed steps with CAS blob pointers and verifies scope and local or external checks; eligible failures can enter bounded repair or `rejectTo` rework |
-| Publish | For `pull_request` mode, streams verified CAS blobs into a managed PR after verification |
+| Publish | For `pull_request` mode, consumes shared 3-way merged carry blobs, verifies extracted conflict resolution, and streams verified CAS blobs into a managed PR |
 
 Pass `source-revision` when preflight stages writable files onto a commit separate from `GITHUB_SHA`. Local checks and publication keep protected and non-writable files at `GITHUB_SHA`, and squash writable changes onto a commit parented on `GITHUB_SHA`.
 
@@ -101,6 +110,10 @@ All Action inputs are optional. Conditional credentials, endpoint bindings, and 
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `taskpack-path` | `.loopwright/taskpack.yaml` | Repository-relative manifest path, including a custom control directory. |
+| `suite-path` | Unset | Optional repository-relative `TaskpackSuite` manifest path (for example `.loopwright/suite.yaml`). |
+| `domain` | Unset | Optional target domain identifier within `suite-path`. |
+| `resolve-suite-only` | `false` | Set `true` with `suite-path` to emit `outputs.matrix` without executing a domain run. |
+| `baseline-alignment` | Taskpack `off` | Optional 3-way conflict alignment override (`off`, `fail-fast`, or `extract-context`). |
 | `mode` | `candidate` | `auto` (preflight-driven candidate or check-only `no-change`), `candidate`, or `no-change`. |
 | `allow-privileged-execution` | `false` | Dual-key host unlock for `spec.execution.mode: privileged` or privileged capabilities. |
 | `allow-workflow-writes` | `false` | Dual-key host unlock allowing `allowWorkflowWrites: true` manifests to edit `.github/workflows/**`. |
@@ -152,8 +165,11 @@ The Action writes a compact, scrubbed `result` JSON summary (with SHA-256 digest
 | `memory-pr-url` | Separate memory PR URL when published or updated; otherwise empty. |
 | `total-tokens` | Exact integer token subtotal, or `0` when usage is unavailable. |
 | `cost-usd` | Six-decimal USD known subtotal when cost provenance is `reported` or `estimated`; otherwise omitted. |
+| `matrix` | Deterministic JSON matrix (`{ include: [...] }`) emitted when `suite-path` resolves. |
 
-Extended outputs are written for live runs, or for dry runs with an explicit `output` input. Step summaries and human-readable reports format token counts using `K`/`M`/`B` and elapsed durations using `ms`/`s`/`m`/`h`, while `total-tokens` and JSON reports preserve exact integer counts. Estimated cost uses model pricing and is not provider-attested billing. A missing cost is unknown, not zero.
+Extended outputs are written for live runs, or for dry runs with an explicit `output` input. `github-step-summary`, `markdown`, `text`, and `json` include a sanitized `Run Health` (`RunEval`) section with `toolRepeats`, `pingPong`, `repairConvergence`, per-role/per-step breakdowns, and `autoApplied: false` hints.
+
+Step summaries and human-readable reports format token counts using `K`/`M`/`B` and elapsed durations using `ms`/`s`/`m`/`h`, while `total-tokens` and JSON reports preserve exact integers. Estimated cost uses model pricing, not provider-attested billing; missing cost is unknown, not zero.
 
 | Format | Destination |
 | --- | --- |

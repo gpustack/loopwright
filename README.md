@@ -27,7 +27,8 @@ Read the [architecture overview](./docs/getting-started/architecture.md) and [do
 - **Sandboxed execution**: Native and container backends negotiate required isolation and fail closed when unavailable. See [Sandbox Backends](./docs/configuration/sandbox-backends.md).
 - **Fenced state**: Lease fences, clock guards, and retained reservations protect recovery. Unknown external outcomes require reconciliation. See [state](./docs/contribute/state.md).
 - **Advisory decisions**: Optional System-One routing uses confidence thresholds and deterministic fallbacks. See [Decision Routing](./docs/configuration/decision-routing.md).
-- **Declarative taskpacks**: Define repository scope, triggers, checks, and publication in YAML. See [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md).
+- **Declarative taskpacks & suites**: Define repository scope, triggers, compact step handoffs, conditional rules, baseline alignment (`baselineAlignment`), and multi-domain `TaskpackSuite` manifests (`.loopwright/suite.yaml`) in YAML. See [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md) and [Taskpack](./docs/configuration/taskpack.md).
+- **Run diagnostics (`RunEval`)**: Export deterministic tool-repeat, ping-pong, repair-convergence, and per-role/per-step breakdowns via `loopwright inspect` and `Run Health` step summaries. See [CLI](./docs/operations/cli.md).
 - **Reviewed memory**: Content-addressed proposals apply separately after review. See [memory](./docs/contribute/memory.md).
 - **Capability closure**: Inspect local evidence and external prerequisites with the [closure matrix](./docs/contribute/closure-matrix.md).
 

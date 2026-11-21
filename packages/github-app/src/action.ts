@@ -1,24 +1,38 @@
 import { createHash } from 'node:crypto';
-import { closeSync, existsSync, openSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { closeSync, constants as fsConstants, existsSync, openSync, readFileSync } from 'node:fs';
+import { chmod, lstat, mkdir, open, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PI_THINKING_LEVELS, PI_WIRE_APIS, STANDARD_PI_PROVIDER_ENV, isOAuthOnlyPiProvider, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry, type ExternalMcpServerConfig } from '@loopwright/agent-pi/mcp';
 import { formatDurationMs, formatTokenCount, type ReportMcpServerInfo } from '@loopwright/controller';
 import { DECISION_PROVIDER_API_KEY_ENV, type DecisionTransport } from '@loopwright/decisions';
 import {
+  alignBaselineRevisions,
+  BASELINE_CONFLICT_REASON,
   boundUtf8Lines,
   buildDefaultAuthorPrompt,
   createTaskpackDecisionPort,
   insideRoot,
+  loadTaskpackSuite,
   mergeMcpServerDeclarations,
+  parseBaselineAlignmentPolicy,
   parseMcpServersOverride,
+  resolveBaselineAlignmentConfig,
   resolveExternalMcpConfigs,
-  serializeActionResultSummary,
+  resolveTaskpackSuite,
+  serializeActionResultSummary as taskpackSerializeActionResultSummary,
+  type BaselineAlignmentOverride,
+  type BaselineAlignmentResult,
   type BuildDefaultAuthorPromptOptions,
   type CreateTaskpackDecisionPortOptions,
+  type LoadedTaskpackSuite,
+  type LoadedTaskpackSuiteDomain,
+  type ResolvedBaselineAlignmentConfig,
+  type SuiteMatrixCell,
+  type SuiteResolutionResult,
+  type TargetMatrixCell,
 } from '@loopwright/taskpack';
 import {
   LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, loadPiModelsJson, resolveDefaultProviderTokenEnv, resolveTaskpackModelCandidates,
@@ -37,6 +51,11 @@ import { validateMcpAuthConfiguration, qualifyDeploymentHostProfile } from './qu
 import { negotiateSandboxBackend, resolveEffectiveTaskpackSandboxPolicy } from './sandbox.js';
 import { collectMcpReferencedEnvNames, hasAnyDeclaredGitHubTrigger, isGitHubTriggerDeclared } from './schema.js';
 import {
+  validateGitHubApiBaseUrl,
+  verifySuiteCommentPullRequest,
+  type VerifiedSuitePullRequestOwnership,
+} from './suite-pr-lookup.js';
+import {
   authorizeRepositoryActor, compileDeclarativeTaskpack, DEFAULT_HOST_BUDGETS,
   loadDeclarativeTaskpack, mergeTaskpackLimits, parseActionInputLimits, parseCommentCommand,
   parseLoopwrightEnvLimits, prepareTaskpackIntake, resolveTaskpackMemoryLocation, stageCompiledInstructionResources,
@@ -51,8 +70,9 @@ import {
 import { finalizeAndPublishTurnkeyMemory } from './turnkey-memory.js';
 import {
   checkManagedPrMatchesDiscoveredState, COMMIT_SHA_PATTERN, DEFAULT_GIT_COMMIT_IDENTITY,
-  discoverTaskpackUpstreamsV2, findOpenManagedPullRequest, isPlainRecord, parseOptionalGitIdentityInput,
-  resolveGitCommitSha, resolveGitHubAuth, resolveRepositoryAndRevisions, shouldPreserveExplicitSourceRevision,
+  discoverTaskpackUpstreamsV2, findOpenManagedPullRequest, isPlainRecord,
+  parseOptionalGitIdentityInput, resolveGitCommitSha, resolveGitHubAuth, resolveGitHubToken,
+  resolveRepositoryAndRevisions, shouldPreserveExplicitSourceRevision,
   validateGitAuthorEmail, validateGitAuthorName,
   type ManagedPullRequestInfo,
 } from './upstreams.js';
@@ -74,10 +94,42 @@ export {
   insideRoot,
   mergeMcpServerDeclarations,
   parseMcpServersOverride,
-  serializeActionResultSummary,
   type BuildDefaultAuthorPromptOptions,
   type CreateTaskpackDecisionPortOptions,
 };
+
+export interface SuiteActionEntrypointResult {
+  readonly kind: 'eligible' | 'deferred' | 'ignored';
+  readonly disposition: 'eligible' | 'deferred' | 'ignored';
+  readonly reason: string;
+  readonly detail?: string | undefined;
+  readonly suite: SuiteResolutionResult;
+  readonly matrix: { readonly include: readonly SuiteMatrixCell[] };
+}
+
+export type TurnkeyActionEntrypointResult = ActionEntrypointResult | SuiteActionEntrypointResult;
+
+function isSuiteActionResult(result: TurnkeyActionEntrypointResult): result is SuiteActionEntrypointResult {
+  return result.kind === 'eligible' || result.kind === 'deferred' || result.kind === 'ignored';
+}
+
+export function serializeActionResultSummary(
+  result: TurnkeyActionEntrypointResult,
+  scrubber: SecretScrubber,
+): string {
+  if (isSuiteActionResult(result)) {
+    const payload = {
+      kind: result.kind,
+      disposition: result.disposition,
+      reason: result.reason,
+      ...(result.detail !== undefined ? { detail: result.detail } : {}),
+      suite: result.suite,
+      matrix: result.matrix,
+    };
+    return scrubber.scrub(JSON.stringify(payload));
+  }
+  return taskpackSerializeActionResultSummary(result, scrubber);
+}
 
 export interface TurnkeyActionExecutionReport {
   readonly manifest: TaskpackManifest | null;
@@ -87,6 +139,11 @@ export interface TurnkeyActionExecutionReport {
 }
 
 export interface TurnkeyActionEntrypointInput extends ActionEntrypointInput {
+  readonly suitePath?: string | undefined;
+  readonly domain?: string | undefined;
+  readonly resolveSuiteOnly?: boolean | undefined;
+  readonly schedule?: string | undefined;
+  readonly githubOutputPath?: string | undefined;
   readonly turnkey?: boolean | undefined;
   readonly repositoryId?: number | undefined;
   readonly installationId?: number | undefined;
@@ -279,14 +336,109 @@ async function invokeDelegateForCandidate(
   }
 }
 
+function serializeSuiteMatrixJson(
+  matrix: { readonly include: readonly SuiteMatrixCell[] },
+  scrubber: SecretScrubber,
+): string {
+  const include = matrix.include.map(cell => {
+    let normalizedMatrix: SuiteMatrixCell['matrix'];
+    if (cell.matrix !== undefined) {
+      if (Array.isArray(cell.matrix)) {
+        normalizedMatrix = cell.matrix.map(entry => ({
+          id: entry.id,
+          platform: entry.platform,
+          variant: entry.variant,
+        }));
+      } else {
+        const sorted: Record<string, string | number | boolean> = {};
+        for (const key of Object.keys(cell.matrix).sort()) {
+          const val = (cell.matrix as Readonly<Record<string, string | number | boolean>>)[key];
+          if (val !== undefined) sorted[key] = val;
+        }
+        normalizedMatrix = sorted;
+      }
+    }
+    return {
+      domainId: cell.domainId,
+      taskpackPath: cell.taskpackPath,
+      taskpackName: cell.taskpackName,
+      manifestSha256: cell.manifestSha256,
+      controlRoot: cell.controlRoot,
+      baseRevision: cell.baseRevision,
+      ...(cell.headSha !== undefined ? { headSha: cell.headSha } : {}),
+      ...(cell.stage !== undefined ? { stage: cell.stage } : {}),
+      ...(normalizedMatrix !== undefined ? { matrix: normalizedMatrix } : {}),
+      protectedPaths: [...cell.protectedPaths],
+    };
+  });
+  return scrubber.scrub(JSON.stringify({ include })).replace(/[\r\n]/g, ' ');
+}
+
+async function writeSuiteMatrixGithubOutput(
+  githubOutputPath: string | undefined,
+  matrix: { readonly include: readonly SuiteMatrixCell[] },
+  scrubber: SecretScrubber,
+): Promise<void> {
+  if (githubOutputPath === undefined || githubOutputPath.trim().length === 0) return;
+  const resolved = resolve(githubOutputPath);
+  const parent = dirname(resolved);
+  await mkdir(parent, { recursive: true });
+  const parentStats = await lstat(parent);
+  if (parentStats.isSymbolicLink() || !parentStats.isDirectory()) {
+    throw new GitHubAppError('ACTION_INPUT_INVALID', `output parent "${parent}" must be a non-symlink directory`);
+  }
+  const realParentBefore = await realpath(parent);
+  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const serialized = serializeSuiteMatrixJson(matrix, scrubber);
+  const payload = `matrix<<LOOPWRIGHT_EOF\n${serialized}\nLOOPWRIGHT_EOF\n`;
+  const handle = await open(
+    resolved,
+    fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_WRONLY | noFollow,
+    0o600,
+  );
+  try {
+    const stats = await handle.stat();
+    const postParentStats = await lstat(parent);
+    const postRealParent = await realpath(parent);
+    const postLeafStats = await lstat(resolved);
+    if (
+      !stats.isFile()
+      || stats.nlink !== 1
+      || postParentStats.isSymbolicLink()
+      || postParentStats.dev !== parentStats.dev
+      || postParentStats.ino !== parentStats.ino
+      || postRealParent !== realParentBefore
+      || postLeafStats.isSymbolicLink()
+      || postLeafStats.dev !== stats.dev
+      || postLeafStats.ino !== stats.ino
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `output sink "${resolved}" must be a non-symlink regular file under a stable directory`);
+    }
+    await handle.writeFile(payload, 'utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * Run the complete offline-testable Action flow: qualify the host, refuse interactive MCP authentication,
- * load the target manifest under `policyProfile: 'github'`, validate `spec.triggers` strictly before
- * preflight or upstream discovery, select a healthy model candidate (probing when >= 2 candidates are
- * configured), compile, write trusted artifacts outside the checkout, scrub them, and optionally delegate
- * execution with fresh-session fallback across remaining healthy model candidates.
+ * load the target manifest (or multi-domain `TaskpackSuite`) under `policyProfile: 'github'`, validate
+ * `spec.triggers` strictly before preflight or upstream discovery, run isolated 3-way baseline alignment
+ * strictly before probing model candidates, compile, write trusted artifacts outside the checkout, scrub
+ * them, and optionally delegate execution with fresh-session fallback across remaining healthy model candidates.
  */
-export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointInput): Promise<ActionEntrypointResult> {
+export async function runGitHubActionEntrypoint(
+  input: TurnkeyActionEntrypointInput & {
+    readonly suitePath?: undefined;
+    readonly resolveSuiteOnly?: false | undefined;
+  },
+): Promise<ActionEntrypointResult>;
+export async function runGitHubActionEntrypoint(
+  input: TurnkeyActionEntrypointInput,
+): Promise<TurnkeyActionEntrypointResult>;
+export async function runGitHubActionEntrypoint(
+  input: TurnkeyActionEntrypointInput,
+): Promise<TurnkeyActionEntrypointResult> {
   const entrypointStartedMs = performance.now();
   const runtimeEnv = input.env ?? process.env;
   const turnkeyScrubber = new SecretScrubber();
@@ -370,28 +522,366 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       ?? (runtimeEnv['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true'),
   });
 
-  const manifestPath = join(input.repositoryRoot, input.taskpackPath ?? '.loopwright/taskpack.yaml');
-  let manifest: TaskpackManifest;
-  try {
-    manifest = await loadDeclarativeTaskpack({
-      manifestPath,
+  const effectiveSuitePath = (input.suitePath ?? runtimeEnv['INPUT_SUITE-PATH'])?.trim() || undefined;
+  const effectiveDomain = (input.domain ?? runtimeEnv['INPUT_DOMAIN'])?.trim() || undefined;
+  const rawResolveSuiteOnlyEnv = runtimeEnv['INPUT_RESOLVE-SUITE-ONLY']?.trim();
+  let resolveSuiteOnly = false;
+  if (input.resolveSuiteOnly !== undefined) {
+    resolveSuiteOnly = input.resolveSuiteOnly;
+  } else if (rawResolveSuiteOnlyEnv !== undefined && rawResolveSuiteOnlyEnv.length > 0) {
+    if (rawResolveSuiteOnlyEnv === 'true') {
+      resolveSuiteOnly = true;
+    } else if (rawResolveSuiteOnlyEnv === 'false') {
+      resolveSuiteOnly = false;
+    } else {
+      return blocked('ACTION_INPUT_INVALID', `resolve-suite-only must be "true" or "false" (received "${rawResolveSuiteOnlyEnv}")`);
+    }
+  }
+  if (effectiveDomain !== undefined && effectiveSuitePath === undefined) {
+    return blocked('ACTION_INPUT_INVALID', 'domain input requires suite-path');
+  }
+  if (resolveSuiteOnly && effectiveSuitePath === undefined) {
+    return blocked('ACTION_INPUT_INVALID', 'resolve-suite-only requires suite-path');
+  }
+
+  const rawApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim() || undefined;
+  let effectiveApiBaseUrl: string | undefined;
+  if (rawApiBaseUrl !== undefined) {
+    try {
+      effectiveApiBaseUrl = validateGitHubApiBaseUrl(rawApiBaseUrl, 'ACTION_INPUT_INVALID', '/githubApiBaseUrl');
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+  }
+  const effectiveGithubOutputPath = input.githubOutputPath ?? runtimeEnv['GITHUB_OUTPUT'];
+  const decisionApiKeyEnvs = Object.values(DECISION_PROVIDER_API_KEY_ENV).flat();
+
+  let effectiveTaskpackPath = input.taskpackPath;
+  let effectiveBaseRevision = input.baseRevision;
+  let effectiveEventPayload: unknown = input.eventPayload;
+  let effectiveTargetMatrix: readonly TargetMatrixCell[] | null | undefined = input.targetMatrix;
+  let suiteExtraProtectedPaths: readonly string[] | undefined;
+  let loadedSuite: LoadedTaskpackSuite | undefined;
+  let suiteResolution: SuiteResolutionResult | undefined;
+  let verifiedSuiteCommentMeta: VerifiedSuitePullRequestOwnership | undefined;
+
+  if (effectiveSuitePath !== undefined) {
+    try {
+      loadedSuite = await loadTaskpackSuite({
+        repositoryRoot: input.repositoryRoot,
+        suitePath: effectiveSuitePath,
+        policyProfile: 'github',
+        hostPolicy,
+        allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
+      });
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (
+          error.code === 'PROVIDER_OAUTH_UNSUPPORTED'
+          || error.code === 'MCP_OAUTH_UNSUPPORTED'
+          || error.code === 'TASKPACK_HOST_BINDING_INVALID'
+          || (error.code === 'TASKPACK_SCOPE_VIOLATION' && error.path?.startsWith('/spec/execution') === true)
+        ) {
+          return { kind: 'refused', code: error.code, reason: error.message };
+        }
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+
+    for (const secretEnvKey of [
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+      'INPUT_GITHUB-TOKEN',
+      'INPUT_GITHUB-APP-PRIVATE-KEY',
+      input.providerTokenEnv,
+      input.credentialEnvMap?.provider,
+      input.credentialEnvMap?.gate ?? 'LOOPWRIGHT_GATE_SIGNING_SECRET',
+      input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
+      input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
+      input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV,
+      ...Object.values(STANDARD_PI_PROVIDER_ENV),
+      ...decisionApiKeyEnvs,
+      ...loadedSuite.domains.flatMap(dom => [
+        ...collectManifestSecretEnvNames(dom.manifest),
+        ...collectMcpReferencedEnvNames(dom.manifest.spec.mcp?.servers),
+      ]),
+    ]) {
+      if (typeof secretEnvKey === 'string' && secretEnvKey.length > 0) {
+        const val = runtimeEnv[secretEnvKey];
+        if (typeof val === 'string' && val.trim().length > 0) {
+          turnkeyScrubber.register(val.trim());
+        }
+      }
+    }
+    if (typeof input.decisionApiKey === 'string' && input.decisionApiKey.trim().length > 0) {
+      turnkeyScrubber.register(input.decisionApiKey.trim());
+    }
+    if (typeof input.githubToken === 'string' && input.githubToken.trim().length > 0) {
+      turnkeyScrubber.register(input.githubToken.trim());
+    }
+    if (typeof input.githubAppPrivateKey === 'string' && input.githubAppPrivateKey.trim().length > 0) {
+      turnkeyScrubber.register(input.githubAppPrivateKey.trim());
+    }
+
+    let suiteGithubToken: string | undefined;
+    try {
+      suiteGithubToken = await resolveGitHubToken({
+        apiBaseUrl: effectiveApiBaseUrl,
+        repositoryFullName: input.repositoryFullName,
+        githubToken: input.githubToken,
+        appId: input.githubAppId,
+        appPrivateKey: input.githubAppPrivateKey,
+        appInstallationId: input.githubAppInstallationId,
+        fetchImpl: input.probeFetch,
+        scrubber: turnkeyScrubber,
+        env: runtimeEnv,
+      });
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        return blocked(error.code, turnkeyScrubber.scrub(error.message));
+      }
+      throw error;
+    }
+
+    if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {
+      const prLookup = await verifySuiteCommentPullRequest({
+        suite: loadedSuite,
+        eventName: input.eventName,
+        eventPayload: input.eventPayload,
+        repositoryFullName: input.repositoryFullName,
+        apiBaseUrl: effectiveApiBaseUrl,
+        explicitDomain: effectiveDomain,
+        resolveToken: () => suiteGithubToken,
+        commentPrefixes: input.commentPrefixes,
+        operatorAllowlist: input.operatorAllowlist,
+        fetchImpl: input.probeFetch,
+        scrubber: turnkeyScrubber,
+      });
+      if (prLookup.kind === 'verified') {
+        verifiedSuiteCommentMeta = prLookup.value;
+      } else if (prLookup.kind !== 'ignored') {
+        try {
+          await writeSuiteMatrixGithubOutput(
+            effectiveGithubOutputPath,
+            { include: Object.freeze([]) },
+            turnkeyScrubber,
+          );
+        } catch (outErr) {
+          if (outErr instanceof GitHubAppError) {
+            return blocked(outErr.code, turnkeyScrubber.scrub(outErr.message));
+          }
+          throw outErr;
+        }
+        const blockedReason = (prLookup.kind === 'lookup_failed' || prLookup.kind === 'metadata_unavailable')
+          ? prLookup.reason
+          : prLookup.code;
+        return blocked(blockedReason, turnkeyScrubber.scrub(prLookup.detail));
+      }
+    }
+
+    const allowOfflineStagePrCheck = input.dryRun === true
+      && !resolveSuiteOnly
+      && effectiveApiBaseUrl === undefined
+      && input.probeFetch === undefined
+      && suiteGithubToken === undefined;
+
+    const resolvedSuiteBaseRevision = verifiedSuiteCommentMeta?.prBaseSha ?? input.baseRevision;
+    suiteResolution = await resolveTaskpackSuite({
       repositoryRoot: input.repositoryRoot,
+      loadedSuite,
+      suitePath: effectiveSuitePath,
       policyProfile: 'github',
       hostPolicy,
+      allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
+      baseRevision: resolvedSuiteBaseRevision,
+      eventName: input.eventName,
+      eventPayload: input.eventPayload,
+      schedule: input.schedule,
+      domain: effectiveDomain,
+      ...(input.commentPrefixes !== undefined ? { commentPrefixes: input.commentPrefixes } : {}),
+      ...(verifiedSuiteCommentMeta !== undefined
+        ? {
+          prHeadRef: verifiedSuiteCommentMeta.prHeadRef,
+          prBaseRef: verifiedSuiteCommentMeta.prBaseRef,
+          prHeadSha: verifiedSuiteCommentMeta.prHeadSha,
+          prHeadRepoFullName: input.repositoryFullName,
+          prHeadRepoFork: false,
+        }
+        : {}),
+      operatorAllowlist: input.operatorAllowlist,
+      repositoryFullName: input.repositoryFullName,
+      apiBaseUrl: effectiveApiBaseUrl,
+      githubToken: suiteGithubToken,
+      fetchImpl: input.probeFetch,
+      scrubber: turnkeyScrubber,
+      env: runtimeEnv,
+      discoverUpstreamUpdates: !allowOfflineStagePrCheck,
+      allowOfflineStagePrCheck,
     });
-  } catch (error) {
-    if (error instanceof GitHubAppError) {
-      if (
-        error.code === 'PROVIDER_OAUTH_UNSUPPORTED'
-        || error.code === 'MCP_OAUTH_UNSUPPORTED'
-        || error.code === 'TASKPACK_HOST_BINDING_INVALID'
-        || (error.code === 'TASKPACK_SCOPE_VIOLATION' && error.path?.startsWith('/spec/execution') === true)
-      ) {
-        return { kind: 'refused', code: error.code, reason: error.message };
+
+    const scrubPublicSuiteResolution = (res: SuiteResolutionResult): SuiteResolutionResult => {
+      if (res.comment === undefined && res.detail === undefined) return res;
+      return Object.freeze({
+        ...res,
+        ...(res.detail !== undefined ? { detail: turnkeyScrubber.scrub(res.detail) } : {}),
+        ...(res.comment !== undefined
+          ? {
+            comment: Object.freeze({
+              ...res.comment,
+              guidance: turnkeyScrubber.scrub(res.comment.guidance),
+            }),
+          }
+          : {}),
+      });
+    };
+
+    if (
+      input.commentPrefixes !== undefined
+      && suiteResolution.comment !== undefined
+      && !input.commentPrefixes.includes(suiteResolution.comment.prefix)
+    ) {
+      const emptyMatrix = Object.freeze({ include: Object.freeze<readonly SuiteMatrixCell[]>([]) });
+      try {
+        await writeSuiteMatrixGithubOutput(effectiveGithubOutputPath, emptyMatrix, turnkeyScrubber);
+      } catch (outErr) {
+        if (outErr instanceof GitHubAppError) {
+          return blocked(outErr.code, turnkeyScrubber.scrub(outErr.message));
+        }
+        throw outErr;
       }
-      return blocked('target repository manifest failed validation', 'loadDeclarativeTaskpack refused the manifest');
+      const ignoredSuite: SuiteResolutionResult = scrubPublicSuiteResolution(Object.freeze({
+        ...suiteResolution,
+        disposition: 'ignored',
+        reason: 'comment_prefix_not_configured_for_domain',
+        cells: Object.freeze([]),
+        eligibleCells: Object.freeze([]),
+        matrix: emptyMatrix,
+      }));
+      return {
+        kind: 'ignored',
+        disposition: 'ignored',
+        reason: ignoredSuite.reason,
+        suite: ignoredSuite,
+        matrix: emptyMatrix,
+      };
     }
-    throw error;
+
+    try {
+      await writeSuiteMatrixGithubOutput(
+        effectiveGithubOutputPath,
+        suiteResolution.matrix,
+        turnkeyScrubber,
+      );
+    } catch (outErr) {
+      if (outErr instanceof GitHubAppError) {
+        return blocked(outErr.code, turnkeyScrubber.scrub(outErr.message));
+      }
+      throw outErr;
+    }
+
+    if (suiteResolution.disposition === 'blocked') {
+      return blocked(
+        suiteResolution.code ?? suiteResolution.reason,
+        suiteResolution.detail !== undefined
+          ? turnkeyScrubber.scrub(suiteResolution.detail)
+          : turnkeyScrubber.scrub(suiteResolution.reason),
+      );
+    }
+
+    if (
+      resolveSuiteOnly
+      || suiteResolution.disposition === 'deferred'
+      || suiteResolution.disposition === 'ignored'
+    ) {
+      const scrubbedSuite = scrubPublicSuiteResolution(suiteResolution);
+      return {
+        kind: suiteResolution.disposition,
+        disposition: suiteResolution.disposition,
+        reason: scrubbedSuite.reason,
+        ...(scrubbedSuite.detail !== undefined ? { detail: scrubbedSuite.detail } : {}),
+        suite: scrubbedSuite,
+        matrix: scrubbedSuite.matrix,
+      };
+    }
+
+    const selectedCell = effectiveDomain !== undefined
+      ? suiteResolution.eligibleCells.find(c => c.domainId === effectiveDomain)
+      : (suiteResolution.eligibleCells.length === 1 ? suiteResolution.eligibleCells[0] : undefined);
+    if (selectedCell === undefined) {
+      return blocked(
+        'ACTION_INPUT_INVALID',
+        `suite "${loadedSuite.manifest.metadata.name}" resolved ${suiteResolution.eligibleCells.length} eligible domains (${suiteResolution.eligibleCells.map(c => c.domainId).join(', ')}); pass domain or resolve-suite-only: true`,
+      );
+    }
+    const selectedDomain: LoadedTaskpackSuiteDomain | undefined = loadedSuite.domains.find(
+      d => d.id === selectedCell.domainId,
+    );
+    if (selectedDomain === undefined) {
+      return blocked('TASKPACK_MANIFEST_INVALID', `resolved suite domain "${selectedCell.domainId}" is missing`);
+    }
+
+    effectiveTaskpackPath = selectedDomain.taskpackPath;
+    effectiveBaseRevision = selectedCell.baseRevision;
+    suiteExtraProtectedPaths = selectedDomain.protectedPaths;
+    if (effectiveTargetMatrix === undefined && Array.isArray(selectedDomain.matrix)) {
+      effectiveTargetMatrix = selectedDomain.matrix;
+    }
+    if (verifiedSuiteCommentMeta !== undefined && isPlainRecord(input.eventPayload)) {
+      const existingPr = isPlainRecord(input.eventPayload['pull_request']) ? input.eventPayload['pull_request'] : {};
+      effectiveEventPayload = {
+        ...input.eventPayload,
+        pull_request: {
+          ...existingPr,
+          ...(verifiedSuiteCommentMeta.prNumber !== undefined ? { number: verifiedSuiteCommentMeta.prNumber } : {}),
+          head: {
+            ref: verifiedSuiteCommentMeta.prHeadRef,
+            sha: verifiedSuiteCommentMeta.prHeadSha,
+            repo: { full_name: input.repositoryFullName, fork: false },
+          },
+          base: {
+            ref: verifiedSuiteCommentMeta.prBaseRef,
+            ...(verifiedSuiteCommentMeta.prBaseSha !== undefined ? { sha: verifiedSuiteCommentMeta.prBaseSha } : {}),
+            repo: { full_name: input.repositoryFullName, fork: false },
+          },
+        },
+      };
+    }
+  }
+
+  let manifest: TaskpackManifest;
+  if (loadedSuite !== undefined && effectiveTaskpackPath !== undefined) {
+    const boundDomain = loadedSuite.domains.find(d => d.taskpackPath === effectiveTaskpackPath);
+    if (boundDomain === undefined) {
+      return blocked('TASKPACK_MANIFEST_INVALID', `suite domain at "${effectiveTaskpackPath}" was not found`);
+    }
+    manifest = boundDomain.manifest;
+  } else {
+    const manifestPath = join(input.repositoryRoot, effectiveTaskpackPath ?? '.loopwright/taskpack.yaml');
+    try {
+      manifest = await loadDeclarativeTaskpack({
+        manifestPath,
+        repositoryRoot: input.repositoryRoot,
+        policyProfile: 'github',
+        hostPolicy,
+      });
+    } catch (error) {
+      if (error instanceof GitHubAppError) {
+        if (
+          error.code === 'PROVIDER_OAUTH_UNSUPPORTED'
+          || error.code === 'MCP_OAUTH_UNSUPPORTED'
+          || error.code === 'TASKPACK_HOST_BINDING_INVALID'
+          || (error.code === 'TASKPACK_SCOPE_VIOLATION' && error.path?.startsWith('/spec/execution') === true)
+        ) {
+          return { kind: 'refused', code: error.code, reason: error.message };
+        }
+        return blocked('target repository manifest failed validation', 'loadDeclarativeTaskpack refused the manifest');
+      }
+      throw error;
+    }
   }
 
   let effectiveMcpDecls: readonly TaskpackMcpServerDeclaration[];
@@ -413,9 +903,27 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
 
   resolveActionOutputFormats(input.output, manifest);
 
+  let effectiveBaselineOverride: BaselineAlignmentOverride | undefined;
+  let effectiveBaselineConfig: ResolvedBaselineAlignmentConfig;
+  try {
+    const rawAlignEnv = runtimeEnv['INPUT_BASELINE-ALIGNMENT']?.trim();
+    effectiveBaselineOverride = input.baselineAlignment
+      ?? (rawAlignEnv !== undefined && rawAlignEnv.length > 0
+        ? parseBaselineAlignmentPolicy(rawAlignEnv)
+        : undefined);
+    effectiveBaselineConfig = resolveBaselineAlignmentConfig(
+      manifest.spec.baselineAlignment,
+      effectiveBaselineOverride,
+    );
+  } catch (error) {
+    if (error instanceof GitHubAppError) {
+      return blocked(error.code, turnkeyScrubber.scrub(error.message));
+    }
+    throw error;
+  }
+
   // Register known host secrets onto turnkeyScrubber BEFORE any preflight script or external call runs.
   const manifestSecretEnvs = collectManifestSecretEnvNames(manifest);
-  const decisionApiKeyEnvs = Object.values(DECISION_PROVIDER_API_KEY_ENV).flat();
   for (const secretEnvKey of [
     'GITHUB_TOKEN',
     'GH_TOKEN',
@@ -492,41 +1000,65 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         reason: `GitHub event "${input.eventName}" is not enabled in spec.triggers.commentCommands`,
       };
     }
-    const effectivePrefixes = input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes;
-    const preliminaryCmd = extractPreliminaryCommentCommand(input.eventPayload, input.eventName, effectivePrefixes);
-    if (
-      preliminaryCmd !== null
-      && !isGitHubTriggerDeclared(manifest.spec.triggers, {
-        eventName: input.eventName,
-        commentCommand: preliminaryCmd,
-      })
-    ) {
-      return {
-        kind: 'refused',
-        code: 'TASKPACK_TRIGGER_UNSUPPORTED',
-        reason: `comment command "${preliminaryCmd}" is not enabled in spec.triggers.commentCommands`,
+    if (suiteResolution?.comment !== undefined && verifiedSuiteCommentMeta !== undefined) {
+      if (
+        !isGitHubTriggerDeclared(manifest.spec.triggers, {
+          eventName: input.eventName,
+          commentCommand: suiteResolution.comment.command,
+        })
+      ) {
+        return {
+          kind: 'refused',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: `comment command "${suiteResolution.comment.command}" is not enabled in spec.triggers.commentCommands`,
+        };
+      }
+      preEvaluatedComment = {
+        command: suiteResolution.comment.command,
+        guidance: suiteResolution.comment.guidance,
+        login: verifiedSuiteCommentMeta.login,
+        authorAssociation: verifiedSuiteCommentMeta.authorAssociation,
+        commandId: verifiedSuiteCommentMeta.commandId,
+        headSha: verifiedSuiteCommentMeta.prHeadSha,
       };
-    }
-    preEvaluatedComment = evaluateCommentPayload(input.eventPayload, {
-      eventName: input.eventName,
-      commentPrefixes: effectivePrefixes,
-      commentCommands: manifest.spec.triggers.commentCommands,
-      operatorAllowlist: input.operatorAllowlist,
-    });
-    if ('ignoredReason' in preEvaluatedComment) {
-      return blocked(`comment ignored: ${preEvaluatedComment.ignoredReason}`);
-    }
-    if ('blockedReason' in preEvaluatedComment) {
-      return blocked(preEvaluatedComment.blockedReason, preEvaluatedComment.detail);
+    } else {
+      const effectivePrefixes = input.commentPrefixes ?? manifest.spec.triggers.commentPrefixes;
+      const preliminaryCmd = extractPreliminaryCommentCommand(input.eventPayload, input.eventName, effectivePrefixes);
+      if (
+        preliminaryCmd !== null
+        && !isGitHubTriggerDeclared(manifest.spec.triggers, {
+          eventName: input.eventName,
+          commentCommand: preliminaryCmd,
+        })
+      ) {
+        return {
+          kind: 'refused',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: `comment command "${preliminaryCmd}" is not enabled in spec.triggers.commentCommands`,
+        };
+      }
+      preEvaluatedComment = evaluateCommentPayload(input.eventPayload, {
+        eventName: input.eventName,
+        commentPrefixes: effectivePrefixes,
+        commentCommands: manifest.spec.triggers.commentCommands,
+        operatorAllowlist: input.operatorAllowlist,
+      });
+      if ('ignoredReason' in preEvaluatedComment) {
+        return blocked(`comment ignored: ${preEvaluatedComment.ignoredReason}`);
+      }
+      if ('blockedReason' in preEvaluatedComment) {
+        return blocked(preEvaluatedComment.blockedReason, preEvaluatedComment.detail);
+      }
     }
   }
 
   const turnkeyEnabled = input.turnkey === true && input.dryRun !== true;
   let effectiveRepositoryId = input.repositoryId ?? 0;
   let effectiveInstallationId = input.installationId ?? 0;
-  let effectiveBaseRevision = input.baseRevision;
   const explicitSourceRevision = (input.sourceRevision ?? runtimeEnv['INPUT_SOURCE-REVISION'])?.trim() || undefined;
-  let effectiveSourceRevision = explicitSourceRevision ?? input.baseRevision;
+  let effectiveSourceRevision = explicitSourceRevision
+    ?? verifiedSuiteCommentMeta?.prHeadSha
+    ?? effectiveBaseRevision;
   let effectiveUpstreamRecords = input.upstreamRecords;
   let githubToken: string | undefined;
   let gitCommitIdentity: GitCommitIdentity = Object.freeze({
@@ -535,7 +1067,6 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
   });
   let openManagedPr: ManagedPullRequestInfo | null = null;
   let managedPrMatchesDiscoveredState = input.managedPrMatchesDiscoveredState;
-  const effectiveApiBaseUrl = input.githubApiBaseUrl?.trim() || runtimeEnv['GITHUB_API_URL']?.trim() || undefined;
   let preflightResult: RunTaskpackPreflightResult | undefined;
 
   try {
@@ -543,7 +1074,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       try {
         const effectivePolicy = resolveEffectiveTaskpackSandboxPolicy(manifest, {
           workspaceRoot: input.repositoryRoot,
-          relativeTaskpackPath: input.taskpackPath,
+          relativeTaskpackPath: effectiveTaskpackPath,
           env: runtimeEnv,
           policyProfile: 'github',
           hostPolicy,
@@ -602,7 +1133,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           sourceRevision: explicitSourceRevision,
           preserveExplicitSourceRevision,
           eventName: input.eventName,
-          eventPayload: input.eventPayload,
+          eventPayload: effectiveEventPayload,
           apiBaseUrl: effectiveApiBaseUrl,
           githubToken,
           fetchImpl: input.probeFetch,
@@ -620,24 +1151,55 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         }
         throw error;
       }
-    } else if (explicitSourceRevision !== undefined && existsSync(join(input.repositoryRoot, '.git'))) {
+    } else if (
+      (explicitSourceRevision !== undefined || verifiedSuiteCommentMeta !== undefined)
+      && existsSync(join(input.repositoryRoot, '.git'))
+    ) {
       try {
         effectiveBaseRevision = await resolveGitCommitSha(input.repositoryRoot, effectiveBaseRevision);
-        effectiveSourceRevision = explicitSourceRevision === input.baseRevision
-          ? effectiveBaseRevision
-          : await resolveGitCommitSha(input.repositoryRoot, explicitSourceRevision);
+        if (explicitSourceRevision !== undefined) {
+          effectiveSourceRevision = explicitSourceRevision === input.baseRevision
+            ? effectiveBaseRevision
+            : await resolveGitCommitSha(input.repositoryRoot, explicitSourceRevision);
+        } else if (verifiedSuiteCommentMeta !== undefined) {
+          effectiveSourceRevision = verifiedSuiteCommentMeta.prHeadSha;
+        }
       } catch (error) {
         if (error instanceof GitHubAppError) {
           return blocked(error.code, turnkeyScrubber.scrub(error.message));
         }
         throw error;
       }
+    } else if (verifiedSuiteCommentMeta !== undefined && effectiveSourceRevision === undefined) {
+      effectiveSourceRevision = verifiedSuiteCommentMeta.prHeadSha;
     }
 
     const isStatusComment = preEvaluatedComment !== undefined
       && !('ignoredReason' in preEvaluatedComment)
       && !('blockedReason' in preEvaluatedComment)
       && preEvaluatedComment.command === 'status';
+
+    if (verifiedSuiteCommentMeta !== undefined && !isStatusComment) {
+      if (verifiedSuiteCommentMeta.prBaseSha === undefined) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          'pull_request_metadata_unavailable: pull request base.sha must be a verified 40-hex commit SHA',
+        );
+      }
+      if (effectiveBaseRevision.toLowerCase() !== verifiedSuiteCommentMeta.prBaseSha.toLowerCase()) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          `resolved base revision "${effectiveBaseRevision}" disagrees with verified pull request base SHA "${verifiedSuiteCommentMeta.prBaseSha}"`,
+        );
+      }
+      const resolvedSourceForCheck = effectiveSourceRevision ?? effectiveBaseRevision;
+      if (resolvedSourceForCheck.toLowerCase() !== verifiedSuiteCommentMeta.prHeadSha.toLowerCase()) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          `resolved source revision "${resolvedSourceForCheck}" disagrees with verified pull request head SHA "${verifiedSuiteCommentMeta.prHeadSha}"`,
+        );
+      }
+    }
 
     if (manifest.spec.preflight !== undefined && !isStatusComment) {
       try {
@@ -791,7 +1353,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
               failures: [],
               reason: pfReason,
               summary: pfReason,
-              targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+              targetMatrix: effectiveTargetMatrix ?? manifest.spec.target?.matrix ?? null,
             } as TaskpackIntakeOutcome,
           };
         }
@@ -809,7 +1371,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
             disposition: 'ready' as const,
             baseRevision: effectiveBaseRevision,
             updates: [],
-            targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+            targetMatrix: effectiveTargetMatrix ?? manifest.spec.target?.matrix ?? null,
           },
         };
       }
@@ -825,7 +1387,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
             disposition: 'ready' as const,
             baseRevision: effectiveBaseRevision,
             updates: [],
-            targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+            targetMatrix: effectiveTargetMatrix ?? manifest.spec.target?.matrix ?? null,
           },
         };
       }
@@ -834,7 +1396,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         records: effectiveUpstreamRecords ?? [],
         ...(allowForce ? { force: true } : {}),
         ...(!bypassManagedPrDedupe && managedPrMatchesDiscoveredState !== undefined ? { managedPrMatchesDiscoveredState } : {}),
-        targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+        targetMatrix: effectiveTargetMatrix ?? manifest.spec.target?.matrix ?? null,
       });
       if (outcome.kind === 'discover' && outcome.disposition === 'no_change') {
         emitProgress?.(`intake: no_change (${outcome.reason})`);
@@ -958,6 +1520,10 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
     );
     let mcpRegistry: HostMcpRegistry | undefined;
 
+    let baselineAlignmentResult: BaselineAlignmentResult | undefined;
+    let enableBaselineConflictGate = false;
+    let extractedConflictPaths: readonly string[] | undefined;
+
     let trackedSourceTokenEnvNames: readonly string[] = input.providerTokenEnv !== undefined
       ? [input.providerTokenEnv]
       : [];
@@ -998,11 +1564,17 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         hostPolicy,
         repository: input.repositoryFullName,
         repositoryRoot: input.repositoryRoot,
-        taskpackPath: input.taskpackPath,
+        taskpackPath: effectiveTaskpackPath,
         baseRevision: effectiveBaseRevision,
         sourceRevision: effectiveSourceRevision,
+        baselineAlignment: effectiveBaselineConfig,
+        ...(baselineAlignmentResult !== undefined ? { baselineAlignmentResult } : {}),
+        ...(baselineAlignmentResult?.conflictResource !== null && baselineAlignmentResult?.conflictResource !== undefined
+          ? { baselineConflictResource: baselineAlignmentResult.conflictResource }
+          : {}),
+        ...(enableBaselineConflictGate ? { enableBaselineConflictGate: true } : {}),
         upstreamRecords: effectiveUpstreamRecords,
-        targetMatrix: input.targetMatrix ?? manifest.spec.target?.matrix ?? null,
+        targetMatrix: effectiveTargetMatrix ?? manifest.spec.target?.matrix ?? null,
         roleSelection,
         ...(candidate !== undefined ? { candidateIndex: candidate.manifestIndex } : {}),
         allowManifestCustomBaseUrl: input.allowManifestCustomBaseUrl,
@@ -1201,6 +1773,59 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       }
     }
 
+    // Pre-probe 3-way baseline alignment: runs STRICTLY BEFORE model candidate probing (`selectHealthyModelCandidate`)!
+    if (
+      input.dryRun !== true
+      && effectiveCompileMode === 'candidate'
+      && effectiveSourceRevision !== effectiveBaseRevision
+      && (existsSync(join(realRepositoryRoot, '.git')) || effectiveBaselineConfig.policy !== 'off')
+    ) {
+      try {
+        baselineAlignmentResult = await alignBaselineRevisions({
+          repositoryRoot: realRepositoryRoot,
+          baseRevision: effectiveBaseRevision,
+          sourceRevision: effectiveSourceRevision,
+          manifest,
+          taskpackPath: effectiveTaskpackPath,
+          policyProfile: 'github',
+          hostPolicy,
+          extraProtectedPaths: suiteExtraProtectedPaths,
+          baselineAlignment: effectiveBaselineConfig,
+          scrubber,
+          scratchRoot: realRunRoot,
+          onLog: emitProgress,
+        });
+      } catch (error) {
+        if (error instanceof GitHubAppError) {
+          return blocked(error.code, scrubber.scrub(error.message));
+        }
+        throw error;
+      }
+
+      if (baselineAlignmentResult.status === 'blocked') {
+        const conflictDetail = scrubber.scrub(baselineAlignmentResult.detail || baselineAlignmentResult.reason);
+        input.onTurnkeyReport?.({
+          manifest,
+          scrubber,
+          report: {
+            runId: normalizeControllerRunId(input.runId),
+            status: 'blocked',
+            reasonCode: BASELINE_CONFLICT_REASON,
+            detail: conflictDetail,
+            discovery: intake.kind === 'discover'
+              ? { disposition: intake.disposition, ...(intake.disposition === 'ready' ? { updatesCount: intake.updates.length } : {}) }
+              : null,
+            scrub: text => scrubber.scrub(text),
+          },
+        });
+        return blocked(BASELINE_CONFLICT_REASON, conflictDetail);
+      }
+
+      enableBaselineConflictGate = baselineAlignmentResult.conflictResource !== null
+        || baselineAlignmentResult.disposition === 'unmerged_off';
+      extractedConflictPaths = baselineAlignmentResult.conflictResource?.extractedPaths;
+    }
+
     const roleProviderEnvNames: string[] = [];
     if (manifest.spec.roles !== undefined && manifest.spec.roles.length > 0) {
       try {
@@ -1387,6 +2012,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
             gitCommitIdentity,
             fetchImpl: input.probeFetch,
             scrubber,
+            extractedConflictPaths,
           });
           activePublicationEndpoint = publisherServer.endpointPlan;
           ephemeralEnv[publicationEnvName] = publisherServer.signingSecret;
@@ -1394,7 +2020,10 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         }
 
         const hasCommandChecks = effectiveCompileMode === 'candidate'
-          && manifest.spec.verification.localChecks.some(check => check.implementation === 'command.v1');
+          && (
+            manifest.spec.verification.localChecks.some(check => check.implementation === 'command.v1')
+            || enableBaselineConflictGate
+          );
         if (hasCommandChecks) {
           let preview: Awaited<ReturnType<typeof compileDeclarativeTaskpack>>;
           try {
@@ -1423,6 +2052,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
                 scrubber,
                 forbiddenEnvNames: forbiddenCommandEnvNames,
                 checkStagedDir: preflightResult?.checkStagedDir,
+                extractedConflictPaths: preview.extractedConflictPaths ?? extractedConflictPaths,
                 onLog: emitProgress,
               });
             } catch (error) {
@@ -1607,8 +2237,8 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
       const settledRunId = lastTurnkeySummary?.attemptRunId ?? normalizeControllerRunId(input.runId);
       let memorySummary: TurnkeyMemorySummary | undefined;
       if (lastTurnkeySummary !== undefined || existsSync(join(realRunRoot, settledRunId, 'run.json'))) {
-        const memoryTargetCell = input.targetMatrix !== undefined
-          ? (input.targetMatrix !== null && input.targetMatrix.length === 1 ? input.targetMatrix[0]! : null)
+        const memoryTargetCell = effectiveTargetMatrix !== undefined
+          ? (effectiveTargetMatrix !== null && effectiveTargetMatrix.length === 1 ? effectiveTargetMatrix[0]! : null)
           : undefined;
         try {
           memorySummary = await finalizeAndPublishTurnkeyMemory({
@@ -1617,7 +2247,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
             repositoryRoot: realRepositoryRoot,
             repositoryFullName: input.repositoryFullName,
             manifest,
-            taskpackPath: input.taskpackPath,
+            taskpackPath: effectiveTaskpackPath,
             baseRevision: effectiveBaseRevision,
             upstreamRecords: effectiveUpstreamRecords,
             ...(memoryTargetCell !== undefined ? { targetMatrix: memoryTargetCell } : {}),
@@ -1633,7 +2263,7 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           const message = error instanceof Error ? error.message : String(error);
           let fallbackDirectory = manifest.spec.memory.directory;
           try {
-            fallbackDirectory = resolveTaskpackMemoryLocation(manifest, input.taskpackPath).memoryDirectory;
+            fallbackDirectory = resolveTaskpackMemoryLocation(manifest, effectiveTaskpackPath).memoryDirectory;
           } catch {
             // keep declared directory when location resolution itself failed
           }
@@ -1680,6 +2310,9 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
           usage: lastTurnkeySummary?.usage ?? null,
           elapsedMs: lastTurnkeySummary?.elapsedMs ?? null,
           externalUrl: lastTurnkeySummary?.externalUrl ?? null,
+          ...(lastTurnkeySummary?.runEval !== undefined && lastTurnkeySummary.runEval !== null
+            ? { runEval: lastTurnkeySummary.runEval }
+            : {}),
           scrub: text => scrubber.scrub(text),
         },
       });
@@ -1743,6 +2376,8 @@ export async function runActionCli(
 
   const result = await runGitHubActionEntrypoint({
     repositoryRoot,
+    suitePath: env['INPUT_SUITE-PATH']?.trim() || undefined,
+    domain: env['INPUT_DOMAIN']?.trim() || undefined,
     taskpackPath: env['INPUT_TASKPACK-PATH']?.trim() || undefined,
     repositoryFullName: env['LOOPWRIGHT_REPOSITORY'] ?? env['GITHUB_REPOSITORY'] ?? basename(repositoryRoot),
     baseRevision: env['GITHUB_SHA'] ?? 'HEAD',
@@ -1811,23 +2446,34 @@ export async function runActionCli(
 
   const manifest = capturedReport?.manifest ?? (result.kind === 'compiled' ? result.manifest : null);
   const formats = prevalidatedInputFormats ?? resolveActionOutputFormats(undefined, manifest);
+  const suiteOnly = isSuiteActionResult(result);
   const report: RunReportInput = capturedReport?.report ?? {
     runId: normalizeControllerRunId(inputRunId),
-    status: result.kind === 'no_change'
-      ? (result.delegateOutcome?.ok === false ? 'failed' : 'no_change')
+    status: isSuiteActionResult(result)
+      ? result.kind
+      : result.kind === 'no_change'
+        ? (result.delegateOutcome?.ok === false ? 'failed' : 'no_change')
+        : result.kind === 'blocked'
+          ? 'blocked'
+          : result.kind === 'refused'
+            ? 'refused'
+            : (result.delegateOutcome?.ok === false ? 'failed' : 'passed'),
+    reasonCode: result.kind === 'refused'
+      ? result.code
       : result.kind === 'blocked'
-        ? 'blocked'
-        : result.kind === 'refused'
-          ? 'refused'
-          : (result.delegateOutcome?.ok === false ? 'failed' : 'passed'),
-    reasonCode: result.kind === 'refused' ? result.code : result.kind === 'blocked' ? result.reason : null,
+        ? result.reason
+        : isSuiteActionResult(result)
+          ? result.reason
+          : null,
     detail: result.kind === 'refused'
       ? result.reason
       : result.kind === 'blocked'
         ? (result.detail ?? null)
-        : result.kind === 'no_change'
-          ? (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : result.reason)
-          : (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : null),
+        : isSuiteActionResult(result)
+          ? (result.detail ?? result.reason)
+          : result.kind === 'no_change'
+            ? (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : result.reason)
+            : (result.delegateOutcome?.ok === false ? result.delegateOutcome.detail : null),
     scrub: text => fallbackScrubber.scrub(text),
   };
 
@@ -1845,8 +2491,9 @@ export async function runActionCli(
     alwaysLogTextSummary: !dryRun,
   });
 
-  const executionSucceeded = (result.kind === 'no_change'
-    && (result.delegateOutcome === undefined || result.delegateOutcome === null || result.delegateOutcome.ok))
+  const executionSucceeded = suiteOnly
+    || (result.kind === 'no_change'
+      && (result.delegateOutcome === undefined || result.delegateOutcome === null || result.delegateOutcome.ok))
     || (result.kind === 'compiled' && (result.delegateOutcome === null || result.delegateOutcome.ok));
   return executionSucceeded ? 0 : 1;
 }
