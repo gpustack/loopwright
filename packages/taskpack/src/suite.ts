@@ -12,6 +12,7 @@ import {
   effectiveProtectedPaths,
   headBranchPrefixesCollide,
   IDENTIFIER_PATTERN,
+  isGitHubTriggerDeclared,
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
@@ -67,6 +68,7 @@ import {
   buildCleanGitEnv,
   COMMIT_SHA_PATTERN,
   discoverTaskpackUpstreamsV2,
+  extractBaselineVersionsFromDocument,
   extractJsonVersionPath,
   fetchBoundedText,
   findOpenManagedPullRequest,
@@ -154,7 +156,7 @@ function deriveControlRoot(relativeManifestPath: string | undefined): string {
   return dir === '.' || dir === '' ? '.loopwright' : dir;
 }
 
-function validateSuiteHttpSourceUrl(source: string, path: string, allowLoopbackHttp = true): void {
+function validateSuiteHttpSourceUrl(source: string, path: string, allowLoopbackHttp = false): void {
   if (/[\s]/.test(source)) suiteInvalid('http-json source must not contain whitespace', path);
   let parsed: URL;
   try {
@@ -170,7 +172,12 @@ function validateSuiteHttpSourceUrl(source: string, path: string, allowLoopbackH
     const host = parsed.hostname.toLowerCase();
     if (host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1') return;
   }
-  suiteInvalid('http-json source must use https:// (or loopback http://)', path);
+  suiteInvalid(
+    allowLoopbackHttp
+      ? 'http-json source must use https:// (or loopback http://)'
+      : 'http-json source must use https://',
+    path,
+  );
 }
 
 function validateSuiteDomainMatrix(raw: unknown, path: string): TaskpackSuiteDomainMatrix {
@@ -226,6 +233,7 @@ function validateSuiteReadinessProbe(
   path: string,
   domainIds: ReadonlySet<string>,
   seenProbeIds: Set<string>,
+  allowLoopbackHttp: boolean,
 ): SuiteStageReadinessProbe {
   const rec = requireSuiteObject(raw, path, [
     'id', 'kind', 'source', 'versionFrom', 'expectedVersion', 'ref',
@@ -248,7 +256,7 @@ function validateSuiteReadinessProbe(
       suiteInvalid(`github-release readiness probe source "${source}" must match owner/repo`, `${path}/source`);
     }
   } else if (kind === 'http-json') {
-    validateSuiteHttpSourceUrl(source, `${path}/source`);
+    validateSuiteHttpSourceUrl(source, `${path}/source`, allowLoopbackHttp);
   } else if (source.startsWith('-')) {
     suiteInvalid(`${kind} readiness probe source must not start with "-"`, `${path}/source`);
   }
@@ -373,6 +381,7 @@ function computeTopologicalStageOrder(stages: readonly TaskpackSuiteStageDeclara
 export interface ValidateTaskpackSuiteOptions {
   readonly suitePath?: string | undefined;
   readonly controlRoot?: string | undefined;
+  readonly allowLoopbackHttp?: boolean | undefined;
 }
 
 /** Validate a parsed `TaskpackSuite` object (including null-prototype records). */
@@ -380,6 +389,7 @@ export function validateTaskpackSuiteManifest(
   value: Json,
   options: ValidateTaskpackSuiteOptions = {},
 ): TaskpackSuiteManifest {
+  const allowLoopbackHttp = options.allowLoopbackHttp === true;
   const suitePath = options.suitePath !== undefined
     ? normalizeRelativePath(options.suitePath, '/')
     : undefined;
@@ -486,7 +496,7 @@ export function validateTaskpackSuiteManifest(
         }
         const seenProbeIds = new Set<string>();
         readiness = Object.freeze(rawProbes.map((probe, pIdx) => (
-          validateSuiteReadinessProbe(probe, `${sPath}/readiness/${pIdx}`, domainIds, seenProbeIds)
+          validateSuiteReadinessProbe(probe, `${sPath}/readiness/${pIdx}`, domainIds, seenProbeIds, allowLoopbackHttp)
         )));
       }
 
@@ -574,6 +584,7 @@ async function readSafeControlFileUnderRoot(
 ): Promise<{ bytes: Buffer; sha256: string }> {
   const normalized = normalizeRelativePath(relPath, diagPath);
   const segments = normalized.split('/');
+  const parentDirs: Array<{ readonly path: string; readonly dev: number; readonly ino: number }> = [];
   let cursor = resolvedRoot;
   for (let i = 0; i < segments.length; i += 1) {
     cursor = join(cursor, segments[i]!);
@@ -584,8 +595,11 @@ async function readSafeControlFileUnderRoot(
     if (st.isSymbolicLink()) {
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `path "${normalized}" must not traverse or target symbolic links`, diagPath);
     }
-    if (i < segments.length - 1 && !st.isDirectory()) {
-      throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent segment of "${normalized}" is not a directory`, diagPath);
+    if (i < segments.length - 1) {
+      if (!st.isDirectory()) {
+        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent segment of "${normalized}" is not a directory`, diagPath);
+      }
+      parentDirs.push({ path: cursor, dev: st.dev, ino: st.ino });
     }
   }
   const realFull = await realpath(cursor).catch(() => {
@@ -632,6 +646,39 @@ async function readSafeControlFileUnderRoot(
     }
     if (info.size !== before.size || info.size > maxBytes) {
       throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" changed size while loading or exceeds ${maxBytes} bytes`, diagPath);
+    }
+    for (const parent of parentDirs) {
+      const postParent = await lstat(parent.path).catch(() => null);
+      if (
+        postParent === null
+        || postParent.isSymbolicLink()
+        || !postParent.isDirectory()
+        || postParent.dev !== parent.dev
+        || postParent.ino !== parent.ino
+      ) {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `parent directory of "${normalized}" changed identity or became a symbolic link while opening`,
+          diagPath,
+        );
+      }
+    }
+    const postReal = await realpath(cursor).catch(() => null);
+    const postLeaf = await lstat(cursor).catch(() => null);
+    if (
+      postReal === null
+      || postReal !== realFull
+      || !isContainedInRoot(postReal, realRoot)
+      || postLeaf === null
+      || postLeaf.isSymbolicLink()
+      || postLeaf.dev !== info.dev
+      || postLeaf.ino !== info.ino
+    ) {
+      throw new TaskpackError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `file "${normalized}" escaped repository root or changed identity during open`,
+        diagPath,
+      );
     }
     const buf = Buffer.alloc(info.size + 1);
     let size = 0;
@@ -736,10 +783,12 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     TASKPACK_SUITE_MANIFEST_BYTES,
     '/',
   );
+  const effectiveAllowLoopbackHttp = options.allowLoopbackHttp ?? (policyProfile === 'local');
   const suiteManifest = parseTaskpackSuiteManifest(suiteBytes, {
     suitePath,
     controlRoot: suiteControlRoot,
     format: suiteExt === '.json' ? 'json' : 'yaml',
+    allowLoopbackHttp: effectiveAllowLoopbackHttp,
   });
 
   const githubSiblings = policyProfile === 'github'
@@ -1087,6 +1136,58 @@ function extractByRfc6901Pointer(root: unknown, pointer: string): string | undef
   const trimmed = current.trim();
   if (trimmed.length === 0 || trimmed.length > 256) return undefined;
   return trimmed;
+}
+
+async function readOptionalGitBlobBytes(
+  repositoryRoot: string,
+  resolvedSha: string,
+  relPath: string,
+  maxBytes: number,
+  timeoutMs: number,
+): Promise<Buffer | null> {
+  const normalizedPath = normalizeRelativePath(relPath, '/baseline/path');
+  const gitBin = resolveGitExecutable();
+  const cleanEnv = buildCleanGitEnv();
+  const { stdout: lsTreeOut } = await execFileAsync(
+    gitBin,
+    ['-C', repositoryRoot, '-c', 'core.hooksPath=/dev/null', 'ls-tree', '-z', resolvedSha, '--', normalizedPath],
+    { env: cleanEnv, timeout: timeoutMs, maxBuffer: 65_536, encoding: 'utf8' },
+  );
+  const rows = lsTreeOut.split('\0').filter(Boolean);
+  if (rows.length === 0) return null;
+  if (rows.length !== 1) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `unexpected git ls-tree entry count for "${normalizedPath}"`);
+  }
+  const match = /^([0-9]{6}) ([a-z]+) ([0-9a-f]{40})\t(.+)$/s.exec(rows[0]!);
+  if (match === null || match[4] !== normalizedPath) {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `unexpected git ls-tree entry for "${normalizedPath}"`);
+  }
+  const mode = match[1]!;
+  const objType = match[2]!;
+  if (mode === '120000' || objType !== 'blob') {
+    throw new TaskpackError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `baseline path "${normalizedPath}" in commit ${resolvedSha} must be a regular blob (found mode=${mode} type=${objType})`,
+    );
+  }
+  const { stdout: sizeOut } = await execFileAsync(
+    gitBin,
+    ['-C', repositoryRoot, '-c', 'core.hooksPath=/dev/null', 'cat-file', '-s', `${resolvedSha}:${normalizedPath}`],
+    { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+  );
+  const byteSize = Number.parseInt(sizeOut.trim(), 10);
+  if (!Number.isSafeInteger(byteSize) || byteSize < 0 || byteSize > maxBytes) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `baseline blob "${normalizedPath}" (${byteSize} bytes) exceeds ${maxBytes} bytes`,
+    );
+  }
+  const { stdout: blobBuf } = await execFileAsync(
+    gitBin,
+    ['-C', repositoryRoot, '-c', 'core.hooksPath=/dev/null', 'cat-file', '-p', `${resolvedSha}:${normalizedPath}`],
+    { env: cleanEnv, timeout: timeoutMs, maxBuffer: maxBytes + 1_024, encoding: 'buffer' },
+  );
+  return blobBuf;
 }
 
 /**
@@ -1443,10 +1544,11 @@ async function runDefaultReadinessProbe(
     readonly githubHeaders: Readonly<Record<string, string>>;
     readonly fetchImpl: typeof globalThis.fetch;
     readonly timeoutMs: number;
+    readonly allowLoopbackHttp: boolean;
   },
 ): Promise<SuiteReadinessProbeRunnerResult> {
   const { probe, expectedVersion, repositoryRoot, scrubber } = input;
-  const { apiBaseUrl, githubHeaders, fetchImpl, timeoutMs } = context;
+  const { apiBaseUrl, githubHeaders, fetchImpl, timeoutMs, allowLoopbackHttp } = context;
 
   try {
     switch (probe.kind) {
@@ -1546,6 +1648,16 @@ async function runDefaultReadinessProbe(
       }
 
       case 'http-json': {
+        try {
+          validateSuiteHttpSourceUrl(probe.source, '/readiness/source', allowLoopbackHttp);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return {
+            disposition: 'blocked',
+            reason: 'probe_url_disallowed',
+            detail: scrubber.scrub(detail),
+          };
+        }
         const fetched = await fetchProbeJsonPage(
           `http-json "${probe.source}"`,
           probe.source,
@@ -1841,6 +1953,11 @@ async function runDefaultReadinessProbe(
             ['-C', gitSource, 'rev-parse', '--git-dir'],
             { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
           );
+          const isGitProcessFailure = (error: unknown): boolean => {
+            if (error === null || typeof error !== 'object') return true;
+            const err = error as { readonly killed?: unknown; readonly signal?: unknown; readonly code?: unknown };
+            return err.killed === true || (err.signal !== null && err.signal !== undefined) || typeof err.code !== 'number';
+          };
           const targetRef = probe.ref ?? 'HEAD';
           let refSha: string;
           try {
@@ -1850,18 +1967,26 @@ async function runDefaultReadinessProbe(
               { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
             );
             refSha = stdout.trim().toLowerCase();
-          } catch {
+          } catch (error) {
+            if (isGitProcessFailure(error)) throw error;
             return {
               disposition: 'deferred',
               reason: 'stage_not_ready',
               detail: scrubber.scrub(`git ref "${targetRef}" is not yet available in "${probe.source}"`),
             };
           }
-          const commitExists = await execFileAsync(
-            gitBin,
-            ['-C', gitSource, 'cat-file', '-e', `${expectedVersion}^{commit}`],
-            { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
-          ).then(() => true, () => false);
+          let commitExists = true;
+          try {
+            await execFileAsync(
+              gitBin,
+              ['-C', gitSource, 'cat-file', '-e', `${expectedVersion}^{commit}`],
+              { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+            );
+          } catch (error) {
+            const exitCode = (error as { code?: unknown }).code;
+            if (isGitProcessFailure(error) || (exitCode !== 1 && exitCode !== 128)) throw error;
+            commitExists = false;
+          }
           if (!commitExists) {
             return {
               disposition: 'deferred',
@@ -1870,11 +1995,17 @@ async function runDefaultReadinessProbe(
               detail: scrubber.scrub(`commit "${expectedVersion}" is absent from "${probe.source}"`),
             };
           }
-          const isAncestor = await execFileAsync(
-            gitBin,
-            ['-C', gitSource, 'merge-base', '--is-ancestor', expectedVersion, refSha],
-            { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
-          ).then(() => true, () => false);
+          let isAncestor = true;
+          try {
+            await execFileAsync(
+              gitBin,
+              ['-C', gitSource, 'merge-base', '--is-ancestor', expectedVersion, refSha],
+              { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+            );
+          } catch (error) {
+            if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
+            isAncestor = false;
+          }
           if (!isAncestor) {
             return {
               disposition: 'deferred',
@@ -2184,7 +2315,16 @@ function extractCommentMetadataFromPayload(payload: unknown): ExtractedCommentEv
   const headObj = prObj !== undefined && isPlainRecord(prObj['head']) ? prObj['head'] : undefined;
   const baseObj = prObj !== undefined && isPlainRecord(prObj['base']) ? prObj['base'] : undefined;
   const headRepo = headObj !== undefined && isPlainRecord(headObj['repo']) ? headObj['repo'] : undefined;
+  const baseRepo = baseObj !== undefined && isPlainRecord(baseObj['repo']) ? baseObj['repo'] : undefined;
   const prHeadRepoNull = headObj !== undefined && headObj['repo'] === null;
+  let prHeadRepoFork: boolean | undefined;
+  if (typeof headRepo?.['fork'] === 'boolean') {
+    const sameForkRepo = baseRepo !== undefined
+      && baseRepo['fork'] === true
+      && typeof headRepo['id'] === 'number'
+      && headRepo['id'] === baseRepo['id'];
+    prHeadRepoFork = sameForkRepo ? false : headRepo['fork'];
+  }
 
   let prNumber: number | undefined;
   if (typeof prObj?.['number'] === 'number' && Number.isSafeInteger(prObj['number']) && prObj['number'] > 0) {
@@ -2203,7 +2343,7 @@ function extractCommentMetadataFromPayload(payload: unknown): ExtractedCommentEv
     ...(typeof baseObj?.['ref'] === 'string' ? { prBaseRef: baseObj['ref'] } : {}),
     ...(typeof headObj?.['sha'] === 'string' ? { prHeadSha: headObj['sha'] } : {}),
     ...(typeof headRepo?.['full_name'] === 'string' ? { prHeadRepoFullName: headRepo['full_name'] } : {}),
-    ...(typeof headRepo?.['fork'] === 'boolean' ? { prHeadRepoFork: headRepo['fork'] } : {}),
+    ...(prHeadRepoFork !== undefined ? { prHeadRepoFork } : {}),
     ...(prHeadRepoNull ? { prHeadRepoNull: true } : {}),
     ...(prNumber !== undefined ? { prNumber } : {}),
     ...(login !== undefined ? { actorLogin: login } : {}),
@@ -2243,7 +2383,13 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
     scrubber,
   );
 
-  const suite = options.loadedSuite ?? await loadTaskpackSuite(options);
+  const effectivePolicyProfile: PolicyProfile = options.policyProfile ?? options.hostPolicy?.policyProfile ?? 'local';
+  const effectiveAllowLoopbackHttp = options.allowLoopbackHttp ?? (effectivePolicyProfile === 'local');
+  const suite = options.loadedSuite ?? await loadTaskpackSuite({
+    ...options,
+    policyProfile: effectivePolicyProfile,
+    allowLoopbackHttp: effectiveAllowLoopbackHttp,
+  });
   const validDomainIds = Object.freeze(suite.domains.map(d => d.id));
   const domainById = new Map<string, LoadedTaskpackSuiteDomain>(suite.domains.map(d => [d.id, d]));
   const stageById = new Map<string, TaskpackSuiteStageDeclaration>(suite.manifest.spec.stages.map(s => [s.id, s]));
@@ -2352,6 +2498,28 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
       }
       if (options.discoverUpstreamUpdates === true && domain.manifest.spec.upstreams.length > 0) {
         try {
+          let gitBaselines: ReadonlyMap<string, string> | undefined;
+          const proposal = domain.manifest.spec.proposal;
+          const baselineRelPath = proposal !== undefined
+            ? (proposal.path.toLowerCase().endsWith('.json') ? proposal.path : null)
+            : 'package.json';
+          if (baselineRelPath !== null) {
+            const rawBlob = await readOptionalGitBlobBytes(
+              options.repositoryRoot,
+              resolvedBaseRevision,
+              baselineRelPath,
+              MAX_SUITE_STAGE_VERSION_BLOB_BYTES,
+              timeoutMs,
+            );
+            if (rawBlob !== null) {
+              const parsedDoc = JSON.parse(rawBlob.toString('utf8')) as unknown;
+              gitBaselines = extractBaselineVersionsFromDocument(
+                domain.manifest,
+                parsedDoc,
+                proposal !== undefined ? 'proposal' : 'package-json',
+              );
+            }
+          }
           const discovered = await discoverTaskpackUpstreamsV2(domain.manifest, {
             repositoryRoot: options.repositoryRoot,
             apiBaseUrl,
@@ -2361,6 +2529,8 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
             scrubber,
             env: runtimeEnv,
             timeoutMs,
+            baselineVersions: gitBaselines,
+            skipWorkingTreeBaselines: true,
           });
           if (discovered.disposition === 'blocked') {
             return { status: 'blocked', detail: scrubber.scrub(discovered.reason) };
@@ -2446,11 +2616,20 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
       }
 
       const collectedProbes: SuiteStageProbeEvaluation[] = [];
+      const seenProbeKeys = new Set<string>();
+      const pushUniqueProbe = (entry: SuiteStageProbeEvaluation): void => {
+        const key = `${entry.stageId}\0${entry.probeIndex}`;
+        if (seenProbeKeys.has(key)) return;
+        seenProbeKeys.add(key);
+        collectedProbes.push(entry);
+      };
       let upstreamDeferredDetail: string | undefined;
 
       for (const parentStageId of stage.dependsOn) {
         const parentOutcome = await evaluateStage(parentStageId);
-        collectedProbes.push(...parentOutcome.probes);
+        for (const p of parentOutcome.probes) {
+          pushUniqueProbe(p);
+        }
         if (parentOutcome.disposition === 'blocked') {
           return {
             disposition: 'blocked',
@@ -2509,7 +2688,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
             expectedVersion = probe.tagPrefix !== undefined ? `${probe.tagPrefix}${rawVersion}` : rawVersion;
           } catch (error) {
             const detail = scrubber.scrub(error instanceof Error ? error.message : String(error));
-            collectedProbes.push(Object.freeze({
+            pushUniqueProbe(Object.freeze({
               stageId,
               probeIndex,
               ...(probe.id !== undefined ? { probeId: probe.id } : {}),
@@ -2544,6 +2723,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
               githubHeaders,
               fetchImpl,
               timeoutMs,
+              allowLoopbackHttp: effectiveAllowLoopbackHttp,
             });
         } catch (error) {
           const detail = scrubber.scrub(error instanceof Error ? error.message : String(error));
@@ -2558,7 +2738,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         const scrubbedDetail = outcome.detail !== undefined ? scrubber.scrub(outcome.detail) : undefined;
         const scrubbedObserved = outcome.observedVersion !== undefined ? scrubber.scrub(outcome.observedVersion) : undefined;
 
-        collectedProbes.push(Object.freeze({
+        pushUniqueProbe(Object.freeze({
           stageId,
           probeIndex,
           ...(probe.id !== undefined ? { probeId: probe.id } : {}),
@@ -2801,12 +2981,19 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         const head = isPlainRecord(prData['head']) ? prData['head'] : undefined;
         const base = isPlainRecord(prData['base']) ? prData['base'] : undefined;
         const headRepo = head !== undefined && isPlainRecord(head['repo']) ? head['repo'] : undefined;
+        const baseRepo = base !== undefined && isPlainRecord(base['repo']) ? base['repo'] : undefined;
         if (head !== undefined && head['repo'] === null) prHeadRepoNull = true;
         if (typeof head?.['ref'] === 'string') prHeadRef ??= head['ref'];
         if (typeof base?.['ref'] === 'string') prBaseRef ??= base['ref'];
         if (typeof head?.['sha'] === 'string') prHeadSha ??= head['sha'];
         if (typeof headRepo?.['full_name'] === 'string') prHeadRepoFullName ??= headRepo['full_name'];
-        if (typeof headRepo?.['fork'] === 'boolean') prHeadRepoFork ??= headRepo['fork'];
+        if (typeof headRepo?.['fork'] === 'boolean') {
+          const sameForkRepo = baseRepo !== undefined
+            && baseRepo['fork'] === true
+            && typeof headRepo['id'] === 'number'
+            && headRepo['id'] === baseRepo['id'];
+          prHeadRepoFork ??= sameForkRepo ? false : headRepo['fork'];
+        }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return buildResult({
@@ -2972,6 +3159,29 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
     });
   }
 
+  const payloadSchedule = isPlainRecord(options.eventPayload) && typeof options.eventPayload['schedule'] === 'string'
+    ? options.eventPayload['schedule']
+    : undefined;
+  const scheduleKey = options.schedule ?? payloadSchedule;
+
+  const domainMatchesTriggerAndSchedule = (dom: LoadedTaskpackSuiteDomain): boolean => {
+    if (!dom.enabled) return false;
+    if (
+      effectivePolicyProfile === 'github'
+      && (inferredEventName === 'schedule' || inferredEventName === 'workflow_dispatch' || inferredEventName === 'release')
+      && !isGitHubTriggerDeclared(dom.manifest.spec.triggers, { eventName: inferredEventName })
+    ) {
+      return false;
+    }
+    if (inferredEventName === 'schedule') {
+      if (scheduleKey !== undefined && scheduleKey.length > 0) {
+        return dom.schedules !== undefined && dom.schedules.includes(scheduleKey);
+      }
+      return dom.schedules === undefined || dom.schedules.length > 0;
+    }
+    return true;
+  };
+
   // 2. Direct single-domain selection / matrix cell revalidation
   if (options.domain !== undefined) {
     let directHeadSha: string | undefined;
@@ -2996,6 +3206,42 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         code: 'TASKPACK_MANIFEST_INVALID',
       });
     }
+    if (!selected.enabled) {
+      const cell = await evaluateDomainCell(selected, directHeadSha);
+      return buildResult({
+        disposition: cell.disposition,
+        reason: cell.reason,
+        detail: cell.detail,
+        code: cell.code,
+        cells: [cell],
+      });
+    }
+    if (!domainMatchesTriggerAndSchedule(selected)) {
+      const detail = inferredEventName === 'schedule' && scheduleKey !== undefined && scheduleKey.length > 0
+        ? `domain "${selected.id}" does not match schedule "${scheduleKey}"`
+        : `domain "${selected.id}" does not enable trigger "${inferredEventName}"`;
+      const cell: SuiteDomainResolution = Object.freeze({
+        domainId: selected.id,
+        taskpackPath: selected.taskpackPath,
+        taskpackName: selected.manifest.metadata.name,
+        manifestSha256: selected.manifestSha256,
+        controlRoot: selected.controlRoot,
+        baseRevision: resolvedBaseRevision,
+        ...(directHeadSha !== undefined ? { headSha: directHeadSha } : {}),
+        ...(selected.stage !== undefined ? { stage: selected.stage } : {}),
+        ...(selected.matrix !== undefined ? { matrix: selected.matrix } : {}),
+        protectedPaths: selected.protectedPaths,
+        disposition: 'deferred',
+        reason: 'no_matching_domains',
+        detail,
+      });
+      return buildResult({
+        disposition: 'deferred',
+        reason: 'no_matching_domains',
+        detail,
+        cells: [cell],
+      });
+    }
     const cell = await evaluateDomainCell(selected, directHeadSha);
     return buildResult({
       disposition: cell.disposition,
@@ -3007,21 +3253,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
   }
 
   // 3. Schedule & workflow_dispatch multi-domain resolution
-  const payloadSchedule = isPlainRecord(options.eventPayload) && typeof options.eventPayload['schedule'] === 'string'
-    ? options.eventPayload['schedule']
-    : undefined;
-  const scheduleKey = options.schedule ?? payloadSchedule;
-
-  const candidateDomains = suite.domains.filter(dom => {
-    if (!dom.enabled) return false;
-    if (inferredEventName === 'schedule') {
-      if (scheduleKey !== undefined && scheduleKey.length > 0) {
-        return dom.schedules !== undefined && dom.schedules.includes(scheduleKey);
-      }
-      return dom.schedules === undefined || dom.schedules.length > 0;
-    }
-    return true;
-  });
+  const candidateDomains = suite.domains.filter(domainMatchesTriggerAndSchedule);
 
   if (candidateDomains.length === 0) {
     return buildResult({

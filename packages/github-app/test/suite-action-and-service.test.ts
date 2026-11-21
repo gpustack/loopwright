@@ -2103,4 +2103,198 @@ describe('@loopwright/github-app suite Action routing, PR ownership lookup, mult
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('suppresses redelivery after reconcile_required, preserves partial fan-out failures, settles coalesced deliveries, resolves branch SHA via API, and enforces stage readiness on App webhook intake', async () => {
+    const rawWork = await mkdtemp(join(tmpdir(), 'lw-service-r1-guards-'));
+    const work = await realpath(rawWork);
+    const repo = join(work, 'repo');
+
+    const pinnedMainSha = 'a'.repeat(40);
+    let stageAPrOpen = true;
+    const broker = new InstallationTokenBroker({
+      appId: 101,
+      privateKeyPem: PRIVATE_KEY_PEM,
+      nowSeconds: () => 1_750_000_000,
+      transport: {
+        createInstallationToken: async () => ({
+          token: 'ghs_r1_guard_token_1234567890',
+          expiresAtMs: 1_750_003_600_000,
+        }),
+      },
+    });
+    const githubApi = await startHttpServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (url.pathname === '/repos/acme/mono/git/ref/heads/main' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ref: 'refs/heads/main', object: { sha: pinnedMainSha } }));
+        return;
+      }
+      if (url.pathname === '/repos/acme/mono/pulls' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          stageAPrOpen
+            ? JSON.stringify([{
+              number: 19,
+              title: 'chore(docs): sync',
+              html_url: 'https://github.com/acme/mono/pull/19',
+              head: { ref: 'loopwright/docs/main', sha: 'b'.repeat(40), repo: { full_name: 'acme/mono', fork: false } },
+              base: { ref: 'main', sha: pinnedMainSha },
+            }])
+            : '[]',
+        );
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    let cpHandle: Awaited<ReturnType<typeof startGitHubAppControlPlane>> | undefined;
+    try {
+      await mkdir(join(repo, '.loopwright', 'docs'), { recursive: true });
+      await mkdir(join(repo, '.loopwright', 'sdk'), { recursive: true });
+      await writeFile(
+        join(repo, '.loopwright', 'docs', 'taskpack.yaml'),
+        makeDomainTaskpackYaml({
+          name: 'docs-sync',
+          controlDir: '.loopwright/docs',
+          writable: ['docs/**'],
+          headBranchPrefix: 'loopwright/docs/',
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(repo, '.loopwright', 'sdk', 'taskpack.yaml'),
+        makeDomainTaskpackYaml({
+          name: 'sdk-sync',
+          controlDir: '.loopwright/sdk',
+          writable: ['packages/sdk/**'],
+          headBranchPrefix: 'loopwright/sdk/',
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(repo, '.loopwright', 'suite.yaml'),
+        serializePrettyYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'TaskpackSuite',
+          metadata: { name: 'r1-guard-suite' },
+          spec: {
+            stages: [
+              { id: 'stage-a' },
+              { id: 'stage-b', dependsOn: ['stage-a'] },
+            ],
+            domains: [
+              { id: 'docs', taskpack: '.loopwright/docs/taskpack.yaml', stage: 'stage-a', schedules: ['nightly'] },
+              { id: 'sdk', taskpack: '.loopwright/sdk/taskpack.yaml', stage: 'stage-b', schedules: ['nightly'] },
+            ],
+          },
+        }),
+        'utf8',
+      );
+
+      cpHandle = await startGitHubAppControlPlane({
+        port: 0,
+        webhookSecret: WEBHOOK_SECRET,
+        suitePath: '.loopwright/suite.yaml',
+        repositoryRoot: repo,
+        tokenBroker: broker,
+        apiBaseUrl: githubApi.url,
+        maxPendingPerGroup: 1,
+      });
+
+      const postWebhook = async (deliveryId: string, payload: Record<string, unknown>) => {
+        const raw = JSON.stringify(payload);
+        const res = await fetch(`${cpHandle!.url}/webhooks/github`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-github-event': 'schedule',
+            'x-github-delivery': deliveryId,
+            'x-hub-signature-256': signWebhook(raw),
+          },
+          body: raw,
+        });
+        return { status: res.status, body: await res.json() as Record<string, unknown> };
+      };
+      const schedPayload = {
+        schedule: 'nightly',
+        installation: { id: 55 },
+        repository: { id: 77, full_name: 'acme/mono' },
+      };
+
+      // 1. Stage B is deferred while Stage A has an open PR, AND Stage A pins full 40-hex commit SHA from GitHub API
+      const wh1 = await postWebhook('delivery-r1-staged-1', schedPayload);
+      assert.equal(wh1.status, 202);
+      const domains1 = wh1.body['domains'] as Array<{ domainId: string; manifestDigest: string; queueItemId: string }>;
+      assert.deepEqual(domains1.map(d => d.domainId), ['docs']);
+      const docsTenant: TenantIdentity = { installationId: 55, repositoryId: 77, repositoryFullName: 'acme/mono', taskpackId: 'docs-sync' };
+      const docsQueued = cpHandle.queue.inspectTenantQueue(docsTenant).items[0]!;
+      assert.equal(docsQueued.baseRevision, pinnedMainSha);
+
+      // 2. Coalesced second delivery settles when the shared queue item settles as reconcile_required, and redelivery is suppressed
+      const whCoalesced = await postWebhook('delivery-r1-staged-2', schedPayload);
+      assert.equal(whCoalesced.status, 202);
+      assert.equal(whCoalesced.body['coalesced'], true);
+
+      const leaseRes = await fetch(`${cpHandle.url}/tenants/55/77/docs-sync/lease`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repositoryFullName: 'acme/mono', workerId: 'w1', manifestDigest: domains1[0]!.manifestDigest }),
+      });
+      const leaseBody = await leaseRes.json() as { lease: { queueItemId: string; leaseEpoch: number } };
+      const settleRes = await fetch(`${cpHandle.url}/tenants/55/77/docs-sync/settle`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          repositoryFullName: 'acme/mono',
+          workerId: 'w1',
+          queueItemId: leaseBody.lease.queueItemId,
+          leaseEpoch: leaseBody.lease.leaseEpoch,
+          outcome: 'reconcile_required',
+        }),
+      });
+      assert.equal(settleRes.status, 200);
+      assert.equal(cpHandle.deliveryStore.getDelivery('delivery-r1-staged-1')?.state, 'succeeded');
+      assert.equal(cpHandle.deliveryStore.getDelivery('delivery-r1-staged-2')?.state, 'succeeded');
+
+      // Redelivering delivery-r1-staged-1 must NOT enqueue a new queue item!
+      const replayAfterReconcile = await postWebhook('delivery-r1-staged-1', schedPayload);
+      assert.equal(replayAfterReconcile.status, 200);
+      assert.equal(replayAfterReconcile.body['kind'], 'duplicate');
+      assert.equal(cpHandle.queue.inspectTenantQueue(docsTenant).items.length, 1);
+
+      // 3. Stage A PR closes -> both docs and sdk are eligible, and partial QUEUE_CAPACITY_EXCEEDED failure on sdk does NOT mark delivery succeeded when docs completes
+      stageAPrOpen = false;
+      const sdkTenant: TenantIdentity = { installationId: 55, repositoryId: 77, repositoryFullName: 'acme/mono', taskpackId: 'sdk-sync' };
+      // Fill sdk queue with a different baseRevision so enqueueing sdk for pinnedMainSha hits QUEUE_CAPACITY_EXCEEDED
+      cpHandle.queue.enqueue(sdkTenant, { kind: 'discover', baseRevision: 'c'.repeat(40), deliveryId: 'delivery-filler-sdk' });
+      const partialRes = await postWebhook('delivery-r1-partial-1', schedPayload);
+      assert.equal(partialRes.status, 429);
+      assert.equal(cpHandle.deliveryStore.getDelivery('delivery-r1-partial-1')?.state, 'failed');
+
+      // Lease & complete the already-admitted docs item; delivery must remain failed because sdk was never admitted!
+      const leaseDocs2 = await fetch(`${cpHandle.url}/tenants/55/77/docs-sync/lease`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ repositoryFullName: 'acme/mono', workerId: 'w2', manifestDigest: domains1[0]!.manifestDigest }),
+      });
+      const leaseDocs2Body = await leaseDocs2.json() as { lease: { queueItemId: string; leaseEpoch: number } };
+      await fetch(`${cpHandle.url}/tenants/55/77/docs-sync/settle`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          repositoryFullName: 'acme/mono',
+          workerId: 'w2',
+          queueItemId: leaseDocs2Body.lease.queueItemId,
+          leaseEpoch: leaseDocs2Body.lease.leaseEpoch,
+          outcome: 'completed',
+        }),
+      });
+      assert.equal(cpHandle.deliveryStore.getDelivery('delivery-r1-partial-1')?.state, 'failed');
+    } finally {
+      await cpHandle?.close();
+      await githubApi.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
 });

@@ -7155,7 +7155,7 @@ async function readAndValidateStagedTaskpackSecrets(
   }
   let watchedPaths: readonly string[] | undefined;
   if (parsed['watchedPaths'] !== undefined) {
-    if (!Array.isArray(parsed['watchedPaths']) || parsed['watchedPaths'].length > 256) {
+    if (!Array.isArray(parsed['watchedPaths']) || parsed['watchedPaths'].length > LIMITS.patterns) {
       throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack watchedPaths is invalid');
     }
     const cleanWatchedPaths: string[] = [];

@@ -90,6 +90,7 @@ export interface DiscoverTaskpackUpstreamsOptions {
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly timeoutMs?: number | undefined;
   readonly baselineVersions?: Readonly<Record<string, string>> | ReadonlyMap<string, string> | undefined;
+  readonly skipWorkingTreeBaselines?: boolean | undefined;
   readonly includeMetadata?: boolean | undefined;
 }
 
@@ -1690,6 +1691,16 @@ async function readOptionalLocalJsonFile(
   }
 }
 
+export function extractBaselineVersionsFromDocument(
+  manifest: TaskpackManifest | TaskpackV2Manifest,
+  parsed: unknown,
+  sourceKind: 'proposal' | 'package-json',
+): ReadonlyMap<string, string> {
+  return sourceKind === 'proposal'
+    ? readBaselineVersions(parsed, manifest.spec.upstreams)
+    : readPackageJsonBaselineVersions(parsed, manifest.spec.upstreams);
+}
+
 /**
  * Load baseline upstream versions from `spec.proposal.path` (or `package.json` when `spec.proposal`
  * is omitted), merged with any explicit `baselineVersions` overrides.
@@ -1748,7 +1759,11 @@ export async function discoverTaskpackUpstreams(
       ? attachUpstreamContext(parsed, manifest.spec.upstreams)
       : parsed;
     const baselines = manifest.spec.upstreamGroups !== undefined && manifest.spec.upstreamGroups.length > 0
-      ? await loadRepositoryBaselineVersions(manifest, options.repositoryRoot, options.baselineVersions)
+      ? await loadRepositoryBaselineVersions(
+        manifest,
+        options.skipWorkingTreeBaselines === true ? undefined : options.repositoryRoot,
+        options.baselineVersions,
+      )
       : undefined;
     return applyUpstreamGroups(withContext, manifest.spec.upstreamGroups, baselines);
   }
@@ -1767,7 +1782,11 @@ export async function discoverTaskpackUpstreams(
     scrubber,
   );
 
-  const baselines = await loadRepositoryBaselineVersions(manifest, options.repositoryRoot, options.baselineVersions);
+  const baselines = await loadRepositoryBaselineVersions(
+    manifest,
+    options.skipWorkingTreeBaselines === true ? undefined : options.repositoryRoot,
+    options.baselineVersions,
+  );
 
   const includeMetadata = options.includeMetadata === true;
   const records: UpstreamAcquisitionRecord[] = [];

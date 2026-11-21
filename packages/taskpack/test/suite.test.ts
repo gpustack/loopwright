@@ -1705,7 +1705,7 @@ describe('suite.ts: schedule filtering, matrix binding, and pull-request comment
       assert.equal(badBaseRes.disposition, 'blocked');
       assert.equal(badBaseRes.reason, 'invalid_base_revision');
 
-      const pendingMapSuite = parseTaskpackSuiteManifest([
+      const pendingMapSuiteYaml = [
         'apiVersion: loopwright.dev/v1alpha1',
         'kind: TaskpackSuite',
         'metadata:',
@@ -1734,7 +1734,12 @@ describe('suite.ts: schedule filtering, matrix binding, and pull-request comment
         '          ref: refs/heads/main',
         '    - id: s2',
         '      dependsOn: [s1]',
-      ].join('\n') + '\n');
+      ].join('\n') + '\n';
+      assert.throws(
+        () => parseTaskpackSuiteManifest(pendingMapSuiteYaml),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
+      const pendingMapSuite = parseTaskpackSuiteManifest(pendingMapSuiteYaml, { allowLoopbackHttp: true });
       assert.equal(pendingMapSuite.spec.stages.length, 2);
 
       const loadedProbeModes = {
@@ -2508,6 +2513,120 @@ describe('suite.ts: schedule filtering, matrix binding, and pull-request comment
         loadTaskpackSuite({ repositoryRoot: overflowRoot }),
         (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
       );
+    });
+
+    // Deduplicates transitive probe evidence across a 16-stage complete DAG, enforces direct-domain schedule/trigger filters, and allows same-fork PR comments
+    await withTempDir(async dagRoot => {
+      initGitRepo(dagRoot, 'main');
+      await mkdir(join(dagRoot, '.loopwright', 'leaf'), { recursive: true });
+      await writeFile(
+        join(dagRoot, '.loopwright', 'leaf', 'taskpack.yaml'),
+        domainManifestYaml({
+          name: 'leaf-pack',
+          writable: ['docs/**'],
+          publication: { mode: 'pull_request', targetBranch: 'main', headBranchPrefix: 'loopwright/leaf/', titleTemplate: 'leaf: sync' },
+          triggers: { schedule: true, workflowDispatch: false, commentCommands: ['retry'] },
+        }),
+        'utf8',
+      );
+      const stageLines: string[] = [];
+      for (let i = 0; i < 16; i += 1) {
+        stageLines.push(`    - id: s${i}`);
+        if (i === 0) {
+          stageLines.push('      readiness:');
+          stageLines.push('        - id: root-probe');
+          stageLines.push('          kind: http-json');
+          stageLines.push('          source: https://probes.example.invalid/v.json');
+          stageLines.push('          expectedVersion: "1.0.0"');
+        } else {
+          stageLines.push(`      dependsOn: [${Array.from({ length: i }, (_, j) => `s${j}`).join(', ')}]`);
+        }
+      }
+      await writeFile(
+        join(dagRoot, '.loopwright', 'suite.yaml'),
+        [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: TaskpackSuite',
+          'metadata:',
+          '  name: dense-dag-suite',
+          'spec:',
+          '  domains:',
+          '    - id: leaf',
+          '      taskpack: .loopwright/leaf/taskpack.yaml',
+          '      stage: s15',
+          '      schedules: [nightly]',
+          '  stages:',
+          ...stageLines,
+        ].join('\n') + '\n',
+        'utf8',
+      );
+      git(dagRoot, ['add', '.']);
+      git(dagRoot, ['commit', '-qm', 'init dag suite']);
+      const loadedDag = await loadTaskpackSuite({ repositoryRoot: dagRoot, policyProfile: 'github' });
+      const baseSha = git(dagRoot, ['rev-parse', 'HEAD']);
+      const dagRes = await resolveTaskpackSuite({
+        repositoryRoot: dagRoot,
+        loadedSuite: loadedDag,
+        policyProfile: 'github',
+        baseRevision: baseSha,
+        eventName: 'schedule',
+        schedule: 'nightly',
+        allowOfflineStagePrCheck: true,
+        fetchImpl: async () => new Response(JSON.stringify({ version: '1.0.0' }), { status: 200 }),
+      });
+      assert.equal(dagRes.disposition, 'eligible');
+      assert.equal(dagRes.cells[0]?.probes?.length, 1, 'root probe must be deduplicated across 16-stage complete DAG');
+
+      // Direct domain selection respects schedule filter, and GitHub profile respects taskpack triggers
+      const wrongScheduleDirect = await resolveTaskpackSuite({
+        repositoryRoot: dagRoot,
+        loadedSuite: loadedDag,
+        policyProfile: 'github',
+        baseRevision: baseSha,
+        domain: 'leaf',
+        eventName: 'schedule',
+        schedule: 'hourly',
+        allowOfflineStagePrCheck: true,
+      });
+      assert.equal(wrongScheduleDirect.disposition, 'deferred');
+      assert.equal(wrongScheduleDirect.reason, 'no_matching_domains');
+
+      const disabledWorkflowDispatch = await resolveTaskpackSuite({
+        repositoryRoot: dagRoot,
+        loadedSuite: loadedDag,
+        policyProfile: 'github',
+        baseRevision: baseSha,
+        eventName: 'workflow_dispatch',
+        allowOfflineStagePrCheck: true,
+      });
+      assert.equal(disabledWorkflowDispatch.disposition, 'deferred');
+      assert.equal(disabledWorkflowDispatch.reason, 'no_matching_domains');
+
+      // Same-fork PR comment (head.repo.id === base.repo.id && both fork: true) is accepted
+      const sameForkRes = await resolveTaskpackSuite({
+        repositoryRoot: dagRoot,
+        loadedSuite: loadedDag,
+        policyProfile: 'github',
+        baseRevision: baseSha,
+        repositoryFullName: 'fork-org/mono',
+        eventName: 'pull_request_review',
+        eventPayload: {
+          action: 'submitted',
+          review: {
+            body: '/loopwright retry',
+            author_association: 'OWNER',
+            user: { login: 'maintainer', type: 'User' },
+          },
+          pull_request: {
+            number: 9,
+            base: { ref: 'main', sha: baseSha, repo: { id: 505, full_name: 'fork-org/mono', fork: true } },
+            head: { ref: 'loopwright/leaf/main', sha: baseSha, repo: { id: 505, full_name: 'fork-org/mono', fork: true } },
+          },
+        },
+        allowOfflineStagePrCheck: true,
+        fetchImpl: async () => new Response(JSON.stringify({ version: '1.0.0' }), { status: 200 }),
+      });
+      assert.equal(sameForkRes.disposition, 'eligible');
     });
   });
 });

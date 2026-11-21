@@ -1215,9 +1215,15 @@ export class Cycle {
       };
     }
     if (fromNode?.kind === 'check') {
+      const compiledSlot = this.context.plan.verifierSlots.find(s => s.handler.id === fromNode.handler.id)?.id;
       const receipt = [...(progress?.verifierReceipts ?? [])]
         .reverse()
-        .find(r => r.slot === 'node:' + selector.fromStep && r.generation === this.generation && r.output !== null);
+        .find(
+          r =>
+            (r.slot === compiledSlot || r.slot === 'node:' + selector.fromStep)
+            && r.generation === this.generation
+            && r.output !== null,
+        );
       if (receipt?.output) {
         if (receipt.output.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', `${diagPath}/source`, 'execution');
         const bytes = await this.context.artifacts.read(receipt.output, LIMITS.handoffSourceBytes);

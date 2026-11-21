@@ -442,10 +442,17 @@ async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
       scrubber,
       env: suiteEnv,
     });
+    const scrubbedComment = resolution.comment !== undefined
+      ? Object.freeze({
+        ...resolution.comment,
+        guidance: scrubber.scrub(resolution.comment.guidance),
+      })
+      : undefined;
     const payload = {
       version: 1,
       action: 'resolve',
       ...resolution,
+      ...(scrubbedComment !== undefined ? { comment: scrubbedComment } : {}),
     };
     const cellSummary = resolution.cells.map(cell => `${cell.domainId}:${cell.disposition}:${cell.reason}`).join(', ');
     const detailSuffix = resolution.detail !== undefined ? ` detail=${resolution.detail}` : '';

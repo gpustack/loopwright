@@ -442,7 +442,19 @@ function addQuantityToTokens(quantity: Quantity | undefined): number {
   return quantity.value;
 }
 
+function isProvablyUnexecutedRequest(row: RequestRecord): boolean {
+  return (
+    row.state === 'released'
+    && row.dispatch === null
+    && row.initialObservation === null
+    && row.resolution === null
+  );
+}
+
 function addRequestUsageToBucket(bucket: MutableBucket, row: RequestRecord): void {
+  if (isProvablyUnexecutedRequest(row)) {
+    return;
+  }
   bucket.modelCalls += 1;
   const obs = row.resolution?.kind === 'terminal_usage' ? row.resolution.observation : row.initialObservation;
   const usage = obs?.usage ?? null;
@@ -835,6 +847,7 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
     }
   }
 
+  let fallbackExtraRepeats = 0;
   for (const failure of head?.progress.failures ?? []) {
     const genEntry = ensureGeneration(failure.generation);
     if (genEntry.evaluatedCount === 0 && genEntry.failedItems.length === 0) {
@@ -843,6 +856,9 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
         checkId: 'failure',
         reason: failure.signature.hex.slice(0, 12),
       });
+      if (failure.count > 1) {
+        fallbackExtraRepeats += failure.count - 1;
+      }
     }
   }
 
@@ -855,7 +871,7 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
   }
 
   let checkOscillations = 0;
-  let repeatedFailureSignatures = 0;
+  let repeatedFailureSignatures = fallbackExtraRepeats;
   const lastSeenSigIndex = new Map<string, number>();
 
   for (let i = 0; i < failingSignatures.length; i += 1) {
@@ -869,14 +885,6 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
       }
     }
     lastSeenSigIndex.set(entry.signature, i);
-  }
-
-  if (failingSignatures.length === 0) {
-    for (const failure of head?.progress.failures ?? []) {
-      if (failure.count > 1) {
-        repeatedFailureSignatures += failure.count - 1;
-      }
-    }
   }
 
   // 5. Candidate digest cycles (Da -> Db -> Da).

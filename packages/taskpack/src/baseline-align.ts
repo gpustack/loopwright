@@ -1247,6 +1247,7 @@ async function computeWritableCarryDeltaFromMergedTree(options: {
   }
 
   const carryUpdates: CarryDeltaEntry[] = [];
+  let totalCarryBytes = 0;
   for (const [path, mergedEntry] of [...mergedEntries.entries()].sort((a, b) => compareLexical(a[0], b[0]))) {
     if (excludedConflictPaths.has(path)) continue;
     if (mergedEntry.mode !== '100644' && mergedEntry.mode !== '100755') continue;
@@ -1268,12 +1269,22 @@ async function computeWritableCarryDeltaFromMergedTree(options: {
       continue;
     }
 
+    const remainingCarryBytes = MAX_CARRY_BLOB_BYTES - totalCarryBytes;
+    if (remainingCarryBytes <= 0) {
+      throw new TaskpackError(
+        'TASKPACK_SCOPE_VIOLATION',
+        `${BASELINE_CONFLICT_REASON}: synthesized 3-way carry blobs exceed aggregate ${MAX_CARRY_BLOB_BYTES} byte budget`,
+        '/spec/baselineAlignment',
+        { reason: BASELINE_CONFLICT_REASON },
+      );
+    }
     const mergedBytes = await readVerifiedBlobIsolated(
       repositoryRoot,
       mergedEntry.oid,
-      MAX_CARRY_BLOB_BYTES,
+      remainingCarryBytes,
       isolatedEnv,
     );
+    totalCarryBytes += mergedBytes.byteLength;
     const sha256 = createHash('sha256').update(mergedBytes).digest('hex');
     carryUpdates.push(Object.freeze({
       path,
@@ -2157,15 +2168,29 @@ export async function mergeCandidateOverlayWithCarry(
         ? await readVerifiedBlobIsolated(repositoryRoot, srcEntry.oid, MAX_CARRY_BLOB_BYTES, isolatedEnv)
         : Buffer.alloc(0);
 
+      const resolvedMode: '100644' | '100755' =
+        file.mode !== undefined && (srcEntry === undefined || file.mode !== srcEntry.mode)
+          ? file.mode
+          : oursMode;
+
       if (oursBytes.equals(theirsBytes)) {
-        reconciled.push(file);
+        reconciled.push(
+          file.mode === resolvedMode
+            ? file
+            : {
+              kind: 'inline',
+              name: cleanName,
+              mode: resolvedMode,
+              bytes: oursBytes,
+            },
+        );
         continue;
       }
       if (srcEntry !== undefined && ancBytes.equals(theirsBytes)) {
         reconciled.push({
           kind: 'inline',
           name: cleanName,
-          mode: oursMode,
+          mode: resolvedMode,
           bytes: oursBytes,
         });
         continue;

@@ -446,6 +446,22 @@ test('cli-suite: loopwright suite resolve returns exit 0 for eligible/deferred a
     const unknownDomainEnv = JSON.parse(unknownDomainRes.stdout) as { data: { disposition: string; code: string } };
     assert.equal(unknownDomainEnv.data.disposition, 'blocked');
     assert.equal(unknownDomainEnv.data.code, 'TASKPACK_MANIFEST_INVALID');
+
+    // 8. suite resolve --json scrubs registered credentials pasted in comment guidance
+    mode = 'ready';
+    const scrubbedGuidanceRes = await runCliInProcess([
+      'suite', 'resolve', '--suite', fixture.suitePath, '--repo', fixture.repoRoot,
+      '--event', 'issue_comment',
+      '--comment-body', `/loopwright docs revise please avoid leaking ${secretToken}`,
+      '--pr-head-ref', 'loopwright/docs/main',
+      '--pr-base-ref', 'main',
+      '--json',
+    ], env);
+    assert.equal(scrubbedGuidanceRes.status, 0, scrubbedGuidanceRes.stdout + scrubbedGuidanceRes.stderr);
+    assert.equal(scrubbedGuidanceRes.stdout.includes(secretToken), false);
+    assert.equal(scrubbedGuidanceRes.stderr.includes(secretToken), false);
+    const scrubbedGuidanceEnv = JSON.parse(scrubbedGuidanceRes.stdout) as { data: { comment?: { guidance: string } } };
+    assert.match(scrubbedGuidanceEnv.data.comment?.guidance ?? '', /\[scrubbed\]/);
   } finally {
     await fixture.cleanup();
     await new Promise<void>(resolveClosed => server.close(() => resolveClosed()));

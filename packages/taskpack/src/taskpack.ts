@@ -2956,7 +2956,12 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         if (trimmed.length === 0 || seen.has(trimmed)) continue;
         seen.add(trimmed);
         deduped.push(trimmed);
-        if (deduped.length >= 256) return Object.freeze(deduped);
+        if (deduped.length > LIMITS.patterns) {
+          manifestInvalid(
+            `aggregate watchedPaths count exceeds maximum of ${LIMITS.patterns}`,
+            '/spec/upstreams',
+          );
+        }
       }
     }
     return Object.freeze(deduped);

@@ -4,7 +4,9 @@ import { LIMITS } from '@loopwright/core';
 import {
   assertManifestScopeInvariants,
   assertMultiTenantManifestAuthority,
+  COMMIT_SHA_PATTERN,
   DEFAULT_COMMENT_PREFIXES,
+  fetchBoundedText,
   GITHUB_PROTECTED_AUTOMATION_PATHS,
   headBranchPrefixesCollide,
   isGitHubTriggerDeclared,
@@ -13,7 +15,9 @@ import {
   LOCAL_PROTECTED_AUTOMATION_PATHS,
   MULTI_TENANT_HOST_POLICY,
   REPOSITORY_FULL_NAME_PATTERN,
+  resolveGitCommitSha,
   resolveManifestControlRoot,
+  resolveTaskpackSuite,
   validateTaskpackV2Manifest,
   type LoadedTaskpackSuite,
   type LoadedTaskpackSuiteDomain,
@@ -416,27 +420,75 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     readonly queueItemId: string;
   }
 
-  const enqueuedByDeliveryDomain = new Map<string, { readonly item: QueueItem; readonly coalesced: boolean }>();
-  const fanoutEntriesByDeliveryId = new Map<string, TrackedFanoutDomainEntry[]>();
+  interface TrackedFanoutDelivery {
+    readonly expectedDomains: Set<string>;
+    readonly entriesByDomain: Map<string, TrackedFanoutDomainEntry>;
+  }
+
+  interface EnqueuedDomainRecord {
+    readonly item: QueueItem;
+    readonly coalesced: boolean;
+    reconcileRequired: boolean;
+  }
+
+  const enqueuedByDeliveryDomain = new Map<string, EnqueuedDomainRecord>();
+  const fanoutDeliveriesById = new Map<string, TrackedFanoutDelivery>();
+  const deliveryIdsByQueueItemId = new Map<string, Set<string>>();
+
+  const trackQueueItemDelivery = (queueItemId: string, deliveryId: string): void => {
+    let set = deliveryIdsByQueueItemId.get(queueItemId);
+    if (set === undefined) {
+      if (deliveryIdsByQueueItemId.size >= MAX_TRACKED_FANOUT_DELIVERIES * 4) {
+        const oldest = deliveryIdsByQueueItemId.keys().next().value;
+        if (oldest !== undefined) deliveryIdsByQueueItemId.delete(oldest);
+      }
+      set = new Set<string>();
+      deliveryIdsByQueueItemId.set(queueItemId, set);
+    }
+    set.add(deliveryId);
+  };
 
   const evictDeliveryTracking = (deliveryId: string): void => {
-    const tracked = fanoutEntriesByDeliveryId.get(deliveryId);
+    const tracked = fanoutDeliveriesById.get(deliveryId);
     if (tracked !== undefined) {
-      for (const entry of tracked) {
-        enqueuedByDeliveryDomain.delete(`${deliveryId}\0${entry.domainId}`);
+      for (const domainId of tracked.expectedDomains) {
+        const rec = enqueuedByDeliveryDomain.get(`${deliveryId}\0${domainId}`);
+        if (rec !== undefined && !rec.reconcileRequired) {
+          enqueuedByDeliveryDomain.delete(`${deliveryId}\0${domainId}`);
+        }
       }
-      fanoutEntriesByDeliveryId.delete(deliveryId);
+      for (const entry of tracked.entriesByDomain.values()) {
+        const linked = deliveryIdsByQueueItemId.get(entry.queueItemId);
+        if (linked !== undefined) {
+          linked.delete(deliveryId);
+          if (linked.size === 0) deliveryIdsByQueueItemId.delete(entry.queueItemId);
+        }
+      }
+      fanoutDeliveriesById.delete(deliveryId);
     }
   };
 
-  const setBoundedFanoutEntries = (deliveryId: string, entries: TrackedFanoutDomainEntry[]): void => {
-    if (!fanoutEntriesByDeliveryId.has(deliveryId) && fanoutEntriesByDeliveryId.size >= MAX_TRACKED_FANOUT_DELIVERIES) {
-      const oldestKey = fanoutEntriesByDeliveryId.keys().next().value;
-      if (oldestKey !== undefined) {
-        evictDeliveryTracking(oldestKey);
+  const ensureBoundedFanoutDelivery = (
+    deliveryId: string,
+    expectedDomainIds: readonly string[],
+  ): TrackedFanoutDelivery => {
+    let existing = fanoutDeliveriesById.get(deliveryId);
+    if (existing === undefined) {
+      if (fanoutDeliveriesById.size >= MAX_TRACKED_FANOUT_DELIVERIES) {
+        const oldestKey = fanoutDeliveriesById.keys().next().value;
+        if (oldestKey !== undefined) {
+          evictDeliveryTracking(oldestKey);
+        }
       }
+      existing = {
+        expectedDomains: new Set<string>(expectedDomainIds),
+        entriesByDomain: new Map<string, TrackedFanoutDomainEntry>(),
+      };
+      fanoutDeliveriesById.set(deliveryId, existing);
+    } else {
+      for (const id of expectedDomainIds) existing.expectedDomains.add(id);
     }
-    fanoutEntriesByDeliveryId.set(deliveryId, entries);
+    return existing;
   };
 
   const respond = (response: ServerResponse, status: number, payload: unknown, deliverRaw?: { readonly marker: string; readonly value: string }): void => {
@@ -620,6 +672,99 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     let matchedDomains: LoadedTaskpackSuiteDomain[];
     let action: 'discover' | 'revise' | 'status' = 'discover';
     let verifiedPrHeadSha: string | undefined;
+    let verifiedPrBaseSha: string | undefined;
+    let deferredCellsOut: readonly { readonly domainId: string; readonly reason: string; readonly detail?: string | undefined }[] = [];
+
+    const mintReadOnlyToken = async (): Promise<string | undefined> => {
+      if (options.tokenBroker === undefined) return undefined;
+      const lookupTenant: TenantIdentity = {
+        installationId,
+        repositoryId: repository.id,
+        repositoryFullName: repository.fullName,
+        taskpackId: suite.domains[0]!.manifest.metadata.name,
+      };
+      const minted = await options.tokenBroker.mint(lookupTenant, 'read_only');
+      scrubber.register(minted.token);
+      return minted.token;
+    };
+
+    const resolvedBranchShas = new Map<string, string>();
+    const resolveTargetBranchBaseSha = async (targetBranch: string): Promise<
+      | { readonly ok: true; readonly sha: string }
+      | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
+    > => {
+      if (options.baseRevision !== undefined && options.baseRevision.trim().length > 0) {
+        return { ok: true, sha: options.baseRevision.trim() };
+      }
+      if (verifiedPrBaseSha !== undefined && COMMIT_SHA_PATTERN.test(verifiedPrBaseSha)) {
+        return { ok: true, sha: verifiedPrBaseSha.toLowerCase() };
+      }
+      const payloadAfter = typeof payload['after'] === 'string' ? payload['after'].trim() : '';
+      if (COMMIT_SHA_PATTERN.test(payloadAfter)) {
+        return { ok: true, sha: payloadAfter.toLowerCase() };
+      }
+      const cached = resolvedBranchShas.get(targetBranch);
+      if (cached !== undefined) return { ok: true, sha: cached };
+      if (options.tokenBroker !== undefined) {
+        try {
+          const token = await mintReadOnlyToken();
+          const headers: Record<string, string> = {
+            accept: 'application/vnd.github+json',
+            'user-agent': 'loopwright-github-app',
+            ...(token !== undefined ? { authorization: `Bearer ${token}` } : {}),
+          };
+          const refPath = targetBranch.split('/').map(seg => encodeURIComponent(seg)).join('/');
+          const res = await fetchBoundedText(
+            `${effectiveApiBaseUrl}/repos/${repository.fullName}/git/ref/heads/${refPath}`,
+            fetchImpl,
+            headers,
+            15_000,
+            scrubber,
+          );
+          if (!res.ok) {
+            return {
+              ok: false,
+              status: 502,
+              message: scrubber.scrub(`failed to resolve branch "${targetBranch}" head SHA (HTTP ${res.status})`),
+            };
+          }
+          const parsedRef = JSON.parse(res.text) as unknown;
+          const obj = isPlainRecord(parsedRef) && isPlainRecord(parsedRef['object']) ? parsedRef['object'] : null;
+          const sha = typeof obj?.['sha'] === 'string' ? obj['sha'].trim() : '';
+          if (!COMMIT_SHA_PATTERN.test(sha)) {
+            return {
+              ok: false,
+              status: 502,
+              message: scrubber.scrub(`GitHub ref response for "${targetBranch}" did not contain a valid 40-hex commit SHA`),
+            };
+          }
+          const lower = sha.toLowerCase();
+          resolvedBranchShas.set(targetBranch, lower);
+          return { ok: true, sha: lower };
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return {
+            ok: false,
+            status: 502,
+            message: scrubber.scrub(`failed to resolve branch "${targetBranch}" head SHA: ${detail}`),
+          };
+        }
+      }
+      if (options.repositoryRoot !== undefined) {
+        try {
+          const localSha = await resolveGitCommitSha(options.repositoryRoot, targetBranch, 15_000);
+          resolvedBranchShas.set(targetBranch, localSha);
+          return { ok: true, sha: localSha };
+        } catch {
+          // Fall through to fail-closed error below.
+        }
+      }
+      return {
+        ok: false,
+        status: 400,
+        message: scrubber.scrub(`cannot establish pinned baseRevision commit SHA for branch "${targetBranch}"`),
+      };
+    };
 
     if (eventName === 'issue_comment' || eventName === 'pull_request_review') {
       const prCheck = await verifySuiteCommentPullRequest({
@@ -633,18 +778,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         operatorAllowlist: options.operatorAllowlist,
         fetchImpl,
         scrubber,
-        resolveToken: options.tokenBroker !== undefined
-          ? async () => {
-            const lookupTenant: TenantIdentity = {
-              installationId,
-              repositoryId: repository.id,
-              repositoryFullName: repository.fullName,
-              taskpackId: suite.domains[0]!.manifest.metadata.name,
-            };
-            const minted = await options.tokenBroker!.mint(lookupTenant, 'read_only');
-            return minted.token;
-          }
-          : undefined,
+        resolveToken: options.tokenBroker !== undefined ? mintReadOnlyToken : undefined,
       });
 
       if (prCheck.kind === 'ignored' || prCheck.kind === 'missing_attribution') {
@@ -696,6 +830,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       const targetDomain = prCheck.value.domain;
       const parsedCmd = prCheck.value.comment;
       verifiedPrHeadSha = prCheck.value.prHeadSha;
+      verifiedPrBaseSha = prCheck.value.prBaseSha;
 
       if (!targetDomain.enabled) {
         deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
@@ -754,13 +889,111 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           reason: `trigger "${eventName}" matched zero enabled suite domains`,
         });
       }
+
+      // Enforce stage readiness before enqueueing downstream domains when the suite declares stages.
+      const hasDependentStageDomains = suite.manifest.spec.stages.some(st => st.dependsOn.length > 0)
+        && matchedDomains.some(dom => dom.stage !== undefined);
+      if (hasDependentStageDomains) {
+        const primaryBranch = matchedDomains[0]!.manifest.spec.publication.mode === 'pull_request'
+          ? matchedDomains[0]!.manifest.spec.publication.targetBranch
+          : 'main';
+        const baseRes = await resolveTargetBranchBaseSha(primaryBranch);
+        if (!baseRes.ok) {
+          if (baseRes.status === 502) {
+            deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
+          } else {
+            deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+          }
+          return respond(response, baseRes.status, {
+            error: { code: 'ACTION_INPUT_INVALID', message: baseRes.message },
+          });
+        }
+        const parsedApiUrl = new URL(effectiveApiBaseUrl);
+        const allowLoopbackForStage = parsedApiUrl.protocol === 'http:'
+          && (
+            parsedApiUrl.hostname === '127.0.0.1'
+            || parsedApiUrl.hostname === 'localhost'
+            || parsedApiUrl.hostname === '[::1]'
+            || parsedApiUrl.hostname === '::1'
+          );
+        const stageResolution = await resolveTaskpackSuite({
+          repositoryRoot: options.repositoryRoot ?? process.cwd(),
+          loadedSuite: suite,
+          policyProfile: 'github',
+          hostPolicy: MULTI_TENANT_HOST_POLICY,
+          allowLoopbackHttp: allowLoopbackForStage,
+          baseRevision: baseRes.sha,
+          eventName,
+          eventPayload: payload,
+          schedule: scheduleKey,
+          repositoryFullName: repository.fullName,
+          apiBaseUrl: effectiveApiBaseUrl,
+          githubToken: options.tokenBroker !== undefined ? mintReadOnlyToken : undefined,
+          fetchImpl,
+          scrubber,
+          discoverUpstreamUpdates: true,
+        });
+        if (stageResolution.disposition === 'blocked') {
+          const isStaticError = stageResolution.code === 'TASKPACK_SCOPE_VIOLATION'
+            || stageResolution.code === 'TASKPACK_MANIFEST_INVALID';
+          if (isStaticError) {
+            deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+          } else {
+            deliveryStore.markDeliveryState(headerDeliveryId, 'failed', stageResolution.code ?? 'ACTION_INPUT_INVALID');
+          }
+          return respond(response, isStaticError ? 400 : 502, {
+            kind: 'blocked',
+            code: stageResolution.code ?? 'ACTION_INPUT_INVALID',
+            reason: stageResolution.reason,
+            detail: stageResolution.detail,
+            cells: stageResolution.cells,
+          });
+        }
+        const eligibleIds = new Set(stageResolution.eligibleCells.map(c => c.domainId));
+        deferredCellsOut = stageResolution.cells
+          .filter(c => c.disposition === 'deferred')
+          .map(c => ({
+            domainId: c.domainId,
+            reason: c.reason,
+            ...(c.detail !== undefined ? { detail: c.detail } : {}),
+          }));
+        matchedDomains = matchedDomains.filter(dom => eligibleIds.has(dom.id));
+        if (matchedDomains.length === 0) {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+          return respond(response, 200, {
+            kind: 'deferred',
+            reason: stageResolution.reason,
+            detail: stageResolution.detail,
+            deferredDomains: deferredCellsOut,
+          });
+        }
+      }
+    }
+
+    const baseShaByDomain = new Map<string, string>();
+    for (const domain of matchedDomains) {
+      const targetBranch = domain.manifest.spec.publication.mode === 'pull_request'
+        ? domain.manifest.spec.publication.targetBranch
+        : 'main';
+      const baseRes = await resolveTargetBranchBaseSha(targetBranch);
+      if (!baseRes.ok) {
+        if (baseRes.status === 502) {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
+        } else {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        }
+        return respond(response, baseRes.status, {
+          error: { code: 'ACTION_INPUT_INVALID', message: baseRes.message },
+        });
+      }
+      baseShaByDomain.set(domain.id, baseRes.sha);
     }
 
     deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
+    const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
     try {
       const kind = action === 'revise' ? 'revise' : action === 'status' ? 'status' : 'discover';
       const reviseBinding = kind === 'revise' ? readReviseBinding(rawBytes, verifiedPrHeadSha) : null;
-      const fanoutList = fanoutEntriesByDeliveryId.get(entry.deliveryId) ?? [];
       const admitted: Array<{
         readonly domainId: string;
         readonly taskpackId: string;
@@ -784,9 +1017,15 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           const liveItem = queue.inspectTenantQueue(tenant).items.find(
             cand => cand.queueItemId === enqueuedRecord!.item.queueItemId,
           );
+          const isReconcileLocked = enqueuedRecord.reconcileRequired || liveItem?.state === 'reconcile_required';
           if (
-            liveItem === undefined
-            || (liveItem.state !== 'pending' && liveItem.state !== 'leased' && liveItem.state !== 'completed')
+            !isReconcileLocked
+            && (
+              liveItem === undefined
+              || liveItem.state === 'failed'
+              || liveItem.state === 'blocked'
+              || liveItem.state === 'cancelled'
+            )
           ) {
             enqueuedByDeliveryDomain.delete(dedupKey);
             enqueuedRecord = undefined;
@@ -795,7 +1034,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         if (enqueuedRecord === undefined) {
           const outcome = queue.enqueue(tenant, {
             kind,
-            baseRevision: options.baseRevision ?? entry.payloadDigest.slice(0, 12),
+            baseRevision: baseShaByDomain.get(domain.id)!,
             deliveryId: entry.deliveryId,
             payloadDigest: entry.payloadDigest,
             domainId: domain.id,
@@ -810,16 +1049,16 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
               }
               : {}),
           });
-          enqueuedRecord = { item: outcome.item, coalesced: outcome.kind === 'coalesced' };
+          enqueuedRecord = { item: outcome.item, coalesced: outcome.kind === 'coalesced', reconcileRequired: false };
           enqueuedByDeliveryDomain.set(dedupKey, enqueuedRecord);
           queueSummary.enqueued += outcome.kind === 'coalesced' ? 0 : 1;
           queueSummary.coalesced += outcome.kind === 'coalesced' ? 1 : 0;
-          const existingFanoutIdx = fanoutList.findIndex(f => f.domainId === domain.id);
-          if (existingFanoutIdx >= 0) {
-            fanoutList[existingFanoutIdx] = { tenant, domainId: domain.id, queueItemId: outcome.item.queueItemId };
-          } else {
-            fanoutList.push({ tenant, domainId: domain.id, queueItemId: outcome.item.queueItemId });
-          }
+          trackedDelivery.entriesByDomain.set(domain.id, {
+            tenant,
+            domainId: domain.id,
+            queueItemId: outcome.item.queueItemId,
+          });
+          trackQueueItemDelivery(outcome.item.queueItemId, entry.deliveryId);
         }
         admitted.push({
           domainId: domain.id,
@@ -831,12 +1070,12 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         });
       }
 
-      setBoundedFanoutEntries(entry.deliveryId, fanoutList);
       return respond(response, 202, {
         kind: 'accepted',
         action,
         suiteName: suite.manifest.metadata.name,
         domains: admitted,
+        ...(deferredCellsOut.length > 0 ? { deferredDomains: deferredCellsOut } : {}),
         queueItemId: admitted[0]!.queueItemId,
         runId: admitted[0]!.runId,
         coalesced: admitted.every(a => a.coalesced),
@@ -966,6 +1205,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         });
         queueSummary.enqueued += enqueued.kind === 'coalesced' ? 0 : 1;
         queueSummary.coalesced += enqueued.kind === 'coalesced' ? 1 : 0;
+        trackQueueItemDelivery(enqueued.item.queueItemId, entry.deliveryId);
         return respond(response, 202, {
           kind: 'accepted', action: outcome.action, queueItemId: enqueued.item.queueItemId,
           runId: enqueued.item.runId, coalesced: enqueued.kind === 'coalesced', attemptCount: entry.attemptCount,
@@ -1093,35 +1333,71 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         }
         const settled = queue.settleLease(tenant, queueItemId, leaseEpoch, workerId, settleOutcome, nowSample);
         queueSummary.settled += 1;
-        if (settled.deliveryId !== null) {
-          if (settleOutcome !== 'completed' && settled.domainId !== undefined) {
-            enqueuedByDeliveryDomain.delete(`${settled.deliveryId}\0${settled.domainId}`);
+        const affectedDeliveryIds = new Set<string>();
+        if (settled.deliveryId !== null) affectedDeliveryIds.add(settled.deliveryId);
+        const linkedDeliveries = deliveryIdsByQueueItemId.get(settled.queueItemId);
+        if (linkedDeliveries !== undefined) {
+          for (const linkedId of linkedDeliveries) affectedDeliveryIds.add(linkedId);
+          deliveryIdsByQueueItemId.delete(settled.queueItemId);
+        }
+        for (const deliveryId of affectedDeliveryIds) {
+          if (settled.domainId !== undefined) {
+            const dedupKey = `${deliveryId}\0${settled.domainId}`;
+            if (settleOutcome === 'reconcile_required') {
+              const existingRec = enqueuedByDeliveryDomain.get(dedupKey);
+              if (existingRec !== undefined) {
+                existingRec.reconcileRequired = true;
+              }
+            } else if (settleOutcome === 'failed' || settleOutcome === 'blocked') {
+              enqueuedByDeliveryDomain.delete(dedupKey);
+            }
           }
-          const fanoutEntries = fanoutEntriesByDeliveryId.get(settled.deliveryId);
-          if (fanoutEntries !== undefined && fanoutEntries.length > 0) {
+          const tracked = fanoutDeliveriesById.get(deliveryId);
+          if (tracked !== undefined && tracked.expectedDomains.size > 0) {
             let hasActive = false;
-            let firstFailure: string | null = null;
-            for (const fEntry of fanoutEntries) {
+            let hasUnadmitted = false;
+            let hasReconcileRequired = false;
+            let firstRetryableFailure: string | null = null;
+            for (const expectedDomainId of tracked.expectedDomains) {
+              const fEntry = tracked.entriesByDomain.get(expectedDomainId);
+              if (fEntry === undefined) {
+                hasUnadmitted = true;
+                continue;
+              }
               const fItem = queue.inspectTenantQueue(fEntry.tenant).items.find(cand => cand.queueItemId === fEntry.queueItemId);
-              if (fItem === undefined) continue;
+              if (fItem === undefined) {
+                hasUnadmitted = true;
+                continue;
+              }
               if (fItem.state === 'pending' || fItem.state === 'leased') {
                 hasActive = true;
-              } else if (fItem.state !== 'completed' && firstFailure === null) {
-                firstFailure = fItem.state;
+              } else if (fItem.state === 'reconcile_required') {
+                hasReconcileRequired = true;
+              } else if (fItem.state !== 'completed' && firstRetryableFailure === null) {
+                firstRetryableFailure = fItem.state;
               }
             }
             if (!hasActive) {
-              if (firstFailure === null) {
-                deliveryStore.markDeliveryState(settled.deliveryId, 'succeeded');
-                evictDeliveryTracking(settled.deliveryId);
+              if (!hasUnadmitted && !hasReconcileRequired && firstRetryableFailure === null) {
+                deliveryStore.markDeliveryState(deliveryId, 'succeeded');
+                evictDeliveryTracking(deliveryId);
+              } else if (hasUnadmitted || firstRetryableFailure !== null) {
+                deliveryStore.markDeliveryState(deliveryId, 'failed', firstRetryableFailure ?? 'partial_fanout');
               } else {
-                deliveryStore.markDeliveryState(settled.deliveryId, 'failed', firstFailure);
+                // Only reconcile_required remains: suppress redelivery until explicit reconciliation.
+                deliveryStore.markDeliveryState(deliveryId, 'succeeded');
+                evictDeliveryTracking(deliveryId);
               }
             }
           } else {
-            deliveryStore.markDeliveryState(settled.deliveryId, settleOutcome === 'completed' ? 'succeeded' : 'failed', settleOutcome === 'completed' ? null : settleOutcome);
-            if (settleOutcome === 'completed') {
-              evictDeliveryTracking(settled.deliveryId);
+            const suppressRedelivery = settleOutcome === 'completed' || settleOutcome === 'reconcile_required';
+            deliveryStore.markDeliveryState(
+              deliveryId,
+              suppressRedelivery ? 'succeeded' : 'failed',
+              suppressRedelivery ? null : settleOutcome,
+            );
+            if (suppressRedelivery) {
+              evictDeliveryTracking(deliveryId);
             }
           }
         }
