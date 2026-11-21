@@ -387,7 +387,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `TaskContract` validates `steps[].handoffs` (`1..16` selectors, strict ancestor `fromStep`, decoded RFC 6901 prototype-key rejection, `maxBytes` `64..65,536`). `trustedContext.resources[].when` validates deterministic predicates while keeping `discovery: 'disabled'`.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg core`
 
-- [ ] **T3 · Controller RunEval diagnostics, inspect bundle, and report formatting**
+- [x] **T3 · Controller RunEval diagnostics, inspect bundle, and report formatting**
       Blocked by: None
       Owns: `packages/controller/src/run-eval.ts`, `packages/controller/src/inspect.ts`, `packages/controller/src/report.ts`, `packages/controller/src/index.ts`, `packages/controller/test/run-eval.test.ts`
       Gate: review

@@ -12,6 +12,7 @@ import { resolveCanonicalCasBlobPath, stateValue, checkedRef, streamVerifiedCasB
 import { parsePrivateJson } from './parser.js';
 import { freeze, id, isRecord, list, record, same, text } from './schema.js';
 import { PublicBundle, type ExportManifest } from './bundle.js';
+import { evaluateRunHealth, type RunEvalReport } from './run-eval.js';
 import type { RawCandidateFile } from './types.js';
 
 export type CurrentState = Pick<RunView, 'revision' | 'clockStatus' | 'counts' | 'ledger' | 'clock'>;
@@ -251,12 +252,13 @@ export interface InspectRunValue {
   readonly manifest: ExportManifest | null;
   readonly usage: UsageSummary | null;
   readonly externalUrl: string | null;
+  readonly runEval: RunEvalReport | null;
 }
 export function inspectRun(input: InspectRunInput): Promise<ControllerResult<InspectRunValue>> {
   return result(async (): Promise<InspectRunValue> => {
     const fields = Object.keys(input); record(input, fields); if (fields.some(key => !['runRoot', 'runId', 'output'].includes(key))) refuse('CONFIG_SCHEMA', '', 'inspection');
     const runId = id(input.runId); let saved: Awaited<ReturnType<typeof snapshot>>;
-    try { saved = await snapshot(input); } catch { return freeze({ status: unavailable(runId), manifest: null, usage: null, externalUrl: null }); }
+    try { saved = await snapshot(input); } catch { return freeze({ status: unavailable(runId), manifest: null, usage: null, externalUrl: null, runEval: null }); }
     const bundle = new PublicBundle(runId, saved.lock.spec.lockHash), { head, primary, observed } = saved;
     bundle.json('task.lock.json', saved.lock); bundle.json('plan.json', saved.plan);
     if (head) {
@@ -337,7 +339,24 @@ export function inspectRun(input: InspectRunInput): Promise<ControllerResult<Ins
     } else if (publication && publication.receipt !== null && ['confirmed', 'failed'].includes(publication.status)) {
       bundle.absent('publication.json');
     } else bundle.absent('publication.json', saved.plan.publication.mode === 'disabled' ? 'disabled' : 'ineligible', 'not_run');
+    let runEval: RunEvalReport | null;
+    try {
+      runEval = await evaluateRunHealth({
+        runId,
+        status: saved.status.status,
+        plan: saved.plan,
+        records: saved.records,
+        head,
+        artifacts: saved.artifacts,
+        artifactsDirectory: join(saved.directory, 'artifacts'),
+        observed,
+      });
+      bundle.json('run-eval.json', runEval);
+    } catch {
+      runEval = null;
+      bundle.absent('run-eval.json');
+    }
     if (input.output !== undefined) await bundle.write(input.output, saved.directory);
-    return freeze({ status: saved.status, manifest: bundle.manifest(), usage, externalUrl });
+    return freeze({ status: saved.status, manifest: bundle.manifest(), usage, externalUrl, runEval });
   }, 'inspection');
 }

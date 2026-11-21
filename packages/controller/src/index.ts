@@ -26,6 +26,33 @@ export type { ReconcileCycleInput, ReconcileExecution } from './reconcile.js';
 export { readStatus, inspectRun } from './inspect.js';
 export type { RunStatus, CurrentState, InspectRunInput, InspectRunValue } from './inspect.js';
 export {
+  RUN_EVAL_SCHEMA_VERSION,
+  RUN_EVAL_LOCAL_TOOL_RECEIPT_MAX_BYTES,
+  RUN_EVAL_ARTIFACT_MAX_BYTES,
+  RUN_EVAL_AGGREGATE_MAX_BYTES,
+  RUN_EVAL_MAX_SUGGESTIONS,
+  evaluateRunHealth,
+} from './run-eval.js';
+export type {
+  RunEvalToolTelemetryState,
+  RunEvalCircuitBreakerState,
+  RunEvalCostCompleteness,
+  RunEvalSuggestionSeverity,
+  RunEvalToolRepeat,
+  RunEvalToolRepeats,
+  RunEvalPingPong,
+  RunEvalAttemptCounts,
+  RunEvalRepairConvergence,
+  RunEvalTokenBreakdown,
+  RunEvalStepBreakdown,
+  RunEvalRoleBreakdown,
+  RunEvalBreakdownTotals,
+  RunEvalBreakdown,
+  RunEvalSuggestion,
+  RunEvalReport,
+  EvaluateRunHealthInput,
+} from './run-eval.js';
+export {
   REPORT_OUTPUT_FORMATS,
   parseReportOutputFormats,
   formatCostUsd,
