@@ -9,6 +9,7 @@ import {
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const MONOTONIC_PATTERN = /^[0-9]{1,20}$/;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
 const DEFAULT_MAX_PENDING_PER_GROUP = 100;
 const DEFAULT_LEASE_DURATION_MS = 600_000;
 const DRIFT_LIMIT_MS = 1_000n;
@@ -151,6 +152,12 @@ export class TenantAdmissionQueue {
     validateTenantIdentity(tenant);
     validateRevision(input.baseRevision, 'baseRevision');
     if (!(_instanceOfKind(input.kind))) queueError('QUEUE_STATE_INVALID', `unsupported queue item kind`);
+    if (input.domainId !== undefined && (typeof input.domainId !== 'string' || !IDENTIFIER_PATTERN.test(input.domainId))) {
+      queueError('QUEUE_STATE_INVALID', 'domainId must be a lowercase identifier');
+    }
+    if (input.manifestDigest !== undefined && (typeof input.manifestDigest !== 'string' || !SHA256_HEX_PATTERN.test(input.manifestDigest))) {
+      queueError('QUEUE_STATE_INVALID', 'manifestDigest must be a 64-hex SHA-256 digest');
+    }
     let command: TaskpackReviseCommand | null = null;
     if (input.kind === 'revise') {
       const candidate = input.command;
@@ -179,7 +186,10 @@ export class TenantAdmissionQueue {
     const item: QueueItem = {
       queueItemId, runId: `run-${queueItemId}`, tenant: { ...tenant }, kind: input.kind,
       baseRevision: input.baseRevision, command, payloadDigest: input.payloadDigest ?? null,
-      deliveryId: input.deliveryId ?? null, enqueuedAtMs: nowMs,
+      deliveryId: input.deliveryId ?? null,
+      ...(input.domainId !== undefined ? { domainId: input.domainId } : {}),
+      ...(input.manifestDigest !== undefined ? { manifestDigest: input.manifestDigest } : {}),
+      enqueuedAtMs: nowMs,
       state: 'pending', cancelReason: null, reconcileEffect: null, lease: null,
     };
     this.#items.set(queueItemId, item);
@@ -211,6 +221,8 @@ export class TenantAdmissionQueue {
       return {
         leaseEpoch: lease.leaseEpoch, workerId, queueItemId: item.queueItemId, runId: item.runId,
         notAfterMonotonicMs: lease.notAfterMonotonicMs,
+        ...(item.domainId !== undefined ? { domainId: item.domainId } : {}),
+        ...(item.manifestDigest !== undefined ? { manifestDigest: item.manifestDigest } : {}),
       };
     }
     void seenGroups;
@@ -247,6 +259,8 @@ export class TenantAdmissionQueue {
     return {
       leaseEpoch: lease.leaseEpoch, workerId, queueItemId: item.queueItemId, runId: item.runId,
       notAfterMonotonicMs: lease.notAfterMonotonicMs,
+      ...(item.domainId !== undefined ? { domainId: item.domainId } : {}),
+      ...(item.manifestDigest !== undefined ? { manifestDigest: item.manifestDigest } : {}),
     };
   }
 

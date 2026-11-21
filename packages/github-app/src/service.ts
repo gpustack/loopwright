@@ -1,24 +1,42 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';
+import { LIMITS } from '@loopwright/core';
 import {
   assertManifestScopeInvariants,
   assertMultiTenantManifestAuthority,
+  DEFAULT_COMMENT_PREFIXES,
+  GITHUB_PROTECTED_AUTOMATION_PATHS,
+  headBranchPrefixesCollide,
   isGitHubTriggerDeclared,
+  isPlainRecord,
+  loadTaskpackSuite,
+  LOCAL_PROTECTED_AUTOMATION_PATHS,
   MULTI_TENANT_HOST_POLICY,
+  REPOSITORY_FULL_NAME_PATTERN,
   resolveManifestControlRoot,
   validateTaskpackV2Manifest,
+  type LoadedTaskpackSuite,
+  type LoadedTaskpackSuiteDomain,
 } from '@loopwright/taskpack';
+import {
+  DEFAULT_GITHUB_API_BASE_URL,
+  validateGitHubApiBaseUrl,
+  verifySuiteCommentPullRequest,
+} from './suite-pr-lookup.js';
 import { InstallationTokenBroker, SecretScrubber } from './token-broker.js';
-import { intakeWebhookDelivery, WebhookDeliveryStore } from './webhook.js';
+import { intakeWebhookDelivery, verifyWebhookSignature, WebhookDeliveryStore } from './webhook.js';
 import { TenantAdmissionQueue } from './tenant-queue.js';
 import {
   GitHubAppError,
+  WEBHOOK_DELIVERY_ID_PATTERN,
   type ClockSample,
   type GitHubAppErrorCode,
   type QueueItem,
   type TaskpackManifest,
   type TaskpackReviseCommand,
   type TaskpackV2Manifest,
+  type TenantIdentity,
+  type WebhookDeliveryOutcome,
   type WebhookIntakeOutcome,
 } from './types.js';
 
@@ -55,6 +73,16 @@ export interface ControlPlaneOptions {
   readonly baseRevision?: string | undefined;
   /** Optional validated manifest bound to this multi-tenant control plane (enforced under MULTI_TENANT_HOST_POLICY). */
   readonly manifest?: TaskpackManifest | TaskpackV2Manifest | undefined;
+  /** Optional validated multi-domain TaskpackSuite bound to this control plane (mutually exclusive with manifest). */
+  readonly suite?: LoadedTaskpackSuite | undefined;
+  /** Optional suite manifest path loaded under repositoryRoot when suite is omitted (mutually exclusive with manifest). */
+  readonly suitePath?: string | undefined;
+  /** Optional repository root used when loading suitePath. */
+  readonly repositoryRoot?: string | undefined;
+  /** Optional GitHub REST API base URL for PR branch ownership lookups on issue_comment webhooks. */
+  readonly apiBaseUrl?: string | undefined;
+  /** Optional fetch implementation for loopback/mock GitHub API lookups. */
+  readonly fetchImpl?: typeof globalThis.fetch | undefined;
 }
 
 function systemSample(): ClockSample {
@@ -99,28 +127,32 @@ function statusForError(code: GitHubAppErrorCode): number {
 
 const TENANT_PATH_PATTERN = /^\/tenants\/([0-9]+)\/([0-9]+)\/([a-z][a-z0-9]*(?:[._-][a-z0-9]+)*)\/(lease|settle)$/;
 const IDENTIFIER_PATTERN = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/;
+const SUPPORTED_WEBHOOK_EVENTS = new Set([
+  'issue_comment', 'pull_request_review', 'release', 'schedule', 'workflow_dispatch',
+  'repository_dispatch', 'installation', 'installation_repositories',
+]);
 
 function isClockSample(value: unknown): value is ClockSample {
-  if (value === null || typeof value !== 'object') return false;
-  const record = value as Record<string, unknown>;
-  return typeof record['wallMs'] === 'number' && typeof record['monotonicMs'] === 'string';
+  if (!isPlainRecord(value)) return false;
+  return typeof value['wallMs'] === 'number' && typeof value['monotonicMs'] === 'string';
 }
 
 /** Re-read the revise command binding (comment id, head sha, body digest) from the raw webhook payload. */
-function readReviseBinding(rawBody: Buffer): TaskpackReviseCommand | null {
+function readReviseBinding(rawBody: Buffer, overrideHeadSha?: string): TaskpackReviseCommand | null {
   try {
     const payload: unknown = JSON.parse(rawBody.toString('utf8'));
-    if (payload === null || typeof payload !== 'object') return null;
-    const record = payload as Record<string, unknown>;
-    const container = record['comment'] ?? record['review'];
-    if (container === null || typeof container !== 'object') return null;
-    const id = (container as Record<string, unknown>)['id'];
-    const issue = record['issue'];
-    const pullRequest = issue !== null && typeof issue === 'object' ? (issue as Record<string, unknown>)['pull_request'] : null;
-    const head = pullRequest !== null && typeof pullRequest === 'object' ? (pullRequest as Record<string, unknown>)['head'] : null;
-    const headSha = head !== null && typeof head === 'object' && typeof (head as Record<string, unknown>)['sha'] === 'string'
-      ? (head as Record<string, unknown>)['sha'] as string
-      : null;
+    if (!isPlainRecord(payload)) return null;
+    const container = payload['comment'] ?? payload['review'];
+    if (!isPlainRecord(container)) return null;
+    const id = container['id'];
+    const issue = isPlainRecord(payload['issue']) ? payload['issue'] : null;
+    const pullRequest = isPlainRecord(payload['pull_request'])
+      ? payload['pull_request']
+      : (issue !== null && isPlainRecord(issue['pull_request']) ? issue['pull_request'] : null);
+    const head = pullRequest !== null && isPlainRecord(pullRequest['head']) ? pullRequest['head'] : null;
+    const headSha = overrideHeadSha
+      ?? (head !== null && typeof head['sha'] === 'string' && head['sha'].length > 0 ? head['sha'] : null);
     return {
       commandId: typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? id : 0,
       headSha: headSha ?? 'unknown',
@@ -142,8 +174,162 @@ function canonicalJson(value: unknown): string {
   return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
 }
 
-function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: string; readonly runId: string; readonly kind: string; readonly baseRevision: string } | null {
-  return item === undefined ? null : { queueItemId: item.queueItemId, runId: item.runId, kind: item.kind, baseRevision: item.baseRevision };
+function summarizeItem(item: QueueItem | undefined): {
+  readonly queueItemId: string;
+  readonly runId: string;
+  readonly kind: string;
+  readonly baseRevision: string;
+  readonly domainId?: string | undefined;
+  readonly manifestDigest?: string | undefined;
+} | null {
+  if (item === undefined) return null;
+  return {
+    queueItemId: item.queueItemId,
+    runId: item.runId,
+    kind: item.kind,
+    baseRevision: item.baseRevision,
+    ...(item.domainId !== undefined ? { domainId: item.domainId } : {}),
+    ...(item.manifestDigest !== undefined ? { manifestDigest: item.manifestDigest } : {}),
+  };
+}
+
+const MAX_TRACKED_FANOUT_DELIVERIES = 4_096;
+
+interface ValidatedSuiteDomainRecord {
+  readonly domain: LoadedTaskpackSuiteDomain;
+  readonly manifestDigest: string;
+  readonly canonicalManifest: string;
+}
+
+function validateSuiteControlPlaneAuthority(suite: LoadedTaskpackSuite): {
+  readonly byDomainId: ReadonlyMap<string, ValidatedSuiteDomainRecord>;
+  readonly byTaskpackName: ReadonlyMap<string, ValidatedSuiteDomainRecord>;
+} {
+  if (
+    !isPlainRecord(suite.manifest)
+    || suite.manifest.kind !== 'TaskpackSuite'
+    || !isPlainRecord(suite.manifest.metadata)
+    || !IDENTIFIER_PATTERN.test(suite.manifest.metadata.name)
+  ) {
+    throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', 'invalid TaskpackSuite manifest bound to control plane', '/');
+  }
+  if (!Array.isArray(suite.domains) || suite.domains.length < 1) {
+    throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', 'suite must contain at least one loaded domain', '/spec/domains');
+  }
+  if (!Array.isArray(suite.suiteProtectedPaths) || suite.suiteProtectedPaths.length > LIMITS.patterns) {
+    throw new GitHubAppError(
+      'TASKPACK_MANIFEST_INVALID',
+      `suite-wide mandatory protected path union exceeds ${LIMITS.patterns} patterns`,
+      '/spec/domains',
+    );
+  }
+
+  const builtInProtectedSet = new Set<string>([
+    ...LOCAL_PROTECTED_AUTOMATION_PATHS,
+    ...GITHUB_PROTECTED_AUTOMATION_PATHS,
+  ]);
+  const byDomainId = new Map<string, ValidatedSuiteDomainRecord>();
+  const byTaskpackName = new Map<string, ValidatedSuiteDomainRecord>();
+  const prByTarget = new Map<string, LoadedTaskpackSuiteDomain[]>();
+
+  for (const [idx, domain] of suite.domains.entries()) {
+    if (byDomainId.has(domain.id)) {
+      throw new GitHubAppError('TASKPACK_MANIFEST_INVALID', `duplicate suite domain id "${domain.id}"`, `/spec/domains/${idx}/id`);
+    }
+    if (byTaskpackName.has(domain.manifest.metadata.name)) {
+      throw new GitHubAppError(
+        'TASKPACK_MANIFEST_INVALID',
+        `duplicate taskpack metadata.name "${domain.manifest.metadata.name}" across suite`,
+        `/spec/domains/${idx}`,
+      );
+    }
+    assertMultiTenantManifestAuthority(domain.manifest);
+    if (
+      !Array.isArray(domain.protectedPaths)
+      || domain.protectedPaths.length > LIMITS.patterns
+      || !domain.protectedPaths.includes(suite.suitePath)
+    ) {
+      throw new GitHubAppError(
+        'TASKPACK_MANIFEST_INVALID',
+        `domain "${domain.id}" is missing suite-wide mandatory protected paths`,
+        `/spec/domains/${idx}`,
+      );
+    }
+    const manifestProtectedSet = new Set<string>(domain.manifest.spec.scope.protected);
+    for (const requiredProtected of suite.suiteProtectedPaths) {
+      if (!builtInProtectedSet.has(requiredProtected) && !manifestProtectedSet.has(requiredProtected)) {
+        throw new GitHubAppError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          `domain "${domain.id}" manifest is missing suite-augmented protected path "${requiredProtected}"`,
+          `/spec/domains/${idx}/scope/protected`,
+        );
+      }
+    }
+
+    const resolvedControl = resolveManifestControlRoot(domain.manifest, domain.taskpackPath);
+    assertManifestScopeInvariants(domain.manifest, {
+      controlRoot: resolvedControl.controlRoot,
+      manifestPath: resolvedControl.manifestPath,
+      extraProtectedPaths: domain.protectedPaths,
+      policyProfile: 'github',
+      hostPolicy: MULTI_TENANT_HOST_POLICY,
+      enforceHostAuthority: true,
+    });
+
+    if (domain.manifest.spec.publication.mode === 'pull_request') {
+      const tb = domain.manifest.spec.publication.targetBranch;
+      const list = prByTarget.get(tb) ?? [];
+      for (const prev of list) {
+        const prevPrefix = prev.manifest.spec.publication.mode === 'pull_request'
+          ? prev.manifest.spec.publication.headBranchPrefix
+          : '';
+        if (headBranchPrefixesCollide(prevPrefix, domain.manifest.spec.publication.headBranchPrefix)) {
+          throw new GitHubAppError(
+            'TASKPACK_MANIFEST_INVALID',
+            `domains "${prev.id}" and "${domain.id}" declare colliding headBranchPrefix values on targetBranch "${tb}"`,
+            `/spec/domains/${idx}`,
+          );
+        }
+      }
+      list.push(domain);
+      prByTarget.set(tb, list);
+    }
+
+    const canonicalManifest = canonicalJson(domain.manifest);
+    const manifestDigest = createHash('sha256').update(canonicalManifest, 'utf8').digest('hex');
+
+    const rec: ValidatedSuiteDomainRecord = Object.freeze({
+      domain,
+      manifestDigest,
+      canonicalManifest,
+    });
+    byDomainId.set(domain.id, rec);
+    byTaskpackName.set(domain.manifest.metadata.name, rec);
+  }
+
+  return { byDomainId, byTaskpackName };
+}
+
+function readWebhookInstallationId(payload: Record<string, unknown>): number | null {
+  const installation = isPlainRecord(payload['installation']) ? payload['installation'] : null;
+  const id = installation?.['id'];
+  return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function readWebhookRepository(payload: Record<string, unknown>): { readonly id: number; readonly fullName: string } | null {
+  const repository = isPlainRecord(payload['repository']) ? payload['repository'] : null;
+  const id = repository?.['id'];
+  const fullName = repository?.['full_name'];
+  if (
+    typeof id !== 'number'
+    || !Number.isSafeInteger(id)
+    || id <= 0
+    || typeof fullName !== 'string'
+    || !REPOSITORY_FULL_NAME_PATTERN.test(fullName)
+  ) {
+    return null;
+  }
+  return { id, fullName };
 }
 
 /**
@@ -151,6 +337,43 @@ function summarizeItem(item: QueueItem | undefined): { readonly queueItemId: str
  * dispatch with scoped installation tokens, and scrubbed structured JSON on every response.
  */
 export async function startGitHubAppControlPlane(options: ControlPlaneOptions): Promise<ControlPlaneHandle> {
+  if (options.manifest !== undefined && (options.suite !== undefined || options.suitePath !== undefined)) {
+    throw new GitHubAppError(
+      'TASKPACK_HOST_BINDING_INVALID',
+      'control plane cannot bind both single-taskpack manifest and multi-domain suite',
+      '/suite',
+    );
+  }
+  if (options.suite !== undefined && options.suitePath !== undefined) {
+    throw new GitHubAppError(
+      'TASKPACK_HOST_BINDING_INVALID',
+      'control plane cannot specify both preloaded suite and suitePath',
+      '/suitePath',
+    );
+  }
+
+  let effectiveSuite: LoadedTaskpackSuite | undefined = options.suite;
+  if (effectiveSuite === undefined && options.suitePath !== undefined) {
+    if (options.repositoryRoot === undefined || options.repositoryRoot.trim().length === 0) {
+      throw new GitHubAppError(
+        'TASKPACK_HOST_BINDING_INVALID',
+        'control plane suitePath requires repositoryRoot',
+        '/repositoryRoot',
+      );
+    }
+    effectiveSuite = await loadTaskpackSuite({
+      repositoryRoot: options.repositoryRoot,
+      suitePath: options.suitePath,
+      policyProfile: 'github',
+      hostPolicy: MULTI_TENANT_HOST_POLICY,
+      enforceHostAuthority: true,
+    });
+  }
+
+  const suiteRegistry = effectiveSuite !== undefined
+    ? validateSuiteControlPlaneAuthority(effectiveSuite)
+    : null;
+
   if (options.manifest !== undefined) {
     assertMultiTenantManifestAuthority(options.manifest);
     const resolvedControl = resolveManifestControlRoot(options.manifest, options.manifest.manifestPath);
@@ -176,10 +399,45 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
   const scrubber = options.scrubber ?? options.tokenBroker?.scrubber ?? new SecretScrubber();
   scrubber.register(options.webhookSecret);
   const queueSummary = { enqueued: 0, coalesced: 0, leased: 0, settled: 0, revoked: 0 };
+  const effectiveApiBaseUrl = validateGitHubApiBaseUrl(
+    options.apiBaseUrl ?? DEFAULT_GITHUB_API_BASE_URL,
+    'ACTION_INPUT_INVALID',
+    '/apiBaseUrl',
+  );
   const host = options.host ?? '127.0.0.1';
   const port = options.port ?? 0;
   const webhookPath = options.webhookPath ?? '/webhooks/github';
   const maxPayloadBytes = options.maxPayloadBytes ?? 1_048_576;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+
+  interface TrackedFanoutDomainEntry {
+    readonly tenant: TenantIdentity;
+    readonly domainId: string;
+    readonly queueItemId: string;
+  }
+
+  const enqueuedByDeliveryDomain = new Map<string, { readonly item: QueueItem; readonly coalesced: boolean }>();
+  const fanoutEntriesByDeliveryId = new Map<string, TrackedFanoutDomainEntry[]>();
+
+  const evictDeliveryTracking = (deliveryId: string): void => {
+    const tracked = fanoutEntriesByDeliveryId.get(deliveryId);
+    if (tracked !== undefined) {
+      for (const entry of tracked) {
+        enqueuedByDeliveryDomain.delete(`${deliveryId}\0${entry.domainId}`);
+      }
+      fanoutEntriesByDeliveryId.delete(deliveryId);
+    }
+  };
+
+  const setBoundedFanoutEntries = (deliveryId: string, entries: TrackedFanoutDomainEntry[]): void => {
+    if (!fanoutEntriesByDeliveryId.has(deliveryId) && fanoutEntriesByDeliveryId.size >= MAX_TRACKED_FANOUT_DELIVERIES) {
+      const oldestKey = fanoutEntriesByDeliveryId.keys().next().value;
+      if (oldestKey !== undefined) {
+        evictDeliveryTracking(oldestKey);
+      }
+    }
+    fanoutEntriesByDeliveryId.set(deliveryId, entries);
+  };
 
   const respond = (response: ServerResponse, status: number, payload: unknown, deliverRaw?: { readonly marker: string; readonly value: string }): void => {
     // Scrub before computing content-length: tracked secrets shrink the body. A deliberate raw field
@@ -209,10 +467,10 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     if (!raw.ok) return { ok: false, status: 413, detail: `request body exceeds ${maxPayloadBytes} bytes` };
     try {
       const parsed: unknown = JSON.parse(raw.bytes.toString('utf8'));
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      if (!isPlainRecord(parsed)) {
         return { ok: false, status: 400, detail: 'request body must be a JSON object' };
       }
-      return { ok: true, body: parsed as Record<string, unknown> };
+      return { ok: true, body: parsed };
     } catch {
       return { ok: false, status: 400, detail: 'request body is not valid JSON' };
     }
@@ -244,6 +502,357 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     void error;
   });
 
+  const handleSuiteWebhook = async (
+    suite: LoadedTaskpackSuite,
+    registry: NonNullable<typeof suiteRegistry>,
+    request: IncomingMessage,
+    response: ServerResponse,
+    rawBytes: Buffer,
+    headerDeliveryId: string,
+  ): Promise<void> => {
+    const eventName = String(request.headers['x-github-event'] ?? '');
+    const signatureHeader = request.headers['x-hub-signature-256'] as string | undefined;
+
+    if (eventName === 'installation' || eventName === 'installation_repositories') {
+      const revOutcome = intakeWebhookDelivery({
+        rawBody: rawBytes,
+        signatureHeader,
+        secret: options.webhookSecret,
+        eventName,
+        deliveryId: headerDeliveryId,
+        receivedAtMs: Date.now(),
+        operatorAllowlist: options.operatorAllowlist,
+      }, deliveryStore);
+      if (revOutcome.kind === 'signature_rejected') {
+        return respond(response, revOutcome.code === 'WEBHOOK_PAYLOAD_TOO_LARGE' ? 413 : 401, { error: { code: revOutcome.code, message: revOutcome.detail } });
+      }
+      if (revOutcome.kind === 'delivery_conflict') {
+        return respond(response, 409, { error: { code: 'WEBHOOK_DELIVERY_CONFLICT', message: revOutcome.detail } });
+      }
+      if (revOutcome.kind === 'duplicate') {
+        return respond(response, 200, { kind: 'duplicate', state: revOutcome.state, deliveryId: revOutcome.entry.deliveryId, attemptCount: revOutcome.entry.attemptCount });
+      }
+      if (revOutcome.kind === 'ignored') {
+        if (deliveryStore.getDelivery(headerDeliveryId) !== undefined) deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, { kind: 'ignored', reason: revOutcome.reason });
+      }
+      if (revOutcome.kind === 'revoked') {
+        const installationId = revOutcome.installationId ?? 0;
+        const revoked = revOutcome.repositoryIds.length === 0
+          ? queue.revokeInstallationScope(installationId)
+          : queue.revokeRepositoryScope(installationId, revOutcome.repositoryIds);
+        if (options.tokenBroker !== undefined) {
+          if (revOutcome.repositoryIds.length === 0) options.tokenBroker.revokeInstallationTokens(installationId);
+          else options.tokenBroker.revokeRepositoryTokens(installationId, revOutcome.repositoryIds);
+        }
+        queueSummary.revoked += 1;
+        if (deliveryStore.getDelivery(headerDeliveryId) !== undefined) deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 202, {
+          kind: 'revoked',
+          installationId: revOutcome.installationId,
+          repositoryIds: revOutcome.repositoryIds,
+          cancelled: revoked.cancelled,
+          fenced: revoked.fenced,
+        });
+      }
+      return respond(response, 200, { kind: 'ignored', reason: 'unhandled revocation state' });
+    }
+
+    const verification = verifyWebhookSignature(rawBytes, signatureHeader, options.webhookSecret);
+    if (!verification.ok) {
+      return respond(response, verification.code === 'WEBHOOK_PAYLOAD_TOO_LARGE' ? 413 : 401, {
+        error: { code: verification.code, message: verification.detail },
+      });
+    }
+    if (!WEBHOOK_DELIVERY_ID_PATTERN.test(headerDeliveryId)) {
+      throw new GitHubAppError('WEBHOOK_DELIVERY_INVALID', `delivery id "${headerDeliveryId}" must match ^[A-Za-z0-9-]{8,128}$`);
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(rawBytes.toString('utf8'));
+      if (!isPlainRecord(parsed)) {
+        return respond(response, 200, { kind: 'ignored', reason: 'payload is not a JSON object' });
+      }
+      payload = parsed;
+    } catch {
+      return respond(response, 200, { kind: 'ignored', reason: 'payload is not valid JSON' });
+    }
+
+    if (!SUPPORTED_WEBHOOK_EVENTS.has(eventName)) {
+      return respond(response, 200, { kind: 'ignored', reason: `unsupported event ${eventName}` });
+    }
+    const installationId = readWebhookInstallationId(payload);
+    if (installationId === null) {
+      return respond(response, 200, { kind: 'ignored', reason: 'missing installation attribution' });
+    }
+    const repository = readWebhookRepository(payload);
+    if (repository === null) {
+      return respond(response, 200, { kind: 'ignored', reason: 'missing repository attribution' });
+    }
+
+    let delivery: WebhookDeliveryOutcome;
+    try {
+      delivery = deliveryStore.recordDelivery({
+        deliveryId: headerDeliveryId,
+        eventName,
+        payloadDigest: verification.payloadDigest,
+        installationId,
+        repositoryFullName: repository.fullName,
+        receivedAtMs: Date.now(),
+      });
+    } catch (error) {
+      if (error instanceof GitHubAppError && error.code === 'WEBHOOK_DELIVERY_CONFLICT') {
+        return respond(response, 409, { error: { code: 'WEBHOOK_DELIVERY_CONFLICT', message: error.message } });
+      }
+      throw error;
+    }
+    if (delivery.kind === 'duplicate') {
+      return respond(response, 200, {
+        kind: 'duplicate',
+        state: delivery.state,
+        deliveryId: delivery.entry.deliveryId,
+        attemptCount: delivery.entry.attemptCount,
+      });
+    }
+
+    const entry = delivery.entry;
+    let matchedDomains: LoadedTaskpackSuiteDomain[];
+    let action: 'discover' | 'revise' | 'status' = 'discover';
+    let verifiedPrHeadSha: string | undefined;
+
+    if (eventName === 'issue_comment' || eventName === 'pull_request_review') {
+      const prCheck = await verifySuiteCommentPullRequest({
+        suite,
+        eventName,
+        eventPayload: payload,
+        repositoryFullName: repository.fullName,
+        apiBaseUrl: effectiveApiBaseUrl,
+        commentPrefixes: options.commentPrefixes,
+        commentCommands: options.commentCommands,
+        operatorAllowlist: options.operatorAllowlist,
+        fetchImpl,
+        scrubber,
+        resolveToken: options.tokenBroker !== undefined
+          ? async () => {
+            const lookupTenant: TenantIdentity = {
+              installationId,
+              repositoryId: repository.id,
+              repositoryFullName: repository.fullName,
+              taskpackId: suite.domains[0]!.manifest.metadata.name,
+            };
+            const minted = await options.tokenBroker!.mint(lookupTenant, 'read_only');
+            return minted.token;
+          }
+          : undefined,
+      });
+
+      if (prCheck.kind === 'ignored' || prCheck.kind === 'missing_attribution') {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, {
+          kind: 'ignored',
+          reason: prCheck.kind === 'ignored' ? prCheck.reason : 'comment payload is unreadable',
+        });
+      }
+      if (prCheck.kind === 'unauthorized' || prCheck.kind === 'invalid_guidance') {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 403, {
+          kind: 'rejected',
+          code: prCheck.code,
+          detail: prCheck.detail,
+        });
+      }
+      if (prCheck.kind === 'lookup_failed') {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
+        return respond(response, 502, {
+          error: {
+            code: 'ACTION_INPUT_INVALID',
+            reason: prCheck.reason,
+            message: prCheck.detail,
+          },
+        });
+      }
+      if (prCheck.kind === 'metadata_unavailable') {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 400, {
+          error: {
+            code: 'ACTION_INPUT_INVALID',
+            reason: prCheck.reason,
+            message: prCheck.detail,
+          },
+        });
+      }
+      if (prCheck.kind === 'cross_fork' || prCheck.kind === 'scope_violation') {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 400, {
+          error: {
+            code: 'TASKPACK_SCOPE_VIOLATION',
+            reason: prCheck.reason,
+            message: prCheck.detail,
+          },
+        });
+      }
+
+      const targetDomain = prCheck.value.domain;
+      const parsedCmd = prCheck.value.comment;
+      verifiedPrHeadSha = prCheck.value.prHeadSha;
+
+      if (!targetDomain.enabled) {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, { kind: 'ignored', reason: `suite domain "${targetDomain.id}" is disabled` });
+      }
+      const domainPrefixes = targetDomain.manifest.spec.triggers.commentPrefixes.length > 0
+        ? targetDomain.manifest.spec.triggers.commentPrefixes
+        : DEFAULT_COMMENT_PREFIXES;
+      if (options.commentPrefixes === undefined && !domainPrefixes.includes(parsedCmd.prefix)) {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, { kind: 'ignored', reason: `prefix "${parsedCmd.prefix}" is not configured on domain "${targetDomain.id}"` });
+      }
+      if (
+        !isGitHubTriggerDeclared(targetDomain.manifest.spec.triggers, {
+          eventName,
+          commentCommand: parsedCmd.command,
+        })
+      ) {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, {
+          kind: 'ignored',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: `comment command "${parsedCmd.command}" is not enabled on domain "${targetDomain.id}"`,
+        });
+      }
+
+      matchedDomains = [targetDomain];
+      action = parsedCmd.command === 'retry' ? 'discover' : parsedCmd.command === 'revise' ? 'revise' : 'status';
+    } else {
+      if (eventName === 'release') {
+        const releaseAction = typeof payload['action'] === 'string' ? payload['action'] : '';
+        if (releaseAction !== 'published') {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+          return respond(response, 200, { kind: 'ignored', reason: `release action ${releaseAction} is not published` });
+        }
+      }
+      const scheduleKey = eventName === 'schedule' && typeof payload['schedule'] === 'string' && payload['schedule'].length > 0
+        ? payload['schedule']
+        : undefined;
+      matchedDomains = suite.domains.filter(dom => {
+        if (!dom.enabled) return false;
+        if (!isGitHubTriggerDeclared(dom.manifest.spec.triggers, { eventName })) return false;
+        if (eventName === 'schedule') {
+          return scheduleKey !== undefined
+            ? (dom.schedules !== undefined && dom.schedules.includes(scheduleKey))
+            : (dom.schedules === undefined || dom.schedules.length > 0);
+        }
+        return true;
+      });
+
+      if (matchedDomains.length === 0) {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, {
+          kind: 'ignored',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: `trigger "${eventName}" matched zero enabled suite domains`,
+        });
+      }
+    }
+
+    deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
+    try {
+      const kind = action === 'revise' ? 'revise' : action === 'status' ? 'status' : 'discover';
+      const reviseBinding = kind === 'revise' ? readReviseBinding(rawBytes, verifiedPrHeadSha) : null;
+      const fanoutList = fanoutEntriesByDeliveryId.get(entry.deliveryId) ?? [];
+      const admitted: Array<{
+        readonly domainId: string;
+        readonly taskpackId: string;
+        readonly manifestDigest: string;
+        readonly queueItemId: string;
+        readonly runId: string;
+        readonly coalesced: boolean;
+      }> = [];
+
+      for (const domain of matchedDomains) {
+        const domainRec = registry.byDomainId.get(domain.id)!;
+        const tenant: TenantIdentity = {
+          installationId,
+          repositoryId: repository.id,
+          repositoryFullName: repository.fullName,
+          taskpackId: domain.manifest.metadata.name,
+        };
+        const dedupKey = `${entry.deliveryId}\0${domain.id}`;
+        let enqueuedRecord = enqueuedByDeliveryDomain.get(dedupKey);
+        if (enqueuedRecord !== undefined && delivery.kind === 'retry_failed') {
+          const liveItem = queue.inspectTenantQueue(tenant).items.find(
+            cand => cand.queueItemId === enqueuedRecord!.item.queueItemId,
+          );
+          if (
+            liveItem === undefined
+            || (liveItem.state !== 'pending' && liveItem.state !== 'leased' && liveItem.state !== 'completed')
+          ) {
+            enqueuedByDeliveryDomain.delete(dedupKey);
+            enqueuedRecord = undefined;
+          }
+        }
+        if (enqueuedRecord === undefined) {
+          const outcome = queue.enqueue(tenant, {
+            kind,
+            baseRevision: options.baseRevision ?? entry.payloadDigest.slice(0, 12),
+            deliveryId: entry.deliveryId,
+            payloadDigest: entry.payloadDigest,
+            domainId: domain.id,
+            manifestDigest: domainRec.manifestDigest,
+            ...(kind === 'revise'
+              ? {
+                command: reviseBinding ?? {
+                  commandId: 0,
+                  headSha: verifiedPrHeadSha ?? tenant.repositoryFullName,
+                  commandDigest: entry.payloadDigest,
+                },
+              }
+              : {}),
+          });
+          enqueuedRecord = { item: outcome.item, coalesced: outcome.kind === 'coalesced' };
+          enqueuedByDeliveryDomain.set(dedupKey, enqueuedRecord);
+          queueSummary.enqueued += outcome.kind === 'coalesced' ? 0 : 1;
+          queueSummary.coalesced += outcome.kind === 'coalesced' ? 1 : 0;
+          const existingFanoutIdx = fanoutList.findIndex(f => f.domainId === domain.id);
+          if (existingFanoutIdx >= 0) {
+            fanoutList[existingFanoutIdx] = { tenant, domainId: domain.id, queueItemId: outcome.item.queueItemId };
+          } else {
+            fanoutList.push({ tenant, domainId: domain.id, queueItemId: outcome.item.queueItemId });
+          }
+        }
+        admitted.push({
+          domainId: domain.id,
+          taskpackId: domain.manifest.metadata.name,
+          manifestDigest: domainRec.manifestDigest,
+          queueItemId: enqueuedRecord.item.queueItemId,
+          runId: enqueuedRecord.item.runId,
+          coalesced: enqueuedRecord.coalesced,
+        });
+      }
+
+      setBoundedFanoutEntries(entry.deliveryId, fanoutList);
+      return respond(response, 202, {
+        kind: 'accepted',
+        action,
+        suiteName: suite.manifest.metadata.name,
+        domains: admitted,
+        queueItemId: admitted[0]!.queueItemId,
+        runId: admitted[0]!.runId,
+        coalesced: admitted.every(a => a.coalesced),
+        attemptCount: entry.attemptCount,
+      });
+    } catch (error) {
+      if (error !== null && typeof error === 'object' && 'code' in error) {
+        if (WEBHOOK_DELIVERY_ID_TEST.test(entry.deliveryId)) {
+          deliveryStore.markDeliveryState(entry.deliveryId, 'failed', String((error as { code: unknown }).code));
+        }
+        return respondError(response, error);
+      }
+      throw error;
+    }
+  };
+
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const method = request.method ?? 'GET';
@@ -258,6 +867,11 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       if (method !== 'POST') return respond(response, 405, { error: { code: 'SERVICE_FAULT', message: 'method not allowed' } });
       const raw = await readBody(request);
       if (!raw.ok) return respond(response, 413, { error: { code: 'WEBHOOK_PAYLOAD_TOO_LARGE', message: `webhook body exceeds ${maxPayloadBytes} bytes` } });
+
+      if (effectiveSuite !== undefined && suiteRegistry !== null) {
+        return handleSuiteWebhook(effectiveSuite, suiteRegistry, request, response, raw.bytes, headerDeliveryId);
+      }
+
       const outcome: WebhookIntakeOutcome = intakeWebhookDelivery({
         rawBody: raw.bytes,
         signatureHeader: request.headers['x-hub-signature-256'] as string | undefined,
@@ -379,10 +993,47 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       const workerId = typeof parsed.body['workerId'] === 'string' ? parsed.body['workerId'] : '';
       try {
         if (action === 'lease') {
-          if (parsed.body['manifest'] !== undefined) {
+          const suiteDomainRecord = suiteRegistry?.byTaskpackName.get(taskpackId!);
+          if (suiteRegistry !== null && suiteDomainRecord === undefined) {
+            throw new GitHubAppError(
+              'TASKPACK_HOST_BINDING_INVALID',
+              `taskpackId "${taskpackId!}" is not registered in control-plane suite`,
+              '/taskpackId',
+            );
+          }
+          const hasManifestDigest = Object.hasOwn(parsed.body, 'manifestDigest') && parsed.body['manifestDigest'] !== undefined;
+          const hasManifest = Object.hasOwn(parsed.body, 'manifest') && parsed.body['manifest'] !== undefined;
+          if (suiteDomainRecord !== undefined && !hasManifestDigest && !hasManifest) {
+            throw new GitHubAppError(
+              'TASKPACK_HOST_BINDING_INVALID',
+              'suite control-plane lease requires manifestDigest or suite-augmented manifest',
+              '/manifestDigest',
+            );
+          }
+          if (hasManifestDigest) {
+            const requestedDigest = parsed.body['manifestDigest'];
+            if (
+              typeof requestedDigest !== 'string'
+              || !SHA256_HEX_PATTERN.test(requestedDigest)
+              || (suiteDomainRecord !== undefined && requestedDigest !== suiteDomainRecord.manifestDigest)
+            ) {
+              throw new GitHubAppError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                'leased manifestDigest does not match control-plane pinned domain manifest digest',
+                '/manifestDigest',
+              );
+            }
+          }
+          if (hasManifest) {
             const tenantManifest = validateTaskpackV2Manifest(
               parsed.body['manifest'] as Parameters<typeof validateTaskpackV2Manifest>[0],
               {
+                ...(suiteDomainRecord !== undefined
+                  ? {
+                    controlRoot: suiteDomainRecord.domain.controlRoot,
+                    manifestPath: suiteDomainRecord.domain.taskpackPath,
+                  }
+                  : {}),
                 policyProfile: 'github',
                 hostPolicy: MULTI_TENANT_HOST_POLICY,
                 enforceHostAuthority: true,
@@ -396,10 +1047,18 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
                 '/metadata/name',
               );
             }
-            if (pinnedManifestCanonical !== null && canonicalJson(tenantManifest) !== pinnedManifestCanonical) {
+            const tenantCanonical = canonicalJson(tenantManifest);
+            if (pinnedManifestCanonical !== null && tenantCanonical !== pinnedManifestCanonical) {
               throw new GitHubAppError(
                 'TASKPACK_HOST_BINDING_INVALID',
                 'leased manifest does not match control-plane pinned manifest',
+                '/manifest',
+              );
+            }
+            if (suiteDomainRecord !== undefined && tenantCanonical !== suiteDomainRecord.canonicalManifest) {
+              throw new GitHubAppError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                `leased manifest does not match suite-augmented control-plane domain "${suiteDomainRecord.domain.id}"`,
                 '/manifest',
               );
             }
@@ -414,8 +1073,15 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           const item = queue.inspectTenantQueue(tenant).items.find(candidate => candidate.queueItemId === grant.queueItemId);
           if (item !== undefined && item.deliveryId !== null) deliveryStore.markDeliveryState(item.deliveryId, 'processing');
           const tokenMarker = `lw-token-${randomBytes(8).toString('hex')}`;
+          const leaseOut = suiteDomainRecord !== undefined
+            ? {
+              ...grant,
+              domainId: grant.domainId ?? suiteDomainRecord.domain.id,
+              manifestDigest: grant.manifestDigest ?? suiteDomainRecord.manifestDigest,
+            }
+            : { ...grant };
           return respond(response, 200, {
-            lease: { ...grant }, item: summarizeItem(item),
+            lease: leaseOut, item: summarizeItem(item),
             installationToken: { token: tokenMarker, expiresAtMs: token.expiresAtMs, profile: token.profile },
           }, { marker: tokenMarker, value: token.token });
         }
@@ -428,7 +1094,36 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         const settled = queue.settleLease(tenant, queueItemId, leaseEpoch, workerId, settleOutcome, nowSample);
         queueSummary.settled += 1;
         if (settled.deliveryId !== null) {
-          deliveryStore.markDeliveryState(settled.deliveryId, settleOutcome === 'completed' ? 'succeeded' : 'failed', settleOutcome === 'completed' ? null : settleOutcome);
+          if (settleOutcome !== 'completed' && settled.domainId !== undefined) {
+            enqueuedByDeliveryDomain.delete(`${settled.deliveryId}\0${settled.domainId}`);
+          }
+          const fanoutEntries = fanoutEntriesByDeliveryId.get(settled.deliveryId);
+          if (fanoutEntries !== undefined && fanoutEntries.length > 0) {
+            let hasActive = false;
+            let firstFailure: string | null = null;
+            for (const fEntry of fanoutEntries) {
+              const fItem = queue.inspectTenantQueue(fEntry.tenant).items.find(cand => cand.queueItemId === fEntry.queueItemId);
+              if (fItem === undefined) continue;
+              if (fItem.state === 'pending' || fItem.state === 'leased') {
+                hasActive = true;
+              } else if (fItem.state !== 'completed' && firstFailure === null) {
+                firstFailure = fItem.state;
+              }
+            }
+            if (!hasActive) {
+              if (firstFailure === null) {
+                deliveryStore.markDeliveryState(settled.deliveryId, 'succeeded');
+                evictDeliveryTracking(settled.deliveryId);
+              } else {
+                deliveryStore.markDeliveryState(settled.deliveryId, 'failed', firstFailure);
+              }
+            }
+          } else {
+            deliveryStore.markDeliveryState(settled.deliveryId, settleOutcome === 'completed' ? 'succeeded' : 'failed', settleOutcome === 'completed' ? null : settleOutcome);
+            if (settleOutcome === 'completed') {
+              evictDeliveryTracking(settled.deliveryId);
+            }
+          }
         }
         return respond(response, 200, { kind: 'settled', queueItemId: settled.queueItemId, state: settled.state });
       } catch (error) {

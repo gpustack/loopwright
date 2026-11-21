@@ -429,7 +429,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
       Acceptance: `taskpack.yaml` compiles `handoffs` and `{ path, when }` rules into `TaskContract` within the `256 KiB` ceiling while rejecting conflicting same-path `when` rules. `digests.lock.json` (`pinDigests: true`) and protected-path sets cover all conditional rules across turnkey Pi and `step` runs.
       Verify: `npm run build && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack`
 
-- [ ] **T9 · GitHub Action and App suite routing, PR ownership lookup, and 3-way publisher**
+- [x] **T9 · GitHub Action and App suite routing, PR ownership lookup, and 3-way publisher**
       Blocked by: T1, T8
       Owns: `packages/github-app/**`, `action.yml`
       Gate: review
