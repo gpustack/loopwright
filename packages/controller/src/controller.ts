@@ -38,9 +38,24 @@ import {
   type RetainedSubmission,
 } from './submission.js';
 import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
-import { prepareGate, Gate, authenticatedGate, validateGateUrlOverrides, type PreparedGate } from './gate.js';
+import { prepareGate, Gate, GATE_OUTPUT_BYTES, authenticatedGate, validateGateUrlOverrides, type PreparedGate } from './gate.js';
+import {
+  prepareBenchmarkGate,
+  BenchmarkGate,
+  BENCHMARK_OUTPUT_BYTES,
+  authenticatedBenchmarkGate,
+  collectPriorGenerationVerifierBudget,
+  createRateLimitedProgress,
+  sealBenchmarkBaseTreeBundle,
+  type BenchmarkBaseTreeBundle,
+  type PreparedBenchmarkGate,
+} from './benchmark-gate.js';
 import { preparePublication, Publication, headRevision, type PreparedPublication } from './publication.js';
-import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
+import {
+  evaluateControllerAcceptance,
+  verifyControllerVerifierCasDescriptors,
+  type AcceptanceObservation,
+} from './acceptance.js';
 import { nextNode, descendants, compactionTarget, resetSubgraphNodes, reworkSubgraph } from './scheduler.js';
 import { failureSignature, rememberFailure, repairDisposition, formatPolicy, formatPrompt, reworkPrompt, verdictFormatPrompt } from './repair.js';
 import { WorkDeadline } from './deadlines.js';
@@ -206,7 +221,14 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     if (!admitted.ok) refuse('CONFIG_SCHEMA', '/spec/task', 'admission'); const lock = admitted.value, manifest = await artifacts.json('manifest', source.manifest, overlayBounds.manifestMaxBytes);
     const initial: ByteInventory = { manifest: source.manifest, ref: manifest, files: source.artifacts, baselineProofs: source.baselineProofs };
     // Core identity is pure; complete byte preflight still precedes S02 create/claim and every initial dispatch.
-    for (const slot of plan.verifierSlots) if (slot.handler.implementation !== 'gate.v1') prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
+    for (const slot of plan.verifierSlots) {
+      if (slot.handler.implementation === 'gate.v1') continue;
+      if (slot.handler.implementation === 'benchmark-gate.v1') {
+        prepareBenchmarkGate(plan, lock, slot.id, initial, 0, randomBytes(16).toString('hex'), input.configuration.registry.spec.gateEndpoints);
+        continue;
+      }
+      prepareVerification(plan, lock, slot.id, initial, initial, 0, randomBytes(16).toString('hex'));
+    }
     const planRef = await artifacts.json('plan', plan, 4194304), lockRef = await artifacts.json('task-lock', lock, 4194304);
     const adapters = [...new Set(plan.task.spec.roles.map(role => role.adapter))].sort().map(id => ({ id, version: '0.0.0' }));
     const identity: LocalRunIdentity = { directory: join(directory, 'state'), storeId: 'store.' + hash('loopwright.dev/controller/store/v1\0' + runId).hex.slice(0, 40), lock,
@@ -224,9 +246,10 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
 }
 export class Cycle {
   head: ProgressHead | null; candidate: ByteInventory; submission: RetainedSubmission | null = null; readonly checks = new Map<string, VerifiedCheck>(); readonly refusals = new Map<string, PreflightRefusal>();
-  readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier; readonly gate: Gate; readonly publisher: Publication;
+  readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier; readonly gate: Gate; readonly benchmarkGate: BenchmarkGate; readonly publisher: Publication;
   readonly advisoryObservations: Record<string, unknown>[] = [];
   #activeAdapter: PiAdapterV2 | null = null; #candidateKnown = true; #cleanup: ControllerIncident['cleanup'] = 'complete';
+  readonly #baseTreeBundles = new Map<string, BenchmarkBaseTreeBundle | null>();
   #publicationObservation: { readonly status: 'not_run' | 'confirmed' | 'failed' | 'unresolved'; readonly reason: string | null; readonly receipt: ArtifactRef | null } = { status: 'not_run', reason: 'disabled', receipt: null };
   constructor(readonly context: CycleContext, head: ProgressHead | null = null, candidate?: ByteInventory, readonly resumeAdoption?: boolean) {
     this.head = head; this.candidate = candidate ?? { manifest: context.source.manifest, ref: { name: '', digest: hash(''), byteLength: 0 }, files: context.source.artifacts, baselineProofs: context.source.baselineProofs };
@@ -238,6 +261,26 @@ export class Cycle {
     this.gate = new Gate(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
       () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
       detail => this.events.push('gate_waiting', null, null, null, [], detail), context.ports.gateUrlOverrides);
+    this.benchmarkGate = new BenchmarkGate(
+      context.store,
+      context.authority,
+      context.artifacts,
+      context.plan,
+      context.lock,
+      ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
+      () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; },
+      detail => this.events.push('gate_waiting', null, null, null, [], detail),
+      context.ports.gateUrlOverrides,
+      (gen, excludeSlotId) =>
+        collectPriorGenerationVerifierBudget(
+          context.plan,
+          context.artifacts,
+          gen,
+          excludeSlotId,
+          this.checks,
+          this.head?.progress.verifierReceipts,
+        ),
+    );
     this.publisher = new Publication(context.store, context.authority, context.artifacts, context.plan, context.lock, ref => approvedState(context.loaded).vault.resolveNetworkCredential(ref),
       () => { const bound = bindSubject(context.lock, this.candidate.manifest, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); return bound.value; }, context.descriptor.repository);
     if (head && head.progress.publication.status !== 'idle') {
@@ -523,7 +566,11 @@ export class Cycle {
   async #finalizeVerifierPost(slotId: string, checked: VerifiedCheck, ordinal: number, phase: string): Promise<void> {
     const { plan, artifacts } = this.context;
     const slot = plan.verifierSlots[ordinal]!;
-    const gateSlot = slot.handler.implementation === 'gate.v1';
+    const impl = slot.handler.implementation;
+    const gateSlot = impl === 'gate.v1';
+    const benchmarkSlot = impl === 'benchmark-gate.v1';
+    const isPreemptedBenchmark =
+      benchmarkSlot && (checked.reason === 'BENCHMARK_PREEMPTED' || authenticatedBenchmarkGate(checked).retryablePreemption);
     let draft: Draft = {
       ...this.draft,
       stage: { ...this.draft.stage, kind: 'verifier_post' as const },
@@ -531,8 +578,12 @@ export class Cycle {
         item.slot === slotId && item.generation === this.generation ? { ...item, output: checked.output, receipt: checked.receipt } : item,
       ),
     };
-    if (checked.status === 'failed') {
-      const trusted = gateSlot ? authenticatedGate(checked) : authenticatedCheck(checked);
+    if (checked.status === 'failed' && !isPreemptedBenchmark) {
+      const trusted = gateSlot
+        ? authenticatedGate(checked)
+        : benchmarkSlot
+          ? authenticatedBenchmarkGate(checked)
+          : authenticatedCheck(checked);
       const stable = hash(
         canonical({
           slot: slot.id,
@@ -554,7 +605,7 @@ export class Cycle {
       draft = { ...draft, failures: rememberFailure(draft.failures, signature, this.generation, checked.output) };
     }
     const reworkCheckNode =
-      checked.status === 'failed'
+      checked.status === 'failed' && !isPreemptedBenchmark
         ? plan.orderedDAG.find(node => {
             if (node.kind !== 'check' || !node.onRework || node.handler.id !== slot.handler.id) return false;
             if (!same(node.handler.parameters, slot.handler.parameters)) return false;
@@ -565,13 +616,22 @@ export class Cycle {
         : undefined;
     if (reworkCheckNode?.onRework) {
       let detail: string | undefined;
-      if (gateSlot) {
-        const trusted = authenticatedGate(checked);
+      if (gateSlot || benchmarkSlot) {
+        const trusted = gateSlot ? authenticatedGate(checked) : authenticatedBenchmarkGate(checked);
+        const outCap = gateSlot ? GATE_OUTPUT_BYTES : BENCHMARK_OUTPUT_BYTES;
         try {
-          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), 65536);
+          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), outCap);
           const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
-          if (verdict && typeof verdict.reason === 'string' && verdict.reason.length > 0) {
-            detail = Array.from(verdict.reason).slice(0, 256).join('');
+          if (verdict) {
+            const rawDetail =
+              benchmarkSlot && typeof verdict.detail === 'string' && verdict.detail.length > 0
+                ? verdict.detail
+                : typeof verdict.reason === 'string' && verdict.reason.length > 0
+                  ? verdict.reason
+                  : undefined;
+            if (rawDetail !== undefined) {
+              detail = Array.from(rawDetail).slice(0, 256).join('');
+            }
           }
         } catch {
           // Malformed gate payload falls back to checked.reason.
@@ -642,6 +702,26 @@ export class Cycle {
     }
     await this.publish(draft, phase + '.post');
   }
+  async #ensureBenchmarkBaseTreeBundle(): Promise<BenchmarkBaseTreeBundle | undefined> {
+    if (this.context.source.version !== 2 || this.candidate.manifest.spec.baseTree === undefined) return undefined;
+    const key = String(this.generation) + ':' + hash(canonical(this.candidate.manifest)).hex;
+    if (this.#baseTreeBundles.has(key)) {
+      return this.#baseTreeBundles.get(key) ?? undefined;
+    }
+    const bundleProgress = createRateLimitedProgress(() => {
+      this.deadline.assert(true);
+    }, 1_000);
+    const sealed = await sealBenchmarkBaseTreeBundle(
+      this.context.source,
+      this.candidate.manifest,
+      this.context.artifacts,
+      this.context.owner,
+      this.deadline.abort.signal,
+      bundleProgress,
+    );
+    this.#baseTreeBundles.set(key, sealed ?? null);
+    return sealed;
+  }
   async runVerifier(slotId: string): Promise<VerifiedCheck | PreflightRefusal> {
     const { plan, lock, artifacts } = this.context, bounds = this.#overlayBounds();
     const existing = this.head!.progress.verifierReceipts.find(item => item.slot === slotId && item.generation === this.generation);
@@ -660,14 +740,28 @@ export class Cycle {
     }
     if (existing) {
       const key = slotId + ':' + this.generation, known = this.checks.get(key); if (known) return known;
-      const gateSlot = plan.verifierSlots.find(item => item.id === slotId)!.handler.implementation === 'gate.v1';
-      const job = gateSlot
+      const impl = plan.verifierSlots.find(item => item.id === slotId)!.handler.implementation;
+      const gateSlot = impl === 'gate.v1';
+      const benchmarkSlot = impl === 'benchmark-gate.v1';
+      const baseTreeBundle = benchmarkSlot ? await this.#ensureBenchmarkBaseTreeBundle() : undefined;
+      const job: PreparedVerification | PreparedGate | PreparedBenchmarkGate = gateSlot
         ? prepareGate(plan, lock, slotId, this.candidate, this.generation, existing.producerNonce, this.context.loaded.registry.spec.gateEndpoints)
-        : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs }, this.candidate, this.generation, existing.producerNonce);
+        : benchmarkSlot
+          ? prepareBenchmarkGate(plan, lock, slotId, this.candidate, this.generation, existing.producerNonce, this.context.loaded.registry.spec.gateEndpoints, baseTreeBundle)
+          : prepareVerification(plan, lock, slotId, { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs }, this.candidate, this.generation, existing.producerNonce);
       const operation = this.context.store.getOperation(job.operationId);
-      const restored = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND' && existing.receipt === null
-        ? await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal))
-        : await (gateSlot ? this.gate.restore(job as PreparedGate) : this.verifier.restore(job as PreparedVerification));
+      const isFresh = !operation.ok && operation.error.code === 'RECORD_NOT_FOUND' && existing.receipt === null;
+      const restored = isFresh
+        ? await (gateSlot
+            ? this.gate.run(job as PreparedGate, this.deadline.abort.signal)
+            : benchmarkSlot
+              ? this.benchmarkGate.run(job as PreparedBenchmarkGate, this.deadline.abort.signal)
+              : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal))
+        : await (gateSlot
+            ? this.gate.restore(job as PreparedGate)
+            : benchmarkSlot
+              ? this.benchmarkGate.restore(job as PreparedBenchmarkGate, this.deadline.abort.signal)
+              : this.verifier.restore(job as PreparedVerification));
       if (existing.receipt !== null && (!same(existing.receipt, restored.receipt) || !same(existing.output, restored.output))) refuse('RECOVERY_REQUIRED', '', 'recovery');
       this.checks.set(key, restored);
       const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId), phase = 'verify.' + this.generation + '.' + ordinal;
@@ -680,21 +774,32 @@ export class Cycle {
     if (this.draft.failures.length >= 16) refuse('OUTPUT_LIMIT', '', 'verification');
     await this.guard(); const ordinal = plan.verifierSlots.findIndex(slot => slot.id === slotId); if (ordinal < 0) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
     const nonce = randomBytes(16).toString('hex'), source = { manifest: this.context.source.manifest, ref: await artifacts.json('manifest', this.context.source.manifest, bounds.manifestMaxBytes), files: this.context.source.artifacts, baselineProofs: this.context.source.baselineProofs };
-    const gateSlot = plan.verifierSlots[ordinal]!.handler.implementation === 'gate.v1';
-    const sized = gateSlot ? null : preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
+    const impl = plan.verifierSlots[ordinal]!.handler.implementation;
+    const gateSlot = impl === 'gate.v1';
+    const benchmarkSlot = impl === 'benchmark-gate.v1';
+    const sized = gateSlot || benchmarkSlot ? null : preflightVerification(plan, lock, slotId, source, this.candidate, this.generation, nonce), phase = 'verify.' + this.generation + '.' + ordinal;
     if (sized && sized.kind === 'refused') {
       const row = await this.verifier.storeRefusal(sized.prepared); await this.events.push('verification', 'OUTPUT_LIMIT');
       await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierRefusals: [...this.draft.verifierRefusals, row] }, phase + '.pre');
       await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_post' }, nodes: this.nodeDispositions(this.draft.nodes, this.generation, { slotId, status: 'blocked' }) }, phase + '.post');
       const checked = await this.verifier.restoreRefusal(sized.prepared, row); this.refusals.set(slotId + ':' + this.generation, checked); return checked;
     }
-    const job: PreparedVerification | PreparedGate = gateSlot
+    const baseTreeBundle = benchmarkSlot ? await this.#ensureBenchmarkBaseTreeBundle() : undefined;
+    const job: PreparedVerification | PreparedGate | PreparedBenchmarkGate = gateSlot
       ? prepareGate(plan, lock, slotId, this.candidate, this.generation, nonce, this.context.loaded.registry.spec.gateEndpoints)
-      : sized!.job;
+      : benchmarkSlot
+        ? prepareBenchmarkGate(plan, lock, slotId, this.candidate, this.generation, nonce, this.context.loaded.registry.spec.gateEndpoints, baseTreeBundle)
+        : sized!.job;
     await this.events.push('verification', null);
     const epochTag = this.reworkEpoch > 0 ? { reworkEpoch: this.reworkEpoch } : {};
     await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'verifier_pre' }, verifierReceipts: [...this.draft.verifierReceipts, { slot: slotId, generation: this.generation, operationId: job.operationId, producerNonce: nonce, output: null, receipt: null, ...epochTag }] }, phase + '.pre');
-    this.deadline.assert(); const checked = await (gateSlot ? this.gate.run(job as PreparedGate, this.deadline.abort.signal) : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal)); this.checks.set(slotId + ':' + this.generation, checked);
+    this.deadline.assert();
+    const checked = await (gateSlot
+      ? this.gate.run(job as PreparedGate, this.deadline.abort.signal)
+      : benchmarkSlot
+        ? this.benchmarkGate.run(job as PreparedBenchmarkGate, this.deadline.abort.signal)
+        : this.verifier.run(job as PreparedVerification, this.deadline.abort.signal));
+    this.checks.set(slotId + ':' + this.generation, checked);
     await this.#finalizeVerifierPost(slotId, checked, ordinal, phase);
     return checked;
   }
@@ -1429,6 +1534,38 @@ export class Cycle {
     const originalSubmission = this.draft.failures.at(-1)?.evidence ?? this.draft.submission, before = journal(store).view.counts, oldDigest = this.draft.candidate.digest;
     const originalState = await schedulingSnapshot(store, authority, lock, artifacts, this.candidate, this.draft.candidate);
     observeParentExhaustion(this.deadline.assert(), lock, delegatedCounts.modelCalls);
+    // Native Pi adapter materializes files using baseline-derived modes in tree_overlay (v2) and 0o444 (100644)
+    // for every file in classic (v1); fail closed with zero effect before launching a native role whenever a
+    // candidate overlay/mutation carries an effective mode that Pi cannot faithfully materialize.
+    const baselineByPath = new Map(
+      this.context.source.version === 2
+        ? (this.context.source.baselineEntries ?? []).map(entry => [
+            entry.name,
+            { mode: entry.mode, bytes: null as Uint8Array | null, sha256: null as string | null },
+          ])
+        : this.context.source.artifacts.map(entry => [
+            entry.name,
+            { mode: entry.mode ?? ('100644' as const), bytes: entry.bytes, sha256: hash(entry.bytes).hex },
+          ]),
+    );
+    for (const file of this.candidate.files) {
+      const base = baselineByPath.get(file.name);
+      const baselineMode = base?.mode ?? '100644';
+      const effectiveMode = file.mode ?? baselineMode;
+      const piMaterializedMode = this.context.source.version === 2 ? baselineMode : '100644';
+      if (this.context.source.version === 1 && base !== undefined) {
+        const bytesUnchanged =
+          'bytes' in file
+            ? Buffer.from(file.bytes).equals(Buffer.from(base.bytes!))
+            : file.byteLength === base.bytes!.byteLength && file.digest.hex === base.sha256;
+        if (bytesUnchanged && effectiveMode === baselineMode) {
+          continue;
+        }
+      }
+      if (effectiveMode !== piMaterializedMode) {
+        refuse('CAPABILITY_UNSUPPORTED', '', 'execution', { effect: 'none' });
+      }
+    }
     const attempt: ControllerAttempt = retained ?? {
       ordinal, id: commandId, nodeId, nativeStepId, sessionId, purpose, repair, command,
       before: { requests: before.requests, operations: before.operations }, finished: null,
@@ -1632,7 +1769,18 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
   async prepareImplementationRepair(): Promise<{ readonly targetNodeId: string; readonly role: PlannedRole; readonly prompt: string } | null> {
     const { plan } = this.context; if (plan.budgets.maxImplementationRepairs === 0) return null;
     const checks = this.currentChecks(), required = plan.verifierSlots.filter(slot => slot.implicit === null && plan.task.spec.acceptance.required.includes(slot.checkId));
-    const failed = checks.filter(check => check.status === 'failed' && required.some(slot => slot.id === check.slotId));
+    const failed = checks.filter(check => {
+      if (check.status !== 'failed') return false;
+      const slot = required.find(item => item.id === check.slotId);
+      if (!slot) return false;
+      if (
+        slot.handler.implementation === 'benchmark-gate.v1'
+        && (check.reason === 'BENCHMARK_PREEMPTED' || authenticatedBenchmarkGate(check).retryablePreemption)
+      ) {
+        return false;
+      }
+      return true;
+    });
     if (!failed.length || this.submission?.value.status === 'no_change' && !plan.noChangeEligibility.available) return null;
     const allAvailable = required.every(slot => checks.some(check => check.slotId === slot.id && check.status !== 'blocked'));
     if (!allAvailable || checks.some(check => plan.verifierSlots.find(slot => slot.id === check.slotId)!.implicit === 'scope' && check.status !== 'passed')) return null;
@@ -1656,13 +1804,23 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     }[] = failed.map(check => {
       const slot = plan.verifierSlots.find(slot => slot.id === check.slotId)!;
       let detail: string | undefined;
-      if (slot.handler.implementation === 'gate.v1') {
-        const trusted = authenticatedGate(check);
+      if (slot.handler.implementation === 'gate.v1' || slot.handler.implementation === 'benchmark-gate.v1') {
+        const isBench = slot.handler.implementation === 'benchmark-gate.v1';
+        const trusted = isBench ? authenticatedBenchmarkGate(check) : authenticatedGate(check);
+        const outCap = isBench ? BENCHMARK_OUTPUT_BYTES : GATE_OUTPUT_BYTES;
         try {
-          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), 65536);
+          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), outCap);
           const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
-          if (verdict && typeof verdict.reason === 'string' && verdict.reason.length > 0) {
-            detail = Array.from(verdict.reason).slice(0, 256).join('');
+          if (verdict) {
+            const rawDetail =
+              isBench && typeof verdict.detail === 'string' && verdict.detail.length > 0
+                ? verdict.detail
+                : typeof verdict.reason === 'string' && verdict.reason.length > 0
+                  ? verdict.reason
+                  : undefined;
+            if (rawDetail !== undefined) {
+              detail = Array.from(rawDetail).slice(0, 256).join('');
+            }
           }
         } catch {
           // Malformed gate payload must not crash failure repair; fall back to default detail.
@@ -1732,6 +1890,14 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
     await this.graph();
     for (;;) {
       await this.ensureSubmissionForAcceptance();
+      const checks = this.currentChecks();
+      const preverified = await verifyControllerVerifierCasDescriptors(this.context.plan, checks, {
+        signal: this.deadline.abort.signal,
+        checkAuthority: async () => {
+          this.deadline.assert(true);
+          await this.context.owner.assertCurrent();
+        },
+      });
       const verdictHalt = this.haltedVerdictStatus();
       const acceptance = evaluateControllerAcceptance(
         this.context.plan,
@@ -1739,12 +1905,14 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
         this.candidate.manifest,
         this.candidate.files,
         this.generation,
-        this.currentChecks(),
+        checks,
         this.submission!.value,
         this.context.store,
         verdictHalt,
         this.draft.nodes.every(node => node.state === 'completed'),
         this.currentRefusals(),
+        null,
+        preverified,
       );
       if (verdictHalt === null && acceptance.result.spec.status === 'failed' && await this.implementationRepair()) {
         await this.graph();
@@ -1786,7 +1954,15 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       this.#publicationObservation = { status: 'unresolved', reason: result.reason, receipt: null };
       await this.publish({ ...this.draft, stage: { ...this.draft.stage, kind: 'publication_post' }, publication: { status: 'unresolved', operationId: prepared.operationId, receipt: null } }, 'publication.post');
     }
-    return evaluateControllerAcceptance(plan, lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission!.value, store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals());
+    const checks = this.currentChecks();
+    const preverified = await verifyControllerVerifierCasDescriptors(plan, checks, {
+      signal: this.deadline.abort.signal,
+      checkAuthority: async () => {
+        this.deadline.assert(true);
+        await this.context.owner.assertCurrent();
+      },
+    });
+    return evaluateControllerAcceptance(plan, lock, this.candidate.manifest, this.candidate.files, this.generation, checks, this.submission!.value, store, null, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals(), null, preverified);
   }
   async terminal(primary: AcceptanceObservation | ControllerIncident, drainWindowMs = 0): Promise<CycleExecution> {
     const { store, artifacts, lock } = this.context, secondary: ControllerDiagnostic['code'][] = [];
@@ -1863,7 +2039,13 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       if (this.#candidateKnown && facts.ok && (['DEADLINE', 'CANCELLED', 'BUDGET_EXHAUSTED', 'ATTEMPT_LIMIT', 'REPEAT_FAILURE'].includes(diagnostic.code) || (certain && ['CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED', 'EVIDENCE_UNAVAILABLE', 'SUBMISSION_AMBIGUOUS', 'SUBMISSION_INVALID'].includes(diagnostic.code)))) {
         const forced = diagnostic.code === 'DEADLINE' ? 'expired' : diagnostic.code === 'CANCELLED' ? 'cancelled' : ['SUBMISSION_AMBIGUOUS', 'SUBMISSION_INVALID'].includes(diagnostic.code) ? 'failed' : ['CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED', 'EVIDENCE_UNAVAILABLE'].includes(diagnostic.code) ? 'blocked' : 'exhausted';
         const forcedDiagnostic = ['CAPABILITY_UNSUPPORTED', 'MCP_AUTHENTICATION_REQUIRED', 'EVIDENCE_UNAVAILABLE', 'SUBMISSION_AMBIGUOUS', 'SUBMISSION_INVALID'].includes(diagnostic.code) ? diagnostic.code : null;
-        try { primary = evaluateControllerAcceptance(this.context.plan, this.context.lock, this.candidate.manifest, this.candidate.files, this.generation, this.currentChecks(), this.submission?.value ?? null, this.context.store, forced, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals(), forcedDiagnostic); }
+        try {
+          const checks = this.currentChecks();
+          const preverified = await verifyControllerVerifierCasDescriptors(this.context.plan, checks, {
+            checkAuthority: () => this.context.owner.assertCurrent(),
+          });
+          primary = evaluateControllerAcceptance(this.context.plan, this.context.lock, this.candidate.manifest, this.candidate.files, this.generation, checks, this.submission?.value ?? null, this.context.store, forced, this.draft.nodes.every(node => node.state === 'completed'), this.currentRefusals(), forcedDiagnostic, preverified);
+        }
         catch { primary = incident(diagnostic, this.context.lock.spec.runId, this.context.lock.spec.lockHash, [this.context.descriptor.plan, this.context.source.inventory], ['authoritative_result'], this.#cleanup); }
       } else primary = incident(diagnostic, this.context.lock.spec.runId, this.context.lock.spec.lockHash, [this.context.descriptor.plan, this.context.source.inventory], this.#candidateKnown ? ['authoritative_result'] : ['current_candidate', 'submission', 'authoritative_result'], this.#cleanup);
     }

@@ -101,9 +101,6 @@ export function checkedRefusalSubject(input: unknown, lock: TaskLock): Subject {
   const value = record(input, ['lockHash', 'contractHash', 'repository', 'baseRevision', 'sourceRevision', 'candidateDigest', 'targetMatrixDigest']);
   const contract = lock.spec.contract;
   const target = contract.spec.target;
-  if (contract.spec.acceptance.checks.some(check => check.allowedEvidenceLevels.includes('hardware_execution'))) {
-    refuse('RECOVERY_REQUIRED', '', 'recovery');
-  }
   const probe = bindSubject(lock, PROBE_MANIFEST);
   if (!probe.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
   if (value.targetMatrixDigest !== null) digestValue(value.targetMatrixDigest);

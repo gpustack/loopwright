@@ -314,7 +314,7 @@ Key conventions:
       Acceptance: `@loopwright/core` preserves legacy `{ id, platform, variant }` digests, enforces unmixed `['hardware_execution']` checks with hardware `targetCellId`, validates `bounds`/`comparative` `metricThresholds` and `hardwareProvenance` (`probeKind`, `topology`, `driverConstraint`, exact `deviceCount`), budgets `.loopwright-verifier/*` CAS descriptors separately from `overlay.maxBytes`, and blocks forged or mismatched `passed` claims in `evaluateAcceptance` and `constructRunResult`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg core`
 
-- [ ] **T3 · Controller `benchmark-gate.v1`, CAS staging/ingestion, preemption settlement, and recovery/reconcile**
+- [x] **T3 · Controller `benchmark-gate.v1`, CAS staging/ingestion, preemption settlement, and recovery/reconcile**
       Blocked by: T2
       Owns: `packages/controller/src/**`, `packages/controller/test/**`
       Gate: review

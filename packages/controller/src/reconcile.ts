@@ -3,21 +3,41 @@ import { lstat, open, realpath, rename } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { reopenLocalRun, type Authority, type LocalRunStore, type OperationReceipt } from '@loopwright/state';
-import { validateDocument } from '@loopwright/core';
+import { VERIFIER_ARTIFACT_LIMITS, validateDocument, type ArtifactManifest, type ArtifactRef, type Subject } from '@loopwright/core';
 import { approvedState, loadConfiguration } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner } from './ownership.js';
 import { admitRetainedRun, readRetained, validatePortPolicyFields, validatePortsAgainstHostPolicy } from './retained.js';
 import { resumeCycleWithPorts } from './recovery.js';
-import { ArtifactStore, checkedRef, stateValue } from './storage.js';
+import { overlayManifestBounds, restoreSource } from './source.js';
+import { ArtifactStore, checkedRef, overwriteAtomicMarker, publishAtomicMarker, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
-import { ProgressStore } from './progress.js';
+import { ProgressStore, journal, phaseCheckpointId, validateProgress } from './progress.js';
 import { parsePrivateJson } from './parser.js';
-import { canonical, freeze, hash, isRecord, record, same, text } from './schema.js';
+import { canonical, freeze, hash, isRecord, list, record, same, text } from './schema.js';
 import type { ControllerPorts } from './controller.js';
 import { preparePublication, verifyPublicationReceipt } from './publication.js';
 import { checkedGateVerdict, GATE_OUTPUT_BYTES, RESPONSE_BYTES, stripVerdictSignature, validateGateUrlOverrides, verifyGateSignature, verifySignedPayload, type GateVerdict } from './gate.js';
+import {
+  BENCHMARK_OUTPUT_BYTES,
+  BENCHMARK_RESPONSE_BYTES,
+  checkedBenchmarkVerdict,
+  checkedVerifierArtifactRef,
+  collectPriorGenerationVerifierBudget,
+  computeBenchmarkDisposition,
+  createRateLimitedProgress,
+  expectedBenchmarkOutputArtifactRef,
+  expectedBenchmarkRequest,
+  isPreemptedBenchmarkVerdict,
+  pullBenchmarkOutputBlobs,
+  resolveBenchmarkBaseUrl,
+  resolveBenchmarkSlotMetadata,
+  sealBenchmarkBaseTreeBundle,
+  shouldPullBenchmarkOutputs,
+  validateStoredBenchmarkProof,
+  type BenchmarkVerdict,
+} from './benchmark-gate.js';
 import type { LoadedConfiguration } from './types.js';
 export interface ReconcileCycleInput { readonly configuration: LoadedConfiguration; readonly runRoot: string; readonly runId: string; readonly receipt: string; readonly signal?: AbortSignal }
 export type ReconcileExecution =
@@ -46,7 +66,7 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
     const receiptBytes = await readReceiptFile(input.receipt);
     let raw: unknown; try { raw = parsePrivateJson(receiptBytes, RECEIPT_BYTES); } catch { refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery'); }
     const kind = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>).kind : null;
-    if (kind !== 'publication_receipt' && kind !== 'gate_verdict') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    if (kind !== 'publication_receipt' && kind !== 'gate_verdict' && kind !== 'benchmark_verdict') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
     let effectiveConfig = input.configuration;
     let state = approvedState(effectiveConfig);
     try {
@@ -61,6 +81,7 @@ export function reconcileCycle(input: ReconcileCycleInput, ports: ControllerPort
     if (!compiled.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
     const plan = compiled.value;
     if (kind === 'gate_verdict') return await reconcileGate({ ...input, configuration: effectiveConfig }, state, plan, receiptBytes, ports);
+    if (kind === 'benchmark_verdict') return await reconcileBenchmarkGate({ ...input, configuration: effectiveConfig }, state, plan, receiptBytes, ports);
     if (plan.publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
     return await reconcilePublication({ ...input, configuration: effectiveConfig }, state, plan, raw, ports);
   }, 'recovery');
@@ -75,12 +96,14 @@ async function admit(input: ReconcileCycleInput, plan: import('./types.js').Comp
 async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeof approvedState>, plan: import('./types.js').CompiledPlan, receiptBytes: Buffer, ports: ControllerPorts) {
   const { directory, descriptor, lock, effectivePorts } = await admit(input, plan, ports);
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
+  let primaryFailed = false;
   try {
     owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
     store = stateValue(reopenLocalRun(descriptor.identity)); const original = stateValue(store.inspect());
     if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
     authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
+    await artifacts.cleanCasTempFiles();
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source), head = await progress.read();
     const rawReceipt = parsePrivateJson(receiptBytes, 65_792);
     if (!isRecord(rawReceipt)) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
@@ -198,17 +221,1021 @@ async function reconcileGate(input: ReconcileCycleInput, state: ReturnType<typeo
     if (execution.value.result.spec.status === 'reconcile_required') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
     const receipt = settledReceipt as OperationReceipt;
     return freeze({ kind: 'settled', version: 1, runId: lock.spec.runId, status: execution.value.result.spec.status === 'completed' ? 'completed' : execution.value.result.spec.status === 'failed' ? 'failed' : 'blocked', outcome: receipt.outcome === 'succeeded' ? 'succeeded' : 'not_executed', externalEffects: execution.value.result.spec.externalEffects === 'confirmed' ? 'confirmed' : 'none', receipt: freeze(receipt) }) as ReconcileExecution;
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
   } finally {
-    if (store) { if (authority) stateValue(store.release(authority)); stateValue(store.close()); }
-    if (owner) await owner.release();
+    await releaseReconcileHandles(store, authority, owner, primaryFailed);
+  }
+}
+async function releaseReconcileHandles(
+  store: LocalRunStore | null,
+  authority: Authority | null,
+  owner: ControllerOwner | null,
+  suppressError: boolean,
+): Promise<void> {
+  let firstError: unknown = null;
+  const capture = (err: unknown) => {
+    if (firstError === null) firstError = err;
+  };
+  if (store) {
+    if (authority) {
+      try {
+        stateValue(store.release(authority));
+      } catch (err) {
+        capture(err);
+      }
+    }
+    try {
+      stateValue(store.close());
+    } catch (err) {
+      capture(err);
+    }
+  }
+  if (owner) {
+    try {
+      await owner.release();
+    } catch (err) {
+      capture(err);
+    }
+  }
+  if (!suppressError && firstError !== null) {
+    throw firstError;
   }
 }
 async function writeMarker(path: string, value: unknown, vault: { assertClean: (value: Uint8Array | string | object) => void }): Promise<void> {
-  const bytes = Buffer.from(canonical(value)); if (bytes.byteLength > 1048576) refuse('OUTPUT_LIMIT', '', 'recovery'); vault.assertClean(bytes);
-  let file: Awaited<ReturnType<typeof open>>;
-  try { file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !Buffer.from(await readBoundedFile(path, 1048576, true)).equals(bytes)) refuse('RECOVERY_REQUIRED', '', 'recovery'); return; }
-  try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  await publishAtomicMarker(path, value, vault, 'recovery');
+}
+async function reconcileBenchmarkGate(
+  input: ReconcileCycleInput,
+  state: ReturnType<typeof approvedState>,
+  plan: import('./types.js').CompiledPlan,
+  receiptBytes: Buffer,
+  ports: ControllerPorts,
+) {
+  const { directory, descriptor, lock, effectivePorts } = await admit(input, plan, ports);
+  let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
+  let primaryFailed = false;
+  try {
+    owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
+    store = stateValue(reopenLocalRun(descriptor.identity));
+    const original = stateValue(store.inspect());
+    if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
+    authority = stateValue(
+      store.claim({
+        ownerId: 'controller.' + owner.nonce,
+        expectedGeneration: original.owner.generation,
+        expectedRevision: original.revision,
+        mode: 'recovery',
+      }),
+    ).authority;
+    const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
+    await artifacts.cleanCasTempFiles();
+    const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source);
+    const head = await progress.read();
+    const rawReceipt = parsePrivateJson(receiptBytes, RECEIPT_BYTES);
+    if (!isRecord(rawReceipt)) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    const optionalVerdictKeys = (
+      ['retryablePreemption', 'detail', 'metrics', 'findings', 'hardwareProvenance', 'outputArtifacts'] as const
+    ).filter(key => Object.hasOwn(rawReceipt, key) && rawReceipt[key] !== undefined);
+    let file: Record<string, unknown>;
+    try {
+      file = record(
+        rawReceipt,
+        [
+          'version',
+          'kind',
+          'storeId',
+          'runId',
+          'lockHash',
+          'operationId',
+          'dispatchId',
+          'dispatchGeneration',
+          'gateId',
+          'checkId',
+          'candidateDigest',
+          'status',
+          'reason',
+          'expiresAtMs',
+          'preemptionCount',
+          'signature',
+          ...optionalVerdictKeys,
+        ],
+        '/receipt',
+      );
+    } catch {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+
+    if (!head) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    const receiptOpId = text(file.operationId, '/receipt', 128);
+    if (receiptOpId.length < 1) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+
+    // Resolve the receipt's operationId directly from retained verifierReceipts first so replaying an earlier slot
+    // or candidate generation never collides with a later active row.
+    const row = head.progress.verifierReceipts.find(item => item.operationId === receiptOpId) ?? null;
+    if (!row) {
+      const hasAnyBenchmarkRow = head.progress.verifierReceipts.some(
+        item => plan.verifierSlots.find(s => s.id === item.slot)?.handler.implementation === 'benchmark-gate.v1',
+      );
+      if (hasAnyBenchmarkRow) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+      refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    }
+    const slot = plan.verifierSlots.find(item => item.id === row.slot) ?? null;
+    if (!slot || slot.handler.implementation !== 'benchmark-gate.v1') {
+      refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    }
+    const ordinal = plan.verifierSlots.findIndex(item => item.id === slot.id);
+    if (ordinal < 0) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+
+    const meta = resolveBenchmarkSlotMetadata(plan, slot);
+    const endpoint = input.configuration.registry.spec.gateEndpoints.find(item => item.id === meta.endpointRef);
+    if (!endpoint) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    const operation = stateValue(store.getOperation(row.operationId));
+    const dispatch = operation.dispatch;
+    if (!dispatch || (operation.state !== 'dispatch_uncertain' && operation.state !== 'confirmed')) {
+      refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    }
+
+    // Bind validation and replay to this operation's own retained candidate generation checkpoint, subject, and manifest.
+    const storeJournal = journal(store);
+    const preCheckpointId = phaseCheckpointId(lock.spec.runId, `verify.${String(row.generation)}.${String(ordinal)}.pre`);
+    const rowCheckpoint = storeJournal.checkpoints.find(cp => cp.checkpointId === preCheckpointId) ?? null;
+    let subject: Subject;
+    let rowManifest: ArtifactManifest;
+    let rowWorkspaceRef: ArtifactRef;
+    if (rowCheckpoint) {
+      subject = rowCheckpoint.subject;
+      if (row.generation === head.progress.candidate.generation && same(subject, head.checkpoint.subject)) {
+        rowManifest = head.manifest;
+        rowWorkspaceRef = head.progress.candidate.workspace;
+      } else {
+        const wide = plan.capacity.D > 64;
+        const pMaxBytes = wide ? 262_144 : 65_536;
+        const pColLimit = wide ? 1024 : 256;
+        const rowProgressRef = rowCheckpoint.additionalArtifacts[0];
+        if (!rowProgressRef) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        const rowProgress = validateProgress(
+          parsePrivateJson(await artifacts.read(rowProgressRef, pMaxBytes), pMaxBytes, pColLimit),
+          plan,
+          lock,
+        );
+        rowManifest = await progress.manifest(rowProgress.candidate.manifest);
+        rowWorkspaceRef = rowProgress.candidate.workspace;
+      }
+    } else if (row.generation === head.progress.candidate.generation) {
+      subject = head.checkpoint.subject;
+      rowManifest = head.manifest;
+      rowWorkspaceRef = head.progress.candidate.workspace;
+    } else {
+      refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+    }
+
+    const secret = state.vault.resolveNetworkCredential(endpoint.signingCredentialRef);
+    const bearerToken = endpoint.authCredentialRef !== null ? state.vault.resolveNetworkCredential(endpoint.authCredentialRef) : null;
+    const extraSecrets = [secret, ...(bearerToken !== null ? [bearerToken] : [])];
+    const body = stripVerdictSignature(file);
+    const bodyCanonicalBytes = Buffer.from(canonical(body), 'utf8');
+    if (
+      typeof file.signature !== 'string'
+      || bodyCanonicalBytes.byteLength > BENCHMARK_RESPONSE_BYTES
+      || !verifyGateSignature(secret, file, file.signature)
+    ) {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+
+    let parsedVerdict: BenchmarkVerdict;
+    try {
+      parsedVerdict = checkedBenchmarkVerdict(body, {
+        storeId: original.storeId,
+        runId: lock.spec.runId,
+        lockHash: lock.spec.lockHash,
+        operationId: row.operationId,
+        dispatchId: dispatch.dispatchId,
+        dispatchGeneration: dispatch.generation,
+        gateId: meta.gateId,
+        checkId: slot.checkId,
+        candidateDigest: subject.candidateDigest.hex,
+        slotId: slot.id,
+      });
+    } catch {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+    if (parsedVerdict.status === 'pending') {
+      refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+    }
+
+    const nonce = row.producerNonce;
+    const prefix = join(artifacts.directory, 'benchmark-producer-' + hash(row.operationId + '\0' + nonce).hex);
+    const effectiveSignal = input.signal ?? new AbortController().signal;
+    if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+    let settledReceipt: OperationReceipt | null = null;
+    const wasAlreadyConfirmed = operation.state === 'confirmed';
+
+    if (wasAlreadyConfirmed) {
+      settledReceipt = operation.reconciliation ?? operation.initialReceipt;
+      if (!settledReceipt) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+      const savedOutput = record(
+        parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, BENCHMARK_OUTPUT_BYTES), BENCHMARK_OUTPUT_BYTES),
+        ['version', 'binding', 'observation', 'verdict', 'responseBytes', 'responseSignature', 'verifierArtifacts', 'disposition'],
+      );
+      if (savedOutput.verdict === null) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+      if (!same(savedOutput.verdict, parsedVerdict)) refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
+      const savedVerifierRefsRaw = list(savedOutput.verifierArtifacts, '', VERIFIER_ARTIFACT_LIMITS.maxFilesPerSlot);
+      if (savedVerifierRefsRaw.length > 0) {
+        const expectedOutputs = parsedVerdict.outputArtifacts ?? [];
+        if (savedVerifierRefsRaw.length !== expectedOutputs.length) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        const replayProgress = createRateLimitedProgress(() => {
+          if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+          stateValue(store!.renew(authority!));
+        }, 1_000);
+        for (let idx = 0; idx < savedVerifierRefsRaw.length; idx++) {
+          const ref = checkedVerifierArtifactRef(savedVerifierRefsRaw[idx], 'recovery');
+          const expOut = expectedOutputs[idx]!;
+          if (!same(ref, expectedBenchmarkOutputArtifactRef(slot.id, expOut, 'recovery'))) {
+            refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          }
+          const verified = await artifacts.verifyOrReuseVerifierCasBlob({
+            logicalName: ref.name,
+            expectedSha256: ref.digest.hex,
+            expectedByteLength: ref.byteLength,
+            mediaType: expOut.mediaType,
+            maxBytes: VERIFIER_ARTIFACT_LIMITS.maxFileBytes,
+            phase: 'recovery',
+            extraSecrets,
+            signal: effectiveSignal,
+            onProgress: replayProgress,
+          });
+          if (!verified || !same(verified.blobRef, ref)) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        }
+      }
+      if ((head.progress.stage.kind.startsWith('terminal') || head.progress.stage.kind === 'reconcile_result') && head.progress.terminalIntent?.result) {
+        let raw: unknown;
+        try {
+          raw = parsePrivateJson(await artifacts.read(head.progress.terminalIntent.result, 1_048_576), 1_048_576);
+        } catch {
+          refuse('RECOVERY_REQUIRED', '', 'recovery');
+        }
+        const terminalResult = validateDocument(raw, 'RunResult');
+        if (!terminalResult.ok) refuse('RECOVERY_REQUIRED', '', 'recovery');
+        const runStatus = terminalResult.value.spec.status;
+        if (runStatus === 'reconcile_required') {
+          return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
+        }
+        return freeze({
+          kind: 'settled',
+          version: 1,
+          runId: lock.spec.runId,
+          status: runStatus === 'completed' ? 'completed' : runStatus === 'failed' ? 'failed' : 'blocked',
+          outcome: settledReceipt.outcome === 'succeeded' ? 'succeeded' : 'not_executed',
+          externalEffects: terminalResult.value.spec.externalEffects === 'confirmed' ? 'confirmed' : 'none',
+          receipt: freeze(settledReceipt),
+        }) as ReconcileExecution;
+      }
+      // If another operation is currently dispatch_uncertain/unresolved, another verifier slot has an unfinished
+      // verifier_pre checkpoint row (even before putIntent), or a delegated role attempt is unfinished, return
+      // unresolved without calling resumeCycleWithPorts (which would advance/dispatch or timeout sibling work).
+      const hasOtherUnresolvedOps = storeJournal.operations.some(
+        op => op.intent.operationId !== row.operationId && (op.state === 'dispatch_uncertain' || op.state === 'unresolved'),
+      );
+      const hasOtherPendingVerifier =
+        head.progress.verifierReceipts.some(item => item.operationId !== row.operationId && item.receipt === null)
+        || (head.progress.stage.kind === 'verifier_pre'
+          && head.progress.stage.phase !== `verify.${String(row.generation)}.${String(ordinal)}.pre`);
+      if (hasOtherUnresolvedOps || hasOtherPendingVerifier) {
+        return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
+      }
+      const activeAttempt = head.progress.attempts.at(-1);
+      if (activeAttempt && activeAttempt.finished === null) {
+        return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'delegated_step_required' }) as ReconcileExecution;
+      }
+    } else {
+      let bindingBytes: Buffer;
+      try {
+        bindingBytes = await readBoundedFile(prefix + '.binding.json', 1_048_576, true, 0o600);
+      } catch (error) {
+        if (error instanceof ControllerFailure && error.diagnostic.code === 'REGISTRY_UNTRUSTED') {
+          refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        }
+        throw error;
+      }
+      const binding = record(parsePrivateJson(bindingBytes, 1_048_576), [
+        'version',
+        'planDigest',
+        'operationId',
+        'producerNonce',
+        'requestDigest',
+        'requestBytesDigest',
+        'intentDigest',
+        'subject',
+        'generation',
+        'endpoint',
+        'dispatchReceipt',
+      ]);
+
+      let baseTreeBundle: Awaited<ReturnType<typeof sealBenchmarkBaseTreeBundle>>;
+      const entryModes = new Map<string, '100644' | '100755'>();
+      if (rowManifest.spec.baseTree !== undefined || rowManifest.spec.entries.length > 0) {
+        const jsonPaths = [
+          ...new Set(
+            plan.verifierSlots
+              .filter(s => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(s.handler.implementation))
+              .map(s => text(s.handler.parameters.path)),
+          ),
+        ];
+        const source = await restoreSource(
+          descriptor.repository,
+          plan.task,
+          owner,
+          artifacts,
+          descriptor.source,
+          descriptor.sourceWorkspace,
+          jsonPaths,
+        );
+        if (source.version === 2) {
+          for (const item of source.baselineEntries ?? []) entryModes.set(item.name, item.mode);
+          if (rowManifest.spec.baseTree !== undefined) {
+            const bundleProgress = createRateLimitedProgress(() => {
+              if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+              stateValue(store!.renew(authority!));
+            }, 1_000);
+            baseTreeBundle = await sealBenchmarkBaseTreeBundle(
+              source,
+              rowManifest,
+              artifacts,
+              owner,
+              effectiveSignal,
+              bundleProgress,
+            );
+          }
+        } else {
+          for (const item of source.artifacts) entryModes.set(item.name, item.mode ?? '100644');
+        }
+        if (rowManifest.spec.entries.length > 0 && !same(rowWorkspaceRef, descriptor.sourceWorkspace)) {
+          const bounds = overlayManifestBounds(plan.budgets.overlay);
+          const maxWsBytes = Math.max(8_388_608, bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+          const wsBytes = await artifacts.read(rowWorkspaceRef, maxWsBytes);
+          let isDelegatedWorkspace = false;
+          try {
+            const parsedWs = parsePrivateJson(Buffer.from(wsBytes), maxWsBytes, bounds.collectionLimit);
+            if (
+              isRecord(parsedWs)
+              && (parsedWs.format === 'delegated-capture.v1' || parsedWs.format === 'delegated-capture.v2')
+              && Array.isArray(parsedWs.overlay)
+            ) {
+              isDelegatedWorkspace = true;
+              for (const ov of parsedWs.overlay) {
+                if (isRecord(ov) && typeof ov.name === 'string' && (ov.mode === '100644' || ov.mode === '100755')) {
+                  entryModes.set(ov.name, ov.mode);
+                }
+              }
+            }
+          } catch {
+            // Native Pi capture (non-JSON workspace).
+          }
+          if (!isDelegatedWorkspace && source.version === 1) {
+            // Native Pi classic (v1) materializes every file as 0o444 (100644) and capture records explicit 100644.
+            for (const entry of rowManifest.spec.entries) {
+              entryModes.set(entry.name, '100644');
+            }
+          }
+        }
+      }
+
+      const request: Record<string, unknown> = {
+        ...expectedBenchmarkRequest(plan, slot, endpoint, subject, rowManifest, baseTreeBundle, entryModes),
+        storeId: original.storeId,
+        runId: lock.spec.runId,
+        lockHash: lock.spec.lockHash,
+        operationId: row.operationId,
+        dispatchId: dispatch.dispatchId,
+        dispatchGeneration: dispatch.generation,
+        requestDigest: operation.intent.requestDigest.hex,
+      };
+      const requestBytesDigest = hash(Buffer.from(canonical(request))).hex;
+      if (
+        binding.version !== 1
+        || !same(binding.planDigest, plan.planDigest)
+        || binding.operationId !== row.operationId
+        || binding.producerNonce !== nonce
+        || binding.generation !== row.generation
+        || !same(binding.subject, subject)
+        || !same(binding.requestDigest, operation.intent.requestDigest)
+        || !same(binding.intentDigest, operation.intentDigest)
+        || binding.endpoint !== endpoint.id
+        || !same(binding.requestBytesDigest, requestBytesDigest)
+        || !same(binding.dispatchReceipt, {
+          generation: dispatch.generation,
+          dispatchId: dispatch.dispatchId,
+          revision: dispatch.revision,
+          clockEpoch: original.clock.basis.clockEpoch,
+        })
+      ) {
+        refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+      }
+
+      const priorBudget = await collectPriorGenerationVerifierBudget(
+        plan,
+        artifacts,
+        row.generation,
+        slot.id,
+        undefined,
+        head.progress.verifierReceipts,
+      );
+
+      const proofPath = prefix + '.proof.json';
+      let proofExists = false;
+      try {
+        await lstat(proofPath);
+        proofExists = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        }
+      }
+
+      let useFreshReconcile = !proofExists;
+      let overwriteExistingProvisionalProof = false;
+      if (proofExists) {
+        let proofBytes: Buffer;
+        try {
+          proofBytes = await readBoundedFile(proofPath, 1_048_576, true, 0o600);
+        } catch {
+          refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        }
+        const proofVerifyProgress = createRateLimitedProgress(() => {
+          if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+          stateValue(store!.renew(authority!));
+        }, 1_000);
+        const validated = await validateStoredBenchmarkProof({
+          proofBytes,
+          artifacts,
+          plan,
+          slot,
+          endpoint,
+          targetHardware: meta.targetHardware,
+          targetCellId: meta.targetCellId,
+          allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+          metricThresholds: meta.metricThresholds,
+          view: original,
+          operation,
+          dispatch,
+          operationId: row.operationId,
+          producerNonce: nonce,
+          generation: row.generation,
+          subject,
+          request,
+          requestBytesDigest,
+          secret,
+          bearerToken,
+          priorBudget,
+          signal: effectiveSignal,
+          onProgress: proofVerifyProgress,
+          allowInvalidLocalCasSettlement: true,
+        });
+        const isProvisionalTimeoutProof =
+          validated.verdict === null
+          && validated.observation.transport === 'deadline'
+          && validated.observation.casOutcome === 'gate_timeout';
+        if (isProvisionalTimeoutProof) {
+          // A prior #settleTimeout wrote a provisional timeout .proof.json but was cancelled/crashed before
+          // confirming SQLite (operation is still dispatch_uncertain). Let the verified signed receipt
+          // supersede the provisional timeout proof via normal fresh-receipt reconciliation.
+          useFreshReconcile = true;
+          overwriteExistingProvisionalProof = true;
+        } else {
+          if (validated.verdict === null) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          if (!same(validated.verdict, parsedVerdict)) refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
+          if (effectiveSignal?.aborted) refuse('CANCELLED', '', 'recovery');
+          stateValue(store.renew(authority));
+          const postValidateView = stateValue(store.inspect());
+          const postValidateWallMs = BigInt(postValidateView.clock.sampledNow.wallMs);
+          const currentlyFresh =
+            parsedVerdict.status !== 'approved'
+            || (BigInt(parsedVerdict.expiresAtMs) >= postValidateWallMs
+              && BigInt(parsedVerdict.expiresAtMs) <= postValidateWallMs + 86_400_000n);
+
+          if (validated.localCasInvalid) {
+            // Local CAS blob referenced by an unconfirmed proof is missing or invalid: settle the operation as
+            // blocked / ARTIFACT_INVALID with empty verifier refs instead of stranding dispatch_uncertain.
+            const invalidWallClockValid = validated.observation.wallClockValid && currentlyFresh;
+            const invalidDisposition = computeBenchmarkDisposition({
+              verdict: parsedVerdict,
+              timedOut: validated.observation.transport === 'deadline',
+              sawPreemption: validated.observation.sawPreemption,
+              wallClockValid: invalidWallClockValid,
+              targetHardware: meta.targetHardware,
+              targetCellId: meta.targetCellId,
+              allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+              metricThresholds: meta.metricThresholds,
+              casOutcome: 'artifact_invalid',
+            });
+            const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
+            const invalidOutput = await artifacts.json(
+              'benchmark-output',
+              {
+                version: 1,
+                binding: {
+                  planDigest: plan.planDigest,
+                  operationId: row.operationId,
+                  producerNonce: nonce,
+                  generation: row.generation,
+                  endpoint: endpoint.id,
+                  subject,
+                  requestBytesDigest,
+                },
+                observation: {
+                  attempts: validated.observation.attempts,
+                  elapsedMs: validated.observation.elapsedMs,
+                  transport: validated.observation.transport,
+                  sawPreemption: validated.observation.sawPreemption,
+                  wallClockValid: invalidWallClockValid,
+                  casOutcome: 'artifact_invalid',
+                },
+                verdict: parsedVerdict,
+                responseBytes: validated.responseBytesBase64,
+                responseSignature: validated.responseSignature,
+                verifierArtifacts: [],
+                disposition: invalidDisposition,
+              },
+              BENCHMARK_OUTPUT_BYTES,
+            );
+            const invalidEvidenceSpec = {
+              checkId: slot.checkId,
+              observedStatus: invalidDisposition.status,
+              producerId: 'loopwright.benchmark-gate.v1',
+              method: invalidDisposition.method,
+              level: 'hardware_execution' as const,
+              subject,
+              artifacts: [invalidOutput],
+              reason: invalidDisposition.reason,
+              ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
+              ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
+              ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
+              ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
+            };
+            const invalidEvidence = validateDocument(
+              { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: invalidEvidenceSpec },
+              'Evidence',
+            );
+            if (!invalidEvidence.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+            settledReceipt = {
+              receiptId: 'receipt.' + suffix,
+              outcome: invalidDisposition.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
+              evidence: {
+                evidenceId: 'receipt-evidence.' + suffix,
+                producerId: 'loopwright.benchmark-gate.v1',
+                method: invalidDisposition.method,
+                subject: {
+                  storeId: original.storeId,
+                  runId: lock.spec.runId,
+                  lockHash: lock.spec.lockHash,
+                  operationId: row.operationId,
+                  requestId: null,
+                  intentDigest: operation.intentDigest,
+                  dispatchGeneration: dispatch.generation,
+                  dispatchId: dispatch.dispatchId,
+                },
+                artifact: invalidOutput,
+              },
+            };
+            const invalidReceiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+            await overwriteAtomicMarker(
+              proofPath,
+              { version: 1, output: invalidOutput, receipt: invalidReceiptRef, evidence: invalidEvidence.value },
+              state.vault,
+              'recovery',
+            );
+            if (effectiveSignal?.aborted) refuse('CANCELLED', '', 'recovery');
+            stateValue(store.renew(authority));
+            const finalBlockedView = stateValue(store.inspect());
+            if (finalBlockedView.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+            if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+            stateValue(store.reconcileOperation(authority, row.operationId, settledReceipt));
+          } else {
+            // Operation still needs first SQLite confirmation: apply current-time expiresAtMs freshness admission
+            // AFTER lease renewal and proof + CAS validation, with ZERO intervening durable writes before confirmation.
+            if (!currentlyFresh) {
+              refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+            }
+            if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+            settledReceipt = validated.receipt;
+            stateValue(store.reconcileOperation(authority, row.operationId, settledReceipt));
+          }
+        }
+      }
+      if (useFreshReconcile) {
+        // Freshness admission strictly for first settlement (never blocks idempotent replay or valid existing proof).
+        const initialWallMs = BigInt(original.clock.sampledNow.wallMs);
+        if (
+          parsedVerdict.status === 'approved'
+          && (BigInt(parsedVerdict.expiresAtMs) < initialWallMs || BigInt(parsedVerdict.expiresAtMs) > initialWallMs + 86_400_000n)
+        ) {
+          refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+        }
+
+        // Lock signed receipt identity atomically before any CAS retrieval so transient CAS transport failures remain
+        // retryable with the exact same signed receipt while conflicting replacement verdicts refuse RECEIPT_CONFLICT.
+        const commitmentPath = prefix + '.reconcile-receipt.json';
+        const bodyDigest = hash(bodyCanonicalBytes).hex;
+        let hasCommitment = false;
+        try {
+          await lstat(commitmentPath);
+          hasCommitment = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          }
+        }
+        if (hasCommitment) {
+          let rawCommitBytes: Buffer;
+          try {
+            rawCommitBytes = await readBoundedFile(commitmentPath, 1_048_576, true, 0o600);
+          } catch {
+            refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          }
+          const committed = record(parsePrivateJson(rawCommitBytes, 1_048_576), [
+            'version',
+            'operationId',
+            'dispatchId',
+            'dispatchGeneration',
+            'verdict',
+            'bodyDigest',
+          ]);
+          if (
+            committed.version !== 1
+            || committed.operationId !== row.operationId
+            || committed.dispatchId !== dispatch.dispatchId
+            || committed.dispatchGeneration !== dispatch.generation
+          ) {
+            refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          }
+          if (!same(committed.verdict, parsedVerdict) || committed.bodyDigest !== bodyDigest) {
+            refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
+          }
+        } else {
+          await publishAtomicMarker(
+            commitmentPath,
+            {
+              version: 1,
+              operationId: row.operationId,
+              dispatchId: dispatch.dispatchId,
+              dispatchGeneration: dispatch.generation,
+              verdict: parsedVerdict,
+              bodyDigest,
+            },
+            state.vault,
+            'recovery',
+          );
+        }
+
+        const reconcileStarted = performance.now();
+        const reconcileStartMono = BigInt(original.clock.sampledNow.monotonicMs);
+        const reconcileBudgetMs = Math.max(endpoint.timeoutMs, endpoint.maxPollMs);
+        const reconcileDeadlineMono = reconcileStartMono + BigInt(reconcileBudgetMs);
+
+        const isPastReconcileDeadline = (): boolean => {
+          const nowMono = BigInt(stateValue(store!.inspect()).clock.sampledNow.monotonicMs);
+          const elapsed = Math.ceil(performance.now() - reconcileStarted);
+          return nowMono >= reconcileDeadlineMono || elapsed >= reconcileBudgetMs;
+        };
+
+        const resolveReconcileTimeoutMs = (): number | null => {
+          const nowMono = BigInt(stateValue(store!.inspect()).clock.sampledNow.monotonicMs);
+          const elapsed = Math.ceil(performance.now() - reconcileStarted);
+          const remMono = Number(reconcileDeadlineMono - nowMono);
+          const remElapsed = reconcileBudgetMs - elapsed;
+          const windowMs = Math.min(endpoint.timeoutMs, remMono, remElapsed);
+          return windowMs <= 0 ? null : windowMs;
+        };
+
+        const shouldPull = shouldPullBenchmarkOutputs({
+          verdict: parsedVerdict,
+          wallClockValid: true,
+          targetHardware: meta.targetHardware,
+          targetCellId: meta.targetCellId,
+          allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+          metricThresholds: meta.metricThresholds,
+        });
+
+        let casOutcome: 'ok' | 'artifact_invalid' | 'evidence_unavailable' | 'gate_timeout' = 'ok';
+        let verifierCasRefs: readonly ArtifactRef[] = freeze([]);
+        if (shouldPull && parsedVerdict.outputArtifacts) {
+          const proposedFiles = parsedVerdict.outputArtifacts.length;
+          const proposedBytes = parsedVerdict.outputArtifacts.reduce((sum, item) => sum + item.byteLength, 0);
+          if (
+            priorBudget.files + proposedFiles > VERIFIER_ARTIFACT_LIMITS.maxTotalFiles
+            || proposedBytes > VERIFIER_ARTIFACT_LIMITS.maxTotalBytes - priorBudget.bytes
+          ) {
+            casOutcome = 'artifact_invalid';
+          } else {
+            const baseUrl = resolveBenchmarkBaseUrl(endpoint, effectivePorts.gateUrlOverrides, 'recovery');
+            const pulled = await pullBenchmarkOutputBlobs({
+              baseUrl,
+              operationId: row.operationId,
+              slotId: slot.id,
+              secret,
+              bearerToken,
+              outputArtifacts: parsedVerdict.outputArtifacts,
+              artifacts,
+              signal: effectiveSignal,
+              resolveTimeoutMs: resolveReconcileTimeoutMs,
+              onBeforeEach: () => {
+                stateValue(store!.renew(authority!));
+              },
+              reuseLocalFirst: true,
+              phase: 'recovery',
+            });
+            if (!pulled.ok) {
+              casOutcome = pulled.casOutcome;
+            } else if (isPastReconcileDeadline()) {
+              casOutcome = 'gate_timeout';
+            } else {
+              verifierCasRefs = pulled.refs;
+            }
+          }
+        }
+
+        // Transient CAS transport unavailability leaves SQLite dispatch_uncertain (with receipt commitment locked)
+        // so retrying the exact same signed receipt succeeds once transport recovers.
+        if (casOutcome === 'evidence_unavailable' || casOutcome === 'gate_timeout') {
+          refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
+        }
+
+        // Re-sample wall-clock freshness immediately before first settlement (after any CAS retrieval).
+        const postPullView = stateValue(store.inspect());
+        const postPullWallMs = BigInt(postPullView.clock.sampledNow.wallMs);
+        const wallClockValid =
+          parsedVerdict.status !== 'approved'
+          || (BigInt(parsedVerdict.expiresAtMs) >= postPullWallMs
+            && BigInt(parsedVerdict.expiresAtMs) <= postPullWallMs + 86_400_000n);
+
+        const sawPreemption = parsedVerdict.preemptionCount > 0 || isPreemptedBenchmarkVerdict(parsedVerdict);
+        const dispositioned = computeBenchmarkDisposition({
+          verdict: parsedVerdict,
+          timedOut: false,
+          sawPreemption,
+          wallClockValid,
+          targetHardware: meta.targetHardware,
+          targetCellId: meta.targetCellId,
+          allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+          metricThresholds: meta.metricThresholds,
+          casOutcome,
+        });
+        const retainOutputs =
+          casOutcome === 'ok'
+          && shouldPullBenchmarkOutputs({
+            verdict: parsedVerdict,
+            wallClockValid,
+            targetHardware: meta.targetHardware,
+            targetCellId: meta.targetCellId,
+            allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+            metricThresholds: meta.metricThresholds,
+          });
+        const effectiveRefs = retainOutputs ? verifierCasRefs : freeze([]);
+
+        const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
+        const output = await artifacts.json(
+          'benchmark-output',
+          {
+            version: 1,
+            binding: {
+              planDigest: plan.planDigest,
+              operationId: row.operationId,
+              producerNonce: nonce,
+              generation: row.generation,
+              endpoint: endpoint.id,
+              subject,
+              requestBytesDigest,
+            },
+            observation: {
+              attempts: 1,
+              elapsedMs: Math.ceil(performance.now() - reconcileStarted),
+              transport: 'completed',
+              sawPreemption,
+              wallClockValid,
+              casOutcome,
+            },
+            verdict: parsedVerdict,
+            responseBytes: bodyCanonicalBytes.toString('base64'),
+            responseSignature: text(file.signature),
+            verifierArtifacts: effectiveRefs,
+            disposition: dispositioned,
+          },
+          BENCHMARK_OUTPUT_BYTES,
+        );
+        const evidenceSpec = {
+          checkId: slot.checkId,
+          observedStatus: dispositioned.status,
+          producerId: 'loopwright.benchmark-gate.v1',
+          method: dispositioned.method,
+          level: 'hardware_execution' as const,
+          subject,
+          artifacts: [output, ...effectiveRefs],
+          reason: dispositioned.reason,
+          ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
+          ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
+          ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
+          ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
+        };
+        const evidenceResult = validateDocument(
+          { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },
+          'Evidence',
+        );
+        if (!evidenceResult.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        settledReceipt = {
+          receiptId: 'receipt.' + suffix,
+          outcome: dispositioned.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
+          evidence: {
+            evidenceId: 'receipt-evidence.' + suffix,
+            producerId: 'loopwright.benchmark-gate.v1',
+            method: dispositioned.method,
+            subject: {
+              storeId: original.storeId,
+              runId: lock.spec.runId,
+              lockHash: lock.spec.lockHash,
+              operationId: row.operationId,
+              requestId: null,
+              intentDigest: operation.intentDigest,
+              dispatchGeneration: dispatch.generation,
+              dispatchId: dispatch.dispatchId,
+            },
+            artifact: output,
+          },
+        };
+        const receiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+        if (overwriteExistingProvisionalProof) {
+          await overwriteAtomicMarker(
+            prefix + '.proof.json',
+            { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value },
+            state.vault,
+            'recovery',
+          );
+        } else {
+          await writeMarker(prefix + '.proof.json', { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value }, state.vault);
+        }
+        if (effectiveSignal?.aborted) refuse('CANCELLED', '', 'recovery');
+        stateValue(store.renew(authority));
+
+        // Recheck signed expiresAtMs after durable proof persistence, right at first SQLite confirmation.
+        const confirmView = stateValue(store.inspect());
+        const confirmWallMs = BigInt(confirmView.clock.sampledNow.wallMs);
+        const confirmFresh =
+          parsedVerdict.status !== 'approved'
+          || (BigInt(parsedVerdict.expiresAtMs) >= confirmWallMs
+            && BigInt(parsedVerdict.expiresAtMs) <= confirmWallMs + 86_400_000n);
+        if (wallClockValid && !confirmFresh) {
+          const expiredDisposition = computeBenchmarkDisposition({
+            verdict: parsedVerdict,
+            timedOut: false,
+            sawPreemption,
+            wallClockValid: false,
+            targetHardware: meta.targetHardware,
+            targetCellId: meta.targetCellId,
+            allowSyntheticHardwareProbe: meta.allowSyntheticHardwareProbe,
+            metricThresholds: meta.metricThresholds,
+            casOutcome,
+          });
+          const expiredOutput = await artifacts.json(
+            'benchmark-output',
+            {
+              version: 1,
+              binding: {
+                planDigest: plan.planDigest,
+                operationId: row.operationId,
+                producerNonce: nonce,
+                generation: row.generation,
+                endpoint: endpoint.id,
+                subject,
+                requestBytesDigest,
+              },
+              observation: {
+                attempts: 1,
+                elapsedMs: Math.ceil(performance.now() - reconcileStarted),
+                transport: 'completed',
+                sawPreemption,
+                wallClockValid: false,
+                casOutcome,
+              },
+              verdict: parsedVerdict,
+              responseBytes: bodyCanonicalBytes.toString('base64'),
+              responseSignature: text(file.signature),
+              verifierArtifacts: [],
+              disposition: expiredDisposition,
+            },
+            BENCHMARK_OUTPUT_BYTES,
+          );
+          const expiredEvidenceSpec = {
+            checkId: slot.checkId,
+            observedStatus: expiredDisposition.status,
+            producerId: 'loopwright.benchmark-gate.v1',
+            method: expiredDisposition.method,
+            level: 'hardware_execution' as const,
+            subject,
+            artifacts: [expiredOutput],
+            reason: expiredDisposition.reason,
+            ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
+            ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
+            ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
+            ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
+          };
+          const expiredEvidence = validateDocument(
+            { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: expiredEvidenceSpec },
+            'Evidence',
+          );
+          if (!expiredEvidence.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          settledReceipt = {
+            receiptId: 'receipt.' + suffix,
+            outcome: expiredDisposition.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
+            evidence: {
+              evidenceId: 'receipt-evidence.' + suffix,
+              producerId: 'loopwright.benchmark-gate.v1',
+              method: expiredDisposition.method,
+              subject: {
+                storeId: original.storeId,
+                runId: lock.spec.runId,
+                lockHash: lock.spec.lockHash,
+                operationId: row.operationId,
+                requestId: null,
+                intentDigest: operation.intentDigest,
+                dispatchGeneration: dispatch.generation,
+                dispatchId: dispatch.dispatchId,
+              },
+              artifact: expiredOutput,
+            },
+          };
+          const expiredReceiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+          await overwriteAtomicMarker(
+            prefix + '.proof.json',
+            { version: 1, output: expiredOutput, receipt: expiredReceiptRef, evidence: expiredEvidence.value },
+            state.vault,
+            'recovery',
+          );
+          if (effectiveSignal?.aborted) refuse('CANCELLED', '', 'recovery');
+          stateValue(store.renew(authority));
+          const finalExpiredView = stateValue(store.inspect());
+          if (finalExpiredView.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+          if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
+        }
+
+        stateValue(store.reconcileOperation(authority, row.operationId, settledReceipt));
+      }
+    }
+
+    // Check if other operations remain unresolved in the store or another verifier slot has an unfinished
+    // pre-checkpoint row before invoking resumeCycleWithPorts.
+    const postJournal = journal(store);
+    const remainingUnresolvedOps = postJournal.operations.some(
+      op => op.intent.operationId !== row.operationId && (op.state === 'dispatch_uncertain' || op.state === 'unresolved'),
+    );
+    const remainingPendingVerifier = head.progress.verifierReceipts.some(
+      item => item.operationId !== row.operationId && item.receipt === null,
+    );
+    if (remainingUnresolvedOps || remainingPendingVerifier) {
+      return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
+    }
+
+    stateValue(store.release(authority)); authority = null;
+    stateValue(store.close()); store = null;
+    await owner.release(); owner = null;
+    const execution = await resumeCycleWithPorts(
+      {
+        configuration: input.configuration,
+        repository: descriptor.repository,
+        runRoot: input.runRoot,
+        runId: input.runId,
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+      effectivePorts,
+    );
+    if (!execution.ok && execution.error.code === 'CAPABILITY_UNSUPPORTED') {
+      return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'delegated_step_required' }) as ReconcileExecution;
+    }
+    if (!execution.ok || execution.value.kind !== 'result') refuse('RECOVERY_REQUIRED', '', 'recovery');
+    if (execution.value.result.spec.status === 'reconcile_required') {
+      return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
+    }
+    const receipt = settledReceipt as OperationReceipt;
+    return freeze({
+      kind: 'settled',
+      version: 1,
+      runId: lock.spec.runId,
+      status:
+        execution.value.result.spec.status === 'completed'
+          ? 'completed'
+          : execution.value.result.spec.status === 'failed'
+            ? 'failed'
+            : 'blocked',
+      outcome: receipt.outcome === 'succeeded' ? 'succeeded' : 'not_executed',
+      externalEffects: execution.value.result.spec.externalEffects === 'confirmed' ? 'confirmed' : 'none',
+      receipt: freeze(receipt),
+    }) as ReconcileExecution;
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
+  } finally {
+    await releaseReconcileHandles(store, authority, owner, primaryFailed);
+  }
 }
 /** Replaces a proof marker that only carried an unresolved observation; a settled proof with different bytes refuses. */
 async function replaceMarker(path: string, value: unknown, vault: { assertClean: (value: Uint8Array | string | object) => void }): Promise<void> {
@@ -231,12 +1258,14 @@ async function reconcilePublication(input: ReconcileCycleInput, state: ReturnTyp
   if (publication.mode !== 'pull_request') refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
   const { directory, descriptor, lock, effectivePorts } = await admit(input, plan, ports);
   let owner: ControllerOwner | null = null, store: LocalRunStore | null = null, authority: Authority | null = null;
+  let primaryFailed = false;
   try {
     owner = await ControllerOwner.acquire(directory, input.runId, plan.planDigest);
     store = stateValue(reopenLocalRun(descriptor.identity)); const original = stateValue(store.inspect());
     if (original.clockStatus !== 'trusted') refuse('RECOVERY_REQUIRED', '', 'recovery');
     authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
+    await artifacts.cleanCasTempFiles();
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source), head = await progress.read();
     const pending = head?.progress.publication;
     if (!head || !pending || pending.status === 'idle' || pending.operationId === null) refuse('RECOVERY_REQUIRED', '/publication', 'recovery');
@@ -314,9 +1343,11 @@ async function reconcilePublication(input: ReconcileCycleInput, state: ReturnTyp
     if (executionStatus.status === 'reconcile_required') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'remaining_unresolved_work' }) as ReconcileExecution;
     if (executionStatus.status === 'incident_retained') return freeze({ kind: 'unresolved', version: 1, runId: lock.spec.runId, reason: 'incident_retained' }) as ReconcileExecution;
     return freeze({ kind: 'settled', version: 1, runId: lock.spec.runId, status: executionStatus.status === 'completed' ? 'completed' : 'failed', outcome, externalEffects: executionStatus.fx as 'confirmed' | 'none', receipt: freeze(receipt) }) as ReconcileExecution;
+  } catch (error) {
+    primaryFailed = true;
+    throw error;
   } finally {
-    if (store) { if (authority) stateValue(store.release(authority)); stateValue(store.close()); }
-    if (owner) await owner.release();
+    await releaseReconcileHandles(store, authority, owner, primaryFailed);
   }
 }
 /** Supersedes a retained reconcile_required terminal result in place when the run has already terminalized. */

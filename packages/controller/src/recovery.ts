@@ -22,6 +22,14 @@ import { boundFindingsForObservations, hydrateStepVerdicts, normalizeSubmission,
 import { freeze, record, same, text } from './schema.js';
 import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
 import { Gate, GATE_OUTPUT_BYTES, prepareGate, validateGateUrlOverrides } from './gate.js';
+import {
+  BenchmarkGate,
+  BENCHMARK_OUTPUT_BYTES,
+  collectPriorGenerationVerifierBudget,
+  createRateLimitedProgress,
+  prepareBenchmarkGate,
+  sealBenchmarkBaseTreeBundle,
+} from './benchmark-gate.js';
 import { Publication, preparePublication } from './publication.js';
 import { countDelegatedBudgets } from './budget-observations.js';
 import { executeCycleContext, isHaltedByVerdict, type CycleContext, type ControllerPorts, type RunCycleInput } from './controller.js';
@@ -40,6 +48,7 @@ export async function restoredCandidate(context: CycleContext, head: ProgressHea
   const decoded = await decodeCandidateCapture({
     artifacts: context.artifacts,
     artifactsDirectory: context.artifacts.directory,
+    source: context.source,
     lock: context.lock,
     plan: context.plan,
     checkpoint,
@@ -115,6 +124,49 @@ export async function reconcileInterruptedOperations(context: CycleContext, head
         if (slot.handler.implementation === 'gate.v1') {
           const prepared = prepareGate(plan, lock, row.slot, candidate, head.progress.candidate.generation, row.producerNonce, loaded.registry.spec.gateEndpoints);
           await new Gate(store, authority, artifacts, plan, lock, ref => approvedState(loaded).vault.resolveNetworkCredential(ref), () => subject, null, ports.gateUrlOverrides).restore(prepared);
+        } else if (slot.handler.implementation === 'benchmark-gate.v1') {
+          const bundleProgress = createRateLimitedProgress(() => {
+            if (context.signal.aborted) refuse('CANCELLED', '', 'recovery');
+            stateValue(store.renew(authority));
+          }, 1_000);
+          const baseTreeBundle = await sealBenchmarkBaseTreeBundle(
+            source,
+            candidate.manifest,
+            artifacts,
+            context.owner,
+            context.signal,
+            bundleProgress,
+          );
+          const prepared = prepareBenchmarkGate(
+            plan,
+            lock,
+            row.slot,
+            candidate,
+            head.progress.candidate.generation,
+            row.producerNonce,
+            loaded.registry.spec.gateEndpoints,
+            baseTreeBundle,
+          );
+          await new BenchmarkGate(
+            store,
+            authority,
+            artifacts,
+            plan,
+            lock,
+            ref => approvedState(loaded).vault.resolveNetworkCredential(ref),
+            () => subject,
+            null,
+            ports.gateUrlOverrides,
+            (gen, excludeSlotId) =>
+              collectPriorGenerationVerifierBudget(
+                plan,
+                artifacts,
+                gen,
+                excludeSlotId,
+                undefined,
+                head.progress.verifierReceipts,
+              ),
+          ).restore(prepared, context.signal);
         } else {
           const bounds = overlayManifestBounds(plan.budgets.overlay);
           const prepared = prepareVerification(plan, lock, row.slot, { manifest: source.manifest, ref: await artifacts.json('manifest', source.manifest, bounds.manifestMaxBytes), files: source.artifacts, ...(source.baselineProofs ? { baselineProofs: source.baselineProofs } : {}) }, candidate, head.progress.candidate.generation, row.producerNonce);
@@ -207,42 +259,52 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
           const requiredExplicitSlots = plan.verifierSlots.filter(
             slot => slot.implicit === null && plan.task.spec.acceptance.required.includes(slot.checkId),
           );
-          let allRequiredPassed = head !== null;
+          let anyRequiredBlocked = false;
+          let hasFailedOrUnrunRequired = head === null;
           for (const slot of requiredExplicitSlots) {
-            if (!allRequiredPassed) break;
+            if (anyRequiredBlocked) break;
             if (head!.progress.verifierRefusals.some(row => row.slot === slot.id && row.generation === generation)) {
-              allRequiredPassed = false;
+              anyRequiredBlocked = true;
               break;
             }
             const receiptRow = head!.progress.verifierReceipts.find(row => row.slot === slot.id && row.generation === generation);
             if (!receiptRow) {
-              allRequiredPassed = false;
-              break;
+              hasFailedOrUnrunRequired = true;
+              continue;
             }
             const op = store.getOperation(receiptRow.operationId);
             const settledReceipt = op.ok && op.value.state === 'confirmed'
               ? (op.value.reconciliation ?? op.value.initialReceipt)
               : null;
             if (!settledReceipt) {
-              allRequiredPassed = false;
-              break;
+              hasFailedOrUnrunRequired = true;
+              continue;
             }
             try {
-              const outCap = slot.handler.implementation === 'gate.v1' ? GATE_OUTPUT_BYTES : 65536;
+              const impl = slot.handler.implementation;
+              const isGateLike = impl === 'gate.v1' || impl === 'benchmark-gate.v1';
+              const outCap = impl === 'gate.v1' ? GATE_OUTPUT_BYTES : impl === 'benchmark-gate.v1' ? BENCHMARK_OUTPUT_BYTES : 65536;
               const rawOut = parsePrivateJson(await artifacts.read(settledReceipt.evidence.artifact, outCap), outCap) as Record<string, unknown>;
-              const status = slot.handler.implementation === 'gate.v1'
-                ? (rawOut.disposition as Record<string, unknown> | undefined)?.status
+              const dispositionObj = isGateLike ? (rawOut.disposition as Record<string, unknown> | undefined) : undefined;
+              const status = isGateLike
+                ? dispositionObj?.status
                 : (rawOut.response as Record<string, unknown> | undefined)?.status;
-              if (status !== 'passed') {
-                allRequiredPassed = false;
+              if (
+                status === 'blocked'
+                || (impl === 'benchmark-gate.v1'
+                  && (dispositionObj?.retryablePreemption === true || dispositionObj?.reason === 'BENCHMARK_PREEMPTED'))
+              ) {
+                anyRequiredBlocked = true;
                 break;
               }
+              if (status !== 'passed') {
+                hasFailedOrUnrunRequired = true;
+              }
             } catch {
-              allRequiredPassed = false;
-              break;
+              hasFailedOrUnrunRequired = true;
             }
           }
-          if (!allRequiredPassed) implRepairDelegated = true;
+          if (!anyRequiredBlocked && hasFailedOrUnrunRequired) implRepairDelegated = true;
         }
       }
       if (unfinishedDelegated || reachableDelegated || formatRepairDelegated || implRepairDelegated) {

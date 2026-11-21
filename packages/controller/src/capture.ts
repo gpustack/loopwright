@@ -285,7 +285,7 @@ export async function decodeDelegatedWorkspace(
     const ref = digestArtifact(name, bytes);
     if (!ref.ok) return fail();
     overlay.push({ name, mode, bodyBase64 });
-    artifacts.push({ name, bytes });
+    artifacts.push({ name, bytes, mode });
     entries.push(ref.value);
   }
   if (!same([...overlay.map(o => o.name)].sort(compareUtf16), overlay.map(o => o.name)) || new Set(overlay.map(o => o.name)).size !== overlay.length) return fail();
@@ -350,6 +350,7 @@ async function assertCandidateArtifactsClean(
 export async function decodeCandidateCapture(input: {
   readonly artifacts: ArtifactReader;
   readonly artifactsDirectory?: string;
+  readonly source?: FrozenSource;
   readonly lock: TaskLock;
   readonly plan: CompiledPlan;
   readonly checkpoint: CheckpointRecord;
@@ -407,8 +408,21 @@ export async function decodeCandidateCapture(input: {
   if (!decoded.ok || !same(canonicalizeCandidateManifest(decoded.value.candidate), expectedManifest)) {
     refuse(phase === 'inspection' ? 'ARTIFACT_INVALID' : 'RECOVERY_REQUIRED', '', phase);
   }
-  const candidateArtifacts: readonly CandidateFileEntry[] =
+  const baselineModes: ReadonlyMap<string, '100644' | '100755'> | undefined =
+    input.source && input.source.version === 2
+      ? new Map((input.source.baselineEntries ?? []).map(e => [e.name, e.mode]))
+      : undefined;
+  const rawCandidateArtifacts: readonly CandidateFileEntry[] =
     decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
+  const candidateArtifacts: readonly CandidateFileEntry[] =
+    baselineModes !== undefined
+      ? rawCandidateArtifacts.map(item => {
+          const baseMode = baselineModes.get(item.name);
+          return baseMode === '100755' ? { ...item, mode: '100755' as const } : item;
+        })
+      : input.source?.version === 1
+        ? rawCandidateArtifacts.map(item => ({ ...item, mode: '100644' as const }))
+        : rawCandidateArtifacts;
   if (artifacts instanceof ArtifactStore) {
     await assertCandidateArtifactsClean(artifacts, candidateArtifacts, phase);
   }
@@ -724,8 +738,18 @@ export async function adoptRoleCapture(
   if (!decoded.ok) refuse('RECOVERY_REQUIRED', '', 'execution', { piCode: decoded.error.code });
   const canonicalManifest = identifyManifest(canonicalizeCandidateManifest(decoded.value.candidate), bounds.options);
   if (!canonicalManifest.ok || Buffer.byteLength(canonical(canonicalManifest.value.manifest)) > bounds.manifestMaxBytes) refuse('OUTPUT_LIMIT', '', 'execution');
-  const candidateArtifacts: readonly CandidateFileEntry[] =
+  const baselineModes =
+    source.version === 2
+      ? new Map<string, '100644' | '100755'>((source.baselineEntries ?? []).map(e => [e.name, e.mode]))
+      : undefined;
+  const rawCandidateArtifacts: readonly CandidateFileEntry[] =
     decoded.value.blobArtifacts.length > 0 ? decoded.value.blobArtifacts : decoded.value.artifacts;
+  const candidateArtifacts: readonly CandidateFileEntry[] =
+    baselineModes !== undefined
+      ? rawCandidateArtifacts.map(item =>
+          baselineModes.get(item.name) === '100755' ? { ...item, mode: '100755' as const } : item,
+        )
+      : rawCandidateArtifacts.map(item => ({ ...item, mode: '100644' as const }));
   await assertCandidateArtifactsClean(artifacts, candidateArtifacts, 'execution');
   await assertCanonicalMinimalOverlay(canonicalManifest.value.manifest, candidateArtifacts, source, 'execution');
   assertNoHostProtectedMutations(canonicalManifest.value.manifest, candidateArtifacts, source, hostProtection);

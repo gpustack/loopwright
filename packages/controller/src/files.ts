@@ -22,7 +22,7 @@ export async function canonicalComponents(path: string, owned = true): Promise<v
   if (await realpath(path) !== path) refuse(code, path_);
 }
 
-export async function readBoundedFile(path: string, maximum: number, owned: boolean): Promise<Buffer> {
+export async function readBoundedFile(path: string, maximum: number, owned: boolean, exactMode?: number): Promise<Buffer> {
   try {
     await canonicalComponents(path, owned);
     const before = await lstat(path);
@@ -31,13 +31,32 @@ export async function readBoundedFile(path: string, maximum: number, owned: bool
       const parent = await lstat(dirname(path));
       if (before.uid !== process.getuid?.() || before.mode & 0o077 || parent.uid !== process.getuid?.() || parent.mode & 0o077) refuse('REGISTRY_UNTRUSTED', '/registry');
     }
+    if (exactMode !== undefined && (before.mode & 0o7777) !== exactMode) {
+      refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config');
+    }
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const info = await file.stat(); if (info.dev !== before.dev || info.ino !== before.ino || info.size !== before.size || info.nlink !== 1 || !info.isFile()) refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config');
+      const info = await file.stat();
+      if (
+        info.dev !== before.dev
+        || info.ino !== before.ino
+        || info.size !== before.size
+        || info.nlink !== 1
+        || !info.isFile()
+        || (exactMode !== undefined && (info.mode & 0o7777) !== exactMode)
+      ) refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config');
       const bytes = Buffer.alloc(info.size + 1); let size = 0;
       while (size < bytes.length) { const next = await file.read(bytes, size, bytes.length - size, size); if (!next.bytesRead) break; size += next.bytesRead; }
       const after = await file.stat(), current = await lstat(path);
-      if (size !== info.size || info.mtimeMs !== after.mtimeMs || info.ctimeMs !== after.ctimeMs || current.dev !== info.dev || current.ino !== info.ino || after.size !== info.size) refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config');
+      if (
+        size !== info.size
+        || info.mtimeMs !== after.mtimeMs
+        || info.ctimeMs !== after.ctimeMs
+        || current.dev !== info.dev
+        || current.ino !== info.ino
+        || after.size !== info.size
+        || (exactMode !== undefined && (after.mode & 0o7777) !== exactMode)
+      ) refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config');
       return bytes.subarray(0, size);
     } finally { await file.close(); }
   } catch (error) { if (error instanceof ControllerFailure) throw error; refuse(owned ? 'REGISTRY_UNTRUSTED' : 'CONFIG_SYNTAX', owned ? '/registry' : '/config'); }

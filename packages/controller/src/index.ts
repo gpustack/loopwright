@@ -11,6 +11,27 @@ export { runCycleWithPorts } from './controller.js';
 export type { ControllerPorts } from './controller.js';
 export { signPayload, verifySignedPayload, signGateVerdict, verifyGateSignature } from './gate.js';
 export type { GateVerdict } from './gate.js';
+export {
+  signBenchmarkVerdict,
+  verifyBenchmarkSignature,
+  checkedBenchmarkVerdict,
+  checkedBenchmarkCandidateArtifacts,
+  sealBenchmarkBaseTreeBundle,
+  decodeBenchmarkBaseTreeBundle,
+  LWTREE01_MAGIC,
+  BENCHMARK_REQUEST_BYTES,
+  BENCHMARK_RESPONSE_BYTES,
+  BENCHMARK_OUTPUT_BYTES,
+} from './benchmark-gate.js';
+export type {
+  BenchmarkOutputArtifact,
+  BenchmarkBaseTreeBundle,
+  DecodedBaseTreeEntry,
+  BenchmarkCandidateEntry,
+  BenchmarkCandidateArtifacts,
+  BenchmarkRequest,
+  BenchmarkVerdict,
+} from './benchmark-gate.js';
 export { CONTROLLER_CLEANUP_STATES } from './finalize.js';
 export type { ControllerIncident } from './finalize.js';
 export { parseSubmission, parseStepVerdict } from './submission.js';
