@@ -595,7 +595,7 @@ async function assertObjectsDirNoSymlinks(objectsDir: string): Promise<void> {
   await walk(objectsDir, 0);
 }
 
-async function resolveReadOnlyAlternateObjectDirs(repositoryRoot: string): Promise<readonly string[]> {
+export async function resolveReadOnlyAlternateObjectDirs(repositoryRoot: string): Promise<readonly string[]> {
   const dotGitStat = await lstat(join(repositoryRoot, '.git')).catch(() => null);
   if (dotGitStat === null || dotGitStat.isSymbolicLink()) {
     throw new TaskpackError('ACTION_INPUT_INVALID', 'repository .git must exist and must not be a symbolic link');
@@ -737,13 +737,17 @@ async function computeBlobSha256Isolated(
   };
 }
 
+type PreExtractedConflictHunks =
+  | { readonly hunks: readonly BaselineConflictHunk[]; readonly totalHunkBytes: number }
+  | 'failed';
+
 interface RawMergeProbeOutput {
   readonly clean: boolean;
   readonly mergeBase: string | null;
   readonly mergedTreeOid: string | null;
   readonly conflictPaths: readonly string[];
   readonly conflictMessages: readonly MergeConflictMessageRecord[];
-  readonly conflictTextByPath: ReadonlyMap<string, Buffer>;
+  readonly extractedHunksByPath: ReadonlyMap<string, PreExtractedConflictHunks>;
 }
 
 function parseMergeTreeWriteTreeOutput(stdout: Buffer, clean: boolean): {
@@ -831,6 +835,7 @@ async function runIndexThreeWayMergeFallback(options: {
   readonly retainConflictText?: {
     readonly maxConflictFiles: number;
     readonly maxTotalConflictBytes: number;
+    readonly scrubber: SecretScrubber;
   } | undefined;
 }): Promise<RawMergeProbeOutput> {
   const { repositoryRoot, baseRevision, sourceRevision, mergeBase, privateTempDir, isolatedEnv, retainConflictText } = options;
@@ -876,11 +881,11 @@ async function runIndexThreeWayMergeFallback(options: {
 
   const conflictPaths: string[] = [];
   const conflictMessages: MergeConflictMessageRecord[] = [];
-  const conflictTextByPath = new Map<string, Buffer>();
+  const extractedHunksByPath = new Map<string, PreExtractedConflictHunks>();
   const conflictedStage2ByPath = new Map<string, StageEntry | undefined>();
   const mergeScratchDir = join(privateTempDir, 'merge-files');
   await mkdir(mergeScratchDir, { recursive: true, mode: 0o700 });
-  let retainedConflictTextBytes = 0;
+  let retainedConflictHunkBytes = 0;
 
   for (const [path, stageMap] of [...stagesByPath.entries()].sort((a, b) => compareLexical(a[0], b[0]))) {
     const s1 = stageMap.get(1);
@@ -919,6 +924,45 @@ async function runIndexThreeWayMergeFallback(options: {
         conflictType: 'CONFLICT (modify/delete)',
         message: `CONFLICT (modify/delete): ${path}`,
       });
+      continue;
+    }
+
+    // Resolve trivial content cases (one side unchanged from ancestor, or both sides identical OID)
+    // BEFORE binary NUL checks so a mode-only change on one side + binary byte edit on the other
+    // resolves cleanly just like native `git merge-tree --write-tree`.
+    const trivialOid = s1 !== undefined
+      ? (s2.oid === s1.oid ? s3.oid : (s3.oid === s1.oid || s2.oid === s3.oid ? s2.oid : null))
+      : (s2.oid === s3.oid ? s2.oid : null);
+    if (trivialOid !== null) {
+      const resolvedMode: '100644' | '100755' | null = s1 !== undefined
+        ? (s1.mode === s2.mode
+          ? (s3.mode === '100755' ? '100755' : '100644')
+          : (s1.mode === s3.mode || s2.mode === s3.mode
+            ? (s2.mode === '100755' ? '100755' : '100644')
+            : null))
+        : (s2.mode === s3.mode ? (s2.mode === '100755' ? '100755' : '100644') : null);
+      if (resolvedMode === null) {
+        conflictPaths.push(path);
+        conflictedStage2ByPath.set(path, s2);
+        conflictMessages.push({
+          paths: [path],
+          conflictType: 'CONFLICT (distinct modes)',
+          message: `CONFLICT (distinct modes): ${path}`,
+        });
+        continue;
+      }
+      await execIsolatedGitChecked(
+        repositoryRoot,
+        ['update-index', '--force-remove', '-z', '--stdin'],
+        indexEnv,
+        { input: `${path}\0` },
+      );
+      await execIsolatedGitChecked(
+        repositoryRoot,
+        ['update-index', '-z', '--index-info'],
+        indexEnv,
+        { input: `${resolvedMode} blob ${trivialOid}\t${path}\0` },
+      );
       continue;
     }
 
@@ -985,13 +1029,33 @@ async function runIndexThreeWayMergeFallback(options: {
     } else if (mergeRes.code !== null && mergeRes.code > 0 && mergeRes.code <= MAX_MERGE_FILE_EXIT_CONFLICTS) {
       conflictPaths.push(path);
       conflictedStage2ByPath.set(path, s2);
-      if (
-        retainConflictText !== undefined
-        && conflictPaths.length <= retainConflictText.maxConflictFiles
-        && retainedConflictTextBytes + mergeRes.stdout.byteLength <= retainConflictText.maxTotalConflictBytes
-      ) {
-        conflictTextByPath.set(path, mergeRes.stdout);
-        retainedConflictTextBytes += mergeRes.stdout.byteLength;
+      if (retainConflictText !== undefined && conflictPaths.length <= retainConflictText.maxConflictFiles) {
+        if (mergeRes.stdoutOverflow || mergeRes.stdout.includes(0)) {
+          extractedHunksByPath.set(path, 'failed');
+        } else {
+          let mergedConflictText: string | null;
+          try {
+            mergedConflictText = new TextDecoder('utf-8', { fatal: true }).decode(mergeRes.stdout);
+          } catch {
+            mergedConflictText = null;
+          }
+          if (mergedConflictText === null) {
+            extractedHunksByPath.set(path, 'failed');
+          } else {
+            const remainingBudget = Math.max(0, retainConflictText.maxTotalConflictBytes - retainedConflictHunkBytes);
+            const extracted = extractConflictHunksFromMergedText(
+              mergedConflictText,
+              retainConflictText.scrubber,
+              remainingBudget,
+            );
+            if (extracted !== null) {
+              extractedHunksByPath.set(path, extracted);
+              retainedConflictHunkBytes += extracted.totalHunkBytes;
+            } else {
+              extractedHunksByPath.set(path, 'failed');
+            }
+          }
+        }
       }
       conflictMessages.push({
         paths: [path],
@@ -1033,7 +1097,7 @@ async function runIndexThreeWayMergeFallback(options: {
       mergedTreeOid,
       conflictPaths: Object.freeze([...new Set(conflictPaths)].sort(compareLexical)),
       conflictMessages: Object.freeze(conflictMessages),
-      conflictTextByPath,
+      extractedHunksByPath,
     };
   }
 
@@ -1043,7 +1107,7 @@ async function runIndexThreeWayMergeFallback(options: {
     mergedTreeOid,
     conflictPaths: Object.freeze([]),
     conflictMessages: Object.freeze([]),
-    conflictTextByPath,
+    extractedHunksByPath,
   };
 }
 
@@ -1059,6 +1123,7 @@ async function runIsolatedThreeWayMergeProbe(options: {
   readonly retainConflictText?: {
     readonly maxConflictFiles: number;
     readonly maxTotalConflictBytes: number;
+    readonly scrubber: SecretScrubber;
   } | undefined;
 }): Promise<RawMergeProbeOutput> {
   const {
@@ -1167,7 +1232,7 @@ async function runIsolatedThreeWayMergeProbe(options: {
     mergedTreeOid: parsed.mergedTreeOid,
     conflictPaths: Object.freeze(conflictPaths),
     conflictMessages: parsed.messages,
-    conflictTextByPath: new Map(),
+    extractedHunksByPath: new Map(),
   };
 }
 
@@ -1447,10 +1512,8 @@ export async function alignBaselineRevisions(
         ? {
           retainConflictText: {
             maxConflictFiles: policy.maxConflictFiles,
-            maxTotalConflictBytes: Math.max(
-              MIN_CONFLICT_BLOB_READ_CAP_BYTES,
-              policy.maxConflictBytes * CONFLICT_BLOB_READ_MULTIPLIER,
-            ),
+            maxTotalConflictBytes: policy.maxConflictBytes,
+            scrubber,
           },
         }
         : {}),
@@ -1679,8 +1742,25 @@ export async function alignBaselineRevisions(
         ]);
       } else {
         conflictKind = mbEntry === undefined ? 'add_add' : 'content';
-        let rawMergedConflictBytes = probe.conflictTextByPath.get(conflictPath);
-        if (rawMergedConflictBytes === undefined) {
+        const preExtracted = probe.extractedHunksByPath.get(conflictPath);
+        if (preExtracted === 'failed') {
+          return makeBlocked(
+            `conflict hunks in "${conflictPath}" could not be extracted within maxConflictBytes (${policy.maxConflictBytes})`,
+            probe.mergeBase,
+            probe.conflictPaths,
+          );
+        }
+        if (preExtracted !== undefined) {
+          if (cumulativeHunkBytes + preExtracted.totalHunkBytes > policy.maxConflictBytes) {
+            return makeBlocked(
+              `conflict hunks in "${conflictPath}" exceed maxConflictBytes (${policy.maxConflictBytes})`,
+              probe.mergeBase,
+              probe.conflictPaths,
+            );
+          }
+          fileHunks = preExtracted.hunks;
+          fileHunkBytes = preExtracted.totalHunkBytes;
+        } else {
           const mergedConflictEntry = mergedTreeEntries.get(conflictPath);
           if (mergedConflictEntry === undefined || (mergedConflictEntry.mode !== '100644' && mergedConflictEntry.mode !== '100755')) {
             return makeBlocked(
@@ -1689,6 +1769,7 @@ export async function alignBaselineRevisions(
               probe.conflictPaths,
             );
           }
+          let rawMergedConflictBytes: Buffer;
           try {
             rawMergedConflictBytes = await readVerifiedBlobIsolated(
               repositoryRoot,
@@ -1706,38 +1787,38 @@ export async function alignBaselineRevisions(
             }
             throw error;
           }
-        }
-        if (rawMergedConflictBytes.includes(0)) {
-          return makeBlocked(
-            `binary merge conflict in "${conflictPath}" cannot be extracted`,
-            probe.mergeBase,
-            probe.conflictPaths,
+          if (rawMergedConflictBytes.includes(0)) {
+            return makeBlocked(
+              `binary merge conflict in "${conflictPath}" cannot be extracted`,
+              probe.mergeBase,
+              probe.conflictPaths,
+            );
+          }
+          let mergedConflictText: string;
+          try {
+            mergedConflictText = new TextDecoder('utf-8', { fatal: true }).decode(rawMergedConflictBytes);
+          } catch {
+            return makeBlocked(
+              `non-UTF-8 merge conflict in "${conflictPath}" cannot be extracted`,
+              probe.mergeBase,
+              probe.conflictPaths,
+            );
+          }
+          const extracted = extractConflictHunksFromMergedText(
+            mergedConflictText,
+            scrubber,
+            policy.maxConflictBytes - cumulativeHunkBytes,
           );
+          if (extracted === null) {
+            return makeBlocked(
+              `conflict hunks in "${conflictPath}" could not be extracted within maxConflictBytes (${policy.maxConflictBytes})`,
+              probe.mergeBase,
+              probe.conflictPaths,
+            );
+          }
+          fileHunks = extracted.hunks;
+          fileHunkBytes = extracted.totalHunkBytes;
         }
-        let mergedConflictText: string;
-        try {
-          mergedConflictText = new TextDecoder('utf-8', { fatal: true }).decode(rawMergedConflictBytes);
-        } catch {
-          return makeBlocked(
-            `non-UTF-8 merge conflict in "${conflictPath}" cannot be extracted`,
-            probe.mergeBase,
-            probe.conflictPaths,
-          );
-        }
-        const extracted = extractConflictHunksFromMergedText(
-          mergedConflictText,
-          scrubber,
-          policy.maxConflictBytes - cumulativeHunkBytes,
-        );
-        if (extracted === null) {
-          return makeBlocked(
-            `conflict hunks in "${conflictPath}" could not be extracted within maxConflictBytes (${policy.maxConflictBytes})`,
-            probe.mergeBase,
-            probe.conflictPaths,
-          );
-        }
-        fileHunks = extracted.hunks;
-        fileHunkBytes = extracted.totalHunkBytes;
       }
 
       cumulativeHunkBytes += fileHunkBytes;

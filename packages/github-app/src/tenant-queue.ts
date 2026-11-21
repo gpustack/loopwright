@@ -320,62 +320,104 @@ export class TenantAdmissionQueue {
     return { runRoot: this.#runRoot, runDirectory, receiptPath: join(runDirectory, item.runId, 'receipt.json') };
   }
 
-  revokeTenantScope(tenant: TenantIdentity): { readonly cancelled: number; readonly fenced: boolean } {
+  revokeTenantScope(tenant: TenantIdentity): {
+    readonly cancelled: number;
+    readonly fenced: boolean;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     validateTenantIdentity(tenant);
     let cancelled = 0, fenced = false;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (!sameTenant(item.tenant, tenant)) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced = true;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 
-  revokeInstallationScope(installationId: number): { readonly cancelled: number; readonly fenced: number } {
+  revokeInstallationScope(installationId: number): {
+    readonly cancelled: number;
+    readonly fenced: number;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     if (typeof installationId !== 'number' || !Number.isSafeInteger(installationId) || installationId <= 0) {
       queueError('TENANT_IDENTITY_INVALID', 'installationId must be a positive integer');
     }
     let cancelled = 0, fenced = 0;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (item.tenant.installationId !== installationId) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced += 1;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 
   /** Revoke only the tenants of `installationId` whose repositoryId is listed (installation_repositories.removed). */
-  revokeRepositoryScope(installationId: number, repositoryIds: readonly number[]): { readonly cancelled: number; readonly fenced: number } {
+  revokeRepositoryScope(installationId: number, repositoryIds: readonly number[]): {
+    readonly cancelled: number;
+    readonly fenced: number;
+    readonly cancelledQueueItemIds: readonly string[];
+    readonly fencedQueueItemIds: readonly string[];
+  } {
     if (typeof installationId !== 'number' || !Number.isSafeInteger(installationId) || installationId <= 0
       || !Array.isArray(repositoryIds) || repositoryIds.some(id => typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)) {
       queueError('TENANT_IDENTITY_INVALID', 'revokeRepositoryScope requires a positive installationId and positive repositoryIds');
     }
     const removed = new Set(repositoryIds);
     let cancelled = 0, fenced = 0;
+    const cancelledQueueItemIds: string[] = [];
+    const fencedQueueItemIds: string[] = [];
     for (const item of this.#items.values()) {
       if (item.tenant.installationId !== installationId || !removed.has(item.tenant.repositoryId)) continue;
       if (item.state === 'pending') {
         item.state = 'cancelled';
         item.cancelReason = 'installation_revoked';
         cancelled += 1;
+        cancelledQueueItemIds.push(item.queueItemId);
       } else if (item.state === 'leased' && item.lease !== null) {
         item.lease.revoked = true;
         fenced += 1;
+        fencedQueueItemIds.push(item.queueItemId);
       }
     }
-    return { cancelled, fenced };
+    return {
+      cancelled,
+      fenced,
+      cancelledQueueItemIds: Object.freeze(cancelledQueueItemIds),
+      fencedQueueItemIds: Object.freeze(fencedQueueItemIds),
+    };
   }
 }
 

@@ -1019,7 +1019,7 @@ export class Cycle {
   resolveRetainedActiveResources(roleId: string, retained: ControllerAttempt) {
     const allRoleResources = roleResourcesFor(this.context.loaded, this.context.plan, roleId);
     if (retained.activatedResourceIds === undefined) {
-      if (retained.repair === 'format') {
+      if (retained.repair === 'format' || retained.purpose === 'compaction') {
         const whenById = new Map(
           this.context.plan.task.spec.trustedContext.resources.map(r => [r.id, r.when] as const),
         );

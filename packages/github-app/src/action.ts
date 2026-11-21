@@ -1130,23 +1130,6 @@ export async function runGitHubActionEntrypoint(
           : resolvedRepo.repositoryId;
         effectiveBaseRevision = resolvedRepo.baseRevision;
         effectiveSourceRevision = resolvedRepo.sourceRevision;
-        if (verifiedSuiteCommentMeta !== undefined) {
-          if (
-            verifiedSuiteCommentMeta.prBaseSha !== undefined
-            && effectiveBaseRevision.toLowerCase() !== verifiedSuiteCommentMeta.prBaseSha.toLowerCase()
-          ) {
-            return blocked(
-              'ACTION_INPUT_INVALID',
-              `resolved base revision "${effectiveBaseRevision}" disagrees with verified pull request base SHA "${verifiedSuiteCommentMeta.prBaseSha}"`,
-            );
-          }
-          if (effectiveSourceRevision.toLowerCase() !== verifiedSuiteCommentMeta.prHeadSha.toLowerCase()) {
-            return blocked(
-              'ACTION_INPUT_INVALID',
-              `resolved source revision "${effectiveSourceRevision}" disagrees with verified pull request head SHA "${verifiedSuiteCommentMeta.prHeadSha}"`,
-            );
-          }
-        }
       } catch (error) {
         if (error instanceof GitHubAppError) {
           return blocked(error.code, turnkeyScrubber.scrub(error.message));
@@ -1172,12 +1155,36 @@ export async function runGitHubActionEntrypoint(
         }
         throw error;
       }
+    } else if (verifiedSuiteCommentMeta !== undefined && effectiveSourceRevision === undefined) {
+      effectiveSourceRevision = verifiedSuiteCommentMeta.prHeadSha;
     }
 
     const isStatusComment = preEvaluatedComment !== undefined
       && !('ignoredReason' in preEvaluatedComment)
       && !('blockedReason' in preEvaluatedComment)
       && preEvaluatedComment.command === 'status';
+
+    if (verifiedSuiteCommentMeta !== undefined && !isStatusComment) {
+      if (verifiedSuiteCommentMeta.prBaseSha === undefined) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          'pull_request_metadata_unavailable: pull request base.sha must be a verified 40-hex commit SHA',
+        );
+      }
+      if (effectiveBaseRevision.toLowerCase() !== verifiedSuiteCommentMeta.prBaseSha.toLowerCase()) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          `resolved base revision "${effectiveBaseRevision}" disagrees with verified pull request base SHA "${verifiedSuiteCommentMeta.prBaseSha}"`,
+        );
+      }
+      const resolvedSourceForCheck = effectiveSourceRevision ?? effectiveBaseRevision;
+      if (resolvedSourceForCheck.toLowerCase() !== verifiedSuiteCommentMeta.prHeadSha.toLowerCase()) {
+        return blocked(
+          'ACTION_INPUT_INVALID',
+          `resolved source revision "${resolvedSourceForCheck}" disagrees with verified pull request head SHA "${verifiedSuiteCommentMeta.prHeadSha}"`,
+        );
+      }
+    }
 
     if (manifest.spec.preflight !== undefined && !isStatusComment) {
       try {

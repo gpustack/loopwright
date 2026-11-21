@@ -465,10 +465,10 @@ export function contractSchema(input: Json, path = ''): TaskContract {
     });
   });
   const roleIds = new Set(spec.roles.map(role => role.id));
-  const stepIds = new Set(spec.steps.map(step => step.id));
+  const stepById = new Map(spec.steps.map(step => [step.id, step] as const));
   spec.steps.forEach((step, index) => {
     if (step.roleId === null ? step.kind === 'agent' : !roleIds.has(step.roleId)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/roleId`);
-    if (step.onRework !== undefined && !stepIds.has(step.onRework.rejectTo)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/onRework/rejectTo`);
+    if (step.onRework !== undefined && !stepById.has(step.onRework.rejectTo)) fail('REFERENCE_UNKNOWN', `${stepsPath}/${index}/onRework/rejectTo`);
     if (step.handoffs !== undefined) {
       if (step.kind !== 'agent' || isCompactionUses(step.uses)) fail('FIELD_UNKNOWN', `${stepsPath}/${index}/handoffs`);
       const seenHandoffIds = new Set<string>();
@@ -480,7 +480,11 @@ export function contractSchema(input: Json, path = ''): TaskContract {
         seenHandoffIds.add(effectiveHandoffId);
         aggregateBytes += handoff.maxBytes ?? LIMITS.handoffDefaultBytes;
         if (aggregateBytes > LIMITS.handoffAggregateBytes) fail('VALUE_RANGE', handoffPath);
-        if (!stepIds.has(handoff.fromStep)) fail('REFERENCE_UNKNOWN', `${handoffPath}/fromStep`);
+        const fromStep = stepById.get(handoff.fromStep);
+        if (fromStep === undefined) fail('REFERENCE_UNKNOWN', `${handoffPath}/fromStep`);
+        if (fromStep.kind !== 'agent' && handoff.source.kind === 'artifact') {
+          fail('VALUE_ENUM', `${handoffPath}/source/kind`);
+        }
       });
     }
   });

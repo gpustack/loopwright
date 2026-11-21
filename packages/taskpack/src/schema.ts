@@ -2655,6 +2655,12 @@ function validateStepsDag(
           diagPath,
         );
       }
+      if (sourceStep.kind === 'check' && handoff.source.kind === 'artifact') {
+        manifestInvalid(
+          `role "${roleDecl.id}" handoff fromStep "${handoff.fromStep}" is a check step and cannot supply an artifact handoff`,
+          `/spec/roles/${roleIdx}/handoffs/${hIdx}/source/kind`,
+        );
+      }
     }
   }
 
@@ -2704,6 +2710,12 @@ function validateStepsDag(
             manifestInvalid(
               `step "${step.id}" handoff fromStep "${handoff.fromStep}" must not reference a compact step`,
               diagPath,
+            );
+          }
+          if (sourceStep.kind === 'check' && handoff.source.kind === 'artifact') {
+            manifestInvalid(
+              `step "${step.id}" handoff fromStep "${handoff.fromStep}" is a check step and cannot supply an artifact handoff`,
+              step.handoffs !== undefined ? `/spec/steps/${idx}/handoffs/${hIdx}/source/kind` : diagPath,
             );
           }
         }

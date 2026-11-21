@@ -100,6 +100,9 @@ export function compilePlan(loaded: LoadedConfiguration) {
           if (fromNode.handler.implementation === 'pi.compact.v1') {
             refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
           }
+          if (fromNode.kind !== 'agent' && handoff.source.kind === 'artifact') {
+            refuse('CONFIG_SCHEMA', '/spec/task/spec/steps', 'compile');
+          }
         }
       }
       if (node.handler.implementation === 'pi.compact.v1') {

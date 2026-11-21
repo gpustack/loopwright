@@ -245,7 +245,6 @@ class BoundedArtifactReader {
     if (bytes.byteLength > effectiveCap) {
       return { ok: false, reason: 'cap_exceeded' };
     }
-    this.#remainingBytes -= bytes.byteLength;
     this.#cache.set(cacheKey, bytes);
     return { ok: true, bytes };
   }
@@ -259,6 +258,11 @@ class BoundedArtifactReader {
     } catch {
       return { ok: false, reason: 'invalid' };
     }
+  }
+
+  #debitConsumed(bytesRead: number): void {
+    if (bytesRead <= 0) return;
+    this.#remainingBytes = Math.max(0, this.#remainingBytes - bytesRead);
   }
 
   async #readVerified(ref: ArtifactRef, effectiveCap: number): Promise<Uint8Array | null> {
@@ -278,6 +282,7 @@ class BoundedArtifactReader {
             },
             chunk => {
               collected += chunk.byteLength;
+              this.#debitConsumed(chunk.byteLength);
               if (collected > effectiveCap) {
                 throw new Error('cap_exceeded');
               }
@@ -328,6 +333,7 @@ class BoundedArtifactReader {
           },
           chunk => {
             collected += chunk.byteLength;
+            this.#debitConsumed(chunk.byteLength);
             if (collected > effectiveCap) {
               throw new Error('cap_exceeded');
             }
@@ -346,6 +352,7 @@ class BoundedArtifactReader {
     if (this.artifacts !== undefined) {
       try {
         const bytes = await this.artifacts.read(ref, effectiveCap);
+        this.#debitConsumed(bytes.byteLength);
         if (bytes.byteLength > effectiveCap) return null;
         const actual = digestArtifact(ref.name, bytes);
         if (!actual.ok || !same(actual.value, ref)) return null;

@@ -58,6 +58,7 @@ import {
   MAX_GIT_LIST_BYTES,
   mergeCandidateOverlayWithCarry,
   normalizeCandidateRelativePath,
+  resolveReadOnlyAlternateObjectDirs,
   verifyCandidateBaselinePrePublication,
   type BaselineAlignmentResult,
 } from './baseline-align.js';
@@ -5091,6 +5092,8 @@ export async function startLocalCommandGateServer(
                 }
               }
             }
+            const guardRealRepoRoot = await realpath(options.repositoryRoot);
+            const guardAlternateDirs = await resolveReadOnlyAlternateObjectDirs(guardRealRepoRoot);
             const guardCarryDelta = await computeThreeWaySourceRevisionCarryDelta({
               repositoryRoot: options.repositoryRoot,
               baseRevision: snapshot.baseRevision,
@@ -5101,6 +5104,7 @@ export async function startLocalCommandGateServer(
               candidateFiles: overlayFilesToCheck,
               candidateDeletedPaths: effectiveDeletedPaths,
               extractedConflictPaths: options.extractedConflictPaths,
+              alternateObjectDirs: guardAlternateDirs,
               scratchRoot: workDir,
               gitEnv,
               scrubber,
@@ -5117,6 +5121,7 @@ export async function startLocalCommandGateServer(
               baseEntries: guardBaseTreeMap,
               sourceEntries: guardSourceTreeMap,
               extractedConflictPaths: guardCarryDelta.resolvedConflictPaths,
+              alternateObjectDirs: guardAlternateDirs,
               scratchRoot: workDir,
               scrubber,
               onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),
@@ -5232,6 +5237,8 @@ export async function startLocalCommandGateServer(
               }
             }
 
+            const commandRealRepoRoot = await realpath(options.repositoryRoot);
+            const commandAlternateDirs = await resolveReadOnlyAlternateObjectDirs(commandRealRepoRoot);
             const { carryRemovals, carryUpdates, resolvedConflictPaths } = await computeThreeWaySourceRevisionCarryDelta({
               repositoryRoot: options.repositoryRoot,
               baseRevision: snapshot.baseRevision,
@@ -5242,6 +5249,7 @@ export async function startLocalCommandGateServer(
               candidateFiles: overlayFilesToMaterialize,
               candidateDeletedPaths: effectiveDeletedPaths,
               extractedConflictPaths: options.extractedConflictPaths,
+              alternateObjectDirs: commandAlternateDirs,
               scratchRoot: workDir,
               gitEnv,
               scrubber,
@@ -5259,6 +5267,7 @@ export async function startLocalCommandGateServer(
               baseEntries: baseTreeMap,
               sourceEntries: sourceTreeMap,
               extractedConflictPaths: resolvedConflictPaths,
+              alternateObjectDirs: commandAlternateDirs,
               scratchRoot: workDir,
               scrubber,
               onLog: options.onLog === undefined ? undefined : line => options.onLog?.(scrubber.scrub(line)),

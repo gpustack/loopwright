@@ -375,7 +375,7 @@ async function materializeAttemptWorkspace(
   const workspacesRoot = join(resolve(runRoot), 'workspaces');
   const runWorkspaceDir = join(workspacesRoot, context.lock.spec.runId);
   const attemptWorkspaceDir = join(runWorkspaceDir, attemptId);
-  const stagingWorkspaceDir = join(runWorkspaceDir, `.stage-${attemptId}-${randomBytes(6).toString('hex')}`);
+  const stagingWorkspaceDir = join(runWorkspaceDir, `.stage-${attemptId}`);
   const stagingCandidateDir = join(stagingWorkspaceDir, 'candidate');
   const stagingContextDir = join(stagingWorkspaceDir, 'context');
   const candidateDir = join(attemptWorkspaceDir, 'candidate');
@@ -383,6 +383,7 @@ async function materializeAttemptWorkspace(
 
   await privateDirectory(workspacesRoot, excluded);
   await privateDirectory(runWorkspaceDir, excluded);
+  await rm(stagingWorkspaceDir, { recursive: true, force: true });
   await privateDirectory(stagingWorkspaceDir, excluded);
   await privateDirectory(stagingCandidateDir, excluded);
   await privateDirectory(stagingContextDir, excluded);
@@ -1717,68 +1718,81 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         await context.owner.release();
         refuse('OWNER_BUSY', '', 'execution');
       }
-      const priorLease = await readStepLease(context.directory);
-      const promptText = priorLease?.prompt ?? new TextDecoder('utf-8', { fatal: true }).decode(await context.artifacts.read(active.command, LIMITS.inputBytes));
-      const effectiveRole = active.repair === 'format' ? { ...activeRole, policy: formatPolicy(activeRole.policy) } : activeRole;
-      const cycle = new Cycle(context, head, candidate, false);
-      const activeResources = cycle.resolveRetainedActiveResources(effectiveRole.roleId, active);
-      const hostProtection = hostProtectionFromPolicy(effectiveMeta.hostPolicy);
-      const workspacesRoot = join(resolve(input.runRoot), 'workspaces');
-      const runWorkspaceDir = join(workspacesRoot, context.lock.spec.runId);
-      const attemptWorkspaceDir = join(runWorkspaceDir, active.id);
-      const candidateDir = join(attemptWorkspaceDir, 'candidate');
-      const contextDir = join(attemptWorkspaceDir, 'context');
-      const candidateExists = await lstat(candidateDir).then(st => st.isDirectory() && !st.isSymbolicLink(), () => false);
-      let contextFiles: readonly string[];
-      if (!candidateExists) {
-        const rematerialized = await materializeAttemptWorkspace(
-          cycle,
-          input.runRoot,
-          active.id,
-          effectiveRole,
-          active.repair,
-          hostProtection,
-          activeResources,
-          active.handoffExtracts ?? [],
-          'recovery',
+      let cycle: Cycle | undefined;
+      try {
+        const priorLease = await readStepLease(context.directory);
+        const promptText = priorLease?.prompt ?? new TextDecoder('utf-8', { fatal: true }).decode(await context.artifacts.read(active.command, LIMITS.inputBytes));
+        const effectiveRole = active.repair === 'format' ? { ...activeRole, policy: formatPolicy(activeRole.policy) } : activeRole;
+        cycle = new Cycle(context, head, candidate, false);
+        const activeResources = cycle.resolveRetainedActiveResources(effectiveRole.roleId, active);
+        const hostProtection = hostProtectionFromPolicy(effectiveMeta.hostPolicy);
+        const workspacesRoot = join(resolve(input.runRoot), 'workspaces');
+        const runWorkspaceDir = join(workspacesRoot, context.lock.spec.runId);
+        const attemptWorkspaceDir = join(runWorkspaceDir, active.id);
+        const candidateDir = join(attemptWorkspaceDir, 'candidate');
+        const contextDir = join(attemptWorkspaceDir, 'context');
+        const candidateExists = await lstat(candidateDir).then(st => st.isDirectory() && !st.isSymbolicLink(), () => false);
+        let contextFiles: readonly string[];
+        if (!candidateExists) {
+          const rematerialized = await materializeAttemptWorkspace(
+            cycle,
+            input.runRoot,
+            active.id,
+            effectiveRole,
+            active.repair,
+            hostProtection,
+            activeResources,
+            active.handoffExtracts ?? [],
+            'recovery',
+          );
+          contextFiles = rematerialized.contextFiles;
+        } else {
+          const excluded = [context.descriptor.repository, ...approvedState(context.loaded).input.untrustedRoots];
+          await privateDirectory(workspacesRoot, excluded);
+          await privateDirectory(runWorkspaceDir, excluded);
+          await privateDirectory(attemptWorkspaceDir, excluded);
+          await rm(contextDir, { recursive: true, force: true });
+          await privateDirectory(contextDir, excluded);
+          contextFiles = await materializeContextFilesDir(
+            contextDir,
+            activeResources,
+            active.handoffExtracts ?? [],
+            context.artifacts.directory,
+            'recovery',
+          );
+        }
+        const newToken = randomBytes(32).toString('hex');
+        await writeAtomicPrivateJson(
+          join(context.directory, 'step-lease.json'),
+          {
+            version: 1,
+            runId: context.lock.spec.runId,
+            attemptId: active.id,
+            ordinal: active.ordinal,
+            leaseDigest: hash(newToken).hex,
+            prompt: promptText,
+            contextFiles,
+          } satisfies StepLeaseRecord,
+          context.artifacts.vault,
         );
-        contextFiles = rematerialized.contextFiles;
-      } else {
-        const excluded = [context.descriptor.repository, ...approvedState(context.loaded).input.untrustedRoots];
-        await privateDirectory(workspacesRoot, excluded);
-        await privateDirectory(runWorkspaceDir, excluded);
-        await privateDirectory(attemptWorkspaceDir, excluded);
-        await rm(contextDir, { recursive: true, force: true });
-        await privateDirectory(contextDir, excluded);
-        contextFiles = await materializeContextFilesDir(
-          contextDir,
-          activeResources,
-          active.handoffExtracts ?? [],
-          context.artifacts.directory,
-          'recovery',
-        );
+        return await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
+      } finally {
+        if (cycle !== undefined) {
+          await cycle.deadline.dispose().catch(() => {});
+          await cycle.events.suspend().catch(() => {});
+        }
+        try {
+          context.store.release(context.authority);
+        } catch {
+          // best-effort release on reissue exit
+        }
+        try {
+          context.store.close();
+        } catch {
+          // best-effort close on reissue exit
+        }
+        await context.owner.release().catch(() => {});
       }
-      const newToken = randomBytes(32).toString('hex');
-      await writeAtomicPrivateJson(
-        join(context.directory, 'step-lease.json'),
-        {
-          version: 1,
-          runId: context.lock.spec.runId,
-          attemptId: active.id,
-          ordinal: active.ordinal,
-          leaseDigest: hash(newToken).hex,
-          prompt: promptText,
-          contextFiles,
-        } satisfies StepLeaseRecord,
-        context.artifacts.vault,
-      );
-      const stepYield = await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
-      await cycle.deadline.dispose();
-      await cycle.events.suspend();
-      stateValue(context.store.release(context.authority));
-      stateValue(context.store.close());
-      await context.owner.release();
-      return stepYield;
     }
 
     return await runStepTickWithCycle(context, input.runRoot, effectiveMeta, {

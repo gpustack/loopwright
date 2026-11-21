@@ -276,6 +276,8 @@ export async function verifySuiteCommentPullRequest(
       prHeadRef === undefined
       || prBaseRef === undefined
       || prHeadSha === undefined
+      || !COMMIT_SHA_PATTERN.test(prHeadSha.trim())
+      || (parsedCmd.command !== 'status' && (prBaseSha === undefined || !COMMIT_SHA_PATTERN.test(prBaseSha.trim())))
       || prHeadRepoFullName === undefined
     );
 
@@ -354,8 +356,12 @@ export async function verifySuiteCommentPullRequest(
       if (fHead !== null && fHead['repo'] === null) prHeadRepoNull = true;
       prHeadRef ??= readNonEmptyString(fHead, 'ref') ?? undefined;
       prBaseRef ??= readNonEmptyString(fBase, 'ref') ?? undefined;
-      prHeadSha ??= readNonEmptyString(fHead, 'sha') ?? undefined;
-      prBaseSha ??= readNonEmptyString(fBase, 'sha') ?? undefined;
+      if (prHeadSha === undefined || !COMMIT_SHA_PATTERN.test(prHeadSha.trim())) {
+        prHeadSha = readNonEmptyString(fHead, 'sha') ?? prHeadSha;
+      }
+      if (prBaseSha === undefined || !COMMIT_SHA_PATTERN.test(prBaseSha.trim())) {
+        prBaseSha = readNonEmptyString(fBase, 'sha') ?? prBaseSha;
+      }
       prHeadRepoFullName ??= readNonEmptyString(fHeadRepo, 'full_name') ?? undefined;
       if (typeof fHeadRepo?.['fork'] === 'boolean') {
         const sameForkRepo = fBaseRepo !== null
@@ -435,6 +441,15 @@ export async function verifySuiteCommentPullRequest(
   const normalizedBaseSha = prBaseSha !== undefined && COMMIT_SHA_PATTERN.test(prBaseSha.trim())
     ? prBaseSha.trim().toLowerCase()
     : undefined;
+  if (parsedCmd.command !== 'status' && normalizedBaseSha === undefined) {
+    return {
+      kind: 'metadata_unavailable',
+      code: 'ACTION_INPUT_INVALID',
+      reason: 'pull_request_metadata_unavailable',
+      detail: 'pull_request_metadata_unavailable: pull request base.sha must be a verified 40-hex commit SHA',
+      comment: parsedCmd,
+    };
+  }
 
   // 3. Verify `(targetBranch, headBranchPrefix)` domain ownership and explicit `<domainId>` consistency.
   const domainById = new Map<string, LoadedTaskpackSuiteDomain>(options.suite.domains.map(d => [d.id, d]));

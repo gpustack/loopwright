@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
@@ -575,6 +575,61 @@ async function resolveSafeRepositoryRoot(repositoryRoot: string): Promise<{ reso
   return { resolvedRoot, realRoot };
 }
 
+async function resolveDarwinFdPath(fd: number): Promise<string | null> {
+  return new Promise<string | null>(resolvePromise => {
+    let settled = false;
+    const finish = (value: string | null): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    let child;
+    try {
+      child = spawn(
+        '/usr/bin/perl',
+        ['-e', 'open(my $fh, "<&=", 3) or exit 1; my $buf = "\\0" x 4096; fcntl($fh, 50, $buf) or exit 1; $buf =~ s/\\0.*//s; print $buf;'],
+        {
+          stdio: ['ignore', 'pipe', 'ignore', fd],
+          env: { PATH: '/usr/bin:/bin' },
+        },
+      );
+    } catch {
+      finish(null);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(null);
+    }, 5_000);
+    timer.unref?.();
+    child.stdout?.on('data', (chunk: Buffer) => {
+      total += chunk.byteLength;
+      if (total > 4096) {
+        child.kill('SIGKILL');
+        clearTimeout(timer);
+        finish(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        finish(null);
+        return;
+      }
+      const out = Buffer.concat(chunks, total).toString('utf8');
+      finish(out.length > 0 ? out : null);
+    });
+  });
+}
+
 async function readSafeControlFileUnderRoot(
   resolvedRoot: string,
   realRoot: string,
@@ -584,10 +639,11 @@ async function readSafeControlFileUnderRoot(
 ): Promise<{ bytes: Buffer; sha256: string }> {
   const normalized = normalizeRelativePath(relPath, diagPath);
   const segments = normalized.split('/');
-  const parentDirs: Array<{ readonly path: string; readonly dev: number; readonly ino: number }> = [];
+  const parentDirs: Array<{ readonly path: string; readonly segment: string; readonly dev: number; readonly ino: number }> = [];
   let cursor = resolvedRoot;
   for (let i = 0; i < segments.length; i += 1) {
-    cursor = join(cursor, segments[i]!);
+    const seg = segments[i]!;
+    cursor = join(cursor, seg);
     const st = await lstat(cursor).catch(() => null);
     if (st === null) {
       throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `path "${normalized}" does not exist`, diagPath);
@@ -599,7 +655,7 @@ async function readSafeControlFileUnderRoot(
       if (!st.isDirectory()) {
         throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent segment of "${normalized}" is not a directory`, diagPath);
       }
-      parentDirs.push({ path: cursor, dev: st.dev, ino: st.ino });
+      parentDirs.push({ path: cursor, segment: seg, dev: st.dev, ino: st.ino });
     }
   }
   const realFull = await realpath(cursor).catch(() => {
@@ -631,34 +687,69 @@ async function readSafeControlFileUnderRoot(
   const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
   const oDirectory = 'O_DIRECTORY' in constants ? constants.O_DIRECTORY : 0;
   const pinnedParentHandles: Array<{ readonly handle: Awaited<ReturnType<typeof open>>; readonly path: string; readonly dev: number; readonly ino: number }> = [];
+  let rootHandle: Awaited<ReturnType<typeof open>> | undefined;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    for (const parent of parentDirs) {
-      let dirHandle: Awaited<ReturnType<typeof open>>;
+    if (process.platform === 'linux') {
+      rootHandle = await open(realRoot, constants.O_RDONLY | noFollow | oDirectory);
+      let currentDirFd = rootHandle.fd;
+      for (const parent of parentDirs) {
+        let dirHandle: Awaited<ReturnType<typeof open>>;
+        try {
+          dirHandle = await open(`/proc/self/fd/${currentDirFd}/${parent.segment}`, constants.O_RDONLY | noFollow | oDirectory);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code === 'ELOOP' || code === 'ENOTDIR') {
+            throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" became a symbolic link`, diagPath);
+          }
+          throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent directory of "${normalized}" could not be opened`, diagPath);
+        }
+        const dirInfo = await dirHandle.stat();
+        if (!dirInfo.isDirectory() || dirInfo.dev !== parent.dev || dirInfo.ino !== parent.ino) {
+          await dirHandle.close().catch(() => undefined);
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" changed identity before opening`, diagPath);
+        }
+        pinnedParentHandles.push({ handle: dirHandle, path: parent.path, dev: parent.dev, ino: parent.ino });
+        currentDirFd = dirHandle.fd;
+      }
+      const leafSegment = segments[segments.length - 1]!;
       try {
-        dirHandle = await open(parent.path, constants.O_RDONLY | noFollow | oDirectory);
+        handle = await open(`/proc/self/fd/${currentDirFd}/${leafSegment}`, constants.O_RDONLY | noFollow);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException | null)?.code;
-        if (code === 'ELOOP' || code === 'ENOTDIR') {
-          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" became a symbolic link`, diagPath);
+        if (code === 'ELOOP') {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symbolic link detected while opening "${normalized}"`, diagPath);
         }
-        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent directory of "${normalized}" could not be opened`, diagPath);
+        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" could not be opened`, diagPath);
       }
-      const dirInfo = await dirHandle.stat();
-      if (!dirInfo.isDirectory() || dirInfo.dev !== parent.dev || dirInfo.ino !== parent.ino) {
-        await dirHandle.close().catch(() => undefined);
-        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" changed identity before opening`, diagPath);
+    } else {
+      for (const parent of parentDirs) {
+        let dirHandle: Awaited<ReturnType<typeof open>>;
+        try {
+          dirHandle = await open(parent.path, constants.O_RDONLY | noFollow | oDirectory);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code === 'ELOOP' || code === 'ENOTDIR') {
+            throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" became a symbolic link`, diagPath);
+          }
+          throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent directory of "${normalized}" could not be opened`, diagPath);
+        }
+        const dirInfo = await dirHandle.stat();
+        if (!dirInfo.isDirectory() || dirInfo.dev !== parent.dev || dirInfo.ino !== parent.ino) {
+          await dirHandle.close().catch(() => undefined);
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" changed identity before opening`, diagPath);
+        }
+        pinnedParentHandles.push({ handle: dirHandle, path: parent.path, dev: parent.dev, ino: parent.ino });
       }
-      pinnedParentHandles.push({ handle: dirHandle, path: parent.path, dev: parent.dev, ino: parent.ino });
-    }
-    try {
-      handle = await open(cursor, constants.O_RDONLY | noFollow);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException | null)?.code;
-      if (code === 'ELOOP') {
-        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symbolic link detected while opening "${normalized}"`, diagPath);
+      try {
+        handle = await open(cursor, constants.O_RDONLY | noFollow);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ELOOP') {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symbolic link detected while opening "${normalized}"`, diagPath);
+        }
+        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" could not be opened`, diagPath);
       }
-      throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" could not be opened`, diagPath);
     }
     const info = await handle.stat();
     if (!info.isFile() || info.nlink !== 1 || info.dev !== before.dev || info.ino !== before.ino) {
@@ -669,6 +760,15 @@ async function readSafeControlFileUnderRoot(
     }
     if (process.platform === 'linux') {
       const fdResolvedPath = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+      if (fdResolvedPath === null || fdResolvedPath !== realFull || !isContainedInRoot(fdResolvedPath, realRoot)) {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `opened file descriptor for "${normalized}" resolved outside repository root`,
+          diagPath,
+        );
+      }
+    } else if (process.platform === 'darwin') {
+      const fdResolvedPath = await resolveDarwinFdPath(handle.fd);
       if (fdResolvedPath === null || fdResolvedPath !== realFull || !isContainedInRoot(fdResolvedPath, realRoot)) {
         throw new TaskpackError(
           'TASKPACK_SCOPE_VIOLATION',
@@ -731,8 +831,11 @@ async function readSafeControlFileUnderRoot(
     if (handle !== undefined) {
       await handle.close().catch(() => undefined);
     }
-    for (const parent of pinnedParentHandles) {
+    for (const parent of pinnedParentHandles.reverse()) {
       await parent.handle.close().catch(() => undefined);
+    }
+    if (rootHandle !== undefined) {
+      await rootHandle.close().catch(() => undefined);
     }
   }
 }
@@ -792,6 +895,7 @@ function cloneManifestWithAdditionalProtectedPaths(
 export interface LoadTaskpackSuiteOptions {
   readonly repositoryRoot: string;
   readonly suitePath?: string | undefined;
+  readonly gitRevision?: string | undefined;
   readonly policyProfile?: PolicyProfile | undefined;
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly enforceHostAuthority?: boolean | undefined;
@@ -809,15 +913,26 @@ export interface LoadTaskpackSuiteOptions {
 export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Promise<LoadedTaskpackSuite> {
   const policyProfile: PolicyProfile = options.policyProfile ?? options.hostPolicy?.policyProfile ?? 'local';
   const { resolvedRoot, realRoot } = await resolveSafeRepositoryRoot(options.repositoryRoot);
+  const pinnedGitSha = options.gitRevision !== undefined
+    ? await resolveGitCommitSha(resolvedRoot, options.gitRevision, 15_000)
+    : undefined;
+  const readControlFile = async (relPath: string, maxBytes: number, diagPath: string): Promise<{ bytes: Buffer; sha256: string }> => {
+    if (pinnedGitSha !== undefined) {
+      const bytes = await readOptionalGitBlobBytes(resolvedRoot, pinnedGitSha, relPath, maxBytes, 15_000);
+      if (bytes === null) {
+        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `path "${relPath}" does not exist in git revision ${pinnedGitSha}`, diagPath);
+      }
+      return { bytes, sha256: createHash('sha256').update(bytes).digest('hex') };
+    }
+    return readSafeControlFileUnderRoot(resolvedRoot, realRoot, relPath, maxBytes, diagPath);
+  };
   const suitePath = resolveSuiteRelativePath(resolvedRoot, options.suitePath);
   const suiteExt = extname(suitePath).toLowerCase();
   if (suiteExt !== '.yaml' && suiteExt !== '.yml' && suiteExt !== '.json') {
     suiteInvalid('suite manifest extension must be .yaml, .yml, or .json', '/');
   }
   const suiteControlRoot = deriveControlRoot(suitePath);
-  const { bytes: suiteBytes, sha256: suiteSha256 } = await readSafeControlFileUnderRoot(
-    resolvedRoot,
-    realRoot,
+  const { bytes: suiteBytes, sha256: suiteSha256 } = await readControlFile(
     suitePath,
     TASKPACK_SUITE_MANIFEST_BYTES,
     '/',
@@ -853,9 +968,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     if (domainExt !== '.yaml' && domainExt !== '.yml' && domainExt !== '.json') {
       suiteInvalid('domain taskpack extension must be .yaml, .yml, or .json', diagPath);
     }
-    const { bytes: domainBytes, sha256: manifestSha256 } = await readSafeControlFileUnderRoot(
-      resolvedRoot,
-      realRoot,
+    const { bytes: domainBytes, sha256: manifestSha256 } = await readControlFile(
       decl.taskpack,
       TASKPACK_MANIFEST_BYTES,
       diagPath,
@@ -1229,6 +1342,159 @@ async function readOptionalGitBlobBytes(
   return blobBuf;
 }
 
+async function hasLocalGitCommit(
+  repositoryRoot: string,
+  sha: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!existsSync(join(resolve(repositoryRoot), '.git'))) return false;
+  try {
+    const gitBin = resolveGitExecutable();
+    const cleanEnv = buildCleanGitEnv();
+    const { stdout } = await execFileAsync(
+      gitBin,
+      ['-C', repositoryRoot, '-c', 'core.hooksPath=/dev/null', 'cat-file', '-t', sha],
+      { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+    );
+    return stdout.trim() === 'commit';
+  } catch {
+    return false;
+  }
+}
+
+async function fetchGitHubContentsBlobBytes(options: {
+  readonly repositoryFullName: string;
+  readonly resolvedSha: string;
+  readonly relPath: string;
+  readonly apiBaseUrl: string;
+  readonly githubHeaders: Readonly<Record<string, string>>;
+  readonly fetchImpl: typeof globalThis.fetch;
+  readonly maxBytes: number;
+  readonly timeoutMs: number;
+  readonly optional: boolean;
+}): Promise<Buffer | null> {
+  const normalizedPath = normalizeRelativePath(options.relPath, '/baseline/path');
+  const encodedPath = normalizedPath.split('/').map(seg => encodeURIComponent(seg)).join('/');
+  const url = `${options.apiBaseUrl}/repos/${options.repositoryFullName}/contents/${encodedPath}?ref=${encodeURIComponent(options.resolvedSha)}`;
+  const res = await fetchBoundedProbeResponse(url, options.fetchImpl, options.githubHeaders, options.timeoutMs);
+  if (res.status === 404) {
+    if (options.optional) return null;
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `path "${normalizedPath}" does not exist in remote commit ${options.resolvedSha}`,
+    );
+  }
+  if (!res.ok) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `remote blob lookup for "${normalizedPath}" at ${options.resolvedSha} failed with HTTP ${res.status}`,
+    );
+  }
+  let doc: unknown;
+  try {
+    doc = JSON.parse(res.text) as unknown;
+  } catch {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `remote blob lookup for "${normalizedPath}" returned invalid JSON`);
+  }
+  if (!isPlainRecord(doc)) {
+    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `remote path "${normalizedPath}" at ${options.resolvedSha} must be a regular file`);
+  }
+  if (doc['type'] !== 'file') {
+    throw new TaskpackError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `remote path "${normalizedPath}" at ${options.resolvedSha} must be a regular file (found type=${String(doc['type'])})`,
+    );
+  }
+  if (typeof doc['size'] === 'number' && doc['size'] > options.maxBytes) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `remote blob "${normalizedPath}" (${doc['size']} bytes) exceeds ${options.maxBytes} bytes`,
+    );
+  }
+  if (doc['encoding'] !== 'base64' || typeof doc['content'] !== 'string') {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `remote blob "${normalizedPath}" lacks base64 content`);
+  }
+  const bytes = Buffer.from(doc['content'].replace(/\s+/g, ''), 'base64');
+  if (bytes.byteLength > options.maxBytes) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `remote blob "${normalizedPath}" (${bytes.byteLength} bytes) exceeds ${options.maxBytes} bytes`,
+    );
+  }
+  return bytes;
+}
+
+function parseVersionFromBlobBytes(
+  blobBuf: Buffer,
+  normalizedPath: string,
+  selector: SuiteVersionFromSelector,
+): string {
+  if (blobBuf.byteLength > MAX_SUITE_STAGE_VERSION_BLOB_BYTES) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `versionFrom blob "${normalizedPath}" exceeds ${MAX_SUITE_STAGE_VERSION_BLOB_BYTES} bytes`,
+    );
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(blobBuf);
+  } catch {
+    throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom blob "${normalizedPath}" is not valid UTF-8`);
+  }
+
+  if (selector.jsonPointer !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" is not valid JSON: ${detail}`);
+    }
+    const extracted = extractByRfc6901Pointer(parsed, selector.jsonPointer);
+    if (extracted === undefined) {
+      throw new TaskpackError(
+        'ACTION_INPUT_INVALID',
+        `versionFrom pointer "${selector.jsonPointer}" did not resolve to a non-empty string in "${normalizedPath}"`,
+      );
+    }
+    return extracted;
+  }
+
+  if (normalizedPath.toLowerCase().endsWith('.json')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" is not valid JSON: ${detail}`);
+    }
+    if (typeof parsed === 'string' && !/[\0\r\n]/.test(parsed) && parsed.trim().length > 0 && parsed.trim().length <= 256) {
+      return parsed.trim();
+    }
+    if (
+      isPlainRecord(parsed)
+      && Object.hasOwn(parsed, 'version')
+      && typeof parsed['version'] === 'string'
+      && !/[\0\r\n]/.test(parsed['version'])
+      && parsed['version'].trim().length > 0
+      && parsed['version'].trim().length <= 256
+    ) {
+      return parsed['version'].trim();
+    }
+    throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" lacks a valid top-level "version" string`);
+  }
+
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length > 256 || /[\0\r\n]/.test(trimmed)) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `versionFrom "${normalizedPath}" must contain a single-line string of 1..256 characters`,
+    );
+  }
+  return trimmed;
+}
+
 /**
  * Read a `versionFrom` string strictly from `baseRevision` in Git (`git cat-file -p <sha>:<path>`,
  * capped at `<= 1 MiB` UTF-8, refusing symlinks/trees and never reading the working tree on disk).
@@ -1293,70 +1559,7 @@ export async function readGitRevisionVersionFrom(options: {
       encoding: 'buffer',
     },
   );
-  if (blobBuf.byteLength > MAX_SUITE_STAGE_VERSION_BLOB_BYTES) {
-    throw new TaskpackError(
-      'ACTION_INPUT_INVALID',
-      `versionFrom blob "${normalizedPath}" exceeds ${MAX_SUITE_STAGE_VERSION_BLOB_BYTES} bytes`,
-    );
-  }
-
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(blobBuf);
-  } catch {
-    throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom blob "${normalizedPath}" is not valid UTF-8`);
-  }
-
-  if (options.selector.jsonPointer !== undefined) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" is not valid JSON: ${detail}`);
-    }
-    const extracted = extractByRfc6901Pointer(parsed, options.selector.jsonPointer);
-    if (extracted === undefined) {
-      throw new TaskpackError(
-        'ACTION_INPUT_INVALID',
-        `versionFrom pointer "${options.selector.jsonPointer}" did not resolve to a non-empty string in "${normalizedPath}"`,
-      );
-    }
-    return extracted;
-  }
-
-  if (normalizedPath.toLowerCase().endsWith('.json')) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" is not valid JSON: ${detail}`);
-    }
-    if (typeof parsed === 'string' && !/[\0\r\n]/.test(parsed) && parsed.trim().length > 0 && parsed.trim().length <= 256) {
-      return parsed.trim();
-    }
-    if (
-      isPlainRecord(parsed)
-      && Object.hasOwn(parsed, 'version')
-      && typeof parsed['version'] === 'string'
-      && !/[\0\r\n]/.test(parsed['version'])
-      && parsed['version'].trim().length > 0
-      && parsed['version'].trim().length <= 256
-    ) {
-      return parsed['version'].trim();
-    }
-    throw new TaskpackError('ACTION_INPUT_INVALID', `versionFrom "${normalizedPath}" lacks a valid top-level "version" string`);
-  }
-
-  const trimmed = text.trim();
-  if (trimmed.length === 0 || trimmed.length > 256 || /[\0\r\n]/.test(trimmed)) {
-    throw new TaskpackError(
-      'ACTION_INPUT_INVALID',
-      `versionFrom "${normalizedPath}" must contain a single-line string of 1..256 characters`,
-    );
-  }
-  return trimmed;
+  return parseVersionFromBlobBytes(blobBuf, normalizedPath, options.selector);
 }
 
 function versionMatchesTag(observedTag: string, expectedVersion: string, explicitTagPrefix: string | undefined): boolean {
@@ -1999,38 +2202,81 @@ async function runDefaultReadinessProbe(
           };
           const targetRef = probe.ref ?? 'HEAD';
           let refExists = false;
-          const candidateRefs: string[] = [];
-          if (targetRef === 'HEAD') {
+          if (COMMIT_SHA_PATTERN.test(targetRef)) {
             try {
-              const sym = await execFileAsync(
+              await execFileAsync(
                 gitBin,
-                ['-C', gitSource, 'symbolic-ref', '--quiet', 'HEAD'],
+                ['-C', gitSource, 'cat-file', '-e', targetRef],
                 { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
               );
-              const symRef = sym.stdout.trim();
-              if (symRef.length > 0) candidateRefs.push(symRef);
+              const { stdout: targetTypeOut } = await execFileAsync(
+                gitBin,
+                ['-C', gitSource, 'cat-file', '-t', targetRef],
+                { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+              );
+              refExists = targetTypeOut.trim() === 'commit';
             } catch (error) {
-              if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
-              // Detached HEAD: check `git rev-parse --verify HEAD` directly below.
-              refExists = true;
+              const exitCode = (error as { code?: unknown }).code;
+              const stderrText = typeof (error as { stderr?: unknown }).stderr === 'string'
+                ? (error as { stderr: string }).stderr
+                : '';
+              if (isGitProcessFailure(error) || exitCode !== 1 || /corrupt|bad object|unable to read/i.test(stderrText)) {
+                throw error;
+              }
+              refExists = false;
             }
-          } else if (targetRef.startsWith('refs/')) {
-            candidateRefs.push(targetRef);
+          } else if (/[~^@:]/.test(targetRef)) {
+            try {
+              await execFileAsync(
+                gitBin,
+                ['-C', gitSource, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${targetRef}^{commit}`],
+                { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+              );
+              refExists = true;
+            } catch (error) {
+              const exitCode = (error as { code?: unknown }).code;
+              const stderrText = typeof (error as { stderr?: unknown }).stderr === 'string'
+                ? (error as { stderr: string }).stderr
+                : '';
+              if (isGitProcessFailure(error) || (exitCode !== 1 && exitCode !== 128) || /corrupt|bad object|unable to read/i.test(stderrText)) {
+                throw error;
+              }
+              refExists = false;
+            }
           } else {
-            candidateRefs.push(`refs/heads/${targetRef}`, `refs/tags/${targetRef}`, `refs/remotes/${targetRef}`);
-          }
-          if (!refExists) {
-            for (const fullRef of candidateRefs) {
+            const candidateRefs: string[] = [];
+            if (targetRef === 'HEAD') {
               try {
-                await execFileAsync(
+                const sym = await execFileAsync(
                   gitBin,
-                  ['-C', gitSource, 'show-ref', '--verify', '--quiet', '--', fullRef],
+                  ['-C', gitSource, 'symbolic-ref', '--quiet', 'HEAD'],
                   { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
                 );
-                refExists = true;
-                break;
+                const symRef = sym.stdout.trim();
+                if (symRef.length > 0) candidateRefs.push(symRef);
               } catch (error) {
                 if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
+                // Detached HEAD: check `git rev-parse --verify HEAD` directly below.
+                refExists = true;
+              }
+            } else if (targetRef.startsWith('refs/')) {
+              candidateRefs.push(targetRef);
+            } else {
+              candidateRefs.push(`refs/heads/${targetRef}`, `refs/tags/${targetRef}`, `refs/remotes/${targetRef}`);
+            }
+            if (!refExists) {
+              for (const fullRef of candidateRefs) {
+                try {
+                  await execFileAsync(
+                    gitBin,
+                    ['-C', gitSource, 'show-ref', '--verify', '--quiet', '--', fullRef],
+                    { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+                  );
+                  refExists = true;
+                  break;
+                } catch (error) {
+                  if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
+                }
               }
             }
           }
@@ -2297,11 +2543,14 @@ export interface SuiteDomainUpdatesStatus {
 export interface ResolveTaskpackSuiteOptions extends LoadTaskpackSuiteOptions {
   readonly loadedSuite?: LoadedTaskpackSuite | undefined;
   readonly baseRevision?: string | undefined;
+  readonly remoteBaseRevision?: boolean | undefined;
   readonly eventName?: string | undefined;
   readonly eventPayload?: unknown | undefined;
   readonly schedule?: string | undefined;
   readonly domain?: string | undefined;
+  readonly domains?: readonly string[] | undefined;
   readonly commentBody?: string | undefined;
+  readonly commentPrefixes?: readonly string[] | undefined;
   readonly prHeadRef?: string | undefined;
   readonly prBaseRef?: string | undefined;
   readonly prHeadSha?: string | undefined;
@@ -2357,8 +2606,12 @@ async function resolveSuiteBaseRevision(
   repositoryRoot: string,
   rawBaseRevision: string | undefined,
   timeoutMs: number,
+  remoteBaseRevision?: boolean | undefined,
 ): Promise<string> {
   const candidate = rawBaseRevision?.trim() || 'HEAD';
+  if (remoteBaseRevision === true && COMMIT_SHA_PATTERN.test(candidate)) {
+    return candidate.toLowerCase();
+  }
   if (existsSync(join(resolve(repositoryRoot), '.git'))) {
     return resolveGitCommitSha(repositoryRoot, candidate, timeoutMs);
   }
@@ -2489,7 +2742,12 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
 
   let resolvedBaseRevision: string;
   try {
-    resolvedBaseRevision = await resolveSuiteBaseRevision(options.repositoryRoot, options.baseRevision, timeoutMs);
+    resolvedBaseRevision = await resolveSuiteBaseRevision(
+      options.repositoryRoot,
+      options.baseRevision,
+      timeoutMs,
+      options.remoteBaseRevision,
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return Object.freeze({
@@ -2568,6 +2826,47 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
     | { readonly ok: false; readonly reason: string; readonly detail: string };
   const openPrCache = new Map<string, Promise<OpenPrCheckResult>>();
 
+  const localCommitAvailabilityPromise = hasLocalGitCommit(options.repositoryRoot, resolvedBaseRevision, timeoutMs);
+  const readRevisionBlobBytes = async (
+    relPath: string,
+    maxBytes: number,
+    optional: boolean,
+  ): Promise<Buffer | null> => {
+    if (await localCommitAvailabilityPromise) {
+      const localBytes = await readOptionalGitBlobBytes(
+        options.repositoryRoot,
+        resolvedBaseRevision,
+        relPath,
+        maxBytes,
+        timeoutMs,
+      );
+      if (localBytes === null && !optional) {
+        throw new TaskpackError(
+          'ACTION_INPUT_INVALID',
+          `path "${relPath}" does not exist in commit ${resolvedBaseRevision}`,
+        );
+      }
+      return localBytes;
+    }
+    if (effectiveRepoFullName !== undefined && REPOSITORY_FULL_NAME_PATTERN.test(effectiveRepoFullName)) {
+      return fetchGitHubContentsBlobBytes({
+        repositoryFullName: effectiveRepoFullName,
+        resolvedSha: resolvedBaseRevision,
+        relPath,
+        apiBaseUrl,
+        githubHeaders,
+        fetchImpl,
+        maxBytes,
+        timeoutMs,
+        optional,
+      });
+    }
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `commit ${resolvedBaseRevision} is not present locally and no GitHub repository is configured for remote blob lookup of "${relPath}"`,
+    );
+  };
+
   const checkUpstreamDomainUpdates = (domain: LoadedTaskpackSuiteDomain): Promise<SuiteDomainUpdatesStatus> => {
     const existing = domainUpdatesCache.get(domain.id);
     if (existing !== undefined) return existing;
@@ -2594,12 +2893,10 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
             ? (proposal.path.toLowerCase().endsWith('.json') ? proposal.path : null)
             : 'package.json';
           if (baselineRelPath !== null) {
-            const rawBlob = await readOptionalGitBlobBytes(
-              options.repositoryRoot,
-              resolvedBaseRevision,
+            const rawBlob = await readRevisionBlobBytes(
               baselineRelPath,
               MAX_SUITE_STAGE_VERSION_BLOB_BYTES,
-              timeoutMs,
+              true,
             );
             if (rawBlob !== null) {
               const parsedDoc = JSON.parse(rawBlob.toString('utf8')) as unknown;
@@ -2769,12 +3066,19 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         let expectedVersion: string | undefined;
         if (probe.versionFrom !== undefined) {
           try {
-            const rawVersion = await readGitRevisionVersionFrom({
-              repositoryRoot: options.repositoryRoot,
-              baseRevision: resolvedBaseRevision,
-              selector: probe.versionFrom,
-              timeoutMs,
-            });
+            const normalizedVersionPath = normalizeRelativePath(probe.versionFrom.path, '/versionFrom/path');
+            const rawVersion = (await localCommitAvailabilityPromise)
+              ? await readGitRevisionVersionFrom({
+                repositoryRoot: options.repositoryRoot,
+                baseRevision: resolvedBaseRevision,
+                selector: probe.versionFrom,
+                timeoutMs,
+              })
+              : parseVersionFromBlobBytes(
+                (await readRevisionBlobBytes(normalizedVersionPath, MAX_SUITE_STAGE_VERSION_BLOB_BYTES, false))!,
+                normalizedVersionPath,
+                probe.versionFrom,
+              );
             expectedVersion = probe.tagPrefix !== undefined ? `${probe.tagPrefix}${rawVersion}` : rawVersion;
           } catch (error) {
             const detail = scrubber.scrub(error instanceof Error ? error.message : String(error));
@@ -2957,6 +3261,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
     }
 
     const allPrefixes = new Set<string>(DEFAULT_COMMENT_PREFIXES);
+    for (const p of options.commentPrefixes ?? []) allPrefixes.add(p);
     for (const dom of suite.domains) {
       for (const p of dom.manifest.spec.triggers.commentPrefixes) allPrefixes.add(p);
     }
@@ -3217,7 +3522,10 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
     const configuredPrefixes = targetDomain.manifest.spec.triggers.commentPrefixes.length > 0
       ? targetDomain.manifest.spec.triggers.commentPrefixes
       : DEFAULT_COMMENT_PREFIXES;
-    if (!configuredPrefixes.includes(parsedComment.prefix)) {
+    const effectiveAllowedPrefixes = options.commentPrefixes !== undefined && options.commentPrefixes.length > 0
+      ? options.commentPrefixes
+      : configuredPrefixes;
+    if (!effectiveAllowedPrefixes.includes(parsedComment.prefix)) {
       return buildResult({
         disposition: 'ignored',
         reason: 'comment_prefix_not_configured_for_domain',
@@ -3235,6 +3543,20 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         detail: `domain "${targetDomain.id}" does not enable comment command "${parsedComment.command}"`,
         code: 'TASKPACK_TRIGGER_UNSUPPORTED',
         comment: parsedComment,
+      });
+    }
+
+    if (parsedComment.command === 'status') {
+      const statusCell: SuiteDomainResolution = Object.freeze({
+        ...toMatrixCell(targetDomain, resolvedBaseRevision, normalizedHeadSha),
+        disposition: 'eligible',
+        reason: 'ready',
+      });
+      return buildResult({
+        disposition: 'eligible',
+        reason: 'ready',
+        comment: parsedComment,
+        cells: [statusCell],
       });
     }
 
@@ -3261,7 +3583,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
         const releaseAction = isPlainRecord(options.eventPayload) && typeof options.eventPayload['action'] === 'string'
           ? options.eventPayload['action']
           : undefined;
-        if (releaseAction !== undefined && releaseAction !== 'published') {
+        if (releaseAction !== 'published') {
           return false;
         }
       }
@@ -3349,7 +3671,11 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
   }
 
   // 3. Schedule & workflow_dispatch multi-domain resolution
-  const candidateDomains = suite.domains.filter(domainMatchesTriggerAndSchedule);
+  const requestedDomainSet = options.domains !== undefined ? new Set<string>(options.domains) : null;
+  const candidateDomains = suite.domains.filter(dom => (
+    (requestedDomainSet === null || requestedDomainSet.has(dom.id))
+    && domainMatchesTriggerAndSchedule(dom)
+  ));
 
   if (candidateDomains.length === 0) {
     return buildResult({
