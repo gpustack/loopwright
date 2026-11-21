@@ -82,6 +82,10 @@ export class SecretScrubber {
     if (typeof secret !== 'string' || secret.length === 0) return;
     if (secret.trim().length >= 4) {
       this.#rawSecrets.add(secret);
+      const rawBytes = Buffer.byteLength(secret, 'utf8');
+      if (rawBytes > this.#maxDerivedSecretBytes) {
+        this.#maxDerivedSecretBytes = rawBytes;
+      }
     }
     const forms = [
       secret,
@@ -122,6 +126,11 @@ export class SecretScrubber {
 
   /** Return true when any tracked credential form or generic token pattern appears in `value`. */
   containsSecret(value: string): boolean {
+    for (const raw of this.#rawSecrets) {
+      if (value.includes(raw)) {
+        return true;
+      }
+    }
     for (const form of this.#forms) {
       if (form.length >= MIN_FORM_LENGTH && value.includes(form)) {
         return true;
@@ -140,6 +149,11 @@ export class SecretScrubber {
     const serialized = value instanceof Uint8Array
       ? Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString('utf8')
       : typeof value === 'string' ? value : JSON.stringify(value);
+    for (const raw of this.#rawSecrets) {
+      if (serialized.includes(raw)) {
+        throw new TaskpackError('TOKEN_SECRET_LEAK_DETECTED', `artifact contains tracked credential material at ${path}`, path);
+      }
+    }
     for (const form of this.#forms) {
       if (form.length >= MIN_FORM_LENGTH && serialized.includes(form)) {
         throw new TaskpackError('TOKEN_SECRET_LEAK_DETECTED', `artifact contains tracked credential material at ${path}`, path);
@@ -241,9 +255,9 @@ export class SecretScrubber {
 
   #scrubInternal(text: string, deferEndTouchingGeneric: boolean): string {
     let output = text;
-    if (this.#forms.size > 0) {
+    if (this.#forms.size > 0 || this.#rawSecrets.size > 0) {
       // Replace longest registered forms first so prefixes cannot fragment longer secrets.
-      const sortedForms = [...this.#forms].sort((a, b) => b.length - a.length);
+      const sortedForms = [...new Set([...this.#rawSecrets, ...this.#forms])].sort((a, b) => b.length - a.length);
       for (const form of sortedForms) {
         output = output.split(form).join('[scrubbed]');
       }

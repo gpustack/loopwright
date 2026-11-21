@@ -91,5 +91,15 @@ describe('scrubber.ts: derived-form scrubbing and 64 KiB boundary sliding-window
       assertStreamClean([hugeBuf.subarray(0, half), hugeBuf.subarray(half)], scrubber),
       (err: unknown) => err instanceof TaskpackError && err.code === 'TOKEN_SECRET_LEAK_DETECTED',
     );
+
+    // 4-7 character registered raw secrets are scrubbed and detected consistently in batch and stream checks
+    const shortScrubber = new SecretScrubber();
+    shortScrubber.register('sec123');
+    assert.equal(shortScrubber.containsSecret('token=sec123!'), true);
+    assert.equal(shortScrubber.scrub('token=sec123!'), 'token=[scrubbed]!');
+    await assert.rejects(
+      assertStreamClean(['token=sec', '123!'], shortScrubber, '/short-secret'),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'TOKEN_SECRET_LEAK_DETECTED',
+    );
   });
 });
