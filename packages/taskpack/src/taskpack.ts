@@ -1337,9 +1337,13 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       const nextPrompt = markerIdx > 0
         ? `${role.prompt.slice(0, markerIdx)}\n\n${conflictPromptNote}${role.prompt.slice(markerIdx)}`
         : `${role.prompt}\n\n${conflictPromptNote}`;
-      if (Buffer.byteLength(nextPrompt, 'utf8') <= effectiveRoleCap) {
-        compiledRoles[i] = { ...role, prompt: nextPrompt };
+      if (Buffer.byteLength(nextPrompt, 'utf8') > effectiveRoleCap) {
+        bindingInvalid(
+          `role "${role.roleId}" prompt exceeds promptBytes (${effectiveRoleCap}) when appending mandatory baseline conflict instructions`,
+          '/spec/baselineAlignment',
+        );
       }
+      compiledRoles[i] = { ...role, prompt: nextPrompt };
     }
   }
 
@@ -1600,6 +1604,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         hostPolicy: bindings.hostPolicy,
         githubSiblings,
         controlRootSiblingSet,
+        ...(conflictResource !== null ? { extraProtectedPaths: [conflictResource.path] } : {}),
       });
       const checkCodeFingerprint = manifest.spec.memory.checkCodeFingerprint === true;
       const checkUpstreamVersions = manifest.spec.memory.checkUpstreamVersions === true;
@@ -2847,6 +2852,9 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     hostPolicy: bindings.hostPolicy,
     githubSiblings: input.githubSiblings,
     controlRootSiblingSet: input.controlRootSiblingSet,
+    ...(bindings.baselineConflictResource !== undefined && bindings.baselineConflictResource !== null
+      ? { extraProtectedPaths: [bindings.baselineConflictResource.path] }
+      : {}),
   });
   const compiledResources = input.instructionResources.map(r => ({
     id: r.id,

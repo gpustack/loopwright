@@ -940,13 +940,13 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     let verifiedPrBaseSha: string | undefined;
     let deferredCellsOut: readonly { readonly domainId: string; readonly reason: string; readonly detail?: string | undefined }[] = [];
 
-    const mintReadOnlyToken = async (): Promise<string | undefined> => {
+    const mintReadOnlyToken = async (targetTaskpackId?: string): Promise<string | undefined> => {
       if (options.tokenBroker === undefined) return undefined;
       const lookupTenant: TenantIdentity = {
         installationId,
         repositoryId: repository.id,
         repositoryFullName: repository.fullName,
-        taskpackId: suite.domains[0]!.manifest.metadata.name,
+        taskpackId: targetTaskpackId ?? suite.domains[0]!.manifest.metadata.name,
       };
       const minted = await options.tokenBroker.mint(lookupTenant, 'read_only');
       scrubber.register(minted.token);
@@ -955,7 +955,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
 
     const resolvedBranchShas = new Map<string, string>();
     let cachedDefaultBranch: string | null | undefined;
-    const resolveRepositoryDefaultBranch = async (): Promise<
+    const resolveRepositoryDefaultBranch = async (targetTaskpackId?: string): Promise<
       | { readonly ok: true; readonly branch: string }
       | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
     > => {
@@ -968,7 +968,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       }
       if (options.tokenBroker !== undefined) {
         try {
-          const token = await mintReadOnlyToken();
+          const token = await mintReadOnlyToken(targetTaskpackId);
           const headers: Record<string, string> = {
             accept: 'application/vnd.github+json',
             'user-agent': 'loopwright-github-app',
@@ -1016,7 +1016,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       };
     };
 
-    const resolveRefToCommitSha = async (refName: string): Promise<
+    const resolveRefToCommitSha = async (refName: string, targetTaskpackId?: string): Promise<
       | { readonly ok: true; readonly sha: string }
       | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
     > => {
@@ -1028,7 +1028,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       if (cached !== undefined) return { ok: true, sha: cached };
       if (options.tokenBroker !== undefined && trimmedRef !== 'HEAD') {
         try {
-          const token = await mintReadOnlyToken();
+          const token = await mintReadOnlyToken(targetTaskpackId);
           const headers: Record<string, string> = {
             accept: 'application/vnd.github+json',
             'user-agent': 'loopwright-github-app',
@@ -1093,7 +1093,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
     > => {
       if (options.baseRevision !== undefined && options.baseRevision.trim().length > 0) {
-        const overrideRes = await resolveRefToCommitSha(options.baseRevision);
+        const overrideRes = await resolveRefToCommitSha(options.baseRevision, domain.manifest.metadata.name);
         if (!overrideRes.ok) return overrideRes;
         if (
           action !== 'status'
@@ -1119,11 +1119,11 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         return { ok: true, sha: payloadAfter.toLowerCase() };
       }
       if (domain.manifest.spec.publication.mode === 'pull_request') {
-        return resolveRefToCommitSha(domain.manifest.spec.publication.targetBranch);
+        return resolveRefToCommitSha(domain.manifest.spec.publication.targetBranch, domain.manifest.metadata.name);
       }
-      const defBranchRes = await resolveRepositoryDefaultBranch();
+      const defBranchRes = await resolveRepositoryDefaultBranch(domain.manifest.metadata.name);
       if (!defBranchRes.ok) return defBranchRes;
-      return resolveRefToCommitSha(defBranchRes.branch);
+      return resolveRefToCommitSha(defBranchRes.branch, domain.manifest.metadata.name);
     };
 
     let verifiedPrHeadRef: string | undefined;
@@ -1325,7 +1325,9 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             operatorAllowlist: options.operatorAllowlist,
             repositoryFullName: repository.fullName,
             apiBaseUrl: effectiveApiBaseUrl,
-            githubToken: options.tokenBroker !== undefined ? mintReadOnlyToken : undefined,
+            githubToken: options.tokenBroker !== undefined
+              ? () => mintReadOnlyToken(shaGroup[0]!.manifest.metadata.name)
+              : undefined,
             fetchImpl,
             scrubber,
             discoverUpstreamUpdates: true,
@@ -1539,6 +1541,15 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         }
         throw error;
       }
+    } catch (outerError) {
+      const currentState = deliveryStore.getDelivery(entry.deliveryId)?.state;
+      if (currentState !== 'succeeded' && currentState !== 'failed') {
+        const errCode = (outerError !== null && typeof outerError === 'object' && 'code' in outerError)
+          ? String((outerError as { code: unknown }).code)
+          : 'SERVICE_FAULT';
+        deliveryStore.markDeliveryState(entry.deliveryId, 'failed', errCode);
+      }
+      throw outerError;
     } finally {
       admissionWatch.release();
     }
@@ -1764,6 +1775,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           const grant = queue.leaseNext(tenant, workerId, nowSample);
           if (grant === null) return respond(response, 200, { item: null });
           const leaseWatch = beginRevocationWatch(tenant.installationId, tenant.repositoryId);
+          const mintStartNs = process.hrtime.bigint();
           let token;
           try {
             token = await options.tokenBroker.mint(tenant, 'read_only');
@@ -1777,7 +1789,13 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           } finally {
             leaseWatch.release();
           }
-          const postMintSample = isClockSample(parsed.body['nowSample']) ? nowSample : systemSample();
+          const mintElapsedMs = Math.max(0, Math.floor(Number(process.hrtime.bigint() - mintStartNs) / 1_000_000));
+          const postMintSample: ClockSample = isClockSample(parsed.body['nowSample'])
+            ? {
+              wallMs: nowSample.wallMs + mintElapsedMs,
+              monotonicMs: String(BigInt(nowSample.monotonicMs) + BigInt(mintElapsedMs)),
+            }
+            : systemSample();
           const item = queue.assertActiveLease(tenant, grant.queueItemId, grant.leaseEpoch, workerId, postMintSample);
           queueSummary.leased += 1;
           if (item.deliveryId !== null && deliveryStore.getDelivery(item.deliveryId)?.state !== 'succeeded') {

@@ -1077,7 +1077,7 @@ async function runIndexThreeWayMergeFallback(options: {
       { input: `${path}\0` },
     );
     if (s2 !== undefined && (s2.mode === '100644' || s2.mode === '100755')) {
-      await runIsolatedGit(
+      await execIsolatedGitChecked(
         repositoryRoot,
         ['update-index', '-z', '--index-info'],
         indexEnv,
@@ -1247,17 +1247,19 @@ function extractConflictHunksFromMergedText(
   let totalHunkBytes = 0;
   let i = 0;
 
+  const openMarkerRe = /^<{7}(?: |$)/;
+  const closeMarkerRe = /^>{7}(?: |$)/;
   while (i < lines.length) {
     const line = lines[i]!;
-    if (line.startsWith('<<<<<<<')) {
+    if (openMarkerRe.test(line)) {
       const startIdx = i;
       let endIdx = -1;
       let depth = 1;
       for (let j = i + 1; j < lines.length; j += 1) {
         const cur = lines[j]!;
-        if (cur.startsWith('<<<<<<<')) {
+        if (openMarkerRe.test(cur)) {
           depth += 1;
-        } else if (cur.startsWith('>>>>>>>')) {
+        } else if (closeMarkerRe.test(cur)) {
           depth -= 1;
           if (depth === 0) {
             endIdx = j;

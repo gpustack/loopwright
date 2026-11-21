@@ -466,9 +466,10 @@ async function runSuiteCommand(args: Arguments, emit: EmitFn): Promise<number> {
       case 'ignored':
         return 0;
       case 'blocked':
-        return resolution.code === 'TASKPACK_MANIFEST_INVALID' || resolution.code === 'ACTION_INPUT_INVALID'
-          ? 2
-          : 3;
+        if (resolution.code === undefined || resolution.code === 'TASKPACK_SCOPE_VIOLATION') {
+          return 3;
+        }
+        return taskpackExitCode(resolution.code);
       default: {
         const _exhaustive: never = resolution.disposition;
         return _exhaustive;

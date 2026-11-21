@@ -1113,7 +1113,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
           });
           for (const s of sibs.prioritySiblings) suiteUnionSet.add(s);
           for (const s of sibs.regularSiblings) {
-            if (suiteUnionSet.size <= LIMITS.patterns) suiteUnionSet.add(s);
+            suiteUnionSet.add(s);
           }
         }
       }
@@ -1134,7 +1134,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
           });
           for (const s of sibs.prioritySiblings) suiteUnionSet.add(s);
           for (const s of sibs.regularSiblings) {
-            if (suiteUnionSet.size <= LIMITS.patterns) suiteUnionSet.add(s);
+            suiteUnionSet.add(s);
           }
         }
       }
@@ -1317,7 +1317,7 @@ async function readOptionalGitBlobBytes(
   if (rows.length !== 1) {
     throw new TaskpackError('ACTION_INPUT_INVALID', `unexpected git ls-tree entry count for "${normalizedPath}"`);
   }
-  const match = /^([0-9]{6}) ([a-z]+) ([0-9a-f]{40})\t(.+)$/s.exec(rows[0]!);
+  const match = /^([0-9]{6}) ([a-z]+) ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$/s.exec(rows[0]!);
   if (match === null || match[4] !== normalizedPath) {
     throw new TaskpackError('ACTION_INPUT_INVALID', `unexpected git ls-tree entry for "${normalizedPath}"`);
   }
@@ -1427,7 +1427,7 @@ async function fetchGitHubContentsBlobBytes(options: {
         throw new TaskpackError('ACTION_INPUT_INVALID', `remote commit lookup for ${options.resolvedSha} returned invalid JSON`);
       }
       const rootTreeObj = isPlainRecord(commitDoc) && isPlainRecord(commitDoc['tree']) ? commitDoc['tree'] : null;
-      const rootTreeSha = typeof rootTreeObj?.['sha'] === 'string' && COMMIT_SHA_PATTERN.test(rootTreeObj['sha'])
+      const rootTreeSha = typeof rootTreeObj?.['sha'] === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(rootTreeObj['sha'])
         ? rootTreeObj['sha'].toLowerCase()
         : null;
       if (rootTreeSha === null) {
@@ -1508,7 +1508,7 @@ async function fetchGitHubContentsBlobBytes(options: {
     }
     const mode = typeof matchedEntry['mode'] === 'string' ? matchedEntry['mode'] : '';
     const entryType = typeof matchedEntry['type'] === 'string' ? matchedEntry['type'] : '';
-    const entrySha = typeof matchedEntry['sha'] === 'string' && COMMIT_SHA_PATTERN.test(matchedEntry['sha'])
+    const entrySha = typeof matchedEntry['sha'] === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(matchedEntry['sha'])
       ? matchedEntry['sha'].toLowerCase()
       : null;
     if (entrySha === null) {
@@ -1596,11 +1596,12 @@ async function fetchGitHubContentsBlobBytes(options: {
         `remote blob "${normalizedPath}" (${bytes.byteLength} bytes) exceeds ${options.maxBytes} bytes`,
       );
     }
-    const actualGitBlobSha = createHash('sha1').update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
+    const hashAlgo = leafBlobSha.length === 64 ? 'sha256' : 'sha1';
+    const actualGitBlobSha = createHash(hashAlgo).update(`blob ${bytes.byteLength}\0`).update(bytes).digest('hex');
     if (actualGitBlobSha !== leafBlobSha) {
       throw new TaskpackError(
         'ACTION_INPUT_INVALID',
-        `remote blob "${normalizedPath}" SHA-1 mismatch (expected ${leafBlobSha}, got ${actualGitBlobSha})`,
+        `remote blob "${normalizedPath}" ${hashAlgo.toUpperCase()} mismatch (expected ${leafBlobSha}, got ${actualGitBlobSha})`,
       );
     }
     return bytes;
@@ -1716,7 +1717,7 @@ export async function readGitRevisionVersionFrom(options: {
       `versionFrom path "${normalizedPath}" does not exist in commit ${resolvedSha}`,
     );
   }
-  const match = /^([0-9]{6}) ([a-z]+) ([0-9a-f]{40})\t(.+)$/s.exec(rows[0]!);
+  const match = /^([0-9]{6}) ([a-z]+) ([0-9a-f]{40}|[0-9a-f]{64})\t(.+)$/s.exec(rows[0]!);
   if (match === null || match[4] !== normalizedPath) {
     throw new TaskpackError('ACTION_INPUT_INVALID', `unexpected git ls-tree entry for "${normalizedPath}"`);
   }
@@ -1981,10 +1982,26 @@ async function runDefaultReadinessProbe(
     readonly fetchImpl: typeof globalThis.fetch;
     readonly timeoutMs: number;
     readonly allowLoopbackHttp: boolean;
+    readonly policyProfile: PolicyProfile;
   },
 ): Promise<SuiteReadinessProbeRunnerResult> {
   const { probe, expectedVersion, repositoryRoot, scrubber } = input;
-  const { apiBaseUrl, githubHeaders, fetchImpl, timeoutMs, allowLoopbackHttp } = context;
+  const { apiBaseUrl, githubHeaders, fetchImpl, timeoutMs, allowLoopbackHttp, policyProfile } = context;
+
+  const assertSafeLocalGitProbeSource = async (rawSource: string): Promise<string> => {
+    const resolvedSource = resolve(repositoryRoot, rawSource);
+    if (policyProfile === 'github') {
+      const realRepo = await realpath(resolve(repositoryRoot));
+      const realSource = await realpath(resolvedSource);
+      if (!isContainedInRoot(realSource, realRepo)) {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `local git probe source "${rawSource}" escapes repository root under github policy profile`,
+        );
+      }
+    }
+    return resolvedSource;
+  };
 
   try {
     switch (probe.kind) {
@@ -2224,7 +2241,9 @@ async function runDefaultReadinessProbe(
         }
 
         const sourceKind = validateGitRemoteSource(probe.source, repositoryRoot);
-        const gitSource = sourceKind === 'local-dir' ? resolve(repositoryRoot, probe.source) : probe.source;
+        const gitSource = sourceKind === 'local-dir'
+          ? await assertSafeLocalGitProbeSource(probe.source)
+          : probe.source;
         const gitBin = resolveGitExecutable();
         const protocolArgs = sourceKind === 'local-dir'
           ? ['-c', 'protocol.file.allow=always', '-c', 'protocol.ext.allow=never', '-c', 'protocol.ssh.allow=never']
@@ -2378,7 +2397,9 @@ async function runDefaultReadinessProbe(
         }
 
         const sourceKind = validateGitRemoteSource(probe.source, repositoryRoot);
-        const gitSource = sourceKind === 'local-dir' ? resolve(repositoryRoot, probe.source) : probe.source;
+        const gitSource = sourceKind === 'local-dir'
+          ? await assertSafeLocalGitProbeSource(probe.source)
+          : probe.source;
         const gitBin = resolveGitExecutable();
         const cleanEnv = buildCleanGitEnv();
 
@@ -3330,6 +3351,7 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
               fetchImpl,
               timeoutMs,
               allowLoopbackHttp: effectiveAllowLoopbackHttp,
+              policyProfile: effectivePolicyProfile,
             });
         } catch (error) {
           const detail = scrubber.scrub(error instanceof Error ? error.message : String(error));

@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { openPiAdapterV2, type PiAdapterV2, type PiCandidateArtifactInput, type PiHostV2, type PiOpenInputV2, type PiOutcomeV2 } from '@loopwright/agent-pi';
-import { LIMITS, admitTask, bindSubject, identifyManifest, validateRelativePath, type ArtifactRef, type Digest, type StepHandoffSelector, type StructuredFinding, type TaskLock } from '@loopwright/core';
+import { LIMITS, admitTask, bindSubject, identifyManifest, validateRelativePath, type ArtifactManifest, type ArtifactRef, type Digest, type StepHandoffSelector, type StructuredFinding, type TaskLock } from '@loopwright/core';
 import { createLocalRun, type Authority, type LocalRunIdentity, type LocalRunStore } from '@loopwright/state';
 import { approvedState, selectRoleResources } from './config.js';
 import { compilePlan } from './compile.js';
@@ -983,7 +983,6 @@ export class Cycle {
     for (const refusal of this.currentRefusals()) {
       failedChecks.add(refusal.checkId);
       if (refusal.reason.length > 0) failureCodes.add(refusal.reason);
-      failureCodes.add('OUTPUT_LIMIT');
     }
 
     if (failedChecks.size === 0 && this.reworkEpoch > 0 && this.generation > 0 && this.head) {
@@ -1034,9 +1033,19 @@ export class Cycle {
     snap: NodeCandidateSnapshot,
     relPath: string,
     diagPath: string,
+    memo?: {
+      readonly manifests: Map<string, Promise<ArtifactManifest>>;
+      readonly captures: Map<string, Promise<Awaited<ReturnType<typeof decodeCandidateCapture>>>>;
+    },
   ): Promise<Uint8Array | null> {
     const { artifacts, source, owner, store, lock, plan } = this.context;
-    const manifest = await this.context.progress.manifest(snap.manifest);
+    const manifestKey = snap.manifest.digest.hex;
+    let manifestPromise = memo?.manifests.get(manifestKey);
+    if (manifestPromise === undefined) {
+      manifestPromise = this.context.progress.manifest(snap.manifest);
+      memo?.manifests.set(manifestKey, manifestPromise);
+    }
+    const manifest = await manifestPromise;
     const readCasOrWorkspaceFile = async (entry: ArtifactRef): Promise<Uint8Array> => {
       if (entry.byteLength > LIMITS.handoffSourceBytes) refuse('OUTPUT_LIMIT', diagPath, 'execution');
       const casReused = await artifacts.tryReuseCasBlob(relPath, entry.digest.hex, entry.byteLength);
@@ -1072,21 +1081,28 @@ export class Cycle {
       }
       const attempt = (this.head?.progress.attempts ?? []).find(a => a.id === snap.attemptId);
       if (!attempt?.finished?.nativeCheckpointId) refuse('RECOVERY_REQUIRED', diagPath, 'execution');
-      const checkpoint = stateValue(store.getCheckpoint(attempt.finished.nativeCheckpointId));
-      const interval = journal(store).requests.filter(
-        row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests,
-      );
-      const decoded = await decodeCandidateCapture({
-        artifacts,
-        artifactsDirectory: artifacts.directory,
-        lock,
-        plan,
-        checkpoint,
-        attempt,
-        expectedManifest: manifest,
-        requestIds: interval.map(row => row.admission.requestId),
-        phase: 'execution',
-      });
+      const loadDecodedCapture = (): Promise<Awaited<ReturnType<typeof decodeCandidateCapture>>> => {
+        const cached = memo?.captures.get(snap.attemptId);
+        if (cached !== undefined) return cached;
+        const checkpoint = stateValue(store.getCheckpoint(attempt.finished!.nativeCheckpointId!));
+        const interval = journal(store).requests.filter(
+          row => row.sequence > attempt.before.requests && row.sequence <= attempt.finished!.after.requests,
+        );
+        const promise = decodeCandidateCapture({
+          artifacts,
+          artifactsDirectory: artifacts.directory,
+          lock,
+          plan,
+          checkpoint,
+          attempt,
+          expectedManifest: manifest,
+          requestIds: interval.map(row => row.admission.requestId),
+          phase: 'execution',
+        });
+        memo?.captures.set(snap.attemptId, promise);
+        return promise;
+      };
+      const decoded = await loadDecodedCapture();
       const matched = decoded.artifacts.find(f => f.name === relPath);
       if (!matched) refuse('ARTIFACT_INVALID', diagPath, 'execution');
       if ('bytes' in matched) {
@@ -1144,6 +1160,10 @@ export class Cycle {
   async readUpstreamHandoffSource(
     selector: StepHandoffSelector,
     diagPath: string,
+    memo?: {
+      readonly manifests: Map<string, Promise<ArtifactManifest>>;
+      readonly captures: Map<string, Promise<Awaited<ReturnType<typeof decodeCandidateCapture>>>>;
+    },
   ): Promise<UpstreamSourceLookupResult> {
     const progress = this.head?.progress;
     const attempts = progress?.attempts ?? [];
@@ -1162,7 +1182,7 @@ export class Cycle {
           reworkEpoch: lastFromAttempt?.reworkEpoch ?? this.reworkEpoch,
         };
       }
-      const bytes = await this.#readSnapshotArtifactBytes(snap, selector.source.path, `${diagPath}/source/path`);
+      const bytes = await this.#readSnapshotArtifactBytes(snap, selector.source.path, `${diagPath}/source/path`, memo);
       return {
         found: bytes !== null,
         bytes,
@@ -1304,9 +1324,13 @@ export class Cycle {
 
     const stepIndex = plan.task.spec.steps.findIndex(s => s.id === nodeId);
     const stepDiagBase = stepIndex >= 0 ? `/spec/task/spec/steps/${stepIndex}/handoffs` : '/handoffs';
+    const snapshotMemo = {
+      manifests: new Map<string, Promise<ArtifactManifest>>(),
+      captures: new Map<string, Promise<Awaited<ReturnType<typeof decodeCandidateCapture>>>>(),
+    };
     const lookups: UpstreamSourceLookupResult[] = [];
     for (let i = 0; i < node.handoffs.length; i += 1) {
-      lookups.push(await this.readUpstreamHandoffSource(node.handoffs[i]!, `${stepDiagBase}/${i}`));
+      lookups.push(await this.readUpstreamHandoffSource(node.handoffs[i]!, `${stepDiagBase}/${i}`, snapshotMemo));
     }
     const resolvedHandoffs = evaluateStepHandoffSelectors(
       node.handoffs,

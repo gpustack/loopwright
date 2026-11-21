@@ -7,7 +7,7 @@ import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/
 import { approvedState } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result, safeDiagnostic, type ControllerDiagnostic } from './errors.js';
-import { copyVerifiedFileReadOnly, readBoundedFile, STREAM_CHUNK_BYTES } from './files.js';
+import { copyVerifiedFileReadOnly, inside, readBoundedFile, STREAM_CHUNK_BYTES } from './files.js';
 import { parsePrivateJson } from './parser.js';
 import { canonical, freeze, hash, id, integer, isRecord, list, record, same, text } from './schema.js';
 import { ArtifactStore, privateDirectory, resolveCanonicalCasBlobPath, stateValue } from './storage.js';
@@ -478,8 +478,24 @@ async function materializeAttemptWorkspace(
       phase,
     );
 
-    await rm(attemptWorkspaceDir, { recursive: true, force: true });
-    await rename(stagingWorkspaceDir, attemptWorkspaceDir);
+    const backupWorkspaceDir = join(runWorkspaceDir, `.prev-${attemptId}`);
+    await rm(backupWorkspaceDir, { recursive: true, force: true });
+    let movedPriorAside = false;
+    if (await lstat(attemptWorkspaceDir).then(() => true, () => false)) {
+      await rename(attemptWorkspaceDir, backupWorkspaceDir);
+      movedPriorAside = true;
+    }
+    try {
+      await rename(stagingWorkspaceDir, attemptWorkspaceDir);
+    } catch (renameError) {
+      if (movedPriorAside) {
+        await rename(backupWorkspaceDir, attemptWorkspaceDir).catch(() => undefined);
+      }
+      throw renameError;
+    }
+    if (movedPriorAside) {
+      await rm(backupWorkspaceDir, { recursive: true, force: true }).catch(() => undefined);
+    }
     const contextFiles = stagedContextFiles.map(filePath => join(contextDir, relative(stagingContextDir, filePath)));
     return { candidateDir, contextFiles };
   } catch (error) {
@@ -1719,6 +1735,8 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         refuse('OWNER_BUSY', '', 'execution');
       }
       let cycle: Cycle | undefined;
+      let stepYield: StepYield | undefined;
+      let teardownError: unknown = null;
       try {
         const priorLease = await readStepLease(context.directory);
         const promptText = priorLease?.prompt ?? new TextDecoder('utf-8', { fatal: true }).decode(await context.artifacts.read(active.command, LIMITS.inputBytes));
@@ -1731,7 +1749,33 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
         const attemptWorkspaceDir = join(runWorkspaceDir, active.id);
         const candidateDir = join(attemptWorkspaceDir, 'candidate');
         const contextDir = join(attemptWorkspaceDir, 'context');
-        const candidateExists = await lstat(candidateDir).then(st => st.isDirectory() && !st.isSymbolicLink(), () => false);
+        const isSafeExistingCandidateTree = async (rootDir: string): Promise<boolean> => {
+          const rootSt = await lstat(rootDir).catch(() => null);
+          if (rootSt === null || rootSt.isSymbolicLink() || !rootSt.isDirectory()) return false;
+          const stack: string[] = [rootDir];
+          let visited = 0;
+          const maxEntries = 65_536;
+          while (stack.length > 0) {
+            const dir = stack.pop()!;
+            const names = await readdir(dir).catch(() => null);
+            if (names === null) return false;
+            for (const name of names) {
+              visited += 1;
+              if (visited > maxEntries) return false;
+              const child = join(dir, name);
+              if (!inside(child, rootDir)) return false;
+              const st = await lstat(child).catch(() => null);
+              if (st === null || st.isSymbolicLink()) return false;
+              if (st.isDirectory()) {
+                stack.push(child);
+              } else if (!st.isFile() || st.nlink !== 1) {
+                return false;
+              }
+            }
+          }
+          return true;
+        };
+        const candidateExists = await isSafeExistingCandidateTree(candidateDir);
         let contextFiles: readonly string[];
         if (!candidateExists) {
           const rematerialized = await materializeAttemptWorkspace(
@@ -1775,24 +1819,40 @@ export function stepNext(input: StepNextInput, ports: ControllerPorts = {}) {
           } satisfies StepLeaseRecord,
           context.artifacts.vault,
         );
-        return await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
+        stepYield = await buildStepYield(cycle, input.runRoot, active, effectiveRole, promptText, contextFiles, newToken, effectiveMeta);
       } finally {
         if (cycle !== undefined) {
-          await cycle.deadline.dispose().catch(() => {});
-          await cycle.events.suspend().catch(() => {});
+          try {
+            await cycle.deadline.dispose();
+          } catch (err) {
+            teardownError ??= err;
+          }
+          try {
+            await cycle.events.suspend();
+          } catch (err) {
+            teardownError ??= err;
+          }
         }
         try {
-          context.store.release(context.authority);
-        } catch {
-          // best-effort release on reissue exit
+          stateValue(context.store.release(context.authority));
+        } catch (err) {
+          teardownError ??= err;
         }
         try {
-          context.store.close();
-        } catch {
-          // best-effort close on reissue exit
+          stateValue(context.store.close());
+        } catch (err) {
+          teardownError ??= err;
         }
-        await context.owner.release().catch(() => {});
+        try {
+          await context.owner.release();
+        } catch (err) {
+          teardownError ??= err;
+        }
       }
+      if (teardownError !== null) {
+        throw teardownError;
+      }
+      return stepYield!;
     }
 
     return await runStepTickWithCycle(context, input.runRoot, effectiveMeta, {

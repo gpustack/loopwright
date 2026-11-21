@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { LIMITS } from '@loopwright/core';
 import { describePiAdapterFiles, type AdapterPolicy } from '@loopwright/agent-pi';
 import { resolveBuiltInPiCatalogModel, resolveCatalogModel } from '@loopwright/agent-pi/catalog';
 import { approvedState, selectRoleResources } from './config.js';
@@ -89,7 +90,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
         if (node.handler.implementation === 'pi.compact.v1') {
           refuse('CAPABILITY_UNSUPPORTED', '/spec/profiles/steps', 'compile');
         }
-        if (node.kind !== 'agent' || node.handoffs.length < 1 || node.handoffs.length > 16) {
+        if (node.kind !== 'agent' || node.handoffs.length < 1 || node.handoffs.length > LIMITS.handoffsPerStep) {
           refuse('CONFIG_SCHEMA', '/spec/task/spec/steps', 'compile');
         }
         for (const handoff of node.handoffs) {

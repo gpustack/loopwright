@@ -750,17 +750,19 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
 
     const parentReq = parentRequestId !== null ? requestById.get(parentRequestId) : undefined;
     const stepId = attempt?.nodeId ?? parentReq?.admission.nodeId ?? op.intent.nodeId;
-    const roleId = dagById.get(stepId)?.roleId ?? parentReq?.admission.roleId ?? 'unknown';
+    const resolvedRoleId = dagById.get(stepId)?.roleId ?? parentReq?.admission.roleId ?? null;
 
-    ensureStepBucket(stepId, roleId).toolCalls += 1;
-    ensureRoleBucket(roleId).toolCalls += 1;
+    ensureStepBucket(stepId, resolvedRoleId).toolCalls += 1;
+    if (resolvedRoleId !== null) {
+      ensureRoleBucket(resolvedRoleId).toolCalls += 1;
+    }
     totalsBucket.toolCalls += 1;
 
     const failed = receipt?.outcome === 'failed' || payloadOutcome === 'failed';
     if (failed) {
       totalFailingToolCalls += 1;
       if (toolName !== null) {
-        const cleanRole = clean(roleId);
+        const cleanRole = clean(resolvedRoleId ?? 'unknown');
         const cleanStep = clean(stepId);
         const cleanTool = clean(toolName);
         const cleanTarget = clean(targetText ?? op.intent.targetIdentity);

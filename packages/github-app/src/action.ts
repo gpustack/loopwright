@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants as fsConstants, existsSync, lstatSync, openSync, readFileSync } from 'node:fs';
-import { chmod, mkdir, open, realpath, writeFile } from 'node:fs/promises';
+import { closeSync, constants as fsConstants, existsSync, openSync, readFileSync } from 'node:fs';
+import { chmod, lstat, mkdir, open, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -383,10 +383,11 @@ async function writeSuiteMatrixGithubOutput(
   const resolved = resolve(githubOutputPath);
   const parent = dirname(resolved);
   await mkdir(parent, { recursive: true });
-  const parentStats = lstatSync(parent);
+  const parentStats = await lstat(parent);
   if (parentStats.isSymbolicLink() || !parentStats.isDirectory()) {
     throw new GitHubAppError('ACTION_INPUT_INVALID', `output parent "${parent}" must be a non-symlink directory`);
   }
+  const realParentBefore = await realpath(parent);
   const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
   const serialized = serializeSuiteMatrixJson(matrix, scrubber);
   const payload = `matrix<<LOOPWRIGHT_EOF\n${serialized}\nLOOPWRIGHT_EOF\n`;
@@ -397,8 +398,21 @@ async function writeSuiteMatrixGithubOutput(
   );
   try {
     const stats = await handle.stat();
-    if (!stats.isFile()) {
-      throw new GitHubAppError('ACTION_INPUT_INVALID', `output sink "${resolved}" must be a regular file`);
+    const postParentStats = await lstat(parent);
+    const postRealParent = await realpath(parent);
+    const postLeafStats = await lstat(resolved);
+    if (
+      !stats.isFile()
+      || stats.nlink !== 1
+      || postParentStats.isSymbolicLink()
+      || postParentStats.dev !== parentStats.dev
+      || postParentStats.ino !== parentStats.ino
+      || postRealParent !== realParentBefore
+      || postLeafStats.isSymbolicLink()
+      || postLeafStats.dev !== stats.dev
+      || postLeafStats.ino !== stats.ino
+    ) {
+      throw new GitHubAppError('ACTION_INPUT_INVALID', `output sink "${resolved}" must be a non-symlink regular file under a stable directory`);
     }
     await handle.writeFile(payload, 'utf8');
   } finally {
