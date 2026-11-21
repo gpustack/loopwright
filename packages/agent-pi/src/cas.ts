@@ -727,9 +727,7 @@ export async function publishCandidateFileToCas(
       await tmpHandle.close().catch(() => {});
     }
     if (tmpCreated) {
-      await unlink(tmpPath).catch(error => {
-        if (!absent(error)) throw error;
-      });
+      await unlink(tmpPath).catch(() => {});
     }
   }
 }
