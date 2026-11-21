@@ -6,7 +6,17 @@ import {
   CONTROLLER_INCIDENT_CODES,
   type ControllerIncident,
 } from '@loopwright/controller';
-import type { MemoryDiagnostic, MemoryErrorCode, MemoryEntry, MemoryEvidenceRef, MemoryOperation, MemoryProposal, MemoryStoreIndex, RetiredMemoryEntry } from './types.js';
+import {
+  MAX_MEMORY_INDEX_BLOB_BYTES,
+  type MemoryDiagnostic,
+  type MemoryErrorCode,
+  type MemoryEntry,
+  type MemoryEvidenceRef,
+  type MemoryOperation,
+  type MemoryProposal,
+  type MemoryStoreIndex,
+  type RetiredMemoryEntry,
+} from './types.js';
 
 export class MemoryDiagnosticError extends Error {
   constructor(readonly code: MemoryErrorCode, readonly path: string, readonly detail: string) { super(`${code} at ${path}: ${detail}`); }
@@ -296,34 +306,50 @@ export const MEMORY_ENTRY_HEADER_FENCE = '---';
 export function renderEntryMarkdown(entry: MemoryEntry): string {
   return `${MEMORY_ENTRY_HEADER_FENCE}\n${canonical(entry)}\n${MEMORY_ENTRY_HEADER_FENCE}\n\n${entry.claim}\n`;
 }
-function splitLines(content: string): readonly string[] {
+/** Serializes a validated store index with a single trailing LF while enforcing the index blob byte ceiling. */
+export function serializeMemoryStoreIndex(index: MemoryStoreIndex, path = 'index.json'): string {
+  const serialized = `${canonical(index)}\n`;
+  const byteLength = Buffer.byteLength(serialized, 'utf8');
+  if (byteLength > MAX_MEMORY_INDEX_BLOB_BYTES) {
+    fail('MEMORY_SCHEMA_INVALID', path, `serialized index byte length ${byteLength} exceeds maximum ${MAX_MEMORY_INDEX_BLOB_BYTES}`);
+  }
+  return serialized;
+}
+interface DiffLine { readonly text: string; readonly hasNewline: boolean; readonly key: string }
+function splitLinesWithNewline(content: string): readonly DiffLine[] {
   if (content.length === 0) return [];
-  const lines = content.split('\n');
-  if (lines[lines.length - 1] === '') lines.pop();
+  const parts = content.split('\n');
+  const lines: DiffLine[] = [];
+  for (let index = 0; index < parts.length; index++) {
+    if (index === parts.length - 1 && parts[index] === '') break;
+    const text = parts[index]!;
+    const hasNewline = index < parts.length - 1;
+    lines.push({ text, hasNewline, key: hasNewline ? `${text}\n` : text });
+  }
   return lines;
 }
 /** Git-style unified diff over repo-relative text files; `before === null` means a new file and `after === null` means a deleted file. */
-type DiffOp = { readonly kind: ' ' | '-' | '+'; readonly text: string };
-function editScript(a: readonly string[], b: readonly string[]): readonly DiffOp[] {
+type DiffOp = { readonly kind: ' ' | '-' | '+'; readonly text: string; readonly hasNewline: boolean };
+function editScript(a: readonly DiffLine[], b: readonly DiffLine[]): readonly DiffOp[] {
   const m = a.length, n = b.length;
   const table: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0) as number[]);
   for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--)
-    table[i]![j] = a[i] === b[j] ? table[i + 1]![j + 1]! + 1 : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);
+    table[i]![j] = a[i]!.key === b[j]!.key ? table[i + 1]![j + 1]! + 1 : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);
   const ops: DiffOp[] = [];
   let i = 0, j = 0;
   while (i < m && j < n) {
-    if (a[i] === b[j]) { ops.push({ kind: ' ', text: a[i]! }); i++; j++; }
-    else if (table[i + 1]![j]! >= table[i]![j + 1]!) { ops.push({ kind: '-', text: a[i]! }); i++; }
-    else { ops.push({ kind: '+', text: b[j]! }); j++; }
+    if (a[i]!.key === b[j]!.key) { ops.push({ kind: ' ', text: a[i]!.text, hasNewline: a[i]!.hasNewline }); i++; j++; }
+    else if (table[i + 1]![j]! >= table[i]![j + 1]!) { ops.push({ kind: '-', text: a[i]!.text, hasNewline: a[i]!.hasNewline }); i++; }
+    else { ops.push({ kind: '+', text: b[j]!.text, hasNewline: b[j]!.hasNewline }); j++; }
   }
-  while (i < m) { ops.push({ kind: '-', text: a[i]! }); i++; }
-  while (j < n) { ops.push({ kind: '+', text: b[j]! }); j++; }
+  while (i < m) { ops.push({ kind: '-', text: a[i]!.text, hasNewline: a[i]!.hasNewline }); i++; }
+  while (j < n) { ops.push({ kind: '+', text: b[j]!.text, hasNewline: b[j]!.hasNewline }); j++; }
   return ops;
 }
 export function unifiedFileDiff(path: string, before: string | null, after: string | null, context = 3): string {
   if (before === null && after === null) return '';
-  const a = splitLines(before ?? ''), b = splitLines(after ?? '');
-  if (before !== null && after !== null && a.length === b.length && a.every((line, index) => line === b[index])) return '';
+  if (before !== null && after !== null && before === after) return '';
+  const a = splitLinesWithNewline(before ?? ''), b = splitLinesWithNewline(after ?? '');
   const ops = editScript(a, b);
   const changed = ops.map(op => op.kind !== ' ');
   const hunks: string[] = [];
@@ -339,7 +365,10 @@ export function unifiedFileDiff(path: string, before: string | null, after: stri
     for (let k = from; k < to; k++) { if (ops[k]!.kind !== '+') oldCount++; if (ops[k]!.kind !== '-') newCount++; }
     const oldStartNumber = oldCount === 0 ? 0 : oldStart, newStartNumber = newCount === 0 ? 0 : newStart;
     const lines = [`@@ -${oldStartNumber},${oldCount} +${newStartNumber},${newCount} @@`];
-    for (let k = from; k < to; k++) lines.push(ops[k]!.kind + ops[k]!.text);
+    for (let k = from; k < to; k++) {
+      lines.push(ops[k]!.kind + ops[k]!.text);
+      if (!ops[k]!.hasNewline) lines.push('\\ No newline at end of file');
+    }
     hunks.push(lines.join('\n'));
     index = to;
   }

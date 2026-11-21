@@ -3,10 +3,20 @@ import { createHash, randomBytes } from 'node:crypto';
 import { open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import type { Digest } from '@loopwright/core';
-import { canonical, digestEqual, unifiedFileDiff } from './schema.js';
+import { canonical, digestEqual, serializeMemoryStoreIndex, unifiedFileDiff } from './schema.js';
 import { ensureSafeDirectoryChain, entryFileBytes, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import { verifyMemoryProposal } from './verifier.js';
-import type { MemoryCASInput, MemoryCASRefusal, MemoryCASResult, MemoryDiagnostic, MemoryEntry, MemoryModifiedFile, MemoryOperation, MemoryProposal, SeparateMemoryPullRequestSpec } from './types.js';
+import type {
+  MemoryCASInput,
+  MemoryCASRefusal,
+  MemoryCASResult,
+  MemoryDiagnostic,
+  MemoryEntry,
+  MemoryModifiedFile,
+  MemoryOperation,
+  MemoryProposal,
+  SeparateMemoryPullRequestSpec,
+} from './types.js';
 
 const LOCK_NAME = '.cas.lock';
 const MAX_MEMORY_PR_TITLE_CODEPOINTS = 72;
@@ -286,18 +296,6 @@ async function syncDirectory(directoryPath: string): Promise<void> {
   const handle = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try { await handle.sync(); } finally { await handle.close(); }
 }
-async function readOptionalRegularFileNoFollow(filePath: string): Promise<Buffer | null> {
-  let handle: Awaited<ReturnType<typeof open>> | null = null;
-  try {
-    handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    return await handle.readFile();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  } finally {
-    if (handle !== null) await handle.close();
-  }
-}
 function touchedBy(proposal: MemoryProposal): { readonly ids: ReadonlySet<string>; readonly claimKeys: ReadonlySet<string> } {
   const ids = new Set<string>(), claimKeys = new Set<string>();
   for (const operation of proposal.operations) {
@@ -375,9 +373,15 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     verifyBase = input.baseStore;
   }
   const projectionOptions = { maxEntries: input.maxEntries };
+  const indexPath = join(taskpackDirectory, 'index.json');
+  const indexRelPath = `${directory}/index.json`;
   const baseEntryFiles = fastPath ? loaded.entryFiles : new Map([...input.baseStore!.entries].map(entry => [entry.id, entryFileBytes(entry)]));
   const baseProjection = projectMemoryStore(verifyBase, proposal.operations, input.nowMs, proposal.proposalId, projectionOptions);
-  const verificationPatch = buildPatch(directory, baseEntryFiles, baseProjection.entryFiles, canonical(verifyBase), canonical(baseProjection.index)).patch;
+  const baseIndexBefore = fastPath
+    ? (loaded.indexBytes === null ? null : Buffer.from(loaded.indexBytes).toString('utf8'))
+    : `${canonical(verifyBase)}\n`;
+  const baseIndexAfter = serializeMemoryStoreIndex(baseProjection.index, indexRelPath);
+  const verificationPatch = buildPatch(directory, baseEntryFiles, baseProjection.entryFiles, baseIndexBefore, baseIndexAfter).patch;
   const verification = await verifyAgainst(input, proposal, verificationPatch, verifyBase, memoryRoot);
   if (!verification.satisfied) {
     return refusal('MEMORY_VERIFICATION_FAILED', verification.gates.flatMap(gate => gate.diagnostics), storeDigestBefore);
@@ -391,8 +395,9 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     }
     effective = { ...proposal, baseStoreDigest: loaded.index.storeDigest, baseRevision: input.currentRevision };
     const rebasedProjection = projectMemoryStore(loaded.index, effective.operations, input.nowMs, effective.proposalId, projectionOptions);
-    const rebasedPatch = buildPatch(directory, loaded.entryFiles, rebasedProjection.entryFiles,
-      existsSync(join(repository, directory, 'index.json')) ? canonical(loaded.index) : null, canonical(rebasedProjection.index));
+    const rebasedIndexBefore = loaded.indexBytes === null ? null : Buffer.from(loaded.indexBytes).toString('utf8');
+    const rebasedIndexAfter = serializeMemoryStoreIndex(rebasedProjection.index, indexRelPath);
+    const rebasedPatch = buildPatch(directory, loaded.entryFiles, rebasedProjection.entryFiles, rebasedIndexBefore, rebasedIndexAfter);
     const rebasedVerification = await verifyAgainst(input, effective, rebasedPatch.patch, loaded.index, memoryRoot);
     if (!rebasedVerification.satisfied) {
       return refusal('MEMORY_VERIFICATION_FAILED', rebasedVerification.gates.flatMap(gate => gate.diagnostics), storeDigestBefore);
@@ -418,8 +423,8 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     }
     lockCreated = true;
     try {
-      await lockHandle.writeFile(canonical({ version: 1, pid: process.pid, nonce, proposalId: effective.proposalId,
-        acquiredAtMs: input.nowMs, touchedEntryIds: [...lockTouchedIds].sort() }));
+      await lockHandle.writeFile(`${canonical({ version: 1, pid: process.pid, nonce, proposalId: effective.proposalId,
+        acquiredAtMs: input.nowMs, touchedEntryIds: [...lockTouchedIds].sort() })}\n`);
       await lockHandle.sync();
     } finally { await lockHandle.close(); }
     const current = await loadMemoryStore(input.repository, input.taskpack, input.proposal.repository, memoryRoot);
@@ -428,17 +433,16 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     }
     await ensureSafeDirectoryChain(repository, [...taskpackSegments, 'entries']);
     const projection = projectMemoryStore(current.index, effective.operations, input.nowMs, effective.proposalId, projectionOptions);
-    const indexPath = join(taskpackDirectory, 'index.json');
-    const indexExistedBefore = existsSync(indexPath);
-    const patch = buildPatch(directory, current.entryFiles, projection.entryFiles,
-      indexExistedBefore ? canonical(current.index) : null, canonical(projection.index));
+    const priorIndexBytes = current.indexBytes === null ? null : Buffer.from(current.indexBytes);
+    const indexBefore = priorIndexBytes === null ? null : priorIndexBytes.toString('utf8');
+    const indexAfter = serializeMemoryStoreIndex(projection.index, indexRelPath);
+    const patch = buildPatch(directory, current.entryFiles, projection.entryFiles, indexBefore, indexAfter);
     const writtenFiles = patch.files.filter(file => file.deleted !== true);
     const deletedTargets = patch.files.filter(file => file.deleted === true).map(file => join(repository, file.path));
     const priorEntryBytesByTarget = new Map<string, Buffer>();
     for (const [id, bytes] of current.entryFiles) {
       priorEntryBytesByTarget.set(join(repository, `${directory}/entries/${id}.md`), Buffer.from(bytes));
     }
-    const priorIndexBytes = indexExistedBefore ? await readOptionalRegularFileNoFollow(indexPath) : null;
     for (const file of writtenFiles) {
       const target = join(repository, file.path);
       staged.push({ temp: await stageFile(target, Buffer.from(file.content, 'utf8'), nonce), target });
@@ -449,7 +453,7 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
     }
     for (const target of deletedTargets) rollback.set(target, priorEntryBytesByTarget.get(target) ?? null);
     try {
-      const entryStages = staged.filter(candidate => !candidate.target.endsWith('index.json'));
+      const entryStages = staged.filter(candidate => candidate.target !== indexPath);
       for (const stage of entryStages) await rename(stage.temp, stage.target);
       for (const target of deletedTargets) {
         await unlink(target).catch((err: NodeJS.ErrnoException) => {
@@ -458,7 +462,7 @@ export async function applyMemoryProposalCAS(input: MemoryCASInput): Promise<Mem
       }
       if (entryStages.length > 0 || deletedTargets.length > 0) await syncDirectory(join(taskpackDirectory, 'entries'));
       await input.faultInjectionHook?.();
-      const indexStages = staged.filter(candidate => candidate.target.endsWith('index.json'));
+      const indexStages = staged.filter(candidate => candidate.target === indexPath);
       for (const stage of indexStages) await rename(stage.temp, stage.target);
       if (indexStages.length > 0) await syncDirectory(taskpackDirectory);
     } catch (error) {

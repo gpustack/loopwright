@@ -1,6 +1,6 @@
 export { MemoryDiagnosticError, diagnostic, fail, digestEqual, canonical, hashDomain, digestBytes, storeDigestOf,
   incidentReferenceDigest, syntheticIncidentArtifact, memoryIdentifierPattern, hasControlCharacter, memoryEntrySchema,
-  memoryStoreIndexSchema, memoryProposalSchema, renderEntryMarkdown, parseEntryMarkdown, unifiedFileDiff,
+  memoryStoreIndexSchema, memoryProposalSchema, renderEntryMarkdown, serializeMemoryStoreIndex, parseEntryMarkdown, unifiedFileDiff,
   MEMORY_STORE_DIGEST_DOMAIN, MEMORY_ENTRY_HEADER_FENCE } from './schema.js';
 export { MEMORY_ROOT, normalizeMemoryRoot, memoryDirectoryFor, forbiddenMemoryArtifactName, isMemoryManagedPath, emptyMemoryStoreIndex,
   loadMemoryStore, computeCodeFingerprint, compileScopePattern, matchScopePattern, entryFileBytes, projectMemoryStore,
@@ -13,6 +13,7 @@ export {
   DEFAULT_MEMORY_MAX_PROMPT_BYTES,
   MAX_MEMORY_ENTRY_FILE_BYTES,
   MAX_MEMORY_INDEX_FILE_BYTES,
+  MAX_MEMORY_INDEX_BLOB_BYTES,
 } from './types.js';
 export { selectActiveMemory, bindMemorySnapshotToResource, memorySnapshotBindingMatches, memorySnapshotResourceId } from './selector.js';
 export { finalizeRunMemory, resolveSettledCycleContext, type ResolvedSettledCycleContext } from './finalizer.js';
