@@ -617,7 +617,7 @@ export async function projectVerifiedWorkspaceSource(options: {
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
       || (currentUid !== undefined && createdStat.uid !== currentUid)
-      || createdStat.ino === srcBefore.ino
+      || (createdStat.dev === srcBefore.dev && createdStat.ino === srcBefore.ino)
     ) {
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `${diagPath}: staged temp destination failed initial identity/nlink check`, diagPath);
     }
@@ -868,7 +868,7 @@ export async function cloneVerifiedStagedFileForChecks(options: {
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
       || (currentUid !== undefined && createdStat.uid !== currentUid)
-      || createdStat.ino === srcBefore.ino
+      || (createdStat.dev === srcBefore.dev && createdStat.ino === srcBefore.ino)
     ) {
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `${diagPath}: check resource failed temp identity/nlink check`, diagPath);
     }

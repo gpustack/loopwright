@@ -1586,8 +1586,8 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           const defaultWorkingWindow = Math.min(16_777_216, Math.max(8_388_608, catalogRecord.contextWindow));
           const workingWindowCeiling = mergedLimits.workingWindowBytes ?? defaultWorkingWindow;
           const maxRequestBytes = Math.min(mergedLimits.maxRequestBytes ?? 8_388_608, workingWindowCeiling);
-          const serviceMargin = Math.max(32_768, Math.min(32_768, Math.floor(workingWindowCeiling / 4)));
-          const toolReserve = Math.max(16_384, Math.min(16_384, Math.floor(workingWindowCeiling / 8)));
+          const serviceMargin = Math.min(32_768, Math.floor(workingWindowCeiling / 4));
+          const toolReserve = Math.min(16_384, Math.floor(workingWindowCeiling / 8));
           const usableWindow = Math.min(catalogRecord.contextWindow, workingWindowCeiling) - serviceMargin - toolReserve;
           const baseInputHeadroom = usableWindow > 8_192 ? Math.min(65_536, Math.floor(usableWindow * 0.8)) : 4_096;
           const basePromptBytes = Buffer.byteLength(role.prompt, 'utf8');

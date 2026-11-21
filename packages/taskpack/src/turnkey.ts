@@ -711,7 +711,7 @@ export async function copySingleRegularFileReadOnly(
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
       || (currentUid !== undefined && createdStat.uid !== currentUid)
-      || createdStat.ino === srcBefore.ino
+      || (createdStat.dev === srcBefore.dev && createdStat.ino === srcBefore.ino)
     ) {
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `mounted file "${destPath}" failed temp identity/nlink/ownership check`);
     }
@@ -1917,7 +1917,7 @@ async function projectVerifiedCasCandidateFile(options: {
       || createdStat.isSymbolicLink()
       || createdStat.nlink !== 1
       || (currentUid !== undefined && createdStat.uid !== currentUid)
-      || createdStat.ino === srcInfo.ino
+      || (createdStat.dev === srcInfo.dev && createdStat.ino === srcInfo.ino)
     ) {
       throw new TaskpackError('ACTION_INPUT_INVALID', `materialized CAS candidate "${fileName}" failed temp identity/nlink/ownership check`);
     }
@@ -3595,7 +3595,7 @@ export function buildCommandScriptInvocation(
     return {
       command: shell,
       args: baseArgs,
-      networkIsolated: allowNet,
+      networkIsolated: false,
       filesystemIsolated: false,
       processIsolated: false,
     };
@@ -5487,7 +5487,10 @@ export async function startLocalCommandGateServer(
     throw new TaskpackError('ACTION_INPUT_INVALID', 'local command gate server failed to bind TCP port');
   }
 
-  const url = `http://${host}:${address.port}/${LOCAL_COMMAND_GATE_ENDPOINT_ID}`;
+  const boundLoopbackHost = host === '127.0.0.1'
+    ? '127.0.0.1'
+    : (address.address.includes(':') ? `[${address.address}]` : address.address);
+  const url = `http://${boundLoopbackHost}:${address.port}/${LOCAL_COMMAND_GATE_ENDPOINT_ID}`;
   const timeoutMs = Math.min(3_600_000, Math.max(35_000, syncWaitMs + 15_000, maxTimeoutSeconds * 1000 + 15_000));
   const maxPollMs = Math.min(3_600_000, Math.max(50_000, timeoutMs + 15_000));
 
@@ -6421,7 +6424,9 @@ export async function executeTurnkeyCycle(
     await chmod(rawSummaryHolder, 0o700);
     const summaryHolder = await realpath(rawSummaryHolder);
     const tempInspectDir = join(summaryHolder, 'bundle');
-    let inspectedStatus = cycleOutcome.ok ? 'completed' : 'failed';
+    let inspectedStatus = cycleOutcome.ok
+      ? 'completed'
+      : (cycleOutcome.code === 'CANCELLED' ? 'cancelled' : 'failed');
     let externalUrl: string | null = null;
     let usage: UsageSummary | null = null;
     let inspectedLedger: {
@@ -6434,22 +6439,32 @@ export async function executeTurnkeyCycle(
       checks: [],
     };
 
-    try {
-      const inspected = await inspectRun({ runRoot, runId: attemptRunId, output: tempInspectDir });
-      if (inspected.ok) {
-        inspectedStatus = inspected.value.status.status ?? inspectedStatus;
-        externalUrl = inspected.value.externalUrl;
-        usage = inspected.value.usage;
-        if (inspected.value.status.currentState !== null) {
-          inspectedLedger = {
-            formatRepairs: inspected.value.status.currentState.ledger.formatRepairs,
-            implementationRepairs: inspected.value.status.currentState.ledger.implementationRepairs,
-            modelCalls: inspected.value.status.currentState.ledger.admittedCalls,
-          };
+    if (cycleOutcome.code !== 'OWNER_BUSY') {
+      try {
+        const inspected = await inspectRun({ runRoot, runId: attemptRunId, output: tempInspectDir });
+        if (inspected.ok) {
+          const candidateStatus = inspected.value.status.status;
+          if (
+            candidateStatus !== null
+            && (cycleOutcome.ok || (candidateStatus !== 'completed' && candidateStatus !== 'no_change'))
+          ) {
+            inspectedStatus = candidateStatus;
+          }
+          externalUrl = inspected.value.externalUrl;
+          usage = inspected.value.usage;
+          if (inspected.value.status.currentState !== null) {
+            inspectedLedger = {
+              formatRepairs: inspected.value.status.currentState.ledger.formatRepairs,
+              implementationRepairs: inspected.value.status.currentState.ledger.implementationRepairs,
+              modelCalls: inspected.value.status.currentState.ledger.admittedCalls,
+            };
+          }
+          extraInfo = await inspectRunChecksAndExternalWrites(runRoot, attemptRunId, tempInspectDir);
         }
-        extraInfo = await inspectRunChecksAndExternalWrites(runRoot, attemptRunId, tempInspectDir);
+      } finally {
+        await rm(summaryHolder, { recursive: true, force: true }).catch(() => undefined);
       }
-    } finally {
+    } else {
       await rm(summaryHolder, { recursive: true, force: true }).catch(() => undefined);
     }
     if (cycleOutcome.kind === 'settled_result' && cycleOutcome.candidateVerifiedNoChange) {
