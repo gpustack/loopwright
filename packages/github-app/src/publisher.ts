@@ -1075,8 +1075,18 @@ export async function startNativePullRequestPublisherServer(
     readonly candidateDigest: string;
   }
 
-  const MAX_RECEIPT_CACHE_ENTRIES = 256;
+  const MAX_RECEIPT_CACHE_ENTRIES = 4_096;
   const receiptCache = new Map<string, PublicationReceiptPayload>();
+  const inFlightReceipts = new Map<
+    string,
+    {
+      readonly storeId: string;
+      readonly runId: string;
+      readonly operationId: string;
+      readonly candidateDigest: string;
+      readonly promise: Promise<PublicationReceiptPayload>;
+    }
+  >();
   const expectedBearerBuf = Buffer.from(`Bearer ${authToken}`, 'utf8');
 
   const server = createServer(async (req, res) => {
@@ -1166,6 +1176,25 @@ export async function startNativePullRequestPublisherServer(
         writeSignedJsonResponse(res, 200, signingSecret, cached);
         return;
       }
+      const inFlight = inFlightReceipts.get(idempotencyKey);
+      if (inFlight !== undefined) {
+        if (
+          inFlight.storeId !== storeId
+          || inFlight.runId !== runId
+          || inFlight.operationId !== operationId
+          || inFlight.candidateDigest !== candidateDigest
+        ) {
+          writePlainJsonResponse(res, 409, { error: 'idempotency_key_conflict' });
+          return;
+        }
+        const sharedReceipt = await inFlight.promise;
+        writeSignedJsonResponse(res, 200, signingSecret, sharedReceipt);
+        return;
+      }
+      if (receiptCache.size + inFlightReceipts.size >= MAX_RECEIPT_CACHE_ENTRIES) {
+        writePlainJsonResponse(res, 503, { error: 'receipt_cache_exhausted' });
+        return;
+      }
     }
 
     const makeReceipt = (
@@ -1188,13 +1217,25 @@ export async function startNativePullRequestPublisherServer(
       candidateDigest,
     });
 
+    let resolveInFlight: ((receipt: PublicationReceiptPayload) => void) | undefined;
+    if (idempotencyKey.length > 0) {
+      const inFlightPromise = new Promise<PublicationReceiptPayload>(resolveReceipt => {
+        resolveInFlight = resolveReceipt;
+      });
+      inFlightReceipts.set(idempotencyKey, {
+        storeId,
+        runId,
+        operationId,
+        candidateDigest,
+        promise: inFlightPromise,
+      });
+    }
+
     const emitReceipt = (receipt: PublicationReceiptPayload): void => {
       if (idempotencyKey.length > 0) {
-        if (!receiptCache.has(idempotencyKey) && receiptCache.size >= MAX_RECEIPT_CACHE_ENTRIES) {
-          const oldestKey = receiptCache.keys().next().value;
-          if (oldestKey !== undefined) receiptCache.delete(oldestKey);
-        }
         receiptCache.set(idempotencyKey, receipt);
+        inFlightReceipts.delete(idempotencyKey);
+        resolveInFlight?.(receipt);
       }
       writeSignedJsonResponse(res, 200, signingSecret, receipt);
     };
@@ -1616,7 +1657,10 @@ export async function startNativePullRequestPublisherServer(
     throw new GitHubAppError('ACTION_INPUT_INVALID', 'native pull request publisher server failed to bind TCP port');
   }
 
-  const url = `http://${host}:${address.port}/publish`;
+  const boundLoopbackHost = host === '127.0.0.1'
+    ? '127.0.0.1'
+    : (address.address.includes(':') ? `[${address.address}]` : address.address);
+  const url = `http://${boundLoopbackHost}:${address.port}/publish`;
 
   return {
     url,

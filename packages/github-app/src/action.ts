@@ -469,17 +469,19 @@ export async function runGitHubActionEntrypoint(input: TurnkeyActionEntrypointIn
         reason: `GitHub event "${input.eventName}" is not enabled in spec.triggers`,
       };
     }
-    if (
-      input.eventName === 'release'
-      && isPlainRecord(input.eventPayload)
-      && typeof input.eventPayload['action'] === 'string'
-      && input.eventPayload['action'] !== 'published'
-    ) {
-      return {
-        kind: 'refused',
-        code: 'TASKPACK_TRIGGER_UNSUPPORTED',
-        reason: `release action "${input.eventPayload['action']}" is not enabled in spec.triggers`,
-      };
+    if (input.eventName === 'release') {
+      const releaseAction = isPlainRecord(input.eventPayload) && typeof input.eventPayload['action'] === 'string'
+        ? input.eventPayload['action']
+        : undefined;
+      if (releaseAction !== 'published') {
+        return {
+          kind: 'refused',
+          code: 'TASKPACK_TRIGGER_UNSUPPORTED',
+          reason: releaseAction === undefined
+            ? 'release event payload is missing required action "published"'
+            : `release action "${releaseAction}" is not enabled in spec.triggers`,
+        };
+      }
     }
   }
   if (input.eventName === 'issue_comment' || input.eventName === 'pull_request_review') {

@@ -1,5 +1,6 @@
 import {
   executeTurnkeyCycle as taskpackExecuteTurnkeyCycle,
+  TaskpackError,
   type ActionDelegateOutcome,
   type ExecuteTurnkeyActionCycleOptions,
   type TurnkeyCycleAttemptSummary,
@@ -85,6 +86,17 @@ export {
 export async function executeTurnkeyActionCycle(
   options: ExecuteTurnkeyActionCycleOptions,
 ): Promise<TurnkeyCycleAttemptSummary & { readonly outcome: ActionDelegateOutcome; readonly memory?: TurnkeyMemorySummary | undefined }> {
+  if (
+    options.policyProfile !== undefined
+    && options.taskpack.policyProfile !== undefined
+    && options.taskpack.policyProfile !== options.policyProfile
+  ) {
+    throw new TaskpackError(
+      'TASKPACK_SCOPE_VIOLATION',
+      `compiled taskpack policyProfile "${options.taskpack.policyProfile}" does not match requested delegate profile "${options.policyProfile}"`,
+      '/policyProfile',
+    );
+  }
   return taskpackExecuteTurnkeyCycle({
     ...options,
     policyProfile: options.policyProfile ?? options.taskpack.policyProfile ?? 'github',
