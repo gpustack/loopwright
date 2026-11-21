@@ -1,15 +1,18 @@
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { describe, it } from 'node:test';
+import { SecretScrubber } from '../src/scrubber.js';
 import { TaskpackError } from '../src/types.js';
 import { validateTaskpackV2Manifest, type Json } from '../src/schema.js';
 import {
   applyUpstreamGroups,
+  checkManagedPrMatchesDiscoveredState,
   compareStrictSemver,
   compareVersionTags,
   discoverTaskpackUpstreams,
   discoverTaskpackUpstreamsV2,
   extractJsonVersionPath,
+  fetchBoundedText,
   findOpenManagedPullRequest,
 } from '../src/upstreams.js';
 
@@ -146,5 +149,57 @@ describe('upstreams.ts: injectable auth, SemVer tuple sorting, and lockstep grou
       }),
       (err: unknown) => err instanceof TaskpackError && err.code === 'ACTION_INPUT_INVALID',
     );
+
+    let bodyReadCalled = false;
+    await assert.rejects(
+      fetchBoundedText(
+        'https://api.example.test/oversized',
+        (async () => ({
+          status: 200,
+          ok: true,
+          headers: new Headers({ 'content-length': '2097152' }),
+          body: null,
+          arrayBuffer: async () => {
+            bodyReadCalled = true;
+            return new ArrayBuffer(0);
+          },
+          text: async () => {
+            bodyReadCalled = true;
+            return '';
+          },
+        })) as unknown as typeof globalThis.fetch,
+        {},
+        5_000,
+        new SecretScrubber(),
+      ),
+      (err: unknown) => err instanceof TaskpackError && err.code === 'ACTION_INPUT_INVALID',
+    );
+    assert.equal(bodyReadCalled, false, 'oversized Content-Length must reject before reading body');
+
+    for (const badProposalPath of ['/etc/passwd', 'docs\\proposal.json', 'a:b/proposal.json']) {
+      const matched = await checkManagedPrMatchesDiscoveredState({
+        openManagedPr: {
+          number: 1,
+          htmlUrl: 'https://example.test/pull/1',
+          headRef: 'lw/main',
+          headSha: 'a'.repeat(40),
+          baseRef: 'main',
+          baseSha: 'b'.repeat(40),
+          title: 'sync',
+          body: null,
+        },
+        manifest: {
+          ...emptyManifest,
+          spec: {
+            ...emptyManifest.spec,
+            proposal: { path: badProposalPath, requiredFields: ['version'], schemaVersion: 1 },
+          },
+        },
+        records: [{ upstreamId: 'u1', status: 'available', version: '1.0.0' }],
+        repositoryRoot: '/nonexistent',
+        repositoryFullName: 'octo/tool',
+      });
+      assert.equal(matched, false, `unnormalized proposal path "${badProposalPath}" must return false`);
+    }
   });
 });

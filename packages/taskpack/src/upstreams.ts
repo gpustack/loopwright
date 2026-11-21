@@ -5,7 +5,7 @@ import { lstat, open, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { SecretScrubber } from './scrubber.js';
-import { parseJsonSubset, type Json } from './schema.js';
+import { parseJsonSubset, tryNormalizeRelativePath, type Json } from './schema.js';
 import {
   REPOSITORY_FULL_NAME_PATTERN, TaskpackError,
   type GitCommitIdentity, type TaskpackManifest, type TaskpackUpstreamDescriptor,
@@ -364,8 +364,25 @@ export async function fetchBoundedText(
       redirect: 'error',
       signal: controller.signal,
     });
+    const rawContentLength = typeof response.headers?.get === 'function'
+      ? response.headers.get('content-length')
+      : null;
+    if (rawContentLength !== null && /^\d+$/.test(rawContentLength.trim())) {
+      const declaredBytes = Number(rawContentLength.trim());
+      if (!Number.isSafeInteger(declaredBytes) || declaredBytes > MAX_RESPONSE_BYTES) {
+        await response.body?.cancel?.().catch(() => undefined);
+        throw new TaskpackError('ACTION_INPUT_INVALID', `response from "${scrubber.scrub(url)}" exceeded ${MAX_RESPONSE_BYTES} bytes`);
+      }
+    }
     const reader = response.body?.getReader();
     if (!reader) {
+      if (typeof response.arrayBuffer === 'function') {
+        const buf = Buffer.from(await response.arrayBuffer());
+        if (buf.byteLength > MAX_RESPONSE_BYTES) {
+          throw new TaskpackError('ACTION_INPUT_INVALID', `response from "${scrubber.scrub(url)}" exceeded ${MAX_RESPONSE_BYTES} bytes`);
+        }
+        return { status: response.status, ok: response.ok, text: buf.toString('utf8') };
+      }
       const text = await response.text();
       if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
         throw new TaskpackError('ACTION_INPUT_INVALID', `response from "${scrubber.scrub(url)}" exceeded ${MAX_RESPONSE_BYTES} bytes`);
@@ -2678,7 +2695,7 @@ export async function checkManagedPrMatchesDiscoveredState(
     return false;
   }
   const proposalPath = manifest.spec.proposal.path;
-  if (proposalPath.startsWith('-') || proposalPath.includes('..') || proposalPath.includes('\0')) {
+  if (tryNormalizeRelativePath(proposalPath) === undefined || proposalPath.startsWith('-')) {
     return false;
   }
 
