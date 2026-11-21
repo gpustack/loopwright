@@ -847,6 +847,17 @@ interface CheckedEntry {
   readonly patchDigest: string | null;
 }
 
+function validatorRegistrationFingerprint(registration: RunnerCandidateRegistration): string {
+  return canonical({
+    policyProfile: registration.policyProfile ?? 'github',
+    allowWorkflowWrites: registration.allowWorkflowWrites === true,
+    upstreamSources: registration.upstreamSources,
+    ascendPairs: registration.ascendPairs,
+    enginePrereleases: registration.enginePrereleases,
+    prereleasePackages: registration.prereleasePackages,
+  });
+}
+
 interface Binding {
   readonly storeId: string;
   readonly runId: string;
@@ -1552,8 +1563,7 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
     const key = `${normalized.storeId}|${normalized.runId}|${candidateDigest}`;
     const rawCached = checkedCache.get(key);
     const cached = rawCached !== undefined
-      && (rawCached.registration.policyProfile ?? 'github') === (registration.policyProfile ?? 'github')
-      && (rawCached.registration.allowWorkflowWrites === true) === (registration.allowWorkflowWrites === true)
+      && validatorRegistrationFingerprint(rawCached.registration) === validatorRegistrationFingerprint(registration)
       ? rawCached
       : undefined;
     if (cached === undefined) {
@@ -1669,11 +1679,13 @@ export async function startRunnerTaskpackService(options: RunnerTaskpackServiceO
     const registration = registrationFor(normalized) ?? rawCached?.registration;
     const cached = rawCached !== undefined
       && registration !== undefined
-      && (rawCached.registration.policyProfile ?? 'github') === (registration.policyProfile ?? 'github')
-      && (rawCached.registration.allowWorkflowWrites === true) === (registration.allowWorkflowWrites === true)
+      && validatorRegistrationFingerprint(rawCached.registration) === validatorRegistrationFingerprint(registration)
       ? rawCached
       : undefined;
     if (cached === undefined || registration === undefined) return settle('not_executed', null, 'gate_revalidation_required: no gate-verified artifact for this binding');
+    if (registration.candidateDigest != null && registration.candidateDigest !== candidateDigest) {
+      return settle('not_executed', null, 'candidate_pin_mismatch: request candidate differs from the registered candidate digest');
+    }
     if (String(request.baseRevision) !== registration.identity.defaultSha || String(request.sourceRevision) !== registration.identity.headSha) {
       return settle('not_executed', null, 'revision_binding_mismatch: request revisions differ from the registered identity');
     }
