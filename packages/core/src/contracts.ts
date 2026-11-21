@@ -475,10 +475,9 @@ export function contractSchema(input: Json, path = ''): TaskContract {
       let aggregateBytes = 0;
       step.handoffs.forEach((handoff, handoffIndex) => {
         const handoffPath = `${stepsPath}/${index}/handoffs/${handoffIndex}`;
-        if (handoff.id !== undefined) {
-          if (seenHandoffIds.has(handoff.id)) fail('DUPLICATE_ID', `${handoffPath}/id`);
-          seenHandoffIds.add(handoff.id);
-        }
+        const effectiveHandoffId = handoff.id ?? `handoff-${handoffIndex + 1}`;
+        if (seenHandoffIds.has(effectiveHandoffId)) fail('DUPLICATE_ID', `${handoffPath}/id`);
+        seenHandoffIds.add(effectiveHandoffId);
         aggregateBytes += handoff.maxBytes ?? LIMITS.handoffDefaultBytes;
         if (aggregateBytes > LIMITS.handoffAggregateBytes) fail('VALUE_RANGE', handoffPath);
         if (!stepIds.has(handoff.fromStep)) fail('REFERENCE_UNKNOWN', `${handoffPath}/fromStep`);

@@ -443,8 +443,11 @@ function addQuantityToTokens(quantity: Quantity | undefined): number {
 }
 
 function isProvablyUnexecutedRequest(row: RequestRecord): boolean {
+  if (row.resolution?.kind === 'not_executed') {
+    return true;
+  }
   return (
-    row.state === 'released'
+    (row.state === 'released' || row.state === 'reserved')
     && row.dispatch === null
     && row.initialObservation === null
     && row.resolution === null
@@ -807,6 +810,7 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
     return entry;
   };
 
+  const failedReceiptCountsByEvidence = new Map<string, number>();
   for (const row of head?.progress.verifierReceipts ?? []) {
     const slot = slotById.get(row.slot);
     const slotIndex = slotIndexById.get(row.slot);
@@ -844,6 +848,8 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
         checkId: clean(checkId),
         reason: clean(reasonValue ?? 'failed'),
       });
+      const evHex = row.output.digest.hex;
+      failedReceiptCountsByEvidence.set(evHex, (failedReceiptCountsByEvidence.get(evHex) ?? 0) + 1);
     }
   }
 
@@ -858,6 +864,11 @@ export async function evaluateRunHealth(input: EvaluateRunHealthInput): Promise<
       });
       if (failure.count > 1) {
         fallbackExtraRepeats += failure.count - 1;
+      }
+    } else if (failure.count > 1 && failure.evidence !== null) {
+      const matchedReceipts = failedReceiptCountsByEvidence.get(failure.evidence.digest.hex) ?? 0;
+      if (matchedReceipts > 0 && failure.count > matchedReceipts) {
+        fallbackExtraRepeats += failure.count - matchedReceipts;
       }
     }
   }

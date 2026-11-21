@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { LIMITS, bindSubject, digestArtifact, digestArtifactFromMetadata, identifyManifest, isWritablePath, type ArtifactManifest, type ArtifactRef, type Digest, type TaskContract } from '@loopwright/core';
 import { reopenLocalRun, type Authority, type LocalRunStore } from '@loopwright/state';
@@ -375,106 +375,116 @@ async function materializeAttemptWorkspace(
   const workspacesRoot = join(resolve(runRoot), 'workspaces');
   const runWorkspaceDir = join(workspacesRoot, context.lock.spec.runId);
   const attemptWorkspaceDir = join(runWorkspaceDir, attemptId);
+  const stagingWorkspaceDir = join(runWorkspaceDir, `.stage-${attemptId}-${randomBytes(6).toString('hex')}`);
+  const stagingCandidateDir = join(stagingWorkspaceDir, 'candidate');
+  const stagingContextDir = join(stagingWorkspaceDir, 'context');
   const candidateDir = join(attemptWorkspaceDir, 'candidate');
   const contextDir = join(attemptWorkspaceDir, 'context');
 
   await privateDirectory(workspacesRoot, excluded);
   await privateDirectory(runWorkspaceDir, excluded);
-  await rm(attemptWorkspaceDir, { recursive: true, force: true });
-  await privateDirectory(attemptWorkspaceDir, excluded);
-  await privateDirectory(candidateDir, excluded);
-  await privateDirectory(contextDir, excluded);
+  await privateDirectory(stagingWorkspaceDir, excluded);
+  await privateDirectory(stagingCandidateDir, excluded);
+  await privateDirectory(stagingContextDir, excluded);
 
-  const effectiveTools = repair === 'format' ? [] : role.policy.tools;
-  const readOnlyRole = repair === 'format' || !effectiveTools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
-  const modes = await resolveCurrentFileModes(context, cycle.head);
+  try {
+    const effectiveTools = repair === 'format' ? [] : role.policy.tools;
+    const readOnlyRole = repair === 'format' || !effectiveTools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
+    const modes = await resolveCurrentFileModes(context, cycle.head);
 
-  if (source.version === 2) {
-    await materializeBaseline(source, candidateDir, owner, cycle.deadline);
-    await chmod(candidateDir, 0o700);
-    const deletedSet = new Set(cycle.candidate.manifest.spec.deleted ?? []);
-    for (const delPath of deletedSet) {
-      await rm(join(candidateDir, delPath), { force: true });
-    }
-    for (const item of cycle.candidate.files) {
-      const targetPath = join(candidateDir, item.name);
-      await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
-      await rm(targetPath, { recursive: true, force: true });
-      if ('bytes' in item) {
-        const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-        try {
-          await file.writeFile(item.bytes);
-          await file.sync();
-        } finally {
-          await file.close();
+    if (source.version === 2) {
+      await materializeBaseline(source, stagingCandidateDir, owner, cycle.deadline);
+      await chmod(stagingCandidateDir, 0o700);
+      const deletedSet = new Set(cycle.candidate.manifest.spec.deleted ?? []);
+      for (const delPath of deletedSet) {
+        await rm(join(stagingCandidateDir, delPath), { force: true });
+      }
+      for (const item of cycle.candidate.files) {
+        const targetPath = join(stagingCandidateDir, item.name);
+        await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+        await rm(targetPath, { recursive: true, force: true });
+        if ('bytes' in item) {
+          const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+          try {
+            await file.writeFile(item.bytes);
+            await file.sync();
+          } finally {
+            await file.close();
+          }
+        } else {
+          const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
+          await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
+            expectedBytes: item.byteLength,
+            expectedSha256: item.digest.hex,
+            mode: 0o600,
+            ownedSource: true,
+            requireReadOnlySource: true,
+            verifyCanonicalSource: true,
+            path: item.name,
+            phase: 'execution',
+          });
         }
-      } else {
-        const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
-        await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
-          expectedBytes: item.byteLength,
-          expectedSha256: item.digest.hex,
-          mode: 0o600,
-          ownedSource: true,
-          requireReadOnlySource: true,
-          verifyCanonicalSource: true,
-          path: item.name,
-          phase: 'execution',
-        });
+      }
+      const allPaths = new Set<string>();
+      for (const entry of source.baselineEntries ?? []) {
+        if (!deletedSet.has(entry.name)) allPaths.add(entry.name);
+      }
+      for (const file of cycle.candidate.files) allPaths.add(file.name);
+      for (const relPath of allPaths) {
+        const gitMode = modes.get(relPath) ?? '100644';
+        const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope, hostProtection);
+        const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
+        await chmod(join(stagingCandidateDir, relPath), perm);
+      }
+    } else {
+      for (const item of cycle.candidate.files) {
+        const targetPath = join(stagingCandidateDir, item.name);
+        await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
+        const gitMode = modes.get(item.name) ?? '100644';
+        const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope, hostProtection);
+        const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
+        if ('bytes' in item) {
+          const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, perm);
+          try {
+            await file.writeFile(item.bytes);
+            await file.chmod(perm);
+            await file.sync();
+          } finally {
+            await file.close();
+          }
+        } else {
+          const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
+          await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
+            expectedBytes: item.byteLength,
+            expectedSha256: item.digest.hex,
+            mode: perm,
+            ownedSource: true,
+            requireReadOnlySource: true,
+            verifyCanonicalSource: true,
+            path: item.name,
+            phase: 'execution',
+          });
+        }
       }
     }
-    const allPaths = new Set<string>();
-    for (const entry of source.baselineEntries ?? []) {
-      if (!deletedSet.has(entry.name)) allPaths.add(entry.name);
-    }
-    for (const file of cycle.candidate.files) allPaths.add(file.name);
-    for (const relPath of allPaths) {
-      const gitMode = modes.get(relPath) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(relPath, plan.scope, hostProtection);
-      const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
-      await chmod(join(candidateDir, relPath), perm);
-    }
-  } else {
-    for (const item of cycle.candidate.files) {
-      const targetPath = join(candidateDir, item.name);
-      await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
-      const gitMode = modes.get(item.name) ?? '100644';
-      const writable = !readOnlyRole && isWritableCandidateFile(item.name, plan.scope, hostProtection);
-      const perm = gitMode === '100755' ? (writable ? 0o700 : 0o500) : (writable ? 0o600 : 0o400);
-      if ('bytes' in item) {
-        const file = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, perm);
-        try {
-          await file.writeFile(item.bytes);
-          await file.chmod(perm);
-          await file.sync();
-        } finally {
-          await file.close();
-        }
-      } else {
-        const canonicalBlobPath = await resolveCanonicalCasBlobPath(artifacts.directory, item.digest.hex, item.blobPath, 'execution');
-        await copyVerifiedFileReadOnly(canonicalBlobPath, targetPath, {
-          expectedBytes: item.byteLength,
-          expectedSha256: item.digest.hex,
-          mode: perm,
-          ownedSource: true,
-          requireReadOnlySource: true,
-          verifyCanonicalSource: true,
-          path: item.name,
-          phase: 'execution',
-        });
-      }
-    }
+
+    const effectiveResources = activeResources ?? roleResourcesFor(loaded, plan, role.roleId);
+    const stagedContextFiles = await materializeContextFilesDir(
+      stagingContextDir,
+      effectiveResources,
+      handoffExtracts,
+      artifacts.directory,
+      phase,
+    );
+
+    await rm(attemptWorkspaceDir, { recursive: true, force: true });
+    await rename(stagingWorkspaceDir, attemptWorkspaceDir);
+    const contextFiles = stagedContextFiles.map(filePath => join(contextDir, relative(stagingContextDir, filePath)));
+    return { candidateDir, contextFiles };
+  } catch (error) {
+    await rm(stagingWorkspaceDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
-
-  const effectiveResources = activeResources ?? roleResourcesFor(loaded, plan, role.roleId);
-  const contextFiles = await materializeContextFilesDir(
-    contextDir,
-    effectiveResources,
-    handoffExtracts,
-    artifacts.directory,
-    phase,
-  );
-
-  return { candidateDir, contextFiles };
 }
 
 async function buildStepYield(

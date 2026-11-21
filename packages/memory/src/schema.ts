@@ -332,6 +332,36 @@ function splitLinesWithNewline(content: string): readonly DiffLine[] {
 type DiffOp = { readonly kind: ' ' | '-' | '+'; readonly text: string; readonly hasNewline: boolean };
 function editScript(a: readonly DiffLine[], b: readonly DiffLine[]): readonly DiffOp[] {
   const m = a.length, n = b.length;
+  if (m === 0) return b.map(line => ({ kind: '+', text: line.text, hasNewline: line.hasNewline }));
+  if (n === 0) return a.map(line => ({ kind: '-', text: line.text, hasNewline: line.hasNewline }));
+  if (n === 1) {
+    const target = b[0]!;
+    const matchIdx = a.findIndex(line => line.key === target.key);
+    const ops: DiffOp[] = [];
+    if (matchIdx >= 0) {
+      for (let i = 0; i < matchIdx; i++) ops.push({ kind: '-', text: a[i]!.text, hasNewline: a[i]!.hasNewline });
+      ops.push({ kind: ' ', text: target.text, hasNewline: target.hasNewline });
+      for (let i = matchIdx + 1; i < m; i++) ops.push({ kind: '-', text: a[i]!.text, hasNewline: a[i]!.hasNewline });
+    } else {
+      for (let i = 0; i < m; i++) ops.push({ kind: '-', text: a[i]!.text, hasNewline: a[i]!.hasNewline });
+      ops.push({ kind: '+', text: target.text, hasNewline: target.hasNewline });
+    }
+    return ops;
+  }
+  if (m === 1) {
+    const target = a[0]!;
+    const matchIdx = b.findIndex(line => line.key === target.key);
+    const ops: DiffOp[] = [];
+    if (matchIdx >= 0) {
+      for (let j = 0; j < matchIdx; j++) ops.push({ kind: '+', text: b[j]!.text, hasNewline: b[j]!.hasNewline });
+      ops.push({ kind: ' ', text: target.text, hasNewline: target.hasNewline });
+      for (let j = matchIdx + 1; j < n; j++) ops.push({ kind: '+', text: b[j]!.text, hasNewline: b[j]!.hasNewline });
+    } else {
+      ops.push({ kind: '-', text: target.text, hasNewline: target.hasNewline });
+      for (let j = 0; j < n; j++) ops.push({ kind: '+', text: b[j]!.text, hasNewline: b[j]!.hasNewline });
+    }
+    return ops;
+  }
   const table: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0) as number[]);
   for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--)
     table[i]![j] = a[i]!.key === b[j]!.key ? table[i + 1]![j + 1]! + 1 : Math.max(table[i + 1]![j]!, table[i]![j + 1]!);

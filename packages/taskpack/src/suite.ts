@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { LIMITS } from '@loopwright/core';
@@ -629,17 +629,37 @@ async function readSafeControlFileUnderRoot(
   }
 
   const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
-  let handle;
+  const oDirectory = 'O_DIRECTORY' in constants ? constants.O_DIRECTORY : 0;
+  const pinnedParentHandles: Array<{ readonly handle: Awaited<ReturnType<typeof open>>; readonly path: string; readonly dev: number; readonly ino: number }> = [];
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(cursor, constants.O_RDONLY | noFollow);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException | null)?.code;
-    if (code === 'ELOOP') {
-      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symbolic link detected while opening "${normalized}"`, diagPath);
+    for (const parent of parentDirs) {
+      let dirHandle: Awaited<ReturnType<typeof open>>;
+      try {
+        dirHandle = await open(parent.path, constants.O_RDONLY | noFollow | oDirectory);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ELOOP' || code === 'ENOTDIR') {
+          throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" became a symbolic link`, diagPath);
+        }
+        throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `parent directory of "${normalized}" could not be opened`, diagPath);
+      }
+      const dirInfo = await dirHandle.stat();
+      if (!dirInfo.isDirectory() || dirInfo.dev !== parent.dev || dirInfo.ino !== parent.ino) {
+        await dirHandle.close().catch(() => undefined);
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `parent directory of "${normalized}" changed identity before opening`, diagPath);
+      }
+      pinnedParentHandles.push({ handle: dirHandle, path: parent.path, dev: parent.dev, ino: parent.ino });
     }
-    throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" could not be opened`, diagPath);
-  }
-  try {
+    try {
+      handle = await open(cursor, constants.O_RDONLY | noFollow);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      if (code === 'ELOOP') {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `symbolic link detected while opening "${normalized}"`, diagPath);
+      }
+      throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" could not be opened`, diagPath);
+    }
     const info = await handle.stat();
     if (!info.isFile() || info.nlink !== 1 || info.dev !== before.dev || info.ino !== before.ino) {
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `file "${normalized}" identity or link count changed while opening`, diagPath);
@@ -647,14 +667,28 @@ async function readSafeControlFileUnderRoot(
     if (info.size !== before.size || info.size > maxBytes) {
       throw new TaskpackError('TASKPACK_MANIFEST_INVALID', `file "${normalized}" changed size while loading or exceeds ${maxBytes} bytes`, diagPath);
     }
-    for (const parent of parentDirs) {
+    if (process.platform === 'linux') {
+      const fdResolvedPath = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+      if (fdResolvedPath === null || fdResolvedPath !== realFull || !isContainedInRoot(fdResolvedPath, realRoot)) {
+        throw new TaskpackError(
+          'TASKPACK_SCOPE_VIOLATION',
+          `opened file descriptor for "${normalized}" resolved outside repository root`,
+          diagPath,
+        );
+      }
+    }
+    for (const parent of pinnedParentHandles) {
       const postParent = await lstat(parent.path).catch(() => null);
+      const postFdStat = await parent.handle.stat().catch(() => null);
       if (
         postParent === null
+        || postFdStat === null
         || postParent.isSymbolicLink()
         || !postParent.isDirectory()
         || postParent.dev !== parent.dev
         || postParent.ino !== parent.ino
+        || postFdStat.dev !== parent.dev
+        || postFdStat.ino !== parent.ino
       ) {
         throw new TaskpackError(
           'TASKPACK_SCOPE_VIOLATION',
@@ -694,7 +728,12 @@ async function readSafeControlFileUnderRoot(
     const sha256 = createHash('sha256').update(slice).digest('hex');
     return { bytes: slice, sha256 };
   } finally {
-    await handle.close();
+    if (handle !== undefined) {
+      await handle.close().catch(() => undefined);
+    }
+    for (const parent of pinnedParentHandles) {
+      await parent.handle.close().catch(() => undefined);
+    }
   }
 }
 
@@ -1959,32 +1998,70 @@ async function runDefaultReadinessProbe(
             return err.killed === true || (err.signal !== null && err.signal !== undefined) || typeof err.code !== 'number';
           };
           const targetRef = probe.ref ?? 'HEAD';
-          let refSha: string;
-          try {
-            const { stdout } = await execFileAsync(
-              gitBin,
-              ['-C', gitSource, 'rev-parse', '--verify', '--end-of-options', `${targetRef}^{commit}`],
-              { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
-            );
-            refSha = stdout.trim().toLowerCase();
-          } catch (error) {
-            if (isGitProcessFailure(error)) throw error;
+          let refExists = false;
+          const candidateRefs: string[] = [];
+          if (targetRef === 'HEAD') {
+            try {
+              const sym = await execFileAsync(
+                gitBin,
+                ['-C', gitSource, 'symbolic-ref', '--quiet', 'HEAD'],
+                { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+              );
+              const symRef = sym.stdout.trim();
+              if (symRef.length > 0) candidateRefs.push(symRef);
+            } catch (error) {
+              if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
+              // Detached HEAD: check `git rev-parse --verify HEAD` directly below.
+              refExists = true;
+            }
+          } else if (targetRef.startsWith('refs/')) {
+            candidateRefs.push(targetRef);
+          } else {
+            candidateRefs.push(`refs/heads/${targetRef}`, `refs/tags/${targetRef}`, `refs/remotes/${targetRef}`);
+          }
+          if (!refExists) {
+            for (const fullRef of candidateRefs) {
+              try {
+                await execFileAsync(
+                  gitBin,
+                  ['-C', gitSource, 'show-ref', '--verify', '--quiet', '--', fullRef],
+                  { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+                );
+                refExists = true;
+                break;
+              } catch (error) {
+                if (isGitProcessFailure(error) || (error as { code?: unknown }).code !== 1) throw error;
+              }
+            }
+          }
+          if (!refExists) {
             return {
               disposition: 'deferred',
               reason: 'stage_not_ready',
               detail: scrubber.scrub(`git ref "${targetRef}" is not yet available in "${probe.source}"`),
             };
           }
+          const { stdout: refShaOut } = await execFileAsync(
+            gitBin,
+            ['-C', gitSource, 'rev-parse', '--verify', '--end-of-options', `${targetRef}^{commit}`],
+            { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+          );
+          const refSha = refShaOut.trim().toLowerCase();
           let commitExists = true;
           try {
             await execFileAsync(
               gitBin,
-              ['-C', gitSource, 'cat-file', '-e', `${expectedVersion}^{commit}`],
+              ['-C', gitSource, 'cat-file', '-e', expectedVersion],
               { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
             );
           } catch (error) {
             const exitCode = (error as { code?: unknown }).code;
-            if (isGitProcessFailure(error) || (exitCode !== 1 && exitCode !== 128)) throw error;
+            const stderrText = typeof (error as { stderr?: unknown }).stderr === 'string'
+              ? (error as { stderr: string }).stderr
+              : '';
+            if (isGitProcessFailure(error) || exitCode !== 1 || /corrupt|bad object|unable to read/i.test(stderrText)) {
+              throw error;
+            }
             commitExists = false;
           }
           if (!commitExists) {
@@ -1993,6 +2070,19 @@ async function runDefaultReadinessProbe(
               observedVersion: scrubber.scrub(refSha),
               reason: 'stage_not_ready',
               detail: scrubber.scrub(`commit "${expectedVersion}" is absent from "${probe.source}"`),
+            };
+          }
+          const { stdout: objTypeOut } = await execFileAsync(
+            gitBin,
+            ['-C', gitSource, 'cat-file', '-t', expectedVersion],
+            { env: cleanEnv, timeout: timeoutMs, maxBuffer: 4_096, encoding: 'utf8' },
+          );
+          if (objTypeOut.trim() !== 'commit') {
+            return {
+              disposition: 'deferred',
+              observedVersion: scrubber.scrub(refSha),
+              reason: 'stage_not_ready',
+              detail: scrubber.scrub(`object "${expectedVersion}" in "${probe.source}" is not a commit`),
             };
           }
           let isAncestor = true;
@@ -3166,12 +3256,18 @@ export async function resolveTaskpackSuite(options: ResolveTaskpackSuiteOptions)
 
   const domainMatchesTriggerAndSchedule = (dom: LoadedTaskpackSuiteDomain): boolean => {
     if (!dom.enabled) return false;
-    if (
-      effectivePolicyProfile === 'github'
-      && (inferredEventName === 'schedule' || inferredEventName === 'workflow_dispatch' || inferredEventName === 'release')
-      && !isGitHubTriggerDeclared(dom.manifest.spec.triggers, { eventName: inferredEventName })
-    ) {
-      return false;
+    if (effectivePolicyProfile === 'github') {
+      if (inferredEventName === 'release') {
+        const releaseAction = isPlainRecord(options.eventPayload) && typeof options.eventPayload['action'] === 'string'
+          ? options.eventPayload['action']
+          : undefined;
+        if (releaseAction !== undefined && releaseAction !== 'published') {
+          return false;
+        }
+      }
+      if (!isGitHubTriggerDeclared(dom.manifest.spec.triggers, { eventName: inferredEventName })) {
+        return false;
+      }
     }
     if (inferredEventName === 'schedule') {
       if (scheduleKey !== undefined && scheduleKey.length > 0) {

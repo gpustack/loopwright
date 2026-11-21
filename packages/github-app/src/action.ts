@@ -675,6 +675,7 @@ export async function runGitHubActionEntrypoint(
       && input.probeFetch === undefined
       && suiteGithubToken === undefined;
 
+    const resolvedSuiteBaseRevision = verifiedSuiteCommentMeta?.prBaseSha ?? input.baseRevision;
     suiteResolution = await resolveTaskpackSuite({
       repositoryRoot: input.repositoryRoot,
       loadedSuite,
@@ -682,7 +683,7 @@ export async function runGitHubActionEntrypoint(
       policyProfile: 'github',
       hostPolicy,
       allowLoopbackHttp: input.allowManifestCustomBaseUrl === true,
-      baseRevision: input.baseRevision,
+      baseRevision: resolvedSuiteBaseRevision,
       eventName: input.eventName,
       eventPayload: input.eventPayload,
       schedule: input.schedule,
@@ -707,6 +708,22 @@ export async function runGitHubActionEntrypoint(
       allowOfflineStagePrCheck,
     });
 
+    const scrubPublicSuiteResolution = (res: SuiteResolutionResult): SuiteResolutionResult => {
+      if (res.comment === undefined && res.detail === undefined) return res;
+      return Object.freeze({
+        ...res,
+        ...(res.detail !== undefined ? { detail: turnkeyScrubber.scrub(res.detail) } : {}),
+        ...(res.comment !== undefined
+          ? {
+            comment: Object.freeze({
+              ...res.comment,
+              guidance: turnkeyScrubber.scrub(res.comment.guidance),
+            }),
+          }
+          : {}),
+      });
+    };
+
     if (
       input.commentPrefixes !== undefined
       && suiteResolution.comment !== undefined
@@ -721,14 +738,14 @@ export async function runGitHubActionEntrypoint(
         }
         throw outErr;
       }
-      const ignoredSuite: SuiteResolutionResult = Object.freeze({
+      const ignoredSuite: SuiteResolutionResult = scrubPublicSuiteResolution(Object.freeze({
         ...suiteResolution,
         disposition: 'ignored',
         reason: 'comment_prefix_not_configured_for_domain',
         cells: Object.freeze([]),
         eligibleCells: Object.freeze([]),
         matrix: emptyMatrix,
-      });
+      }));
       return {
         kind: 'ignored',
         disposition: 'ignored',
@@ -765,13 +782,14 @@ export async function runGitHubActionEntrypoint(
       || suiteResolution.disposition === 'deferred'
       || suiteResolution.disposition === 'ignored'
     ) {
+      const scrubbedSuite = scrubPublicSuiteResolution(suiteResolution);
       return {
         kind: suiteResolution.disposition,
         disposition: suiteResolution.disposition,
-        reason: suiteResolution.reason,
-        ...(suiteResolution.detail !== undefined ? { detail: suiteResolution.detail } : {}),
-        suite: suiteResolution,
-        matrix: suiteResolution.matrix,
+        reason: scrubbedSuite.reason,
+        ...(scrubbedSuite.detail !== undefined ? { detail: scrubbedSuite.detail } : {}),
+        suite: scrubbedSuite,
+        matrix: scrubbedSuite.matrix,
       };
     }
 
@@ -1112,6 +1130,23 @@ export async function runGitHubActionEntrypoint(
           : resolvedRepo.repositoryId;
         effectiveBaseRevision = resolvedRepo.baseRevision;
         effectiveSourceRevision = resolvedRepo.sourceRevision;
+        if (verifiedSuiteCommentMeta !== undefined) {
+          if (
+            verifiedSuiteCommentMeta.prBaseSha !== undefined
+            && effectiveBaseRevision.toLowerCase() !== verifiedSuiteCommentMeta.prBaseSha.toLowerCase()
+          ) {
+            return blocked(
+              'ACTION_INPUT_INVALID',
+              `resolved base revision "${effectiveBaseRevision}" disagrees with verified pull request base SHA "${verifiedSuiteCommentMeta.prBaseSha}"`,
+            );
+          }
+          if (effectiveSourceRevision.toLowerCase() !== verifiedSuiteCommentMeta.prHeadSha.toLowerCase()) {
+            return blocked(
+              'ACTION_INPUT_INVALID',
+              `resolved source revision "${effectiveSourceRevision}" disagrees with verified pull request head SHA "${verifiedSuiteCommentMeta.prHeadSha}"`,
+            );
+          }
+        }
       } catch (error) {
         if (error instanceof GitHubAppError) {
           return blocked(error.code, turnkeyScrubber.scrub(error.message));

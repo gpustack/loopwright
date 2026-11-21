@@ -435,19 +435,6 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
   const fanoutDeliveriesById = new Map<string, TrackedFanoutDelivery>();
   const deliveryIdsByQueueItemId = new Map<string, Set<string>>();
 
-  const trackQueueItemDelivery = (queueItemId: string, deliveryId: string): void => {
-    let set = deliveryIdsByQueueItemId.get(queueItemId);
-    if (set === undefined) {
-      if (deliveryIdsByQueueItemId.size >= MAX_TRACKED_FANOUT_DELIVERIES * 4) {
-        const oldest = deliveryIdsByQueueItemId.keys().next().value;
-        if (oldest !== undefined) deliveryIdsByQueueItemId.delete(oldest);
-      }
-      set = new Set<string>();
-      deliveryIdsByQueueItemId.set(queueItemId, set);
-    }
-    set.add(deliveryId);
-  };
-
   const evictDeliveryTracking = (deliveryId: string): void => {
     const tracked = fanoutDeliveriesById.get(deliveryId);
     if (tracked !== undefined) {
@@ -468,17 +455,59 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     }
   };
 
+  const evictTerminalFanoutDelivery = (): boolean => {
+    for (const candidateId of fanoutDeliveriesById.keys()) {
+      const state = deliveryStore.getDelivery(candidateId)?.state;
+      if (state === undefined || state === 'succeeded' || state === 'failed') {
+        evictDeliveryTracking(candidateId);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const trackQueueItemDelivery = (queueItemId: string, deliveryId: string): void => {
+    let set = deliveryIdsByQueueItemId.get(queueItemId);
+    if (set === undefined) {
+      if (deliveryIdsByQueueItemId.size >= MAX_TRACKED_FANOUT_DELIVERIES * 4) {
+        let evicted = false;
+        for (const [candidateItemId, linkedIds] of deliveryIdsByQueueItemId.entries()) {
+          const allTerminal = [...linkedIds].every(id => {
+            const state = deliveryStore.getDelivery(id)?.state;
+            return state === undefined || state === 'succeeded' || state === 'failed';
+          });
+          if (allTerminal) {
+            deliveryIdsByQueueItemId.delete(candidateItemId);
+            evicted = true;
+            break;
+          }
+        }
+        if (!evicted) {
+          throw new GitHubAppError(
+            'QUEUE_CAPACITY_EXCEEDED',
+            'active coalesced delivery tracking capacity exceeded',
+            '/webhooks/github',
+          );
+        }
+      }
+      set = new Set<string>();
+      deliveryIdsByQueueItemId.set(queueItemId, set);
+    }
+    set.add(deliveryId);
+  };
+
   const ensureBoundedFanoutDelivery = (
     deliveryId: string,
     expectedDomainIds: readonly string[],
   ): TrackedFanoutDelivery => {
     let existing = fanoutDeliveriesById.get(deliveryId);
     if (existing === undefined) {
-      if (fanoutDeliveriesById.size >= MAX_TRACKED_FANOUT_DELIVERIES) {
-        const oldestKey = fanoutDeliveriesById.keys().next().value;
-        if (oldestKey !== undefined) {
-          evictDeliveryTracking(oldestKey);
-        }
+      if (fanoutDeliveriesById.size >= MAX_TRACKED_FANOUT_DELIVERIES && !evictTerminalFanoutDelivery()) {
+        throw new GitHubAppError(
+          'QUEUE_CAPACITY_EXCEEDED',
+          'active fan-out delivery tracking capacity exceeded',
+          '/webhooks/github',
+        );
       }
       existing = {
         expectedDomains: new Set<string>(expectedDomainIds),
@@ -689,22 +718,18 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
     };
 
     const resolvedBranchShas = new Map<string, string>();
-    const resolveTargetBranchBaseSha = async (targetBranch: string): Promise<
-      | { readonly ok: true; readonly sha: string }
+    let cachedDefaultBranch: string | null | undefined;
+    const resolveRepositoryDefaultBranch = async (): Promise<
+      | { readonly ok: true; readonly branch: string }
       | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
     > => {
-      if (options.baseRevision !== undefined && options.baseRevision.trim().length > 0) {
-        return { ok: true, sha: options.baseRevision.trim() };
+      if (typeof cachedDefaultBranch === 'string') return { ok: true, branch: cachedDefaultBranch };
+      const repoObj = isPlainRecord(payload['repository']) ? payload['repository'] : null;
+      const payloadDefault = typeof repoObj?.['default_branch'] === 'string' ? repoObj['default_branch'].trim() : '';
+      if (payloadDefault.length > 0) {
+        cachedDefaultBranch = payloadDefault;
+        return { ok: true, branch: payloadDefault };
       }
-      if (verifiedPrBaseSha !== undefined && COMMIT_SHA_PATTERN.test(verifiedPrBaseSha)) {
-        return { ok: true, sha: verifiedPrBaseSha.toLowerCase() };
-      }
-      const payloadAfter = typeof payload['after'] === 'string' ? payload['after'].trim() : '';
-      if (COMMIT_SHA_PATTERN.test(payloadAfter)) {
-        return { ok: true, sha: payloadAfter.toLowerCase() };
-      }
-      const cached = resolvedBranchShas.get(targetBranch);
-      if (cached !== undefined) return { ok: true, sha: cached };
       if (options.tokenBroker !== undefined) {
         try {
           const token = await mintReadOnlyToken();
@@ -713,7 +738,68 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             'user-agent': 'loopwright-github-app',
             ...(token !== undefined ? { authorization: `Bearer ${token}` } : {}),
           };
-          const refPath = targetBranch.split('/').map(seg => encodeURIComponent(seg)).join('/');
+          const res = await fetchBoundedText(
+            `${effectiveApiBaseUrl}/repos/${repository.fullName}`,
+            fetchImpl,
+            headers,
+            15_000,
+            scrubber,
+          );
+          if (!res.ok) {
+            return {
+              ok: false,
+              status: 502,
+              message: scrubber.scrub(`failed to query repository default branch (HTTP ${res.status})`),
+            };
+          }
+          const parsedRepo = JSON.parse(res.text) as unknown;
+          const defBranch = isPlainRecord(parsedRepo) && typeof parsedRepo['default_branch'] === 'string'
+            ? parsedRepo['default_branch'].trim()
+            : '';
+          if (defBranch.length > 0) {
+            cachedDefaultBranch = defBranch;
+            return { ok: true, branch: defBranch };
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return {
+            ok: false,
+            status: 502,
+            message: scrubber.scrub(`failed to query repository default branch: ${detail}`),
+          };
+        }
+      }
+      if (options.repositoryRoot !== undefined) {
+        cachedDefaultBranch = 'HEAD';
+        return { ok: true, branch: 'HEAD' };
+      }
+      return {
+        ok: false,
+        status: 400,
+        message: scrubber.scrub('cannot determine repository default branch for publication-disabled domain'),
+      };
+    };
+
+    const resolveRefToCommitSha = async (refName: string): Promise<
+      | { readonly ok: true; readonly sha: string }
+      | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
+    > => {
+      const trimmedRef = refName.trim();
+      if (COMMIT_SHA_PATTERN.test(trimmedRef)) {
+        return { ok: true, sha: trimmedRef.toLowerCase() };
+      }
+      const cached = resolvedBranchShas.get(trimmedRef);
+      if (cached !== undefined) return { ok: true, sha: cached };
+      if (options.tokenBroker !== undefined && trimmedRef !== 'HEAD') {
+        try {
+          const token = await mintReadOnlyToken();
+          const headers: Record<string, string> = {
+            accept: 'application/vnd.github+json',
+            'user-agent': 'loopwright-github-app',
+            ...(token !== undefined ? { authorization: `Bearer ${token}` } : {}),
+          };
+          const normalizedBranch = trimmedRef.replace(/^refs\/heads\//, '');
+          const refPath = normalizedBranch.split('/').map(seg => encodeURIComponent(seg)).join('/');
           const res = await fetchBoundedText(
             `${effectiveApiBaseUrl}/repos/${repository.fullName}/git/ref/heads/${refPath}`,
             fetchImpl,
@@ -725,7 +811,7 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             return {
               ok: false,
               status: 502,
-              message: scrubber.scrub(`failed to resolve branch "${targetBranch}" head SHA (HTTP ${res.status})`),
+              message: scrubber.scrub(`failed to resolve branch "${trimmedRef}" head SHA (HTTP ${res.status})`),
             };
           }
           const parsedRef = JSON.parse(res.text) as unknown;
@@ -735,25 +821,25 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             return {
               ok: false,
               status: 502,
-              message: scrubber.scrub(`GitHub ref response for "${targetBranch}" did not contain a valid 40-hex commit SHA`),
+              message: scrubber.scrub(`GitHub ref response for "${trimmedRef}" did not contain a valid 40-hex commit SHA`),
             };
           }
           const lower = sha.toLowerCase();
-          resolvedBranchShas.set(targetBranch, lower);
+          resolvedBranchShas.set(trimmedRef, lower);
           return { ok: true, sha: lower };
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           return {
             ok: false,
             status: 502,
-            message: scrubber.scrub(`failed to resolve branch "${targetBranch}" head SHA: ${detail}`),
+            message: scrubber.scrub(`failed to resolve branch "${trimmedRef}" head SHA: ${detail}`),
           };
         }
       }
       if (options.repositoryRoot !== undefined) {
         try {
-          const localSha = await resolveGitCommitSha(options.repositoryRoot, targetBranch, 15_000);
-          resolvedBranchShas.set(targetBranch, localSha);
+          const localSha = await resolveGitCommitSha(options.repositoryRoot, trimmedRef, 15_000);
+          resolvedBranchShas.set(trimmedRef, localSha);
           return { ok: true, sha: localSha };
         } catch {
           // Fall through to fail-closed error below.
@@ -762,9 +848,35 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       return {
         ok: false,
         status: 400,
-        message: scrubber.scrub(`cannot establish pinned baseRevision commit SHA for branch "${targetBranch}"`),
+        message: scrubber.scrub(`cannot establish pinned baseRevision commit SHA for ref "${trimmedRef}"`),
       };
     };
+
+    const resolveTargetBranchBaseSha = async (domain: LoadedTaskpackSuiteDomain): Promise<
+      | { readonly ok: true; readonly sha: string }
+      | { readonly ok: false; readonly status: 400 | 502; readonly message: string }
+    > => {
+      if (options.baseRevision !== undefined && options.baseRevision.trim().length > 0) {
+        return resolveRefToCommitSha(options.baseRevision);
+      }
+      if (verifiedPrBaseSha !== undefined && COMMIT_SHA_PATTERN.test(verifiedPrBaseSha)) {
+        return { ok: true, sha: verifiedPrBaseSha.toLowerCase() };
+      }
+      const payloadAfter = typeof payload['after'] === 'string' ? payload['after'].trim() : '';
+      if (COMMIT_SHA_PATTERN.test(payloadAfter)) {
+        return { ok: true, sha: payloadAfter.toLowerCase() };
+      }
+      if (domain.manifest.spec.publication.mode === 'pull_request') {
+        return resolveRefToCommitSha(domain.manifest.spec.publication.targetBranch);
+      }
+      const defBranchRes = await resolveRepositoryDefaultBranch();
+      if (!defBranchRes.ok) return defBranchRes;
+      return resolveRefToCommitSha(defBranchRes.branch);
+    };
+
+    let verifiedPrHeadRef: string | undefined;
+    let verifiedPrBaseRef: string | undefined;
+    let verifiedScheduleKey: string | undefined;
 
     if (eventName === 'issue_comment' || eventName === 'pull_request_review') {
       const prCheck = await verifySuiteCommentPullRequest({
@@ -831,6 +943,8 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
       const parsedCmd = prCheck.value.comment;
       verifiedPrHeadSha = prCheck.value.prHeadSha;
       verifiedPrBaseSha = prCheck.value.prBaseSha;
+      verifiedPrHeadRef = prCheck.value.prHeadRef;
+      verifiedPrBaseRef = prCheck.value.prBaseRef;
 
       if (!targetDomain.enabled) {
         deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
@@ -867,15 +981,15 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           return respond(response, 200, { kind: 'ignored', reason: `release action ${releaseAction} is not published` });
         }
       }
-      const scheduleKey = eventName === 'schedule' && typeof payload['schedule'] === 'string' && payload['schedule'].length > 0
+      verifiedScheduleKey = eventName === 'schedule' && typeof payload['schedule'] === 'string' && payload['schedule'].length > 0
         ? payload['schedule']
         : undefined;
       matchedDomains = suite.domains.filter(dom => {
         if (!dom.enabled) return false;
         if (!isGitHubTriggerDeclared(dom.manifest.spec.triggers, { eventName })) return false;
         if (eventName === 'schedule') {
-          return scheduleKey !== undefined
-            ? (dom.schedules !== undefined && dom.schedules.includes(scheduleKey))
+          return verifiedScheduleKey !== undefined
+            ? (dom.schedules !== undefined && dom.schedules.includes(verifiedScheduleKey))
             : (dom.schedules === undefined || dom.schedules.length > 0);
         }
         return true;
@@ -889,50 +1003,81 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
           reason: `trigger "${eventName}" matched zero enabled suite domains`,
         });
       }
+    }
 
-      // Enforce stage readiness before enqueueing downstream domains when the suite declares stages.
-      const hasDependentStageDomains = suite.manifest.spec.stages.some(st => st.dependsOn.length > 0)
-        && matchedDomains.some(dom => dom.stage !== undefined);
-      if (hasDependentStageDomains) {
-        const primaryBranch = matchedDomains[0]!.manifest.spec.publication.mode === 'pull_request'
-          ? matchedDomains[0]!.manifest.spec.publication.targetBranch
-          : 'main';
-        const baseRes = await resolveTargetBranchBaseSha(primaryBranch);
-        if (!baseRes.ok) {
-          if (baseRes.status === 502) {
-            deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
-          } else {
-            deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
-          }
-          return respond(response, baseRes.status, {
-            error: { code: 'ACTION_INPUT_INVALID', message: baseRes.message },
+    const baseShaByDomain = new Map<string, string>();
+    for (const domain of matchedDomains) {
+      const baseRes = await resolveTargetBranchBaseSha(domain);
+      if (!baseRes.ok) {
+        if (baseRes.status === 502) {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
+        } else {
+          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        }
+        return respond(response, baseRes.status, {
+          error: { code: 'ACTION_INPUT_INVALID', message: baseRes.message },
+        });
+      }
+      baseShaByDomain.set(domain.id, baseRes.sha);
+    }
+
+    // Evaluate stage readiness for every execution-triggering event with staged domains (including
+    // single-stage readiness probes and comment-triggered retry/revise) against each domain's pinned SHA.
+    const stagedMatchedDomains = action !== 'status'
+      ? matchedDomains.filter(dom => dom.stage !== undefined)
+      : [];
+    if (stagedMatchedDomains.length > 0) {
+      const parsedApiUrl = new URL(effectiveApiBaseUrl);
+      const allowLoopbackForStage = parsedApiUrl.protocol === 'http:'
+        && (
+          parsedApiUrl.hostname === '127.0.0.1'
+          || parsedApiUrl.hostname === 'localhost'
+          || parsedApiUrl.hostname === '[::1]'
+          || parsedApiUrl.hostname === '::1'
+        );
+      const eligibleIds = new Set<string>(matchedDomains.filter(dom => dom.stage === undefined).map(d => d.id));
+      const deferredList: Array<{ readonly domainId: string; readonly reason: string; readonly detail?: string | undefined }> = [];
+      let lastStageReason = 'stage_not_ready';
+      let lastStageDetail: string | undefined;
+
+      for (const stagedDom of stagedMatchedDomains) {
+        const domainBaseSha = baseShaByDomain.get(stagedDom.id)!;
+        let stageResolution;
+        try {
+          stageResolution = await resolveTaskpackSuite({
+            repositoryRoot: options.repositoryRoot ?? process.cwd(),
+            loadedSuite: suite,
+            policyProfile: 'github',
+            hostPolicy: MULTI_TENANT_HOST_POLICY,
+            allowLoopbackHttp: allowLoopbackForStage,
+            baseRevision: domainBaseSha,
+            eventName,
+            eventPayload: payload,
+            schedule: verifiedScheduleKey,
+            domain: stagedDom.id,
+            ...(verifiedPrHeadRef !== undefined ? { prHeadRef: verifiedPrHeadRef } : {}),
+            ...(verifiedPrBaseRef !== undefined ? { prBaseRef: verifiedPrBaseRef } : {}),
+            ...(verifiedPrHeadSha !== undefined ? { prHeadSha: verifiedPrHeadSha } : {}),
+            ...(verifiedPrHeadRef !== undefined ? { prHeadRepoFullName: repository.fullName, prHeadRepoFork: false } : {}),
+            operatorAllowlist: options.operatorAllowlist,
+            repositoryFullName: repository.fullName,
+            apiBaseUrl: effectiveApiBaseUrl,
+            githubToken: options.tokenBroker !== undefined ? mintReadOnlyToken : undefined,
+            fetchImpl,
+            scrubber,
+            discoverUpstreamUpdates: true,
+          });
+        } catch (error) {
+          const detail = scrubber.scrub(error instanceof Error ? error.message : String(error));
+          deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
+          return respond(response, 502, {
+            error: {
+              code: 'ACTION_INPUT_INVALID',
+              reason: 'stage_resolution_failed',
+              message: detail,
+            },
           });
         }
-        const parsedApiUrl = new URL(effectiveApiBaseUrl);
-        const allowLoopbackForStage = parsedApiUrl.protocol === 'http:'
-          && (
-            parsedApiUrl.hostname === '127.0.0.1'
-            || parsedApiUrl.hostname === 'localhost'
-            || parsedApiUrl.hostname === '[::1]'
-            || parsedApiUrl.hostname === '::1'
-          );
-        const stageResolution = await resolveTaskpackSuite({
-          repositoryRoot: options.repositoryRoot ?? process.cwd(),
-          loadedSuite: suite,
-          policyProfile: 'github',
-          hostPolicy: MULTI_TENANT_HOST_POLICY,
-          allowLoopbackHttp: allowLoopbackForStage,
-          baseRevision: baseRes.sha,
-          eventName,
-          eventPayload: payload,
-          schedule: scheduleKey,
-          repositoryFullName: repository.fullName,
-          apiBaseUrl: effectiveApiBaseUrl,
-          githubToken: options.tokenBroker !== undefined ? mintReadOnlyToken : undefined,
-          fetchImpl,
-          scrubber,
-          discoverUpstreamUpdates: true,
-        });
         if (stageResolution.disposition === 'blocked') {
           const isStaticError = stageResolution.code === 'TASKPACK_SCOPE_VIOLATION'
             || stageResolution.code === 'TASKPACK_MANIFEST_INVALID';
@@ -949,49 +1094,37 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
             cells: stageResolution.cells,
           });
         }
-        const eligibleIds = new Set(stageResolution.eligibleCells.map(c => c.domainId));
-        deferredCellsOut = stageResolution.cells
-          .filter(c => c.disposition === 'deferred')
-          .map(c => ({
-            domainId: c.domainId,
-            reason: c.reason,
-            ...(c.detail !== undefined ? { detail: c.detail } : {}),
-          }));
-        matchedDomains = matchedDomains.filter(dom => eligibleIds.has(dom.id));
-        if (matchedDomains.length === 0) {
-          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
-          return respond(response, 200, {
-            kind: 'deferred',
-            reason: stageResolution.reason,
-            detail: stageResolution.detail,
-            deferredDomains: deferredCellsOut,
+        if (stageResolution.eligibleCells.some(c => c.domainId === stagedDom.id)) {
+          eligibleIds.add(stagedDom.id);
+        } else {
+          lastStageReason = stageResolution.reason;
+          lastStageDetail ??= stageResolution.detail;
+          const cell = stageResolution.cells.find(c => c.domainId === stagedDom.id);
+          deferredList.push({
+            domainId: stagedDom.id,
+            reason: cell?.reason ?? stageResolution.reason,
+            ...(cell?.detail !== undefined
+              ? { detail: cell.detail }
+              : (stageResolution.detail !== undefined ? { detail: stageResolution.detail } : {})),
           });
         }
       }
-    }
-
-    const baseShaByDomain = new Map<string, string>();
-    for (const domain of matchedDomains) {
-      const targetBranch = domain.manifest.spec.publication.mode === 'pull_request'
-        ? domain.manifest.spec.publication.targetBranch
-        : 'main';
-      const baseRes = await resolveTargetBranchBaseSha(targetBranch);
-      if (!baseRes.ok) {
-        if (baseRes.status === 502) {
-          deliveryStore.markDeliveryState(headerDeliveryId, 'failed', 'ACTION_INPUT_INVALID');
-        } else {
-          deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
-        }
-        return respond(response, baseRes.status, {
-          error: { code: 'ACTION_INPUT_INVALID', message: baseRes.message },
+      deferredCellsOut = deferredList;
+      matchedDomains = matchedDomains.filter(dom => eligibleIds.has(dom.id));
+      if (matchedDomains.length === 0) {
+        deliveryStore.markDeliveryState(headerDeliveryId, 'succeeded');
+        return respond(response, 200, {
+          kind: 'deferred',
+          reason: lastStageReason,
+          ...(lastStageDetail !== undefined ? { detail: lastStageDetail } : {}),
+          deferredDomains: deferredCellsOut,
         });
       }
-      baseShaByDomain.set(domain.id, baseRes.sha);
     }
 
     deliveryStore.markDeliveryState(entry.deliveryId, 'processing');
-    const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
     try {
+      const trackedDelivery = ensureBoundedFanoutDelivery(entry.deliveryId, matchedDomains.map(d => d.id));
       const kind = action === 'revise' ? 'revise' : action === 'status' ? 'status' : 'discover';
       const reviseBinding = kind === 'revise' ? readReviseBinding(rawBytes, verifiedPrHeadSha) : null;
       const admitted: Array<{
@@ -1014,14 +1147,12 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
         const dedupKey = `${entry.deliveryId}\0${domain.id}`;
         let enqueuedRecord = enqueuedByDeliveryDomain.get(dedupKey);
         if (enqueuedRecord !== undefined && delivery.kind === 'retry_failed') {
-          const liveItem = queue.inspectTenantQueue(tenant).items.find(
-            cand => cand.queueItemId === enqueuedRecord!.item.queueItemId,
-          );
+          const liveItem = queue.getItem(tenant, enqueuedRecord.item.queueItemId);
           const isReconcileLocked = enqueuedRecord.reconcileRequired || liveItem?.state === 'reconcile_required';
           if (
             !isReconcileLocked
             && (
-              liveItem === undefined
+              liveItem === null
               || liveItem.state === 'failed'
               || liveItem.state === 'blocked'
               || liveItem.state === 'cancelled'
@@ -1364,17 +1495,19 @@ export async function startGitHubAppControlPlane(options: ControlPlaneOptions): 
                 hasUnadmitted = true;
                 continue;
               }
-              const fItem = queue.inspectTenantQueue(fEntry.tenant).items.find(cand => cand.queueItemId === fEntry.queueItemId);
-              if (fItem === undefined) {
+              const fState = fEntry.queueItemId === settled.queueItemId
+                ? settled.state
+                : queue.getItem(fEntry.tenant, fEntry.queueItemId)?.state;
+              if (fState === undefined) {
                 hasUnadmitted = true;
                 continue;
               }
-              if (fItem.state === 'pending' || fItem.state === 'leased') {
+              if (fState === 'pending' || fState === 'leased') {
                 hasActive = true;
-              } else if (fItem.state === 'reconcile_required') {
+              } else if (fState === 'reconcile_required') {
                 hasReconcileRequired = true;
-              } else if (fItem.state !== 'completed' && firstRetryableFailure === null) {
-                firstRetryableFailure = fItem.state;
+              } else if (fState !== 'completed' && firstRetryableFailure === null) {
+                firstRetryableFailure = fState;
               }
             }
             if (!hasActive) {

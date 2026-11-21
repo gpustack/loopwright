@@ -67,7 +67,7 @@ export {
  * Intentionally excludes standalone 7-character `=======` lines so Markdown/RST setext headings
  * are not falsely flagged when no conflict open/ancestor/close marker is present.
  */
-export const BASELINE_CONFLICT_MARKER_PATTERN = /^(?:<{7}(?:[ \t].*)?|\|{7}(?:[ \t].*)?|>{7}(?:[ \t].*)?)\r?$/m;
+export const BASELINE_CONFLICT_MARKER_PATTERN = /^(?:<{7,}(?:[ \t].*)?|\|{7,}(?:[ \t].*)?|>{7,}(?:[ \t].*)?)\r?$/m;
 
 export const MAX_GIT_LIST_BYTES = 16 * 1024 * 1024;
 const MAX_GIT_STDOUT_BYTES = MAX_GIT_LIST_BYTES;
@@ -155,6 +155,7 @@ export interface AlignBaselineRevisionsOptions {
   readonly baselineAlignment?: BaselineAlignmentOverride | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly scratchRoot?: string | undefined;
+  readonly alternateObjectDirs?: readonly string[] | undefined;
   readonly forceIndexFallback?: boolean | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
 }
@@ -179,6 +180,7 @@ export interface ComputeThreeWayCarryDeltaOptions {
   readonly extractedConflictPaths?: readonly string[] | undefined;
   readonly scratchRoot?: string | undefined;
   readonly gitEnv?: Record<string, string> | undefined;
+  readonly alternateObjectDirs?: readonly string[] | undefined;
   readonly forceIndexFallback?: boolean | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
@@ -204,6 +206,7 @@ export interface MergeCandidateOverlayWithCarryOptions {
   readonly sourceEntries?: ReadonlyMap<string, GitTreeEntry> | undefined;
   readonly extractedConflictPaths?: readonly string[] | undefined;
   readonly scratchRoot?: string | undefined;
+  readonly alternateObjectDirs?: readonly string[] | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly onLog?: ((line: string) => void) | undefined;
 }
@@ -825,8 +828,12 @@ async function runIndexThreeWayMergeFallback(options: {
   readonly mergeBase: string | null;
   readonly privateTempDir: string;
   readonly isolatedEnv: Record<string, string>;
+  readonly retainConflictText?: {
+    readonly maxConflictFiles: number;
+    readonly maxTotalConflictBytes: number;
+  } | undefined;
 }): Promise<RawMergeProbeOutput> {
-  const { repositoryRoot, baseRevision, sourceRevision, mergeBase, privateTempDir, isolatedEnv } = options;
+  const { repositoryRoot, baseRevision, sourceRevision, mergeBase, privateTempDir, isolatedEnv, retainConflictText } = options;
   const indexFile = join(privateTempDir, 'fallback-index');
   const indexEnv: Record<string, string> = {
     ...isolatedEnv,
@@ -873,6 +880,7 @@ async function runIndexThreeWayMergeFallback(options: {
   const conflictedStage2ByPath = new Map<string, StageEntry | undefined>();
   const mergeScratchDir = join(privateTempDir, 'merge-files');
   await mkdir(mergeScratchDir, { recursive: true, mode: 0o700 });
+  let retainedConflictTextBytes = 0;
 
   for (const [path, stageMap] of [...stagesByPath.entries()].sort((a, b) => compareLexical(a[0], b[0]))) {
     const s1 = stageMap.get(1);
@@ -977,7 +985,14 @@ async function runIndexThreeWayMergeFallback(options: {
     } else if (mergeRes.code !== null && mergeRes.code > 0 && mergeRes.code <= MAX_MERGE_FILE_EXIT_CONFLICTS) {
       conflictPaths.push(path);
       conflictedStage2ByPath.set(path, s2);
-      conflictTextByPath.set(path, mergeRes.stdout);
+      if (
+        retainConflictText !== undefined
+        && conflictPaths.length <= retainConflictText.maxConflictFiles
+        && retainedConflictTextBytes + mergeRes.stdout.byteLength <= retainConflictText.maxTotalConflictBytes
+      ) {
+        conflictTextByPath.set(path, mergeRes.stdout);
+        retainedConflictTextBytes += mergeRes.stdout.byteLength;
+      }
       conflictMessages.push({
         paths: [path],
         conflictType: s1 === undefined ? 'CONFLICT (add/add)' : 'CONFLICT (contents)',
@@ -1041,6 +1056,10 @@ async function runIsolatedThreeWayMergeProbe(options: {
   readonly baseEntries: ReadonlyMap<string, GitTreeEntry>;
   readonly sourceEntries: ReadonlyMap<string, GitTreeEntry>;
   readonly forceIndexFallback?: boolean | undefined;
+  readonly retainConflictText?: {
+    readonly maxConflictFiles: number;
+    readonly maxTotalConflictBytes: number;
+  } | undefined;
 }): Promise<RawMergeProbeOutput> {
   const {
     repositoryRoot,
@@ -1051,6 +1070,7 @@ async function runIsolatedThreeWayMergeProbe(options: {
     baseEntries,
     sourceEntries,
     forceIndexFallback,
+    retainConflictText,
   } = options;
 
   const mbRes = await runIsolatedGit(
@@ -1090,6 +1110,7 @@ async function runIsolatedThreeWayMergeProbe(options: {
       mergeBase,
       privateTempDir,
       isolatedEnv,
+      retainConflictText,
     });
   }
 
@@ -1117,6 +1138,7 @@ async function runIsolatedThreeWayMergeProbe(options: {
       mergeBase,
       privateTempDir,
       isolatedEnv,
+      retainConflictText,
     });
   }
   if (mtRes.spawnError !== null || mtRes.timedOut || mtRes.stdoutOverflow || (mtRes.code !== 0 && mtRes.code !== 1)) {
@@ -1343,7 +1365,7 @@ export async function alignBaselineRevisions(
   }
 
   const repositoryRoot = await realpath(options.repositoryRoot);
-  const alternateDirs = await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
+  const alternateDirs = options.alternateObjectDirs ?? await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
   const scratchParent = options.scratchRoot !== undefined
     ? await realpath(options.scratchRoot)
     : await realpath(tmpdir());
@@ -1421,6 +1443,17 @@ export async function alignBaselineRevisions(
       baseEntries,
       sourceEntries,
       forceIndexFallback: options.forceIndexFallback,
+      ...(policy.policy === 'extract-context'
+        ? {
+          retainConflictText: {
+            maxConflictFiles: policy.maxConflictFiles,
+            maxTotalConflictBytes: Math.max(
+              MIN_CONFLICT_BLOB_READ_CAP_BYTES,
+              policy.maxConflictBytes * CONFLICT_BLOB_READ_MULTIPLIER,
+            ),
+          },
+        }
+        : {}),
     });
 
     if (probe.clean && probe.mergedTreeOid !== null) {
@@ -1932,7 +1965,7 @@ export async function computeThreeWaySourceRevisionCarryDelta(
   }
 
   const repositoryRoot = await realpath(options.repositoryRoot);
-  const alternateDirs = await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
+  const alternateDirs = options.alternateObjectDirs ?? await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
   const scratchParent = options.scratchRoot !== undefined
     ? await realpath(options.scratchRoot)
     : await realpath(tmpdir());
@@ -2072,7 +2105,7 @@ export async function mergeCandidateOverlayWithCarry(
   );
 
   const repositoryRoot = await realpath(options.repositoryRoot);
-  const alternateDirs = await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
+  const alternateDirs = options.alternateObjectDirs ?? await resolveReadOnlyAlternateObjectDirs(repositoryRoot);
   const scratchParent = options.scratchRoot !== undefined
     ? await realpath(options.scratchRoot)
     : await realpath(tmpdir());
@@ -2101,7 +2134,12 @@ export async function mergeCandidateOverlayWithCarry(
       const carryEntry = carryByPath.get(delPath);
       const baseEntry = baseEntries.get(delPath);
       const effectiveTargetOid = carryEntry?.oid ?? baseEntry?.oid;
-      if (srcEntry !== undefined && effectiveTargetOid !== undefined && effectiveTargetOid !== srcEntry.oid) {
+      const effectiveTargetMode = carryEntry?.mode ?? baseEntry?.mode;
+      if (
+        srcEntry !== undefined
+        && effectiveTargetOid !== undefined
+        && (effectiveTargetOid !== srcEntry.oid || effectiveTargetMode !== srcEntry.mode)
+      ) {
         throw new TaskpackError(
           'TASKPACK_SCOPE_VIOLATION',
           `${BASELINE_CONFLICT_REASON}: candidate deletion of "${delPath}" conflicts with baseRevision modifications`,
@@ -2141,7 +2179,8 @@ export async function mergeCandidateOverlayWithCarry(
           const srcBytes = (srcEntry.mode === '100644' || srcEntry.mode === '100755')
             ? await readVerifiedBlobIsolated(repositoryRoot, srcEntry.oid, MAX_CARRY_BLOB_BYTES, isolatedEnv)
             : null;
-          if (srcBytes === null || !candBytes.equals(srcBytes)) {
+          const candModeMatches = file.mode === undefined || file.mode === srcEntry.mode;
+          if (srcBytes === null || !candBytes.equals(srcBytes) || !candModeMatches) {
             throw new TaskpackError(
               'TASKPACK_SCOPE_VIOLATION',
               `${BASELINE_CONFLICT_REASON}: candidate modification on "${cleanName}" conflicts with deletion on baseRevision`,
@@ -2193,6 +2232,19 @@ export async function mergeCandidateOverlayWithCarry(
           mode: resolvedMode,
           bytes: oursBytes,
         });
+        continue;
+      }
+      if (srcEntry !== undefined && srcEntry.oid === oursOid) {
+        reconciled.push(
+          file.mode === resolvedMode
+            ? file
+            : {
+              kind: 'inline',
+              name: cleanName,
+              mode: resolvedMode,
+              bytes: theirsBytes,
+            },
+        );
         continue;
       }
       if (ancBytes.includes(0) || oursBytes.includes(0) || theirsBytes.includes(0)) {
@@ -2381,6 +2433,11 @@ export async function verifyCandidateBaselinePrePublication(
     normalizeGitRelativePath(rawRel);
   }
 
+  const realRepoRoot = await realpath(resolvedRepoRoot);
+  const sharedAlternateDirs = snapshot.sourceRevision !== snapshot.baseRevision
+    ? await resolveReadOnlyAlternateObjectDirs(realRepoRoot)
+    : undefined;
+
   const carryDelta = await computeThreeWaySourceRevisionCarryDelta({
     repositoryRoot: options.repositoryRoot,
     baseRevision: snapshot.baseRevision,
@@ -2392,6 +2449,7 @@ export async function verifyCandidateBaselinePrePublication(
     candidateDeletedPaths: deletedPaths,
     extractedConflictPaths: options.extractedConflictPaths,
     scratchRoot: options.scratchRoot,
+    alternateObjectDirs: sharedAlternateDirs,
     gitEnv: options.gitEnv,
     forceIndexFallback: options.forceIndexFallback,
     scrubber: options.scrubber,
@@ -2410,6 +2468,7 @@ export async function verifyCandidateBaselinePrePublication(
     sourceEntries,
     extractedConflictPaths: carryDelta.resolvedConflictPaths,
     scratchRoot: options.scratchRoot,
+    alternateObjectDirs: sharedAlternateDirs,
     scrubber: options.scrubber,
     onLog: options.onLog,
   });

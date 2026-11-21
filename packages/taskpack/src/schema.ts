@@ -2117,11 +2117,12 @@ function validateHandoffSelectors(raw: unknown, path: string): readonly StepHand
     let id: string | undefined;
     if (Object.hasOwn(rec, 'id') && rec['id'] !== undefined) {
       id = requireIdentifier(rec['id'], `${itemPath}/id`);
-      if (seenIds.has(id)) {
-        manifestInvalid(`duplicate handoff selector id "${id}"`, `${itemPath}/id`);
-      }
-      seenIds.add(id);
     }
+    const effectiveId = id ?? `handoff-${idx + 1}`;
+    if (seenIds.has(effectiveId)) {
+      manifestInvalid(`duplicate handoff selector id "${effectiveId}"`, `${itemPath}/id`);
+    }
+    seenIds.add(effectiveId);
 
     if (!Object.hasOwn(rec, 'fromStep')) {
       manifestInvalid('handoff selector requires "fromStep"', `${itemPath}/fromStep`);

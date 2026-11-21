@@ -291,6 +291,13 @@ export class TenantAdmissionQueue {
     queueError('QUEUE_STATE_INVALID', `queue item ${queueItemId} has no expired lease to reconcile`);
   }
 
+  getItem(tenant: TenantIdentity, queueItemId: string): QueueItem | null {
+    validateTenantIdentity(tenant);
+    const item = this.#items.get(queueItemId);
+    if (item === undefined || !sameTenant(item.tenant, tenant)) return null;
+    return copyItem(item);
+  }
+
   inspectTenantQueue(tenant: TenantIdentity): { readonly counts: QueueCounts; readonly items: readonly QueueItem[] } {
     validateTenantIdentity(tenant);
     const items = [...this.#items.values()].filter(item => sameTenant(item.tenant, tenant)).map(copyItem);
