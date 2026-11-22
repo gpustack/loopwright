@@ -183,7 +183,7 @@ spec:
         implementation: command.v1
         parameters:
           script: .auto-sync/checks/verify.sh
-          timeoutSeconds: 900
+          timeoutSeconds: 2100
           allowReadOnlyGitHubToken: false
           networkMode: loopback-only
           env:
@@ -223,12 +223,12 @@ spec:
         temperature: 0.4
         top_p: 0.9
   limits:
-    wallTimeSeconds: 2700
+    wallTimeSeconds: 3600
     totalTokens: 20000000
     contextWindow: 1000000
     maxOutputTokens: 65536
     maxModelCalls: 128
-    commandTimeoutSeconds: 900
+    commandTimeoutSeconds: 2100
     toolTimeoutSeconds: 300
     maxAttempts: 3
     overlay:
