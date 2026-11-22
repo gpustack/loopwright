@@ -3344,13 +3344,13 @@ export function buildCommandScriptInvocation(
           bwrapArgs.push('--ro-bind', roPath, roPath);
         }
 
-        if (gitBind !== null) {
-          bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
-        }
-
         for (const wp of canonicalWritables) {
           if (probeHost && !existsSync(wp)) continue;
           bwrapArgs.push('--bind', wp, wp);
+        }
+
+        if (gitBind !== null) {
+          bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
         }
 
         const mountedRoots = [
@@ -3442,13 +3442,13 @@ export function buildCommandScriptInvocation(
         bwrapArgs.push('--ro-bind', roPath, roPath);
       }
 
-      if (gitBind !== null) {
-        bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
-      }
-
       for (const wp of canonicalWritables) {
         if (probeHost && !existsSync(wp)) continue;
         bwrapArgs.push('--bind', wp, wp);
+      }
+
+      if (gitBind !== null) {
+        bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
       }
 
       for (const deniedPath of sortPathsShortestFirst(postMountDeniedSet)) {
@@ -3829,6 +3829,21 @@ const BROAD_FORBIDDEN_TOOL_ROOTS: ReadonlySet<string> = new Set([
   '/opt',
 ]);
 
+const ENV_MOUNT_DENIED_SYSTEM_ROOTS: readonly string[] = Object.freeze([
+  '/etc',
+  '/private/etc',
+  '/var/lib',
+  '/var/run',
+  '/run',
+  '/proc',
+  '/sys',
+  '/dev',
+  '/root',
+  '/boot',
+  '/private/var/db',
+  '/private/var/run',
+]);
+
 export function collectPositiveRuntimeToolReadRoots(options: {
   readonly childEnv: Readonly<Record<string, string>>;
   readonly gate: CompiledLocalCommandGate;
@@ -3854,16 +3869,33 @@ export function collectPositiveRuntimeToolReadRoots(options: {
     return false;
   };
 
-  const isSafeRuntimeToolDir = (realDir: string): boolean => {
+  const isSafeRuntimeToolDir = (
+    realDir: string,
+    dirOptions?: { readonly allowTmpSubdir?: boolean },
+  ): boolean => {
     if (realDir.length === 0 || realDir.length > 1024 || /[\0\r\n"\\]/.test(realDir) || !isAbsolute(realDir)) {
       return false;
     }
     if (BROAD_FORBIDDEN_TOOL_ROOTS.has(realDir)) return false;
+    if (ENV_MOUNT_DENIED_SYSTEM_ROOTS.some(denied => isSameOrStrictChildPath(realDir, denied))) {
+      return false;
+    }
     if (canonHome !== null && isSameOrStrictChildPath(canonHome, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonRepoRoot) || isSameOrStrictChildPath(canonRepoRoot, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonRunRoot) || isSameOrStrictChildPath(canonRunRoot, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonScratchBase) || isSameOrStrictChildPath(canonScratchBase, realDir)) return false;
-    if (
+    if (dirOptions?.allowTmpSubdir === true) {
+      if (
+        realDir === canonTmpDir
+        || isSameOrStrictChildPath(canonTmpDir, realDir)
+        || realDir === '/tmp'
+        || realDir === '/private/tmp'
+        || realDir === '/var/folders'
+        || realDir === '/private/var/folders'
+      ) {
+        return false;
+      }
+    } else if (
       isSameOrStrictChildPath(realDir, canonTmpDir)
       || isSameOrStrictChildPath(canonTmpDir, realDir)
       || isSameOrStrictChildPath(realDir, '/tmp')
@@ -3980,6 +4012,25 @@ export function collectPositiveRuntimeToolReadRoots(options: {
           // Ignore broken test fixture path.
         }
       }
+    }
+  }
+
+  // Mount existing absolute host directories explicitly forwarded via manifest parameters.env
+  // (for example preflight stage/cache directories such as AUTOSYNC_STAGE_DIR) read-only,
+  // reusing isSafeRuntimeToolDir to refuse broad roots, system config/state trees, and sensitive paths.
+  for (const envName of gate.env) {
+    const rawVal = childEnv[envName]?.trim();
+    if (rawVal === undefined || rawVal.length === 0 || rawVal.length > 1024 || !isAbsolute(rawVal) || /[\0\r\n"\\]/.test(rawVal)) {
+      continue;
+    }
+    if (!existsSync(rawVal)) continue;
+    try {
+      const realDir = realpathSync(rawVal);
+      if (isSafeRuntimeToolDir(realDir, { allowTmpSubdir: true })) {
+        out.add(realDir);
+      }
+    } catch {
+      // Ignore unreadable or broken env path values.
     }
   }
 
@@ -5461,7 +5512,10 @@ export async function startLocalCommandGateServer(
           const canonScratchBase = canonicalizeCommandContainmentPath(scratchBase, 'scratchBase');
           const canonTmpDir = canonicalizeCommandContainmentPath(tmpdir(), 'tmpdir');
           const homeDeniedSet = collectDefaultDeniedHomePaths();
+          const effectiveGateNetworkMode: SandboxNetworkMode = gate.networkMode
+            ?? (gate.allowCheckNetwork === true ? 'allow-outbound' : 'none');
           const writablePaths = [
+            canonCandidateDir,
             canonicalizeCommandContainmentPath(outDir, 'outDir'),
             canonicalizeCommandContainmentPath(scratchHome, 'scratchHome'),
             canonicalizeCommandContainmentPath(scratchTmp, 'scratchTmp'),
@@ -5507,9 +5561,6 @@ export async function startLocalCommandGateServer(
           }
           deniedReadPathSet.delete('/');
           deniedReadPathSet.delete(canonCandidateDir);
-
-          const effectiveGateNetworkMode: SandboxNetworkMode = gate.networkMode
-            ?? (gate.allowCheckNetwork === true ? 'allow-outbound' : 'none');
           const registerKiller = (kill: () => void): (() => void) => {
             activeKillers.add(kill);
             return () => {

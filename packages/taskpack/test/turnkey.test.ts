@@ -701,6 +701,27 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
       assert.ok(outIdx > candIdx);
       assert.ok(maskIdx > outIdx, 'strict denied child inside mounted root is masked after mounts');
 
+      // Writable candidateDir still keeps .git/objects mounted read-only AFTER --bind candidateDir
+      const bwrapWritableCand = buildCommandScriptInvocation('/work/check-dir/check.sh', {
+        platform: 'linux',
+        arch: 'x64',
+        linuxBwrapExecutable: '/usr/bin/bwrap',
+        networkMode: 'none',
+        cwd: '/work/cand',
+        allowedReadOnlyPaths: ['/work/base', '/work/check-dir', '/tmp/autosync-stage/priors'],
+        writablePaths: ['/work/cand', '/work/out'],
+        readOnlyGitObjectsBind: { sourceObjectsDir: '/repo/.git/objects', targetObjectsDir: '/work/cand/.git/objects' },
+      });
+      const expectedStageRo = process.platform === 'darwin'
+        ? '/private/tmp/autosync-stage/priors'
+        : '/tmp/autosync-stage/priors';
+      const rwCandIdx = findTriplet(bwrapWritableCand.args, '--bind', '/work/cand', '/work/cand');
+      const rwGitObjIdx = findTriplet(bwrapWritableCand.args, '--ro-bind', '/repo/.git/objects', '/work/cand/.git/objects');
+      const roStageIdx = findTriplet(bwrapWritableCand.args, '--ro-bind', expectedStageRo, expectedStageRo);
+      assert.ok(rwCandIdx >= 0);
+      assert.ok(roStageIdx >= 0, 'explicitly allowed stage dir under /tmp is bind-mounted read-only');
+      assert.ok(rwGitObjIdx > rwCandIdx, 'git objects --ro-bind must follow writable candidateDir --bind');
+
       // R3-5 & R4-1: Linux bwrap "none" installs --seccomp 3 IP-socket filter while "loopback-only" omits --seccomp (lo is auto-configured by bwrap)
       const bwrapNone = buildCommandScriptInvocation('/work/check-dir/check.sh', {
         platform: 'linux',
@@ -965,6 +986,38 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         assert.equal(toolRoots.includes(sysTmpReal), false, 'must NOT grant containing /private/tmp or /tmp directory');
         assert.equal(toolRoots.includes('/tmp'), false);
         assert.equal(toolRoots.includes('/private/tmp'), false);
+
+        // Env-derived read roots admit strict tmp subdirectories while refusing /etc, /tmp, and repoRoot
+        const envStageDir = join(sysTmpReal, `lw-env-stage-${process.pid}-${Date.now()}`);
+        await mkdir(envStageDir, { recursive: true });
+        try {
+          const envRoots = collectPositiveRuntimeToolReadRoots({
+            childEnv: {
+              PATH: '/usr/bin:/bin',
+              AUTOSYNC_STAGE_DIR: envStageDir,
+              BAD_ETC_DIR: '/etc',
+              BAD_TMP_DIR: '/tmp',
+              BAD_REPO_DIR: repoRoot,
+            },
+            gate: {
+              ...privGate,
+              env: ['AUTOSYNC_STAGE_DIR', 'BAD_ETC_DIR', 'BAD_TMP_DIR', 'BAD_REPO_DIR'],
+            },
+            canonRepoRoot: repoRoot,
+            canonRunRoot: runRoot,
+            canonScratchBase: join(holder, 'scratch'),
+            canonTmpDir: base,
+            homeDeniedSet: new Set<string>(),
+          });
+          assert.equal(envRoots.includes(envStageDir), true, 'must admit strict child stage dir declared in gate.env');
+          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env');
+          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env');
+          assert.equal(envRoots.includes('/tmp'), false, 'must refuse bare /tmp via gate.env');
+          assert.equal(envRoots.includes('/private/tmp'), false, 'must refuse bare /private/tmp via gate.env');
+          assert.equal(envRoots.includes(repoRoot), false, 'must refuse repoRoot via gate.env');
+        } finally {
+          await rm(envStageDir, { recursive: true, force: true }).catch(() => undefined);
+        }
 
         // Hardlinked HUGO_BIN (nlink > 1) must be refused
         await link(fakeHugoPath, fakeHugoHardlink);
@@ -1385,13 +1438,18 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
             'if cat "$AGENT_WS_FILE" >/dev/null 2>&1; then echo "READ_AGENT_WS_LEAK"; exit 21; fi',
             'if cat "$STAGE_PARENT/secrets.json" >/dev/null 2>&1; then echo "READ_SECRETS_JSON_LEAK"; exit 22; fi',
             'if cat "$REPO_ROOT_PATH/.git/config" >/dev/null 2>&1; then echo "READ_REPO_GIT_CONFIG_LEAK"; exit 23; fi',
-            '# Writing to candidateDir or host repoRoot MUST fail',
-            'if sh -c \'echo hacked > "$LOOPWRIGHT_CANDIDATE_DIR/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_CANDIDATE_LEAK"; exit 24; fi',
-            'if sh -c \'echo hacked > "$REPO_ROOT_PATH/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_REPO_LEAK"; exit 25; fi',
-            '# Reading candidateDir, baseDir, exposeToChecks LOOPWRIGHT_STAGED_DIR and writing TMPDIR + LOOPWRIGHT_CHECK_OUT MUST succeed',
+            '# Writing to read-only baseDir, stagedDir, declaredStageDir, or host repoRoot MUST fail',
+            'if sh -c \'echo hacked > "$LOOPWRIGHT_BASE_DIR/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_BASE_LEAK"; exit 24; fi',
+            'if sh -c \'echo hacked > "$LOOPWRIGHT_STAGED_DIR/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_STAGED_LEAK"; exit 25; fi',
+            'if sh -c \'echo hacked > "$DECLARED_STAGE_DIR/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_DECLARED_STAGE_LEAK"; exit 26; fi',
+            'if sh -c \'echo hacked > "$REPO_ROOT_PATH/hacked.txt"\' >/dev/null 2>&1; then echo "WRITE_REPO_LEAK"; exit 27; fi',
+            '# Reading candidateDir, baseDir, exposeToChecks LOOPWRIGHT_STAGED_DIR, and declared stage dir + writing disposable candidateDir & TMPDIR MUST succeed',
             'grep -q "v2" "$LOOPWRIGHT_CANDIDATE_DIR/src/target.txt"',
             'grep -q "v1" "$LOOPWRIGHT_BASE_DIR/src/target.txt"',
             'grep -q "PUBLIC_CHECK_OK" "$LOOPWRIGHT_STAGED_DIR/public-check.txt"',
+            'grep -q "DECLARED_STAGE_OK" "$DECLARED_STAGE_DIR/cache.txt"',
+            'echo "build-temp-ok" > "$LOOPWRIGHT_CANDIDATE_DIR/scratch-build.txt"',
+            'grep -q "build-temp-ok" "$LOOPWRIGHT_CANDIDATE_DIR/scratch-build.txt"',
             'echo "scratch-ok" > "$TMPDIR/scratch.txt"',
             'grep -q "scratch-ok" "$TMPDIR/scratch.txt"',
             '# On macOS, verify LOOPWRIGHT_MACOS_SB_SOCK enforces genuine per-stage none vs loopback-only and monotonic tightening',
@@ -1525,7 +1583,7 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
                       script: '.loopwright/checks/contain-check.sh',
                       timeoutSeconds: 20,
                       networkMode: canEnforceLoopbackNetns ? 'loopback-only' : 'none',
-                      env: ['REPO_ROOT_PATH', 'AGENT_WS_FILE', 'UNGRANTED_HOME_FILE', 'LOOPBACK_PROBE_PORT'],
+                      env: ['REPO_ROOT_PATH', 'AGENT_WS_FILE', 'UNGRANTED_HOME_FILE', 'DECLARED_STAGE_DIR', 'LOOPBACK_PROBE_PORT'],
                     },
                   },
                 ],
@@ -1551,6 +1609,10 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
         const agentWsFile = join(staged.workspaceStagedDir!, 'agent-secret.txt');
         assert.equal(await readFile(agentWsFile, 'utf8'), 'TOP_SECRET_AGENT_ONLY\n');
 
+        const declaredStageDir = join(holder, 'declared-stage-cache');
+        await mkdir(declaredStageDir, { recursive: true });
+        await writeFile(join(declaredStageDir, 'cache.txt'), 'DECLARED_STAGE_OK\n', 'utf8');
+
         const gateHandle = await openStagedTaskpackStepGate({
           runRoot,
           runId,
@@ -1559,6 +1621,7 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
             REPO_ROOT_PATH: repoRoot,
             AGENT_WS_FILE: agentWsFile,
             UNGRANTED_HOME_FILE: ungrantedHomeSiblingFile,
+            DECLARED_STAGE_DIR: declaredStageDir,
             LOOPBACK_PROBE_PORT: String(loopbackPort),
           },
         });
@@ -1617,6 +1680,8 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
             'completed',
           );
           await assert.rejects(stat(join(repoRoot, 'hacked.txt')), { code: 'ENOENT' });
+          await assert.rejects(stat(join(repoRoot, 'scratch-build.txt')), { code: 'ENOENT' });
+          await assert.rejects(stat(join(declaredStageDir, 'hacked.txt')), { code: 'ENOENT' });
         } finally {
           await gateHandle.close();
         }
