@@ -31,7 +31,7 @@ Generic declarative `Taskpack` execution lives in `@loopwright/taskpack` (`packa
 | `github-app/src/action.ts` | `runGitHubActionEntrypoint` (`policyProfile: 'github'`) and `INPUT_*` CLI shim |
 | `github-app/src/publisher.ts` | Single-fd `1 MiB` streaming CAS PR publisher with 3-way carry and conflict guards |
 | `github-app/src/suite-pr-lookup.ts` | Authenticated `issue_comment` PR branch ownership and same-repo verification |
-| `github-app/src/turnkey-memory.ts` | Post-settlement `separate-pull-request` CAS memory publication |
+| `github-app/src/turnkey-memory.ts` | Post-settlement `separate-pull-request` and `inline-with-candidate` CAS memory publication |
 | `github-app/src/service.ts` | `startGitHubAppControlPlane` loopback HTTP receiver, suite routing, and `MULTI_TENANT_HOST_POLICY` |
 
 Repository CI/CD runs from `.github/workflows/`. Configure consumer workflows separately and review the [Action limits](../operations/github-action.md).

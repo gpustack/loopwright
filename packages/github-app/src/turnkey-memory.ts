@@ -61,6 +61,7 @@ import {
   type TurnkeyMemorySummary,
   type UpstreamAcquisitionRecord,
 } from '@loopwright/taskpack';
+import { type PublishedCandidatePullRequest } from './publisher.js';
 import { GitHubAppError } from './types.js';
 import { findOpenMemoryPullRequest } from './upstreams.js';
 
@@ -74,6 +75,7 @@ export interface FinalizeAndPublishTurnkeyMemoryOptions {
   readonly baseRevision: string;
   readonly upstreamRecords?: readonly TaskpackUpstreamRecord[] | undefined;
   readonly targetMatrix?: TargetMatrixCell | null | undefined;
+  readonly candidatePublication?: PublishedCandidatePullRequest | null | undefined;
   readonly remoteUrl?: string | undefined;
   readonly apiBaseUrl?: string | undefined;
   readonly githubToken?: string | undefined;
@@ -647,6 +649,9 @@ function validateMemoryPullRequestApiResponse(
  * - `apply: 'separate-pull-request'` clones into an isolated scratch directory and
  *   publishes `loopwright/memory/<taskpack>/<targetBranch>` without mutating
  *   `repositoryRoot`, `.git/worktrees`, primary `RunResult`, or the candidate PR branch.
+ * - `apply: 'inline-with-candidate'` skips unless a candidate PR was published for
+ *   this run, then appends a host-signed memory-only commit onto the published
+ *   candidate PR branch with `--force-with-lease` protection and zero second PR.
  * - `apply: 'local-only'` and `apply: 'disabled'` delegate to `@loopwright/taskpack`
  *   under `policyProfile: 'github'`.
  */
@@ -671,8 +676,13 @@ export async function finalizeAndPublishTurnkeyMemory(
     const { manifestPath } = resolveManifestControlRoot(options.manifest, options.taskpackPath);
     const taskpack = options.manifest.metadata.name;
     const targetBranch = options.manifest.spec.publication.targetBranch ?? 'main';
-    const memoryBranch = `loopwright/memory/${taskpack}/${targetBranch}`;
+    const defaultMemoryBranch = `loopwright/memory/${taskpack}/${targetBranch}`;
     const memoryApply = options.manifest.spec.memory.apply;
+    const isInlineMode = memoryApply === 'inline-with-candidate';
+    const candidatePublication = isInlineMode ? (options.candidatePublication ?? null) : null;
+    const memoryBranch = isInlineMode && candidatePublication !== null
+      ? candidatePublication.branchName
+      : defaultMemoryBranch;
 
     if (memoryApply === 'disabled') {
       return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'memory_apply_disabled');
@@ -760,14 +770,27 @@ export async function finalizeAndPublishTurnkeyMemory(
           reason: existingReceipt.reason ?? 'memory publication outcome is uncertain from a prior attempt; reconcile before replaying',
         });
       }
+      const expectedReceiptBranch = isInlineMode
+        ? (candidatePublication?.branchName ?? existingReceipt.branchName)
+        : memoryBranch;
+      const inlineReceiptBranchInvalid = isInlineMode && (
+        expectedReceiptBranch === targetBranch
+        || !SAFE_BRANCH_PATTERN.test(expectedReceiptBranch)
+        || expectedReceiptBranch.includes('..')
+        || expectedReceiptBranch.startsWith('-')
+      );
       const retainedRunMismatch = await verifyRetainedRunDescriptorIfPresent(options.runRoot, expectedBindings);
-      const bindingMismatchReason = validateReceiptBindings(existingReceipt, {
-        repositoryFullName: options.repositoryFullName,
-        taskpack,
-        targetBranch,
-        memoryDirectory,
-        memoryBranch,
-      }) ?? retainedRunMismatch;
+      const bindingMismatchReason = (inlineReceiptBranchInvalid
+        ? `inline memory receipt branch "${expectedReceiptBranch}" is invalid or targets "${targetBranch}"`
+        : null)
+        ?? validateReceiptBindings(existingReceipt, {
+          repositoryFullName: options.repositoryFullName,
+          taskpack,
+          targetBranch,
+          memoryDirectory,
+          memoryBranch: expectedReceiptBranch,
+        })
+        ?? retainedRunMismatch;
       if (bindingMismatchReason !== null) {
         return Object.freeze({
           status: 'refused',
@@ -792,6 +815,46 @@ export async function finalizeAndPublishTurnkeyMemory(
         pullRequestNumber: existingReceipt.pullRequestNumber,
         reason: null,
       });
+    }
+
+    if (isInlineMode) {
+      if (options.manifest.spec.publication.mode !== 'pull_request') {
+        return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'publication.mode is disabled; inline memory skipped');
+      }
+      if (candidatePublication === null) {
+        return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'no_candidate_pull_request');
+      }
+      if (candidatePublication.runId !== options.runId) {
+        return buildEmptyMemorySummary(memoryDirectory, 'refused', 'candidate publication runId does not match settled runId', {
+          branchName: candidatePublication.branchName,
+          pullRequestUrl: candidatePublication.pullRequestUrl,
+          pullRequestNumber: candidatePublication.pullRequestNumber,
+        });
+      }
+      if (!COMMIT_SHA_PATTERN.test(candidatePublication.headSha)) {
+        return buildEmptyMemorySummary(memoryDirectory, 'failed', 'candidate publication headSha is not a 40-hex commit SHA', {
+          branchName: candidatePublication.branchName,
+          pullRequestUrl: candidatePublication.pullRequestUrl,
+          pullRequestNumber: candidatePublication.pullRequestNumber,
+        });
+      }
+      if (
+        !SAFE_BRANCH_PATTERN.test(candidatePublication.branchName)
+        || candidatePublication.branchName.includes('..')
+        || candidatePublication.branchName.startsWith('-')
+      ) {
+        return buildEmptyMemorySummary(memoryDirectory, 'failed', `unsafe candidate branch name "${candidatePublication.branchName}"`);
+      }
+      if (candidatePublication.branchName === targetBranch) {
+        return buildEmptyMemorySummary(memoryDirectory, 'refused', `refusing to append inline memory directly onto target branch "${targetBranch}"`, {
+          branchName: candidatePublication.branchName,
+          pullRequestUrl: candidatePublication.pullRequestUrl,
+          pullRequestNumber: candidatePublication.pullRequestNumber,
+        });
+      }
+      trackedBranchName = candidatePublication.branchName;
+      trackedPrUrl = candidatePublication.pullRequestUrl;
+      trackedPrNumber = candidatePublication.pullRequestNumber;
     }
 
     // 1. Validate working-tree memory path segments on repositoryRoot before cloning.
@@ -837,9 +900,20 @@ export async function finalizeAndPublishTurnkeyMemory(
       });
       if (!settledPreOutcome.ok) return settledPreOutcome.summary;
       const settledPre = settledPreOutcome.settled;
-      const primaryRunSucceeded = settledPre.incident === null
+      const primaryRunCompleted = settledPre.incident === null
         && settledPre.result !== null
-        && (settledPre.result.spec.status === 'completed' || settledPre.result.spec.status === 'no_change');
+        && settledPre.result.spec.status === 'completed';
+      const primaryRunSucceeded = primaryRunCompleted
+        || (settledPre.incident === null
+          && settledPre.result !== null
+          && settledPre.result.spec.status === 'no_change');
+      if (isInlineMode && !primaryRunCompleted) {
+        return buildEmptyMemorySummary(memoryDirectory, 'skipped', 'candidate_run_not_completed', {
+          branchName: candidatePublication?.branchName ?? null,
+          pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
+          pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
+        });
+      }
       if (
         memoryApply === 'separate-pull-request'
         && options.manifest.spec.memory.publishOnFailure !== true
@@ -866,13 +940,18 @@ export async function finalizeAndPublishTurnkeyMemory(
       const apiBaseUrl = (options.apiBaseUrl?.trim() || options.runtimeEnv?.['GITHUB_API_URL']?.trim() || '').replace(/\/+$/, '');
       const hasGitHubCredentials = typeof options.githubToken === 'string' && options.githubToken.trim().length > 0;
       const publicationModeEnabled = options.manifest.spec.publication.mode === 'pull_request'
-        && options.manifest.spec.memory.apply === 'separate-pull-request';
-      const remotePublicationRequested = publicationModeEnabled && apiBaseUrl.length > 0 && hasGitHubCredentials;
+        && (memoryApply === 'separate-pull-request' || isInlineMode);
 
+      let remoteKind: 'https' | 'local-dir' | undefined;
       let protocolArgs: readonly string[] = ['-c', 'protocol.ext.allow=never', '-c', 'protocol.ssh.allow=never'];
+      const remotePublicationRequested = publicationModeEnabled && (
+        isInlineMode
+          ? true
+          : (apiBaseUrl.length > 0 && hasGitHubCredentials)
+      );
       if (resolvedRemote !== undefined) {
         try {
-          const remoteKind = validateGitRemoteSource(resolvedRemote);
+          remoteKind = validateGitRemoteSource(resolvedRemote);
           protocolArgs = remoteKind === 'local-dir'
             ? ['-c', 'protocol.file.allow=always', '-c', 'protocol.ext.allow=never', '-c', 'protocol.ssh.allow=never']
             : ['-c', 'protocol.ext.allow=never', '-c', 'protocol.ssh.allow=never'];
@@ -885,9 +964,9 @@ export async function finalizeAndPublishTurnkeyMemory(
               proposalId: null,
               entryCount: 0,
               rebased: false,
-              branchName: null,
-              pullRequestUrl: null,
-              pullRequestNumber: null,
+              branchName: isInlineMode ? memoryBranch : null,
+              pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
+              pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
               reason: truncateCodePoints(
                 sanitizeReportText(detail, { scrub: text => scrubber.scrub(text), singleLine: true }),
                 MAX_REASON_CODEPOINTS,
@@ -898,12 +977,109 @@ export async function finalizeAndPublishTurnkeyMemory(
         }
       }
 
-      const canPublishRemote = remotePublicationRequested
-        && memoryBranchSafe
-        && resolvedRemote !== undefined;
+      const inlineRemoteReady = isInlineMode
+        && resolvedRemote !== undefined
+        && (remoteKind === 'local-dir' || hasGitHubCredentials);
+      const canPublishRemote = isInlineMode
+        ? (publicationModeEnabled && inlineRemoteReady && memoryBranchSafe)
+        : (remotePublicationRequested && memoryBranchSafe && resolvedRemote !== undefined);
 
       let currentTargetTip = options.baseRevision;
-      if (canPublishRemote && resolvedRemote !== undefined) {
+      let parentCommit = options.baseRevision;
+      let openMemoryPr: ManagedPullRequestInfo | null = null;
+      let expectedRemoteOid = '';
+      let openMemoryManagedFiles: readonly { readonly path: string; readonly bytes: Buffer }[] | null = null;
+
+      if (isInlineMode && canPublishRemote && resolvedRemote !== undefined && candidatePublication !== null) {
+        const expectedCandidateHead = candidatePublication.headSha.toLowerCase();
+        const candidateFetchRes = await execGitDetailed(
+          cloneDir,
+          [...protocolArgs, 'fetch', '--quiet', '--', resolvedRemote, `refs/heads/${memoryBranch}:refs/remotes/candidate/head`],
+          { env: gitAuthEnv, timeoutMs: 15_000 },
+        );
+        if (
+          candidateFetchRes.spawnError !== null
+          || candidateFetchRes.stdoutOverflow
+          || candidateFetchRes.timedOut
+          || candidateFetchRes.signal !== null
+          || candidateFetchRes.code !== 0
+        ) {
+          const stderrText = candidateFetchRes.stderr.toString('utf8').trim();
+          return Object.freeze({
+            status: 'failed',
+            directory: memoryDirectory,
+            proposalId: null,
+            entryCount: 0,
+            rebased: false,
+            branchName: memoryBranch,
+            pullRequestUrl: candidatePublication.pullRequestUrl,
+            pullRequestNumber: candidatePublication.pullRequestNumber,
+            reason: truncateCodePoints(
+              sanitizeReportText(
+                `failed to fetch remote candidate branch "${memoryBranch}" for inline memory commit${stderrText.length > 0 ? `: ${stderrText}` : ''}`,
+                { scrub: text => scrubber.scrub(text), singleLine: true },
+              ),
+              MAX_REASON_CODEPOINTS,
+            ),
+          });
+        }
+        const fetchedCandidateHead = (
+          await execGit(cloneDir, ['rev-parse', '--verify', 'refs/remotes/candidate/head^{commit}'], { env: cleanGitEnv, timeoutMs: 5_000 })
+        ).toString('utf8').trim().toLowerCase();
+        if (fetchedCandidateHead !== expectedCandidateHead) {
+          return Object.freeze({
+            status: 'refused',
+            directory: memoryDirectory,
+            proposalId: null,
+            entryCount: 0,
+            rebased: false,
+            branchName: memoryBranch,
+            pullRequestUrl: candidatePublication.pullRequestUrl,
+            pullRequestNumber: candidatePublication.pullRequestNumber,
+            reason: `MEMORY_CAS_CONFLICT: candidate pull request branch "${memoryBranch}" moved concurrently before inline memory commit`,
+          });
+        }
+
+        const baseRevEntries = await listTreeEntriesAtRevision(cloneDir, options.baseRevision, cleanGitEnv);
+        const candidateEntries = await listTreeEntriesAtRevision(cloneDir, expectedCandidateHead, cleanGitEnv);
+        const baseManagedMap = new Map<string, string>();
+        for (const [path, entry] of baseRevEntries) {
+          if (isMemoryManagedPath(taskpack, path, memoryRoot)) {
+            baseManagedMap.set(path, `${entry.mode}:${entry.oid}`);
+          }
+        }
+        const candidateManagedMap = new Map<string, string>();
+        for (const [path, entry] of candidateEntries) {
+          if (isMemoryManagedPath(taskpack, path, memoryRoot)) {
+            candidateManagedMap.set(path, `${entry.mode}:${entry.oid}`);
+          }
+        }
+        let managedMemoryModifiedByCandidate = baseManagedMap.size !== candidateManagedMap.size;
+        if (!managedMemoryModifiedByCandidate) {
+          for (const [path, sig] of baseManagedMap) {
+            if (candidateManagedMap.get(path) !== sig) {
+              managedMemoryModifiedByCandidate = true;
+              break;
+            }
+          }
+        }
+        if (managedMemoryModifiedByCandidate) {
+          return Object.freeze({
+            status: 'refused',
+            directory: memoryDirectory,
+            proposalId: null,
+            entryCount: 0,
+            rebased: false,
+            branchName: memoryBranch,
+            pullRequestUrl: candidatePublication.pullRequestUrl,
+            pullRequestNumber: candidatePublication.pullRequestNumber,
+            reason: `MEMORY_CAS_CONFLICT: candidate pull request branch "${memoryBranch}" already modified managed memory paths`,
+          });
+        }
+
+        parentCommit = expectedCandidateHead;
+        expectedRemoteOid = expectedCandidateHead;
+      } else if (!isInlineMode && canPublishRemote && resolvedRemote !== undefined) {
         if (!targetBranchSafe) {
           return Object.freeze({
             status: 'failed',
@@ -965,7 +1141,8 @@ export async function finalizeAndPublishTurnkeyMemory(
           });
         }
         currentTargetTip = fetchedTip;
-      } else if (publicationModeEnabled && resolvedRemote !== undefined && targetBranchSafe) {
+        parentCommit = fetchedTip;
+      } else if (!isInlineMode && publicationModeEnabled && resolvedRemote !== undefined && targetBranchSafe) {
         const fetchedTip = await execGit(
           cloneDir,
           [...protocolArgs, 'fetch', '--quiet', '--', resolvedRemote, `refs/heads/${targetBranch}:refs/remotes/target/tip`],
@@ -976,14 +1153,11 @@ export async function finalizeAndPublishTurnkeyMemory(
         );
         if (COMMIT_SHA_PATTERN.test(fetchedTip)) {
           currentTargetTip = fetchedTip;
+          parentCommit = fetchedTip;
         }
       }
 
-      let openMemoryPr: ManagedPullRequestInfo | null = null;
-      let expectedRemoteOid = '';
-      let openMemoryManagedFiles: readonly { readonly path: string; readonly bytes: Buffer }[] | null = null;
-
-      if (canPublishRemote && resolvedRemote !== undefined) {
+      if (!isInlineMode && canPublishRemote && resolvedRemote !== undefined) {
         trackedBranchName = memoryBranch;
         const lsRemoteOut = (
           await execGit(
@@ -1268,10 +1442,13 @@ export async function finalizeAndPublishTurnkeyMemory(
       }
 
       if (
-        options.manifest.spec.memory.apply !== 'separate-pull-request'
-        || resolvedRemote === undefined
-        || apiBaseUrl.length === 0
-        || !hasGitHubCredentials
+        (isInlineMode && !inlineRemoteReady)
+        || (!isInlineMode && (
+          options.manifest.spec.memory.apply !== 'separate-pull-request'
+          || resolvedRemote === undefined
+          || apiBaseUrl.length === 0
+          || !hasGitHubCredentials
+        ))
       ) {
         return Object.freeze({
           status: 'local_only',
@@ -1280,9 +1457,24 @@ export async function finalizeAndPublishTurnkeyMemory(
           entryCount: finalized.proposal.operations.length,
           rebased: casResult.rebased,
           branchName: memoryBranch,
-          pullRequestUrl: null,
-          pullRequestNumber: null,
-          reason: 'GitHub credentials, API URL, or git remote unavailable for separate memory PR publication',
+          pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
+          pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
+          reason: isInlineMode
+            ? 'GitHub credentials or git remote unavailable for inline memory commit'
+            : 'GitHub credentials, API URL, or git remote unavailable for separate memory PR publication',
+        });
+      }
+      if (resolvedRemote === undefined) {
+        return Object.freeze({
+          status: 'local_only',
+          directory: memoryDirectory,
+          proposalId: finalized.proposal.proposalId,
+          entryCount: finalized.proposal.operations.length,
+          rebased: casResult.rebased,
+          branchName: memoryBranch,
+          pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
+          pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
+          reason: 'git remote unavailable for memory publication',
         });
       }
 
@@ -1301,10 +1493,10 @@ export async function finalizeAndPublishTurnkeyMemory(
       ): Promise<Buffer> => execGit(cloneDir, args, { env: { ...gitAuthEnv, GIT_INDEX_FILE: memIndexFile }, ...extraOpts });
 
       const baseTreeOid = (
-        await gitClone(['rev-parse', '--verify', '--end-of-options', `${currentTargetTip}^{tree}`])
+        await gitClone(['rev-parse', '--verify', '--end-of-options', `${parentCommit}^{tree}`])
       ).toString('utf8').trim();
-      await gitWithMemIndex(['read-tree', `${currentTargetTip}^{tree}`]);
-      const baseEntries = await listTreeEntriesAtRevision(cloneDir, currentTargetTip, cleanGitEnv);
+      await gitWithMemIndex(['read-tree', `${parentCommit}^{tree}`]);
+      const baseEntries = await listTreeEntriesAtRevision(cloneDir, parentCommit, cleanGitEnv);
 
       const existingBaseManagedPaths = [...baseEntries.keys()].filter(path => isMemoryManagedPath(taskpack, path, memoryRoot));
       for (const existingPath of existingBaseManagedPaths) {
@@ -1403,13 +1595,15 @@ export async function finalizeAndPublishTurnkeyMemory(
           entryCount: 0,
           rebased: casResult.rebased,
           branchName: memoryBranch,
-          pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-          pullRequestNumber: openMemoryPr?.number ?? null,
-          reason: 'memory tree already matches target branch',
+          pullRequestUrl: isInlineMode ? candidatePublication?.pullRequestUrl ?? null : openMemoryPr?.htmlUrl ?? null,
+          pullRequestNumber: isInlineMode ? candidatePublication?.pullRequestNumber ?? null : openMemoryPr?.number ?? null,
+          reason: isInlineMode
+            ? 'memory tree already matches candidate branch'
+            : 'memory tree already matches target branch',
         });
       }
 
-      if (openMemoryPr !== null) {
+      if (!isInlineMode && openMemoryPr !== null) {
         const existingOpenTreeOid = (
           await gitClone(['rev-parse', '--verify', '--end-of-options', 'refs/remotes/memory/open^{tree}'])
         ).toString('utf8').trim();
@@ -1444,7 +1638,8 @@ export async function finalizeAndPublishTurnkeyMemory(
       ].join('\n');
       const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
       const hasExactSignoff = cleanTitle === signoffLine;
-      const skipCiParagraph = options.manifest.spec.memory.skipCi !== false ? '\n\n[skip ci]' : '';
+      const effectiveSkipCi = options.manifest.spec.memory.skipCi ?? !isInlineMode;
+      const skipCiParagraph = effectiveSkipCi ? '\n\n[skip ci]' : '';
       const commitMessage = hasExactSignoff
         ? `${cleanTitle}\n\n${commitBody}${skipCiParagraph}\n`
         : `${cleanTitle}\n\n${commitBody}${skipCiParagraph}\n\n${signoffLine}\n`;
@@ -1457,13 +1652,15 @@ export async function finalizeAndPublishTurnkeyMemory(
             'commit-tree',
             treeOid,
             '-p',
-            currentTargetTip,
+            parentCommit,
           ],
           { input: commitMessage },
         )
       ).toString('utf8').trim().toLowerCase();
 
       trackedBranchName = memoryBranch;
+      const existingPrUrl = isInlineMode ? (candidatePublication?.pullRequestUrl ?? null) : (openMemoryPr?.htmlUrl ?? null);
+      const existingPrNumber = isInlineMode ? (candidatePublication?.pullRequestNumber ?? null) : (openMemoryPr?.number ?? null);
       const baseReceiptRecord = {
         version: 1 as const,
         repository: options.repositoryFullName,
@@ -1484,9 +1681,9 @@ export async function finalizeAndPublishTurnkeyMemory(
           ...baseReceiptRecord,
           state: 'uncertain',
           status: 'reconcile_required',
-          pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-          pullRequestNumber: openMemoryPr?.number ?? null,
-          reason: 'memory branch push in flight',
+          pullRequestUrl: existingPrUrl,
+          pullRequestNumber: existingPrNumber,
+          reason: isInlineMode ? 'inline memory branch push in flight' : 'memory branch push in flight',
           updatedAtMs: Date.now(),
         },
         scrubber,
@@ -1499,8 +1696,8 @@ export async function finalizeAndPublishTurnkeyMemory(
           entryCount: finalized.proposal.operations.length,
           rebased: casResult.rebased,
           branchName: memoryBranch,
-          pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-          pullRequestNumber: openMemoryPr?.number ?? null,
+          pullRequestUrl: existingPrUrl,
+          pullRequestNumber: existingPrNumber,
           reason: 'memory publication already in flight or unresolved for this run',
         });
       }
@@ -1598,9 +1795,11 @@ export async function finalizeAndPublishTurnkeyMemory(
             entryCount: 0,
             rebased: casResult.rebased,
             branchName: memoryBranch,
-            pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-            pullRequestNumber: openMemoryPr?.number ?? null,
-            reason: 'MEMORY_CAS_CONFLICT: remote memory branch moved concurrently (force-with-lease rejected)',
+            pullRequestUrl: existingPrUrl,
+            pullRequestNumber: existingPrNumber,
+            reason: isInlineMode
+              ? 'MEMORY_CAS_CONFLICT: remote candidate pull request branch moved concurrently (force-with-lease rejected)'
+              : 'MEMORY_CAS_CONFLICT: remote memory branch moved concurrently (force-with-lease rejected)',
           });
         }
 
@@ -1622,8 +1821,8 @@ export async function finalizeAndPublishTurnkeyMemory(
             ...baseReceiptRecord,
             state: 'uncertain',
             status: 'reconcile_required',
-            pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-            pullRequestNumber: openMemoryPr?.number ?? null,
+            pullRequestUrl: existingPrUrl,
+            pullRequestNumber: existingPrNumber,
             reason: scrubbedPushReason,
             updatedAtMs: Date.now(),
           },
@@ -1636,9 +1835,36 @@ export async function finalizeAndPublishTurnkeyMemory(
           entryCount: finalized.proposal.operations.length,
           rebased: casResult.rebased,
           branchName: memoryBranch,
-          pullRequestUrl: openMemoryPr?.htmlUrl ?? null,
-          pullRequestNumber: openMemoryPr?.number ?? null,
+          pullRequestUrl: existingPrUrl,
+          pullRequestNumber: existingPrNumber,
           reason: scrubbedPushReason,
+        });
+      }
+
+      if (isInlineMode) {
+        await updatePerRunMemoryReceipt(
+          runDir,
+          {
+            ...baseReceiptRecord,
+            state: 'completed',
+            status: 'updated',
+            pullRequestUrl: existingPrUrl,
+            pullRequestNumber: existingPrNumber,
+            reason: null,
+            updatedAtMs: Date.now(),
+          },
+          scrubber,
+        );
+        return Object.freeze({
+          status: 'updated',
+          directory: memoryDirectory,
+          proposalId: finalized.proposal.proposalId,
+          entryCount: finalized.proposal.operations.length,
+          rebased: casResult.rebased,
+          branchName: memoryBranch,
+          pullRequestUrl: existingPrUrl,
+          pullRequestNumber: existingPrNumber,
+          reason: null,
         });
       }
 

@@ -500,37 +500,39 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         const store = await loadMemoryStore(repoRoot, 'local-mem-test', 'local/repo', '.loopwright/memory');
         assert.equal(store.index.entries.length, localSummary.entryCount);
 
-        // 3. separate-pull-request fails closed with TASKPACK_HOST_BINDING_INVALID when no GitHub PR publisher is delegated
-        const prMemManifest = validateTaskpackV2Manifest({
-          apiVersion: 'loopwright.dev/v1alpha1',
-          kind: 'Taskpack',
-          metadata: { name: 'local-mem-test' },
-          spec: {
-            goal: { candidate: 'Update index.ts.', noChange: 'Confirm no change.' },
-            scope: { writable: ['src/**'], protected: [] },
-            memory: {
-              directory: '.loopwright/memory/local-mem-test',
-              apply: 'separate-pull-request',
-              onNoModelBudget: 'deterministic-observations-only',
+        // 3. separate-pull-request and inline-with-candidate fail closed with TASKPACK_HOST_BINDING_INVALID when no GitHub PR publisher is delegated
+        for (const remoteApply of ['separate-pull-request', 'inline-with-candidate'] as const) {
+          const prMemManifest = validateTaskpackV2Manifest({
+            apiVersion: 'loopwright.dev/v1alpha1',
+            kind: 'Taskpack',
+            metadata: { name: 'local-mem-test' },
+            spec: {
+              goal: { candidate: 'Update index.ts.', noChange: 'Confirm no change.' },
+              scope: { writable: ['src/**'], protected: [] },
+              memory: {
+                directory: '.loopwright/memory/local-mem-test',
+                apply: remoteApply,
+                onNoModelBudget: 'deterministic-observations-only',
+              },
+              verification: { localChecks: [], externalGates: [] },
             },
-            verification: { localChecks: [], externalGates: [] },
-          },
-        });
-        await assert.rejects(
-          () => finalizeLocalTurnkeyMemory({
-            runRoot,
-            runId,
-            repositoryRoot: repoRoot,
-            repositoryFullName: 'local/repo',
-            manifest: prMemManifest,
-            baseRevision: baseSha,
-            scrubber,
-          }),
-          (err: unknown) => {
-            if (!(err instanceof TaskpackError)) return false;
-            return err.code === 'TASKPACK_HOST_BINDING_INVALID';
-          },
-        );
+          });
+          await assert.rejects(
+            () => finalizeLocalTurnkeyMemory({
+              runRoot,
+              runId,
+              repositoryRoot: repoRoot,
+              repositoryFullName: 'local/repo',
+              manifest: prMemManifest,
+              baseRevision: baseSha,
+              scrubber,
+            }),
+            (err: unknown) => {
+              if (!(err instanceof TaskpackError)) return false;
+              return err.code === 'TASKPACK_HOST_BINDING_INVALID';
+            },
+          );
+        }
       } finally {
         await liveGate.close();
       }

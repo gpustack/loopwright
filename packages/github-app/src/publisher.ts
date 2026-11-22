@@ -66,11 +66,20 @@ export interface NativePullRequestPublisherOptions {
   readonly extractedConflictPaths?: readonly string[] | undefined;
 }
 
+export interface PublishedCandidatePullRequest {
+  readonly runId: string;
+  readonly branchName: string;
+  readonly headSha: string;
+  readonly pullRequestUrl: string | null;
+  readonly pullRequestNumber: number | null;
+}
+
 export interface NativePullRequestPublisherServer {
   readonly url: string;
   readonly signingSecret: string;
   readonly authToken: string;
   readonly endpointPlan: HostPublicationEndpointPlan;
+  getLastPublishedPullRequest(): PublishedCandidatePullRequest | null;
   close(): Promise<void>;
 }
 
@@ -1081,6 +1090,7 @@ export async function startNativePullRequestPublisherServer(
 
   const MAX_RECEIPT_CACHE_ENTRIES = 4_096;
   const receiptCache = new Map<string, PublicationReceiptPayload>();
+  let lastPublishedPullRequest: PublishedCandidatePullRequest | null = null;
   const inFlightReceipts = new Map<
     string,
     {
@@ -1508,6 +1518,7 @@ export async function startNativePullRequestPublisherServer(
       );
 
       let externalUrl: string | null = null;
+      let pullRequestNumber: number | null = options.openManagedPr?.number ?? null;
       const apiBaseUrl = options.apiBaseUrl?.trim().replace(/\/+$/, '');
       if (apiBaseUrl && apiBaseUrl.length > 0) {
         const apiHeaders: Record<string, string> = {
@@ -1649,10 +1660,24 @@ export async function startNativePullRequestPublisherServer(
           );
         }
         const parsedPr = JSON.parse(prRes.text) as unknown;
-        if (isPlainRecord(parsedPr) && typeof parsedPr['html_url'] === 'string') {
-          externalUrl = parsedPr['html_url'];
+        if (isPlainRecord(parsedPr)) {
+          if (typeof parsedPr['html_url'] === 'string') {
+            externalUrl = parsedPr['html_url'];
+          }
+          const rawPrNumber = parsedPr['number'];
+          if (typeof rawPrNumber === 'number' && Number.isSafeInteger(rawPrNumber) && rawPrNumber > 0) {
+            pullRequestNumber = rawPrNumber;
+          }
         }
       }
+
+      lastPublishedPullRequest = Object.freeze({
+        runId,
+        branchName,
+        headSha: headOid.toLowerCase(),
+        pullRequestUrl: externalUrl,
+        pullRequestNumber,
+      });
 
       emitReceipt(makeReceipt('succeeded', externalUrl, null));
     } catch (error) {
@@ -1702,6 +1727,7 @@ export async function startNativePullRequestPublisherServer(
       authCredentialRef: 'taskpack-publication-auth',
       timeoutMs: 60_000,
     },
+    getLastPublishedPullRequest: () => lastPublishedPullRequest,
     close: async () => {
       server.closeIdleConnections?.();
       await new Promise<void>(resolveClose => server.close(() => resolveClose()));

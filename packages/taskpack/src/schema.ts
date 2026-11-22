@@ -3746,8 +3746,13 @@ function validateTaskpackManifestInternal(
       throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `memory directory "${memoryDirectory}" overlaps writable path "${memoryOverlap}"`, '/spec/memory/directory');
     }
     const applyRaw = requireString(memory['apply'], '/spec/memory/apply', 1, 32);
-    if (applyRaw !== 'separate-pull-request' && applyRaw !== 'local-only' && applyRaw !== 'disabled') {
-      manifestInvalid('memory apply must be separate-pull-request, local-only, or disabled', '/spec/memory/apply');
+    if (
+      applyRaw !== 'separate-pull-request'
+      && applyRaw !== 'inline-with-candidate'
+      && applyRaw !== 'local-only'
+      && applyRaw !== 'disabled'
+    ) {
+      manifestInvalid('memory apply must be separate-pull-request, inline-with-candidate, local-only, or disabled', '/spec/memory/apply');
     }
     const apply: TaskpackMemoryApplyMode = applyRaw;
     let onNoModelBudget: TaskpackMemoryNoBudgetMode;
@@ -3783,7 +3788,7 @@ function validateTaskpackManifestInternal(
       ? false
       : requireBoolean(memory['publishOnFailure'], '/spec/memory/publishOnFailure');
     const skipCi = memory['skipCi'] === undefined
-      ? true
+      ? apply !== 'inline-with-candidate'
       : requireBoolean(memory['skipCi'], '/spec/memory/skipCi');
 
     memoryRecord = Object.freeze({

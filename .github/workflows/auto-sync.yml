@@ -56,7 +56,7 @@ jobs:
         && startsWith(github.event.comment.body, '/auto-sync')
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       )
-    runs-on: ${{ inputs.runner_profile && inputs.runner_profile != 'normal' && format('ubuntu-24.04-{0}', inputs.runner_profile) || vars.AUTOSYNC_RUNNER || vars.SELF_UPGRADE_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.runner_profile && inputs.runner_profile != 'normal' && format('ubuntu-24.04-{0}', inputs.runner_profile) || vars.AUTOSYNC_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 45
     env:
       npm_config_ignore_scripts: 'true'

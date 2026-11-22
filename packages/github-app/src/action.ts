@@ -2256,6 +2256,7 @@ export async function runGitHubActionEntrypoint(
           ? (effectiveTargetMatrix !== null && effectiveTargetMatrix.length === 1 ? effectiveTargetMatrix[0]! : null)
           : undefined;
         try {
+          const publishedCandidate = publisherServer?.getLastPublishedPullRequest() ?? null;
           memorySummary = await finalizeAndPublishTurnkeyMemory({
             runRoot: realRunRoot,
             runId: settledRunId,
@@ -2266,6 +2267,9 @@ export async function runGitHubActionEntrypoint(
             baseRevision: effectiveBaseRevision,
             upstreamRecords: effectiveUpstreamRecords,
             ...(memoryTargetCell !== undefined ? { targetMatrix: memoryTargetCell } : {}),
+            ...(publishedCandidate !== null && publishedCandidate.runId === settledRunId
+              ? { candidatePublication: publishedCandidate }
+              : {}),
             remoteUrl: input.gitRemoteUrl,
             apiBaseUrl: effectiveApiBaseUrl,
             githubToken,

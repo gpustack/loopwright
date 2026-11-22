@@ -968,7 +968,10 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
           '/spec/publication/mode',
         );
       }
-      if (rawManifest.spec.memory.apply === 'separate-pull-request') {
+      if (
+        rawManifest.spec.memory.apply === 'separate-pull-request'
+        || rawManifest.spec.memory.apply === 'inline-with-candidate'
+      ) {
         throw new TaskpackError(
           'TASKPACK_HOST_BINDING_INVALID',
           'local CLI "loopwright run --taskpack" has no GitHub pull-request memory publisher bound; set spec.memory.apply to "local-only" or "disabled"',

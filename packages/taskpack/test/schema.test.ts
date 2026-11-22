@@ -443,8 +443,11 @@ spec:
       controlRoot: '.auto-sync',
       hostPolicy: { allowPrivileged: true },
     });
-    const verifyCheck = selfUpgradeManifest.spec.verification.localChecks.find(c => c.id === 'self-upgrade-verify');
+    const verifyCheck = selfUpgradeManifest.spec.verification.localChecks.find(c => c.id === 'auto-sync-verify');
     assert.ok(verifyCheck !== undefined);
+    assert.equal(selfUpgradeManifest.metadata.name, 'auto-sync');
+    assert.equal(selfUpgradeManifest.spec.memory.apply, 'inline-with-candidate');
+    assert.equal(selfUpgradeManifest.spec.memory.skipCi, false);
     const verifyEnvList = verifyCheck.parameters?.['env'];
     assert.ok(Array.isArray(verifyEnvList) && verifyEnvList.includes('RUNNER_ENVIRONMENT'));
 

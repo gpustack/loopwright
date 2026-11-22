@@ -412,7 +412,11 @@ export interface TaskpackRoleDeclaration {
   readonly handoffs?: readonly StepHandoffSelector[] | undefined;
 }
 
-export type TaskpackMemoryApplyMode = 'separate-pull-request' | 'local-only' | 'disabled';
+export type TaskpackMemoryApplyMode =
+  | 'separate-pull-request'
+  | 'inline-with-candidate'
+  | 'local-only'
+  | 'disabled';
 export type TaskpackMemoryNoBudgetMode = 'deterministic-observations-only' | 'skip';
 
 export interface TaskpackMemoryDeclaration {

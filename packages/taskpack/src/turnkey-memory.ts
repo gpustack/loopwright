@@ -509,20 +509,20 @@ export async function applyAndValidateTurnkeyMemoryCAS(options: {
 
 /**
  * Local post-settlement memory finalization (`disabled` and `local-only` with neutral protected paths).
- * Refuses `apply: 'separate-pull-request'` with `TASKPACK_HOST_BINDING_INVALID` unless delegated
- * to `@loopwright/github-app` via `separatePullRequestFinalizer`.
+ * Refuses `apply: 'separate-pull-request'` and `apply: 'inline-with-candidate'` with
+ * `TASKPACK_HOST_BINDING_INVALID` unless delegated to `@loopwright/github-app` via `separatePullRequestFinalizer`.
  */
 export async function finalizeLocalTurnkeyMemory(
   options: FinalizeLocalTurnkeyMemoryOptions,
 ): Promise<TurnkeyMemorySummary> {
   const memoryApply = options.manifest.spec.memory.apply;
-  if (memoryApply === 'separate-pull-request') {
+  if (memoryApply === 'separate-pull-request' || memoryApply === 'inline-with-candidate') {
     if (options.separatePullRequestFinalizer !== undefined) {
       return await options.separatePullRequestFinalizer();
     }
     throw new TaskpackError(
       'TASKPACK_HOST_BINDING_INVALID',
-      'memory.apply "separate-pull-request" requires a GitHub pull-request memory publisher (@loopwright/github-app)',
+      `memory.apply "${memoryApply}" requires a GitHub pull-request memory publisher (@loopwright/github-app)`,
       '/spec/memory/apply',
     );
   }
