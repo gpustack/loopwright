@@ -28,6 +28,7 @@ import {
   type StructuredFinding,
 } from '@loopwright/core';
 import {
+  LANDLOCK_BOOTSTRAP_SCRIPT,
   negotiateSandboxBackend,
   SECCOMP_BLOCKED_SYSCALLS,
   TaskpackError,
@@ -64,7 +65,9 @@ import {
 export const LWTREE01_MAGIC = 'LWTREE01' as const;
 const BASE_TREE_BUNDLE_MAGIC = Buffer.from(LWTREE01_MAGIC, 'ascii');
 
-export const MAX_STAGE_B_RESULT_BYTES = 65_536;
+// Cap Stage B stdout JSON envelope at 48 KiB so the worker's `:complete` control body
+// (envelope + hardwareProvenance + outputArtifacts + lease credentials) stays within 64 KiB.
+export const MAX_STAGE_B_RESULT_BYTES = 49_152;
 export const MAX_STAGE_STDIO_BYTES = 1_048_576;
 export const STAGE_B_RESULT_MARKER_PREFIX = 'LOOPWRIGHT_STAGE_B_RESULT:' as const;
 
@@ -1969,6 +1972,124 @@ export function buildStrictLinuxBwrapArgs(
   return Object.freeze(args);
 }
 
+const LINUX_LANDLOCK_POSITIVE_READ_ROOTS: readonly string[] = Object.freeze([
+  ...LINUX_BWRAP_NARROW_USR_SUBPATHS,
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib32',
+  '/lib64',
+  '/etc/ld.so.cache',
+  '/etc/ld.so.conf',
+  '/etc/ld.so.conf.d',
+  '/etc/alternatives',
+  '/etc/localtime',
+  '/proc/cpuinfo',
+  '/proc/meminfo',
+  '/proc/stat',
+  '/proc/version',
+  '/proc/sys/kernel/random',
+  '/dev/urandom',
+  '/sys/devices/system/cpu',
+]);
+
+export function buildStrictLinuxLandlockConfig(
+  spec: NativeTwoStageSandboxSpec,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+): string {
+  const stageAOutReal = canonicalizeExistingOrParentSync(spec.stageAOutDir);
+  const scratchReal = canonicalizeExistingOrParentSync(spec.scratchDir);
+  const candidateReal = spec.candidateDir !== undefined ? canonicalizeExistingOrParentSync(spec.candidateDir) : null;
+  const workloadSnapReal = spec.workloadSnapshotDir !== undefined ? canonicalizeExistingOrParentSync(spec.workloadSnapshotDir) : null;
+
+  if (spec.stage === 'A' && (candidateReal === null || workloadSnapReal !== null)) {
+    throw new HardwareRunnerError('RUNNER_SANDBOX_FAILED', 'invalid Stage A linux-landlock directory specification');
+  }
+  if (spec.stage === 'B' && (workloadSnapReal === null || candidateReal !== null)) {
+    throw new HardwareRunnerError('RUNNER_SANDBOX_FAILED', 'invalid Stage B linux-landlock directory specification');
+  }
+
+  const implicitVariants = new Set<string>();
+  for (const rtRoot of LINUX_BWRAP_IMPLICIT_RUNTIME_ROOTS) {
+    for (const v of canonicalOrResolvedSync(rtRoot)) {
+      if (v !== '/') implicitVariants.add(v);
+    }
+  }
+  const nonOverlappingPaths = [
+    ...spec.explicitDeniedReadPaths,
+    spec.stageAOutDir,
+    spec.scratchDir,
+    ...(spec.candidateDir !== undefined ? [spec.candidateDir] : []),
+    ...(spec.workloadSnapshotDir !== undefined ? [spec.workloadSnapshotDir] : []),
+  ];
+  for (const rawProtected of nonOverlappingPaths) {
+    for (const pv of canonicalOrResolvedSync(rawProtected)) {
+      for (const iv of implicitVariants) {
+        if (pathsOverlap(iv, pv)) {
+          throw new HardwareRunnerError(
+            'RUNNER_SANDBOX_FAILED',
+            `linux-landlock implicit runtime bind "${iv}" overlaps protected or job path "${pv}"`,
+          );
+        }
+      }
+    }
+  }
+
+  const allowedReadOnlyPaths: string[] = [];
+  for (const tc of spec.toolchainPaths) {
+    allowedReadOnlyPaths.push(canonicalizeExistingOrParentSync(tc));
+  }
+  const writablePaths: string[] = [];
+  if (spec.stage === 'A') {
+    allowedReadOnlyPaths.push(candidateReal!);
+    writablePaths.push(stageAOutReal, scratchReal);
+  } else {
+    allowedReadOnlyPaths.push(stageAOutReal, workloadSnapReal!);
+    writablePaths.push(scratchReal);
+  }
+
+  const deniedReadPaths = new Set<string>();
+  for (const dp of spec.explicitDeniedReadPaths) {
+    for (const v of canonicalOrResolvedSync(dp)) {
+      deniedReadPaths.add(v);
+    }
+  }
+
+  const safeEnv: Record<string, string> = {
+    HOME: scratchReal,
+    TMPDIR: scratchReal,
+    PATH: '/usr/local/bin:/usr/bin:/bin',
+    LANG: 'C.UTF-8',
+    TERM: 'dumb',
+    ...env,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+  for (const key of Object.keys(safeEnv).sort(compareUtf16)) {
+    const val = safeEnv[key]!;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || /[\0\r\n]/.test(val)) {
+      throw new HardwareRunnerError('RUNNER_SANDBOX_FAILED', `invalid environment variable "${key}" for linux-landlock`);
+    }
+  }
+
+  const canonicalCwd = canonicalizeExistingOrParentSync(cwd);
+  return JSON.stringify({
+    workspaceRoot: canonicalCwd,
+    positiveReadRoots: [...LINUX_LANDLOCK_POSITIVE_READ_ROOTS],
+    writablePaths,
+    exactWritableFiles: [],
+    protectedPaths: [],
+    deniedReadPaths: [...deniedReadPaths].sort(compareUtf16),
+    allowedReadOnlyPaths: [...new Set(allowedReadOnlyPaths)].sort(compareUtf16),
+    networkMode: 'none',
+    blockAllSockets: true,
+    cwd: canonicalCwd,
+    env: safeEnv,
+  });
+}
+
 export interface PreparedStageSandboxInvocation {
   readonly executablePath: string;
   readonly args: readonly string[];
@@ -2014,7 +2135,7 @@ export function prepareStageSandboxInvocation(input: StageProcessExecutionInput)
   const preferredBackends = platform === 'darwin'
     ? (['macos-seatbelt'] as const)
     : platform === 'linux'
-      ? (['linux-bwrap'] as const)
+      ? (['linux-bwrap', 'linux-landlock'] as const)
       : [];
   if (preferredBackends.length === 0) {
     throw new HardwareRunnerError(
@@ -2025,7 +2146,7 @@ export function prepareStageSandboxInvocation(input: StageProcessExecutionInput)
 
   const probePolicy: SandboxPolicyInput = {
     workspaceRoot: resolve(stageSpec.scratchDir),
-    writablePaths: ['.'],
+    writablePaths: ['work'],
     networkMode: 'none',
     preferredBackends,
   };
@@ -2082,6 +2203,18 @@ export function prepareStageSandboxInvocation(input: StageProcessExecutionInput)
       args: Object.freeze([...bwrapArgs, '--seccomp', '3', '--', input.command, ...input.args]),
       cwd: '/',
       seccompBpf,
+      dockerCleanupInfo: null,
+      cleanup: () => undefined,
+    });
+  }
+
+  if (negotiated.backendId === 'linux-landlock') {
+    const landlockConfig = buildStrictLinuxLandlockConfig(normalizedSpec, input.cwd, input.env);
+    return Object.freeze({
+      executablePath: negotiated.executablePath!,
+      args: Object.freeze(['-I', '-S', '-B', '-c', LANDLOCK_BOOTSTRAP_SCRIPT, landlockConfig, input.command, ...input.args]),
+      cwd: '/',
+      seccompBpf: null,
       dockerCleanupInfo: null,
       cleanup: () => undefined,
     });

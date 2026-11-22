@@ -526,7 +526,6 @@ export class RelayPullQueue {
 
     if (job.preemptionCount + 1 <= req.maxPreemptions) {
       job.preemptionCount += 1;
-      job.state = 'preempted';
       job.evictedEpochs.set(lease.leaseEpoch, {
         leaseToken: lease.leaseToken,
         status: 'requeued',

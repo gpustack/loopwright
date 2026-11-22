@@ -2290,16 +2290,21 @@ machine = os.uname().machine
 if machine in ("x86_64", "amd64"):
     audit_arch = 0xc000003e
     blocked_nrs = [90, 91, 92, 93, 94, 260, 268, 425, 426, 427, 452]
+    all_socket_nrs = [41, 42, 43, 49, 50, 53, 288]
     sys_socket = 41
     block_x32 = True
 elif machine in ("aarch64", "arm64"):
     audit_arch = 0xc00000b7
     blocked_nrs = [52, 53, 54, 55, 425, 426, 427, 452]
+    all_socket_nrs = [198, 199, 200, 201, 202, 203, 242]
     sys_socket = 198
     block_x32 = False
 else:
     sys.exit(126)
-block_ip = cfg.get("blockIpSockets") is True
+block_all_sockets = cfg.get("blockAllSockets") is True
+if block_all_sockets:
+    blocked_nrs = blocked_nrs + all_socket_nrs
+block_ip = (not block_all_sockets) and (cfg.get("blockIpSockets") is True)
 extra_sock = 3 if block_ip else 0
 n_blocked = len(blocked_nrs)
 raw_insns = [

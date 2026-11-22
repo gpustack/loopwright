@@ -5,7 +5,7 @@ import { request as httpRequest, type IncomingMessage, type RequestOptions } fro
 import { Agent as HttpsAgent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
 import { resolve } from 'node:path';
 import type { TLSSocket } from 'node:tls';
-import { SecretScrubber } from '@loopwright/core';
+import { OVERLAY_LIMITS, SecretScrubber } from '@loopwright/core';
 import { readBoundedRegularFile } from '@loopwright/taskpack';
 import {
   assertNoSymlinkAncestors,
@@ -1032,7 +1032,25 @@ async function createOutboundHttpClient(config: WorkerConfig): Promise<OutboundH
               buffer = buffer.slice(boundary + 2);
               const lines = frame.split(/\r?\n/);
               for (const line of lines) {
-                if (line === 'event: cancel' || (line.startsWith('data:') && line.includes('"cancel"'))) {
+                let isCancelEvent = line === 'event: cancel';
+                if (!isCancelEvent && line.startsWith('data:')) {
+                  const dataPayload = line.slice(5).trim();
+                  try {
+                    const parsed = JSON.parse(dataPayload) as unknown;
+                    if (
+                      parsed !== null
+                      && typeof parsed === 'object'
+                      && !Array.isArray(parsed)
+                      && Object.hasOwn(parsed, 'desiredState')
+                      && (parsed as Record<string, unknown>)['desiredState'] === 'cancel'
+                    ) {
+                      isCancelEvent = true;
+                    }
+                  } catch {
+                    // Ignore malformed or non-JSON SSE data payloads.
+                  }
+                }
+                if (isCancelEvent) {
                   sawExplicitEvent = true;
                   onCancel();
                   req.destroy();
@@ -1189,7 +1207,7 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
         throw mappedAcquireErr;
       }
 
-      const grant = parseLeaseGrantPayload(acquireRes.bytes, 17_179_869_184);
+      const grant = parseLeaseGrantPayload(acquireRes.bytes, OVERLAY_LIMITS.maxMaxBytes);
       const creds: LeaseCredentials = {
         relayBootId: grant.relayBootId,
         leaseEpoch: grant.leaseEpoch,

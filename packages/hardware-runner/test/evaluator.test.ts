@@ -10,6 +10,7 @@ import { TRUSTED_DOCKER_PATHS } from '@loopwright/taskpack';
 import {
   buildDockerStageBSeccompProfileJson,
   buildStrictLinuxBwrapArgs,
+  buildStrictLinuxLandlockConfig,
   collectHardwareProvenance,
   compileDockerSandboxCommand,
   compileStrictSocketDenySeccompBpf,
@@ -19,7 +20,9 @@ import {
   evaluateBenchmarkJob,
   HardwareRunnerError,
   isRunnerTeardownError,
+  MAX_STAGE_B_RESULT_BYTES,
   parseStageBResultEnvelope,
+  parseStrictJsonBytes,
   prepareStageSandboxInvocation,
   reconstructCandidateWorkspace,
   removeTreeFailClosed,
@@ -2050,4 +2053,85 @@ test('Phase 5.5 bounds: Stage A >2048-char stderr (with surrogate pair) and 64 S
     await relay.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('linux-landlock fallback, Stage B 48 KiB control-body headroom, and parseStrictJsonBytes error code preservation', () => {
+  // 1. Linux falls back cleanly from unavailable bwrap to linux-landlock with strict positive reads + blockAllSockets
+  const stageAInv = prepareStageSandboxInvocation({
+    stage: 'A',
+    backend: 'native_os',
+    probeMode: 'synthetic_fixture',
+    command: '/bin/sh',
+    args: ['-c', 'true'],
+    cwd: '/tmp/lw-ll-cand',
+    env: { LOOPWRIGHT_STAGE: 'A' },
+    timeoutMs: 5_000,
+    nativeStageSpec: {
+      stage: 'A',
+      candidateDir: '/tmp/lw-ll-cand',
+      stageAOutDir: '/tmp/lw-ll-out',
+      scratchDir: '/tmp/lw-ll-scratch',
+      toolchainPaths: ['/opt/custom-toolchain'],
+      explicitDeniedReadPaths: ['/tmp/lw-ll-workloads'],
+    },
+    host: {
+      platform: 'linux',
+      arch: 'x64',
+      bwrapExecutable: '/nonexistent/bwrap',
+      pythonExecutable: '/usr/bin/python3',
+      probeExecutables: false,
+    },
+  });
+  assert.equal(stageAInv.executablePath, '/usr/bin/python3');
+  assert.equal(stageAInv.seccompBpf, null);
+  assert.deepEqual(stageAInv.args.slice(0, 4), ['-I', '-S', '-B', '-c']);
+  const llCfg = JSON.parse(stageAInv.args[5]!) as {
+    positiveReadRoots: string[];
+    allowedReadOnlyPaths: string[];
+    writablePaths: string[];
+    deniedReadPaths: string[];
+    blockAllSockets: boolean;
+    networkMode: string;
+  };
+  assert.equal(llCfg.blockAllSockets, true);
+  assert.equal(llCfg.networkMode, 'none');
+  assert.equal(llCfg.positiveReadRoots.includes('/usr'), false, 'must never grant wholesale /usr');
+  assert.equal(llCfg.allowedReadOnlyPaths.some(p => p.endsWith('/lw-ll-cand')), true);
+  assert.equal(llCfg.allowedReadOnlyPaths.includes('/opt/custom-toolchain'), true);
+  assert.equal(llCfg.writablePaths.some(p => p.endsWith('/lw-ll-out')), true);
+  assert.equal(llCfg.writablePaths.some(p => p.endsWith('/lw-ll-scratch')), true);
+  assert.equal(llCfg.deniedReadPaths.some(p => p.endsWith('/lw-ll-workloads')), true);
+
+  // Reject overlap with implicit Linux runtime roots
+  assert.throws(
+    () => buildStrictLinuxLandlockConfig(
+      {
+        stage: 'B',
+        stageAOutDir: '/tmp/lw-ll-out',
+        workloadSnapshotDir: '/usr/local/share/held-out',
+        scratchDir: '/tmp/lw-ll-scratch',
+        toolchainPaths: [],
+        explicitDeniedReadPaths: [],
+      },
+      '/tmp/lw-ll-scratch',
+      {},
+    ),
+    (err: unknown) => err instanceof HardwareRunnerError && err.code === 'RUNNER_SANDBOX_FAILED',
+  );
+
+  // 2. Stage B envelope cap leaves headroom below 64 KiB `:complete` control body limit
+  assert.equal(MAX_STAGE_B_RESULT_BYTES, 49_152);
+  assert.throws(
+    () => parseStageBResultEnvelope(
+      `LOOPWRIGHT_STAGE_B_RESULT:${JSON.stringify({ status: 'approved', detail: 'x'.repeat(MAX_STAGE_B_RESULT_BYTES) })}\n`,
+      new SecretScrubber(),
+    ),
+    (err: unknown) => err instanceof HardwareRunnerError && err.code === 'PAYLOAD_TOO_LARGE',
+  );
+
+  // 3. parseStrictJsonBytes preserves caller-specified error code on oversize payloads
+  assert.throws(
+    () => parseStrictJsonBytes(Buffer.alloc(128, 0x20), 64, 'RUNNER_SANDBOX_FAILED', '/probe'),
+    (err: unknown) => err instanceof HardwareRunnerError && err.code === 'RUNNER_SANDBOX_FAILED',
+  );
 });

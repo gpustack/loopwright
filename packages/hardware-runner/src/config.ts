@@ -222,7 +222,7 @@ export function parseStrictJsonBytes(
   diagPath = '/',
 ): Json {
   if (bytes.byteLength > maxBytes) {
-    failWith(code === 'CONFIG_INVALID' ? 'CONFIG_INVALID' : 'PAYLOAD_TOO_LARGE', `payload exceeds ${maxBytes} bytes`, diagPath);
+    failWith(code, `payload exceeds ${maxBytes} bytes`, diagPath);
   }
   let source: string;
   try {
@@ -315,6 +315,16 @@ function resolveFilesystemPath(raw: unknown, baseDir: string, path: string): str
   return isAbsolute(raw) ? resolve(raw) : resolve(baseDir, raw);
 }
 
+export const RUNNER_SECRET_ENV_FIELDS: readonly string[] = Object.freeze([
+  'signingSecretEnv',
+  'controllerAuthTokenEnv',
+  'workerTokenEnv',
+]);
+
+export const RUNNER_SECRET_ENV_LIST_FIELDS: readonly string[] = Object.freeze([
+  'workerTokenEnvs',
+]);
+
 /**
  * Resolve a credential reference (`ENV_NAME` or `env:ENV_NAME`) from `env` without ever
  * embedding secret values into thrown error messages.
@@ -329,7 +339,7 @@ export function resolveEnvSecretRef(
   }
   const envName = rawRef.startsWith('env:') ? rawRef.slice(4) : rawRef;
   if (!ENV_VAR_NAME_RE.test(envName)) {
-    configInvalid(`invalid credential env reference syntax at ${path}`, path);
+    configInvalid('invalid credential env reference syntax', path);
   }
   const resolved = Object.hasOwn(env, envName) ? env[envName] : undefined;
   if (

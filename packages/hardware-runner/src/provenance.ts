@@ -1062,7 +1062,6 @@ export function parseRocmSmiOutput(
       }
     }
   } else if (trimmedSmi.length > 0) {
-    let fallbackCard0Used = false;
     for (const rawLine of trimmedSmi.split(/\r?\n/)) {
       const line = rawLine.trim();
       if (!line) continue;
@@ -1082,7 +1081,6 @@ export function parseRocmSmiOutput(
       if (prefixMatch === null && !/(?:Card Series|Product Name|Marketing Name|GFX Version|Compute Partition|Performance Level)\s*:/i.test(body)) {
         continue;
       }
-      if (prefixMatch === null) fallbackCard0Used = true;
       if (!Number.isSafeInteger(cardIdx) || cardIdx < 0 || cardIdx >= 64) continue;
       const card = getOrCreateCard(cardIdx);
       const inlineDrv = /^Driver\s+version\s*:\s*(.+)$/i.exec(body);
@@ -1110,7 +1108,6 @@ export function parseRocmSmiOutput(
         card.clockLockMode = 'unlocked';
       }
     }
-    void fallbackCard0Used;
   }
 
   const availableIndices = new Set<number>();
