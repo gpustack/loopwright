@@ -1925,6 +1925,10 @@ export function buildStrictLinuxBwrapArgs(
     '/etc/ld.so.conf',
     '/etc/ld.so.conf.d',
     '/etc/alternatives',
+    '/etc/ssl/openssl.cnf',
+    '/etc/ssl/certs',
+    '/etc/ca-certificates',
+    '/etc/pki',
   ];
   for (const sysPath of optionalSystemRo) {
     if (!probeExecutables || existsSync(sysPath)) {
@@ -1983,6 +1987,10 @@ const LINUX_LANDLOCK_POSITIVE_READ_ROOTS: readonly string[] = Object.freeze([
   '/etc/ld.so.conf',
   '/etc/ld.so.conf.d',
   '/etc/alternatives',
+  '/etc/ssl/openssl.cnf',
+  '/etc/ssl/certs',
+  '/etc/ca-certificates',
+  '/etc/pki',
   '/etc/localtime',
   '/proc/cpuinfo',
   '/proc/meminfo',
