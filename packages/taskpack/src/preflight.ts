@@ -121,13 +121,13 @@ const RESERVED_PREFLIGHT_INJECTED_VARS: ReadonlySet<string> = new Set([
   'LOOPWRIGHT_STAGING_DIR',
 ]);
 
-const FORBIDDEN_CREDENTIAL_ENV_NAMES: ReadonlySet<string> = new Set([
+const CREDENTIAL_VALUE_ENV_NAMES: ReadonlySet<string> = new Set([
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'GITHUB_APP_PRIVATE_KEY',
   'GITHUB_APP_WEBHOOK_SECRET',
-  'GITHUB_APP_ID',
-  'GITHUB_APP_INSTALLATION_ID',
+  'INPUT_GITHUB-TOKEN',
+  'INPUT_GITHUB-APP-PRIVATE-KEY',
   'OPENAI_API_KEY',
   'ANTHROPIC_API_KEY',
   'GEMINI_API_KEY',
@@ -146,10 +146,16 @@ const FORBIDDEN_CREDENTIAL_ENV_NAMES: ReadonlySet<string> = new Set([
   'COHERE_API_KEY',
   'GROQ_API_KEY',
   'LLM_TOKEN',
+  ...Object.values(STANDARD_PI_PROVIDER_ENV),
+]);
+
+const FORBIDDEN_CREDENTIAL_ENV_NAMES: ReadonlySet<string> = new Set([
+  ...CREDENTIAL_VALUE_ENV_NAMES,
+  'GITHUB_APP_ID',
+  'GITHUB_APP_INSTALLATION_ID',
   'BASH_ENV',
   'ENV',
   'NODE_OPTIONS',
-  ...Object.values(STANDARD_PI_PROVIDER_ENV),
 ]);
 
 const FORBIDDEN_CREDENTIAL_ENV_PREFIXES: readonly string[] = Object.freeze([
@@ -163,7 +169,8 @@ const FORBIDDEN_CREDENTIAL_ENV_PREFIXES: readonly string[] = Object.freeze([
   'DYLD_',
 ]);
 
-const FORBIDDEN_CREDENTIAL_ENV_PATTERN = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|ACCESS_KEY_ID|AUTH_KEY|CREDENTIAL|BEARER|COOKIE|SESSION_KEY|SIGNING_KEY|GH_PAT)(?:$|_)/;
+const CREDENTIAL_VALUE_ENV_PATTERN = /(?:^|[_-])(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY(?:[_-]?ID)?|AUTH[_-]?KEY|CREDENTIAL|BEARER|COOKIE|SESSION[_-]?KEY|SIGNING[_-]?KEY|GH[_-]?PAT)(?:$|[_-])/;
+const NON_SECRET_METADATA_ENV_SUFFIX = /(?:[_-])(?:ENV(?:[_-]NAME)?|PATH|FILE|URL|URI|COUNT|LIMIT|BUDGET|SECONDS|MS)$/;
 
 const FORBIDDEN_OBJECT_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
 const ALLOWED_DISPOSITIONS: ReadonlySet<string> = new Set<PreflightDisposition>(['candidate', 'no_change', 'blocked']);
@@ -223,8 +230,26 @@ export function isForbiddenPreflightEnvName(
   if (FORBIDDEN_CREDENTIAL_ENV_NAMES.has(upper)) return true;
   if (ALLOWED_PREFLIGHT_RUNNER_ENV_NAMES.has(upper)) return false;
   if (FORBIDDEN_CREDENTIAL_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))) return true;
-  if (FORBIDDEN_CREDENTIAL_ENV_PATTERN.test(upper)) return true;
+  if (CREDENTIAL_VALUE_ENV_PATTERN.test(upper)) return true;
   return false;
+}
+
+/**
+ * True when an environment variable holds credential/secret material whose VALUE should be
+ * registered in preflight leak-detection scrubbers. Excludes non-secret runner/input flags
+ * (for example `INPUT_DRY-RUN="false"`, `INPUT_MODE="auto"`, `RUNNER_OS="Linux"`, or
+ * `INPUT_PROVIDER-TOKEN-ENV`) that are stripped from child env for hygiene but must not mark
+ * ordinary words or booleans as leaked credentials.
+ */
+export function isCredentialPreflightEnvName(
+  name: string,
+  extraForbidden?: ReadonlySet<string>,
+): boolean {
+  const upper = name.toUpperCase();
+  if (extraForbidden?.has(upper) === true) return true;
+  if (CREDENTIAL_VALUE_ENV_NAMES.has(upper)) return true;
+  if (NON_SECRET_METADATA_ENV_SUFFIX.test(upper)) return false;
+  return CREDENTIAL_VALUE_ENV_PATTERN.test(upper);
 }
 
 function isContainedInRoot(candidate: string, root: string): boolean {
@@ -1438,7 +1463,7 @@ export async function runTaskpackPreflight(
     const hostEnv = options.env ?? process.env;
     const strippedScrubber = new SecretScrubber();
     for (const [key, val] of Object.entries(hostEnv)) {
-      if (typeof val === 'string' && val.length > 0 && isForbiddenPreflightEnvName(key, manifestSecretEnvNames)) {
+      if (typeof val === 'string' && val.length > 0 && isCredentialPreflightEnvName(key, manifestSecretEnvNames)) {
         strippedScrubber.register(val);
       }
     }

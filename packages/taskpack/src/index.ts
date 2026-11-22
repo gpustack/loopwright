@@ -140,6 +140,7 @@ export {
   cloneVerifiedStagedFileForChecks,
   collectManifestSecretEnvNames,
   formatWorkspaceResourcesManifest,
+  isCredentialPreflightEnvName,
   isForbiddenPreflightEnvName,
   PREFLIGHT_DEFAULT_TIMEOUT_SECONDS,
   PREFLIGHT_MAX_METADATA_BYTES,
