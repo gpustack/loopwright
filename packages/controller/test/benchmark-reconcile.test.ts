@@ -54,7 +54,11 @@ function makeProvenance(): HardwareProvenance {
 
 async function startCasRelayServer(
   blobs: Map<string, Buffer>,
-  options?: { readonly getDelayMs?: number; readonly outputArtifacts?: readonly BenchmarkOutputArtifact[] },
+  options?: {
+    readonly getDelayMs?: number;
+    readonly holdGetUntilMs?: () => number;
+    readonly outputArtifacts?: readonly BenchmarkOutputArtifact[];
+  },
 ) {
   let postHits = 0;
   let putHits = 0;
@@ -88,8 +92,12 @@ async function startCasRelayServer(
           res.writeHead(404).end();
           return;
         }
-        if (options?.getDelayMs && options.getDelayMs > 0) {
-          await new Promise<void>(r => setTimeout(r, options.getDelayMs));
+        const targetMs = options?.holdGetUntilMs?.();
+        const delayMs = targetMs !== undefined
+          ? Math.max(0, targetMs - Date.now())
+          : (options?.getDelayMs ?? 0);
+        if (delayMs > 0) {
+          await new Promise<void>(r => setTimeout(r, delayMs));
         }
         res.writeHead(200, {
           'content-type': 'application/octet-stream',
@@ -990,13 +998,17 @@ test('S3 & S4: inconsistent .proof.json leaves SQLite dispatch_uncertain (recove
 });
 
 test('P6 & P8 (reconcile): receipt expiring during CAS pull settles blocked, and Slot A / Gen 0 receipt replays cleanly while Slot B or Gen 1 is active', async () => {
-  // P6 (reconcile): receipt fresh at admission (now + 450ms) expires during 650ms CAS GET -> settles blocked (never hardcodes wallClockValid: true)
+  // P6 (reconcile): receipt fresh at admission (1.2s headroom, well under 2s gate timeoutMs) expires deterministically while CAS GET is held past expiresAtMs -> settles blocked (never hardcodes wallClockValid: true)
   const slowBytes = Buffer.from('slow-reconcile-cubin');
   const slowSha = sha256Hex(slowBytes);
-  const slowRelay = await startCasRelayServer(new Map([[slowSha, slowBytes]]), { getDelayMs: 650 });
+  let expDeadlineMs = 0;
+  const slowRelay = await startCasRelayServer(new Map([[slowSha, slowBytes]]), {
+    holdGetUntilMs: () => expDeadlineMs + 50,
+  });
   const fSlow = await benchmarkReconcileFixture(slowRelay.url);
   try {
     const crashExpire = await injectBenchmarkCrash(fSlow, 'run-p6-rec-expire-mid-pull', 'mid_cas_pull');
+    expDeadlineMs = Date.now() + 1_200;
     const expBody: Record<string, unknown> = {
       version: 1,
       kind: 'benchmark_verdict',
@@ -1011,7 +1023,7 @@ test('P6 & P8 (reconcile): receipt expiring during CAS pull settles blocked, and
       candidateDigest: crashExpire.candidateDigest,
       status: 'approved',
       reason: null,
-      expiresAtMs: String(Date.now() + 450),
+      expiresAtMs: String(expDeadlineMs),
       preemptionCount: 0,
       hardwareProvenance: makeProvenance(),
       metrics: { latency_us: 42.0 },
@@ -1068,7 +1080,7 @@ test('P6 & P8 (reconcile): receipt expiring during CAS pull settles blocked, and
             candidateDigest: parsed.candidateDigest,
             status: 'approved',
             reason: null,
-            expiresAtMs: String(Date.now() + 500), // stays fresh across proof fsync under load, then expires before replay
+            expiresAtMs: String(Date.now() + 1_500), // stays fresh across proof fsync under load, then expires before replay
             preemptionCount: 0,
             hardwareProvenance: makeProvenance(),
             metrics: { latency_us: 38.0 },
@@ -1701,7 +1713,7 @@ test('Fix Pass #2 — S3 signed mediaType proof validation, P5 poisoned local CA
     fTtl = await benchmarkReconcileFixture(`http://127.0.0.1:${ttlPort}/v1/benchmark/jobs`);
 
     // 3a. Unconfirmed operation with existing .proof.json whose expiresAtMs elapses before first SQLite confirmation:
-    shortExpiryMs = 500;
+    shortExpiryMs = 1_500;
     const crashExpiredProof = await injectBenchmarkCrash(fTtl, 'run-fp2-expired-proof-unconfirmed', 'after_proof_before_receipt');
     const expArtDir = join(fTtl.runRoot, crashExpiredProof.runId, 'artifacts');
     const expOutName = (await readdir(expArtDir)).find(n => n.startsWith('benchmark-output-'))!;
@@ -1778,7 +1790,7 @@ test('Fix Pass #2 — S3 signed mediaType proof validation, P5 poisoned local CA
     await rm(expProofRecPath, { force: true });
 
     // 3b. Contrast: ALREADY-confirmed receipt (confirmed before expiry) replays cleanly AFTER expiresAtMs has elapsed!
-    shortExpiryMs = 500;
+    shortExpiryMs = 1_500;
     const confirmedRunId = 'run-fp2-already-confirmed-post-expiry';
     const ctxConf = await createCycle({ configuration: fTtl.loaded, repository: fTtl.repository, runRoot: fTtl.runRoot, runId: confirmedRunId }, {});
     const cycleConf = new Cycle(ctxConf);
