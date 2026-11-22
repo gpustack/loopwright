@@ -1,7 +1,7 @@
 apiVersion: loopwright.dev/v1alpha1
 kind: Taskpack
 metadata:
-  name: self-upgrade
+  name: auto-sync
 spec:
   goal:
     candidate: >-
@@ -179,7 +179,7 @@ spec:
           path: packages/taskpack/package.json
           allowedPointers:
             - /dependencies/yaml
-      - id: self-upgrade-verify
+      - id: auto-sync-verify
         implementation: command.v1
         parameters:
           script: .auto-sync/checks/verify.sh
@@ -198,10 +198,10 @@ spec:
     mode: pull_request
     targetBranch: main
     headBranchPrefix: auto-sync/
-    titleTemplate: "chore(deps): self-upgrade runtime dependencies"
+    titleTemplate: "chore(deps): auto-sync runtime dependencies"
   memory:
-    directory: .auto-sync/memory/self-upgrade
-    apply: separate-pull-request
+    directory: .auto-sync/memory/auto-sync
+    apply: inline-with-candidate
     onNoModelBudget: deterministic-observations-only
   triggers:
     schedule: true

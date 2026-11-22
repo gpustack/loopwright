@@ -77,6 +77,7 @@ export {
   startNativePullRequestPublisherServer,
   type NativePullRequestPublisherOptions,
   type NativePullRequestPublisherServer,
+  type PublishedCandidatePullRequest,
 } from './publisher.js';
 
 /**

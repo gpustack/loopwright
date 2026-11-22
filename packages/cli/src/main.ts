@@ -975,6 +975,13 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
           '/spec/memory/apply',
         );
       }
+      if (rawManifest.spec.memory.apply === 'inline-with-candidate') {
+        throw new TaskpackError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          'local CLI "loopwright run --taskpack" cannot publish a candidate pull request for memory.apply "inline-with-candidate"; set spec.memory.apply to "local-only" or "disabled", or run via GitHub Action/App',
+          '/spec/memory/apply',
+        );
+      }
     }
 
     const { manifest, roleSelection } = applyTaskpackRoleModelOverrides(rawManifest, args.roleModelOverrides);

@@ -1365,7 +1365,7 @@ if (!/^ERR:(EPERM|EACCES|ENOENT)$/.test(String(unixOutcome))) {
                   HOME: homedir(),
                   TMPDIR: tmpdir(),
                   LOOPWRIGHT_CANDIDATE_DIR: runtimeNetRepo,
-                  LOOPWRIGHT_CHECK_ID: 'self-upgrade-verify',
+                  LOOPWRIGHT_CHECK_ID: 'auto-sync-verify',
                   SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
                   SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
                   SELF_UPGRADE_REPO_ROOT: runtimeNetRepo,

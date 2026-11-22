@@ -2065,4 +2065,317 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('appends a host-signed memory-only commit onto the published candidate PR branch under apply: inline-with-candidate with zero shadow PRs', async () => {
+    const work = await realpath(await mkdtemp(join(tmpdir(), 'lw-turnkey-mem-inline-')));
+    let openAiServer: { readonly url: string; close(): Promise<void> } | undefined;
+    let githubServer: { readonly url: string; close(): Promise<void> } | undefined;
+    try {
+      const bareRemote = join(work, 'remote.git');
+      const repo = join(work, 'repo');
+      const runRoot = join(work, 'run-root');
+      await mkdir(bareRemote, { recursive: true });
+      await mkdir(repo, { recursive: true });
+      await mkdir(runRoot, { recursive: true });
+      await chmod(runRoot, 0o700);
+      await git(bareRemote, ['init', '--bare', '--initial-branch=main']);
+      await git(repo, ['init', '--initial-branch=main']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+
+      let prPosts = 0;
+      let prPatches = 0;
+      const createdPrs: Array<{ number: number; head: string; base: string; title: string; body: string; html_url: string }> = [];
+
+      githubServer = await startHttpServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        if (req.method === 'GET' && url.pathname === '/repos/acme/engine/releases/latest') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ tag_name: 'v3.0.0', html_url: 'https://github.invalid/acme/engine/releases/tag/v3.0.0' }));
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/repos/acme/repo') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 808 }));
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/repos/acme/repo/pulls') {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify([]));
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/repos/acme/repo/pulls') {
+          prPosts += 1;
+          const body = await readJsonBody(req);
+          const prNumber = 200 + createdPrs.length;
+          const headRef = String(body['head'] ?? '');
+          const headSha = await git(bareRemote, ['rev-parse', `refs/heads/${headRef}`]);
+          const pr = {
+            number: prNumber,
+            head: headRef,
+            base: String(body['base'] ?? 'main'),
+            title: String(body['title'] ?? ''),
+            body: String(body['body'] ?? ''),
+            html_url: `https://github.com/acme/repo/pull/${prNumber}`,
+          };
+          createdPrs.push(pr);
+          res.writeHead(201, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            number: pr.number,
+            html_url: pr.html_url,
+            title: pr.title,
+            body: pr.body,
+            head: { ref: pr.head, sha: headSha, repo: { full_name: 'acme/repo' } },
+            base: { ref: pr.base, sha: headSha, repo: { full_name: 'acme/repo' } },
+          }));
+          return;
+        }
+        if (req.method === 'PATCH' && url.pathname.startsWith('/repos/acme/repo/pulls/')) {
+          prPatches += 1;
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'unexpected PATCH' }));
+          return;
+        }
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not_found' }));
+      });
+
+      let turn = 0;
+      let runMode: 'candidate' | 'no-change' = 'candidate';
+      openAiServer = await startHttpServer(async (req, res) => {
+        await readJsonBody(req);
+        turn += 1;
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (runMode === 'no-change') {
+          res.end(sseStop('gpt-4.1-mini', JSON.stringify({
+            version: 1,
+            status: 'no_change',
+            checks: [],
+            reason: 'Already synced.',
+          })));
+          return;
+        }
+        if (turn === 1) {
+          res.end(sseToolCall('gpt-4.1-mini', 'call_inline_1', 'write', {
+            path: 'docs/status.md',
+            content: '# Status\n\nSynced to v3.0.0.\n',
+          }));
+        } else if (turn === 2) {
+          res.end(sseToolCall('gpt-4.1-mini', 'call_inline_2', 'write', {
+            path: 'pack/proposal.json',
+            content: `${JSON.stringify({ schema_version: 1, version: '3.0.0', summary: 'Upgrade engine to v3.0.0' }, null, 2)}\n`,
+          }));
+        } else {
+          res.end(sseStop('gpt-4.1-mini', JSON.stringify({
+            version: 1,
+            status: 'completed',
+            checks: [],
+            reason: null,
+          })));
+        }
+      });
+
+      const inlineYaml = makeTaskpackYaml(openAiServer.url).replace(
+        '    apply: separate-pull-request\n',
+        '    apply: inline-with-candidate\n',
+      );
+      await mkdir(join(repo, '.auto-sync', 'prompts'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'checks'), { recursive: true });
+      await mkdir(join(repo, 'docs'), { recursive: true });
+      await mkdir(join(repo, 'pack'), { recursive: true });
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), inlineYaml, 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'prompts', 'instructions.md'), 'Update docs/status.md and pack/proposal.json.\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'checks', 'verify.sh'), '#!/bin/sh\nset -eu\ngrep -q "v3.0.0" "$LOOPWRIGHT_CANDIDATE_DIR/docs/status.md"\n', { mode: 0o755 });
+      await chmod(join(repo, '.auto-sync', 'checks', 'verify.sh'), 0o755);
+      await writeFile(join(repo, 'docs', 'status.md'), '# Status\n\nBaseline v1.0.0.\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'proposal.json'), '{"schema_version":1,"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(repo, 'pack', 'frozen.json'), '{"frozen":true}\n', 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'chore: seed inline memory test repo']);
+      const mainSha = await git(repo, ['rev-parse', 'HEAD']);
+      await git(repo, ['push', 'origin', 'HEAD:refs/heads/main']);
+
+      // 1) Candidate PR run -> exactly 1 PR POST, 0 PATCH, 2 commits on loopwright/main (candidate + inline memory without [skip ci])
+      const candidateRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 808,
+        baseRevision: mainSha,
+        mode: 'candidate',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-inline-1',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_inline_token_123456',
+        gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
+          LLM_TOKEN: 'sk-inline-llm-token-123456',
+        },
+      });
+      assert.equal(candidateRes.kind, 'compiled', candidateRes.kind === 'blocked' ? candidateRes.reason : '');
+      if (candidateRes.kind === 'compiled') {
+        assert.equal(candidateRes.delegateOutcome?.ok, true, candidateRes.delegateOutcome?.detail ?? '');
+        assert.equal(candidateRes.memory?.status, 'updated', candidateRes.memory?.reason ?? '');
+        assert.equal(candidateRes.memory?.branchName, 'loopwright/main');
+        assert.equal(candidateRes.memory?.pullRequestUrl, 'https://github.com/acme/repo/pull/200');
+        assert.equal(candidateRes.memory?.pullRequestNumber, 200);
+        assert.ok((candidateRes.memory?.entryCount ?? 0) >= 1);
+      }
+      assert.equal(prPosts, 1, 'inline-with-candidate must never open a second shadow memory PR');
+      assert.equal(prPatches, 0);
+
+      const branchTip = await git(bareRemote, ['rev-parse', 'refs/heads/loopwright/main']);
+      const candidateCommitSha = await git(bareRemote, ['rev-parse', 'refs/heads/loopwright/main^']);
+      const grandParentSha = await git(bareRemote, ['rev-parse', 'refs/heads/loopwright/main^^']);
+      assert.equal(grandParentSha, mainSha, 'candidate commit must parent on main and inline memory commit must parent on candidate commit');
+
+      const memoryCommitFiles = (await git(bareRemote, ['diff-tree', '--no-commit-id', '--name-only', '-r', `${candidateCommitSha}..${branchTip}`]))
+        .split(/\r?\n/)
+        .filter(Boolean);
+      assert.ok(memoryCommitFiles.length >= 2);
+      assert.ok(memoryCommitFiles.every(p => p.startsWith('.auto-sync/memory/auto-sync/')), `inline memory commit must only touch memory directory: ${memoryCommitFiles.join(', ')}`);
+
+      const statusAtTip = await git(bareRemote, ['show', `${branchTip}:docs/status.md`]);
+      assert.equal(statusAtTip.trim(), '# Status\n\nSynced to v3.0.0.');
+      const memoryCommitMsg = await git(bareRemote, ['log', '-1', '--format=%B', branchTip]);
+      assert.match(memoryCommitMsg, /Signed-off-by: /);
+      assert.equal(memoryCommitMsg.includes('[skip ci]'), false, 'inline-with-candidate defaults skipCi=false so required PR checks still run');
+
+      // 2) no-change run -> skips memory with zero additional PRs or commits
+      runMode = 'no-change';
+      turn = 0;
+      const noChangeRes = await runGitHubActionEntrypoint({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        repositoryFullName: 'acme/repo',
+        repositoryId: 808,
+        baseRevision: mainSha,
+        mode: 'no-change',
+        eventName: 'workflow_dispatch',
+        runRoot,
+        runId: 'run-inline-no-change',
+        turnkey: true,
+        allowManifestCustomBaseUrl: true,
+        githubApiBaseUrl: githubServer.url,
+        githubToken: 'ghp_inline_token_123456',
+        gitRemoteUrl: bareRemote,
+        openHostSessionAdapter: fastAdapter,
+        env: {
+          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+          GITHUB_ACTIONS: 'true',
+          RUNNER_ENVIRONMENT: 'github-hosted',
+          LLM_TOKEN: 'sk-inline-llm-token-123456',
+        },
+      });
+      assert.equal(noChangeRes.kind, 'compiled', noChangeRes.kind === 'blocked' ? noChangeRes.reason : '');
+      if (noChangeRes.kind === 'compiled') {
+        assert.equal(noChangeRes.delegateOutcome?.ok, true, noChangeRes.delegateOutcome?.detail ?? '');
+        assert.equal(noChangeRes.memory?.status, 'skipped');
+        assert.equal(noChangeRes.memory?.reason, 'no_candidate_pull_request');
+      }
+      assert.equal(prPosts, 1);
+
+      // 3) Replay idempotency + direct refusal cases (concurrent branch move & target branch refusal)
+      const manifest = await loadDeclarativeTaskpack({
+        manifestPath: '.auto-sync/taskpack.yaml',
+        repositoryRoot: repo,
+      });
+      const scrubber = new SecretScrubber();
+      scrubber.register('ghp_inline_token_123456');
+      const replayRes = await finalizeAndPublishTurnkeyMemory({
+        runRoot,
+        runId: 'run-inline-1',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        manifest,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: mainSha,
+        candidatePublication: {
+          runId: 'run-inline-1',
+          branchName: 'loopwright/main',
+          headSha: candidateCommitSha,
+          pullRequestUrl: 'https://github.com/acme/repo/pull/200',
+          pullRequestNumber: 200,
+        },
+        remoteUrl: bareRemote,
+        githubToken: 'ghp_inline_token_123456',
+        scrubber,
+      });
+      assert.equal(replayRes.status, 'updated');
+      assert.equal(await git(bareRemote, ['rev-parse', 'refs/heads/loopwright/main']), branchTip, 'replay must not push a duplicate commit');
+
+      // Replaying an existing receipt in inline mode without a matching candidatePublication must refuse (not echo stale receipt)
+      const staleReceiptRefused = await finalizeAndPublishTurnkeyMemory({
+        runRoot,
+        runId: 'run-inline-1',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        manifest,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: mainSha,
+        candidatePublication: null,
+        remoteUrl: bareRemote,
+        githubToken: 'ghp_inline_token_123456',
+        scrubber,
+      });
+      assert.equal(staleReceiptRefused.status, 'refused');
+      assert.match(staleReceiptRefused.reason ?? '', /without matching candidate pull request/);
+
+      // Remove receipt to test concurrent move refusal against branchTip (which already moved past candidateCommitSha)
+      await unlink(join(runRoot, 'run-inline-1', 'memory-publication.json'));
+      const conflictRes = await finalizeAndPublishTurnkeyMemory({
+        runRoot,
+        runId: 'run-inline-1',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        manifest,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: mainSha,
+        candidatePublication: {
+          runId: 'run-inline-1',
+          branchName: 'loopwright/main',
+          headSha: candidateCommitSha,
+          pullRequestUrl: 'https://github.com/acme/repo/pull/200',
+          pullRequestNumber: 200,
+        },
+        remoteUrl: bareRemote,
+        githubToken: 'ghp_inline_token_123456',
+        scrubber,
+      });
+      assert.equal(conflictRes.status, 'refused');
+      assert.match(conflictRes.reason ?? '', /MEMORY_CAS_CONFLICT/);
+
+      const targetBranchRefused = await finalizeAndPublishTurnkeyMemory({
+        runRoot,
+        runId: 'run-inline-1',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        manifest,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: mainSha,
+        candidatePublication: {
+          runId: 'run-inline-1',
+          branchName: 'main',
+          headSha: mainSha,
+          pullRequestUrl: 'https://github.com/acme/repo/pull/200',
+          pullRequestNumber: 200,
+        },
+        remoteUrl: bareRemote,
+        githubToken: 'ghp_inline_token_123456',
+        scrubber,
+      });
+      assert.equal(targetBranchRefused.status, 'refused');
+      assert.match(targetBranchRefused.reason ?? '', /target branch/);
+    } finally {
+      await openAiServer?.close();
+      await githubServer?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
 });

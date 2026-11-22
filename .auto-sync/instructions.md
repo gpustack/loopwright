@@ -1,6 +1,6 @@
-# Loopwright Self-Upgrade Instructions
+# Loopwright Auto-Sync Instructions
 
-You are maintaining Loopwright's own runtime dependency Taskpack (`self-upgrade`). Follow every scope, version-alignment, sandbox, and capture rule below.
+You are maintaining Loopwright's own runtime dependency Taskpack (`auto-sync`). Follow every scope, version-alignment, sandbox, and capture rule below.
 
 ## Dependency Groups & Alignment Invariants
 

@@ -1075,23 +1075,25 @@ test('run-taskpack-cli: live local runs execute minimal manifests (auto/candidat
     assert.equal(prRefused.status, 2, prRefused.stdout + prRefused.stderr);
     assert.equal(parseNdjson(prRefused.stdout)[0]!.data['code'], 'TASKPACK_HOST_BINDING_INVALID');
 
-    await writeAndCommitManifest({
-      apiVersion: 'loopwright.dev/v1alpha1',
-      kind: 'Taskpack',
-      metadata: { name: 'local-mem-pr-refuse' },
-      spec: {
-        goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
-        scope: { writable: ['docs/**'], protected: [] },
-        verification: { localChecks: [], externalGates: [] },
-        memory: { directory: '.loopwright/memory/local-mem-pr-refuse', apply: 'separate-pull-request', onNoModelBudget: 'skip' },
-      },
-    }, 'mem-pr-mode');
-    const memPrRefused = await runCliInProcess([
-      'run', '--taskpack', '.loopwright/taskpack.yaml',
-      '--repo', repoRoot, '--run-root', runRoot, '--run-id', 'tp-mem-pr-refuse', '--json',
-    ], baseEnv);
-    assert.equal(memPrRefused.status, 2, memPrRefused.stdout + memPrRefused.stderr);
-    assert.equal(parseNdjson(memPrRefused.stdout)[0]!.data['code'], 'TASKPACK_HOST_BINDING_INVALID');
+    for (const remoteApply of ['separate-pull-request', 'inline-with-candidate'] as const) {
+      await writeAndCommitManifest({
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'local-mem-pr-refuse' },
+        spec: {
+          goal: { candidate: 'Update docs/notes.md.', noChange: 'Confirm no change.' },
+          scope: { writable: ['docs/**'], protected: [] },
+          verification: { localChecks: [], externalGates: [] },
+          memory: { directory: '.loopwright/memory/local-mem-pr-refuse', apply: remoteApply, onNoModelBudget: 'skip' },
+        },
+      }, `mem-pr-${remoteApply}`);
+      const memPrRefused = await runCliInProcess([
+        'run', '--taskpack', '.loopwright/taskpack.yaml',
+        '--repo', repoRoot, '--run-root', runRoot, '--run-id', `tp-mem-pr-refuse-${remoteApply}`, '--json',
+      ], baseEnv);
+      assert.equal(memPrRefused.status, 2, memPrRefused.stdout + memPrRefused.stderr);
+      assert.equal(parseNdjson(memPrRefused.stdout)[0]!.data['code'], 'TASKPACK_HOST_BINDING_INVALID');
+    }
   } finally {
     await new Promise<void>(resolveClose => sseServer.close(() => resolveClose()));
     await rm(root, { recursive: true, force: true });

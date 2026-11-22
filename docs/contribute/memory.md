@@ -101,7 +101,9 @@ Retiring or superseding an entry removes it from `index.entries`, leaves `index.
 
 The result carries a `SeparateMemoryPullRequestSpec` with unified deletion diffs (`+++ /dev/null`) and `excludesCodeCandidatePaths: true`. `apply: separate-pull-request` opens cleanup PRs even when `no_change` runs only retire stale entries, while `local-only` and `disabled` skip remote memory PRs.
 
-In `@loopwright/github-app`, `separate-pull-request` skips non-passing (`failed`, `blocked`, `exhausted`, `expired`, `cancelled`) or incident runs by default (`publishOnFailure: false`) while `@loopwright/memory` and `local-only` still record `failure_observation` entries. Memory commits insert `[skip ci]` in the body before the `Signed-off-by:` trailer (`skipCi: true`) while keeping commit subjects and PR titles clean.
+In `@loopwright/github-app`, `separate-pull-request` skips non-passing (`failed`, `blocked`, `exhausted`, `expired`, `cancelled`) or incident runs by default (`publishOnFailure: false`) while `@loopwright/memory` and `local-only` still record `failure_observation` entries. Separate memory commits insert `[skip ci]` before the `Signed-off-by:` trailer (`skipCi: true`) while keeping subjects and PR titles clean.
+
+`inline-with-candidate` skips runs without a published candidate PR. When a candidate PR is published, the host runs the same five-gate CAS check and appends a memory-only commit onto that PR branch with `--force-with-lease` and `skipCi: false` by default.
 
 ## Two-layer compaction
 

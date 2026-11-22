@@ -686,7 +686,7 @@ export function runVerifyScript(
     LANG: 'C.UTF-8',
     LC_ALL: 'C.UTF-8',
     LOOPWRIGHT_CANDIDATE_DIR: candidateDir,
-    LOOPWRIGHT_CHECK_ID: 'self-upgrade-verify',
+    LOOPWRIGHT_CHECK_ID: 'auto-sync-verify',
   };
   for (const [k, v] of Object.entries(extraEnv)) {
     if (v !== undefined) {

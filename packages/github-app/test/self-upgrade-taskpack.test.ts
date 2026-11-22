@@ -921,7 +921,7 @@ await new Promise((resolveConn, rejectConn) => {
               LANG: 'C.UTF-8',
               LC_ALL: 'C.UTF-8',
               LOOPWRIGHT_CANDIDATE_DIR: netEscapeRepo,
-              LOOPWRIGHT_CHECK_ID: 'self-upgrade-verify',
+              LOOPWRIGHT_CHECK_ID: 'auto-sync-verify',
               SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
               SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
               SELF_UPGRADE_REPO_ROOT: netEscapeRepo,
