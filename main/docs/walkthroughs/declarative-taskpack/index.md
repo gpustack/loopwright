@@ -39,7 +39,7 @@ Declarative taskpack mode eliminates manual boilerplate while preserving every L
 Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -> offline sandbox -> independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.
 ```
 
-The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks, bounded preflight/verifier hooks, and workflows.
+The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks (plus a `TaskpackSuite` manifest for multi-domain repos), bounded preflight/verifier hooks, and workflows.
 
 ## Step 1: Author taskpack
 

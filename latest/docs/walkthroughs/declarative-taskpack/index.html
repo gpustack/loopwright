@@ -417,7 +417,7 @@
   <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -&gt; offline sandbox -&gt; independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.</span></span></code></pre></div>
 </div>
-<p>The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks, bounded preflight/verifier hooks, and workflows.</p>
+<p>The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks (plus a <code>TaskpackSuite</code> manifest for multi-domain repos), bounded preflight/verifier hooks, and workflows.</p>
 <h2 id="step-1-author-taskpack">Step 1: Author taskpack</h2>
 <p>Create <code>.auto-sync/taskpack.yaml</code> in the target repository. Loopwright derives <code>.auto-sync</code> as the control root.</p>
 <div class="code-block">
