@@ -1564,6 +1564,18 @@ export function compileLinuxBwrapCommand(
     ...normalized.canonicalDeniedReadPaths,
     ...normalized.canonicalReadOnlyBindMounts.flatMap(m => [m.sourcePath, m.targetPath]),
   ].some(p => isSameOrSubpath(p, '/dev/shm'));
+  const shmRoRoots: string[] = [];
+  if (isSameOrSubpath(normalized.canonicalWorkspaceRoot, '/dev/shm') && normalized.canonicalWorkspaceRoot !== '/dev/shm') {
+    shmRoRoots.push(normalized.canonicalWorkspaceRoot);
+  }
+  if (
+    isSameOrSubpath(targetCwd, '/dev/shm')
+    && targetCwd !== '/dev/shm'
+    && !shmRoRoots.some(r => isSameOrSubpath(targetCwd, r))
+    && !normalized.canonicalWritablePaths.some(w => isSameOrSubpath(targetCwd, w))
+  ) {
+    shmRoRoots.push(targetCwd);
+  }
 
   const args: string[] = ['--unshare-all'];
   if (normalized.networkMode === 'allow-outbound') {
@@ -1576,8 +1588,10 @@ export function compileLinuxBwrapCommand(
     '--proc', '/proc',
     '--dev', '/dev',
   );
-  if (usesDevShm && (!env.probeExecutables || existsSync('/dev/shm'))) {
-    args.push('--ro-bind', '/dev/shm', '/dev/shm');
+  if (usesDevShm) {
+    // Isolate /dev/shm with an empty per-sandbox tmpfs instead of exposing host /dev/shm,
+    // bind only the required workspace/policy subpaths, and remount /dev/shm read-only below.
+    args.push('--tmpfs', '/dev/shm');
   }
   if (normalized.networkMode === 'none' && (!env.probeExecutables || existsSync('/etc/hosts'))) {
     args.push('--ro-bind-try', '/dev/null', '/etc/hosts');
@@ -1604,6 +1618,7 @@ export function compileLinuxBwrapCommand(
     }
   };
   const allLaterMountTargets = [
+    ...shmRoRoots,
     ...normalized.canonicalWritablePaths,
     ...normalized.canonicalProtectedPaths,
     ...normalized.canonicalAllowedReadOnlyPaths,
@@ -1620,6 +1635,11 @@ export function compileLinuxBwrapCommand(
     }
     appendDeniedMask(deniedPath);
   }
+  for (const shmRoot of shmRoRoots) {
+    if (!env.probeExecutables || existsSync(shmRoot)) {
+      args.push('--ro-bind', shmRoot, shmRoot);
+    }
+  }
   for (const writablePath of normalized.canonicalWritablePaths) {
     args.push('--bind', writablePath, writablePath);
   }
@@ -1634,6 +1654,9 @@ export function compileLinuxBwrapCommand(
   }
   for (const deniedPath of postMountDeniedPaths) {
     appendDeniedMask(deniedPath);
+  }
+  if (usesDevShm) {
+    args.push('--remount-ro', '/dev/shm');
   }
 
   if (options?.inheritSpawnEnv === true) {

@@ -273,31 +273,43 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
     });
   });
 
-  it('re-mounts /dev/shm read-only after --dev /dev only when policy or cwd paths live under /dev/shm', () => {
+  it('isolates /dev/shm via private tmpfs + per-path binds + --remount-ro without exposing host /dev/shm', () => {
     const shmWorkspace = '/dev/shm/lw-test-ws';
     const shmCompiled = compileLinuxBwrapCommand(
       { workspaceRoot: shmWorkspace, writablePaths: ['docs'], scratchDirectory: '/dev/shm/lw-test-scratch' },
       { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
     );
     const devIdx = shmCompiled.args.findIndex((arg, idx) => arg === '--dev' && shmCompiled.args[idx + 1] === '/dev');
-    const shmRoIdx = shmCompiled.args.findIndex(
+    const shmTmpfsIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--tmpfs' && shmCompiled.args[idx + 1] === '/dev/shm',
+    );
+    const wholeShmRoIdx = shmCompiled.args.findIndex(
       (arg, idx) => arg === '--ro-bind' && shmCompiled.args[idx + 1] === '/dev/shm' && shmCompiled.args[idx + 2] === '/dev/shm',
+    );
+    const wsRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--ro-bind' && shmCompiled.args[idx + 1] === shmWorkspace && shmCompiled.args[idx + 2] === shmWorkspace,
     );
     const bindDocsIdx = shmCompiled.args.findIndex(
       (arg, idx) => arg === '--bind' && shmCompiled.args[idx + 1] === '/dev/shm/lw-test-ws/docs',
     );
+    const shmRemountRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--remount-ro' && shmCompiled.args[idx + 1] === '/dev/shm',
+    );
     assert.ok(devIdx > 0, 'must mount --dev /dev');
-    assert.ok(shmRoIdx > devIdx, 'must mount --ro-bind /dev/shm /dev/shm after --dev /dev');
-    assert.ok(bindDocsIdx > shmRoIdx, 'must mount writable --bind after --ro-bind /dev/shm /dev/shm');
+    assert.equal(wholeShmRoIdx, -1, 'must never expose whole host /dev/shm read-only');
+    assert.ok(shmTmpfsIdx > devIdx, 'must mount empty --tmpfs /dev/shm after --dev /dev');
+    assert.ok(wsRoIdx > shmTmpfsIdx, 'must bind only the specific workspace root read-only under /dev/shm');
+    assert.ok(bindDocsIdx > wsRoIdx, 'must mount writable --bind after workspace --ro-bind');
+    assert.ok(shmRemountRoIdx > bindDocsIdx, 'must --remount-ro /dev/shm after binds to lock ancestor dirs read-only');
 
     const tmpCompiled = compileLinuxBwrapCommand(
       { workspaceRoot: '/tmp/lw-test-ws', writablePaths: ['docs'] },
       { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
     );
-    const tmpShmRoIdx = tmpCompiled.args.findIndex(
-      (arg, idx) => arg === '--ro-bind' && tmpCompiled.args[idx + 1] === '/dev/shm' && tmpCompiled.args[idx + 2] === '/dev/shm',
+    const tmpShmIdx = tmpCompiled.args.findIndex(
+      (arg, idx) => (arg === '--tmpfs' || arg === '--ro-bind') && tmpCompiled.args[idx + 1] === '/dev/shm',
     );
-    assert.equal(tmpShmRoIdx, -1, 'must not emit /dev/shm bind when no policy path is under /dev/shm');
+    assert.equal(tmpShmIdx, -1, 'must not emit /dev/shm mounts when no policy path is under /dev/shm');
   });
 });
 
