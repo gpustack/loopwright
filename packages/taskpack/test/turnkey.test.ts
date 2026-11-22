@@ -987,6 +987,38 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         assert.equal(toolRoots.includes('/tmp'), false);
         assert.equal(toolRoots.includes('/private/tmp'), false);
 
+        // Env-derived read roots admit strict tmp subdirectories while refusing /etc, /tmp, and repoRoot
+        const envStageDir = join(sysTmpReal, `lw-env-stage-${process.pid}-${Date.now()}`);
+        await mkdir(envStageDir, { recursive: true });
+        try {
+          const envRoots = collectPositiveRuntimeToolReadRoots({
+            childEnv: {
+              PATH: '/usr/bin:/bin',
+              AUTOSYNC_STAGE_DIR: envStageDir,
+              BAD_ETC_DIR: '/etc',
+              BAD_TMP_DIR: '/tmp',
+              BAD_REPO_DIR: repoRoot,
+            },
+            gate: {
+              ...privGate,
+              env: ['AUTOSYNC_STAGE_DIR', 'BAD_ETC_DIR', 'BAD_TMP_DIR', 'BAD_REPO_DIR'],
+            },
+            canonRepoRoot: repoRoot,
+            canonRunRoot: runRoot,
+            canonScratchBase: join(holder, 'scratch'),
+            canonTmpDir: base,
+            homeDeniedSet: new Set<string>(),
+          });
+          assert.equal(envRoots.includes(envStageDir), true, 'must admit strict child stage dir declared in gate.env');
+          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env');
+          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env');
+          assert.equal(envRoots.includes('/tmp'), false, 'must refuse bare /tmp via gate.env');
+          assert.equal(envRoots.includes('/private/tmp'), false, 'must refuse bare /private/tmp via gate.env');
+          assert.equal(envRoots.includes(repoRoot), false, 'must refuse repoRoot via gate.env');
+        } finally {
+          await rm(envStageDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+
         // Hardlinked HUGO_BIN (nlink > 1) must be refused
         await link(fakeHugoPath, fakeHugoHardlink);
         const hlToolRoots = collectPositiveRuntimeToolReadRoots({

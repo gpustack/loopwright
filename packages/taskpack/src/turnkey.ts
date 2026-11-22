@@ -3829,6 +3829,21 @@ const BROAD_FORBIDDEN_TOOL_ROOTS: ReadonlySet<string> = new Set([
   '/opt',
 ]);
 
+const ENV_MOUNT_DENIED_SYSTEM_ROOTS: readonly string[] = Object.freeze([
+  '/etc',
+  '/private/etc',
+  '/var/lib',
+  '/var/run',
+  '/run',
+  '/proc',
+  '/sys',
+  '/dev',
+  '/root',
+  '/boot',
+  '/private/var/db',
+  '/private/var/run',
+]);
+
 export function collectPositiveRuntimeToolReadRoots(options: {
   readonly childEnv: Readonly<Record<string, string>>;
   readonly gate: CompiledLocalCommandGate;
@@ -3854,16 +3869,33 @@ export function collectPositiveRuntimeToolReadRoots(options: {
     return false;
   };
 
-  const isSafeRuntimeToolDir = (realDir: string): boolean => {
+  const isSafeRuntimeToolDir = (
+    realDir: string,
+    dirOptions?: { readonly allowTmpSubdir?: boolean },
+  ): boolean => {
     if (realDir.length === 0 || realDir.length > 1024 || /[\0\r\n"\\]/.test(realDir) || !isAbsolute(realDir)) {
       return false;
     }
     if (BROAD_FORBIDDEN_TOOL_ROOTS.has(realDir)) return false;
+    if (ENV_MOUNT_DENIED_SYSTEM_ROOTS.some(denied => isSameOrStrictChildPath(realDir, denied))) {
+      return false;
+    }
     if (canonHome !== null && isSameOrStrictChildPath(canonHome, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonRepoRoot) || isSameOrStrictChildPath(canonRepoRoot, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonRunRoot) || isSameOrStrictChildPath(canonRunRoot, realDir)) return false;
     if (isSameOrStrictChildPath(realDir, canonScratchBase) || isSameOrStrictChildPath(canonScratchBase, realDir)) return false;
-    if (
+    if (dirOptions?.allowTmpSubdir === true) {
+      if (
+        realDir === canonTmpDir
+        || isSameOrStrictChildPath(canonTmpDir, realDir)
+        || realDir === '/tmp'
+        || realDir === '/private/tmp'
+        || realDir === '/var/folders'
+        || realDir === '/private/var/folders'
+      ) {
+        return false;
+      }
+    } else if (
       isSameOrStrictChildPath(realDir, canonTmpDir)
       || isSameOrStrictChildPath(canonTmpDir, realDir)
       || isSameOrStrictChildPath(realDir, '/tmp')
@@ -3985,7 +4017,7 @@ export function collectPositiveRuntimeToolReadRoots(options: {
 
   // Mount existing absolute host directories explicitly forwarded via manifest parameters.env
   // (for example preflight stage/cache directories such as AUTOSYNC_STAGE_DIR) read-only,
-  // while refusing broad roots (/tmp, $HOME, /) and host-sensitive trees.
+  // reusing isSafeRuntimeToolDir to refuse broad roots, system config/state trees, and sensitive paths.
   for (const envName of gate.env) {
     const rawVal = childEnv[envName]?.trim();
     if (rawVal === undefined || rawVal.length === 0 || rawVal.length > 1024 || !isAbsolute(rawVal) || /[\0\r\n"\\]/.test(rawVal)) {
@@ -3994,28 +4026,7 @@ export function collectPositiveRuntimeToolReadRoots(options: {
     if (!existsSync(rawVal)) continue;
     try {
       const realDir = realpathSync(rawVal);
-      const st = tryLstatSync(realDir);
-      if (
-        st !== null
-        && !st.isSymbolicLink()
-        && st.isDirectory()
-        && realDir.length <= 1024
-        && !/[\0\r\n"\\]/.test(realDir)
-        && !BROAD_FORBIDDEN_TOOL_ROOTS.has(realDir)
-        && realDir !== canonTmpDir
-        && realDir !== '/tmp'
-        && realDir !== '/private/tmp'
-        && realDir !== '/var/folders'
-        && realDir !== '/private/var/folders'
-        && (canonHome === null || !isSameOrStrictChildPath(canonHome, realDir))
-        && !isSameOrStrictChildPath(realDir, canonRepoRoot)
-        && !isSameOrStrictChildPath(canonRepoRoot, realDir)
-        && !isSameOrStrictChildPath(realDir, canonRunRoot)
-        && !isSameOrStrictChildPath(canonRunRoot, realDir)
-        && !isSameOrStrictChildPath(realDir, canonScratchBase)
-        && !isSameOrStrictChildPath(canonScratchBase, realDir)
-        && !overlapsHomeDenied(realDir)
-      ) {
+      if (isSafeRuntimeToolDir(realDir, { allowTmpSubdir: true })) {
         out.add(realDir);
       }
     } catch {
@@ -5509,25 +5520,6 @@ export async function startLocalCommandGateServer(
             canonicalizeCommandContainmentPath(scratchHome, 'scratchHome'),
             canonicalizeCommandContainmentPath(scratchTmp, 'scratchTmp'),
           ];
-          if (process.platform === 'linux' && gate.allowPrivileged === true && effectiveGateNetworkMode === 'allow-outbound') {
-            for (const sockCandidate of ['/var/run/docker.sock', '/run/docker.sock']) {
-              if (!existsSync(sockCandidate)) continue;
-              try {
-                const realSock = realpathSync(sockCandidate);
-                const sockSt = tryLstatSync(realSock);
-                if (sockSt !== null && sockSt.isSocket()) {
-                  const canonSock = canonicalizeCommandContainmentPath(realSock, 'dockerSock');
-                  writablePaths.push(canonSock);
-                  if (childEnv['DOCKER_HOST'] === undefined) {
-                    childEnv['DOCKER_HOST'] = `unix://${canonSock}`;
-                  }
-                  break;
-                }
-              } catch {
-                // Ignore inaccessible Docker socket.
-              }
-            }
-          }
           const hasCheckStaged = typeof options.checkStagedDir === 'string' && options.checkStagedDir.length > 0;
           const canonCheckStagedDir = hasCheckStaged
             ? canonicalizeCommandContainmentPath(options.checkStagedDir!, 'checkStagedDir')
