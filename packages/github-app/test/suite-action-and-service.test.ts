@@ -2297,4 +2297,127 @@ describe('@loopwright/github-app suite Action routing, PR ownership lookup, mult
       await rm(work, { recursive: true, force: true });
     }
   });
+
+  it('admits multi-domain suites with shared-root carved-out proposal.path in Action dry-run and multi-tenant control plane', async () => {
+    const work = await mkdtemp(join(tmpdir(), 'lw-suite-carved-props-'));
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    let cpHandle: Awaited<ReturnType<typeof startGitHubAppControlPlane>> | undefined;
+    try {
+      await mkdir(join(repo, '.auto-sync', 'proposals'), { recursive: true });
+      await mkdir(join(repo, '.auto-sync', 'instructions'), { recursive: true });
+      await mkdir(join(repo, 'pkg', 'alpha'), { recursive: true });
+      await mkdir(join(repo, 'pkg', 'beta'), { recursive: true });
+      await mkdir(runRoot, { recursive: true });
+
+      await git(repo, ['init', '-b', 'main']);
+      await git(repo, ['config', 'user.name', 'Test User']);
+      await git(repo, ['config', 'user.email', 'test@example.com']);
+
+      await writeFile(join(repo, '.auto-sync', 'holds.json'), '{}\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'proposals', 'alpha.json'), '{"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'proposals', 'beta.json'), '{"version":"2.0.0"}\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'instructions', 'alpha.md'), '# alpha rules\n', 'utf8');
+      await writeFile(join(repo, '.auto-sync', 'instructions', 'beta.md'), '# beta rules\n', 'utf8');
+      await writeFile(join(repo, 'pkg', 'alpha', 'a.txt'), 'a\n', 'utf8');
+      await writeFile(join(repo, 'pkg', 'beta', 'b.txt'), 'b\n', 'utf8');
+
+      await writeFile(
+        join(repo, '.auto-sync', 'alpha-taskpack.yaml'),
+        makeDomainTaskpackYaml({
+          name: 'alpha-sync',
+          controlDir: '.auto-sync',
+          writable: ['pkg/alpha/**', '.auto-sync/proposals/alpha.json'],
+          headBranchPrefix: 'auto-sync-alpha/',
+          instructions: ['.auto-sync/instructions/alpha.md'],
+          proposalPath: '.auto-sync/proposals/alpha.json',
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(repo, '.auto-sync', 'beta-taskpack.yaml'),
+        makeDomainTaskpackYaml({
+          name: 'beta-sync',
+          controlDir: '.auto-sync',
+          writable: ['pkg/beta/**', '.auto-sync/proposals/beta.json'],
+          headBranchPrefix: 'auto-sync-beta/',
+          instructions: ['.auto-sync/instructions/beta.md'],
+          proposalPath: '.auto-sync/proposals/beta.json',
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(repo, '.auto-sync', 'suite.yaml'),
+        serializePrettyYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'TaskpackSuite',
+          metadata: { name: 'carved-proposals-suite' },
+          spec: {
+            domains: [
+              { id: 'alpha', taskpack: '.auto-sync/alpha-taskpack.yaml', schedules: ['0 2 * * 1'] },
+              { id: 'beta', taskpack: '.auto-sync/beta-taskpack.yaml', schedules: ['0 2 * * 2'] },
+            ],
+          },
+        }),
+        'utf8',
+      );
+
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'chore: init carved proposals suite']);
+      const headSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      const loaded = await loadTaskpackSuite({
+        repositoryRoot: repo,
+        suitePath: '.auto-sync/suite.yaml',
+        policyProfile: 'github',
+        hostPolicy: MULTI_TENANT_HOST_POLICY,
+      });
+
+      // Multi-tenant control plane must accept the loaded suite without TASKPACK_HOST_BINDING_INVALID
+      cpHandle = await startGitHubAppControlPlane({
+        host: '127.0.0.1',
+        port: 0,
+        webhookSecret: WEBHOOK_SECRET,
+        repositoryRoot: repo,
+        suite: loaded,
+      });
+      assert.equal(cpHandle.url.startsWith('http://127.0.0.1:'), true);
+
+      // Action entrypoint resolve-suite-only and per-domain dry-run both succeed cleanly
+      const resolveRes = await runGitHubActionEntrypoint({
+        mode: 'auto',
+        repositoryRoot: repo,
+        suitePath: '.auto-sync/suite.yaml',
+        resolveSuiteOnly: true,
+        eventName: 'schedule',
+        schedule: '0 2 * * 1',
+        baseRevision: headSha,
+        repositoryFullName: 'acme/mono',
+        runRoot,
+        runId: 'carved-resolve',
+      });
+      assert.equal(resolveRes.kind, 'eligible');
+      assert.deepEqual(resolveRes.matrix.include.map(c => c.domainId), ['alpha']);
+
+      const dryRunRes = await runGitHubActionEntrypoint({
+        mode: 'candidate',
+        repositoryRoot: repo,
+        suitePath: '.auto-sync/suite.yaml',
+        domain: 'alpha',
+        dryRun: true,
+        force: true,
+        eventName: 'workflow_dispatch',
+        baseRevision: headSha,
+        repositoryFullName: 'acme/mono',
+        runRoot,
+        runId: 'carved-dry-run',
+        providerTokenEnv: 'OPENAI_API_KEY',
+        env: { ...process.env, OPENAI_API_KEY: 'sk-test-carved-dry-run' },
+      });
+      assert.equal(dryRunRes.kind, 'compiled');
+    } finally {
+      await cpHandle?.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
 });

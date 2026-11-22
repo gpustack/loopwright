@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { matchesScopePattern } from '@loopwright/core';
 import {
   checkTaskpackSuite,
   compileDeclarativeTaskpack,
@@ -2627,6 +2628,307 @@ describe('suite.ts: schedule filtering, matrix binding, and pull-request comment
         fetchImpl: async () => new Response(JSON.stringify({ version: '1.0.0' }), { status: 200 }),
       });
       assert.equal(sameForkRes.disposition, 'eligible');
+    });
+  });
+
+  it('partitions multi-domain carved-out proposal paths across shared and nested control roots while rejecting collisions', async () => {
+    const isAllowedByContractScope = (
+      scope: { readonly writable: readonly string[]; readonly protected: readonly string[] },
+      relPath: string,
+    ): boolean => {
+      const writable = scope.writable.some(p => {
+        const m = matchesScopePattern(p, relPath);
+        return m.ok && m.value;
+      });
+      if (!writable) return false;
+      const blocked = scope.protected.some(p => {
+        const m = matchesScopePattern(p, relPath);
+        return m.ok && m.value;
+      });
+      return !blocked;
+    };
+
+    // 1. Shared control root (.auto-sync/proposals/<id>.json)
+    await withTempDir(async sharedRoot => {
+      initGitRepo(sharedRoot, 'main');
+      await mkdir(join(sharedRoot, '.auto-sync', 'proposals'), { recursive: true });
+      await mkdir(join(sharedRoot, '.auto-sync', 'instructions'), { recursive: true });
+      await mkdir(join(sharedRoot, 'pkg', 'alpha'), { recursive: true });
+      await mkdir(join(sharedRoot, 'pkg', 'beta'), { recursive: true });
+
+      await writeFile(join(sharedRoot, '.auto-sync', 'holds.json'), '{}\n', 'utf8');
+      await writeFile(join(sharedRoot, '.auto-sync', 'proposals', 'alpha.json'), '{"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(sharedRoot, '.auto-sync', 'proposals', 'beta.json'), '{"version":"2.0.0"}\n', 'utf8');
+      await writeFile(join(sharedRoot, '.auto-sync', 'proposals', 'shared-notes.md'), '# keep protected\n', 'utf8');
+      await writeFile(join(sharedRoot, '.auto-sync', 'instructions', 'alpha.md'), '# alpha\n', 'utf8');
+      await writeFile(join(sharedRoot, '.auto-sync', 'instructions', 'beta.md'), '# beta\n', 'utf8');
+      await writeFile(join(sharedRoot, 'pkg', 'alpha', 'version.txt'), '1.0.0\n', 'utf8');
+      await writeFile(join(sharedRoot, 'pkg', 'beta', 'version.txt'), '2.0.0\n', 'utf8');
+
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'alpha-taskpack.yaml'),
+        domainManifestYaml({
+          name: 'alpha-sync',
+          writable: ['pkg/alpha/**', '.auto-sync/proposals/alpha.json'],
+          instructions: ['.auto-sync/instructions/alpha.md'],
+          proposalPath: '.auto-sync/proposals/alpha.json',
+          localChecks: [{ id: 'scope-guard', implementation: 'scope.v1' }],
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'auto-sync-alpha/',
+            titleTemplate: 'chore(alpha): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'beta-taskpack.yaml'),
+        domainManifestYaml({
+          name: 'beta-sync',
+          writable: ['pkg/beta/**', '.auto-sync/proposals/beta.json'],
+          instructions: ['.auto-sync/instructions/beta.md'],
+          proposalPath: '.auto-sync/proposals/beta.json',
+          localChecks: [{ id: 'scope-guard', implementation: 'scope.v1' }],
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'auto-sync-beta/',
+            titleTemplate: 'chore(beta): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'suite.yaml'),
+        [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: TaskpackSuite',
+          'metadata:',
+          '  name: shared-root-proposals-suite',
+          'spec:',
+          '  domains:',
+          '    - id: alpha',
+          '      taskpack: .auto-sync/alpha-taskpack.yaml',
+          '    - id: beta',
+          '      taskpack: .auto-sync/beta-taskpack.yaml',
+        ].join('\n') + '\n',
+        'utf8',
+      );
+      git(sharedRoot, ['add', '.']);
+      git(sharedRoot, ['commit', '-qm', 'init shared root carved proposals']);
+      const baseSha = git(sharedRoot, ['rev-parse', 'HEAD']);
+
+      const loadedShared = await loadTaskpackSuite({
+        repositoryRoot: sharedRoot,
+        suitePath: '.auto-sync/suite.yaml',
+        policyProfile: 'github',
+      });
+      assert.equal(loadedShared.suiteProtectedPaths.includes('.auto-sync/suite.yaml'), true);
+      assert.equal(loadedShared.suiteProtectedPaths.includes('.auto-sync/holds.json'), true);
+      assert.equal(loadedShared.suiteProtectedPaths.includes('.auto-sync/proposals/shared-notes.md'), true);
+      assert.equal(loadedShared.suiteProtectedPaths.includes('.auto-sync/proposals/alpha.json'), false);
+      assert.equal(loadedShared.suiteProtectedPaths.includes('.auto-sync/proposals/beta.json'), false);
+
+      const alphaDom = loadedShared.domains.find(d => d.id === 'alpha')!;
+      const betaDom = loadedShared.domains.find(d => d.id === 'beta')!;
+      assert.equal(alphaDom.protectedPaths.includes('.auto-sync/proposals/alpha.json'), false);
+      assert.equal(alphaDom.protectedPaths.includes('.auto-sync/proposals/beta.json'), true);
+      assert.equal(alphaDom.protectedPaths.includes('.auto-sync/proposals/shared-notes.md'), true);
+      assert.equal(betaDom.protectedPaths.includes('.auto-sync/proposals/beta.json'), false);
+      assert.equal(betaDom.protectedPaths.includes('.auto-sync/proposals/alpha.json'), true);
+      assert.equal(betaDom.protectedPaths.includes('.auto-sync/proposals/shared-notes.md'), true);
+
+      const compiledAlpha = await compileDeclarativeTaskpack(alphaDom.manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        hostPolicy: { policyProfile: 'github' },
+        repository: 'acme/mono',
+        repositoryRoot: sharedRoot,
+        taskpackPath: alphaDom.taskpackPath,
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+      const alphaScope = compiledAlpha.config.spec.task.spec.scope;
+      assert.equal(isAllowedByContractScope(alphaScope, '.auto-sync/proposals/alpha.json'), true);
+      assert.equal(isAllowedByContractScope(alphaScope, '.auto-sync/proposals/beta.json'), false);
+      assert.equal(isAllowedByContractScope(alphaScope, '.auto-sync/proposals/shared-notes.md'), false);
+      assert.equal(isAllowedByContractScope(alphaScope, '.auto-sync/holds.json'), false);
+
+      // Negative: colliding carved-out proposal path (case-folding collision) must be refused
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'beta-taskpack.yaml'),
+        domainManifestYaml({
+          name: 'beta-sync',
+          writable: ['pkg/beta/**', '.auto-sync/proposals/Alpha.json'],
+          instructions: ['.auto-sync/instructions/beta.md'],
+          proposalPath: '.auto-sync/proposals/Alpha.json',
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'auto-sync-beta/',
+            titleTemplate: 'chore(beta): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await assert.rejects(
+        () => loadTaskpackSuite({ repositoryRoot: sharedRoot, suitePath: '.auto-sync/suite.yaml', policyProfile: 'github' }),
+        (err: unknown) => err instanceof TaskpackError
+          && err.code === 'TASKPACK_MANIFEST_INVALID'
+          && /colliding carved-out proposal\.path/i.test(err.message),
+      );
+
+      // Negative: domain declaring peer's proposal in writable must be refused
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'beta-taskpack.yaml'),
+        domainManifestYaml({
+          name: 'beta-sync',
+          writable: ['pkg/beta/**', '.auto-sync/proposals/beta.json'],
+          instructions: ['.auto-sync/instructions/beta.md'],
+          proposalPath: '.auto-sync/proposals/beta.json',
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'auto-sync-beta/',
+            titleTemplate: 'chore(beta): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(sharedRoot, '.auto-sync', 'alpha-taskpack.yaml'),
+        domainManifestYaml({
+          name: 'alpha-sync',
+          writable: ['pkg/alpha/**', '.auto-sync/proposals/beta.json'],
+          instructions: ['.auto-sync/instructions/alpha.md'],
+          proposalPath: '.auto-sync/proposals/alpha.json',
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'auto-sync-alpha/',
+            titleTemplate: 'chore(alpha): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await assert.rejects(
+        () => loadTaskpackSuite({ repositoryRoot: sharedRoot, suitePath: '.auto-sync/suite.yaml', policyProfile: 'github' }),
+        (err: unknown) => err instanceof TaskpackError
+          && (err.code === 'TASKPACK_MANIFEST_INVALID' || err.code === 'TASKPACK_SCOPE_VIOLATION'),
+      );
+    });
+
+    // 2. Subdirectory-per-domain layout (.loopwright/<id>/proposal.json)
+    await withTempDir(async nestedRoot => {
+      initGitRepo(nestedRoot, 'main');
+      await mkdir(join(nestedRoot, '.loopwright', 'alpha'), { recursive: true });
+      await mkdir(join(nestedRoot, '.loopwright', 'beta'), { recursive: true });
+      await mkdir(join(nestedRoot, 'pkg', 'alpha'), { recursive: true });
+      await mkdir(join(nestedRoot, 'pkg', 'beta'), { recursive: true });
+
+      await writeFile(join(nestedRoot, '.loopwright', 'alpha', 'proposal.json'), '{"version":"1.0.0"}\n', 'utf8');
+      await writeFile(join(nestedRoot, '.loopwright', 'beta', 'proposal.json'), '{"version":"2.0.0"}\n', 'utf8');
+      await writeFile(join(nestedRoot, '.loopwright', 'alpha', 'helper.md'), '# alpha helper\n', 'utf8');
+      await writeFile(join(nestedRoot, '.loopwright', 'beta', 'helper.md'), '# beta helper\n', 'utf8');
+      await writeFile(join(nestedRoot, '.loopwright', 'shared-note.md'), '# shared\n', 'utf8');
+      await writeFile(join(nestedRoot, 'pkg', 'alpha', 'a.txt'), 'a\n', 'utf8');
+      await writeFile(join(nestedRoot, 'pkg', 'beta', 'b.txt'), 'b\n', 'utf8');
+
+      await writeFile(
+        join(nestedRoot, '.loopwright', 'alpha', 'taskpack.yaml'),
+        domainManifestYaml({
+          name: 'alpha-nested',
+          writable: ['pkg/alpha/**', '.loopwright/alpha/proposal.json'],
+          proposalPath: '.loopwright/alpha/proposal.json',
+          localChecks: [{ id: 'scope-guard', implementation: 'scope.v1' }],
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'lw-alpha/',
+            titleTemplate: 'chore(alpha): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(nestedRoot, '.loopwright', 'beta', 'taskpack.yaml'),
+        domainManifestYaml({
+          name: 'beta-nested',
+          writable: ['pkg/beta/**', '.loopwright/beta/proposal.json'],
+          proposalPath: '.loopwright/beta/proposal.json',
+          localChecks: [{ id: 'scope-guard', implementation: 'scope.v1' }],
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'lw-beta/',
+            titleTemplate: 'chore(beta): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await writeFile(
+        join(nestedRoot, '.loopwright', 'suite.yaml'),
+        [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: TaskpackSuite',
+          'metadata:',
+          '  name: nested-proposals-suite',
+          'spec:',
+          '  domains:',
+          '    - id: alpha',
+          '      taskpack: .loopwright/alpha/taskpack.yaml',
+          '    - id: beta',
+          '      taskpack: .loopwright/beta/taskpack.yaml',
+        ].join('\n') + '\n',
+        'utf8',
+      );
+      git(nestedRoot, ['add', '.']);
+      git(nestedRoot, ['commit', '-qm', 'init nested carved proposals']);
+      const baseSha = git(nestedRoot, ['rev-parse', 'HEAD']);
+
+      const loadedNested = await loadTaskpackSuite({ repositoryRoot: nestedRoot, policyProfile: 'github' });
+      assert.equal(loadedNested.suiteProtectedPaths.includes('.loopwright/alpha'), false);
+      assert.equal(loadedNested.suiteProtectedPaths.includes('.loopwright/beta'), false);
+      assert.equal(loadedNested.suiteProtectedPaths.includes('.loopwright/shared-note.md'), true);
+      assert.equal(loadedNested.suiteProtectedPaths.includes('.loopwright/alpha/helper.md'), true);
+      assert.equal(loadedNested.suiteProtectedPaths.includes('.loopwright/beta/helper.md'), true);
+
+      const alphaNested = loadedNested.domains.find(d => d.id === 'alpha')!;
+      const betaNested = loadedNested.domains.find(d => d.id === 'beta')!;
+      assert.equal(alphaNested.protectedPaths.includes('.loopwright/alpha'), false);
+      assert.equal(alphaNested.protectedPaths.includes('.loopwright/alpha/proposal.json'), false);
+      assert.equal(alphaNested.protectedPaths.includes('.loopwright/beta'), true);
+      assert.equal(alphaNested.protectedPaths.includes('.loopwright/beta/proposal.json'), true);
+      assert.equal(betaNested.protectedPaths.includes('.loopwright/beta'), false);
+      assert.equal(betaNested.protectedPaths.includes('.loopwright/beta/proposal.json'), false);
+      assert.equal(betaNested.protectedPaths.includes('.loopwright/alpha'), true);
+      assert.equal(betaNested.protectedPaths.includes('.loopwright/alpha/proposal.json'), true);
+
+      const compiledAlphaNested = await compileDeclarativeTaskpack(alphaNested.manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        hostPolicy: { policyProfile: 'github' },
+        repository: 'acme/mono',
+        repositoryRoot: nestedRoot,
+        taskpackPath: alphaNested.taskpackPath,
+        baseRevision: baseSha,
+        sourceRevision: baseSha,
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+      const nestedAlphaScope = compiledAlphaNested.config.spec.task.spec.scope;
+      assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/alpha/proposal.json'), true);
+      assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/alpha/helper.md'), false);
+      assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/beta/proposal.json'), false);
+      assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/beta/new-file.txt'), false);
     });
   });
 });
