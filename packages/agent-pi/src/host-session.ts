@@ -558,22 +558,27 @@ function buildHostToolBashSpawnSpec(options: {
   }
   if (process.platform === 'linux') {
     if (canUseLinuxBwrap()) {
+      const stripTrailingSlashes = (rawPath: string): string => rawPath.replace(/\/+$/, '');
       const isUnderDevShm = (rawPath: string): boolean => {
-        const normalized = rawPath.replace(/\/+$/, '');
+        const normalized = stripTrailingSlashes(rawPath);
         return normalized === '/dev/shm' || normalized.startsWith('/dev/shm/');
       };
-      const underDevShm = [options.candidateDir, options.scratchDir, options.tmpDir].some(isUnderDevShm);
+      const hasWritableShmRoot = [options.scratchDir, options.tmpDir].some(
+        rawPath => stripTrailingSlashes(rawPath) === '/dev/shm',
+      );
+      const isolateDevShm = [options.candidateDir, options.scratchDir, options.tmpDir].some(isUnderDevShm)
+        && !hasWritableShmRoot;
       return {
         executable: '/usr/bin/bwrap',
         args: [
           '--ro-bind', '/', '/',
           '--dev', '/dev',
           '--proc', '/proc',
-          ...(underDevShm ? ['--tmpfs', '/dev/shm'] : []),
+          ...(isolateDevShm ? ['--tmpfs', '/dev/shm'] : []),
           '--ro-bind', options.candidateDir, options.candidateDir,
           '--bind', options.scratchDir, options.scratchDir,
           '--bind', options.tmpDir, options.tmpDir,
-          ...(underDevShm ? ['--remount-ro', '/dev/shm'] : []),
+          ...(isolateDevShm ? ['--remount-ro', '/dev/shm'] : []),
           '--unshare-pid',
           '--unshare-net',
           '--die-with-parent',

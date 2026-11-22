@@ -1564,17 +1564,20 @@ export function compileLinuxBwrapCommand(
     ...normalized.canonicalDeniedReadPaths,
     ...normalized.canonicalReadOnlyBindMounts.flatMap(m => [m.sourcePath, m.targetPath]),
   ].some(p => isSameOrSubpath(p, '/dev/shm'));
+  const isolateDevShm = usesDevShm && !normalized.canonicalWritablePaths.includes('/dev/shm');
   const shmRoRoots: string[] = [];
-  if (isSameOrSubpath(normalized.canonicalWorkspaceRoot, '/dev/shm') && normalized.canonicalWorkspaceRoot !== '/dev/shm') {
-    shmRoRoots.push(normalized.canonicalWorkspaceRoot);
-  }
-  if (
-    isSameOrSubpath(targetCwd, '/dev/shm')
-    && targetCwd !== '/dev/shm'
-    && !shmRoRoots.some(r => isSameOrSubpath(targetCwd, r))
-    && !normalized.canonicalWritablePaths.some(w => isSameOrSubpath(targetCwd, w))
-  ) {
-    shmRoRoots.push(targetCwd);
+  if (isolateDevShm) {
+    if (isSameOrSubpath(normalized.canonicalWorkspaceRoot, '/dev/shm') && normalized.canonicalWorkspaceRoot !== '/dev/shm') {
+      shmRoRoots.push(normalized.canonicalWorkspaceRoot);
+    }
+    if (
+      isSameOrSubpath(targetCwd, '/dev/shm')
+      && targetCwd !== '/dev/shm'
+      && !shmRoRoots.some(r => isSameOrSubpath(targetCwd, r))
+      && !normalized.canonicalWritablePaths.some(w => isSameOrSubpath(targetCwd, w))
+    ) {
+      shmRoRoots.push(targetCwd);
+    }
   }
 
   const args: string[] = ['--unshare-all'];
@@ -1588,7 +1591,7 @@ export function compileLinuxBwrapCommand(
     '--proc', '/proc',
     '--dev', '/dev',
   );
-  if (usesDevShm) {
+  if (isolateDevShm) {
     // Isolate /dev/shm with an empty per-sandbox tmpfs instead of exposing host /dev/shm,
     // bind only the required workspace/policy subpaths, and remount /dev/shm read-only below.
     args.push('--tmpfs', '/dev/shm');
@@ -1655,7 +1658,7 @@ export function compileLinuxBwrapCommand(
   for (const deniedPath of postMountDeniedPaths) {
     appendDeniedMask(deniedPath);
   }
-  if (usesDevShm) {
+  if (isolateDevShm) {
     args.push('--remount-ro', '/dev/shm');
   }
 

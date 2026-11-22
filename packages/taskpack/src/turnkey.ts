@@ -3477,6 +3477,11 @@ export function buildCommandScriptInvocation(
         ...(gitBind !== null ? [gitBind.sourceObjectsDir, gitBind.targetObjectsDir] : []),
         ...canonicalHostMounts.flatMap(m => [m.source, m.target, ...(m.aliasTarget !== undefined ? [m.aliasTarget] : [])]),
       ].some(p => isSameOrStrictChildPath(p, '/dev/shm'));
+      const hasWritableShmRoot = canonicalWritables.includes('/dev/shm')
+        || canonicalHostMounts.some(
+          m => m.mode === 'rw' && (m.target === '/dev/shm' || m.aliasTarget === '/dev/shm'),
+        );
+      const isolateDevShm = usesDevShm && !hasWritableShmRoot;
 
       const bwrapArgs: string[] = [
         ...bwrapNamespaceFlags,
@@ -3484,10 +3489,11 @@ export function buildCommandScriptInvocation(
         '--ro-bind', '/', '/',
         '--dev', '/dev',
         '--proc', '/proc',
-        ...(usesDevShm ? ['--tmpfs', '/dev/shm'] : []),
+        ...(isolateDevShm ? ['--tmpfs', '/dev/shm'] : []),
       ];
 
-      const shmCwdRo = canonicalCwd !== undefined
+      const shmCwdRo = isolateDevShm
+        && canonicalCwd !== undefined
         && isStrictChildPath(canonicalCwd, '/dev/shm')
         && !reopenedAll.some(rp => isSameOrStrictChildPath(canonicalCwd, rp))
         ? canonicalCwd
@@ -3507,7 +3513,7 @@ export function buildCommandScriptInvocation(
       }
 
       const maskedDirs: string[] = [];
-      const ancestorTmpfsDirs: string[] = usesDevShm ? ['/dev/shm'] : [];
+      const ancestorTmpfsDirs: string[] = isolateDevShm ? ['/dev/shm'] : [];
       for (const deniedPath of preMountDenied) {
         if (maskedDirs.some(m => isStrictChildPath(deniedPath, m))) {
           continue;

@@ -310,6 +310,16 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
       (arg, idx) => (arg === '--tmpfs' || arg === '--ro-bind') && tmpCompiled.args[idx + 1] === '/dev/shm',
     );
     assert.equal(tmpShmIdx, -1, 'must not emit /dev/shm mounts when no policy path is under /dev/shm');
+
+    const exactWritableShm = compileLinuxBwrapCommand(
+      { workspaceRoot: '/tmp/lw-test-ws', writablePaths: ['docs'], scratchDirectory: '/dev/shm' },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    assert.equal(
+      exactWritableShm.args.some((arg, idx) => (arg === '--tmpfs' || arg === '--remount-ro') && exactWritableShm.args[idx + 1] === '/dev/shm'),
+      false,
+      'must not remount /dev/shm read-only when /dev/shm itself is explicitly writable',
+    );
   });
 });
 
