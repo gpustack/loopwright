@@ -29,9 +29,7 @@ spec:
       version: 1
       kind: agent
       implementation: pi.agent.v1
-      digest:
-        algorithm: sha256
-        hex: <hash>
+      digest: { algorithm: sha256, hex: <hash> }
       parameters:
         prompt: Update packages/app/manifest.json and satisfy required schema keys.
         purpose: task
@@ -40,9 +38,7 @@ spec:
       version: 1
       kind: check
       implementation: json-artifact.v1
-      digest:
-        algorithm: sha256
-        hex: <hash>
+      digest: { algorithm: sha256, hex: <hash> }
       parameters:
         checkId: manifest-json
         path: packages/app/manifest.json
@@ -54,9 +50,7 @@ spec:
       version: 1
       kind: check
       implementation: gate.v1
-      digest:
-        algorithm: sha256
-        hex: <hash>
+      digest: { algorithm: sha256, hex: <hash> }
       parameters:
         checkId: ci-gate
         endpointRef: ci-gate-endpoint
@@ -98,22 +92,16 @@ spec:
     - id: release-guide
       kind: instruction
       path: context/release-guide.md
-      digest:
-        algorithm: sha256
-        hex: <hash>
+      digest: { algorithm: sha256, hex: <hash> }
   runtimeProfiles:
     - id: default-runtime
       dockerExecutable: /usr/local/bin/docker
       dockerSocket: /var/run/docker.sock
       identity:
         sdkIntegrity: pi-sdk-v1
-        graphDigest:
-          algorithm: sha256
-          hex: <hash>
+        graphDigest: { algorithm: sha256, hex: <hash> }
         imageDigest: sha256:<hash>
-        configDigest:
-          algorithm: sha256
-          hex: <hash>
+        configDigest: { algorithm: sha256, hex: <hash> }
         profile: linux/arm64
   credentialBindings:
     - id: zai-token
@@ -180,9 +168,7 @@ kind: ControllerConfig
 spec:
   registry:
     name: prod-operator-registry
-    digest:
-      algorithm: sha256
-      hex: <hash>
+    digest: { algorithm: sha256, hex: <hash> }
   task:
     apiVersion: loopwright.dev/v1alpha1
     kind: TaskContract
@@ -283,6 +269,7 @@ Each `TrustedRegistry.spec.handlers[]` entry pins `id`, `version: 1`, `digest` (
 | `line-section-guard.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId`, `path`, `startMarker`, `endMarker` |
 | `no-change.v1` | `check` | `['inert_bytes', 'read_only']` | `checkId` (identifier or `null` for implicit comparison) |
 | `gate.v1` | `check` | `['external_service', 'read_only']` | `checkId`, `endpointRef` (`gateEndpoints[].id`), `gateId` |
+| `benchmark-gate.v1` | `check` | `['hardware_execution', 'read_only']` | `checkId`, `endpointRef`, `gateId`, `heldOutWorkloadId`, optional `maxPreemptions` (`0..16`) |
 
 ### Role and runtime profiles
 
@@ -360,9 +347,9 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 
 | Field path | Required | Bounds | Meaning |
 | --- | --- | --- | --- |
-| `gateEndpoints` / `publicationEndpoints` | No | `0 .. 16` items (optional keys) | Omit when unused; required when `gate.v1` or `pull_request` publication is bound |
+| `gateEndpoints` / `publicationEndpoints` | No | `0 .. 16` items (optional keys) | Omit when unused; required when `gate.v1`, `benchmark-gate.v1`, or `pull_request` publication is bound |
 | `*.id` / `*.url` | Conditional | Identifier (`1..64`) / HTTPS URL | **Required** per endpoint item; unique ID and target service URL |
-| `gateEndpoints[].signingCredentialRef` | Conditional | `credentialBindings[].id` (`consumer: gate`) | **Required** per gate item; HMAC key verifying `gate.v1` receipts |
+| `gateEndpoints[].signingCredentialRef` | Conditional | `credentialBindings[].id` (`consumer: gate`) | **Required** per gate item; HMAC key verifying `gate.v1` and `benchmark-gate.v1` receipts |
 | `gateEndpoints[].authCredentialRef` | Conditional | `credentialBindings[].id` or `null` | **Required** per gate item (`null` when no bearer header is used) |
 | `gateEndpoints[].timeoutMs` / `maxPollMs` | Conditional | `1000 .. 3600000` ms / `1000 .. 3600000` ms | **Required** per gate item; per-request and total polling timeouts |
 | `gateEndpoints[].pollInitialMs` / `pollMaxMs` | Conditional | `100 .. 30000` ms / `pollInitialMs .. maxPollMs` | **Required** per gate item; exponential backoff polling interval bounds |
@@ -391,6 +378,11 @@ Loopwright expands `${NAME}` (`[A-Za-z_][A-Za-z0-9_]*`) inside `ControllerConfig
 ### Gates and reconciliation
 
 Run `loopwright check` or `loopwright run --dry-run` before execution. When an external gate or pull request call terminates in `unknown`, never replay blindly; settle with `loopwright reconcile` and an authenticated receipt.
+
+- **Bidirectional hardware binding**: `compilePlan` requires `hardware_execution` checks to bind `benchmark-gate.v1` with a hardware `targetCellId`, and `benchmark-gate.v1` slots to target `hardware_execution` (`CAPABILITY_UNSUPPORTED` or `CONFIG_SCHEMA`).
+- **CAS staging and ingestion**: Controller stages candidate blobs (`PUT /v1/benchmark/jobs/:operationId/blobs/:sha256`), verifies HMAC verdicts, and pulls `.loopwright-verifier/<slotId>/*` blobs (`O_NOFOLLOW`, `nlink === 1`, `0o400`, binary `SecretScrubber` reject).
+- **Preemption settlement**: Measured threshold misses settle as `failed` (allowing repair), whereas exhausted preemption or poll expiry on a preempted job settles `BENCHMARK_PREEMPTED` as `blocked` (non-preempted poll expiry settles `GATE_TIMEOUT`) with zero `implementationRepair` or `onRework`.
+- **Benchmark reconciliation**: `loopwright reconcile` verifies local or pulled CAS blobs and settles a signed `benchmark_verdict` receipt only before `resumeCycle` settles timeout.
 
 ---
 

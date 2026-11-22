@@ -79,7 +79,7 @@ Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
 
-`run`, `resume`, `step next`, and `step submit` accept opt-in `--allow-privileged` and `--allow-workflow-writes`. `run`, `step next`, and `step submit` also accept `--allow-host-mounts <csv>` to authorize `command.v1` `parameters.mounts` sources. `reconcile` accepts `--allow-workflow-writes` only; other commands refuse all privilege flags.
+`run`, `resume`, `step next`, and `step submit` accept opt-in `--allow-privileged` and `--allow-workflow-writes`. `run`, `step next`, and `step submit` also accept `--allow-host-mounts <csv>` to authorize `command.v1` `parameters.mounts` sources. `reconcile` accepts `--allow-workflow-writes` only; other commands (including `runner`) refuse all privilege flags.
 
 `run` and `step` runs wire live `@loopwright/decisions` adapters into `ControllerPorts.decisions` whenever `spec.decisions.enabled` is `true` (falling back deterministically when credentials or endpoints are unavailable).
 
@@ -162,6 +162,8 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | `reconcile` | `--config`, `--registry`, `--registry-sha256`, `--repo`, `--run-root`, `--run-id`, `--receipt` | `--output`, `--json`, `--output-format`, `--step-summary-file` | Settle an unknown external outcome with an authenticated receipt |
 | `closure` | None | `--repo`, `--output`, `--verify-failures`, `--json` | Audit the 23-capability closure matrix and 14-case failure suite |
 | `app-serve` | `--config` | `--repo`, `--json` | Start the opt-in GitHub App HTTP webhook and token listener |
+| `runner relay` | `--config` | `--json` | Start the outbound-pull benchmark relay and CAS server |
+| `runner worker` | `--config` | `--once`, `--json` | Poll relay leases and execute two-stage hardware benchmarks |
 
 ### Suite commands
 
@@ -179,6 +181,23 @@ loopwright app-serve --config github-app.yaml --repo . --json
 
 Set `spec.listen.enabled: true` first. The command exits `2` for disabled or invalid configuration, `130` on SIGINT, and `143` on SIGTERM. See [GitHub App](/loopwright/latest/docs/operations/github-app/index.md) for configuration and host requirements.
 
+### Hardware runner
+
+```sh
+loopwright runner --help
+loopwright runner relay --config relay.yaml --json
+loopwright runner worker --config worker.yaml --once --json
+```
+
+`runner relay` listens for controller submissions (`/v1/benchmark/jobs/*`) and worker pull-lease polls (`/v1/runner/leases*`) with monotonic `leaseEpoch` fencing and `1 MiB` CAS streaming.
+
+`runner worker` opens zero inbound ports, pulls leases outbound over HTTPS or loopback HTTP, compiles Stage A artifacts without `held_out_workloads`, executes Stage B benchmarks read-only under `networkMode: none`, and returns signed verdicts.
+
+- **Graceful shutdown (`SIGINT`)**: Exits `130` (`runner worker` returns `8` if an `unknown` settlement takes precedence).
+- **Preemption (`SIGTERM`)**: Reports lease preemption to the relay and exits `143`, unless superseded by `unknown` (`8`) or a `fenced` preemption acknowledgment (`7`).
+- **Fenced lease (`7`)**: Exits `7` when the relay rejects a stale `leaseEpoch` or `relayBootId` (`QUEUE_LEASE_FENCED`).
+- **Unknown or teardown (`8`)**: Exits `8` on `unknown` acknowledgment, `RUNNER_TEARDOWN_FAILED`, or `RUNNER_TRANSPORT_ERROR`.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -189,8 +208,8 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 | 4 | Execution or acceptance failed |
 | 5 | Allowance exhausted |
 | 6 | Deadline expired |
-| 7 | Reconciliation or ownership needed |
-| 8 | Authoritative result unavailable or incident |
+| 7 | Reconciliation, ownership needed, or fenced runner lease |
+| 8 | Authoritative result unavailable, incident, or runner teardown failure |
 | 130 | Step cancellation or accounted SIGINT, subject to uncertainty precedence |
 | 143 | Accounted SIGTERM, subject to uncertainty precedence |
 

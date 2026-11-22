@@ -124,7 +124,7 @@ Strict `contractSchema` validation requires `apiVersion`, `kind`, and `spec` and
 | `spec.target.repository` | Yes | Repo slug (`1..256` chars) | Target `owner/repo` path (`[A-Za-z0-9._/-]+`) |
 | `spec.target.baseRevision` | Yes | Revision (`1..128` chars) | Base commit SHA, tag, or branch checked out before agent execution |
 | `spec.target.sourceRevision` | Yes | Revision (`1..128` chars) | Upstream release, tag, or commit revision that triggered the work |
-| `spec.target.matrix` | Yes (`null` allowed) | `null` or cell list (`1..64`) | Target matrix (`{ id, platform, variant }`); allowed when no check requires `hardware_execution` |
+| `spec.target.matrix` | Yes (`null` allowed) | `null` or cell list (`1..64`) | Target matrix (`{ id, platform, variant, hardware? }`); `hardware` required for `hardware_execution` |
 
 ## Scope and context
 
@@ -242,6 +242,8 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
 
 Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }` (`<= 256` state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors `budgets.overlay` (default `128` entries / `4 MiB`, configurable up to `16,384` files / `16 GiB` via verified CAS blob pointers).
 
+Verifier-namespaced descriptors (`.loopwright-verifier/<slotId>/*`) use a dedicated verifier output budget (`64` files per slot, `256` total files, and `16 GiB` total bytes) separate from candidate `budgets.overlay.maxBytes`.
+
 `ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence` and `EvaluatedCheck` accept optional `metrics` (finite numbers, strings, or booleans), `findings`, and `detail` even on `passed` (`Evidence.spec.reason` stays `null`).
 
 ### Acceptance fields
@@ -251,7 +253,10 @@ Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }
 | `acceptance.required` | Yes | Identifier list (`1..256`) | Check IDs that must all report `passed` before a candidate can complete |
 | `acceptance.checks` | Yes | Object list (`1..256` items) | Declares every check ID referenced in `required` (plus any optional checks) |
 | `checks[].id` | Yes | Identifier (`1..64` chars) | Check ID matching the verifier handler's `checkId` parameter |
-| `checks[].allowedEvidenceLevels` | Yes | Enum list (`1..5` unique) | Acceptable provenance tiers for receipts certifying `checks[].id` |
+| `checks[].allowedEvidenceLevels` | Yes | Enum list (`1..5` unique) | Acceptable provenance tiers; `hardware_execution` must appear alone as `['hardware_execution']` |
+| `checks[].targetCellId` | Conditional | Identifier (`1..64` chars) | **Required** for `hardware_execution`; references a `target.matrix` cell with `hardware` |
+| `checks[].allowSyntheticHardwareProbe` | No | Boolean (default `false`) | Permits `probeKind: 'synthetic_fixture'` in `hardwareProvenance` for fixture tests |
+| `checks[].metricThresholds` | No | Rule list (`0..32` items) | Quantitative `bounds` and `comparative` rules verified against `evidence.spec.metrics` |
 
 ### Evidence levels
 
@@ -261,7 +266,26 @@ Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }
 | `synthetic_fixture` | Controlled local test fixture | Proves harness logic only; never qualifies live external systems |
 | `local_execution` | Isolated verifier worker on current host | Scoped to current OS/host environment (`json-artifact.v1`, `scope.v1`, `no-change.v1`) |
 | `external_service` | Signed `gate.v1` receipt from remote gate | Requires trusted `gateEndpoints[]` URL and HMAC signing credential |
-| `hardware_execution` | Dedicated physical target hardware runner | Reserved for provisioned hardware-in-the-loop gates |
+| `hardware_execution` | Dedicated physical target hardware runner | Requires unmixed `['hardware_execution']`, hardware `targetCellId`, and `benchmark-gate.v1` |
+
+### Hardware target cells
+
+Each `spec.target.matrix[]` cell accepts an optional `hardware` block alongside `id`, `platform`, and `variant`. Omitting unset optional fields preserves existing `targetMatrixDigest` hashes.
+
+| Field path | Required | Type and bounds | Meaning |
+| --- | --- | --- | --- |
+| `hardware.accelerator` | Yes | Printable ASCII (`1..64`) | Target accelerator label (such as `sm_89`, `sm_90a`, `ascend_910b`, `gfx1101`) |
+| `hardware.isolationMode` | Yes | `'whole_device'` \| `'sliced'` | Whole-device exclusivity or sliced accelerator partition mode |
+| `hardware.deviceCount` | No | Safe integer (`1..64`) | Expected device count verified against observed `hardwareProvenance` |
+| `hardware.driverConstraint` | No | Printable string (`1..128`) | Exact driver match or `>=<dotted-version>` minimum version constraint |
+| `hardware.topology` | No | Printable string (`1..128`) | Optional interconnect or device topology constraint |
+
+### Thresholds and provenance
+
+- **Bounds rules**: `{ kind: 'bounds', metric, min?, max? }` requires at least one finite endpoint (`min <= max`; `-0` normalizes to `0`).
+- **Comparative rules**: `{ kind: 'comparative', metric, baselineMetric, operator, threshold }` supports `min_ratio`, `max_ratio`, and `max_delta` (`baseline > 0` for ratios).
+- **Hardware provenance**: Passing `hardware_execution` `Evidence` requires `hardwareProvenance` (`targetCellId`, `probeKind: 'physical' | 'synthetic_fixture'`, `vendor`, `deviceModel`, `accelerator`, `isolationMode`, `deviceCount`, `driverVersion`, `runtimeVersion`, `topology?`, `workloadDigest`, `clockLockMode: 'locked' | 'unlocked' | 'unknown'`).
+- **Independent core check**: `evaluateAcceptance` requires `probeKind: 'physical'` unless `allowSyntheticHardwareProbe` is `true`, and blocks mismatches (`hardware_provenance_mismatch`, `metric_threshold_failed`).
 
 ---
 

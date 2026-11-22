@@ -526,7 +526,7 @@
           <td><code>spec.target.matrix</code></td>
           <td>Yes (<code>null</code> allowed)</td>
           <td><code>null</code> or cell list (<code>1..64</code>)</td>
-          <td>Target matrix (<code>{ id, platform, variant }</code>); allowed when no check requires <code>hardware_execution</code></td>
+          <td>Target matrix (<code>{ id, platform, variant, hardware? }</code>); <code>hardware</code> required for <code>hardware_execution</code></td>
       </tr>
   </tbody>
 </table>
@@ -933,6 +933,7 @@ Classic <code>{ entries }</code> supports up to 256 entries.
 Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
 <p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>16,384</code> files / <code>16 GiB</code> via verified CAS blob pointers).</p>
+<p>Verifier-namespaced descriptors (<code>.loopwright-verifier/&lt;slotId&gt;/*</code>) use a dedicated verifier output budget (<code>64</code> files per slot, <code>256</code> total files, and <code>16 GiB</code> total bytes) separate from candidate <code>budgets.overlay.maxBytes</code>.</p>
 <p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence</code> and <code>EvaluatedCheck</code> accept optional <code>metrics</code> (finite numbers, strings, or booleans), <code>findings</code>, and <code>detail</code> even on <code>passed</code> (<code>Evidence.spec.reason</code> stays <code>null</code>).</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>
@@ -967,7 +968,25 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
           <td><code>checks[].allowedEvidenceLevels</code></td>
           <td>Yes</td>
           <td>Enum list (<code>1..5</code> unique)</td>
-          <td>Acceptable provenance tiers for receipts certifying <code>checks[].id</code></td>
+          <td>Acceptable provenance tiers; <code>hardware_execution</code> must appear alone as <code>['hardware_execution']</code></td>
+      </tr>
+      <tr>
+          <td><code>checks[].targetCellId</code></td>
+          <td>Conditional</td>
+          <td>Identifier (<code>1..64</code> chars)</td>
+          <td><strong>Required</strong> for <code>hardware_execution</code>; references a <code>target.matrix</code> cell with <code>hardware</code></td>
+      </tr>
+      <tr>
+          <td><code>checks[].allowSyntheticHardwareProbe</code></td>
+          <td>No</td>
+          <td>Boolean (default <code>false</code>)</td>
+          <td>Permits <code>probeKind: 'synthetic_fixture'</code> in <code>hardwareProvenance</code> for fixture tests</td>
+      </tr>
+      <tr>
+          <td><code>checks[].metricThresholds</code></td>
+          <td>No</td>
+          <td>Rule list (<code>0..32</code> items)</td>
+          <td>Quantitative <code>bounds</code> and <code>comparative</code> rules verified against <code>evidence.spec.metrics</code></td>
       </tr>
   </tbody>
 </table>
@@ -1004,10 +1023,61 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
       <tr>
           <td><code>hardware_execution</code></td>
           <td>Dedicated physical target hardware runner</td>
-          <td>Reserved for provisioned hardware-in-the-loop gates</td>
+          <td>Requires unmixed <code>['hardware_execution']</code>, hardware <code>targetCellId</code>, and <code>benchmark-gate.v1</code></td>
       </tr>
   </tbody>
 </table>
+<h3 id="hardware-target-cells">Hardware target cells</h3>
+<p>Each <code>spec.target.matrix[]</code> cell accepts an optional <code>hardware</code> block alongside <code>id</code>, <code>platform</code>, and <code>variant</code>. Omitting unset optional fields preserves existing <code>targetMatrixDigest</code> hashes.</p>
+<table>
+  <thead>
+      <tr>
+          <th>Field path</th>
+          <th>Required</th>
+          <th>Type and bounds</th>
+          <th>Meaning</th>
+      </tr>
+  </thead>
+  <tbody>
+      <tr>
+          <td><code>hardware.accelerator</code></td>
+          <td>Yes</td>
+          <td>Printable ASCII (<code>1..64</code>)</td>
+          <td>Target accelerator label (such as <code>sm_89</code>, <code>sm_90a</code>, <code>ascend_910b</code>, <code>gfx1101</code>)</td>
+      </tr>
+      <tr>
+          <td><code>hardware.isolationMode</code></td>
+          <td>Yes</td>
+          <td><code>'whole_device'</code> | <code>'sliced'</code></td>
+          <td>Whole-device exclusivity or sliced accelerator partition mode</td>
+      </tr>
+      <tr>
+          <td><code>hardware.deviceCount</code></td>
+          <td>No</td>
+          <td>Safe integer (<code>1..64</code>)</td>
+          <td>Expected device count verified against observed <code>hardwareProvenance</code></td>
+      </tr>
+      <tr>
+          <td><code>hardware.driverConstraint</code></td>
+          <td>No</td>
+          <td>Printable string (<code>1..128</code>)</td>
+          <td>Exact driver match or <code>&gt;=&lt;dotted-version&gt;</code> minimum version constraint</td>
+      </tr>
+      <tr>
+          <td><code>hardware.topology</code></td>
+          <td>No</td>
+          <td>Printable string (<code>1..128</code>)</td>
+          <td>Optional interconnect or device topology constraint</td>
+      </tr>
+  </tbody>
+</table>
+<h3 id="thresholds-and-provenance">Thresholds and provenance</h3>
+<ul>
+<li><strong>Bounds rules</strong>: <code>{ kind: 'bounds', metric, min?, max? }</code> requires at least one finite endpoint (<code>min &lt;= max</code>; <code>-0</code> normalizes to <code>0</code>).</li>
+<li><strong>Comparative rules</strong>: <code>{ kind: 'comparative', metric, baselineMetric, operator, threshold }</code> supports <code>min_ratio</code>, <code>max_ratio</code>, and <code>max_delta</code> (<code>baseline &gt; 0</code> for ratios).</li>
+<li><strong>Hardware provenance</strong>: Passing <code>hardware_execution</code> <code>Evidence</code> requires <code>hardwareProvenance</code> (<code>targetCellId</code>, <code>probeKind: 'physical' | 'synthetic_fixture'</code>, <code>vendor</code>, <code>deviceModel</code>, <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount</code>, <code>driverVersion</code>, <code>runtimeVersion</code>, <code>topology?</code>, <code>workloadDigest</code>, <code>clockLockMode: 'locked' | 'unlocked' | 'unknown'</code>).</li>
+<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
+</ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -1053,6 +1123,8 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
         <li><a href="#artifact-manifests">Artifact manifests</a></li>
         <li><a href="#acceptance-fields">Acceptance fields</a></li>
         <li><a href="#evidence-levels">Evidence levels</a></li>
+        <li><a href="#hardware-target-cells">Hardware target cells</a></li>
+        <li><a href="#thresholds-and-provenance">Thresholds and provenance</a></li>
       </ul>
     </li>
   </ul>

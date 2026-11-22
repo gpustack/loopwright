@@ -448,7 +448,7 @@
 <p>When <code>--source-revision</code> differs from <code>HEAD</code>, <code>--baseline-alignment</code> probes 3-way merge conflicts in an isolated Git object directory before model calls (<code>fail-fast</code> halts as <code>baseline_merge_conflict</code>, exit <code>3</code>; <code>extract-context</code> stages scrubbed conflict hunks).</p>
 <p>Under local CLI runs without a PR publisher, <code>mode: auto</code> defaults to <code>candidate</code> when neither <code>preflight</code> nor <code>upstreams</code> is declared. Declaring <code>publication.mode: pull_request</code>, <code>memory.apply: separate-pull-request</code>, or <code>memory.apply: inline-with-candidate</code> fails closed with <code>TASKPACK_HOST_BINDING_INVALID</code>.</p>
 <p>Use <code>resume</code> for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.</p>
-<p><code>run</code>, <code>resume</code>, <code>step next</code>, and <code>step submit</code> accept opt-in <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>. <code>run</code>, <code>step next</code>, and <code>step submit</code> also accept <code>--allow-host-mounts &lt;csv&gt;</code> to authorize <code>command.v1</code> <code>parameters.mounts</code> sources. <code>reconcile</code> accepts <code>--allow-workflow-writes</code> only; other commands refuse all privilege flags.</p>
+<p><code>run</code>, <code>resume</code>, <code>step next</code>, and <code>step submit</code> accept opt-in <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>. <code>run</code>, <code>step next</code>, and <code>step submit</code> also accept <code>--allow-host-mounts &lt;csv&gt;</code> to authorize <code>command.v1</code> <code>parameters.mounts</code> sources. <code>reconcile</code> accepts <code>--allow-workflow-writes</code> only; other commands (including <code>runner</code>) refuse all privilege flags.</p>
 <p><code>run</code> and <code>step</code> runs wire live <code>@loopwright/decisions</code> adapters into <code>ControllerPorts.decisions</code> whenever <code>spec.decisions.enabled</code> is <code>true</code> (falling back deterministically when credentials or endpoints are unavailable).</p>
 <p><code>run</code>, <code>resume</code>, and <code>reconcile</code> accept <code>--output-format &lt;csv&gt;</code> with <code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, and <code>text</code> (each emitting a sanitized <code>Run Health</code> (<code>RunEval</code>) section covering tool repeats, ping-pong loops, repair convergence, per-step/role breakdowns, and <code>autoApplied: false</code> suggestions).
 Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown summary. With <code>--json</code>, stdout stays pure NDJSON and omits selected Markdown or text reports. Without <code>--json</code>, selected reports go to stdout.</p>
@@ -613,6 +613,18 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
           <td><code>--repo</code>, <code>--json</code></td>
           <td>Start the opt-in GitHub App HTTP webhook and token listener</td>
       </tr>
+      <tr>
+          <td><code>runner relay</code></td>
+          <td><code>--config</code></td>
+          <td><code>--json</code></td>
+          <td>Start the outbound-pull benchmark relay and CAS server</td>
+      </tr>
+      <tr>
+          <td><code>runner worker</code></td>
+          <td><code>--config</code></td>
+          <td><code>--once</code>, <code>--json</code></td>
+          <td>Poll relay leases and execute two-stage hardware benchmarks</td>
+      </tr>
   </tbody>
 </table>
 <h3 id="suite-commands">Suite commands</h3>
@@ -629,6 +641,21 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 </div>
 <p>Set <code>spec.listen.enabled: true</code> first. The command exits <code>2</code> for disabled or invalid configuration, <code>130</code> on SIGINT, and <code>143</code> on SIGTERM. See <a href="/loopwright/latest/docs/operations/github-app/">GitHub App</a>
  for configuration and host requirements.</p>
+<h3 id="hardware-runner">Hardware runner</h3>
+<div class="code-block">
+  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright runner --help
+</span></span><span class="line"><span class="cl">loopwright runner relay --config relay.yaml --json
+</span></span><span class="line"><span class="cl">loopwright runner worker --config worker.yaml --once --json</span></span></code></pre></div>
+</div>
+<p><code>runner relay</code> listens for controller submissions (<code>/v1/benchmark/jobs/*</code>) and worker pull-lease polls (<code>/v1/runner/leases*</code>) with monotonic <code>leaseEpoch</code> fencing and <code>1 MiB</code> CAS streaming.</p>
+<p><code>runner worker</code> opens zero inbound ports, pulls leases outbound over HTTPS or loopback HTTP, compiles Stage A artifacts without <code>held_out_workloads</code>, executes Stage B benchmarks read-only under <code>networkMode: none</code>, and returns signed verdicts.</p>
+<ul>
+<li><strong>Graceful shutdown (<code>SIGINT</code>)</strong>: Exits <code>130</code> (<code>runner worker</code> returns <code>8</code> if an <code>unknown</code> settlement takes precedence).</li>
+<li><strong>Preemption (<code>SIGTERM</code>)</strong>: Reports lease preemption to the relay and exits <code>143</code>, unless superseded by <code>unknown</code> (<code>8</code>) or a <code>fenced</code> preemption acknowledgment (<code>7</code>).</li>
+<li><strong>Fenced lease (<code>7</code>)</strong>: Exits <code>7</code> when the relay rejects a stale <code>leaseEpoch</code> or <code>relayBootId</code> (<code>QUEUE_LEASE_FENCED</code>).</li>
+<li><strong>Unknown or teardown (<code>8</code>)</strong>: Exits <code>8</code> on <code>unknown</code> acknowledgment, <code>RUNNER_TEARDOWN_FAILED</code>, or <code>RUNNER_TRANSPORT_ERROR</code>.</li>
+</ul>
 <h2 id="exit-codes">Exit codes</h2>
 <table>
   <thead>
@@ -664,11 +691,11 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
       </tr>
       <tr>
           <td>7</td>
-          <td>Reconciliation or ownership needed</td>
+          <td>Reconciliation, ownership needed, or fenced runner lease</td>
       </tr>
       <tr>
           <td>8</td>
-          <td>Authoritative result unavailable or incident</td>
+          <td>Authoritative result unavailable, incident, or runner teardown failure</td>
       </tr>
       <tr>
           <td>130</td>
@@ -712,6 +739,7 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
     <li><a href="#command-reference">Command reference</a>
       <ul>
         <li><a href="#suite-commands">Suite commands</a></li>
+        <li><a href="#hardware-runner">Hardware runner</a></li>
       </ul>
     </li>
     <li><a href="#exit-codes">Exit codes</a></li>
