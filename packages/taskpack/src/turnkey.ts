@@ -88,8 +88,8 @@ import {
   IDENTIFIER_PATTERN,
   isForbiddenHostMountPath,
   isHostMountAuthorized,
-  MAX_COMMAND_MOUNTS,
   normalizeAbsoluteHostMountPath,
+  normalizeCommandMountList,
   normalizeRelativePath,
   parseBaselineAlignmentPolicy,
   resolveBaselineAlignmentConfig,
@@ -5733,19 +5733,19 @@ export async function startLocalCommandGateServer(
                 );
               }
               if (!existsSync(normSource)) {
-                options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: host mount source "${normSource}" does not exist on host; skipping`,
-                ));
-                continue;
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: declared host mount source "${normSource}" does not exist on host`,
+                );
               }
               let realSource: string;
               try {
                 realSource = realpathSync(normSource);
               } catch {
-                options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: host mount source "${normSource}" is inaccessible on host; skipping`,
-                ));
-                continue;
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: declared host mount source "${normSource}" is inaccessible on host`,
+                );
               }
               const srcSt = tryLstatSync(realSource);
               if (srcSt === null || !(srcSt.isFile() || srcSt.isDirectory() || srcSt.isSocket())) {
@@ -5813,23 +5813,27 @@ export async function startLocalCommandGateServer(
                   `check ${gate.checkId}: mounting host ${kindLabel} ${canonSource} -> ${normTarget} (${mount.mode}) under explicit allowedHostMounts policy`,
                 ));
               } else if (srcSt.isSocket()) {
-                options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: host socket mount "${normSource}" skipped (requires Linux bwrap mount namespace)`,
-                ));
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: host socket mount "${normSource}" requires Linux bwrap mount namespace`,
+                );
+              } else if (mount.mode === 'rw') {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: read-write host mount "${normSource}" requires Linux bwrap mount namespace`,
+                );
               } else if (normTarget === normSource || normTarget === canonSource) {
                 if (!allowedReadOnlyPaths.includes(canonSource)) {
                   allowedReadOnlyPaths.push(canonSource);
                 }
-                if (mount.mode === 'rw' && !writablePaths.includes(canonSource)) {
-                  writablePaths.push(canonSource);
-                }
                 options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: exposing host ${kindLabel} ${canonSource} (${mount.mode}) under explicit allowedHostMounts policy`,
+                  `check ${gate.checkId}: exposing host ${kindLabel} ${canonSource} (ro) under explicit allowedHostMounts policy`,
                 ));
               } else {
-                options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: remapped host mount "${normSource}" -> "${normTarget}" skipped (requires Linux bwrap mount namespace)`,
-                ));
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: remapped host mount "${normSource}" -> "${normTarget}" requires Linux bwrap mount namespace`,
+                );
               }
             }
           }
@@ -7380,36 +7384,9 @@ async function readAndValidateStagedTaskpackSecrets(
     ) {
       throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates networkMode is invalid');
     }
-    let parsedMounts: readonly ResolvedCommandMount[] | undefined;
-    if (gate['mounts'] !== undefined) {
-      if (!Array.isArray(gate['mounts']) || gate['mounts'].length > MAX_COMMAND_MOUNTS) {
-        throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates mounts is invalid');
-      }
-      const outMounts: ResolvedCommandMount[] = [];
-      for (const rawMount of gate['mounts']) {
-        if (!isPlainRecord(rawMount)) {
-          throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates mount entry is invalid');
-        }
-        for (const mKey of Object.keys(rawMount)) {
-          if (STAGED_FORBIDDEN_KEYS.has(mKey) || (mKey !== 'source' && mKey !== 'target' && mKey !== 'mode')) {
-            throw new TaskpackError('ACTION_INPUT_INVALID', `staged taskpack localCommandGates mount has invalid key "${mKey}"`);
-          }
-        }
-        const mSource = normalizeAbsoluteHostMountPath(rawMount['source'], 'mounts/source', 'ACTION_INPUT_INVALID');
-        const mTarget = rawMount['target'] === undefined
-          ? mSource
-          : normalizeAbsoluteHostMountPath(rawMount['target'], 'mounts/target', 'ACTION_INPUT_INVALID');
-        const mMode = rawMount['mode'] ?? 'ro';
-        if (mMode !== 'ro' && mMode !== 'rw') {
-          throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates mount mode is invalid');
-        }
-        if (isForbiddenHostMountPath(mSource, 'source') || isForbiddenHostMountPath(mTarget, 'target')) {
-          throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates mount targets a forbidden path');
-        }
-        outMounts.push(Object.freeze({ source: mSource, target: mTarget, mode: mMode }));
-      }
-      parsedMounts = Object.freeze(outMounts);
-    }
+    const parsedMounts: readonly ResolvedCommandMount[] | undefined = gate['mounts'] !== undefined
+      ? normalizeCommandMountList(gate['mounts'], 'localCommandGates/mounts', 'ACTION_INPUT_INVALID')
+      : undefined;
     localCommandGates.push({
       checkId: gate['checkId'],
       gateId: gate['gateId'],

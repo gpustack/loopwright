@@ -2413,6 +2413,7 @@ export async function runActionCli(
     allowManifestCustomBaseUrl: env['INPUT_ALLOW-CUSTOM-BASE-URL'] === 'true',
     allowPrivilegedExecution: env['INPUT_ALLOW-PRIVILEGED-EXECUTION'] === 'true',
     allowWorkflowWrites: env['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true',
+    allowHostMounts: env['INPUT_ALLOW-HOST-MOUNTS']?.trim() || undefined,
     gateEndpoints: gateEndpointUrl ? [{ id: 'default', url: gateEndpointUrl, signingCredentialRef: 'taskpack-gate-signing' }] : undefined,
     publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),

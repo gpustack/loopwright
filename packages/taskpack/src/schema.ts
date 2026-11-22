@@ -39,7 +39,7 @@ import {
   type ResolvedBaselineAlignmentConfig, type ResolvedCommandMount, type ResolvedTaskpackExecutionCapabilities,
   type SandboxBackendId, type SandboxCapability,
   type SandboxNetworkMode, type TargetMatrixCell,
-  type TaskpackCheckParameterValue, type TaskpackCommandMountDeclaration, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy,
+  type TaskpackCheckParameterValue, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy,
   type TaskpackDecisionProviderKind, type TaskpackDecisionsDeclaration, type TaskpackDecisionTriageRule,
   type TaskpackDecisionTriageRuleKind, type TaskpackDecisionTriageSeverity,
   type TaskpackExecutionCapabilitiesDeclaration, type TaskpackExecutionDeclaration,
@@ -388,11 +388,88 @@ export function resolveExecutionCapabilities(
   });
 }
 
-function extractDeclaredCommandMounts(check: TaskpackV2CheckDeclaration): readonly TaskpackCommandMountDeclaration[] {
+/** Validate and normalize an untrusted `command.v1` `parameters.mounts` array (shared across schema, compiler, and staged secrets). */
+export function normalizeCommandMountList(
+  rawMounts: unknown,
+  diagPath: string,
+  errorCode: 'TASKPACK_MANIFEST_INVALID' | 'ACTION_INPUT_INVALID' = 'TASKPACK_MANIFEST_INVALID',
+): readonly ResolvedCommandMount[] {
+  if (!Array.isArray(rawMounts) || rawMounts.length > MAX_COMMAND_MOUNTS) {
+    throw new TaskpackError(errorCode, `command.v1 mounts must be an array of 0..${MAX_COMMAND_MOUNTS} entries`, diagPath);
+  }
+  const seenTargets = new Set<string>();
+  const parsedMounts: ResolvedCommandMount[] = [];
+  for (const [mIdx, rawMount] of rawMounts.entries()) {
+    const mPath = `${diagPath}/${mIdx}`;
+    if (!isPlainObjectRecord(rawMount)) {
+      throw new TaskpackError(errorCode, 'command.v1 mount entry must be an object', mPath);
+    }
+    for (const key of Object.keys(rawMount)) {
+      if (FORBIDDEN_KEYS.has(key) || (key !== 'source' && key !== 'target' && key !== 'mode')) {
+        throw new TaskpackError(errorCode, `command.v1 mount entry has unsupported key "${key}"`, `${mPath}/${key}`);
+      }
+    }
+    const source = normalizeAbsoluteHostMountPath(rawMount['source'], `${mPath}/source`, errorCode);
+    if (isForbiddenHostMountPath(source, 'source')) {
+      throw new TaskpackError(
+        errorCode === 'ACTION_INPUT_INVALID' ? 'ACTION_INPUT_INVALID' : 'TASKPACK_SCOPE_VIOLATION',
+        `command.v1 mount source "${source}" targets a forbidden host path`,
+        `${mPath}/source`,
+      );
+    }
+    const target = rawMount['target'] === undefined
+      ? source
+      : normalizeAbsoluteHostMountPath(rawMount['target'], `${mPath}/target`, errorCode);
+    if (isForbiddenHostMountPath(target, 'target')) {
+      throw new TaskpackError(
+        errorCode === 'ACTION_INPUT_INVALID' ? 'ACTION_INPUT_INVALID' : 'TASKPACK_SCOPE_VIOLATION',
+        `command.v1 mount target "${target}" targets a forbidden sandbox path`,
+        `${mPath}/target`,
+      );
+    }
+    if (seenTargets.has(target)) {
+      throw new TaskpackError(errorCode, `duplicate command.v1 mount target "${target}"`, `${mPath}/target`);
+    }
+    seenTargets.add(target);
+    let mountMode: CommandMountMode = 'ro';
+    if (rawMount['mode'] !== undefined) {
+      if (rawMount['mode'] !== 'ro' && rawMount['mode'] !== 'rw') {
+        throw new TaskpackError(errorCode, 'command.v1 mount mode must be "ro" or "rw"', `${mPath}/mode`);
+      }
+      mountMode = rawMount['mode'];
+    }
+    parsedMounts.push(Object.freeze({ source, target, mode: mountMode }));
+  }
+  return Object.freeze(parsedMounts);
+}
+
+function extractDeclaredCommandMounts(check: TaskpackV2CheckDeclaration, checkIdx: number): readonly ResolvedCommandMount[] {
   if (check.implementation !== 'command.v1') return [];
   const raw = check.parameters?.['mounts'];
-  if (!Array.isArray(raw) || raw.length === 0) return [];
-  return raw as readonly TaskpackCommandMountDeclaration[];
+  if (raw === undefined) return [];
+  return normalizeCommandMountList(raw, `/spec/verification/localChecks/${checkIdx}/parameters/mounts`);
+}
+
+function pickPrivilegedAuthorityDiagPath(
+  execution: TaskpackExecutionDeclaration | undefined,
+  hasExecPrivCap: boolean,
+  perCheckMountReadOnlyGitIdx: number,
+  perCheckLoopbackNetIdx: number,
+  perCheckMountsIdx: number,
+): string {
+  if (execution?.mode === 'privileged') return '/spec/execution/mode';
+  if (!hasExecPrivCap) {
+    if (perCheckMountReadOnlyGitIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`;
+    }
+    if (perCheckLoopbackNetIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`;
+    }
+    if (perCheckMountsIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckMountsIdx}/parameters/mounts`;
+    }
+  }
+  return '/spec/execution/capabilities';
 }
 
 /**
@@ -410,9 +487,17 @@ export function validateExecutionAuthority(
   const perCheckLoopbackNetIdx = extra?.localChecks?.findIndex(
     check => check.implementation === 'command.v1' && check.parameters?.['networkMode'] === 'loopback-only',
   ) ?? -1;
-  const perCheckMountsIdx = extra?.localChecks?.findIndex(
-    check => extractDeclaredCommandMounts(check).length > 0,
-  ) ?? -1;
+  const parsedMountsByCheckIdx = new Map<number, readonly ResolvedCommandMount[]>();
+  let perCheckMountsIdx = -1;
+  if (extra?.localChecks !== undefined) {
+    for (const [checkIdx, check] of extra.localChecks.entries()) {
+      const parsed = extractDeclaredCommandMounts(check, checkIdx);
+      if (parsed.length > 0) {
+        if (perCheckMountsIdx === -1) perCheckMountsIdx = checkIdx;
+        parsedMountsByCheckIdx.set(checkIdx, parsed);
+      }
+    }
+  }
   if (
     execution === undefined
     && perCheckMountReadOnlyGitIdx === -1
@@ -437,44 +522,27 @@ export function validateExecutionAuthority(
     || perCheckMountsIdx !== -1
   );
   if (requiresPrivileged && hostPolicy.allowPrivileged !== true) {
-    const diagPath = execution?.mode === 'privileged'
-      ? '/spec/execution/mode'
-      : perCheckMountReadOnlyGitIdx !== -1 && !hasExecPrivCap
-        ? `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`
-        : perCheckLoopbackNetIdx !== -1 && !hasExecPrivCap
-          ? `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`
-          : perCheckMountsIdx !== -1 && !hasExecPrivCap
-            ? `/spec/verification/localChecks/${perCheckMountsIdx}/parameters/mounts`
-            : '/spec/execution/capabilities';
+    const diagPath = pickPrivilegedAuthorityDiagPath(
+      execution,
+      hasExecPrivCap,
+      perCheckMountReadOnlyGitIdx,
+      perCheckLoopbackNetIdx,
+      perCheckMountsIdx,
+    );
     throw new TaskpackError(
       'TASKPACK_HOST_BINDING_INVALID',
       'manifest requests privileged execution capabilities without operator host authorization (allowPrivileged)',
       diagPath,
     );
   }
-  if (extra?.localChecks !== undefined) {
-    for (const [checkIdx, check] of extra.localChecks.entries()) {
-      const mounts = extractDeclaredCommandMounts(check);
-      for (const [mountIdx, mount] of mounts.entries()) {
-        if (typeof mount?.source !== 'string') continue;
-        const normalizedSource = normalizeAbsoluteHostMountPath(
-          mount.source,
+  for (const [checkIdx, mounts] of parsedMountsByCheckIdx.entries()) {
+    for (const [mountIdx, mount] of mounts.entries()) {
+      if (!isHostMountAuthorized(mount.source, hostPolicy.allowedHostMounts)) {
+        throw new TaskpackError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          `command.v1 mount source "${mount.source}" is not authorized by operator hostPolicy.allowedHostMounts`,
           `/spec/verification/localChecks/${checkIdx}/parameters/mounts/${mountIdx}/source`,
         );
-        if (isForbiddenHostMountPath(normalizedSource, 'source')) {
-          throw new TaskpackError(
-            'TASKPACK_SCOPE_VIOLATION',
-            `command.v1 mount source "${normalizedSource}" targets a forbidden host path`,
-            `/spec/verification/localChecks/${checkIdx}/parameters/mounts/${mountIdx}/source`,
-          );
-        }
-        if (!isHostMountAuthorized(normalizedSource, hostPolicy.allowedHostMounts)) {
-          throw new TaskpackError(
-            'TASKPACK_HOST_BINDING_INVALID',
-            `command.v1 mount source "${normalizedSource}" is not authorized by operator hostPolicy.allowedHostMounts`,
-            `/spec/verification/localChecks/${checkIdx}/parameters/mounts/${mountIdx}/source`,
-          );
-        }
       }
     }
   }
@@ -3410,63 +3478,25 @@ function validateTaskpackManifestInternal(
 
       let mounts: readonly ResolvedCommandMount[] | undefined;
       if (params['mounts'] !== undefined) {
-        if (!Array.isArray(params['mounts']) || params['mounts'].length > MAX_COMMAND_MOUNTS) {
-          manifestInvalid(`command.v1 mounts must be an array of 0..${MAX_COMMAND_MOUNTS} entries`, `${paramPath}/mounts`);
-        }
-        const seenTargets = new Set<string>();
-        const parsedMounts: ResolvedCommandMount[] = [];
-        for (const [mIdx, rawMount] of params['mounts'].entries()) {
-          const mPath = `${paramPath}/mounts/${mIdx}`;
-          const mObj = requireObject(rawMount, mPath, ['source', 'target', 'mode']);
-          const source = normalizeAbsoluteHostMountPath(mObj['source'], `${mPath}/source`);
-          if (isForbiddenHostMountPath(source, 'source')) {
+        mounts = normalizeCommandMountList(params['mounts'], `${paramPath}/mounts`);
+        if (mounts.length > 0 && options.enforceHostAuthority !== false) {
+          if (options.hostPolicy?.allowPrivileged !== true) {
             throw new TaskpackError(
-              'TASKPACK_SCOPE_VIOLATION',
-              `command.v1 mount source "${source}" targets a forbidden host path`,
-              `${mPath}/source`,
+              'TASKPACK_HOST_BINDING_INVALID',
+              'command.v1 parameters.mounts requires operator host authorization (allowPrivileged)',
+              `${paramPath}/mounts`,
             );
           }
-          const target = mObj['target'] === undefined
-            ? source
-            : normalizeAbsoluteHostMountPath(mObj['target'], `${mPath}/target`);
-          if (isForbiddenHostMountPath(target, 'target')) {
-            throw new TaskpackError(
-              'TASKPACK_SCOPE_VIOLATION',
-              `command.v1 mount target "${target}" targets a forbidden sandbox path`,
-              `${mPath}/target`,
-            );
-          }
-          if (seenTargets.has(target)) {
-            manifestInvalid(`duplicate command.v1 mount target "${target}"`, `${mPath}/target`);
-          }
-          seenTargets.add(target);
-          let mountMode: CommandMountMode = 'ro';
-          if (mObj['mode'] !== undefined) {
-            const rawMode = requireString(mObj['mode'], `${mPath}/mode`, 2, 2);
-            if (rawMode !== 'ro' && rawMode !== 'rw') {
-              manifestInvalid('command.v1 mount mode must be "ro" or "rw"', `${mPath}/mode`);
-            }
-            mountMode = rawMode;
-          }
-          if (options.enforceHostAuthority !== false) {
-            if (options.hostPolicy?.allowPrivileged !== true) {
+          for (const [mIdx, mount] of mounts.entries()) {
+            if (!isHostMountAuthorized(mount.source, options.hostPolicy?.allowedHostMounts)) {
               throw new TaskpackError(
                 'TASKPACK_HOST_BINDING_INVALID',
-                'command.v1 parameters.mounts requires operator host authorization (allowPrivileged)',
-                `${paramPath}/mounts`,
-              );
-            }
-            if (!isHostMountAuthorized(source, options.hostPolicy?.allowedHostMounts)) {
-              throw new TaskpackError(
-                'TASKPACK_HOST_BINDING_INVALID',
-                `command.v1 mount source "${source}" is not authorized by operator hostPolicy.allowedHostMounts`,
-                `${mPath}/source`,
+                `command.v1 mount source "${mount.source}" is not authorized by operator hostPolicy.allowedHostMounts`,
+                `${paramPath}/mounts/${mIdx}/source`,
               );
             }
           }
-          parsedMounts.push(Object.freeze({ source, target, mode: mountMode }));
         }
-        mounts = Object.freeze(parsedMounts);
       }
 
       const compiledParams: Record<string, TaskpackCheckParameterValue> = {

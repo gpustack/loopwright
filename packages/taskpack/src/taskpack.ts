@@ -78,6 +78,7 @@ import {
   compileScopePatterns,
   extractTaskpackResourcePaths,
   IDENTIFIER_PATTERN,
+  normalizeCommandMountList,
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
@@ -140,6 +141,7 @@ export {
   collectControlRootSiblingPaths,
   collectGitHubSiblingPaths,
   compileScopePatterns,
+  normalizeCommandMountList,
   normalizeRelativePath,
   resolveManifestControlRoot,
   type CollectGitHubSiblingPathsOptions,
@@ -1478,14 +1480,8 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           ? rawCheckNetworkMode
           : (resolvedExecCaps?.allowCheckNetwork === true ? 'allow-outbound' : 'none');
         const rawMounts = declared.parameters?.['mounts'];
-        const mounts: readonly ResolvedCommandMount[] | undefined = Array.isArray(rawMounts) && rawMounts.length > 0
-          ? Object.freeze(
-            (rawMounts as readonly { readonly source: string; readonly target?: string; readonly mode?: 'ro' | 'rw' }[]).map(m => Object.freeze({
-              source: m.source,
-              target: m.target ?? m.source,
-              mode: m.mode ?? 'ro',
-            })),
-          )
+        const mounts: readonly ResolvedCommandMount[] | undefined = rawMounts !== undefined
+          ? normalizeCommandMountList(rawMounts, `/spec/verification/localChecks/${index}/parameters/mounts`)
           : undefined;
         commandGateMetaByCheckId.set(declared.id, Object.freeze({
           checkId: declared.id,
@@ -1508,7 +1504,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           allowCheckNetwork: effectiveCheckNetworkMode === 'allow-outbound',
           networkMode: effectiveCheckNetworkMode,
           allowPrivileged: bindings.hostPolicy?.allowPrivileged === true,
-          ...(mounts !== undefined ? { mounts } : {}),
+          ...(mounts !== undefined && mounts.length > 0 ? { mounts } : {}),
         }));
       }
     }

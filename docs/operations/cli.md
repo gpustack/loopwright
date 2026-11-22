@@ -61,7 +61,7 @@ loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 D
 loopwright run --dry-run --taskpack .loopwright/taskpack.yaml --repo . --json
 ```
 
-These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed `run --dry-run` refuses `--allow-privileged` and `--allow-workflow-writes`.
+These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed `run --dry-run` (`--config`) refuses `--allow-privileged`, `--allow-workflow-writes`, and `--allow-host-mounts`, whereas `run --dry-run --taskpack` accepts them for static validation.
 
 ## Step 4: Run work
 

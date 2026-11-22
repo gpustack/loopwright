@@ -1043,7 +1043,7 @@ export interface ActionEntrypointInput {
   readonly mode: 'candidate' | 'no-change' | 'auto';
   readonly allowPrivilegedExecution?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
-  readonly allowHostMounts?: readonly string[] | undefined;
+  readonly allowHostMounts?: string | readonly string[] | undefined;
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;

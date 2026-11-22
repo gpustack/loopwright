@@ -68,6 +68,7 @@ export {
   MAX_ALLOWED_HOST_MOUNTS,
   MAX_COMMAND_MOUNTS,
   normalizeAbsoluteHostMountPath,
+  normalizeCommandMountList,
   normalizeRelativePath,
   normalizeScopePattern,
   parseAllowedHostMounts,
