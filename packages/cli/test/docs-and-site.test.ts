@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { installedHandlerDigests } from '@loopwright/controller';
 import { validateTaskpackManifest } from '@loopwright/github-app';
+import { validateTaskpackSuiteManifest, type Json } from '@loopwright/taskpack';
 import { configurationFixture } from '../../controller/test/config-fixtures.js';
 import { setFixture } from '../../controller/test/progress-fixtures.js';
 
@@ -204,13 +205,18 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.equal(validatedTaskpackRef.spec.memory.publishOnFailure, false);
   assert.equal(validatedTaskpackRef.spec.memory.skipCi, true);
 
-  // Verify embedded Taskpack YAML example in docs/references/bootstrap-interview.md validates against schema
+  // Verify embedded Taskpack and TaskpackSuite YAML examples in docs/references/bootstrap-interview.md validate against schema
   const bootstrapRefDoc = readFileSync(join(REPO_ROOT, 'docs', 'references', 'bootstrap-interview.md'), 'utf8');
-  const bootstrapYamlMatch = bootstrapRefDoc.match(/```yaml\n([\s\S]*?)\n```/);
-  assert.ok(bootstrapYamlMatch?.[1], 'docs/references/bootstrap-interview.md must include a YAML Taskpack example');
-  const parsedBootstrapTaskpack = parseDocument(bootstrapYamlMatch[1], { version: '1.2', schema: 'core', uniqueKeys: true });
-  assert.equal(parsedBootstrapTaskpack.errors.length, 0, 'bootstrap-interview.md YAML must parse cleanly');
-  const validatedBootstrap = validateTaskpackManifest(parsedBootstrapTaskpack.toJS(), {
+  const bootstrapYamlBlocks = [...bootstrapRefDoc.matchAll(/```yaml\n([\s\S]*?)\n```/g)]
+    .map(m => m[1]!)
+    .map(raw => {
+      const parsed = parseDocument(raw, { version: '1.2', schema: 'core', uniqueKeys: true });
+      assert.equal(parsed.errors.length, 0, 'bootstrap-interview.md YAML must parse cleanly');
+      return parsed.toJS() as Record<string, Json>;
+    });
+  const bootstrapTaskpackJs = bootstrapYamlBlocks.find(doc => doc['kind'] === 'Taskpack');
+  assert.ok(bootstrapTaskpackJs, 'docs/references/bootstrap-interview.md must include a YAML Taskpack example');
+  const validatedBootstrap = validateTaskpackManifest(bootstrapTaskpackJs, {
     controlRoot: '.auto-sync',
     manifestPath: '.auto-sync/charts.taskpack.yaml',
   });
@@ -219,6 +225,14 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.deepEqual(validatedBootstrap.spec.scope.protected, ['.auto-sync/**']);
   assert.equal(validatedBootstrap.spec.publication.headBranchPrefix, 'auto-sync-charts-');
   assert.equal(validatedBootstrap.spec.memory.directory, '.auto-sync/memory/charts-sync');
+  assert.equal(validatedBootstrap.spec.baselineAlignment?.policy, 'extract-context');
+
+  const bootstrapSuiteJs = bootstrapYamlBlocks.find(doc => doc['kind'] === 'TaskpackSuite');
+  assert.ok(bootstrapSuiteJs, 'docs/references/bootstrap-interview.md must include a YAML TaskpackSuite example');
+  const validatedBootstrapSuite = validateTaskpackSuiteManifest(bootstrapSuiteJs);
+  assert.equal(validatedBootstrapSuite.metadata.name, 'repo-auto-sync');
+  assert.equal(validatedBootstrapSuite.spec.domains.length, 2);
+  assert.equal(validatedBootstrapSuite.spec.stages.length, 2);
 
   // 4. .claude/skills symlink
   const claudeSkillsPath = join(REPO_ROOT, '.claude', 'skills');
