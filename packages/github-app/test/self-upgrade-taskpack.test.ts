@@ -1929,13 +1929,24 @@ process.exit(45);
             SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
           },
         });
-        assert.equal(candidateRes.kind, 'compiled', JSON.stringify(candidateRes));
-        if (candidateRes.kind === 'compiled') {
-          assert.equal(candidateRes.delegateOutcome?.ok, true, candidateRes.delegateOutcome?.detail ?? '');
+        if (process.platform === 'linux') {
+          // On Linux without github-hosted direct-dedicated mode, linux-bwrap/linux-landlock
+          // must fail closed on dynamic protected globs ("packages/*/tsconfig.json") inside writable dirs.
+          assert.equal(candidateRes.kind, 'blocked', JSON.stringify(candidateRes));
+          if (candidateRes.kind === 'blocked') {
+            assert.equal(candidateRes.reason, 'SANDBOX_CAPABILITY_INSUFFICIENT');
+            assert.match(candidateRes.detail ?? '', /dynamic protected glob/);
+          }
+          assert.equal(createdPrs.length, 0);
+        } else {
+          assert.equal(candidateRes.kind, 'compiled', JSON.stringify(candidateRes));
+          if (candidateRes.kind === 'compiled') {
+            assert.equal(candidateRes.delegateOutcome?.ok, true, candidateRes.delegateOutcome?.detail ?? '');
+          }
+          const candidatePrs = createdPrs.filter(pr => String(pr['head']).startsWith('auto-sync/'));
+          assert.equal(candidatePrs.length, 1);
+          assert.equal(String(candidatePrs[0]?.['body']).includes('packages/taskpack/package.json'), true);
         }
-        const candidatePrs = createdPrs.filter(pr => String(pr['head']).startsWith('auto-sync/'));
-        assert.equal(candidatePrs.length, 1);
-        assert.equal(String(candidatePrs[0]?.['body']).includes('packages/taskpack/package.json'), true);
       } finally {
         await mockLlm.close();
         await mockGitHubApi.close();

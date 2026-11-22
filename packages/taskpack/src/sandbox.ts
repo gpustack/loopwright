@@ -1551,6 +1551,35 @@ export function compileLinuxBwrapCommand(
   if (options?.provisionExactFiles ?? env.probeExecutables) {
     provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
   }
+  const targetCwd = options?.cwd === undefined
+    ? normalized.canonicalWorkspaceRoot
+    : canonicalizeAbsolutePath(options.cwd, 'cwd');
+  const usesDevShm = [
+    normalized.canonicalWorkspaceRoot,
+    ...(normalized.canonicalScratchDirectory !== null ? [normalized.canonicalScratchDirectory] : []),
+    targetCwd,
+    ...normalized.canonicalWritablePaths,
+    ...normalized.canonicalProtectedPaths,
+    ...normalized.canonicalAllowedReadOnlyPaths,
+    ...normalized.canonicalDeniedReadPaths,
+    ...normalized.canonicalReadOnlyBindMounts.flatMap(m => [m.sourcePath, m.targetPath]),
+  ].some(p => isSameOrSubpath(p, '/dev/shm'));
+  const isolateDevShm = usesDevShm && !normalized.canonicalWritablePaths.includes('/dev/shm');
+  const shmRoRoots: string[] = [];
+  if (isolateDevShm) {
+    if (isSameOrSubpath(normalized.canonicalWorkspaceRoot, '/dev/shm') && normalized.canonicalWorkspaceRoot !== '/dev/shm') {
+      shmRoRoots.push(normalized.canonicalWorkspaceRoot);
+    }
+    if (
+      isSameOrSubpath(targetCwd, '/dev/shm')
+      && targetCwd !== '/dev/shm'
+      && !shmRoRoots.some(r => isSameOrSubpath(targetCwd, r))
+      && !normalized.canonicalWritablePaths.some(w => isSameOrSubpath(targetCwd, w))
+    ) {
+      shmRoRoots.push(targetCwd);
+    }
+  }
+
   const args: string[] = ['--unshare-all'];
   if (normalized.networkMode === 'allow-outbound') {
     args.push('--share-net');
@@ -1562,6 +1591,11 @@ export function compileLinuxBwrapCommand(
     '--proc', '/proc',
     '--dev', '/dev',
   );
+  if (isolateDevShm) {
+    // Isolate /dev/shm with an empty per-sandbox tmpfs instead of exposing host /dev/shm,
+    // bind only the required workspace/policy subpaths, and remount /dev/shm read-only below.
+    args.push('--tmpfs', '/dev/shm');
+  }
   if (normalized.networkMode === 'none' && (!env.probeExecutables || existsSync('/etc/hosts'))) {
     args.push('--ro-bind-try', '/dev/null', '/etc/hosts');
   }
@@ -1587,6 +1621,7 @@ export function compileLinuxBwrapCommand(
     }
   };
   const allLaterMountTargets = [
+    ...shmRoRoots,
     ...normalized.canonicalWritablePaths,
     ...normalized.canonicalProtectedPaths,
     ...normalized.canonicalAllowedReadOnlyPaths,
@@ -1603,6 +1638,11 @@ export function compileLinuxBwrapCommand(
     }
     appendDeniedMask(deniedPath);
   }
+  for (const shmRoot of shmRoRoots) {
+    if (!env.probeExecutables || existsSync(shmRoot)) {
+      args.push('--ro-bind', shmRoot, shmRoot);
+    }
+  }
   for (const writablePath of normalized.canonicalWritablePaths) {
     args.push('--bind', writablePath, writablePath);
   }
@@ -1618,10 +1658,10 @@ export function compileLinuxBwrapCommand(
   for (const deniedPath of postMountDeniedPaths) {
     appendDeniedMask(deniedPath);
   }
+  if (isolateDevShm) {
+    args.push('--remount-ro', '/dev/shm');
+  }
 
-  const targetCwd = options?.cwd === undefined
-    ? normalized.canonicalWorkspaceRoot
-    : canonicalizeAbsolutePath(options.cwd, 'cwd');
   if (options?.inheritSpawnEnv === true) {
     args.push('--chdir', targetCwd);
     const pinnedEnv: Record<string, string> = {

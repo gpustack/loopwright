@@ -3469,28 +3469,51 @@ export function buildCommandScriptInvocation(
         };
       }
 
+      const usesDevShm = [
+        ...canonicalDenied,
+        ...canonicalAllowedRo,
+        ...canonicalWritables,
+        ...(canonicalCwd !== undefined ? [canonicalCwd] : []),
+        ...(gitBind !== null ? [gitBind.sourceObjectsDir, gitBind.targetObjectsDir] : []),
+        ...canonicalHostMounts.flatMap(m => [m.source, m.target, ...(m.aliasTarget !== undefined ? [m.aliasTarget] : [])]),
+      ].some(p => isSameOrStrictChildPath(p, '/dev/shm'));
+      const hasWritableShmRoot = canonicalWritables.includes('/dev/shm')
+        || canonicalHostMounts.some(
+          m => m.mode === 'rw' && (m.target === '/dev/shm' || m.aliasTarget === '/dev/shm'),
+        );
+      const isolateDevShm = usesDevShm && !hasWritableShmRoot;
+
       const bwrapArgs: string[] = [
         ...bwrapNamespaceFlags,
         '--die-with-parent',
         '--ro-bind', '/', '/',
         '--dev', '/dev',
         '--proc', '/proc',
+        ...(isolateDevShm ? ['--tmpfs', '/dev/shm'] : []),
       ];
 
+      const shmCwdRo = isolateDevShm
+        && canonicalCwd !== undefined
+        && isStrictChildPath(canonicalCwd, '/dev/shm')
+        && !reopenedAll.some(rp => isSameOrStrictChildPath(canonicalCwd, rp))
+        ? canonicalCwd
+        : null;
+      const effectiveReopenedAll = shmCwdRo !== null ? [...reopenedAll, shmCwdRo] : reopenedAll;
+
       const preMountDenied = canonicalDenied.filter(
-        dp => !reopenedAll.some(rp => isStrictChildPath(dp, rp)),
+        dp => !effectiveReopenedAll.some(rp => isStrictChildPath(dp, rp)),
       );
       const postMountDeniedSet = new Set<string>(
-        canonicalDenied.filter(dp => reopenedAll.some(rp => isStrictChildPath(dp, rp))),
+        canonicalDenied.filter(dp => effectiveReopenedAll.some(rp => isStrictChildPath(dp, rp))),
       );
       for (const hd of homeDeniedSet) {
-        if (reopenedAll.some(rp => isStrictChildPath(hd, rp))) {
+        if (effectiveReopenedAll.some(rp => isStrictChildPath(hd, rp))) {
           postMountDeniedSet.add(hd);
         }
       }
 
       const maskedDirs: string[] = [];
-      const ancestorTmpfsDirs: string[] = [];
+      const ancestorTmpfsDirs: string[] = isolateDevShm ? ['/dev/shm'] : [];
       for (const deniedPath of preMountDenied) {
         if (maskedDirs.some(m => isStrictChildPath(deniedPath, m))) {
           continue;
@@ -3503,7 +3526,7 @@ export function buildCommandScriptInvocation(
           bwrapArgs.push('--ro-bind', '/dev/null', deniedPath);
         } else {
           maskedDirs.push(deniedPath);
-          const hasReopenedChild = reopenedAll.some(rp => isStrictChildPath(rp, deniedPath));
+          const hasReopenedChild = effectiveReopenedAll.some(rp => isStrictChildPath(rp, deniedPath));
           if (hasReopenedChild) {
             bwrapArgs.push('--tmpfs', deniedPath);
             ancestorTmpfsDirs.push(deniedPath);
@@ -3511,6 +3534,10 @@ export function buildCommandScriptInvocation(
             bwrapArgs.push('--tmpfs', deniedPath, '--remount-ro', deniedPath);
           }
         }
+      }
+
+      if (shmCwdRo !== null && (!probeHost || existsSync(shmCwdRo))) {
+        bwrapArgs.push('--ro-bind', shmCwdRo, shmCwdRo);
       }
 
       const writableSet = new Set(canonicalWritables);

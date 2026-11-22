@@ -272,6 +272,55 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
       }
     });
   });
+
+  it('isolates /dev/shm via private tmpfs + per-path binds + --remount-ro without exposing host /dev/shm', () => {
+    const shmWorkspace = '/dev/shm/lw-test-ws';
+    const shmCompiled = compileLinuxBwrapCommand(
+      { workspaceRoot: shmWorkspace, writablePaths: ['docs'], scratchDirectory: '/dev/shm/lw-test-scratch' },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    const devIdx = shmCompiled.args.findIndex((arg, idx) => arg === '--dev' && shmCompiled.args[idx + 1] === '/dev');
+    const shmTmpfsIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--tmpfs' && shmCompiled.args[idx + 1] === '/dev/shm',
+    );
+    const wholeShmRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--ro-bind' && shmCompiled.args[idx + 1] === '/dev/shm' && shmCompiled.args[idx + 2] === '/dev/shm',
+    );
+    const wsRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--ro-bind' && shmCompiled.args[idx + 1] === shmWorkspace && shmCompiled.args[idx + 2] === shmWorkspace,
+    );
+    const bindDocsIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--bind' && shmCompiled.args[idx + 1] === '/dev/shm/lw-test-ws/docs',
+    );
+    const shmRemountRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--remount-ro' && shmCompiled.args[idx + 1] === '/dev/shm',
+    );
+    assert.ok(devIdx > 0, 'must mount --dev /dev');
+    assert.equal(wholeShmRoIdx, -1, 'must never expose whole host /dev/shm read-only');
+    assert.ok(shmTmpfsIdx > devIdx, 'must mount empty --tmpfs /dev/shm after --dev /dev');
+    assert.ok(wsRoIdx > shmTmpfsIdx, 'must bind only the specific workspace root read-only under /dev/shm');
+    assert.ok(bindDocsIdx > wsRoIdx, 'must mount writable --bind after workspace --ro-bind');
+    assert.ok(shmRemountRoIdx > bindDocsIdx, 'must --remount-ro /dev/shm after binds to lock ancestor dirs read-only');
+
+    const tmpCompiled = compileLinuxBwrapCommand(
+      { workspaceRoot: '/tmp/lw-test-ws', writablePaths: ['docs'] },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    const tmpShmIdx = tmpCompiled.args.findIndex(
+      (arg, idx) => (arg === '--tmpfs' || arg === '--ro-bind') && tmpCompiled.args[idx + 1] === '/dev/shm',
+    );
+    assert.equal(tmpShmIdx, -1, 'must not emit /dev/shm mounts when no policy path is under /dev/shm');
+
+    const exactWritableShm = compileLinuxBwrapCommand(
+      { workspaceRoot: '/tmp/lw-test-ws', writablePaths: ['docs'], scratchDirectory: '/dev/shm' },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    assert.equal(
+      exactWritableShm.args.some((arg, idx) => (arg === '--tmpfs' || arg === '--remount-ro') && exactWritableShm.args[idx + 1] === '/dev/shm'),
+      false,
+      'must not remount /dev/shm read-only when /dev/shm itself is explicitly writable',
+    );
+  });
 });
 
 describe('fail-closed sandbox backend negotiation (AC-3)', () => {

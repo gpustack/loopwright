@@ -558,14 +558,27 @@ function buildHostToolBashSpawnSpec(options: {
   }
   if (process.platform === 'linux') {
     if (canUseLinuxBwrap()) {
+      const stripTrailingSlashes = (rawPath: string): string => rawPath.replace(/\/+$/, '');
+      const isUnderDevShm = (rawPath: string): boolean => {
+        const normalized = stripTrailingSlashes(rawPath);
+        return normalized === '/dev/shm' || normalized.startsWith('/dev/shm/');
+      };
+      const hasWritableShmRoot = [options.scratchDir, options.tmpDir].some(
+        rawPath => stripTrailingSlashes(rawPath) === '/dev/shm',
+      );
+      const isolateDevShm = [options.candidateDir, options.scratchDir, options.tmpDir].some(isUnderDevShm)
+        && !hasWritableShmRoot;
       return {
         executable: '/usr/bin/bwrap',
         args: [
           '--ro-bind', '/', '/',
-          '--bind', options.scratchDir, options.scratchDir,
-          '--bind', options.tmpDir, options.tmpDir,
           '--dev', '/dev',
           '--proc', '/proc',
+          ...(isolateDevShm ? ['--tmpfs', '/dev/shm'] : []),
+          '--ro-bind', options.candidateDir, options.candidateDir,
+          '--bind', options.scratchDir, options.scratchDir,
+          '--bind', options.tmpDir, options.tmpDir,
+          ...(isolateDevShm ? ['--remount-ro', '/dev/shm'] : []),
           '--unshare-pid',
           '--unshare-net',
           '--die-with-parent',
