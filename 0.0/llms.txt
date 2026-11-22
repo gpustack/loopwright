@@ -1,0 +1,46 @@
+# Loopwright
+
+> Loopwright is a TypeScript harness and GitHub Action/App control plane for bounded, verified work.
+
+Documentation version: 0.0. Source revision: 9fc93a1f0b48844f24d76dafb16575fd562947aa.
+These pages come from the repository's docs/ sources. For version-specific behavior, use the
+documentation and code for your release. This index routes questions; follow its links for evidence.
+
+## Interactive Bootstrap Protocol
+
+Follow the [Bootstrap Interview Reference](/loopwright/0.0/references/bootstrap-interview.md) when initializing or migrating Loopwright automation.
+
+1. Inspect first, edit last: scan existing sync scripts, Dockerfiles, dependency manifests (go.mod, package.json, pyproject.toml), Helm charts, version tables, and workflows BEFORE asking questions or editing any files.
+2. Interview one question at a time: ask one focused question per turn with a repository-grounded `(Recommended)` default, covering operating mode (Declarative Taskpack vs Managed Controller), modular domain split (explicit /** scopes) and exclusions, schedule cadence, upstream source kinds (prefer github-release with allowPrerelease: false, http-json versionPath/monotonicSemver, and upstreamGroups lockstep), bounded Host Preflight (split stagedResources) -> networkMode: none -> directory-mounted command.v1 and structural guards, spec.execution trust mode, spec.memory.apply, and workflow panel inputs (mode: auto).
+3. Enforce zero model-specific code coupling: declare model pools and unified apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN exclusively in *taskpack.yaml (spec.models); never generate model-specific helper scripts or hardcode vendor names in workflows or scripts.
+4. Fetch schema guides before writing YAML: read the owning Markdown exports linked below right before emitting config (Taskpack + GitHub Action for Mode 1; Managed Controller + Task Contract + Controller and Registry for Mode 2) so spec.execution, spec.preflight, command.v1 parameters, spec.models[] fields, Action inputs, and controller schemas match verbatim.
+5. Gate on Stage 5 approval: present the architecture summary table and wait for explicit user confirmation before generating two-space Pretty YAML (apiVersion: loopwright.dev/v1alpha1), deterministic offline fixture selftests, loopwright digest sync --check, and tiered qualification steps.
+
+## Getting Started
+
+- [Architecture](/loopwright/0.0/docs/getting-started/architecture/index.md): Execution stages, trust boundaries, and configuration map
+- [Installation](/loopwright/0.0/docs/getting-started/installation/index.md): Install the CLI on a laptop or wire the GitHub Action
+
+## Operations
+
+- [GitHub Action](/loopwright/0.0/docs/operations/github-action/index.md): Configure and run the reusable GitHub Action
+- [GitHub App](/loopwright/0.0/docs/operations/github-app/index.md): Deploy and configure the GitHub App control plane
+- [CLI](/loopwright/0.0/docs/operations/cli/index.md): Generate drafts, inspect runs, reconcile, and audit closure
+- [Coding Agents](/loopwright/0.0/docs/operations/coding-agents/index.md): Drive zero-secret delegated step loops from host coding agents
+
+## Walkthroughs
+
+- [Declarative Taskpack](/loopwright/0.0/docs/walkthroughs/declarative-taskpack/index.md): Author or migrate a single-file repository taskpack
+- [Managed Controller](/loopwright/0.0/docs/walkthroughs/managed-controller/index.md): Configure out-of-repo registries, contracts, and CLI runs
+
+## Configuration
+
+- [Taskpack](/loopwright/0.0/docs/configuration/taskpack/index.md): Configure every field and enum in .loopwright/taskpack.yaml
+- [Task Contract](/loopwright/0.0/docs/configuration/task-contract/index.md): Configure task goals, scope, roles, budgets, DAGs, and evidence
+- [Controller and Registry](/loopwright/0.0/docs/configuration/controller-and-registry/index.md): Configure approved handlers, profiles, credentials, and controls
+- [Sandbox Backends](/loopwright/0.0/docs/configuration/sandbox-backends/index.md): Select OS or container sandboxes and required capabilities
+- [Decision Routing](/loopwright/0.0/docs/configuration/decision-routing/index.md): Configure advisory routing policies, providers, and thresholds
+
+## Optional
+
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/9fc93a1f0b48844f24d76dafb16575fd562947aa/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
