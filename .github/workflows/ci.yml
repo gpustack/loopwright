@@ -149,4 +149,4 @@ jobs:
             trap 'rm -f "${NPMRC_TMP}"' EXIT
             export NPM_CONFIG_USERCONFIG="${NPMRC_TMP}"
           fi
-          npm publish "dist-release/gpustack-loopwright-${VERSION}.tgz" --provenance --access public --ignore-scripts --tag "${DIST_TAG}"
+          npm publish "./dist-release/gpustack-loopwright-${VERSION}.tgz" --provenance --access public --ignore-scripts --tag "${DIST_TAG}"
