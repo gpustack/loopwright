@@ -507,3 +507,47 @@ test('cli: parseArguments validates suite check|resolve and --baseline-alignment
     assert.throws(() => parseArguments(invalid), UsageError, `expected UsageError for ${JSON.stringify(invalid)}`);
   }
 });
+
+test('cli: parseArguments validates runner relay|worker grammar and rejects invalid shapes', () => {
+  const relayBasic = parseArguments(['runner', 'relay', '--config', '/etc/loopwright/relay.yaml']);
+  assert.equal(relayBasic.command, 'runner');
+  assert.equal(relayBasic.runnerAction, 'relay');
+  assert.equal(relayBasic.values.get('config'), '/etc/loopwright/relay.yaml');
+  assert.deepEqual([...relayBasic.flags], []);
+
+  const relayJson = parseArguments(['runner', 'relay', '--config', 'relay.yaml', '--json']);
+  assert.equal(relayJson.runnerAction, 'relay');
+  assert.deepEqual([...relayJson.flags], ['json']);
+
+  const workerBasic = parseArguments(['runner', 'worker', '--config', '/etc/loopwright/worker.yaml']);
+  assert.equal(workerBasic.command, 'runner');
+  assert.equal(workerBasic.runnerAction, 'worker');
+  assert.equal(workerBasic.values.get('config'), '/etc/loopwright/worker.yaml');
+  assert.deepEqual([...workerBasic.flags], []);
+
+  const workerOnceJson = parseArguments(['runner', 'worker', '--config', 'worker.yaml', '--once', '--json']);
+  assert.equal(workerOnceJson.runnerAction, 'worker');
+  assert.deepEqual([...workerOnceJson.flags].sort(), ['json', 'once']);
+
+  for (const bad of [
+    ['runner'],
+    ['runner', 'bogus', '--config', 'r.yaml'],
+    ['runner', '--config', 'r.yaml'],
+    ['runner', 'relay'],
+    ['runner', 'worker'],
+    ['runner', 'relay', '--config'],
+    ['runner', 'worker', '--config'],
+    ['runner', 'relay', '--config', '   '],
+    ['runner', 'worker', '--config', '\t'],
+    ['runner', 'relay', '--config', '--json'],
+    ['runner', 'relay', '--config', 'a.yaml', '--config', 'b.yaml'],
+    ['runner', 'worker', '--config', 'w.yaml', '--once', '--once'],
+    ['runner', 'relay', '--config', 'r.yaml', '--once'],
+    ['runner', 'relay', '--config', 'r.yaml', '--role-model', 'author=openai/gpt-5.4'],
+    ['runner', 'worker', '--config', 'w.yaml', '--role-model', 'author=openai/gpt-5.4'],
+    ['runner', 'worker', '--config', 'w.yaml', '--bogus'],
+    ['runner', 'relay', '--config', 'r.yaml', 'extra'],
+  ]) {
+    assert.throws(() => parseArguments(bad), UsageError, `expected UsageError for ${JSON.stringify(bad)}`);
+  }
+});

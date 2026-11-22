@@ -116,6 +116,14 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
     assert.match(helpRun.stdout, /suite check --suite FILE/);
     assert.match(helpRun.stdout, /suite resolve --suite FILE/);
     assert.match(helpRun.stdout, /app-serve --config FILE/);
+    assert.match(helpRun.stdout, /runner relay --config FILE/);
+    assert.match(helpRun.stdout, /runner worker --config FILE/);
+
+    const runnerHelpRun = spawnSync(process.execPath, [binPath, 'runner', '--help'], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(runnerHelpRun.status, 0, `loopwright runner --help failed: ${runnerHelpRun.stderr}`);
+    assert.match(runnerHelpRun.stdout, /^loopwright 0\.1\.0-rc1 runner\n/);
+    assert.match(runnerHelpRun.stdout, /runner relay --config FILE/);
+    assert.match(runnerHelpRun.stdout, /runner worker --config FILE/);
 
     const draftDir = join(sandbox, 'drafts');
     const initRun = spawnSync(process.execPath, [binPath, 'init', '--directory', draftDir, '--json'], {

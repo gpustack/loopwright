@@ -342,7 +342,7 @@ Key conventions:
       Acceptance: Outbound worker handles long-poll acquisition, heartbeats, `SIGTERM`/Kueue preemption, CUDA/ROCm/Ascend + `synthetic_fixture` provenance probes, and two-stage blind execution (`native_os` and `docker`, Stage A `.cubin`/`.sass` seal without `held_out_workloads`, Stage B read-only `held_out_workloads` with `networkMode: 'none'` and zero file exports), passing full `Controller -> Relay -> Worker` loopback e2e and optional `$LOOPWRIGHT_CUDA_SSH_HOST` / `$LOOPWRIGHT_ROCM_SSH_HOST` smoke verification.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg hardware-runner`
 
-- [ ] **T7 · CLI `loopwright runner relay|worker` subcommands and honest 23-row closure ledger**
+- [x] **T7 · CLI `loopwright runner relay|worker` subcommands and honest 23-row closure ledger**
       Blocked by: T4, T6
       Owns: `packages/cli/src/**`, `packages/cli/test/arguments.test.ts`, `packages/cli/test/closure-and-failure-matrix.test.ts`, `packages/cli/test/runner-cli.test.ts`
       Gate: review

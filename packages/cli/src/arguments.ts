@@ -4,11 +4,13 @@ export class UsageError extends Error { constructor() { super('CLI_USAGE'); } }
 export type StepAction = 'next' | 'submit' | 'cancel';
 export type DigestAction = 'sync';
 export type SuiteAction = 'check' | 'resolve';
+export type RunnerAction = 'relay' | 'worker';
 export interface Arguments {
-  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest' | 'suite';
+  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest' | 'suite' | 'runner';
   readonly stepAction?: StepAction;
   readonly digestAction?: DigestAction;
   readonly suiteAction?: SuiteAction;
+  readonly runnerAction?: RunnerAction;
   readonly roleModelOverrides?: readonly RoleModelOverride[];
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
@@ -19,7 +21,7 @@ interface CommandRule {
   readonly flags: readonly string[];
   readonly allowRoleModel?: boolean;
 }
-const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite'>, CommandRule> = {
+const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
   run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'baseline-alignment', 'source-revision', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file', 'allow-host-mounts'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
@@ -47,6 +49,18 @@ const suiteRules: Record<SuiteAction, CommandRule> = {
     required: ['suite'],
     values: ['suite', 'repo', 'event', 'schedule', 'comment-body', 'pr-head-ref', 'pr-base-ref', 'domain'],
     flags: ['json'],
+  },
+};
+const runnerRules: Record<RunnerAction, CommandRule> = {
+  relay: {
+    required: ['config'],
+    values: ['config'],
+    flags: ['json'],
+  },
+  worker: {
+    required: ['config'],
+    values: ['config'],
+    flags: ['once', 'json'],
   },
 };
 const stepRules: Record<StepAction, CommandRule> = {
@@ -245,7 +259,22 @@ export function parseArguments(argv: readonly string[]): Arguments {
     };
   }
 
-  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest' | 'suite'>;
+  if (rawCommand === 'runner') {
+    const rawAction = argv[1];
+    if (rawAction !== 'relay' && rawAction !== 'worker') throw new UsageError();
+    const rule = runnerRules[rawAction];
+    parseOptions(2, key => rule.flags.includes(key), key => rule.values.includes(key), false);
+    if (rule.required.some(key => !values.has(key))) throw new UsageError();
+    if (values.get('config')!.trim().length === 0) throw new UsageError();
+    return {
+      command: 'runner',
+      runnerAction: rawAction,
+      values,
+      flags,
+    };
+  }
+
+  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner'>;
   if (!Object.hasOwn(commands, command)) throw new UsageError();
   const rule = commands[command];
   parseOptions(1, key => rule.flags.includes(key), key => rule.values.includes(key), rule.allowRoleModel === true);
