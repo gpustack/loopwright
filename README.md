@@ -29,6 +29,7 @@ Read the [architecture overview](./docs/getting-started/architecture.md) and [do
 - **Advisory decisions**: Optional System-One routing uses confidence thresholds and deterministic fallbacks. See [Decision Routing](./docs/configuration/decision-routing.md).
 - **Declarative taskpacks & suites**: Define repository scope, triggers, compact step handoffs, conditional rules, baseline alignment (`baselineAlignment`), and multi-domain `TaskpackSuite` manifests (`.loopwright/suite.yaml`) in YAML. See [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md) and [Taskpack](./docs/configuration/taskpack.md).
 - **Run diagnostics (`RunEval`)**: Export deterministic tool-repeat, ping-pong, repair-convergence, and per-role/per-step breakdowns via `loopwright inspect` and `Run Health` step summaries. See [CLI](./docs/operations/cli.md).
+- **Hardware benchmark gates**: Bind hardware `target.matrix` cells to host-owned `benchmark-gate.v1` slots and run outbound-only `@loopwright/hardware-runner` workers (`loopwright runner relay|worker`). See [Task Contract](./docs/configuration/task-contract.md) and [CLI](./docs/operations/cli.md).
 - **Reviewed memory**: Content-addressed proposals apply separately after review. See [memory](./docs/contribute/memory.md).
 - **Capability closure**: Inspect local evidence and external prerequisites with the [closure matrix](./docs/contribute/closure-matrix.md).
 

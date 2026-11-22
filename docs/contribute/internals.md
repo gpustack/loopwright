@@ -10,13 +10,13 @@ The workspace separates contracts, authority, execution, verification and public
 
 ## Build order
 
-The root build compiles `core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, then `cli`. Run `npm run build`, `npm run typecheck`, and `npm run lint` from the root.
+The root build compiles `core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, `hardware-runner`, then `cli`. Run `npm run build`, `npm run typecheck`, and `npm run lint` from the root.
 
 ## Authority boundaries
 
 Core owns contracts, canonical digests, and verified CAS descriptor acceptance; state owns fenced local authority; the adapter owns isolated execution; controller coordinates CAS blob storage (`<artifactsDir>/blobs/sha256/<hex>`), independent verification, and authenticated effects.
 
-The runner owns offline parity, memory owns reviewed compaction, decisions provide bounded advice, `@loopwright/taskpack` owns generic declarative taskpacks and OS sandboxes, `@loopwright/github-app` owns GitHub intake, token scoping, and streamed PR publication, and CLI exposes local operations. Preserve unknown outcomes and do not promote fixture evidence into deployed acceptance.
+The runner owns offline parity, memory owns reviewed compaction, decisions provide bounded advice, `@loopwright/taskpack` owns declarative taskpacks and OS sandboxes, `@loopwright/github-app` owns GitHub intake and PR publication, `@loopwright/hardware-runner` owns the outbound pull-lease benchmark relay and two-stage evaluator, and CLI exposes local operations. Preserve unknown outcomes and do not promote fixture evidence into deployed acceptance.
 
 Controller admits `version: 2` `tree_overlay` sources with `git ls-tree -r -l -z --full-tree`.
 Admission permits up to 65,536 regular files, an 8 MiB `source-tree` NDJSON artifact, and overlays up to 16,384 files / 16 GiB via `1 MiB` streaming CAS blobs and single-descriptor read-only projections.

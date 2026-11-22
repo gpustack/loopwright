@@ -28,7 +28,7 @@ Evaluate whether the diff completely and accurately implements the approved spec
 
 - Inspect `git diff <base>...<head>` (and `git status --short` for untracked files). If the diff is empty, stop and report that no changes exist.
 - Load [`AGENTS.md`](../../../AGENTS.md), [`.opencodereview/rule.json`](../../../.opencodereview/rule.json), the relevant `docs/` guide via the [module map](../../../docs/README.md#module-map), and the governing specification under `specs/` (or linked issue / PR description).
-- Trace callers, callees, and public TypeScript exports across all workspace packages (`packages/{core,state,agent-pi,controller,taskpack-runner,memory,decisions,taskpack,github-app,cli}`).
+- Trace callers, callees, and public TypeScript exports across all workspace packages (`packages/{core,state,agent-pi,controller,taskpack-runner,memory,decisions,taskpack,github-app,hardware-runner,cli}`).
 
 ### 2. Run Jev `review-diff` fast screen (when available)
 
@@ -43,7 +43,7 @@ Evaluate whether the diff completely and accurately implements the approved spec
 Evaluate every changed file against these five Loopwright-specific axes:
 
 1. **Package & Layer Boundaries**:
-   - Dependency DAG: `core -> state -> agent-pi -> controller -> {taskpack-runner, memory, decisions} -> taskpack -> github-app -> cli`. Flag any reverse or circular package dependency.
+   - Dependency DAG: `core -> state -> agent-pi -> controller -> {taskpack-runner, memory, decisions} -> taskpack -> github-app -> cli`, with `hardware-runner` depending only on `core` and `taskpack` (consumed by `cli`). Flag any reverse or circular package dependency.
    - Frozen package guard: When a specification or task freezes lower-level packages (for example, `packages/core`, `packages/state`, `packages/agent-pi`, `packages/controller`, or `examples/*.json`), flag any modification to those paths as `Critical` (`Blocking`).
    - Strict ESM NodeNext discipline: explicit `.js` relative import specifiers, explicit public return and parameter types, and zero `any` or unsafe type assertions.
 2. **Public Contract & YAML/JSON Schema Safety**:

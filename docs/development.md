@@ -15,7 +15,7 @@ uses pinned Pi 1.5.2 packages. The root minimatch override applies to the resolv
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
-Build emits `dist` across all workspace packages (`core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, and `cli`); test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
+Build emits `dist` across all 11 workspace packages (`core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, `hardware-runner`, and `cli`); test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
 
 Private constructor seams isolate clock/transaction faults over actual SQLite; they are absent from the public state factories. Test files run serially to bound owned children. The integration fixture runs authoring, admission, candidate identity, evidence evaluation, and honest run construction. Example outputs are checked against this flow.
 
@@ -96,6 +96,18 @@ The controller/CLI use only public core/state/adapter APIs. Test-only execution 
 Native qualification uses the same cumulative local experiment authority and explicit owned evidence. Failed result,
 unknown effects, held reservations and observed/allocated time remain distinct. Image/daemon preparation is not native
 SDK or live-provider acceptance. See the qualification README and retained program evidence for their actual scope.
+
+### Hardware runner
+
+Run `node scripts/run-tests.mjs --pkg hardware-runner` to exercise config loading, lease fencing, relay routes, two-stage blind evaluation, provenance parsing, and loopback e2e tests without physical GPUs.
+
+Optional live SSH smoke tests run against Docker-enabled Linux CUDA or ROCm hosts when `LOOPWRIGHT_CUDA_SSH_HOST` or `LOOPWRIGHT_ROCM_SSH_HOST` is set (plus optional `LOOPWRIGHT_CUDA_EXPECTED_ARCH` and `LOOPWRIGHT_ROCM_EXPECTED_ARCH`):
+
+```sh
+LOOPWRIGHT_CUDA_SSH_HOST=user@gpu-host.example \
+LOOPWRIGHT_ROCM_SSH_HOST=user@gpu-host.example \
+  node --test .test-build/packages/hardware-runner/test/live-ssh-smoke.test.js
+```
 
 ## Self-upgrade validation
 

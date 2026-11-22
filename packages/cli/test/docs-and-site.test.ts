@@ -147,6 +147,7 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.ok(rulePaths.has('packages/decisions/**/*.ts'), 'must cover decisions');
   assert.ok(rulePaths.has('packages/taskpack/**/*.ts'), 'must cover taskpack');
   assert.ok(rulePaths.has('packages/github-app/**/*.ts'), 'must cover github-app');
+  assert.ok(rulePaths.has('packages/hardware-runner/**/*.ts'), 'must cover hardware-runner');
   assert.ok(rulePaths.has('packages/cli/**/*.ts'), 'must cover cli');
   assert.ok(rulePaths.has('action.yml'), 'must cover action.yml');
   assert.ok(rulePaths.has('docs/**/*.md'), 'must cover docs');

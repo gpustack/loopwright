@@ -1,6 +1,6 @@
 # Spec: Hardware execution, benchmark-gate.v1, and outbound remote runner
 
-Status: Building
+Status: Shipped
 Type: Feature
 
 ## Summary
@@ -349,7 +349,7 @@ Key conventions:
       Acceptance: `loopwright runner relay --config <FILE>` and `loopwright runner worker --config <FILE> [--once]` parse and execute cleanly, `closure.ts` includes `'@loopwright/hardware-runner'` in `OWNER_PACKAGES` and `external-build-and-accelerator-matrix` `evidencePaths`, and `closure --verify-failures` preserves `18` `closedLocal` and `5` `unprovisionedExternal` rows while rejecting falsified promotion (`CLOSURE_FALSIFICATION_FORBIDDEN`).
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg cli && node packages/cli/dist/main.js closure --verify-failures --json`
 
-- [ ] **T8 · Connected documentation, Hugo site, skill references, and full 11-package verification**
+- [x] **T8 · Connected documentation, Hugo site, skill references, and full 11-package verification**
       Blocked by: T7
       Owns: `docs/**`, `site/**`, `README.md`, `AGENTS.md`, `.agents/skills/**`, `packages/cli/test/check-docs-rules.test.ts`, `packages/cli/test/docs-and-site.test.ts`
       Acceptance: Module map (`docs/README.md` under existing module IDs), `task-contract.md`, `taskpack.md`, `controller-and-registry.md`, `cli.md`, `closure-matrix.md`, `AGENTS.md`, and Hugo `site/` document hardware `target.matrix`, `benchmark-gate.v1`, and `loopwright runner`, passing all build, lint, docs, site, test, and closure gates.

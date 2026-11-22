@@ -21,7 +21,7 @@ Read each row as an evidence boundary. Local closure covers its stated criterion
 | `blocked_external` | External qualification remains blocked. |
 | `deferred_owned` | An owned external qualification remains deferred. |
 
-`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows across all workspace packages (`@loopwright/taskpack` owns `qualified-host-clock-and-storage-profile` and `interactive-mcp-oauth-browser-flow`).
+`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows across all 11 workspace packages (`@loopwright/hardware-runner` is registered in `OWNER_PACKAGES`; `@loopwright/taskpack` owns `qualified-host-clock-and-storage-profile` and `interactive-mcp-oauth-browser-flow`).
 
 Eighteen rows are `closed_local` with `verificationStatus: 'passed'` (`unit_and_integration`, `controlled_local_qualification`, or `frozen_offline_parity`). Five rows carry `evidenceLevel: 'unprovisioned_external'` and stay honestly blocked:
 
@@ -36,6 +36,8 @@ Eighteen rows are `closed_local` with `verificationStatus: 'passed'` (`unit_and_
 Every row names a closure criterion, a residual boundary, and at least one `evidencePaths` entry that
 resolves to a committed regular file in the repository. Non-passed rows must carry a non-empty
 `unlockPrerequisite`; passed rows must not.
+
+`external-build-and-accelerator-matrix` lists `@loopwright/hardware-runner` evidence paths (`relay-server.ts`, `worker.ts`, `evaluator.ts`, `e2e-nat-loopback.test.ts`, and `docs/configuration/sandbox-backends.md`), yet stays `blocked_external` (`18` `closedLocal`, `5` `unprovisionedExternal`) until signed `ExternalQualificationReceipt` records are attached (`CLOSURE_FALSIFICATION_FORBIDDEN`).
 
 ## Non-falsification invariant
 

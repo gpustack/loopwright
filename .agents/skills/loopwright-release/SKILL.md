@@ -59,7 +59,7 @@ git tag -l 'v*' --sort=-v:refname | head -n 10
 
 ### Phase 1: Workspace Version & Lockfile Consistency Audit (Read-Only)
 
-Verify that root `package.json`, all workspace package manifests (`packages/{core,state,agent-pi,controller,taskpack-runner,memory,decisions,taskpack,github-app,cli}/package.json`), `package-lock.json`, and `action.yml` are internally consistent:
+Verify that root `package.json`, all workspace package manifests (`packages/{core,state,agent-pi,controller,taskpack-runner,memory,decisions,taskpack,github-app,hardware-runner,cli}/package.json`), `package-lock.json`, and `action.yml` are internally consistent:
 
 ```bash
 node -e '
@@ -67,7 +67,7 @@ node -e '
   const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
   const pkgs = [
     "core", "state", "agent-pi", "controller",
-    "taskpack-runner", "memory", "decisions", "taskpack", "github-app", "cli"
+    "taskpack-runner", "memory", "decisions", "taskpack", "github-app", "hardware-runner", "cli"
   ];
   for (const p of pkgs) {
     const m = JSON.parse(fs.readFileSync(`packages/${p}/package.json`, "utf8"));
