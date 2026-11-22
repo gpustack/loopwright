@@ -78,6 +78,7 @@ import {
   compileScopePatterns,
   extractTaskpackResourcePaths,
   IDENTIFIER_PATTERN,
+  normalizeCommandMountList,
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
@@ -114,6 +115,7 @@ import {
   type PiModelSelection,
   type PolicyProfile,
   type ResolvedBaselineAlignmentConfig,
+  type ResolvedCommandMount,
   type SandboxNetworkMode,
   type TaskpackCommentCommand,
   type TaskpackIntakeInput,
@@ -139,6 +141,7 @@ export {
   collectControlRootSiblingPaths,
   collectGitHubSiblingPaths,
   compileScopePatterns,
+  normalizeCommandMountList,
   normalizeRelativePath,
   resolveManifestControlRoot,
   type CollectGitHubSiblingPathsOptions,
@@ -1476,6 +1479,10 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         const effectiveCheckNetworkMode: SandboxNetworkMode = rawCheckNetworkMode === 'none' || rawCheckNetworkMode === 'loopback-only'
           ? rawCheckNetworkMode
           : (resolvedExecCaps?.allowCheckNetwork === true ? 'allow-outbound' : 'none');
+        const rawMounts = declared.parameters?.['mounts'];
+        const mounts: readonly ResolvedCommandMount[] | undefined = rawMounts !== undefined
+          ? normalizeCommandMountList(rawMounts, `/spec/verification/localChecks/${index}/parameters/mounts`)
+          : undefined;
         commandGateMetaByCheckId.set(declared.id, Object.freeze({
           checkId: declared.id,
           gateId,
@@ -1497,9 +1504,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           allowCheckNetwork: effectiveCheckNetworkMode === 'allow-outbound',
           networkMode: effectiveCheckNetworkMode,
           allowPrivileged: bindings.hostPolicy?.allowPrivileged === true,
-          allowDockerSocket: resolvedExecCaps?.allowDockerSocket === true
-            && bindings.hostPolicy?.allowDockerSocket === true
-            && effectiveCheckNetworkMode === 'allow-outbound',
+          ...(mounts !== undefined && mounts.length > 0 ? { mounts } : {}),
         }));
       }
     }

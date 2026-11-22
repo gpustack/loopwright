@@ -34,8 +34,9 @@ import {
   TASKPACK_MANIFEST_BYTES, TASKPACK_OUTPUT_FORMATS, TASKPACK_TOOL_NAMES, TaskpackError,
   type BaselineAlignmentConfig, type BaselineAlignmentOverride, type BaselineAlignmentPolicy,
   type CandidateScopeSnapshot,
+  type CommandMountMode,
   type ExecutionHostPolicy, type PolicyProfile,
-  type ResolvedBaselineAlignmentConfig, type ResolvedTaskpackExecutionCapabilities,
+  type ResolvedBaselineAlignmentConfig, type ResolvedCommandMount, type ResolvedTaskpackExecutionCapabilities,
   type SandboxBackendId, type SandboxCapability,
   type SandboxNetworkMode, type TargetMatrixCell,
   type TaskpackCheckParameterValue, type TaskpackCommentCommand, type TaskpackDecisionDisclosurePolicy,
@@ -219,6 +220,158 @@ export function parseJsonSubset(source: string, limits: ParseJsonSubsetLimits = 
 // Taskpack 2.0 execution trust modes, trigger checks, & dual-key host authority
 // ---------------------------------------------------------------------------
 
+export const MAX_COMMAND_MOUNTS = 16;
+export const MAX_ALLOWED_HOST_MOUNTS = 32;
+
+const FORBIDDEN_HOST_MOUNT_EXACT_ROOTS: ReadonlySet<string> = new Set([
+  '/',
+  '/Users',
+  '/home',
+  '/tmp',
+  '/private',
+  '/private/tmp',
+  '/var',
+  '/private/var',
+  '/var/folders',
+  '/private/var/folders',
+  '/opt',
+  '/usr',
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib64',
+  '/lib32',
+  '/run',
+  '/var/run',
+  '/private/var/run',
+  '/var/lib',
+]);
+
+const FORBIDDEN_HOST_MOUNT_SOURCE_SUBTREES: readonly string[] = Object.freeze([
+  '/etc',
+  '/private/etc',
+  '/proc',
+  '/sys',
+  '/dev',
+  '/root',
+  '/boot',
+  '/private/var/db',
+  '/var/lib',
+]);
+
+const FORBIDDEN_HOST_MOUNT_TARGET_SUBTREES: readonly string[] = Object.freeze([
+  '/etc',
+  '/private/etc',
+  '/proc',
+  '/sys',
+  '/dev',
+  '/root',
+  '/boot',
+  '/usr',
+  '/bin',
+  '/sbin',
+  '/lib',
+  '/lib64',
+  '/lib32',
+]);
+
+function isPathWithinPrefix(candidate: string, prefix: string): boolean {
+  return candidate === prefix || candidate.startsWith(`${prefix}/`);
+}
+
+/** Normalize and validate an absolute POSIX mount path (rejects `/`, `..`, and control/quote characters). */
+export function normalizeAbsoluteHostMountPath(
+  rawPath: unknown,
+  diagPath: string,
+  errorCode: 'TASKPACK_MANIFEST_INVALID' | 'ACTION_INPUT_INVALID' = 'TASKPACK_MANIFEST_INVALID',
+): string {
+  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.length > 1024) {
+    throw new TaskpackError(errorCode, 'host mount path must be a non-empty string of at most 1024 characters', diagPath);
+  }
+  if (/[\0\r\n"\\]/.test(rawPath) || !rawPath.startsWith('/')) {
+    throw new TaskpackError(errorCode, `host mount path "${rawPath}" must be a clean absolute POSIX path`, diagPath);
+  }
+  const rawSegments = rawPath.split('/');
+  if (rawSegments.includes('..')) {
+    throw new TaskpackError(errorCode, `host mount path "${rawPath}" must not contain ".." traversal segments`, diagPath);
+  }
+  let normalized = posix.normalize(rawPath);
+  if (normalized.length > 1 && normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1);
+  }
+  if (normalized === '/' || !normalized.startsWith('/')) {
+    throw new TaskpackError(errorCode, `host mount path "${rawPath}" must not be "/"`, diagPath);
+  }
+  return normalized;
+}
+
+/** True when a normalized mount path targets a forbidden broad root or sensitive system subtree. */
+export function isForbiddenHostMountPath(normalizedPath: string, role: 'source' | 'target'): boolean {
+  if (FORBIDDEN_HOST_MOUNT_EXACT_ROOTS.has(normalizedPath)) return true;
+  const subtrees = role === 'source'
+    ? FORBIDDEN_HOST_MOUNT_SOURCE_SUBTREES
+    : FORBIDDEN_HOST_MOUNT_TARGET_SUBTREES;
+  return subtrees.some(prefix => isPathWithinPrefix(normalizedPath, prefix));
+}
+
+/** Parse operator-supplied `allow-host-mounts` (comma/newline string or array) into normalized absolute paths. */
+export function parseAllowedHostMounts(
+  raw: string | readonly string[] | undefined,
+  diagPath = 'allow-host-mounts',
+): readonly string[] {
+  if (raw === undefined) return Object.freeze([]);
+  const rawEntries = typeof raw === 'string'
+    ? raw.split(/[,\r\n]+/).map(entry => entry.trim()).filter(entry => entry.length > 0)
+    : raw.map(entry => (typeof entry === 'string' ? entry.trim() : entry)).filter(entry => entry !== '');
+  if (rawEntries.length > MAX_ALLOWED_HOST_MOUNTS) {
+    throw new TaskpackError(
+      'ACTION_INPUT_INVALID',
+      `allow-host-mounts exceeds maximum of ${MAX_ALLOWED_HOST_MOUNTS} entries`,
+      diagPath,
+    );
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const [idx, entry] of rawEntries.entries()) {
+    const normalized = normalizeAbsoluteHostMountPath(entry, `${diagPath}/${idx}`, 'ACTION_INPUT_INVALID');
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      out.push(normalized);
+    }
+  }
+  return Object.freeze(out);
+}
+
+/** True when `mountSource` is explicitly authorized by `allowedHostMounts` (exact normalized match or optional canonical resolver). */
+export function isHostMountAuthorized(
+  mountSource: string,
+  allowedHostMounts: readonly string[] | undefined,
+  canonicalize?: (pathValue: string) => string | null,
+): boolean {
+  if (allowedHostMounts === undefined || allowedHostMounts.length === 0) return false;
+  let normalizedSource: string;
+  try {
+    normalizedSource = normalizeAbsoluteHostMountPath(mountSource, 'mount.source');
+  } catch {
+    return false;
+  }
+  const canonSource = canonicalize?.(normalizedSource) ?? null;
+  for (const rawAllowed of allowedHostMounts) {
+    let normalizedAllowed: string;
+    try {
+      normalizedAllowed = normalizeAbsoluteHostMountPath(rawAllowed, 'allowedHostMounts', 'ACTION_INPUT_INVALID');
+    } catch {
+      continue;
+    }
+    if (normalizedAllowed === normalizedSource) return true;
+    if (canonSource !== null && canonicalize !== undefined) {
+      const canonAllowed = canonicalize(normalizedAllowed);
+      if (canonAllowed !== null && canonAllowed === canonSource) return true;
+    }
+  }
+  return false;
+}
+
 /** Resolve effective execution capability booleans from `mode` defaults plus explicit manifest overrides. */
 export function resolveExecutionCapabilities(
   mode: TaskpackExecutionMode,
@@ -232,13 +385,96 @@ export function resolveExecutionCapabilities(
     allowCheckNetwork: overrides.allowCheckNetwork ?? privilegedDefault,
     allowWorkflowWrites: overrides.allowWorkflowWrites ?? false,
     allowAgentNetwork: overrides.allowAgentNetwork ?? false,
-    allowDockerSocket: overrides.allowDockerSocket ?? false,
   });
+}
+
+/** Validate and normalize an untrusted `command.v1` `parameters.mounts` array (shared across schema, compiler, and staged secrets). */
+export function normalizeCommandMountList(
+  rawMounts: unknown,
+  diagPath: string,
+  errorCode: 'TASKPACK_MANIFEST_INVALID' | 'ACTION_INPUT_INVALID' = 'TASKPACK_MANIFEST_INVALID',
+): readonly ResolvedCommandMount[] {
+  if (!Array.isArray(rawMounts) || rawMounts.length > MAX_COMMAND_MOUNTS) {
+    throw new TaskpackError(errorCode, `command.v1 mounts must be an array of 0..${MAX_COMMAND_MOUNTS} entries`, diagPath);
+  }
+  const seenTargets = new Set<string>();
+  const parsedMounts: ResolvedCommandMount[] = [];
+  for (const [mIdx, rawMount] of rawMounts.entries()) {
+    const mPath = `${diagPath}/${mIdx}`;
+    if (!isPlainObjectRecord(rawMount)) {
+      throw new TaskpackError(errorCode, 'command.v1 mount entry must be an object', mPath);
+    }
+    for (const key of Object.keys(rawMount)) {
+      if (FORBIDDEN_KEYS.has(key) || (key !== 'source' && key !== 'target' && key !== 'mode')) {
+        throw new TaskpackError(errorCode, `command.v1 mount entry has unsupported key "${key}"`, `${mPath}/${key}`);
+      }
+    }
+    const source = normalizeAbsoluteHostMountPath(rawMount['source'], `${mPath}/source`, errorCode);
+    if (isForbiddenHostMountPath(source, 'source')) {
+      throw new TaskpackError(
+        errorCode === 'ACTION_INPUT_INVALID' ? 'ACTION_INPUT_INVALID' : 'TASKPACK_SCOPE_VIOLATION',
+        `command.v1 mount source "${source}" targets a forbidden host path`,
+        `${mPath}/source`,
+      );
+    }
+    const target = rawMount['target'] === undefined
+      ? source
+      : normalizeAbsoluteHostMountPath(rawMount['target'], `${mPath}/target`, errorCode);
+    if (isForbiddenHostMountPath(target, 'target')) {
+      throw new TaskpackError(
+        errorCode === 'ACTION_INPUT_INVALID' ? 'ACTION_INPUT_INVALID' : 'TASKPACK_SCOPE_VIOLATION',
+        `command.v1 mount target "${target}" targets a forbidden sandbox path`,
+        `${mPath}/target`,
+      );
+    }
+    if (seenTargets.has(target)) {
+      throw new TaskpackError(errorCode, `duplicate command.v1 mount target "${target}"`, `${mPath}/target`);
+    }
+    seenTargets.add(target);
+    let mountMode: CommandMountMode = 'ro';
+    if (rawMount['mode'] !== undefined) {
+      if (rawMount['mode'] !== 'ro' && rawMount['mode'] !== 'rw') {
+        throw new TaskpackError(errorCode, 'command.v1 mount mode must be "ro" or "rw"', `${mPath}/mode`);
+      }
+      mountMode = rawMount['mode'];
+    }
+    parsedMounts.push(Object.freeze({ source, target, mode: mountMode }));
+  }
+  return Object.freeze(parsedMounts);
+}
+
+function extractDeclaredCommandMounts(check: TaskpackV2CheckDeclaration, checkIdx: number): readonly ResolvedCommandMount[] {
+  if (check.implementation !== 'command.v1') return [];
+  const raw = check.parameters?.['mounts'];
+  if (raw === undefined) return [];
+  return normalizeCommandMountList(raw, `/spec/verification/localChecks/${checkIdx}/parameters/mounts`);
+}
+
+function pickPrivilegedAuthorityDiagPath(
+  execution: TaskpackExecutionDeclaration | undefined,
+  hasExecPrivCap: boolean,
+  perCheckMountReadOnlyGitIdx: number,
+  perCheckLoopbackNetIdx: number,
+  perCheckMountsIdx: number,
+): string {
+  if (execution?.mode === 'privileged') return '/spec/execution/mode';
+  if (!hasExecPrivCap) {
+    if (perCheckMountReadOnlyGitIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`;
+    }
+    if (perCheckLoopbackNetIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`;
+    }
+    if (perCheckMountsIdx !== -1) {
+      return `/spec/verification/localChecks/${perCheckMountsIdx}/parameters/mounts`;
+    }
+  }
+  return '/spec/execution/capabilities';
 }
 
 /**
  * Dual-key host authorization guard: fails closed unless operator-controlled host flags match
- * every privileged execution capability or `.github/workflows/**` write unlock declared by the manifest.
+ * every privileged execution capability, host mount allowlist, or `.github/workflows/**` write unlock declared by the manifest.
  */
 export function validateExecutionAuthority(
   execution: TaskpackExecutionDeclaration | undefined,
@@ -251,51 +487,64 @@ export function validateExecutionAuthority(
   const perCheckLoopbackNetIdx = extra?.localChecks?.findIndex(
     check => check.implementation === 'command.v1' && check.parameters?.['networkMode'] === 'loopback-only',
   ) ?? -1;
-  if (execution === undefined && perCheckMountReadOnlyGitIdx === -1 && perCheckLoopbackNetIdx === -1) return;
+  const parsedMountsByCheckIdx = new Map<number, readonly ResolvedCommandMount[]>();
+  let perCheckMountsIdx = -1;
+  if (extra?.localChecks !== undefined) {
+    for (const [checkIdx, check] of extra.localChecks.entries()) {
+      const parsed = extractDeclaredCommandMounts(check, checkIdx);
+      if (parsed.length > 0) {
+        if (perCheckMountsIdx === -1) perCheckMountsIdx = checkIdx;
+        parsedMountsByCheckIdx.set(checkIdx, parsed);
+      }
+    }
+  }
+  if (
+    execution === undefined
+    && perCheckMountReadOnlyGitIdx === -1
+    && perCheckLoopbackNetIdx === -1
+    && perCheckMountsIdx === -1
+  ) {
+    return;
+  }
   const caps = execution?.capabilities;
-  const requiresPrivileged = (
-    execution?.mode === 'privileged'
-    || caps?.allowHostEnv === true
+  const hasExecPrivCap = (
+    caps?.allowHostEnv === true
     || caps?.allowHostPath === true
     || caps?.mountReadOnlyGit === true
     || caps?.allowCheckNetwork === true
     || caps?.allowAgentNetwork === true
-    || caps?.allowDockerSocket === true
+  );
+  const requiresPrivileged = (
+    execution?.mode === 'privileged'
+    || hasExecPrivCap
     || perCheckMountReadOnlyGitIdx !== -1
     || perCheckLoopbackNetIdx !== -1
+    || perCheckMountsIdx !== -1
   );
   if (requiresPrivileged && hostPolicy.allowPrivileged !== true) {
-    const diagPath = execution?.mode === 'privileged'
-      ? '/spec/execution/mode'
-      : perCheckMountReadOnlyGitIdx !== -1
-        && caps?.allowHostEnv !== true
-        && caps?.allowHostPath !== true
-        && caps?.mountReadOnlyGit !== true
-        && caps?.allowCheckNetwork !== true
-        && caps?.allowAgentNetwork !== true
-        && caps?.allowDockerSocket !== true
-        ? `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`
-        : perCheckLoopbackNetIdx !== -1
-          && caps?.allowHostEnv !== true
-          && caps?.allowHostPath !== true
-          && caps?.mountReadOnlyGit !== true
-          && caps?.allowCheckNetwork !== true
-          && caps?.allowAgentNetwork !== true
-          && caps?.allowDockerSocket !== true
-          ? `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`
-          : '/spec/execution/capabilities';
+    const diagPath = pickPrivilegedAuthorityDiagPath(
+      execution,
+      hasExecPrivCap,
+      perCheckMountReadOnlyGitIdx,
+      perCheckLoopbackNetIdx,
+      perCheckMountsIdx,
+    );
     throw new TaskpackError(
       'TASKPACK_HOST_BINDING_INVALID',
       'manifest requests privileged execution capabilities without operator host authorization (allowPrivileged)',
       diagPath,
     );
   }
-  if (caps?.allowDockerSocket === true && hostPolicy.allowDockerSocket !== true) {
-    throw new TaskpackError(
-      'TASKPACK_HOST_BINDING_INVALID',
-      'manifest declares allowDockerSocket: true without operator host authorization (allowDockerSocket)',
-      '/spec/execution/capabilities/allowDockerSocket',
-    );
+  for (const [checkIdx, mounts] of parsedMountsByCheckIdx.entries()) {
+    for (const [mountIdx, mount] of mounts.entries()) {
+      if (!isHostMountAuthorized(mount.source, hostPolicy.allowedHostMounts)) {
+        throw new TaskpackError(
+          'TASKPACK_HOST_BINDING_INVALID',
+          `command.v1 mount source "${mount.source}" is not authorized by operator hostPolicy.allowedHostMounts`,
+          `/spec/verification/localChecks/${checkIdx}/parameters/mounts/${mountIdx}/source`,
+        );
+      }
+    }
   }
   if (caps?.allowWorkflowWrites === true && hostPolicy.allowWorkflowWrites !== true) {
     throw new TaskpackError(
@@ -2460,12 +2709,11 @@ function validateExecutionSection(
     allowCheckNetwork?: boolean;
     allowWorkflowWrites?: boolean;
     allowAgentNetwork?: boolean;
-    allowDockerSocket?: boolean;
   } = {};
   if (exec['capabilities'] !== undefined) {
     const rawCaps = requireObject(exec['capabilities'], '/spec/execution/capabilities', [
       'allowHostEnv', 'allowHostPath', 'mountReadOnlyGit',
-      'allowCheckNetwork', 'allowWorkflowWrites', 'allowAgentNetwork', 'allowDockerSocket',
+      'allowCheckNetwork', 'allowWorkflowWrites', 'allowAgentNetwork',
     ]);
     if (rawCaps['allowHostEnv'] !== undefined) overrides.allowHostEnv = requireBoolean(rawCaps['allowHostEnv'], '/spec/execution/capabilities/allowHostEnv');
     if (rawCaps['allowHostPath'] !== undefined) overrides.allowHostPath = requireBoolean(rawCaps['allowHostPath'], '/spec/execution/capabilities/allowHostPath');
@@ -2473,7 +2721,6 @@ function validateExecutionSection(
     if (rawCaps['allowCheckNetwork'] !== undefined) overrides.allowCheckNetwork = requireBoolean(rawCaps['allowCheckNetwork'], '/spec/execution/capabilities/allowCheckNetwork');
     if (rawCaps['allowWorkflowWrites'] !== undefined) overrides.allowWorkflowWrites = requireBoolean(rawCaps['allowWorkflowWrites'], '/spec/execution/capabilities/allowWorkflowWrites');
     if (rawCaps['allowAgentNetwork'] !== undefined) overrides.allowAgentNetwork = requireBoolean(rawCaps['allowAgentNetwork'], '/spec/execution/capabilities/allowAgentNetwork');
-    if (rawCaps['allowDockerSocket'] !== undefined) overrides.allowDockerSocket = requireBoolean(rawCaps['allowDockerSocket'], '/spec/execution/capabilities/allowDockerSocket');
   }
   const capabilities = resolveExecutionCapabilities(mode, overrides);
 
@@ -3108,7 +3355,7 @@ function validateTaskpackManifestInternal(
       const paramPath = `/spec/verification/localChecks/${index}/parameters`;
       const params = requireObject(check['parameters'], paramPath, [
         'script', 'args', 'timeoutSeconds', 'allowReadOnlyGitHubToken', 'env',
-        'toolchainPaths', 'preserveRepoDirName', 'mountReadOnlyGit', 'networkMode',
+        'toolchainPaths', 'preserveRepoDirName', 'mountReadOnlyGit', 'networkMode', 'mounts',
       ]);
       const script = normalizeRelativePath(params['script'], `${paramPath}/script`);
       if (!scriptPlacementProtected.some(protectedPath => scopePatternsMayIntersect(script, asProtectedSubtreePattern(protectedPath), false))) {
@@ -3229,6 +3476,29 @@ function validateTaskpackManifestInternal(
         checkNetworkMode = nm;
       }
 
+      let mounts: readonly ResolvedCommandMount[] | undefined;
+      if (params['mounts'] !== undefined) {
+        mounts = normalizeCommandMountList(params['mounts'], `${paramPath}/mounts`);
+        if (mounts.length > 0 && options.enforceHostAuthority !== false) {
+          if (options.hostPolicy?.allowPrivileged !== true) {
+            throw new TaskpackError(
+              'TASKPACK_HOST_BINDING_INVALID',
+              'command.v1 parameters.mounts requires operator host authorization (allowPrivileged)',
+              `${paramPath}/mounts`,
+            );
+          }
+          for (const [mIdx, mount] of mounts.entries()) {
+            if (!isHostMountAuthorized(mount.source, options.hostPolicy?.allowedHostMounts)) {
+              throw new TaskpackError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                `command.v1 mount source "${mount.source}" is not authorized by operator hostPolicy.allowedHostMounts`,
+                `${paramPath}/mounts/${mIdx}/source`,
+              );
+            }
+          }
+        }
+      }
+
       const compiledParams: Record<string, TaskpackCheckParameterValue> = {
         script,
         ...(args !== undefined ? { args } : {}),
@@ -3239,6 +3509,7 @@ function validateTaskpackManifestInternal(
         ...(preserveRepoDirName !== undefined ? { preserveRepoDirName } : {}),
         ...(mountReadOnlyGit !== undefined ? { mountReadOnlyGit } : {}),
         ...(checkNetworkMode !== undefined ? { networkMode: checkNetworkMode } : {}),
+        ...(mounts !== undefined && mounts.length > 0 ? { mounts } : {}),
       };
       return Object.freeze({
         id: checkId,

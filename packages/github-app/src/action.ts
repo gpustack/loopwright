@@ -17,6 +17,7 @@ import {
   insideRoot,
   loadTaskpackSuite,
   mergeMcpServerDeclarations,
+  parseAllowedHostMounts,
   parseBaselineAlignmentPolicy,
   parseMcpServersOverride,
   resolveBaselineAlignmentConfig,
@@ -512,6 +513,17 @@ export async function runGitHubActionEntrypoint(
     };
   }
 
+  let parsedAllowedHostMounts: readonly string[];
+  try {
+    parsedAllowedHostMounts = parseAllowedHostMounts(
+      input.hostPolicy?.allowedHostMounts
+        ?? input.allowHostMounts
+        ?? runtimeEnv['INPUT_ALLOW-HOST-MOUNTS'],
+      'allow-host-mounts',
+    );
+  } catch (error) {
+    return blocked('ACTION_INPUT_INVALID', error instanceof Error ? error.message : String(error));
+  }
   const hostPolicy: ExecutionHostPolicy = Object.freeze({
     policyProfile: 'github',
     allowPrivileged: input.hostPolicy?.allowPrivileged
@@ -520,9 +532,7 @@ export async function runGitHubActionEntrypoint(
     allowWorkflowWrites: input.hostPolicy?.allowWorkflowWrites
       ?? input.allowWorkflowWrites
       ?? (runtimeEnv['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true'),
-    allowDockerSocket: input.hostPolicy?.allowDockerSocket
-      ?? input.allowDockerSocket
-      ?? (runtimeEnv['INPUT_ALLOW-DOCKER-SOCKET'] === 'true'),
+    allowedHostMounts: parsedAllowedHostMounts,
   });
 
   const effectiveSuitePath = (input.suitePath ?? runtimeEnv['INPUT_SUITE-PATH'])?.trim() || undefined;
@@ -2403,7 +2413,7 @@ export async function runActionCli(
     allowManifestCustomBaseUrl: env['INPUT_ALLOW-CUSTOM-BASE-URL'] === 'true',
     allowPrivilegedExecution: env['INPUT_ALLOW-PRIVILEGED-EXECUTION'] === 'true',
     allowWorkflowWrites: env['INPUT_ALLOW-WORKFLOW-WRITES'] === 'true',
-    allowDockerSocket: env['INPUT_ALLOW-DOCKER-SOCKET'] === 'true',
+    allowHostMounts: env['INPUT_ALLOW-HOST-MOUNTS']?.trim() || undefined,
     gateEndpoints: gateEndpointUrl ? [{ id: 'default', url: gateEndpointUrl, signingCredentialRef: 'taskpack-gate-signing' }] : undefined,
     publicationEndpoint: publicationEndpointUrl ? { id: 'default', url: publicationEndpointUrl, signingCredentialRef: 'taskpack-publication-signing' } : undefined,
     operatorAllowlist: env['LOOPWRIGHT_OPERATOR_ALLOWLIST']?.split(',').filter(entry => entry.length > 0),

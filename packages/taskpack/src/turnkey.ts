@@ -86,6 +86,10 @@ import {
 } from './preflight.js';
 import {
   IDENTIFIER_PATTERN,
+  isForbiddenHostMountPath,
+  isHostMountAuthorized,
+  normalizeAbsoluteHostMountPath,
+  normalizeCommandMountList,
   normalizeRelativePath,
   parseBaselineAlignmentPolicy,
   resolveBaselineAlignmentConfig,
@@ -121,6 +125,7 @@ import {
   type ActionDelegateOutcome,
   type BaselineAlignmentOverride,
   type CarryDeltaEntry,
+  type CommandMountMode,
   type CompiledLocalCommandGate,
   type ExecutionHostPolicy,
   type GitTreeEntry,
@@ -129,6 +134,7 @@ import {
   type InspectedCandidateFile,
   type InspectedCandidateSnapshot,
   type PolicyProfile,
+  type ResolvedCommandMount,
   type SandboxNetworkMode,
   type TaskpackManifest,
   type TaskpackUpstreamRecord,
@@ -3175,12 +3181,19 @@ function tryLstatSync(targetPath: string): Stats | null {
   }
 }
 
+export interface CommandHostMountBind {
+  readonly source: string;
+  readonly target: string;
+  readonly mode: CommandMountMode;
+  readonly aliasTarget?: string | undefined;
+}
+
 export interface BuildCommandScriptInvocationOptions {
   readonly args?: readonly string[] | undefined;
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
-  readonly dockerSocketPath?: string | null | undefined;
+  readonly hostMounts?: readonly CommandHostMountBind[] | undefined;
   readonly writablePaths?: readonly string[] | undefined;
   readonly deniedReadPaths?: readonly string[] | undefined;
   readonly allowedReadOnlyPaths?: readonly string[] | undefined;
@@ -3208,20 +3221,24 @@ export interface CommandScriptInvocation {
   readonly seccompBpf?: Buffer | undefined;
 }
 
-const DOCKER_SOCKET_CANDIDATES: readonly string[] = Object.freeze([
-  '/var/run/docker.sock',
-  '/run/docker.sock',
+const RUNTIME_SOCKET_ONLY_ROOTS: readonly string[] = Object.freeze([
+  '/run',
+  '/var/run',
+  '/private/var/run',
 ]);
 
-function appendDockerSocketBinds(
+function appendHostMountBinds(
   bwrapArgs: string[],
-  canonicalDockerSock: string | null,
+  hostMounts: readonly CommandHostMountBind[],
   probeHost: boolean,
 ): void {
-  if (canonicalDockerSock === null || (probeHost && !existsSync(canonicalDockerSock))) return;
-  bwrapArgs.push('--bind', canonicalDockerSock, canonicalDockerSock);
-  if (canonicalDockerSock !== '/var/run/docker.sock') {
-    bwrapArgs.push('--bind', canonicalDockerSock, '/var/run/docker.sock');
+  for (const mount of hostMounts) {
+    if (probeHost && !existsSync(mount.source)) continue;
+    const bindFlag = mount.mode === 'rw' ? '--bind' : '--ro-bind';
+    bwrapArgs.push(bindFlag, mount.source, mount.target);
+    if (mount.aliasTarget !== undefined && mount.aliasTarget !== mount.target) {
+      bwrapArgs.push(bindFlag, mount.source, mount.aliasTarget);
+    }
   }
 }
 
@@ -3245,19 +3262,49 @@ export function buildCommandScriptInvocation(
         sourceObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.sourceObjectsDir, 'readOnlyGitObjectsBind.sourceObjectsDir'),
         targetObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.targetObjectsDir, 'readOnlyGitObjectsBind.targetObjectsDir'),
       };
-  const rawDockerSock = options?.dockerSocketPath ?? null;
-  const canonicalDockerSock = rawDockerSock === null
-    ? null
-    : canonicalizeCommandContainmentPath(rawDockerSock, 'dockerSocketPath');
-  if (canonicalDockerSock === '/') {
-    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', 'command.v1 dockerSocketPath must not be "/"');
+  const homeDeniedSet = collectDefaultDeniedHomePaths();
+  const canonicalHostMounts: CommandHostMountBind[] = [];
+  for (const [idx, hm] of (options?.hostMounts ?? []).entries()) {
+    const canonSource = canonicalizeCommandContainmentPath(hm.source, `hostMounts/${idx}/source`);
+    if (isForbiddenHostMountPath(canonSource, 'source')) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 hostMount source "${hm.source}" targets a forbidden host path`);
+    }
+    const normTarget = normalizeAbsoluteHostMountPath(hm.target, `hostMounts/${idx}/target`);
+    if (isForbiddenHostMountPath(normTarget, 'target')) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 hostMount target "${hm.target}" targets a forbidden sandbox path`);
+    }
+    if (hm.mode !== 'ro' && hm.mode !== 'rw') {
+      throw new TaskpackError('SANDBOX_POLICY_INVALID', `command.v1 hostMount mode "${String(hm.mode)}" must be "ro" or "rw"`);
+    }
+    const normAlias = hm.aliasTarget === undefined
+      ? undefined
+      : normalizeAbsoluteHostMountPath(hm.aliasTarget, `hostMounts/${idx}/aliasTarget`);
+    if (normAlias !== undefined && isForbiddenHostMountPath(normAlias, 'target')) {
+      throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 hostMount aliasTarget "${hm.aliasTarget}" targets a forbidden sandbox path`);
+    }
+    for (const hd of homeDeniedSet) {
+      if (
+        isSameOrStrictChildPath(canonSource, hd)
+        || isSameOrStrictChildCaseInsensitive(canonSource, hd)
+        || isSameOrStrictChildPath(normTarget, hd)
+        || isSameOrStrictChildCaseInsensitive(normTarget, hd)
+        || (normAlias !== undefined && (isSameOrStrictChildPath(normAlias, hd) || isSameOrStrictChildCaseInsensitive(normAlias, hd)))
+      ) {
+        throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', `command.v1 hostMount "${hm.source}" overlaps denied home secret path "${hd}"`);
+      }
+    }
+    canonicalHostMounts.push({
+      source: canonSource,
+      target: normTarget,
+      mode: hm.mode,
+      ...(normAlias !== undefined ? { aliasTarget: normAlias } : {}),
+    });
   }
   const hasExplicitWritablePaths = options?.writablePaths !== undefined;
   const requireFs = options?.requireFilesystemContainment ?? hasExplicitWritablePaths;
   const canonicalCwd = options?.cwd !== undefined
     ? canonicalizeCommandContainmentPath(options.cwd, 'cwd')
     : undefined;
-  const homeDeniedSet = collectDefaultDeniedHomePaths();
 
   const writableRawSet = new Set<string>();
   for (const [idx, wp] of (options?.writablePaths ?? []).entries()) {
@@ -3378,13 +3425,14 @@ export function buildCommandScriptInvocation(
           bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
         }
 
-        appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
+        appendHostMountBinds(bwrapArgs, canonicalHostMounts, probeHost);
 
         const mountedRoots = [
           '/usr',
           ...canonicalAllowedRo,
           ...canonicalWritables,
           ...(gitBind !== null ? [gitBind.targetObjectsDir] : []),
+          ...canonicalHostMounts.flatMap(m => [m.target, ...(m.aliasTarget !== undefined ? [m.aliasTarget] : [])]),
         ];
         const postMountDenied = sortPathsShortestFirst([...canonicalDenied, ...homeDeniedSet]).filter(
           dp => !explicitReopenSet.has(dp)
@@ -3478,7 +3526,7 @@ export function buildCommandScriptInvocation(
         bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
       }
 
-      appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
+      appendHostMountBinds(bwrapArgs, canonicalHostMounts, probeHost);
 
       for (const deniedPath of sortPathsShortestFirst(postMountDeniedSet)) {
         const st = tryLstatSync(deniedPath);
@@ -3834,7 +3882,7 @@ interface RunCommandScriptOptions {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
-  readonly dockerSocketPath?: string | null | undefined;
+  readonly hostMounts?: readonly CommandHostMountBind[] | undefined;
   readonly writablePaths: readonly string[];
   readonly deniedReadPaths: readonly string[];
   readonly allowedReadOnlyPaths: readonly string[];
@@ -4614,7 +4662,7 @@ async function runCommandScript(
     allowCheckNetwork: effectiveNetworkMode === 'allow-outbound',
     networkMode: effectiveNetworkMode,
     readOnlyGitObjectsBind: options.readOnlyGitObjectsBind,
-    dockerSocketPath: options.dockerSocketPath,
+    hostMounts: options.hostMounts,
     writablePaths: options.writablePaths,
     deniedReadPaths: options.deniedReadPaths,
     allowedReadOnlyPaths: options.allowedReadOnlyPaths,
@@ -5630,43 +5678,162 @@ export async function startLocalCommandGateServer(
             childEnv['LOOPWRIGHT_MACOS_SB_SOCK'] = macosSbHelper.socketPath;
           }
 
-          let dockerSocketPath: string | null = null;
-          if (gate.allowDockerSocket === true) {
-            const dockerHostAuthorized = options.hostPolicy?.allowDockerSocket === true
-              && options.hostPolicy?.allowPrivileged === true;
-            if (!dockerHostAuthorized) {
-              options.onLog?.(scrubber.scrub(
-                `check ${gate.checkId}: allowDockerSocket refused at execution time (missing hostPolicy allowDockerSocket/allowPrivileged)`,
-              ));
-            } else if (process.platform !== 'linux' || effectiveGateNetworkMode !== 'allow-outbound') {
-              options.onLog?.(scrubber.scrub(
-                `check ${gate.checkId}: allowDockerSocket skipped (requires Linux with networkMode "allow-outbound")`,
-              ));
-            } else {
-              for (const sockCandidate of DOCKER_SOCKET_CANDIDATES) {
-                if (!existsSync(sockCandidate)) continue;
-                try {
-                  const realSock = realpathSync(sockCandidate);
-                  const sockSt = tryLstatSync(realSock);
-                  if (sockSt !== null && sockSt.isSocket()) {
-                    const canonSock = canonicalizeCommandContainmentPath(realSock, 'dockerSock');
-                    dockerSocketPath = canonSock;
-                    if (childEnv['DOCKER_HOST'] === undefined) {
-                      childEnv['DOCKER_HOST'] = `unix://${canonSock}`;
-                    }
-                    options.onLog?.(scrubber.scrub(
-                      `check ${gate.checkId}: delegating host Docker socket (${canonSock}) under explicit allowDockerSocket policy`,
-                    ));
-                    break;
-                  }
-                } catch {
-                  // Ignore inaccessible Docker socket.
+          const resolvedHostMounts: CommandHostMountBind[] = [];
+          if (gate.mounts !== undefined && gate.mounts.length > 0) {
+            if (options.hostPolicy?.allowPrivileged !== true) {
+              throw new TaskpackError(
+                'TASKPACK_HOST_BINDING_INVALID',
+                `check ${gate.checkId}: host mounts refused at execution time (missing hostPolicy.allowPrivileged)`,
+              );
+            }
+            const rawHome = homedir();
+            const canonHome = typeof rawHome === 'string' && rawHome.length > 0 && isAbsolute(rawHome) && !/[\0\r\n"\\]/.test(rawHome)
+              ? canonicalizeCommandContainmentPath(rawHome, 'homedir')
+              : null;
+            const tryRealpath = (p: string): string | null => {
+              try {
+                return realpathSync(p);
+              } catch {
+                return null;
+              }
+            };
+            const overlapsHomeDenied = (candidate: string): boolean => {
+              for (const hd of homeDeniedSet) {
+                if (isSameOrStrictChildPath(candidate, hd) || isSameOrStrictChildCaseInsensitive(candidate, hd)) {
+                  return true;
                 }
               }
-              if (dockerSocketPath === null) {
+              return false;
+            };
+            const bwrapAvailableForMount = process.platform === 'linux' && (
+              effectiveGateNetworkMode === 'allow-outbound'
+                ? resolveLinuxBwrapForMountOnly() !== null
+                : resolveLinuxBwrapForNoNet() !== null
+            );
+
+            for (const mount of gate.mounts) {
+              const normSource = normalizeAbsoluteHostMountPath(mount.source, 'mount.source');
+              const normTarget = normalizeAbsoluteHostMountPath(mount.target, 'mount.target');
+              if (isForbiddenHostMountPath(normSource, 'source')) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount source "${normSource}" targets a forbidden host path`,
+                );
+              }
+              if (isForbiddenHostMountPath(normTarget, 'target')) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount target "${normTarget}" targets a forbidden sandbox path`,
+                );
+              }
+              if (!isHostMountAuthorized(normSource, options.hostPolicy?.allowedHostMounts, tryRealpath)) {
+                throw new TaskpackError(
+                  'TASKPACK_HOST_BINDING_INVALID',
+                  `check ${gate.checkId}: host mount source "${normSource}" is not authorized by hostPolicy.allowedHostMounts`,
+                );
+              }
+              if (!existsSync(normSource)) {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: declared host mount source "${normSource}" does not exist on host`,
+                );
+              }
+              let realSource: string;
+              try {
+                realSource = realpathSync(normSource);
+              } catch {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: declared host mount source "${normSource}" is inaccessible on host`,
+                );
+              }
+              const srcSt = tryLstatSync(realSource);
+              if (srcSt === null || !(srcSt.isFile() || srcSt.isDirectory() || srcSt.isSocket())) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount source "${normSource}" must be a regular file, directory, or Unix socket`,
+                );
+              }
+              const canonSource = canonicalizeCommandContainmentPath(realSource, 'mount.source');
+              if (isForbiddenHostMountPath(canonSource, 'source')) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount source "${normSource}" resolves to forbidden host path "${canonSource}"`,
+                );
+              }
+              if (
+                RUNTIME_SOCKET_ONLY_ROOTS.some(root => isSameOrStrictChildPath(canonSource, root))
+                && !srcSt.isSocket()
+              ) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount under runtime directory "${canonSource}" is permitted only for Unix domain sockets`,
+                );
+              }
+              if (
+                (canonHome !== null && isSameOrStrictChildPath(canonHome, canonSource))
+                || isSameOrStrictChildPath(canonSource, canonRepoRoot) || isSameOrStrictChildPath(canonRepoRoot, canonSource)
+                || isSameOrStrictChildPath(canonSource, canonRunRoot) || isSameOrStrictChildPath(canonRunRoot, canonSource)
+                || isSameOrStrictChildPath(canonSource, canonScratchBase) || isSameOrStrictChildPath(canonScratchBase, canonSource)
+                || overlapsHomeDenied(canonSource)
+              ) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount source "${normSource}" overlaps protected control-plane or home secret path`,
+                );
+              }
+              if (
+                isSameOrStrictChildPath(normTarget, canonRepoRoot)
+                || isSameOrStrictChildPath(normTarget, canonRunRoot)
+                || isSameOrStrictChildPath(normTarget, canonScratchBase)
+                || overlapsHomeDenied(normTarget)
+              ) {
+                throw new TaskpackError(
+                  'TASKPACK_SCOPE_VIOLATION',
+                  `check ${gate.checkId}: host mount target "${normTarget}" overlaps protected control-plane or home secret path`,
+                );
+              }
+
+              const kindLabel = srcSt.isSocket() ? 'socket' : srcSt.isDirectory() ? 'directory' : 'file';
+              if (bwrapAvailableForMount) {
+                const aliasTarget = srcSt.isSocket()
+                  && normTarget === normSource
+                  && canonSource !== normTarget
+                  && !isForbiddenHostMountPath(canonSource, 'target')
+                  && !overlapsHomeDenied(canonSource)
+                  ? canonSource
+                  : undefined;
+                resolvedHostMounts.push({
+                  source: canonSource,
+                  target: normTarget,
+                  mode: mount.mode,
+                  ...(aliasTarget !== undefined ? { aliasTarget } : {}),
+                });
                 options.onLog?.(scrubber.scrub(
-                  `check ${gate.checkId}: allowDockerSocket requested but no host Docker socket is available`,
+                  `check ${gate.checkId}: mounting host ${kindLabel} ${canonSource} -> ${normTarget} (${mount.mode}) under explicit allowedHostMounts policy`,
                 ));
+              } else if (srcSt.isSocket()) {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: host socket mount "${normSource}" requires Linux bwrap mount namespace`,
+                );
+              } else if (mount.mode === 'rw') {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: read-write host mount "${normSource}" requires Linux bwrap mount namespace`,
+                );
+              } else if (normTarget === normSource || normTarget === canonSource) {
+                if (!allowedReadOnlyPaths.includes(canonSource)) {
+                  allowedReadOnlyPaths.push(canonSource);
+                }
+                options.onLog?.(scrubber.scrub(
+                  `check ${gate.checkId}: exposing host ${kindLabel} ${canonSource} (ro) under explicit allowedHostMounts policy`,
+                ));
+              } else {
+                throw new TaskpackError(
+                  'SANDBOX_CAPABILITY_INSUFFICIENT',
+                  `check ${gate.checkId}: remapped host mount "${normSource}" -> "${normTarget}" requires Linux bwrap mount namespace`,
+                );
               }
             }
           }
@@ -5685,7 +5852,7 @@ export async function startLocalCommandGateServer(
               allowCheckNetwork: effectiveGateNetworkMode === 'allow-outbound',
               networkMode: effectiveGateNetworkMode,
               readOnlyGitObjectsBind,
-              dockerSocketPath,
+              hostMounts: resolvedHostMounts,
               writablePaths,
               deniedReadPaths: [...deniedReadPathSet],
               allowedReadOnlyPaths,
@@ -6898,7 +7065,7 @@ export interface StageTaskpackForStepOptions {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowPrivileged?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
-  readonly allowDockerSocket?: boolean | undefined;
+  readonly allowedHostMounts?: readonly string[] | undefined;
   readonly runPreflight?: boolean | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly upstreamRecordsJson?: string | undefined;
@@ -6989,7 +7156,7 @@ const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'allowCheckNetwork',
   'networkMode',
   'allowPrivileged',
-  'allowDockerSocket',
+  'mounts',
   'timeoutSeconds',
   'allowReadOnlyGitHubToken',
   'env',
@@ -7217,6 +7384,9 @@ async function readAndValidateStagedTaskpackSecrets(
     ) {
       throw new TaskpackError('ACTION_INPUT_INVALID', 'staged taskpack localCommandGates networkMode is invalid');
     }
+    const parsedMounts: readonly ResolvedCommandMount[] | undefined = gate['mounts'] !== undefined
+      ? normalizeCommandMountList(gate['mounts'], 'localCommandGates/mounts', 'ACTION_INPUT_INVALID')
+      : undefined;
     localCommandGates.push({
       checkId: gate['checkId'],
       gateId: gate['gateId'],
@@ -7235,7 +7405,7 @@ async function readAndValidateStagedTaskpackSecrets(
       ...(typeof gate['allowCheckNetwork'] === 'boolean' ? { allowCheckNetwork: gate['allowCheckNetwork'] } : {}),
       ...(rawGateNetworkMode !== undefined ? { networkMode: rawGateNetworkMode } : {}),
       ...(typeof gate['allowPrivileged'] === 'boolean' ? { allowPrivileged: gate['allowPrivileged'] } : {}),
-      ...(typeof gate['allowDockerSocket'] === 'boolean' ? { allowDockerSocket: gate['allowDockerSocket'] } : {}),
+      ...(parsedMounts !== undefined && parsedMounts.length > 0 ? { mounts: parsedMounts } : {}),
       ...(typeof gate['baselineConflictGuardOnly'] === 'boolean' ? { baselineConflictGuardOnly: gate['baselineConflictGuardOnly'] } : {}),
       timeoutSeconds: gate['timeoutSeconds'],
       env: Object.freeze([...(gate['env'] as string[])]),
@@ -7463,7 +7633,11 @@ export async function stageTaskpackForStep(
     policyProfile,
     allowPrivileged: options.hostPolicy?.allowPrivileged ?? options.allowPrivileged ?? false,
     allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? options.allowWorkflowWrites ?? false,
-    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? options.allowDockerSocket ?? false,
+    ...(options.hostPolicy?.allowedHostMounts !== undefined
+      ? { allowedHostMounts: options.hostPolicy.allowedHostMounts }
+      : options.allowedHostMounts !== undefined
+        ? { allowedHostMounts: options.allowedHostMounts }
+        : {}),
   };
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY']) {
@@ -8111,7 +8285,9 @@ export async function runTurnkeyTaskpack(
     policyProfile,
     allowPrivileged: options.hostPolicy?.allowPrivileged ?? false,
     allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? false,
-    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? false,
+    ...(options.hostPolicy?.allowedHostMounts !== undefined
+      ? { allowedHostMounts: options.hostPolicy.allowedHostMounts }
+      : {}),
   };
   const mode = options.mode ?? 'candidate';
   const repositoryFullName = options.repositoryFullName ?? 'local/repo';

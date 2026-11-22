@@ -64,11 +64,11 @@ describe('Taskpack 2.0 schema: execution trust modes and dual-key authority', ()
   it('resolves strict and privileged default capabilities and defaults omitted execution to strict', () => {
     assert.deepEqual(resolveExecutionCapabilities('strict'), {
       allowHostEnv: false, allowHostPath: false, mountReadOnlyGit: false,
-      allowCheckNetwork: false, allowWorkflowWrites: false, allowAgentNetwork: false, allowDockerSocket: false,
+      allowCheckNetwork: false, allowWorkflowWrites: false, allowAgentNetwork: false,
     });
     assert.deepEqual(resolveExecutionCapabilities('privileged'), {
       allowHostEnv: true, allowHostPath: true, mountReadOnlyGit: true,
-      allowCheckNetwork: true, allowWorkflowWrites: false, allowAgentNetwork: false, allowDockerSocket: false,
+      allowCheckNetwork: true, allowWorkflowWrites: false, allowAgentNetwork: false,
     });
 
     const manifestDefault = validateTaskpackV2Manifest(makeBaseV2Manifest() as Json);
@@ -141,6 +141,44 @@ describe('Taskpack 2.0 schema: execution trust modes and dual-key authority', ()
     expectAppError(() => validateTaskpackV2Manifest(mountGit), 'TASKPACK_HOST_BINDING_INVALID');
     expectAppError(() => validateTaskpackV2Manifest(mountGit, { hostPolicy: { allowPrivileged: false } }), 'TASKPACK_HOST_BINDING_INVALID');
     assert.equal(validateTaskpackV2Manifest(mountGit, { hostPolicy: { allowPrivileged: true } }).spec.verification.localChecks[0]?.parameters?.['mountReadOnlyGit'], true);
+
+    // Per-check command.v1 mounts require dual-key allowPrivileged + allowedHostMounts, default target=source and mode='ro', and refuse forbidden roots or duplicate targets
+    const mountSock = makeBaseV2Manifest({
+      verification: {
+        localChecks: [cmdCheck({
+          mounts: [
+            { source: '/var/run/docker.sock', mode: 'rw' },
+            { source: '/mnt/shared-cache' },
+          ],
+        }, 'docker-check')],
+        externalGates: [],
+      },
+    }) as Json;
+    expectAppError(() => validateTaskpackV2Manifest(mountSock, { hostPolicy: { allowPrivileged: false, allowedHostMounts: ['/var/run/docker.sock', '/mnt/shared-cache'] } }), 'TASKPACK_HOST_BINDING_INVALID');
+    expectAppError(() => validateTaskpackV2Manifest(mountSock, { hostPolicy: { allowPrivileged: true, allowedHostMounts: ['/var/run/docker.sock'] } }), 'TASKPACK_HOST_BINDING_INVALID');
+    const validatedMounts = validateTaskpackV2Manifest(mountSock, {
+      hostPolicy: { allowPrivileged: true, allowedHostMounts: ['/var/run/docker.sock', '/mnt/shared-cache'] },
+    });
+    assert.deepEqual(validatedMounts.spec.verification.localChecks[0]?.parameters?.['mounts'], [
+      { source: '/var/run/docker.sock', target: '/var/run/docker.sock', mode: 'rw' },
+      { source: '/mnt/shared-cache', target: '/mnt/shared-cache', mode: 'ro' },
+    ]);
+    const forbiddenMount = makeBaseV2Manifest({
+      verification: { localChecks: [cmdCheck({ mounts: [{ source: '/etc/shadow' }] }, 'bad-src')], externalGates: [] },
+    }) as Json;
+    expectAppError(() => validateTaskpackV2Manifest(forbiddenMount, { hostPolicy: { allowPrivileged: true, allowedHostMounts: ['/etc/shadow'] } }), 'TASKPACK_SCOPE_VIOLATION');
+    const dupTargetMount = makeBaseV2Manifest({
+      verification: {
+        localChecks: [cmdCheck({
+          mounts: [
+            { source: '/mnt/a', target: '/cache/x' },
+            { source: '/mnt/b', target: '/cache/x' },
+          ],
+        }, 'dup-target')],
+        externalGates: [],
+      },
+    }) as Json;
+    expectAppError(() => validateTaskpackV2Manifest(dupTargetMount, { hostPolicy: { allowPrivileged: true, allowedHostMounts: ['/mnt/a', '/mnt/b'] } }), 'TASKPACK_MANIFEST_INVALID');
   });
 });
 
