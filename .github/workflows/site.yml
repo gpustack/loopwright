@@ -3,6 +3,10 @@ name: Site
 permissions:
   contents: read
 
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
 defaults:
   run:
     shell: bash
@@ -22,20 +26,13 @@ on:
         type: string
 
 jobs:
-  publish:
+  build:
     if: github.repository == 'gpustack/loopwright' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    concurrency:
-      group: github-pages
-      cancel-in-progress: false
     permissions:
       contents: write
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: "${{ steps.deployment.outputs.page_url }}"
+      pages: read
     steps:
       - name: Checkout source ref
         uses: actions/checkout@v4
@@ -122,6 +119,18 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ runner.temp }}/gh-pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: "${{ steps.deployment.outputs.page_url }}"
+    steps:
       - name: Deploy Pages
         id: deployment
         uses: actions/deploy-pages@v4

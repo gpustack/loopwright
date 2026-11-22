@@ -1091,7 +1091,9 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
       signal.removeEventListener('abort', onAbort);
       resolveSleep();
     }, ms);
-    timer.unref();
+    // Keep the timer ref'd: the outbound-only worker holds no listening sockets, so unref'ing
+    // the retry/idle timer would let Node's event loop drain prematurely instead of retrying.
+    // Shutdown/preemption still exits immediately because onAbort clears the timer.
     signal.addEventListener('abort', onAbort, { once: true });
   });
 }
