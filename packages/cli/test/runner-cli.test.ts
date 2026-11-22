@@ -1206,6 +1206,30 @@ test('runner-cli: rejects symlinked config ancestor, preserves unknown (8) and f
     assert.equal(fencedEnv.data.lastSettlement.outcome, 'fenced');
     assert.equal(fencedEnv.data.lastSettlement.acknowledgment, 'fenced');
 
+    // 4b. Fenced settlement followed by SIGINT preserves exit 7 (fenced > SIGINT 130)
+    preemptMode = 'fenced_409';
+    stdoutChunks.length = 0;
+    stderrChunks.length = 0;
+    const fencedSigintPromise = cliMain(['runner', 'worker', '--config', workerCfg, '--once', '--json']);
+    const fsDeadline = Date.now() + 8_000;
+    let fsStarted = false;
+    while (Date.now() < fsDeadline && !fsStarted) {
+      const dirs = await readdir(workDir).catch(() => []);
+      for (const d of dirs) {
+        const marker = await readFile(join(workDir, d, 'stage-a', 'stage-a-out', 'started.txt'), 'utf8').catch(() => null);
+        if (marker !== null) {
+          fsStarted = true;
+          break;
+        }
+      }
+      if (!fsStarted) await new Promise(r => setTimeout(r, 20));
+    }
+    assert.equal(fsStarted, true, 'Stage A did not start for fenced+SIGINT test');
+    process.emit('SIGTERM');
+    process.emit('SIGINT');
+    const fencedSigintExit = await fencedSigintPromise;
+    assert.equal(fencedSigintExit, 7, `expected 7 on fenced + SIGINT, got ${fencedSigintExit}`);
+
     // 5. RunnerTeardownError (locked workDir preventing jobRoot removal on SIGTERM) returns exit 8
     stdoutChunks.length = 0;
     stderrChunks.length = 0;

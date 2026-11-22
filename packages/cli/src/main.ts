@@ -1523,6 +1523,8 @@ async function registerRunnerConfigSecrets(
       targetPath: string,
       opts?: { readonly checkLeaf?: boolean; readonly code?: 'CONFIG_INVALID'; readonly diagPath?: string },
     ) => Promise<void>;
+    readonly scalarEnvFields: readonly string[];
+    readonly listEnvFields: readonly string[];
   },
 ): Promise<void> {
   try {
@@ -1541,38 +1543,48 @@ async function registerRunnerConfigSecrets(
         if (typeof val === 'string' && val.length > 0) scrubber.register(val);
       }
     };
+    const scalarPattern = options.scalarEnvFields.join('|');
+    const listPattern = options.listEnvFields.join('|');
+    // Best-effort fallback extraction before YAML parsing so malformed YAML diagnostics stay scrubbed.
     for (const match of text.matchAll(/\benv:([A-Z][A-Z0-9_]{0,127})\b/g)) {
       registerEnvName(match[1]);
     }
-    for (const match of text.matchAll(/['"]?(?:signingSecretEnv|controllerAuthTokenEnv|workerTokenEnv)['"]?\s*:\s*['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?/g)) {
-      registerEnvName(match[1]);
-    }
-    const listMatch = /['"]?workerTokenEnvs['"]?\s*:\s*\[([^\]]*)\]/.exec(text);
-    if (listMatch?.[1] !== undefined) {
-      for (const item of listMatch[1].matchAll(/\b(?:env:)?([A-Z][A-Z0-9_]{0,127})\b/g)) {
-        registerEnvName(item[1]);
+    if (scalarPattern.length > 0) {
+      const scalarRe = new RegExp(`['"]?(?:${scalarPattern})['"]?\\s*:\\s*['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?`, 'g');
+      for (const match of text.matchAll(scalarRe)) {
+        registerEnvName(match[1]);
       }
     }
-    const blockListMatch = /['"]?workerTokenEnvs['"]?\s*:\s*\n((?:[ \t]+-[ \t]+[^\n]+\n?)+)/.exec(text);
-    if (blockListMatch?.[1] !== undefined) {
-      for (const item of blockListMatch[1].matchAll(/^[ \t]+-[ \t]+['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?/gm)) {
-        registerEnvName(item[1]);
+    if (listPattern.length > 0) {
+      const flowListRe = new RegExp(`['"]?(?:${listPattern})['"]?\\s*:\\s*\\[([^\\]]*)\\]`, 'g');
+      for (const listMatch of text.matchAll(flowListRe)) {
+        for (const item of listMatch[1]!.matchAll(/\b(?:env:)?([A-Z][A-Z0-9_]{0,127})\b/g)) {
+          registerEnvName(item[1]);
+        }
+      }
+      const blockListRe = new RegExp(`['"]?(?:${listPattern})['"]?\\s*:\\s*\\n((?:[ \\t]+-[ \\t]+[^\\n]+\\n?)+)`, 'g');
+      for (const blockListMatch of text.matchAll(blockListRe)) {
+        for (const item of blockListMatch[1]!.matchAll(/^[ \t]+-[ \t]+['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?/gm)) {
+          registerEnvName(item[1]);
+        }
       }
     }
     const parsed = parseYamlDocument(text);
     if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const rec = parsed as Record<string, unknown>;
-      for (const field of ['signingSecretEnv', 'controllerAuthTokenEnv', 'workerTokenEnv']) {
+      for (const field of options.scalarEnvFields) {
         const ref = Object.hasOwn(rec, field) ? rec[field] : undefined;
         if (typeof ref === 'string') {
           registerEnvName(ref.startsWith('env:') ? ref.slice(4) : ref);
         }
       }
-      const list = Object.hasOwn(rec, 'workerTokenEnvs') ? rec.workerTokenEnvs : undefined;
-      if (Array.isArray(list)) {
-        for (const item of list) {
-          if (typeof item === 'string') {
-            registerEnvName(item.startsWith('env:') ? item.slice(4) : item);
+      for (const listField of options.listEnvFields) {
+        const list = Object.hasOwn(rec, listField) ? rec[listField] : undefined;
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            if (typeof item === 'string') {
+              registerEnvName(item.startsWith('env:') ? item.slice(4) : item);
+            }
           }
         }
       }
@@ -1598,6 +1610,8 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
   const {
     assertNoSymlinkAncestors,
     MAX_RUNNER_CONFIG_BYTES,
+    RUNNER_SECRET_ENV_FIELDS,
+    RUNNER_SECRET_ENV_LIST_FIELDS,
     loadRelayConfig,
     loadWorkerConfig,
     startRelayServer,
@@ -1609,6 +1623,8 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
   await registerRunnerConfigSecrets(configPath, scrubber, process.env, {
     maxConfigBytes: MAX_RUNNER_CONFIG_BYTES,
     assertNoSymlinkAncestors,
+    scalarEnvFields: RUNNER_SECRET_ENV_FIELDS,
+    listEnvFields: RUNNER_SECRET_ENV_LIST_FIELDS,
   });
 
   try {
@@ -1668,17 +1684,14 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
     const shutdownController = new AbortController();
     const preemptController = new AbortController();
     let caughtSignal: 'SIGINT' | 'SIGTERM' | null = null;
-    let totalSettlements = 0;
-    let settlementsBeforePreempt = 0;
+    let sawUnknownSettlement = false;
+    let sawFencedSettlement = false;
     const onSigint = () => {
       caughtSignal ??= 'SIGINT';
       shutdownController.abort();
     };
     const onSigterm = () => {
-      if (caughtSignal === null) {
-        caughtSignal = 'SIGTERM';
-        settlementsBeforePreempt = totalSettlements;
-      }
+      caughtSignal ??= 'SIGTERM';
       preemptController.abort();
     };
     process.on('SIGINT', onSigint);
@@ -1694,7 +1707,12 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
         preemptSignal: preemptController.signal,
         registerProcessSignalHandlers: false,
         onJobSettled: summary => {
-          totalSettlements += 1;
+          if (summary.outcome === 'unknown' || summary.acknowledgment === 'unknown') {
+            sawUnknownSettlement = true;
+          }
+          if (summary.outcome === 'fenced' || summary.acknowledgment === 'fenced') {
+            sawFencedSettlement = true;
+          }
           if (settlements.length >= 64) settlements.shift();
           settlements.push(scrubSettlement(summary, scrubber));
         },
@@ -1723,23 +1741,25 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
     );
 
     if (
-      workerResult.lastSettlement !== null
-      && (
-        workerResult.lastSettlement.outcome === 'unknown'
-        || workerResult.lastSettlement.acknowledgment === 'unknown'
+      sawUnknownSettlement
+      || (
+        workerResult.lastSettlement !== null
+        && (
+          workerResult.lastSettlement.outcome === 'unknown'
+          || workerResult.lastSettlement.acknowledgment === 'unknown'
+        )
       )
     ) {
       return 8;
     }
     if (
-      workerResult.lastSettlement !== null
-      && (
-        workerResult.lastSettlement.outcome === 'fenced'
-        || workerResult.lastSettlement.acknowledgment === 'fenced'
-      )
-      && (
-        caughtSignal === null
-        || (caughtSignal === 'SIGTERM' && totalSettlements > settlementsBeforePreempt)
+      sawFencedSettlement
+      || (
+        workerResult.lastSettlement !== null
+        && (
+          workerResult.lastSettlement.outcome === 'fenced'
+          || workerResult.lastSettlement.acknowledgment === 'fenced'
+        )
       )
     ) {
       return 7;
@@ -1751,11 +1771,12 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
     if (err instanceof HardwareRunnerError) {
       const isTeardown = isRunnerTeardownError(err);
       const isTransport = isRunnerTransportError(err);
-      const code = isTeardown
-        ? 'RUNNER_TEARDOWN_FAILED'
-        : isTransport
-          ? 'RUNNER_TRANSPORT_ERROR'
-          : err.code;
+      let code: string = err.code;
+      if (isTeardown) {
+        code = 'RUNNER_TEARDOWN_FAILED';
+      } else if (isTransport) {
+        code = 'RUNNER_TRANSPORT_ERROR';
+      }
       const message = scrubber.scrub(err.message);
       const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
       await emit(
