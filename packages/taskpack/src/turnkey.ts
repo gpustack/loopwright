@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
 import { chmod, link, lstat, mkdir, mkdtemp, open, opendir, readdir, readFile, realpath, rename, rm, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createNetServer, type Socket } from 'node:net';
@@ -3208,6 +3208,23 @@ export interface CommandScriptInvocation {
   readonly seccompBpf?: Buffer | undefined;
 }
 
+const DOCKER_SOCKET_CANDIDATES: readonly string[] = Object.freeze([
+  '/var/run/docker.sock',
+  '/run/docker.sock',
+]);
+
+function appendDockerSocketBinds(
+  bwrapArgs: string[],
+  canonicalDockerSock: string | null,
+  probeHost: boolean,
+): void {
+  if (canonicalDockerSock === null || (probeHost && !existsSync(canonicalDockerSock))) return;
+  bwrapArgs.push('--bind', canonicalDockerSock, canonicalDockerSock);
+  if (canonicalDockerSock !== '/var/run/docker.sock') {
+    bwrapArgs.push('--bind', canonicalDockerSock, '/var/run/docker.sock');
+  }
+}
+
 export function buildCommandScriptInvocation(
   scriptFullPath: string,
   options?: BuildCommandScriptInvocationOptions,
@@ -3361,12 +3378,7 @@ export function buildCommandScriptInvocation(
           bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
         }
 
-        if (canonicalDockerSock !== null && (!probeHost || existsSync(canonicalDockerSock))) {
-          bwrapArgs.push('--bind', canonicalDockerSock, canonicalDockerSock);
-          if (canonicalDockerSock !== '/var/run/docker.sock') {
-            bwrapArgs.push('--bind', canonicalDockerSock, '/var/run/docker.sock');
-          }
-        }
+        appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
 
         const mountedRoots = [
           '/usr',
@@ -3466,12 +3478,7 @@ export function buildCommandScriptInvocation(
         bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
       }
 
-      if (canonicalDockerSock !== null && (!probeHost || existsSync(canonicalDockerSock))) {
-        bwrapArgs.push('--bind', canonicalDockerSock, canonicalDockerSock);
-        if (canonicalDockerSock !== '/var/run/docker.sock') {
-          bwrapArgs.push('--bind', canonicalDockerSock, '/var/run/docker.sock');
-        }
-      }
+      appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
 
       for (const deniedPath of sortPathsShortestFirst(postMountDeniedSet)) {
         const st = tryLstatSync(deniedPath);
@@ -4041,6 +4048,7 @@ export function collectPositiveRuntimeToolReadRoots(options: {
   // Mount existing absolute host directories explicitly forwarded via manifest parameters.env
   // (for example preflight stage/cache directories such as AUTOSYNC_STAGE_DIR) read-only,
   // reusing isSafeRuntimeToolDir to refuse broad roots, system config/state trees, and sensitive paths.
+  // Also mount safe direct child symlink targets so stage-linked cache dirs do not dangle inside bwrap.
   for (const envName of gate.env) {
     const rawVal = childEnv[envName]?.trim();
     if (rawVal === undefined || rawVal.length === 0 || rawVal.length > 1024 || !isAbsolute(rawVal) || /[\0\r\n"\\]/.test(rawVal)) {
@@ -4051,6 +4059,22 @@ export function collectPositiveRuntimeToolReadRoots(options: {
       const realDir = realpathSync(rawVal);
       if (isSafeRuntimeToolDir(realDir, { allowTmpSubdir: true })) {
         out.add(realDir);
+        try {
+          const children = readdirSync(realDir, { withFileTypes: true }).slice(0, 64);
+          for (const child of children) {
+            if (!child.isSymbolicLink()) continue;
+            try {
+              const targetReal = realpathSync(join(realDir, child.name));
+              if (isSafeRuntimeToolDir(targetReal, { allowTmpSubdir: true })) {
+                out.add(targetReal);
+              }
+            } catch {
+              // Ignore dangling or unreadable child symlinks.
+            }
+          }
+        } catch {
+          // Ignore unreadable directory listings.
+        }
       }
     } catch {
       // Ignore unreadable or broken env path values.
@@ -4715,6 +4739,7 @@ export interface LocalCommandGateServerOptions {
   readonly runRoot: string;
   readonly repositoryRoot: string;
   readonly gates: readonly CompiledLocalCommandGate[];
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly readOnlyGitHubToken?: string | undefined;
   readonly scrubber?: SecretScrubber | undefined;
@@ -5606,25 +5631,42 @@ export async function startLocalCommandGateServer(
           }
 
           let dockerSocketPath: string | null = null;
-          if (process.platform === 'linux' && gate.allowDockerSocket === true && effectiveGateNetworkMode === 'allow-outbound') {
-            for (const sockCandidate of ['/var/run/docker.sock', '/run/docker.sock']) {
-              if (!existsSync(sockCandidate)) continue;
-              try {
-                const realSock = realpathSync(sockCandidate);
-                const sockSt = tryLstatSync(realSock);
-                if (sockSt !== null && sockSt.isSocket()) {
-                  const canonSock = canonicalizeCommandContainmentPath(realSock, 'dockerSock');
-                  dockerSocketPath = canonSock;
-                  if (childEnv['DOCKER_HOST'] === undefined) {
-                    childEnv['DOCKER_HOST'] = `unix://${canonSock}`;
+          if (gate.allowDockerSocket === true) {
+            const dockerHostAuthorized = options.hostPolicy?.allowDockerSocket === true
+              && options.hostPolicy?.allowPrivileged === true;
+            if (!dockerHostAuthorized) {
+              options.onLog?.(scrubber.scrub(
+                `check ${gate.checkId}: allowDockerSocket refused at execution time (missing hostPolicy allowDockerSocket/allowPrivileged)`,
+              ));
+            } else if (process.platform !== 'linux' || effectiveGateNetworkMode !== 'allow-outbound') {
+              options.onLog?.(scrubber.scrub(
+                `check ${gate.checkId}: allowDockerSocket skipped (requires Linux with networkMode "allow-outbound")`,
+              ));
+            } else {
+              for (const sockCandidate of DOCKER_SOCKET_CANDIDATES) {
+                if (!existsSync(sockCandidate)) continue;
+                try {
+                  const realSock = realpathSync(sockCandidate);
+                  const sockSt = tryLstatSync(realSock);
+                  if (sockSt !== null && sockSt.isSocket()) {
+                    const canonSock = canonicalizeCommandContainmentPath(realSock, 'dockerSock');
+                    dockerSocketPath = canonSock;
+                    if (childEnv['DOCKER_HOST'] === undefined) {
+                      childEnv['DOCKER_HOST'] = `unix://${canonSock}`;
+                    }
+                    options.onLog?.(scrubber.scrub(
+                      `check ${gate.checkId}: delegating host Docker socket (${canonSock}) under explicit allowDockerSocket policy`,
+                    ));
+                    break;
                   }
-                  options.onLog?.(scrubber.scrub(
-                    `check ${gate.checkId}: delegating host Docker socket (${canonSock}) under explicit allowDockerSocket policy`,
-                  ));
-                  break;
+                } catch {
+                  // Ignore inaccessible Docker socket.
                 }
-              } catch {
-                // Ignore inaccessible Docker socket.
+              }
+              if (dockerSocketPath === null) {
+                options.onLog?.(scrubber.scrub(
+                  `check ${gate.checkId}: allowDockerSocket requested but no host Docker socket is available`,
+                ));
               }
             }
           }
@@ -6856,6 +6898,7 @@ export interface StageTaskpackForStepOptions {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowPrivileged?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
   readonly runPreflight?: boolean | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly upstreamRecordsJson?: string | undefined;
@@ -6885,6 +6928,7 @@ export interface StagedTaskpackForStep {
 export interface OpenStagedTaskpackStepGateOptions {
   readonly runRoot: string;
   readonly runId: string;
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly decisionTransport?: DecisionTransport | undefined;
   readonly decisionApiKey?: string | undefined;
@@ -7419,7 +7463,7 @@ export async function stageTaskpackForStep(
     policyProfile,
     allowPrivileged: options.hostPolicy?.allowPrivileged ?? options.allowPrivileged ?? false,
     allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? options.allowWorkflowWrites ?? false,
-    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? false,
+    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? options.allowDockerSocket ?? false,
   };
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY']) {
@@ -7947,6 +7991,7 @@ export async function openStagedTaskpackStepGate(
     runRoot: realRunRoot,
     repositoryRoot: staged.repositoryRoot,
     gates: staged.localCommandGates,
+    hostPolicy: options.hostPolicy,
     signingSecret: staged.signingSecret,
     runtimeEnv: baseEnv,
     readOnlyGitHubToken,
@@ -8308,6 +8353,7 @@ export async function runTurnkeyTaskpack(
         runRoot: realRunRoot,
         repositoryRoot: realRepositoryRoot,
         gates: compiled.localCommandGates!,
+        hostPolicy,
         signingSecret: gateSigningSecret,
         runtimeEnv,
         scrubber,

@@ -248,7 +248,7 @@ spec:
 | `capabilities.allowCheckNetwork` | `false` / `true` | Grants outbound network for `command.v1` checks; avoids nested macOS Seatbelt `EPERM` when checks run inner sandboxes |
 | `capabilities.allowWorkflowWrites` | `false` / `false` | Dual-key unlock permitting agent edits under `.github/workflows/**` on GitHub policy profile runs |
 | `capabilities.allowAgentNetwork` | `false` / `false` | Governs `resolveEffectiveTaskpackSandboxPolicy` / `executeSandboxedCommand`; turnkey `agent-pi` `bash` stays offline-isolated |
-| `capabilities.allowDockerSocket` | `false` / `false` | Dual-key unlock (`allow-docker-socket: 'true'` + `allowCheckNetwork: true`) binding `/run/docker.sock` in Linux `bwrap` |
+| `capabilities.allowDockerSocket` | `false` / `false` | Requires `allow-privileged-execution`, `allow-docker-socket`, and `allowCheckNetwork` (`allow-outbound`); binds Docker socket in Linux `bwrap` |
 | `digests.pinDigests` / `lockfile` | `false` / `<controlRoot>/digests.lock.json` | Runtime SHA-256 digests freeze runs when `false`; `true` enforces lockfile parity via `loopwright digest sync` |
 
 - **`spec.vars` AST interpolation**: Declare `0..64` static non-secret strings (`[A-Z][A-Z0-9_]*`, `<= 512` chars). Post-parse single-pass interpolation replaces `${VAR}` only in `goal.*`, `publication.titleTemplate`/`bodyTemplate`, `roles[].prompt`, `preflight.env[]`, and `localChecks[].parameters` (`args[]`, `env`, `startMarker`, `endMarker`, `allowedPointers[]`). Undeclared or secret `${...}` expressions refuse with `TASKPACK_UNTRUSTED_INTERPOLATION`.
@@ -336,9 +336,9 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 
 ### Command parameters
 
-- **Mounted environment**: `command.v1` receives `$LOOPWRIGHT_CANDIDATE_DIR`, `$LOOPWRIGHT_BASE_DIR` (read-only baseline), `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`. Default `PATH` is `/usr/local/bin:/usr/bin:/bin`, so use `toolchainPaths` only for extra directories beyond standard system paths; strict mode validates absolute `toolchainPaths` at startup against symlink, tmpdir, ownership, and group/world-writable checks.
-- **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
-- **Inner sandboxes and gates**: Checks running their own inner OS sandbox (such as macOS `sandbox-exec`) should set `allowCheckNetwork: true` under dual-key `--allow-privileged` to avoid nested Seatbelt `EPERM`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
+- **Mounted environment**: `command.v1` mounts the disposable per-check `$LOOPWRIGHT_CANDIDATE_DIR` writable (discarded after exit; `.git/objects` stays `--ro-bind` when `mountReadOnlyGit: true`) and keeps `$LOOPWRIGHT_BASE_DIR`, the script directory, and `$LOOPWRIGHT_STAGED_DIR` read-only. Existing host directories passed via `parameters.env` (and safe direct child symlink targets) mount read-only, while `/etc`, `/tmp`, `repoRoot`, `runRoot`, and `$HOME` secrets remain denied. Default `PATH` is `/usr/local/bin:/usr/bin:/bin`, so use `toolchainPaths` only for extra host directories.
+- **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`; unknown keys such as `passed` or `summary` fail closed) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
+- **Inner sandboxes, Docker, and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Linux `bwrap` checks requiring Docker builds must opt into `capabilities.allowDockerSocket: true` with `allow-docker-socket: 'true'`, `allow-privileged-execution: 'true'`, and `allowCheckNetwork: true` (`networkMode: 'allow-outbound'`). Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
 
 ## Publication and triggers
 

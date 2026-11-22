@@ -1497,7 +1497,9 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           allowCheckNetwork: effectiveCheckNetworkMode === 'allow-outbound',
           networkMode: effectiveCheckNetworkMode,
           allowPrivileged: bindings.hostPolicy?.allowPrivileged === true,
-          allowDockerSocket: resolvedExecCaps?.allowDockerSocket === true && bindings.hostPolicy?.allowDockerSocket === true,
+          allowDockerSocket: resolvedExecCaps?.allowDockerSocket === true
+            && bindings.hostPolicy?.allowDockerSocket === true
+            && effectiveCheckNetworkMode === 'allow-outbound',
         }));
       }
     }

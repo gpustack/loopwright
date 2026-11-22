@@ -1027,9 +1027,13 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         assert.equal(toolRoots.includes('/tmp'), false);
         assert.equal(toolRoots.includes('/private/tmp'), false);
 
-        // Env-derived read roots admit strict tmp subdirectories while refusing /etc, /tmp, and repoRoot
+        // Env-derived read roots admit strict tmp subdirectories (plus safe direct child symlink targets) while refusing /etc, /tmp, and repoRoot
         const envStageDir = join(sysTmpReal, `lw-env-stage-${process.pid}-${Date.now()}`);
+        const envSharedTarget = join(sysTmpReal, `lw-env-shared-${process.pid}-${Date.now()}`);
         await mkdir(envStageDir, { recursive: true });
+        await mkdir(envSharedTarget, { recursive: true });
+        await symlink(envSharedTarget, join(envStageDir, 'go-mod'));
+        await symlink('/etc', join(envStageDir, 'bad-etc-link'));
         try {
           const envRoots = collectPositiveRuntimeToolReadRoots({
             childEnv: {
@@ -1050,13 +1054,15 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
             homeDeniedSet: new Set<string>(),
           });
           assert.equal(envRoots.includes(envStageDir), true, 'must admit strict child stage dir declared in gate.env');
-          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env');
-          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env');
+          assert.equal(envRoots.includes(envSharedTarget), true, 'must admit safe direct child symlink target inside gate.env dir');
+          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env and child symlink');
+          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env and child symlink');
           assert.equal(envRoots.includes('/tmp'), false, 'must refuse bare /tmp via gate.env');
           assert.equal(envRoots.includes('/private/tmp'), false, 'must refuse bare /private/tmp via gate.env');
           assert.equal(envRoots.includes(repoRoot), false, 'must refuse repoRoot via gate.env');
         } finally {
           await rm(envStageDir, { recursive: true, force: true }).catch(() => undefined);
+          await rm(envSharedTarget, { recursive: true, force: true }).catch(() => undefined);
         }
 
         // Hardlinked HUGO_BIN (nlink > 1) must be refused
