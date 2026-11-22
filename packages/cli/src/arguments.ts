@@ -22,7 +22,7 @@ interface CommandRule {
 const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
-  run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'baseline-alignment', 'source-revision', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
+  run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'baseline-alignment', 'source-revision', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file', 'allow-host-mounts'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   resume: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'], flags: ['json', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
   reconcile: { required: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt'], values: ['config', 'registry', 'registry-sha256', 'repo', 'run-root', 'run-id', 'receipt', 'output', 'output-format', 'step-summary-file'], flags: ['json', 'allow-workflow-writes'] },
   status: { required: ['run-root', 'run-id'], values: ['run-root', 'run-id'], flags: ['json'] },
@@ -52,13 +52,13 @@ const suiteRules: Record<SuiteAction, CommandRule> = {
 const stepRules: Record<StepAction, CommandRule> = {
   next: {
     required: ['run-root', 'run-id'],
-    values: ['run-root', 'run-id', 'config', 'registry', 'registry-sha256', 'taskpack', 'repo', 'mode', 'baseline-alignment', 'source-revision', 'output-format', 'step-summary-file'],
+    values: ['run-root', 'run-id', 'config', 'registry', 'registry-sha256', 'taskpack', 'repo', 'mode', 'baseline-alignment', 'source-revision', 'output-format', 'step-summary-file', 'allow-host-mounts'],
     flags: ['reissue-lease', 'json', 'allow-privileged', 'allow-workflow-writes'],
     allowRoleModel: true,
   },
   submit: {
     required: ['run-root', 'run-id', 'lease'],
-    values: ['run-root', 'run-id', 'lease', 'submission-file', 'status', 'reason', 'output-format', 'step-summary-file'],
+    values: ['run-root', 'run-id', 'lease', 'submission-file', 'status', 'reason', 'output-format', 'step-summary-file', 'allow-host-mounts'],
     flags: ['json', 'allow-privileged', 'allow-workflow-writes'],
   },
   cancel: {
@@ -277,7 +277,7 @@ export function parseArguments(argv: readonly string[]): Arguments {
         if (values.has('output')) throw new UsageError();
       }
       if (flags.has('dry-run') && (
-        ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file'].some(key => values.has(key))
+        ['repo', 'run-root', 'run-id', 'output-format', 'step-summary-file', 'allow-host-mounts'].some(key => values.has(key))
         || flags.has('allow-privileged')
         || flags.has('allow-workflow-writes')
       )) throw new UsageError();

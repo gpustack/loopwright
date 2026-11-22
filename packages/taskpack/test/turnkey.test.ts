@@ -29,6 +29,7 @@ import {
   MAX_HELPER_ACTIVE_STAGES,
   MAX_HELPER_CONNECTIONS,
   openStagedTaskpackStepGate,
+  parseAllowedHostMounts,
   SANITIZED_READ_ONLY_GIT_CONFIG,
   SecretScrubber,
   serializePrettyYaml,
@@ -722,10 +723,10 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
       assert.ok(rwCandIdx >= 0);
       assert.ok(roStageIdx >= 0, 'explicitly allowed stage dir under /tmp is bind-mounted read-only');
       assert.ok(rwGitObjIdx > rwCandIdx, 'git objects --ro-bind must follow writable candidateDir --bind');
-      assert.equal(bwrapWritableCand.args.includes('/run/docker.sock'), false, 'docker socket must not be bound unless dockerSocketPath is set');
+      assert.equal(bwrapWritableCand.args.includes('/run/docker.sock'), false, 'host mounts must not be bound unless hostMounts is set');
 
-      // Explicit dockerSocketPath binds both canonical socket and /var/run/docker.sock inside Linux bwrap
-      const bwrapDocker = buildCommandScriptInvocation('/work/check-dir/check.sh', {
+      // Explicit hostMounts bind read-only, read-write, and socket alias targets inside Linux bwrap
+      const bwrapMounts = buildCommandScriptInvocation('/work/check-dir/check.sh', {
         platform: 'linux',
         arch: 'x64',
         linuxBwrapExecutable: '/usr/bin/bwrap',
@@ -733,13 +734,39 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         cwd: '/work/cand',
         allowedReadOnlyPaths: ['/work/base', '/work/check-dir'],
         writablePaths: ['/work/cand', '/work/out'],
-        dockerSocketPath: '/run/docker.sock',
+        hostMounts: [
+          { source: '/run/docker.sock', target: '/var/run/docker.sock', mode: 'rw', aliasTarget: '/run/docker.sock' },
+          { source: '/mnt/shared-cache', target: '/cache/shared', mode: 'ro' },
+        ],
       });
-      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/run/docker.sock') >= 0);
-      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/var/run/docker.sock') >= 0);
+      assert.ok(findTriplet(bwrapMounts.args, '--bind', '/run/docker.sock', '/var/run/docker.sock') >= 0);
+      assert.ok(findTriplet(bwrapMounts.args, '--bind', '/run/docker.sock', '/run/docker.sock') >= 0);
+      assert.ok(findTriplet(bwrapMounts.args, '--ro-bind', '/mnt/shared-cache', '/cache/shared') >= 0);
 
-      // Dual-key authority guard for allowDockerSocket requires both allowPrivileged and allowDockerSocket
-      const dockerExec = {
+      // parseAllowedHostMounts parses comma/newline lists and rejects invalid/root/relative paths
+      assert.deepEqual(
+        parseAllowedHostMounts(' /var/run/docker.sock,\n/mnt/shared-cache/ , /var/run/docker.sock '),
+        ['/var/run/docker.sock', '/mnt/shared-cache'],
+      );
+      assert.throws(
+        () => parseAllowedHostMounts('relative/path'),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'ACTION_INPUT_INVALID',
+      );
+      assert.throws(
+        () => parseAllowedHostMounts('/'),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'ACTION_INPUT_INVALID',
+      );
+
+      // Dual-key authority guard for command.v1 parameters.mounts requires allowPrivileged + allowedHostMounts
+      const mountChecks = [{
+        id: 'docker-build',
+        implementation: 'command.v1' as const,
+        parameters: {
+          script: '.loopwright/checks/build.sh',
+          mounts: [{ source: '/var/run/docker.sock', target: '/var/run/docker.sock', mode: 'rw' as const }],
+        },
+      }];
+      const mountExec = {
         mode: 'strict' as const,
         capabilities: {
           allowHostEnv: false,
@@ -748,19 +775,32 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
           allowCheckNetwork: true,
           allowWorkflowWrites: false,
           allowAgentNetwork: false,
-          allowDockerSocket: true,
         },
         digests: { pinDigests: false },
       };
       assert.throws(
-        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: false }),
+        () => validateExecutionAuthority(mountExec, { policyProfile: 'github', allowPrivileged: true, allowedHostMounts: [] }, { localChecks: mountChecks }),
         (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
       );
       assert.throws(
-        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: false, allowDockerSocket: true }),
+        () => validateExecutionAuthority(mountExec, { policyProfile: 'github', allowPrivileged: false, allowedHostMounts: ['/var/run/docker.sock'] }, { localChecks: mountChecks }),
         (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
       );
-      validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: true });
+      validateExecutionAuthority(mountExec, { policyProfile: 'github', allowPrivileged: true, allowedHostMounts: ['/var/run/docker.sock'] }, { localChecks: mountChecks });
+      assert.throws(
+        () => validateExecutionAuthority(
+          mountExec,
+          { policyProfile: 'github', allowPrivileged: true, allowedHostMounts: ['/etc/passwd'] },
+          {
+            localChecks: [{
+              id: 'bad-mount',
+              implementation: 'command.v1',
+              parameters: { script: '.loopwright/checks/build.sh', mounts: [{ source: '/etc/passwd', target: '/etc/passwd', mode: 'ro' }] },
+            }],
+          },
+        ),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_SCOPE_VIOLATION',
+      );
 
       // R3-5 & R4-1: Linux bwrap "none" installs --seccomp 3 IP-socket filter while "loopback-only" omits --seccomp (lo is auto-configured by bwrap)
       const bwrapNone = buildCommandScriptInvocation('/work/check-dir/check.sh', {

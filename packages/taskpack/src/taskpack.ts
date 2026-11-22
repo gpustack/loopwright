@@ -114,6 +114,7 @@ import {
   type PiModelSelection,
   type PolicyProfile,
   type ResolvedBaselineAlignmentConfig,
+  type ResolvedCommandMount,
   type SandboxNetworkMode,
   type TaskpackCommentCommand,
   type TaskpackIntakeInput,
@@ -1476,6 +1477,16 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         const effectiveCheckNetworkMode: SandboxNetworkMode = rawCheckNetworkMode === 'none' || rawCheckNetworkMode === 'loopback-only'
           ? rawCheckNetworkMode
           : (resolvedExecCaps?.allowCheckNetwork === true ? 'allow-outbound' : 'none');
+        const rawMounts = declared.parameters?.['mounts'];
+        const mounts: readonly ResolvedCommandMount[] | undefined = Array.isArray(rawMounts) && rawMounts.length > 0
+          ? Object.freeze(
+            (rawMounts as readonly { readonly source: string; readonly target?: string; readonly mode?: 'ro' | 'rw' }[]).map(m => Object.freeze({
+              source: m.source,
+              target: m.target ?? m.source,
+              mode: m.mode ?? 'ro',
+            })),
+          )
+          : undefined;
         commandGateMetaByCheckId.set(declared.id, Object.freeze({
           checkId: declared.id,
           gateId,
@@ -1497,9 +1508,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           allowCheckNetwork: effectiveCheckNetworkMode === 'allow-outbound',
           networkMode: effectiveCheckNetworkMode,
           allowPrivileged: bindings.hostPolicy?.allowPrivileged === true,
-          allowDockerSocket: resolvedExecCaps?.allowDockerSocket === true
-            && bindings.hostPolicy?.allowDockerSocket === true
-            && effectiveCheckNetworkMode === 'allow-outbound',
+          ...(mounts !== undefined ? { mounts } : {}),
         }));
       }
     }

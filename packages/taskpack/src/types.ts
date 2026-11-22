@@ -102,7 +102,6 @@ export interface TaskpackExecutionCapabilitiesDeclaration {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly allowAgentNetwork?: boolean | undefined;
-  readonly allowDockerSocket?: boolean | undefined;
 }
 
 export interface ResolvedTaskpackExecutionCapabilities {
@@ -112,7 +111,6 @@ export interface ResolvedTaskpackExecutionCapabilities {
   readonly allowCheckNetwork: boolean;
   readonly allowWorkflowWrites: boolean;
   readonly allowAgentNetwork: boolean;
-  readonly allowDockerSocket: boolean;
 }
 
 export interface TaskpackExecutionDigestsDeclaration {
@@ -131,7 +129,7 @@ export interface ExecutionHostPolicy {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowPrivileged?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
-  readonly allowDockerSocket?: boolean | undefined;
+  readonly allowedHostMounts?: readonly string[] | undefined;
 }
 
 /** Strict host policy for multi-tenant GitHub App control planes: refuses all self-granted privileged capabilities. */
@@ -139,7 +137,7 @@ export const MULTI_TENANT_HOST_POLICY: ExecutionHostPolicy = Object.freeze({
   policyProfile: 'github',
   allowPrivileged: false,
   allowWorkflowWrites: false,
-  allowDockerSocket: false,
+  allowedHostMounts: Object.freeze([]),
 });
 
 export interface TaskpackPreflightDeclaration {
@@ -342,12 +340,27 @@ export interface TaskpackUpstreamDescriptor {
   readonly monotonicSemver?: boolean | undefined;
 }
 
+export type CommandMountMode = 'ro' | 'rw';
+
+export interface TaskpackCommandMountDeclaration {
+  readonly source: string;
+  readonly target?: string | undefined;
+  readonly mode?: CommandMountMode | undefined;
+}
+
+export interface ResolvedCommandMount {
+  readonly source: string;
+  readonly target: string;
+  readonly mode: CommandMountMode;
+}
+
 export type TaskpackCheckParameterValue =
   | string
   | number
   | boolean
   | null
   | readonly string[]
+  | readonly TaskpackCommandMountDeclaration[]
   | Readonly<Record<string, string>>;
 
 export type LegacyTaskpackCheckImplementation = 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'command.v1';
@@ -762,7 +775,7 @@ export interface CompiledLocalCommandGate {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly allowPrivileged?: boolean | undefined;
-  readonly allowDockerSocket?: boolean | undefined;
+  readonly mounts?: readonly ResolvedCommandMount[] | undefined;
   readonly baselineConflictGuardOnly?: boolean | undefined;
 }
 
@@ -1030,7 +1043,7 @@ export interface ActionEntrypointInput {
   readonly mode: 'candidate' | 'no-change' | 'auto';
   readonly allowPrivilegedExecution?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
-  readonly allowDockerSocket?: boolean | undefined;
+  readonly allowHostMounts?: readonly string[] | undefined;
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;

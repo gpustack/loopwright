@@ -235,7 +235,9 @@ spec:
 
 ## Execution and vars
 
-`spec.execution` enforces **dual-key host authority**. Under `mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` still needs `allow-privileged-execution: 'true'` or `--allow-privileged`. `allowWorkflowWrites: true` needs `allow-workflow-writes: 'true'` or `--allow-workflow-writes`. Multi-tenant webhook runs refuse self-granted privileges (`TASKPACK_HOST_BINDING_INVALID` / `TASKPACK_SCOPE_VIOLATION`).
+`spec.execution` enforces **dual-key host authority**. Under `mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'` or `--allow-privileged`.
+
+`allowWorkflowWrites: true` requires `allow-workflow-writes: 'true'` (`--allow-workflow-writes`), and `command.v1` `parameters.mounts[]` requires privileged authority plus an explicit `allow-host-mounts` (`--allow-host-mounts`) allowlist entry per `source`. Multi-tenant webhook runs refuse self-granted privileges (`TASKPACK_HOST_BINDING_INVALID` / `TASKPACK_SCOPE_VIOLATION`).
 
 ### Trust capabilities
 
@@ -248,7 +250,6 @@ spec:
 | `capabilities.allowCheckNetwork` | `false` / `true` | Grants outbound network for `command.v1` checks; avoids nested macOS Seatbelt `EPERM` when checks run inner sandboxes |
 | `capabilities.allowWorkflowWrites` | `false` / `false` | Dual-key unlock permitting agent edits under `.github/workflows/**` on GitHub policy profile runs |
 | `capabilities.allowAgentNetwork` | `false` / `false` | Governs `resolveEffectiveTaskpackSandboxPolicy` / `executeSandboxedCommand`; turnkey `agent-pi` `bash` stays offline-isolated |
-| `capabilities.allowDockerSocket` | `false` / `false` | Requires `allow-privileged-execution`, `allow-docker-socket`, and `allowCheckNetwork` (`allow-outbound`); binds Docker socket in Linux `bwrap` |
 | `digests.pinDigests` / `lockfile` | `false` / `<controlRoot>/digests.lock.json` | Runtime SHA-256 digests freeze runs when `false`; `true` enforces lockfile parity via `loopwright digest sync` |
 
 - **`spec.vars` AST interpolation**: Declare `0..64` static non-secret strings (`[A-Z][A-Z0-9_]*`, `<= 512` chars). Post-parse single-pass interpolation replaces `${VAR}` only in `goal.*`, `publication.titleTemplate`/`bodyTemplate`, `roles[].prompt`, `preflight.env[]`, and `localChecks[].parameters` (`args[]`, `env`, `startMarker`, `endMarker`, `allowedPointers[]`). Undeclared or secret `${...}` expressions refuse with `TASKPACK_UNTRUSTED_INTERPOLATION`.
@@ -332,13 +333,14 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 | `json-keys-guard.v1` | `path`, `allowedPointers` (`/json/pointer`) | Fails if any JSON key outside `allowedPointers` changed vs baseline |
 | `line-section-guard.v1` | `path`, `startMarker`, `endMarker` | Fails if any line outside delimited marker sections changed vs baseline |
 | `scope.v1` / `no-change.v1` | `checkId` (plus implicit guards) | Verifies writable/protected scope or untouched tree parity |
-| `command.v1` | `script`, `args`, `env`, `toolchainPaths`, `mountReadOnlyGit`, `preserveRepoDirName` | Mounts the script's parent directory read-only (whole-tree SHA-256 digest so `./lib.sh` works) |
+| `command.v1` | `script`, `args`, `env`, `toolchainPaths`, `mountReadOnlyGit`, `preserveRepoDirName`, `mounts` | Mounts the script's parent directory read-only (whole-tree SHA-256 digest so `./lib.sh` works) |
 
 ### Command parameters
 
 - **Mounted environment**: `command.v1` mounts the disposable per-check `$LOOPWRIGHT_CANDIDATE_DIR` writable (discarded after exit; `.git/objects` stays `--ro-bind` when `mountReadOnlyGit: true`) and keeps `$LOOPWRIGHT_BASE_DIR`, the script directory, and `$LOOPWRIGHT_STAGED_DIR` read-only. Existing host directories passed via `parameters.env` (and safe direct child symlink targets) mount read-only, while `/etc`, `/tmp`, `repoRoot`, `runRoot`, and `$HOME` secrets remain denied. Default `PATH` is `/usr/local/bin:/usr/bin:/bin`, so use `toolchainPaths` only for extra host directories.
+- **Explicit host mounts (`parameters.mounts[]`)**: Declare `0..16` Docker-style bind entries `{ source, target?, mode?: 'ro' | 'rw' }` (`target` defaults to `source`; `mode` defaults to `'ro'`) for host files, directories, or Unix domain sockets (for example `{ source: /var/run/docker.sock, mode: rw }`). Every `source` requires dual-key `allow-privileged-execution: 'true'` (`--allow-privileged`) plus an explicit entry in `allow-host-mounts` (`--allow-host-mounts`). Broad roots, `/etc`, `/proc`, `/sys`, `/dev`, `/var/lib`, control-plane directories, and `$HOME` secrets are always refused; under `/run` and `/var/run`, only Unix domain sockets are permitted, and socket/remapped binds run inside Linux `bwrap`.
 - **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`; unknown keys such as `passed` or `summary` fail closed) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
-- **Inner sandboxes, Docker, and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Linux `bwrap` checks requiring Docker builds must opt into `capabilities.allowDockerSocket: true` with `allow-docker-socket: 'true'`, `allow-privileged-execution: 'true'`, and `allowCheckNetwork: true` (`networkMode: 'allow-outbound'`). Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
+- **Inner sandboxes and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
 
 ## Publication and triggers
 

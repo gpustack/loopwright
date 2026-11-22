@@ -40,10 +40,10 @@ inputs:
     description: "Dual-key operator unlock allowing manifests declaring spec.execution.capabilities.allowWorkflowWrites: true to modify .github/workflows/** when 'true'."
     required: false
     default: 'false'
-  allow-docker-socket:
-    description: "Dual-key operator unlock allowing Linux bwrap command.v1 checks declaring spec.execution.capabilities.allowDockerSocket: true and allowCheckNetwork: true to bind the host Docker daemon socket when 'true'."
+  allow-host-mounts:
+    description: "Dual-key operator allowlist (comma- or newline-separated absolute host paths, e.g. '/var/run/docker.sock') authorizing command.v1 parameters.mounts entries when combined with allow-privileged-execution: 'true'."
     required: false
-    default: 'false'
+    default: ''
   event-name:
     description: 'Triggering event name (schedule, workflow_dispatch, repository_dispatch, release, issue_comment, pull_request_review).'
     required: false
@@ -194,7 +194,7 @@ runs:
         INPUT_MODE: ${{ inputs.mode }}
         INPUT_ALLOW-PRIVILEGED-EXECUTION: ${{ inputs.allow-privileged-execution }}
         INPUT_ALLOW-WORKFLOW-WRITES: ${{ inputs.allow-workflow-writes }}
-        INPUT_ALLOW-DOCKER-SOCKET: ${{ inputs.allow-docker-socket }}
+        INPUT_ALLOW-HOST-MOUNTS: ${{ inputs.allow-host-mounts }}
         INPUT_EVENT-NAME: ${{ inputs.event-name }}
         INPUT_EVENT-PATH: ${{ inputs.event-path }}
         INPUT_RUN-ROOT: ${{ inputs.run-root }}
