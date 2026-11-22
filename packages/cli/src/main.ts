@@ -1373,6 +1373,7 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         runRoot: realRunRoot,
         repositoryRoot: repoRoot,
         gates: localCommandGates,
+        hostPolicy,
         runtimeEnv: process.env,
         scrubber,
         forbiddenEnvNames: forbiddenCommandEnvNames,

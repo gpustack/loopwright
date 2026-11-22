@@ -102,6 +102,7 @@ export interface TaskpackExecutionCapabilitiesDeclaration {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
   readonly allowAgentNetwork?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
 }
 
 export interface ResolvedTaskpackExecutionCapabilities {
@@ -111,6 +112,7 @@ export interface ResolvedTaskpackExecutionCapabilities {
   readonly allowCheckNetwork: boolean;
   readonly allowWorkflowWrites: boolean;
   readonly allowAgentNetwork: boolean;
+  readonly allowDockerSocket: boolean;
 }
 
 export interface TaskpackExecutionDigestsDeclaration {
@@ -129,6 +131,7 @@ export interface ExecutionHostPolicy {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowPrivileged?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
 }
 
 /** Strict host policy for multi-tenant GitHub App control planes: refuses all self-granted privileged capabilities. */
@@ -136,6 +139,7 @@ export const MULTI_TENANT_HOST_POLICY: ExecutionHostPolicy = Object.freeze({
   policyProfile: 'github',
   allowPrivileged: false,
   allowWorkflowWrites: false,
+  allowDockerSocket: false,
 });
 
 export interface TaskpackPreflightDeclaration {
@@ -758,6 +762,7 @@ export interface CompiledLocalCommandGate {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly allowPrivileged?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
   readonly baselineConflictGuardOnly?: boolean | undefined;
 }
 
@@ -1025,6 +1030,7 @@ export interface ActionEntrypointInput {
   readonly mode: 'candidate' | 'no-change' | 'auto';
   readonly allowPrivilegedExecution?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly eventName: string;
   readonly eventPayload?: unknown | undefined;

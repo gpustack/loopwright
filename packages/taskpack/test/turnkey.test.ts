@@ -38,6 +38,7 @@ import {
   startLocalCommandGateServer,
   startMacosStageSeatbeltHelper,
   TaskpackError,
+  validateExecutionAuthority,
   validateTaskpackV2Manifest,
   type WrittenCompiledTaskpack,
 } from '../src/index.js';
@@ -721,6 +722,45 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
       assert.ok(rwCandIdx >= 0);
       assert.ok(roStageIdx >= 0, 'explicitly allowed stage dir under /tmp is bind-mounted read-only');
       assert.ok(rwGitObjIdx > rwCandIdx, 'git objects --ro-bind must follow writable candidateDir --bind');
+      assert.equal(bwrapWritableCand.args.includes('/run/docker.sock'), false, 'docker socket must not be bound unless dockerSocketPath is set');
+
+      // Explicit dockerSocketPath binds both canonical socket and /var/run/docker.sock inside Linux bwrap
+      const bwrapDocker = buildCommandScriptInvocation('/work/check-dir/check.sh', {
+        platform: 'linux',
+        arch: 'x64',
+        linuxBwrapExecutable: '/usr/bin/bwrap',
+        networkMode: 'allow-outbound',
+        cwd: '/work/cand',
+        allowedReadOnlyPaths: ['/work/base', '/work/check-dir'],
+        writablePaths: ['/work/cand', '/work/out'],
+        dockerSocketPath: '/run/docker.sock',
+      });
+      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/run/docker.sock') >= 0);
+      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/var/run/docker.sock') >= 0);
+
+      // Dual-key authority guard for allowDockerSocket requires both allowPrivileged and allowDockerSocket
+      const dockerExec = {
+        mode: 'strict' as const,
+        capabilities: {
+          allowHostEnv: false,
+          allowHostPath: false,
+          mountReadOnlyGit: false,
+          allowCheckNetwork: true,
+          allowWorkflowWrites: false,
+          allowAgentNetwork: false,
+          allowDockerSocket: true,
+        },
+        digests: { pinDigests: false },
+      };
+      assert.throws(
+        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: false }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+      assert.throws(
+        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: false, allowDockerSocket: true }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+      validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: true });
 
       // R3-5 & R4-1: Linux bwrap "none" installs --seccomp 3 IP-socket filter while "loopback-only" omits --seccomp (lo is auto-configured by bwrap)
       const bwrapNone = buildCommandScriptInvocation('/work/check-dir/check.sh', {
@@ -987,9 +1027,13 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
         assert.equal(toolRoots.includes('/tmp'), false);
         assert.equal(toolRoots.includes('/private/tmp'), false);
 
-        // Env-derived read roots admit strict tmp subdirectories while refusing /etc, /tmp, and repoRoot
+        // Env-derived read roots admit strict tmp subdirectories (plus safe direct child symlink targets) while refusing /etc, /tmp, and repoRoot
         const envStageDir = join(sysTmpReal, `lw-env-stage-${process.pid}-${Date.now()}`);
+        const envSharedTarget = join(sysTmpReal, `lw-env-shared-${process.pid}-${Date.now()}`);
         await mkdir(envStageDir, { recursive: true });
+        await mkdir(envSharedTarget, { recursive: true });
+        await symlink(envSharedTarget, join(envStageDir, 'go-mod'));
+        await symlink('/etc', join(envStageDir, 'bad-etc-link'));
         try {
           const envRoots = collectPositiveRuntimeToolReadRoots({
             childEnv: {
@@ -1010,13 +1054,15 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
             homeDeniedSet: new Set<string>(),
           });
           assert.equal(envRoots.includes(envStageDir), true, 'must admit strict child stage dir declared in gate.env');
-          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env');
-          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env');
+          assert.equal(envRoots.includes(envSharedTarget), true, 'must admit safe direct child symlink target inside gate.env dir');
+          assert.equal(envRoots.includes('/etc'), false, 'must refuse /etc via gate.env and child symlink');
+          assert.equal(envRoots.includes('/private/etc'), false, 'must refuse /private/etc via gate.env and child symlink');
           assert.equal(envRoots.includes('/tmp'), false, 'must refuse bare /tmp via gate.env');
           assert.equal(envRoots.includes('/private/tmp'), false, 'must refuse bare /private/tmp via gate.env');
           assert.equal(envRoots.includes(repoRoot), false, 'must refuse repoRoot via gate.env');
         } finally {
           await rm(envStageDir, { recursive: true, force: true }).catch(() => undefined);
+          await rm(envSharedTarget, { recursive: true, force: true }).catch(() => undefined);
         }
 
         // Hardlinked HUGO_BIN (nlink > 1) must be refused

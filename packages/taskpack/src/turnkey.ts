@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { accessSync, constants as fsConstants, existsSync, lstatSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, type Stats } from 'node:fs';
 import { chmod, link, lstat, mkdir, mkdtemp, open, opendir, readdir, readFile, realpath, rename, rm, unlink, writeFile, type FileHandle } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createNetServer, type Socket } from 'node:net';
@@ -3180,6 +3180,7 @@ export interface BuildCommandScriptInvocationOptions {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
+  readonly dockerSocketPath?: string | null | undefined;
   readonly writablePaths?: readonly string[] | undefined;
   readonly deniedReadPaths?: readonly string[] | undefined;
   readonly allowedReadOnlyPaths?: readonly string[] | undefined;
@@ -3207,6 +3208,23 @@ export interface CommandScriptInvocation {
   readonly seccompBpf?: Buffer | undefined;
 }
 
+const DOCKER_SOCKET_CANDIDATES: readonly string[] = Object.freeze([
+  '/var/run/docker.sock',
+  '/run/docker.sock',
+]);
+
+function appendDockerSocketBinds(
+  bwrapArgs: string[],
+  canonicalDockerSock: string | null,
+  probeHost: boolean,
+): void {
+  if (canonicalDockerSock === null || (probeHost && !existsSync(canonicalDockerSock))) return;
+  bwrapArgs.push('--bind', canonicalDockerSock, canonicalDockerSock);
+  if (canonicalDockerSock !== '/var/run/docker.sock') {
+    bwrapArgs.push('--bind', canonicalDockerSock, '/var/run/docker.sock');
+  }
+}
+
 export function buildCommandScriptInvocation(
   scriptFullPath: string,
   options?: BuildCommandScriptInvocationOptions,
@@ -3227,6 +3245,13 @@ export function buildCommandScriptInvocation(
         sourceObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.sourceObjectsDir, 'readOnlyGitObjectsBind.sourceObjectsDir'),
         targetObjectsDir: canonicalizeCommandContainmentPath(rawGitBind.targetObjectsDir, 'readOnlyGitObjectsBind.targetObjectsDir'),
       };
+  const rawDockerSock = options?.dockerSocketPath ?? null;
+  const canonicalDockerSock = rawDockerSock === null
+    ? null
+    : canonicalizeCommandContainmentPath(rawDockerSock, 'dockerSocketPath');
+  if (canonicalDockerSock === '/') {
+    throw new TaskpackError('TASKPACK_SCOPE_VIOLATION', 'command.v1 dockerSocketPath must not be "/"');
+  }
   const hasExplicitWritablePaths = options?.writablePaths !== undefined;
   const requireFs = options?.requireFilesystemContainment ?? hasExplicitWritablePaths;
   const canonicalCwd = options?.cwd !== undefined
@@ -3353,6 +3378,8 @@ export function buildCommandScriptInvocation(
           bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
         }
 
+        appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
+
         const mountedRoots = [
           '/usr',
           ...canonicalAllowedRo,
@@ -3450,6 +3477,8 @@ export function buildCommandScriptInvocation(
       if (gitBind !== null) {
         bwrapArgs.push('--ro-bind', gitBind.sourceObjectsDir, gitBind.targetObjectsDir);
       }
+
+      appendDockerSocketBinds(bwrapArgs, canonicalDockerSock, probeHost);
 
       for (const deniedPath of sortPathsShortestFirst(postMountDeniedSet)) {
         const st = tryLstatSync(deniedPath);
@@ -3805,6 +3834,7 @@ interface RunCommandScriptOptions {
   readonly allowCheckNetwork?: boolean | undefined;
   readonly networkMode?: SandboxNetworkMode | undefined;
   readonly readOnlyGitObjectsBind?: ReadOnlyGitObjectsBind | null | undefined;
+  readonly dockerSocketPath?: string | null | undefined;
   readonly writablePaths: readonly string[];
   readonly deniedReadPaths: readonly string[];
   readonly allowedReadOnlyPaths: readonly string[];
@@ -4018,6 +4048,7 @@ export function collectPositiveRuntimeToolReadRoots(options: {
   // Mount existing absolute host directories explicitly forwarded via manifest parameters.env
   // (for example preflight stage/cache directories such as AUTOSYNC_STAGE_DIR) read-only,
   // reusing isSafeRuntimeToolDir to refuse broad roots, system config/state trees, and sensitive paths.
+  // Also mount safe direct child symlink targets so stage-linked cache dirs do not dangle inside bwrap.
   for (const envName of gate.env) {
     const rawVal = childEnv[envName]?.trim();
     if (rawVal === undefined || rawVal.length === 0 || rawVal.length > 1024 || !isAbsolute(rawVal) || /[\0\r\n"\\]/.test(rawVal)) {
@@ -4028,6 +4059,22 @@ export function collectPositiveRuntimeToolReadRoots(options: {
       const realDir = realpathSync(rawVal);
       if (isSafeRuntimeToolDir(realDir, { allowTmpSubdir: true })) {
         out.add(realDir);
+        try {
+          const children = readdirSync(realDir, { withFileTypes: true }).slice(0, 64);
+          for (const child of children) {
+            if (!child.isSymbolicLink()) continue;
+            try {
+              const targetReal = realpathSync(join(realDir, child.name));
+              if (isSafeRuntimeToolDir(targetReal, { allowTmpSubdir: true })) {
+                out.add(targetReal);
+              }
+            } catch {
+              // Ignore dangling or unreadable child symlinks.
+            }
+          }
+        } catch {
+          // Ignore unreadable directory listings.
+        }
       }
     } catch {
       // Ignore unreadable or broken env path values.
@@ -4567,6 +4614,7 @@ async function runCommandScript(
     allowCheckNetwork: effectiveNetworkMode === 'allow-outbound',
     networkMode: effectiveNetworkMode,
     readOnlyGitObjectsBind: options.readOnlyGitObjectsBind,
+    dockerSocketPath: options.dockerSocketPath,
     writablePaths: options.writablePaths,
     deniedReadPaths: options.deniedReadPaths,
     allowedReadOnlyPaths: options.allowedReadOnlyPaths,
@@ -4691,6 +4739,7 @@ export interface LocalCommandGateServerOptions {
   readonly runRoot: string;
   readonly repositoryRoot: string;
   readonly gates: readonly CompiledLocalCommandGate[];
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly readOnlyGitHubToken?: string | undefined;
   readonly scrubber?: SecretScrubber | undefined;
@@ -5581,6 +5630,47 @@ export async function startLocalCommandGateServer(
             childEnv['LOOPWRIGHT_MACOS_SB_SOCK'] = macosSbHelper.socketPath;
           }
 
+          let dockerSocketPath: string | null = null;
+          if (gate.allowDockerSocket === true) {
+            const dockerHostAuthorized = options.hostPolicy?.allowDockerSocket === true
+              && options.hostPolicy?.allowPrivileged === true;
+            if (!dockerHostAuthorized) {
+              options.onLog?.(scrubber.scrub(
+                `check ${gate.checkId}: allowDockerSocket refused at execution time (missing hostPolicy allowDockerSocket/allowPrivileged)`,
+              ));
+            } else if (process.platform !== 'linux' || effectiveGateNetworkMode !== 'allow-outbound') {
+              options.onLog?.(scrubber.scrub(
+                `check ${gate.checkId}: allowDockerSocket skipped (requires Linux with networkMode "allow-outbound")`,
+              ));
+            } else {
+              for (const sockCandidate of DOCKER_SOCKET_CANDIDATES) {
+                if (!existsSync(sockCandidate)) continue;
+                try {
+                  const realSock = realpathSync(sockCandidate);
+                  const sockSt = tryLstatSync(realSock);
+                  if (sockSt !== null && sockSt.isSocket()) {
+                    const canonSock = canonicalizeCommandContainmentPath(realSock, 'dockerSock');
+                    dockerSocketPath = canonSock;
+                    if (childEnv['DOCKER_HOST'] === undefined) {
+                      childEnv['DOCKER_HOST'] = `unix://${canonSock}`;
+                    }
+                    options.onLog?.(scrubber.scrub(
+                      `check ${gate.checkId}: delegating host Docker socket (${canonSock}) under explicit allowDockerSocket policy`,
+                    ));
+                    break;
+                  }
+                } catch {
+                  // Ignore inaccessible Docker socket.
+                }
+              }
+              if (dockerSocketPath === null) {
+                options.onLog?.(scrubber.scrub(
+                  `check ${gate.checkId}: allowDockerSocket requested but no host Docker socket is available`,
+                ));
+              }
+            }
+          }
+
           options.onLog?.(scrubber.scrub(
             `check ${gate.checkId}: running ${gate.script} (timeout ${formatDurationMs(gate.timeoutSeconds * 1000)})`,
           ));
@@ -5595,6 +5685,7 @@ export async function startLocalCommandGateServer(
               allowCheckNetwork: effectiveGateNetworkMode === 'allow-outbound',
               networkMode: effectiveGateNetworkMode,
               readOnlyGitObjectsBind,
+              dockerSocketPath,
               writablePaths,
               deniedReadPaths: [...deniedReadPathSet],
               allowedReadOnlyPaths,
@@ -6807,6 +6898,7 @@ export interface StageTaskpackForStepOptions {
   readonly policyProfile?: PolicyProfile | undefined;
   readonly allowPrivileged?: boolean | undefined;
   readonly allowWorkflowWrites?: boolean | undefined;
+  readonly allowDockerSocket?: boolean | undefined;
   readonly runPreflight?: boolean | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly upstreamRecordsJson?: string | undefined;
@@ -6836,6 +6928,7 @@ export interface StagedTaskpackForStep {
 export interface OpenStagedTaskpackStepGateOptions {
   readonly runRoot: string;
   readonly runId: string;
+  readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly runtimeEnv?: NodeJS.ProcessEnv | undefined;
   readonly decisionTransport?: DecisionTransport | undefined;
   readonly decisionApiKey?: string | undefined;
@@ -6896,6 +6989,7 @@ const STAGED_GATE_KEYS: ReadonlySet<string> = new Set([
   'allowCheckNetwork',
   'networkMode',
   'allowPrivileged',
+  'allowDockerSocket',
   'timeoutSeconds',
   'allowReadOnlyGitHubToken',
   'env',
@@ -7141,6 +7235,7 @@ async function readAndValidateStagedTaskpackSecrets(
       ...(typeof gate['allowCheckNetwork'] === 'boolean' ? { allowCheckNetwork: gate['allowCheckNetwork'] } : {}),
       ...(rawGateNetworkMode !== undefined ? { networkMode: rawGateNetworkMode } : {}),
       ...(typeof gate['allowPrivileged'] === 'boolean' ? { allowPrivileged: gate['allowPrivileged'] } : {}),
+      ...(typeof gate['allowDockerSocket'] === 'boolean' ? { allowDockerSocket: gate['allowDockerSocket'] } : {}),
       ...(typeof gate['baselineConflictGuardOnly'] === 'boolean' ? { baselineConflictGuardOnly: gate['baselineConflictGuardOnly'] } : {}),
       timeoutSeconds: gate['timeoutSeconds'],
       env: Object.freeze([...(gate['env'] as string[])]),
@@ -7368,6 +7463,7 @@ export async function stageTaskpackForStep(
     policyProfile,
     allowPrivileged: options.hostPolicy?.allowPrivileged ?? options.allowPrivileged ?? false,
     allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? options.allowWorkflowWrites ?? false,
+    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? options.allowDockerSocket ?? false,
   };
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY']) {
@@ -7895,6 +7991,7 @@ export async function openStagedTaskpackStepGate(
     runRoot: realRunRoot,
     repositoryRoot: staged.repositoryRoot,
     gates: staged.localCommandGates,
+    hostPolicy: options.hostPolicy,
     signingSecret: staged.signingSecret,
     runtimeEnv: baseEnv,
     readOnlyGitHubToken,
@@ -8014,6 +8111,7 @@ export async function runTurnkeyTaskpack(
     policyProfile,
     allowPrivileged: options.hostPolicy?.allowPrivileged ?? false,
     allowWorkflowWrites: options.hostPolicy?.allowWorkflowWrites ?? false,
+    allowDockerSocket: options.hostPolicy?.allowDockerSocket ?? false,
   };
   const mode = options.mode ?? 'candidate';
   const repositoryFullName = options.repositoryFullName ?? 'local/repo';
@@ -8255,6 +8353,7 @@ export async function runTurnkeyTaskpack(
         runRoot: realRunRoot,
         repositoryRoot: realRepositoryRoot,
         gates: compiled.localCommandGates!,
+        hostPolicy,
         signingSecret: gateSigningSecret,
         runtimeEnv,
         scrubber,

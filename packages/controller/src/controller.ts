@@ -1678,7 +1678,7 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       };
     });
     const maxPromptBytes = Math.min(16384, role.policy.limits.promptBytes);
-    const prefix = 'Repair only the admitted writable candidate to satisfy these authenticated current-candidate findings. Return the complete structured submission; evidence claims will be independently checked. Findings:\n';
+    const prefix = 'Repair only writable candidate files for these findings; submit status "blocked" if caused by protected scripts or host environment. Return the complete structured submission. Findings:\n';
     let prompt = prefix + canonical(findings);
     if (Buffer.byteLength(prompt, 'utf8') > maxPromptBytes) {
       for (let index = findings.length - 1; index >= 0 && Buffer.byteLength(prompt, 'utf8') > maxPromptBytes; index--) {
