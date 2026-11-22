@@ -377,7 +377,7 @@ export async function unlinkIfOwnedInode(targetPath: string, expectedDev: number
     st = await lstat(targetPath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    return false;
+    throw error;
   }
   if (
     st.isSymbolicLink()

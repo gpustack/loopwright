@@ -349,6 +349,16 @@ export interface AcceptanceObservation {
 }
 /** Core inputs are JSON-owned here so shared immutable source refs cannot create input aliases. */
 const tree = (input: unknown): unknown => JSON.parse(canonical(input));
+function authenticateCheckByImpl(impl: string | undefined, checked: VerifiedCheck) {
+  if (impl === 'gate.v1') return authenticatedGate(checked);
+  if (impl === 'benchmark-gate.v1') return authenticatedBenchmarkGate(checked);
+  return authenticatedCheck(checked);
+}
+function expectedProducerByImpl(impl: string | undefined): string {
+  if (impl === 'gate.v1') return 'loopwright.gate-verifier.v1';
+  if (impl === 'benchmark-gate.v1') return 'loopwright.benchmark-gate.v1';
+  return 'loopwright.byte-verifier.v1';
+}
 export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock, candidate: ArtifactManifest, candidateFiles: readonly (ResolvedArtifactInput | CandidateFileEntry)[], generation: number,
   checks: readonly VerifiedCheck[], submission: Submission | null, store: LocalRunStore, forced: 'reconcile_required' | 'expired' | 'cancelled' | 'exhausted' | 'blocked' | 'failed' | null = null, graphComplete = true, refusals: readonly PreflightRefusal[] = [], forcedDiagnostic: ControllerDiagnostic['code'] | null = null, preverified?: PreverifiedVerifierArtifacts): AcceptanceObservation {
   if (!same(plan.task, lock.spec.contract)) refuse('ARTIFACT_INVALID', '', 'verification');
@@ -367,17 +377,9 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
   for (const checked of checks) {
     const slot = plan.verifierSlots.find(item => item.id === checked.slotId);
     const impl = slot?.handler.implementation;
-    const original = impl === 'gate.v1'
-      ? authenticatedGate(checked)
-      : impl === 'benchmark-gate.v1'
-        ? authenticatedBenchmarkGate(checked)
-        : authenticatedCheck(checked);
+    const original = authenticateCheckByImpl(impl, checked);
     const operation = records.operations.find(item => item.intent.operationId === checked.operationId);
-    const expectedProducer = impl === 'gate.v1'
-      ? 'loopwright.gate-verifier.v1'
-      : impl === 'benchmark-gate.v1'
-        ? 'loopwright.benchmark-gate.v1'
-        : 'loopwright.byte-verifier.v1';
+    const expectedProducer = expectedProducerByImpl(impl);
     if (
       !slot
       || bySlot.has(slot.id)

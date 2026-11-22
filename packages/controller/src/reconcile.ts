@@ -3,7 +3,7 @@ import { lstat, open, realpath, rename } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { reopenLocalRun, type Authority, type LocalRunStore, type OperationReceipt } from '@loopwright/state';
-import { VERIFIER_ARTIFACT_LIMITS, validateDocument, type ArtifactManifest, type ArtifactRef, type Subject } from '@loopwright/core';
+import { VERIFIER_ARTIFACT_LIMITS, validateDocument, type ArtifactManifest, type ArtifactRef, type Evidence, type Subject } from '@loopwright/core';
 import { approvedState, loadConfiguration } from './config.js';
 import { compilePlan } from './compile.js';
 import { ControllerFailure, refuse, result } from './errors.js';
@@ -442,8 +442,9 @@ async function reconcileBenchmarkGate(
       if (savedOutput.verdict === null) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
       if (!same(savedOutput.verdict, parsedVerdict)) refuse('RECEIPT_CONFLICT', '/receipt', 'recovery');
       const savedVerifierRefsRaw = list(savedOutput.verifierArtifacts, '', VERIFIER_ARTIFACT_LIMITS.maxFilesPerSlot);
-      if (savedVerifierRefsRaw.length > 0) {
-        const expectedOutputs = parsedVerdict.outputArtifacts ?? [];
+      const expectedOutputs = parsedVerdict.outputArtifacts ?? [];
+      const savedDispositionStatus = isRecord(savedOutput.disposition) ? savedOutput.disposition.status : undefined;
+      if (savedVerifierRefsRaw.length > 0 || (expectedOutputs.length > 0 && savedDispositionStatus === 'passed')) {
         if (savedVerifierRefsRaw.length !== expectedOutputs.length) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
         const replayProgress = createRateLimitedProgress(() => {
           if (effectiveSignal.aborted) refuse('CANCELLED', '', 'recovery');
@@ -590,7 +591,10 @@ async function reconcileBenchmarkGate(
                 }
               }
             }
-          } catch {
+          } catch (error) {
+            if (!(error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_SYNTAX')) {
+              throw error;
+            }
             // Native Pi capture (non-JSON workspace).
           }
           if (!isDelegatedWorkspace && source.version === 1) {
@@ -642,6 +646,91 @@ async function reconcileBenchmarkGate(
         undefined,
         head.progress.verifierReceipts,
       );
+
+      const buildBenchmarkSettlement = async (settlement: {
+        readonly disposition: ReturnType<typeof computeBenchmarkDisposition>;
+        readonly observation: {
+          readonly attempts: number;
+          readonly elapsedMs: number;
+          readonly transport: string;
+          readonly sawPreemption: boolean;
+          readonly wallClockValid: boolean;
+          readonly casOutcome: string;
+        };
+        readonly responseBytes: string | null;
+        readonly responseSignature: string | null;
+        readonly verifierArtifacts: readonly ArtifactRef[];
+      }): Promise<{
+        readonly output: ArtifactRef;
+        readonly evidence: Evidence;
+        readonly receipt: OperationReceipt;
+        readonly receiptRef: ArtifactRef;
+      }> => {
+        const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
+        const output = await artifacts.json(
+          'benchmark-output',
+          {
+            version: 1,
+            binding: {
+              planDigest: plan.planDigest,
+              operationId: row.operationId,
+              producerNonce: nonce,
+              generation: row.generation,
+              endpoint: endpoint.id,
+              subject,
+              requestBytesDigest,
+            },
+            observation: settlement.observation,
+            verdict: parsedVerdict,
+            responseBytes: settlement.responseBytes,
+            responseSignature: settlement.responseSignature,
+            verifierArtifacts: settlement.verifierArtifacts,
+            disposition: settlement.disposition,
+          },
+          BENCHMARK_OUTPUT_BYTES,
+        );
+        const evidenceSpec = {
+          checkId: slot.checkId,
+          observedStatus: settlement.disposition.status,
+          producerId: 'loopwright.benchmark-gate.v1',
+          method: settlement.disposition.method,
+          level: 'hardware_execution' as const,
+          subject,
+          artifacts: [output, ...settlement.verifierArtifacts],
+          reason: settlement.disposition.reason,
+          ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
+          ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
+          ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
+          ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
+        };
+        const evidenceResult = validateDocument(
+          { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },
+          'Evidence',
+        );
+        if (!evidenceResult.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
+        const receipt: OperationReceipt = {
+          receiptId: 'receipt.' + suffix,
+          outcome: settlement.disposition.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
+          evidence: {
+            evidenceId: 'receipt-evidence.' + suffix,
+            producerId: 'loopwright.benchmark-gate.v1',
+            method: settlement.disposition.method,
+            subject: {
+              storeId: original.storeId,
+              runId: lock.spec.runId,
+              lockHash: lock.spec.lockHash,
+              operationId: row.operationId,
+              requestId: null,
+              intentDigest: operation.intentDigest,
+              dispatchGeneration: dispatch.generation,
+              dispatchId: dispatch.dispatchId,
+            },
+            artifact: output,
+          },
+        };
+        const receiptRef = await artifacts.json('benchmark-receipt', receipt, 65_536);
+        return { output, evidence: evidenceResult.value, receipt, receiptRef };
+      };
 
       const proofPath = prefix + '.proof.json';
       let proofExists = false;
@@ -730,79 +819,24 @@ async function reconcileBenchmarkGate(
               metricThresholds: meta.metricThresholds,
               casOutcome: 'artifact_invalid',
             });
-            const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
-            const invalidOutput = await artifacts.json(
-              'benchmark-output',
-              {
-                version: 1,
-                binding: {
-                  planDigest: plan.planDigest,
-                  operationId: row.operationId,
-                  producerNonce: nonce,
-                  generation: row.generation,
-                  endpoint: endpoint.id,
-                  subject,
-                  requestBytesDigest,
-                },
-                observation: {
-                  attempts: validated.observation.attempts,
-                  elapsedMs: validated.observation.elapsedMs,
-                  transport: validated.observation.transport,
-                  sawPreemption: validated.observation.sawPreemption,
-                  wallClockValid: invalidWallClockValid,
-                  casOutcome: 'artifact_invalid',
-                },
-                verdict: parsedVerdict,
-                responseBytes: validated.responseBytesBase64,
-                responseSignature: validated.responseSignature,
-                verifierArtifacts: [],
-                disposition: invalidDisposition,
+            const builtInvalid = await buildBenchmarkSettlement({
+              disposition: invalidDisposition,
+              observation: {
+                attempts: validated.observation.attempts,
+                elapsedMs: validated.observation.elapsedMs,
+                transport: validated.observation.transport,
+                sawPreemption: validated.observation.sawPreemption,
+                wallClockValid: invalidWallClockValid,
+                casOutcome: 'artifact_invalid',
               },
-              BENCHMARK_OUTPUT_BYTES,
-            );
-            const invalidEvidenceSpec = {
-              checkId: slot.checkId,
-              observedStatus: invalidDisposition.status,
-              producerId: 'loopwright.benchmark-gate.v1',
-              method: invalidDisposition.method,
-              level: 'hardware_execution' as const,
-              subject,
-              artifacts: [invalidOutput],
-              reason: invalidDisposition.reason,
-              ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
-              ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
-              ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
-              ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
-            };
-            const invalidEvidence = validateDocument(
-              { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: invalidEvidenceSpec },
-              'Evidence',
-            );
-            if (!invalidEvidence.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
-            settledReceipt = {
-              receiptId: 'receipt.' + suffix,
-              outcome: invalidDisposition.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
-              evidence: {
-                evidenceId: 'receipt-evidence.' + suffix,
-                producerId: 'loopwright.benchmark-gate.v1',
-                method: invalidDisposition.method,
-                subject: {
-                  storeId: original.storeId,
-                  runId: lock.spec.runId,
-                  lockHash: lock.spec.lockHash,
-                  operationId: row.operationId,
-                  requestId: null,
-                  intentDigest: operation.intentDigest,
-                  dispatchGeneration: dispatch.generation,
-                  dispatchId: dispatch.dispatchId,
-                },
-                artifact: invalidOutput,
-              },
-            };
-            const invalidReceiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+              responseBytes: validated.responseBytesBase64,
+              responseSignature: validated.responseSignature,
+              verifierArtifacts: [],
+            });
+            settledReceipt = builtInvalid.receipt;
             await overwriteAtomicMarker(
               proofPath,
-              { version: 1, output: invalidOutput, receipt: invalidReceiptRef, evidence: invalidEvidence.value },
+              { version: 1, output: builtInvalid.output, receipt: builtInvalid.receiptRef, evidence: builtInvalid.evidence },
               state.vault,
               'recovery',
             );
@@ -994,85 +1028,30 @@ async function reconcileBenchmarkGate(
           });
         const effectiveRefs = retainOutputs ? verifierCasRefs : freeze([]);
 
-        const suffix = hash(row.operationId + '\0' + nonce).hex.slice(0, 40);
-        const output = await artifacts.json(
-          'benchmark-output',
-          {
-            version: 1,
-            binding: {
-              planDigest: plan.planDigest,
-              operationId: row.operationId,
-              producerNonce: nonce,
-              generation: row.generation,
-              endpoint: endpoint.id,
-              subject,
-              requestBytesDigest,
-            },
-            observation: {
-              attempts: 1,
-              elapsedMs: Math.ceil(performance.now() - reconcileStarted),
-              transport: 'completed',
-              sawPreemption,
-              wallClockValid,
-              casOutcome,
-            },
-            verdict: parsedVerdict,
-            responseBytes: bodyCanonicalBytes.toString('base64'),
-            responseSignature: text(file.signature),
-            verifierArtifacts: effectiveRefs,
-            disposition: dispositioned,
+        const builtFresh = await buildBenchmarkSettlement({
+          disposition: dispositioned,
+          observation: {
+            attempts: 1,
+            elapsedMs: Math.ceil(performance.now() - reconcileStarted),
+            transport: 'completed',
+            sawPreemption,
+            wallClockValid,
+            casOutcome,
           },
-          BENCHMARK_OUTPUT_BYTES,
-        );
-        const evidenceSpec = {
-          checkId: slot.checkId,
-          observedStatus: dispositioned.status,
-          producerId: 'loopwright.benchmark-gate.v1',
-          method: dispositioned.method,
-          level: 'hardware_execution' as const,
-          subject,
-          artifacts: [output, ...effectiveRefs],
-          reason: dispositioned.reason,
-          ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
-          ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
-          ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
-          ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
-        };
-        const evidenceResult = validateDocument(
-          { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },
-          'Evidence',
-        );
-        if (!evidenceResult.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
-        settledReceipt = {
-          receiptId: 'receipt.' + suffix,
-          outcome: dispositioned.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
-          evidence: {
-            evidenceId: 'receipt-evidence.' + suffix,
-            producerId: 'loopwright.benchmark-gate.v1',
-            method: dispositioned.method,
-            subject: {
-              storeId: original.storeId,
-              runId: lock.spec.runId,
-              lockHash: lock.spec.lockHash,
-              operationId: row.operationId,
-              requestId: null,
-              intentDigest: operation.intentDigest,
-              dispatchGeneration: dispatch.generation,
-              dispatchId: dispatch.dispatchId,
-            },
-            artifact: output,
-          },
-        };
-        const receiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+          responseBytes: bodyCanonicalBytes.toString('base64'),
+          responseSignature: text(file.signature),
+          verifierArtifacts: effectiveRefs,
+        });
+        settledReceipt = builtFresh.receipt;
         if (overwriteExistingProvisionalProof) {
           await overwriteAtomicMarker(
             prefix + '.proof.json',
-            { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value },
+            { version: 1, output: builtFresh.output, receipt: builtFresh.receiptRef, evidence: builtFresh.evidence },
             state.vault,
             'recovery',
           );
         } else {
-          await writeMarker(prefix + '.proof.json', { version: 1, output, receipt: receiptRef, evidence: evidenceResult.value }, state.vault);
+          await writeMarker(prefix + '.proof.json', { version: 1, output: builtFresh.output, receipt: builtFresh.receiptRef, evidence: builtFresh.evidence }, state.vault);
         }
         if (effectiveSignal?.aborted) refuse('CANCELLED', '', 'recovery');
         stateValue(store.renew(authority));
@@ -1096,78 +1075,24 @@ async function reconcileBenchmarkGate(
             metricThresholds: meta.metricThresholds,
             casOutcome,
           });
-          const expiredOutput = await artifacts.json(
-            'benchmark-output',
-            {
-              version: 1,
-              binding: {
-                planDigest: plan.planDigest,
-                operationId: row.operationId,
-                producerNonce: nonce,
-                generation: row.generation,
-                endpoint: endpoint.id,
-                subject,
-                requestBytesDigest,
-              },
-              observation: {
-                attempts: 1,
-                elapsedMs: Math.ceil(performance.now() - reconcileStarted),
-                transport: 'completed',
-                sawPreemption,
-                wallClockValid: false,
-                casOutcome,
-              },
-              verdict: parsedVerdict,
-              responseBytes: bodyCanonicalBytes.toString('base64'),
-              responseSignature: text(file.signature),
-              verifierArtifacts: [],
-              disposition: expiredDisposition,
+          const builtExpired = await buildBenchmarkSettlement({
+            disposition: expiredDisposition,
+            observation: {
+              attempts: 1,
+              elapsedMs: Math.ceil(performance.now() - reconcileStarted),
+              transport: 'completed',
+              sawPreemption,
+              wallClockValid: false,
+              casOutcome,
             },
-            BENCHMARK_OUTPUT_BYTES,
-          );
-          const expiredEvidenceSpec = {
-            checkId: slot.checkId,
-            observedStatus: expiredDisposition.status,
-            producerId: 'loopwright.benchmark-gate.v1',
-            method: expiredDisposition.method,
-            level: 'hardware_execution' as const,
-            subject,
-            artifacts: [expiredOutput],
-            reason: expiredDisposition.reason,
-            ...(Object.hasOwn(parsedVerdict, 'detail') ? { detail: parsedVerdict.detail } : {}),
-            ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
-            ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
-            ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
-          };
-          const expiredEvidence = validateDocument(
-            { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: expiredEvidenceSpec },
-            'Evidence',
-          );
-          if (!expiredEvidence.ok) refuse('RECOVERY_REQUIRED', '/gate', 'recovery');
-          settledReceipt = {
-            receiptId: 'receipt.' + suffix,
-            outcome: expiredDisposition.method === 'benchmark-gate.v1' ? 'succeeded' : 'failed',
-            evidence: {
-              evidenceId: 'receipt-evidence.' + suffix,
-              producerId: 'loopwright.benchmark-gate.v1',
-              method: expiredDisposition.method,
-              subject: {
-                storeId: original.storeId,
-                runId: lock.spec.runId,
-                lockHash: lock.spec.lockHash,
-                operationId: row.operationId,
-                requestId: null,
-                intentDigest: operation.intentDigest,
-                dispatchGeneration: dispatch.generation,
-                dispatchId: dispatch.dispatchId,
-              },
-              artifact: expiredOutput,
-            },
-          };
-          const expiredReceiptRef = await artifacts.json('benchmark-receipt', settledReceipt, 65_536);
+            responseBytes: bodyCanonicalBytes.toString('base64'),
+            responseSignature: text(file.signature),
+            verifierArtifacts: [],
+          });
+          settledReceipt = builtExpired.receipt;
           await overwriteAtomicMarker(
             prefix + '.proof.json',
-            { version: 1, output: expiredOutput, receipt: expiredReceiptRef, evidence: expiredEvidence.value },
+            { version: 1, output: builtExpired.output, receipt: builtExpired.receiptRef, evidence: builtExpired.evidence },
             state.vault,
             'recovery',
           );

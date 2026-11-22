@@ -79,7 +79,10 @@ function hasGenericCredentialPattern(bytes: Buffer, isFinal: boolean, minMatchEn
 
 function createCredentialStreamCheckerFromBuffers(formBuffers: readonly Buffer[]): CredentialStreamChecker {
   const maxDerivedFormByteLength = formBuffers.reduce((max, buf) => Math.max(max, buf.byteLength), 0);
-  const overlap = Math.min(262_144, Math.max(16_384, maxDerivedFormByteLength));
+  const overlap = Math.max(16_384, maxDerivedFormByteLength);
+  if (overlap > 262_144) {
+    refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+  }
   const maxWindowSlice = STREAM_CHUNK_BYTES - overlap;
   let carryTail: Buffer = Buffer.alloc(0);
   let maxWindowBytes = 0;

@@ -244,6 +244,25 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
     return { loaded: input.configuration, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports: effectivePorts };
   } catch (error) { if (store) stateValue(store.close()); if (owner) await owner.release(); throw error; }
 }
+function extractGateVerdictDetail(checked: VerifiedCheck, isBenchmark: boolean): string | undefined {
+  const trusted = isBenchmark ? authenticatedBenchmarkGate(checked) : authenticatedGate(checked);
+  const outCap = isBenchmark ? BENCHMARK_OUTPUT_BYTES : GATE_OUTPUT_BYTES;
+  try {
+    const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), outCap);
+    const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
+    if (!verdict) return undefined;
+    let rawDetail: string | undefined;
+    if (isBenchmark && typeof verdict.detail === 'string' && verdict.detail.length > 0) {
+      rawDetail = verdict.detail;
+    } else if (typeof verdict.reason === 'string' && verdict.reason.length > 0) {
+      rawDetail = verdict.reason;
+    }
+    return rawDetail !== undefined ? Array.from(rawDetail).slice(0, 256).join('') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class Cycle {
   head: ProgressHead | null; candidate: ByteInventory; submission: RetainedSubmission | null = null; readonly checks = new Map<string, VerifiedCheck>(); readonly refusals = new Map<string, PreflightRefusal>();
   readonly deadline: WorkDeadline; readonly events: ControllerEvents; readonly verifier: Verifier; readonly gate: Gate; readonly benchmarkGate: BenchmarkGate; readonly publisher: Publication;
@@ -615,28 +634,9 @@ export class Cycle {
           })
         : undefined;
     if (reworkCheckNode?.onRework) {
-      let detail: string | undefined;
-      if (gateSlot || benchmarkSlot) {
-        const trusted = gateSlot ? authenticatedGate(checked) : authenticatedBenchmarkGate(checked);
-        const outCap = gateSlot ? GATE_OUTPUT_BYTES : BENCHMARK_OUTPUT_BYTES;
-        try {
-          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), outCap);
-          const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
-          if (verdict) {
-            const rawDetail =
-              benchmarkSlot && typeof verdict.detail === 'string' && verdict.detail.length > 0
-                ? verdict.detail
-                : typeof verdict.reason === 'string' && verdict.reason.length > 0
-                  ? verdict.reason
-                  : undefined;
-            if (rawDetail !== undefined) {
-              detail = Array.from(rawDetail).slice(0, 256).join('');
-            }
-          }
-        } catch {
-          // Malformed gate payload falls back to checked.reason.
-        }
-      }
+      const detail = (gateSlot || benchmarkSlot)
+        ? extractGateVerdictDetail(checked, benchmarkSlot)
+        : undefined;
       const reasonText = checked.reason ?? 'check_failed';
       const summary = detail
         ? `Check ${reworkCheckNode.id} (${checked.checkId}) failed: ${reasonText} — ${detail}`
@@ -1803,29 +1803,9 @@ let cleanupKnown = false, reader: Promise<void> | null = null, nativeOutcome: Ar
       candidate: typeof candidateDigest;
     }[] = failed.map(check => {
       const slot = plan.verifierSlots.find(slot => slot.id === check.slotId)!;
-      let detail: string | undefined;
-      if (slot.handler.implementation === 'gate.v1' || slot.handler.implementation === 'benchmark-gate.v1') {
-        const isBench = slot.handler.implementation === 'benchmark-gate.v1';
-        const trusted = isBench ? authenticatedBenchmarkGate(check) : authenticatedGate(check);
-        const outCap = isBench ? BENCHMARK_OUTPUT_BYTES : GATE_OUTPUT_BYTES;
-        try {
-          const parsed = parsePrivateJson(Buffer.from(trusted.outputBytes), outCap);
-          const verdict = isRecord(parsed) && isRecord(parsed.verdict) ? parsed.verdict : null;
-          if (verdict) {
-            const rawDetail =
-              isBench && typeof verdict.detail === 'string' && verdict.detail.length > 0
-                ? verdict.detail
-                : typeof verdict.reason === 'string' && verdict.reason.length > 0
-                  ? verdict.reason
-                  : undefined;
-            if (rawDetail !== undefined) {
-              detail = Array.from(rawDetail).slice(0, 256).join('');
-            }
-          }
-        } catch {
-          // Malformed gate payload must not crash failure repair; fall back to default detail.
-        }
-      }
+      const detail = (slot.handler.implementation === 'gate.v1' || slot.handler.implementation === 'benchmark-gate.v1')
+        ? extractGateVerdictDetail(check, slot.handler.implementation === 'benchmark-gate.v1')
+        : undefined;
       return {
         checkId: check.checkId,
         handler: slot.handler.implementation,

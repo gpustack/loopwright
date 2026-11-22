@@ -360,7 +360,10 @@ async function resolveCurrentFileModes(
           }
         }
       }
-    } catch {
+    } catch (error) {
+      if (!(error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_SYNTAX')) {
+        throw error;
+      }
       // Non-JSON workspace (e.g., native Pi capture).
     }
     if (!isDelegatedWorkspace && context.source.version === 1) {

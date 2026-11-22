@@ -1324,7 +1324,7 @@ export function createRateLimitedProgress(
   minIntervalMs = 1_000,
 ): (() => Promise<void>) | undefined {
   if (!onProgress) return undefined;
-  let lastRenewMs = performance.now();
+  let lastRenewMs = -Infinity;
   return async () => {
     const now = performance.now();
     if (now - lastRenewMs < minIntervalMs) return;
