@@ -770,17 +770,94 @@ test('runner-cli: in-process main handles SIGINT (130) on worker cleanly', async
     return true;
   }) as typeof process.stdout.write;
 
-  let sigTimer: ReturnType<typeof setTimeout> | undefined;
+  const sigintBefore = process.listenerCount('SIGINT');
   try {
     const runPromise = cliMain(['runner', 'worker', '--config', workerCfg, '--json']);
-    sigTimer = setTimeout(() => process.emit('SIGINT'), 40);
+    const readyDeadline = Date.now() + 5_000;
+    while (process.listenerCount('SIGINT') <= sigintBefore && Date.now() < readyDeadline) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    assert.ok(
+      process.listenerCount('SIGINT') > sigintBefore,
+      'worker did not register SIGINT handler before deadline',
+    );
+    // Allow one ECONNREFUSED retry cycle into sleepAbortable before emitting SIGINT
+    await new Promise(r => setTimeout(r, 50));
+    process.emit('SIGINT');
     const code = await runPromise;
     assert.equal(code, 130);
     const env = JSON.parse(chunks.join('').trim()) as { kind: string; data: { exitReason: string } };
     assert.equal(env.kind, 'status');
     assert.equal(env.data.exitReason, 'aborted');
+
+    // Also verify a standalone worker subprocess stays alive across retry backoff
+    // (event loop does not drain prematurely) until SIGINT terminates it with exit 130.
+    let retryPolls = 0;
+    let resolveTwoPolls!: () => void;
+    const twoPolls = new Promise<void>(resolveReady => {
+      resolveTwoPolls = resolveReady;
+    });
+    const retryServer = createHttpServer(req => {
+      retryPolls += 1;
+      req.socket.destroy();
+      if (retryPolls >= 2) resolveTwoPolls();
+    });
+    await new Promise<void>(resolveListen => retryServer.listen(0, '127.0.0.1', () => resolveListen()));
+    const retryPort = (retryServer.address() as { port: number }).port;
+    const retryWorkerCfg = join(root, 'worker-retry.yaml');
+    await writeFile(
+      retryWorkerCfg,
+      [
+        'kind: worker',
+        'workerId: inproc-worker-retry',
+        `relayUrl: http://127.0.0.1:${retryPort}`,
+        'workerTokenEnv: LW_INPROC_WORKER_TOK',
+        `workDir: ${workDir}`,
+        `heldOutWorkloadsDir: ${workloadsDir}`,
+        'sandboxBackend: native_os',
+        'probeMode: synthetic_fixture',
+        'pollWaitMs: 5000',
+        'capabilities:',
+        '  accelerator: sm_90a',
+        '  isolationModes: [whole_device]',
+        '  deviceCount: 1',
+        '  driverVersion: "550.90.07"',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    const daemon = spawn(
+      process.execPath,
+      [MAIN, 'runner', 'worker', '--config', retryWorkerCfg, '--json'],
+      {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          PATH: '/usr/bin:/bin',
+          LW_INPROC_WORKER_TOK: 'inproc-worker-token-0123456789abcdef',
+        },
+      },
+    );
+    try {
+      let daemonOut = '';
+      daemon.stdout.on('data', (c: Buffer) => { daemonOut += c.toString('utf8'); });
+      await Promise.race([
+        twoPolls,
+        new Promise<never>((_res, rej) => {
+          const t = setTimeout(() => rej(new Error(`worker did not retry after backoff (polls=${retryPolls}, exit=${daemon.exitCode})`)), 8_000);
+          t.unref();
+        }),
+      ]);
+      assert.equal(daemon.exitCode, null, `worker exited prematurely before SIGINT: ${daemonOut}`);
+      daemon.kill('SIGINT');
+      const daemonExit = await new Promise<number | null>(resolveCode => daemon.once('close', c => resolveCode(c)));
+      assert.equal(daemonExit, 130, `expected 130 on SIGINT, got ${daemonExit}; stdout=${daemonOut}`);
+    } finally {
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        daemon.kill('SIGKILL');
+        await new Promise<void>(resolveClose => daemon.once('close', () => resolveClose()));
+      }
+      await new Promise<void>(resolveClose => retryServer.close(() => resolveClose()));
+    }
   } finally {
-    if (sigTimer !== undefined) clearTimeout(sigTimer);
     process.stdout.write = origWrite;
     if (prevTok === undefined) delete process.env['LW_INPROC_WORKER_TOK'];
     else process.env['LW_INPROC_WORKER_TOK'] = prevTok;
