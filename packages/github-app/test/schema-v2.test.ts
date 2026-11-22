@@ -64,11 +64,11 @@ describe('Taskpack 2.0 schema: execution trust modes and dual-key authority', ()
   it('resolves strict and privileged default capabilities and defaults omitted execution to strict', () => {
     assert.deepEqual(resolveExecutionCapabilities('strict'), {
       allowHostEnv: false, allowHostPath: false, mountReadOnlyGit: false,
-      allowCheckNetwork: false, allowWorkflowWrites: false, allowAgentNetwork: false,
+      allowCheckNetwork: false, allowWorkflowWrites: false, allowAgentNetwork: false, allowDockerSocket: false,
     });
     assert.deepEqual(resolveExecutionCapabilities('privileged'), {
       allowHostEnv: true, allowHostPath: true, mountReadOnlyGit: true,
-      allowCheckNetwork: true, allowWorkflowWrites: false, allowAgentNetwork: false,
+      allowCheckNetwork: true, allowWorkflowWrites: false, allowAgentNetwork: false, allowDockerSocket: false,
     });
 
     const manifestDefault = validateTaskpackV2Manifest(makeBaseV2Manifest() as Json);

@@ -591,7 +591,7 @@ describe('Dual-key operator unlock, authorized preflight, mode: auto, and multi-
   });
 
   it('refuses self-granted privileged capabilities in multi-tenant service.ts', async () => {
-    assert.deepEqual(MULTI_TENANT_HOST_POLICY, { policyProfile: 'github', allowPrivileged: false, allowWorkflowWrites: false });
+    assert.deepEqual(MULTI_TENANT_HOST_POLICY, { policyProfile: 'github', allowPrivileged: false, allowWorkflowWrites: false, allowDockerSocket: false });
     const privilegedManifest = validateTaskpackV2Manifest(
       {
         apiVersion: 'loopwright.dev/v1alpha1',
