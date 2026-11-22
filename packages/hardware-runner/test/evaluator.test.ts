@@ -239,12 +239,14 @@ test('two-stage OS read-allowlist + kernel socket denial + immutable workload sn
       '    sock.on("error", (e) => resolve(e));',
       '  });',
       '  if (!isPerm(tcpErr)) { console.error("TCP expected EPERM/EACCES, got:", tcpErr); process.exit(base + 2); }',
-      '  const localSockPath = path.join(process.env.TMPDIR, "sandbox-socket-probe.sock");',
+      '  const prevCwd = process.cwd();',
+      '  process.chdir(process.env.TMPDIR);',
       '  const unixListenErr = await new Promise((resolve) => {',
       '    const srv = net.createServer();',
       '    srv.on("error", (e) => resolve(e));',
-      '    try { srv.listen(localSockPath, () => { srv.close(); resolve(new Error("UNIX_LISTEN_ALLOWED")); }); } catch (e) { resolve(e); }',
+      '    try { srv.listen("./p.sock", () => { srv.close(); resolve(new Error("UNIX_LISTEN_ALLOWED")); }); } catch (e) { resolve(e); }',
       '  });',
+      '  process.chdir(prevCwd);',
       '  if (!isPerm(unixListenErr)) { console.error("UNIX listen expected EPERM/EACCES, got:", unixListenErr); process.exit(base + 3); }',
       `  const unixConnErr = await new Promise((resolve) => {`,
       `    let u;`,
@@ -2096,6 +2098,10 @@ test('linux-landlock fallback, Stage B 48 KiB control-body headroom, and parseSt
   assert.equal(llCfg.blockAllSockets, true);
   assert.equal(llCfg.networkMode, 'none');
   assert.equal(llCfg.positiveReadRoots.includes('/usr'), false, 'must never grant wholesale /usr');
+  assert.equal(llCfg.positiveReadRoots.includes('/etc/ssl'), false, 'must never grant wholesale /etc/ssl');
+  assert.equal(llCfg.positiveReadRoots.includes('/etc/pki'), false, 'must never grant wholesale /etc/pki');
+  assert.equal(llCfg.positiveReadRoots.includes('/etc/ssl/openssl.cnf'), true);
+  assert.equal(llCfg.positiveReadRoots.includes('/etc/pki/ca-trust'), true);
   assert.equal(llCfg.allowedReadOnlyPaths.some(p => p.endsWith('/lw-ll-cand')), true);
   assert.equal(llCfg.allowedReadOnlyPaths.includes('/opt/custom-toolchain'), true);
   assert.equal(llCfg.writablePaths.some(p => p.endsWith('/lw-ll-out')), true);

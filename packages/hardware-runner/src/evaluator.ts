@@ -1928,7 +1928,10 @@ export function buildStrictLinuxBwrapArgs(
     '/etc/ssl/openssl.cnf',
     '/etc/ssl/certs',
     '/etc/ca-certificates',
-    '/etc/pki',
+    '/etc/pki/ca-trust',
+    '/etc/pki/tls/certs',
+    '/etc/pki/tls/cacerts',
+    '/etc/pki/tls/openssl.cnf',
   ];
   for (const sysPath of optionalSystemRo) {
     if (!probeExecutables || existsSync(sysPath)) {
@@ -1990,7 +1993,10 @@ const LINUX_LANDLOCK_POSITIVE_READ_ROOTS: readonly string[] = Object.freeze([
   '/etc/ssl/openssl.cnf',
   '/etc/ssl/certs',
   '/etc/ca-certificates',
-  '/etc/pki',
+  '/etc/pki/ca-trust',
+  '/etc/pki/tls/certs',
+  '/etc/pki/tls/cacerts',
+  '/etc/pki/tls/openssl.cnf',
   '/etc/localtime',
   '/proc/cpuinfo',
   '/proc/meminfo',
