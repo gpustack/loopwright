@@ -192,33 +192,28 @@ if (parsed.shard !== null) {
 }
 
 if (parsed.listOnly) {
-  for (const file of targetFiles) {
-    process.stdout.write(`${file}\n`);
+  if (targetFiles.length > 0) {
+    process.stdout.write(`${targetFiles.join('\n')}\n`);
   }
-  process.exit(0);
+} else if (targetFiles.length > 0) {
+  const requested = parsed.concurrency ?? Number.parseInt(process.env.LW_TEST_CONCURRENCY ?? '', 10);
+  const isCi = Boolean(process.env.CI && process.env.CI !== '0' && process.env.CI !== 'false');
+  const concurrency = Number.isInteger(requested) && requested >= 1
+    ? requested
+    : isCi
+      ? Math.min(4, Math.max(2, availableParallelism()))
+      : Math.min(6, Math.max(2, Math.floor(availableParallelism() / 3)));
+
+  const child = spawn(process.execPath, ['--test', `--test-concurrency=${String(concurrency)}`, ...targetFiles], {
+    cwd: REPO_ROOT,
+    stdio: 'inherit',
+  });
+
+  child.on('exit', (code, signal) => {
+    if (signal !== null) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 1);
+  });
 }
-
-if (targetFiles.length === 0) {
-  process.exit(0);
-}
-
-const requested = parsed.concurrency ?? Number.parseInt(process.env.LW_TEST_CONCURRENCY ?? '', 10);
-const isCi = Boolean(process.env.CI && process.env.CI !== '0' && process.env.CI !== 'false');
-const concurrency = Number.isInteger(requested) && requested >= 1
-  ? requested
-  : isCi
-    ? Math.min(4, Math.max(2, availableParallelism()))
-    : Math.min(6, Math.max(2, Math.floor(availableParallelism() / 3)));
-
-const child = spawn(process.execPath, ['--test', `--test-concurrency=${String(concurrency)}`, ...targetFiles], {
-  cwd: REPO_ROOT,
-  stdio: 'inherit',
-});
-
-child.on('exit', (code, signal) => {
-  if (signal !== null) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
-});

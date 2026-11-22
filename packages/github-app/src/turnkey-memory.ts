@@ -93,6 +93,10 @@ const MAX_MANAGED_MEMORY_FILES = 2_049;
 const MAX_MEMORY_INDEX_BLOB_BYTES = MAX_MEMORY_INDEX_FILE_BYTES;
 const MAX_MEMORY_ENTRY_BLOB_BYTES = MAX_MEMORY_ENTRY_FILE_BYTES;
 
+function isSafeBranchName(name: string): boolean {
+  return SAFE_BRANCH_PATTERN.test(name) && !name.includes('..') && !name.startsWith('-');
+}
+
 interface PerRunMemoryReceipt {
   readonly version: 1;
   readonly state: 'uncertain' | 'completed';
@@ -771,24 +775,25 @@ export async function finalizeAndPublishTurnkeyMemory(
         });
       }
       const expectedReceiptBranch = isInlineMode
-        ? (candidatePublication?.branchName ?? existingReceipt.branchName)
+        ? (candidatePublication?.branchName ?? null)
         : memoryBranch;
       const inlineReceiptBranchInvalid = isInlineMode && (
-        expectedReceiptBranch === targetBranch
-        || !SAFE_BRANCH_PATTERN.test(expectedReceiptBranch)
-        || expectedReceiptBranch.includes('..')
-        || expectedReceiptBranch.startsWith('-')
+        expectedReceiptBranch === null
+        || expectedReceiptBranch === targetBranch
+        || !isSafeBranchName(expectedReceiptBranch)
       );
       const retainedRunMismatch = await verifyRetainedRunDescriptorIfPresent(options.runRoot, expectedBindings);
       const bindingMismatchReason = (inlineReceiptBranchInvalid
-        ? `inline memory receipt branch "${expectedReceiptBranch}" is invalid or targets "${targetBranch}"`
+        ? (expectedReceiptBranch === null
+          ? 'inline memory receipt cannot be replayed without matching candidate pull request publication'
+          : `inline memory receipt branch "${expectedReceiptBranch}" is invalid or targets "${targetBranch}"`)
         : null)
         ?? validateReceiptBindings(existingReceipt, {
           repositoryFullName: options.repositoryFullName,
           taskpack,
           targetBranch,
           memoryDirectory,
-          memoryBranch: expectedReceiptBranch,
+          memoryBranch: expectedReceiptBranch!,
         })
         ?? retainedRunMismatch;
       if (bindingMismatchReason !== null) {
@@ -838,11 +843,7 @@ export async function finalizeAndPublishTurnkeyMemory(
           pullRequestNumber: candidatePublication.pullRequestNumber,
         });
       }
-      if (
-        !SAFE_BRANCH_PATTERN.test(candidatePublication.branchName)
-        || candidatePublication.branchName.includes('..')
-        || candidatePublication.branchName.startsWith('-')
-      ) {
+      if (!isSafeBranchName(candidatePublication.branchName)) {
         return buildEmptyMemorySummary(memoryDirectory, 'failed', `unsafe candidate branch name "${candidatePublication.branchName}"`);
       }
       if (candidatePublication.branchName === targetBranch) {
@@ -935,8 +936,8 @@ export async function finalizeAndPublishTurnkeyMemory(
         }
       }
 
-      const memoryBranchSafe = SAFE_BRANCH_PATTERN.test(memoryBranch) && !memoryBranch.includes('..') && !memoryBranch.startsWith('-');
-      const targetBranchSafe = SAFE_BRANCH_PATTERN.test(targetBranch) && !targetBranch.includes('..') && !targetBranch.startsWith('-');
+      const memoryBranchSafe = isSafeBranchName(memoryBranch);
+      const targetBranchSafe = isSafeBranchName(targetBranch);
       const apiBaseUrl = (options.apiBaseUrl?.trim() || options.runtimeEnv?.['GITHUB_API_URL']?.trim() || '').replace(/\/+$/, '');
       const hasGitHubCredentials = typeof options.githubToken === 'string' && options.githubToken.trim().length > 0;
       const publicationModeEnabled = options.manifest.spec.publication.mode === 'pull_request'
@@ -1456,9 +1457,9 @@ export async function finalizeAndPublishTurnkeyMemory(
           proposalId: finalized.proposal.proposalId,
           entryCount: finalized.proposal.operations.length,
           rebased: casResult.rebased,
-          branchName: memoryBranch,
-          pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
-          pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
+          branchName: isInlineMode ? null : memoryBranch,
+          pullRequestUrl: null,
+          pullRequestNumber: null,
           reason: isInlineMode
             ? 'GitHub credentials or git remote unavailable for inline memory commit'
             : 'GitHub credentials, API URL, or git remote unavailable for separate memory PR publication',
@@ -1471,9 +1472,9 @@ export async function finalizeAndPublishTurnkeyMemory(
           proposalId: finalized.proposal.proposalId,
           entryCount: finalized.proposal.operations.length,
           rebased: casResult.rebased,
-          branchName: memoryBranch,
-          pullRequestUrl: candidatePublication?.pullRequestUrl ?? null,
-          pullRequestNumber: candidatePublication?.pullRequestNumber ?? null,
+          branchName: isInlineMode ? null : memoryBranch,
+          pullRequestUrl: null,
+          pullRequestNumber: null,
           reason: 'git remote unavailable for memory publication',
         });
       }
@@ -1638,8 +1639,7 @@ export async function finalizeAndPublishTurnkeyMemory(
       ].join('\n');
       const signoffLine = `Signed-off-by: ${commitIdentity.name} <${commitIdentity.email}>`;
       const hasExactSignoff = cleanTitle === signoffLine;
-      const effectiveSkipCi = options.manifest.spec.memory.skipCi ?? !isInlineMode;
-      const skipCiParagraph = effectiveSkipCi ? '\n\n[skip ci]' : '';
+      const skipCiParagraph = options.manifest.spec.memory.skipCi === true ? '\n\n[skip ci]' : '';
       const commitMessage = hasExactSignoff
         ? `${cleanTitle}\n\n${commitBody}${skipCiParagraph}\n`
         : `${cleanTitle}\n\n${commitBody}${skipCiParagraph}\n\n${signoffLine}\n`;

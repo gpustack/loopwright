@@ -2310,6 +2310,23 @@ describe('turnkey @loopwright/memory integration (pre-run selection and separate
       assert.equal(replayRes.status, 'updated');
       assert.equal(await git(bareRemote, ['rev-parse', 'refs/heads/loopwright/main']), branchTip, 'replay must not push a duplicate commit');
 
+      // Replaying an existing receipt in inline mode without a matching candidatePublication must refuse (not echo stale receipt)
+      const staleReceiptRefused = await finalizeAndPublishTurnkeyMemory({
+        runRoot,
+        runId: 'run-inline-1',
+        repositoryRoot: repo,
+        repositoryFullName: 'acme/repo',
+        manifest,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: mainSha,
+        candidatePublication: null,
+        remoteUrl: bareRemote,
+        githubToken: 'ghp_inline_token_123456',
+        scrubber,
+      });
+      assert.equal(staleReceiptRefused.status, 'refused');
+      assert.match(staleReceiptRefused.reason ?? '', /without matching candidate pull request/);
+
       // Remove receipt to test concurrent move refusal against branchTip (which already moved past candidateCommitSha)
       await unlink(join(runRoot, 'run-inline-1', 'memory-publication.json'));
       const conflictRes = await finalizeAndPublishTurnkeyMemory({
