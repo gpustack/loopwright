@@ -2929,6 +2929,46 @@ describe('suite.ts: schedule filtering, matrix binding, and pull-request comment
       assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/alpha/helper.md'), false);
       assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/beta/proposal.json'), false);
       assert.equal(isAllowedByContractScope(nestedAlphaScope, '.loopwright/beta/new-file.txt'), false);
+
+      // Negative: case-variant control root under .loopwright/suite.yaml must fail closed rather than carving out without siblings
+      await mkdir(join(nestedRoot, '.LOOPWRIGHT', 'alpha'), { recursive: true });
+      await writeFile(
+        join(nestedRoot, '.loopwright', 'suite.yaml'),
+        [
+          'apiVersion: loopwright.dev/v1alpha1',
+          'kind: TaskpackSuite',
+          'metadata:',
+          '  name: nested-proposals-suite',
+          'spec:',
+          '  domains:',
+          '    - id: alpha',
+          '      taskpack: .LOOPWRIGHT/alpha/taskpack.yaml',
+          '    - id: beta',
+          '      taskpack: .loopwright/beta/taskpack.yaml',
+        ].join('\n') + '\n',
+        'utf8',
+      );
+      await writeFile(
+        join(nestedRoot, '.LOOPWRIGHT', 'alpha', 'taskpack.yaml'),
+        domainManifestYaml({
+          name: 'alpha-nested',
+          writable: ['pkg/alpha/**', '.LOOPWRIGHT/alpha/proposal.json'],
+          proposalPath: '.LOOPWRIGHT/alpha/proposal.json',
+          localChecks: [{ id: 'scope-guard', implementation: 'scope.v1' }],
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'lw-alpha/',
+            titleTemplate: 'chore(alpha): sync',
+          },
+          triggers: { schedule: true, workflowDispatch: true, commentCommands: ['retry', 'revise', 'status'] },
+        }),
+        'utf8',
+      );
+      await assert.rejects(
+        () => loadTaskpackSuite({ repositoryRoot: nestedRoot, policyProfile: 'github' }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_MANIFEST_INVALID',
+      );
     });
   });
 });

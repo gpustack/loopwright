@@ -16,6 +16,7 @@ import {
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
+  pathCoveredByCaseInsensitive,
   validateRfc6901JsonPointer,
   validateTaskpackV2Manifest,
   writableOverlapsMandatoryProtected,
@@ -1059,23 +1060,19 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     }
   }
 
-  // Reject colliding carved-out proposal paths across domains or against the suite manifest
-  const foldPath = (p: string): string => p.normalize('NFC').toLowerCase();
-  const pathCoversCaseInsensitive = (candidate: string, root: string): boolean => (
-    pathCoveredBy(foldPath(candidate), foldPath(root))
-  );
+  // Reject colliding carved-out proposal paths across domains or against the suite manifest (case-insensitively)
   const seenCarvedProposals: { readonly domainId: string; readonly path: string; readonly index: number }[] = [];
   for (const item of rawDomains) {
     const propPath = item.controlPlane.carvedOutProposalPath;
     if (propPath === undefined) continue;
-    if (pathCoversCaseInsensitive(propPath, suitePath) || pathCoversCaseInsensitive(suitePath, propPath)) {
+    if (pathCoveredByCaseInsensitive(propPath, suitePath) || pathCoveredByCaseInsensitive(suitePath, propPath)) {
       suiteInvalid(
         `domain "${item.decl.id}" carved-out proposal.path "${propPath}" collides with suite manifest "${suitePath}"`,
         `/spec/domains/${item.index}`,
       );
     }
     for (const prev of seenCarvedProposals) {
-      if (pathCoversCaseInsensitive(propPath, prev.path) || pathCoversCaseInsensitive(prev.path, propPath)) {
+      if (pathCoveredByCaseInsensitive(propPath, prev.path) || pathCoveredByCaseInsensitive(prev.path, propPath)) {
         suiteInvalid(
           `domains "${prev.domainId}" ("${prev.path}") and "${item.decl.id}" ("${propPath}") declare colliding carved-out proposal.path values`,
           `/spec/domains/${item.index}`,
@@ -1085,10 +1082,12 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     seenCarvedProposals.push({ domainId: item.decl.id, path: propPath, index: item.index });
   }
 
-  // Compute suite-wide mandatory protected path union (paths NO domain in the suite may write)
+  // Compute suite-wide mandatory protected path union (paths NO domain in the suite may write).
+  // Carve-out matching uses exact `pathCoveredBy` to stay aligned with `canCarveOutControlRootProposal`
+  // and `collectControlRootSiblingPaths`; case-variant control roots fail closed during overlap checks.
   const carvedOutProposals = seenCarvedProposals.map(entry => entry.path);
   const isRootCarvedByAnyProposal = (dirRoot: string): boolean => (
-    carvedOutProposals.some(propPath => pathCoversCaseInsensitive(propPath, dirRoot))
+    carvedOutProposals.some(propPath => pathCoveredBy(propPath, dirRoot))
   );
   const siblingCache = new Map<string, ReturnType<typeof collectControlRootSiblingPaths>>();
   const getControlRootSiblings = (dirRoot: string, propPath: string) => {
@@ -1121,7 +1120,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
   ]);
   const addSuiteWideCarvedSiblings = (dirRoot: string): void => {
     for (const propPath of carvedOutProposals) {
-      if (!pathCoversCaseInsensitive(propPath, dirRoot)) continue;
+      if (!pathCoveredBy(propPath, dirRoot)) continue;
       const sibs = getControlRootSiblings(dirRoot, propPath);
       for (const s of sibs.prioritySiblings) {
         if (!isRootCarvedByAnyProposal(s)) suiteUnionSet.add(s);
@@ -1182,18 +1181,18 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
       for (const s of sibs.regularSiblings) perDomainSuiteExtra.add(s);
     };
     if (hasDedicatedSuiteDir) {
-      if (ownCarvedProposal === undefined || !pathCoversCaseInsensitive(ownCarvedProposal, suiteControlRoot)) {
+      if (ownCarvedProposal === undefined || !pathCoveredBy(ownCarvedProposal, suiteControlRoot)) {
         perDomainSuiteExtra.add(suiteControlRoot);
       } else {
         addOwnCarvedSiblings(suiteControlRoot, ownCarvedProposal);
       }
     }
-    if (ownCarvedProposal !== undefined && pathCoversCaseInsensitive(ownCarvedProposal, item.controlRoot)) {
+    if (ownCarvedProposal !== undefined && pathCoveredBy(ownCarvedProposal, item.controlRoot)) {
       addOwnCarvedSiblings(item.controlRoot, ownCarvedProposal);
     }
     for (const peer of rawDomains) {
       if (peer.decl.id === item.decl.id) continue;
-      if (ownCarvedProposal === undefined || !pathCoversCaseInsensitive(ownCarvedProposal, peer.controlRoot)) {
+      if (ownCarvedProposal === undefined || !pathCoveredBy(ownCarvedProposal, peer.controlRoot)) {
         perDomainSuiteExtra.add(peer.controlRoot);
       } else {
         addOwnCarvedSiblings(peer.controlRoot, ownCarvedProposal);
