@@ -16,6 +16,7 @@ import {
   normalizeRelativePath,
   parseTaskpackDocument,
   pathCoveredBy,
+  pathCoveredByCaseInsensitive,
   validateRfc6901JsonPointer,
   validateTaskpackV2Manifest,
   writableOverlapsMandatoryProtected,
@@ -1013,22 +1014,12 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
       && domainManifest.spec.execution?.capabilities.allowWorkflowWrites === true
       && (options.enforceHostAuthority === false || options.hostPolicy?.allowWorkflowWrites === true)
     );
-    const siblingSet = domainManifest.spec.proposal !== undefined
-      ? collectControlRootSiblingPaths({
-        repositoryRoot: resolvedRoot,
-        controlRoot: domainControlRoot,
-        proposalPath: domainManifest.spec.proposal.path,
-      })
-      : { prioritySiblings: Object.freeze<readonly string[]>([]), regularSiblings: Object.freeze<readonly string[]>([]) };
-
     const controlPlane = collectManifestControlPlanePaths(domainManifest, {
       policyProfile,
       controlRoot: domainControlRoot,
       manifestPath: decl.taskpack,
       allowWorkflowWrites,
       githubSiblings,
-      priorityControlRootSiblings: siblingSet.prioritySiblings,
-      controlRootSiblings: siblingSet.regularSiblings,
     });
 
     rawDomains.push({
@@ -1069,13 +1060,48 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     }
   }
 
-  // Compute suite-wide mandatory protected path union
-  const carvedOutProposals = rawDomains
-    .map(d => d.controlPlane.carvedOutProposalPath)
-    .filter((p): p is string => p !== undefined && p !== suitePath);
+  // Reject colliding carved-out proposal paths across domains or against the suite manifest (case-insensitively)
+  const seenCarvedProposals: { readonly domainId: string; readonly path: string; readonly index: number }[] = [];
+  for (const item of rawDomains) {
+    const propPath = item.controlPlane.carvedOutProposalPath;
+    if (propPath === undefined) continue;
+    if (pathCoveredByCaseInsensitive(propPath, suitePath) || pathCoveredByCaseInsensitive(suitePath, propPath)) {
+      suiteInvalid(
+        `domain "${item.decl.id}" carved-out proposal.path "${propPath}" collides with suite manifest "${suitePath}"`,
+        `/spec/domains/${item.index}`,
+      );
+    }
+    for (const prev of seenCarvedProposals) {
+      if (pathCoveredByCaseInsensitive(propPath, prev.path) || pathCoveredByCaseInsensitive(prev.path, propPath)) {
+        suiteInvalid(
+          `domains "${prev.domainId}" ("${prev.path}") and "${item.decl.id}" ("${propPath}") declare colliding carved-out proposal.path values`,
+          `/spec/domains/${item.index}`,
+        );
+      }
+    }
+    seenCarvedProposals.push({ domainId: item.decl.id, path: propPath, index: item.index });
+  }
+
+  // Compute suite-wide mandatory protected path union (paths NO domain in the suite may write).
+  // Carve-out matching uses exact `pathCoveredBy` to stay aligned with `canCarveOutControlRootProposal`
+  // and `collectControlRootSiblingPaths`; case-variant control roots fail closed during overlap checks.
+  const carvedOutProposals = seenCarvedProposals.map(entry => entry.path);
   const isRootCarvedByAnyProposal = (dirRoot: string): boolean => (
     carvedOutProposals.some(propPath => pathCoveredBy(propPath, dirRoot))
   );
+  const siblingCache = new Map<string, ReturnType<typeof collectControlRootSiblingPaths>>();
+  const getControlRootSiblings = (dirRoot: string, propPath: string) => {
+    const key = `${dirRoot}\0${propPath}`;
+    const cached = siblingCache.get(key);
+    if (cached !== undefined) return cached;
+    const computed = collectControlRootSiblingPaths({
+      repositoryRoot: resolvedRoot,
+      controlRoot: dirRoot,
+      proposalPath: propPath,
+    });
+    siblingCache.set(key, computed);
+    return computed;
+  };
 
   const suiteDirRaw = posix.dirname(suitePath);
   const hasDedicatedSuiteDir = suiteDirRaw !== '.' && suiteDirRaw !== '';
@@ -1092,6 +1118,18 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
     ...builtInAutomation,
     suitePath,
   ]);
+  const addSuiteWideCarvedSiblings = (dirRoot: string): void => {
+    for (const propPath of carvedOutProposals) {
+      if (!pathCoveredBy(propPath, dirRoot)) continue;
+      const sibs = getControlRootSiblings(dirRoot, propPath);
+      for (const s of sibs.prioritySiblings) {
+        if (!isRootCarvedByAnyProposal(s)) suiteUnionSet.add(s);
+      }
+      for (const s of sibs.regularSiblings) {
+        if (!isRootCarvedByAnyProposal(s)) suiteUnionSet.add(s);
+      }
+    }
+  };
   if (hasDedicatedSuiteDir) {
     if (!isRootCarvedByAnyProposal(suiteControlRoot)) {
       suiteUnionSet.add(suiteControlRoot);
@@ -1104,19 +1142,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
       suiteUnionSet.add(`${suiteControlRoot}/taskpack.yml`);
       suiteUnionSet.add(`${suiteControlRoot}/taskpack.json`);
       suiteUnionSet.add(`${suiteControlRoot}/digests.lock.json`);
-      for (const propPath of carvedOutProposals) {
-        if (pathCoveredBy(propPath, suiteControlRoot)) {
-          const sibs = collectControlRootSiblingPaths({
-            repositoryRoot: resolvedRoot,
-            controlRoot: suiteControlRoot,
-            proposalPath: propPath,
-          });
-          for (const s of sibs.prioritySiblings) suiteUnionSet.add(s);
-          for (const s of sibs.regularSiblings) {
-            suiteUnionSet.add(s);
-          }
-        }
-      }
+      addSuiteWideCarvedSiblings(suiteControlRoot);
     }
   }
 
@@ -1125,19 +1151,7 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
       for (const p of item.controlPlane.explicitWithoutControlRoot) {
         suiteUnionSet.add(p);
       }
-      for (const propPath of carvedOutProposals) {
-        if (pathCoveredBy(propPath, item.controlRoot)) {
-          const sibs = collectControlRootSiblingPaths({
-            repositoryRoot: resolvedRoot,
-            controlRoot: item.controlRoot,
-            proposalPath: propPath,
-          });
-          for (const s of sibs.prioritySiblings) suiteUnionSet.add(s);
-          for (const s of sibs.regularSiblings) {
-            suiteUnionSet.add(s);
-          }
-        }
-      }
+      addSuiteWideCarvedSiblings(item.controlRoot);
     } else {
       for (const p of item.controlPlane.compactMandatoryPaths) {
         suiteUnionSet.add(p);
@@ -1157,19 +1171,31 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
   const loadedDomains: LoadedTaskpackSuiteDomain[] = [];
 
   for (const item of rawDomains) {
-    const ownCarvedProposal = item.controlPlane.carvedOutProposalPath !== suitePath
-      ? item.controlPlane.carvedOutProposalPath
-      : undefined;
+    const ownCarvedProposal = item.controlPlane.carvedOutProposalPath;
 
-    // Peer control roots where THIS domain does NOT own a carved-out proposal are fully protected for this domain.
+    // Start with suite-wide invariants, then add peer control roots, peer proposals, and siblings along this domain's own carved-out spine.
     const perDomainSuiteExtra = new Set<string>(suiteProtectedPaths);
-    if (hasDedicatedSuiteDir && (ownCarvedProposal === undefined || !pathCoveredBy(ownCarvedProposal, suiteControlRoot))) {
-      perDomainSuiteExtra.add(suiteControlRoot);
+    const addOwnCarvedSiblings = (dirRoot: string, propPath: string): void => {
+      const sibs = getControlRootSiblings(dirRoot, propPath);
+      for (const s of sibs.prioritySiblings) perDomainSuiteExtra.add(s);
+      for (const s of sibs.regularSiblings) perDomainSuiteExtra.add(s);
+    };
+    if (hasDedicatedSuiteDir) {
+      if (ownCarvedProposal === undefined || !pathCoveredBy(ownCarvedProposal, suiteControlRoot)) {
+        perDomainSuiteExtra.add(suiteControlRoot);
+      } else {
+        addOwnCarvedSiblings(suiteControlRoot, ownCarvedProposal);
+      }
+    }
+    if (ownCarvedProposal !== undefined && pathCoveredBy(ownCarvedProposal, item.controlRoot)) {
+      addOwnCarvedSiblings(item.controlRoot, ownCarvedProposal);
     }
     for (const peer of rawDomains) {
       if (peer.decl.id === item.decl.id) continue;
       if (ownCarvedProposal === undefined || !pathCoveredBy(ownCarvedProposal, peer.controlRoot)) {
         perDomainSuiteExtra.add(peer.controlRoot);
+      } else {
+        addOwnCarvedSiblings(peer.controlRoot, ownCarvedProposal);
       }
       if (peer.controlPlane.carvedOutProposalPath !== undefined) {
         perDomainSuiteExtra.add(peer.controlPlane.carvedOutProposalPath);
@@ -1178,15 +1204,6 @@ export async function loadTaskpackSuite(options: LoadTaskpackSuiteOptions): Prom
 
     for (const [wIdx, writablePattern] of item.manifest.spec.scope.writable.entries()) {
       for (const protectedEntry of perDomainSuiteExtra) {
-        if (
-          ownCarvedProposal !== undefined
-          && writablePattern === ownCarvedProposal
-          && protectedEntry !== suitePath
-          && !rawDomains.some(peer => peer.decl.id !== item.decl.id && peer.controlPlane.carvedOutProposalPath === writablePattern)
-          && protectedEntry === item.controlRoot
-        ) {
-          continue;
-        }
         const isBuiltIn = builtInProtectedSet.has(protectedEntry);
         if (writableOverlapsMandatoryProtected(writablePattern, protectedEntry, item.allowWorkflowWrites, isBuiltIn)) {
           suiteInvalid(

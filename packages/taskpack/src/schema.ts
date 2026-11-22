@@ -695,7 +695,7 @@ export function pathCoveredBy(candidate: string, root: string): boolean {
   return candidate === root || candidate.startsWith(root.endsWith('/') ? root : `${root}/`);
 }
 
-function pathCoveredByCaseInsensitive(candidate: string, root: string): boolean {
+export function pathCoveredByCaseInsensitive(candidate: string, root: string): boolean {
   return pathCoveredBy(candidate.normalize('NFC').toLowerCase(), root.normalize('NFC').toLowerCase());
 }
 
