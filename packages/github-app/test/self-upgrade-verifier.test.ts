@@ -1403,13 +1403,18 @@ if (!/^ERR:(EPERM|EACCES|ENOENT)$/.test(String(unixOutcome))) {
     // 6) Failing runtime-gates test extracts structured failing test name, source .test.ts path, and assertion evidence into LOOPWRIGHT_CHECK_OUT
     await withTempDir(async dir => {
       const failingTestRunnerBody = `process.stdout.write([
-  '✔ ok-case (1.0ms)',
+  '✔ handles fail closed and Error: gracefully (1.0ms)',
+  'ℹ fail 2',
   '✖ failing tests:',
   '',
   'test at .test-build/packages/agent-pi/test/pi-compat.test.js:42:5',
   '✖ pi-1.6-compat-regression (12.3ms)',
   '  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
   "  actual: 'failed', expected: 'completed', operator: 'strictEqual'",
+  '',
+  'test at .test-build/packages/agent-pi/test/nonexistent-generated.test.js:9:1',
+  '✖ generated-only-failure (2.0ms)',
+  '  Error: boom',
   '',
 ].join('\\n'));
 process.exit(1);
@@ -1444,10 +1449,12 @@ process.exit(1);
         findings: readonly { title: string; severity: string; path?: string; evidence: string }[];
       };
       assert.equal(diagOut.detail.includes('pi-1.6-compat-regression'), true, `expected detail to include failing test name: ${diagOut.detail}`);
-      assert.equal(diagOut.findings.length, 1);
+      assert.equal(diagOut.findings.length, 2);
       assert.equal(diagOut.findings[0]?.title.includes('pi-1.6-compat-regression'), true);
       assert.equal(diagOut.findings[0]?.path, 'packages/agent-pi/test/pi-compat.test.ts');
       assert.equal(diagOut.findings[0]?.evidence.includes("expected: 'completed'"), true);
+      assert.equal(diagOut.findings[1]?.title.includes('generated-only-failure'), true);
+      assert.equal(diagOut.findings[1]?.path, undefined, 'nonexistent mapped path must be omitted');
     });
   });
 });

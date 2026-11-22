@@ -1338,8 +1338,7 @@ STAGE_PATH_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9._/-])((?:\.test-build/)?(?:packages|docs|scripts|\.auto-sync)/[A-Za-z0-9._/-]+\.(?:[cm]?[jt]sx?|json|md|ya?ml|sh))"
 )
 STAGE_ERROR_LINE_RE = re.compile(
-    r"(?:error TS\d+|^\s*\d+:\d+\s+error\b|AssertionError|ERR_[A-Z0-9_]+|\bError:|✖|^\s*not ok\b|\bFAIL\b|verify\.sh:)",
-    re.IGNORECASE,
+    r"(?:\berror TS\d+:|^\s*\d+:\d+\s+error\b|^\s*✖\s+|^\s*not ok\b|^\s*(?:AssertionError|TypeError|SyntaxError|ReferenceError|RangeError|Error):|\b(?:AssertionError|ERR_[A-Z0-9_]+)\b|^\s*npm error\b|^\s*ERROR\b)"
 )
 
 
@@ -1349,10 +1348,13 @@ def sanitize_finding_rel_path(raw: str, base_root: str | None = None) -> str | N
         cand = cand[2:]
     if cand.startswith(".test-build/") and cand.endswith(".js"):
         ts_cand = cand[len(".test-build/") : -3] + ".ts"
+        stripped = cand[len(".test-build/") :]
         if base_root and os.path.isfile(os.path.join(base_root, ts_cand)):
             cand = ts_cand
+        elif base_root and os.path.isfile(os.path.join(base_root, stripped)):
+            cand = stripped
         else:
-            cand = cand[len(".test-build/") :]
+            return None
     if not cand or len(cand) > 256 or cand.startswith("/") or "\\" in cand:
         return None
     segs = cand.split("/")
@@ -1367,6 +1369,8 @@ def sanitize_finding_rel_path(raw: str, base_root: str | None = None) -> str | N
             or RESERVED_DEV_NAME_RE.match(seg)
         ):
             return None
+    if base_root and not os.path.isfile(os.path.join(base_root, cand)):
+        return None
     return cand
 
 
@@ -1375,7 +1379,11 @@ class StageOutputCapture:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._stop = threading.Event()
         self._bufs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def stop(self) -> None:
+        self._stop.set()
 
     def append(self, stream_name: str, data: bytes) -> None:
         if not data:
@@ -1392,9 +1400,11 @@ class StageOutputCapture:
 
     def pump_stream(self, pipe: object, stream_name: str, target_stream: object) -> None:
         try:
-            while True:
+            while not self._stop.is_set():
                 chunk = pipe.read(16384)  # type: ignore[attr-defined]
                 if not chunk:
+                    break
+                if self._stop.is_set():
                     break
                 self.append(stream_name, chunk)
                 try:
@@ -1476,7 +1486,11 @@ def build_stage_failure_diagnostics(
 
     # 2. Extract targeted error lines (tsc, eslint, check-docs, hugo, closure, npm) or tail excerpt
     all_lines = [ln.rstrip() for ln in combined.splitlines() if ln.strip()]
-    matched_indices = [idx for idx, ln in enumerate(all_lines) if STAGE_ERROR_LINE_RE.search(ln)]
+    matched_indices = [
+        idx
+        for idx, ln in enumerate(all_lines)
+        if not ln.lstrip().startswith(("✔", "ℹ")) and STAGE_ERROR_LINE_RE.search(ln)
+    ]
     if matched_indices:
         selected_idx: set[int] = set()
         for idx in matched_indices[-20:]:
@@ -2095,8 +2109,12 @@ def run_contained(
                         kill_timed_out = True
                         break
                     time.sleep(0.02)
+            drain_deadline = time.monotonic() + 5.0
             for t in pump_threads:
-                t.join(timeout=2.0)
+                remaining = max(0.0, drain_deadline - time.monotonic())
+                t.join(timeout=remaining)
+            if any(t.is_alive() for t in pump_threads):
+                capture.stop()
             tamper_reason = restore_and_verify_masks(real_ro_masks, dir_modes, file_snap)
             if tamper_reason is not None:
                 sys.stderr.write(f"verify.sh: {tamper_reason} in stage {stage_label!r}\n")
@@ -2404,12 +2422,23 @@ def run_contained(
             except OSError:
                 pass
         if proc is not None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            pgid = proc.pid
+            kill_deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError as exc:
+                    if exc.errno == errno.ESRCH:
+                        break
+                if time.monotonic() >= kill_deadline:
+                    break
+                time.sleep(0.02)
+        drain_deadline = time.monotonic() + 5.0
         for t in pump_threads:
-            t.join(timeout=2.0)
+            remaining = max(0.0, drain_deadline - time.monotonic())
+            t.join(timeout=remaining)
+        if any(t.is_alive() for t in pump_threads):
+            capture.stop()
     if returncode != 0:
         detail_msg, stage_findings = build_stage_failure_diagnostics(stage_label, returncode, capture, stage_cwd)
         write_phase3_check_out(detail_msg, findings=stage_findings)
