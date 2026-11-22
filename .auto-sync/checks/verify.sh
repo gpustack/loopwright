@@ -1300,7 +1300,10 @@ cat >"$TEST_RUNNER" <<'EOF'
 set -euo pipefail
 
 "$VERIFY_NODE_BIN" packages/cli/dist/main.js closure --verify-failures
-LW_TEST_CONCURRENCY="${LW_TEST_CONCURRENCY:-3}" "$VERIFY_NODE_BIN" scripts/run-tests.mjs
+if [[ -z "${LW_TEST_CONCURRENCY:-}" ]]; then
+  LW_TEST_CONCURRENCY="$("$VERIFY_NODE_BIN" -e 'const os = require("node:os"); console.log(Math.min(6, Math.max(2, os.availableParallelism())));' 2>/dev/null || echo 4)"
+fi
+LW_TEST_CONCURRENCY="$LW_TEST_CONCURRENCY" "$VERIFY_NODE_BIN" scripts/run-tests.mjs
 EOF
 chmod 0555 "$TEST_RUNNER"
 
