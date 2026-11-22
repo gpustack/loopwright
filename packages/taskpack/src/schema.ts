@@ -232,6 +232,7 @@ export function resolveExecutionCapabilities(
     allowCheckNetwork: overrides.allowCheckNetwork ?? privilegedDefault,
     allowWorkflowWrites: overrides.allowWorkflowWrites ?? false,
     allowAgentNetwork: overrides.allowAgentNetwork ?? false,
+    allowDockerSocket: overrides.allowDockerSocket ?? false,
   });
 }
 
@@ -259,6 +260,7 @@ export function validateExecutionAuthority(
     || caps?.mountReadOnlyGit === true
     || caps?.allowCheckNetwork === true
     || caps?.allowAgentNetwork === true
+    || caps?.allowDockerSocket === true
     || perCheckMountReadOnlyGitIdx !== -1
     || perCheckLoopbackNetIdx !== -1
   );
@@ -271,6 +273,7 @@ export function validateExecutionAuthority(
         && caps?.mountReadOnlyGit !== true
         && caps?.allowCheckNetwork !== true
         && caps?.allowAgentNetwork !== true
+        && caps?.allowDockerSocket !== true
         ? `/spec/verification/localChecks/${perCheckMountReadOnlyGitIdx}/parameters/mountReadOnlyGit`
         : perCheckLoopbackNetIdx !== -1
           && caps?.allowHostEnv !== true
@@ -278,12 +281,20 @@ export function validateExecutionAuthority(
           && caps?.mountReadOnlyGit !== true
           && caps?.allowCheckNetwork !== true
           && caps?.allowAgentNetwork !== true
+          && caps?.allowDockerSocket !== true
           ? `/spec/verification/localChecks/${perCheckLoopbackNetIdx}/parameters/networkMode`
           : '/spec/execution/capabilities';
     throw new TaskpackError(
       'TASKPACK_HOST_BINDING_INVALID',
       'manifest requests privileged execution capabilities without operator host authorization (allowPrivileged)',
       diagPath,
+    );
+  }
+  if (caps?.allowDockerSocket === true && hostPolicy.allowDockerSocket !== true) {
+    throw new TaskpackError(
+      'TASKPACK_HOST_BINDING_INVALID',
+      'manifest declares allowDockerSocket: true without operator host authorization (allowDockerSocket)',
+      '/spec/execution/capabilities/allowDockerSocket',
     );
   }
   if (caps?.allowWorkflowWrites === true && hostPolicy.allowWorkflowWrites !== true) {
@@ -2449,11 +2460,12 @@ function validateExecutionSection(
     allowCheckNetwork?: boolean;
     allowWorkflowWrites?: boolean;
     allowAgentNetwork?: boolean;
+    allowDockerSocket?: boolean;
   } = {};
   if (exec['capabilities'] !== undefined) {
     const rawCaps = requireObject(exec['capabilities'], '/spec/execution/capabilities', [
       'allowHostEnv', 'allowHostPath', 'mountReadOnlyGit',
-      'allowCheckNetwork', 'allowWorkflowWrites', 'allowAgentNetwork',
+      'allowCheckNetwork', 'allowWorkflowWrites', 'allowAgentNetwork', 'allowDockerSocket',
     ]);
     if (rawCaps['allowHostEnv'] !== undefined) overrides.allowHostEnv = requireBoolean(rawCaps['allowHostEnv'], '/spec/execution/capabilities/allowHostEnv');
     if (rawCaps['allowHostPath'] !== undefined) overrides.allowHostPath = requireBoolean(rawCaps['allowHostPath'], '/spec/execution/capabilities/allowHostPath');
@@ -2461,6 +2473,7 @@ function validateExecutionSection(
     if (rawCaps['allowCheckNetwork'] !== undefined) overrides.allowCheckNetwork = requireBoolean(rawCaps['allowCheckNetwork'], '/spec/execution/capabilities/allowCheckNetwork');
     if (rawCaps['allowWorkflowWrites'] !== undefined) overrides.allowWorkflowWrites = requireBoolean(rawCaps['allowWorkflowWrites'], '/spec/execution/capabilities/allowWorkflowWrites');
     if (rawCaps['allowAgentNetwork'] !== undefined) overrides.allowAgentNetwork = requireBoolean(rawCaps['allowAgentNetwork'], '/spec/execution/capabilities/allowAgentNetwork');
+    if (rawCaps['allowDockerSocket'] !== undefined) overrides.allowDockerSocket = requireBoolean(rawCaps['allowDockerSocket'], '/spec/execution/capabilities/allowDockerSocket');
   }
   const capabilities = resolveExecutionCapabilities(mode, overrides);
 

@@ -38,6 +38,7 @@ import {
   startLocalCommandGateServer,
   startMacosStageSeatbeltHelper,
   TaskpackError,
+  validateExecutionAuthority,
   validateTaskpackV2Manifest,
   type WrittenCompiledTaskpack,
 } from '../src/index.js';
@@ -721,6 +722,45 @@ describe('turnkey.ts & turnkey-memory.ts: hybrid mountReadOnlyGit, CAS security,
       assert.ok(rwCandIdx >= 0);
       assert.ok(roStageIdx >= 0, 'explicitly allowed stage dir under /tmp is bind-mounted read-only');
       assert.ok(rwGitObjIdx > rwCandIdx, 'git objects --ro-bind must follow writable candidateDir --bind');
+      assert.equal(bwrapWritableCand.args.includes('/run/docker.sock'), false, 'docker socket must not be bound unless dockerSocketPath is set');
+
+      // Explicit dockerSocketPath binds both canonical socket and /var/run/docker.sock inside Linux bwrap
+      const bwrapDocker = buildCommandScriptInvocation('/work/check-dir/check.sh', {
+        platform: 'linux',
+        arch: 'x64',
+        linuxBwrapExecutable: '/usr/bin/bwrap',
+        networkMode: 'allow-outbound',
+        cwd: '/work/cand',
+        allowedReadOnlyPaths: ['/work/base', '/work/check-dir'],
+        writablePaths: ['/work/cand', '/work/out'],
+        dockerSocketPath: '/run/docker.sock',
+      });
+      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/run/docker.sock') >= 0);
+      assert.ok(findTriplet(bwrapDocker.args, '--bind', '/run/docker.sock', '/var/run/docker.sock') >= 0);
+
+      // Dual-key authority guard for allowDockerSocket requires both allowPrivileged and allowDockerSocket
+      const dockerExec = {
+        mode: 'strict' as const,
+        capabilities: {
+          allowHostEnv: false,
+          allowHostPath: false,
+          mountReadOnlyGit: false,
+          allowCheckNetwork: true,
+          allowWorkflowWrites: false,
+          allowAgentNetwork: false,
+          allowDockerSocket: true,
+        },
+        digests: { pinDigests: false },
+      };
+      assert.throws(
+        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: false }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+      assert.throws(
+        () => validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: false, allowDockerSocket: true }),
+        (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+      );
+      validateExecutionAuthority(dockerExec, { policyProfile: 'github', allowPrivileged: true, allowDockerSocket: true });
 
       // R3-5 & R4-1: Linux bwrap "none" installs --seccomp 3 IP-socket filter while "loopback-only" omits --seccomp (lo is auto-configured by bwrap)
       const bwrapNone = buildCommandScriptInvocation('/work/check-dir/check.sh', {

@@ -248,6 +248,7 @@ spec:
 | `capabilities.allowCheckNetwork` | `false` / `true` | Grants outbound network for `command.v1` checks; avoids nested macOS Seatbelt `EPERM` when checks run inner sandboxes |
 | `capabilities.allowWorkflowWrites` | `false` / `false` | Dual-key unlock permitting agent edits under `.github/workflows/**` on GitHub policy profile runs |
 | `capabilities.allowAgentNetwork` | `false` / `false` | Governs `resolveEffectiveTaskpackSandboxPolicy` / `executeSandboxedCommand`; turnkey `agent-pi` `bash` stays offline-isolated |
+| `capabilities.allowDockerSocket` | `false` / `false` | Dual-key unlock (`allow-docker-socket: 'true'` + `allowCheckNetwork: true`) binding `/run/docker.sock` in Linux `bwrap` |
 | `digests.pinDigests` / `lockfile` | `false` / `<controlRoot>/digests.lock.json` | Runtime SHA-256 digests freeze runs when `false`; `true` enforces lockfile parity via `loopwright digest sync` |
 
 - **`spec.vars` AST interpolation**: Declare `0..64` static non-secret strings (`[A-Z][A-Z0-9_]*`, `<= 512` chars). Post-parse single-pass interpolation replaces `${VAR}` only in `goal.*`, `publication.titleTemplate`/`bodyTemplate`, `roles[].prompt`, `preflight.env[]`, and `localChecks[].parameters` (`args[]`, `env`, `startMarker`, `endMarker`, `allowedPointers[]`). Undeclared or secret `${...}` expressions refuse with `TASKPACK_UNTRUSTED_INTERPOLATION`.
