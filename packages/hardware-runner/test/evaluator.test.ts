@@ -5,7 +5,7 @@ import { createServer as createNetServer } from 'node:net';
 import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SecretScrubber } from '@loopwright/core';
+import { LIMITS, SecretScrubber } from '@loopwright/core';
 import { TRUSTED_DOCKER_PATHS } from '@loopwright/taskpack';
 import {
   buildDockerStageBSeccompProfileJson,
@@ -24,10 +24,14 @@ import {
   reconstructCandidateWorkspace,
   removeTreeFailClosed,
   resolveTrustedDockerExecutable,
+  runHardwareWorker,
   RunnerTeardownError,
   runSanitizedDockerRmForce,
   sealStageAOutputs,
+  signRelayPayload,
+  startRelayServer,
   waitForProcessGroupExit,
+  type BenchmarkRequest,
   type LeaseGrant,
   type WorkerConfig,
 } from '../src/index.js';
@@ -1866,6 +1870,184 @@ test('pre-spawn monotonic lease deadline recheck aborts synchronous toolchain sc
       (err: unknown) => err instanceof HardwareRunnerError && err.code === 'RUNNER_SANDBOX_FAILED',
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Phase 5.5 bounds: Stage A >2048-char stderr (with surrogate pair) and 64 Stage B findings + threshold miss settle cleanly through relay-server', async () => {
+  const realTmp = await realpath(tmpdir());
+  const root = await mkdtemp(join(realTmp, 'lw-eval-bounds-'));
+  const workDir = join(root, 'work');
+  const workloadsDir = join(root, 'workloads');
+  const casDir = join(root, 'cas');
+  await mkdir(workDir, { recursive: true, mode: 0o700 });
+  await mkdir(join(workloadsDir, 'wl-bounds'), { recursive: true, mode: 0o700 });
+  await mkdir(casDir, { recursive: true, mode: 0o700 });
+
+  const signingSecret = 'bounds-test-signing-secret-0123456789abcdef';
+  const authToken = 'bounds-test-auth-token-0123456789abcdef';
+  const workerToken = 'bounds-test-worker-token-0123456789abcdef';
+
+  const sixtyFourFindings = Array.from({ length: LIMITS.findings }, (_, i) => ({
+    title: `Finding ${i}`,
+    severity: 'low',
+    evidence: `ev-${i}`,
+  }));
+  await writeFile(
+    join(workloadsDir, 'wl-bounds', 'evaluate.sh'),
+    [
+      `#!${process.execPath}`,
+      `const findings = ${JSON.stringify(sixtyFourFindings)};`,
+      'process.stdout.write(JSON.stringify({ status: "approved", detail: "ok", metrics: { tflops: 10, baseline_tflops: 100 }, findings }) + "\\n");',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  const relay = await startRelayServer({
+    port: 0,
+    casDir,
+    controllerSigningSecret: signingSecret,
+    controllerAuthToken: authToken,
+    workerTokens: [workerToken],
+    leaseTtlMs: 10_000,
+    sweepIntervalMs: 100,
+  });
+
+  const stageJobAndRunWorker = async (
+    opId: string,
+    buildScript: Buffer,
+    metricThresholds: BenchmarkRequest['metricThresholds'],
+  ): Promise<{ status: string; reason?: string; findings?: readonly { title: string; evidence: string }[] }> => {
+    const scriptSha = sha256Hex(buildScript);
+    const putSig = signRelayPayload(signingSecret, `PUT\n${opId}\n${scriptSha}\n${buildScript.byteLength}`);
+    const putRes = await fetch(`${relay.url}/v1/benchmark/jobs/${opId}/blobs/${scriptSha}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        'x-loopwright-signature': putSig,
+        'x-loopwright-blob-sha256': scriptSha,
+        'x-loopwright-blob-length': String(buildScript.byteLength),
+        'content-type': 'application/octet-stream',
+      },
+      body: new Uint8Array(buildScript),
+    });
+    assert.ok(putRes.status === 200 || putRes.status === 201);
+
+    const req: BenchmarkRequest = {
+      version: 1,
+      kind: 'benchmark_request',
+      storeId: 'bounds-store',
+      runId: 'bounds-run',
+      lockHash: { algorithm: 'sha256', hex: sha256Hex('bounds-lock') },
+      operationId: opId,
+      dispatchId: `dispatch-${opId}`,
+      dispatchGeneration: 1,
+      requestDigest: sha256Hex(`req:${opId}`),
+      gateId: 'bench-gate',
+      checkId: 'bench-check',
+      candidateDigest: scriptSha,
+      subject: {
+        lockHash: { algorithm: 'sha256', hex: sha256Hex('bounds-lock') },
+        contractHash: { algorithm: 'sha256', hex: sha256Hex('bounds-contract') },
+        repository: 'org/repo',
+        baseRevision: '1'.repeat(40),
+        sourceRevision: '2'.repeat(40),
+        candidateDigest: { algorithm: 'sha256', hex: scriptSha },
+        targetMatrixDigest: { algorithm: 'sha256', hex: sha256Hex('bounds-matrix') },
+      },
+      targetCellId: 'cuda-sm90',
+      targetHardware: { accelerator: 'sm_90a', isolationMode: 'whole_device', deviceCount: 1 },
+      heldOutWorkloadId: 'wl-bounds',
+      metricThresholds,
+      maxPreemptions: 0,
+      candidateArtifacts: {
+        entries: [{ name: 'packages/build.sh', digest: { algorithm: 'sha256', hex: scriptSha }, byteLength: buildScript.byteLength, mode: '100755' }],
+        deleted: [],
+      },
+    };
+    const reqBytes = Buffer.from(JSON.stringify(req), 'utf8');
+    const reqSig = signRelayPayload(signingSecret, reqBytes);
+    const postPromise = fetch(`${relay.url}/v1/benchmark/jobs`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${authToken}`,
+        'x-loopwright-signature': reqSig,
+        'content-type': 'application/json',
+        'x-loopwright-wait-ms': '15000',
+      },
+      body: new Uint8Array(reqBytes),
+    });
+
+    const workerRes = await runHardwareWorker({
+      config: makeWorkerConfig(workDir, workloadsDir, {
+        relayUrl: relay.url,
+        workerToken,
+        probeMode: 'synthetic_fixture',
+        pollWaitMs: 2_000,
+        heartbeatIntervalMs: 100,
+        stageATimeoutMs: 15_000,
+        stageBTimeoutMs: 15_000,
+        toolchainPaths: [join(process.execPath, '..')],
+        capabilities: {
+          accelerator: 'sm_90a',
+          isolationModes: ['whole_device'],
+          deviceCount: 1,
+          driverVersion: '550.90.07',
+          workloadIds: ['wl-bounds'],
+        },
+      }),
+      once: true,
+      registerProcessSignalHandlers: false,
+    });
+    assert.equal(workerRes.exitReason, 'once_completed');
+    assert.equal(workerRes.lastSettlement?.outcome, 'completed');
+    assert.equal(workerRes.lastSettlement?.acknowledgment, 'confirmed');
+
+    const postRes = await postPromise;
+    assert.equal(postRes.status, 200);
+    return (await postRes.json()) as { status: string; reason?: string; findings?: readonly { title: string; evidence: string }[] };
+  };
+
+  try {
+    // 1. Stage A > 2,048-char stderr with a UTF-16 surrogate pair straddling the cut boundary (2048 - 14 = 2034)
+    const stageAFailScript = Buffer.from(
+      [
+        `#!${process.execPath}`,
+        'process.stderr.write("E".repeat(2033) + "\\u{1F600}" + "Z".repeat(500));',
+        'process.exit(1);',
+      ].join('\n'),
+      'utf8',
+    );
+    const stageAVerdict = await stageJobAndRunWorker('verify.0.check.stagea-trunc', stageAFailScript, []);
+    assert.equal(stageAVerdict.status, 'denied');
+    assert.equal(stageAVerdict.reason, 'STAGE_A_COMPILE_FAILED');
+    assert.ok(stageAVerdict.findings && stageAVerdict.findings.length === 1);
+    const ev = stageAVerdict.findings[0]!.evidence;
+    assert.ok(ev.length <= LIMITS.findingEvidence, `evidence length ${ev.length} exceeds ${LIMITS.findingEvidence}`);
+    assert.equal(ev.endsWith('...(truncated)'), true);
+    assert.equal(/[\uD800-\uDFFF]/.test(ev), false, 'truncated evidence must contain zero lone UTF-16 surrogates');
+
+    // 2. Stage B emitting 64 findings + negative/positive comparative threshold failure stays <= 64 findings
+    const stageBOkBuild = Buffer.from(
+      [
+        `#!${process.execPath}`,
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'fs.writeFileSync(path.join(process.env.LOOPWRIGHT_STAGE_A_OUT, "k.cubin"), "bin\\n");',
+      ].join('\n'),
+      'utf8',
+    );
+    const stageBVerdict = await stageJobAndRunWorker('verify.0.check.findings-cap', stageBOkBuild, [
+      { kind: 'comparative', metric: 'tflops', baselineMetric: 'baseline_tflops', operator: 'min_ratio', threshold: -0.25 },
+      { kind: 'comparative', metric: 'tflops', baselineMetric: 'baseline_tflops', operator: 'min_ratio', threshold: 0.5 },
+    ]);
+    assert.equal(stageBVerdict.status, 'denied');
+    assert.equal(stageBVerdict.reason, 'METRIC_THRESHOLD_FAILED');
+    assert.ok(stageBVerdict.findings);
+    assert.equal(stageBVerdict.findings.length, LIMITS.findings);
+    assert.equal(stageBVerdict.findings[LIMITS.findings - 1]!.title, 'Quantitative metric threshold not met');
+  } finally {
+    await relay.close();
     await rm(root, { recursive: true, force: true });
   }
 });

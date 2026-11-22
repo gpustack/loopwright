@@ -1149,17 +1149,21 @@ test('baseTree anchor, denied verdict with structured findings, cross-job worker
     });
     assert.equal(okEmptyComplete.status, 200);
 
-    // Direct parseBenchmarkRequest coverage for max_ratio / max_delta / min+max bounds and signature tamper helper
+    // Direct parseBenchmarkRequest coverage for max_ratio / max_delta / negative finite ratios / min+max bounds and signature tamper helper
     const parsedReq = parseBenchmarkRequest(
       makeBenchmarkRequest({
         metricThresholds: [
           { kind: 'bounds', metric: 'm1', min: 0, max: 10 },
           { kind: 'comparative', metric: 'm2', baselineMetric: 'b2', operator: 'max_ratio', threshold: 1.05 },
           { kind: 'comparative', metric: 'm3', baselineMetric: 'b3', operator: 'max_delta', threshold: -0.5 },
+          { kind: 'comparative', metric: 'm4', baselineMetric: 'b4', operator: 'min_ratio', threshold: -0.25 },
+          { kind: 'comparative', metric: 'm5', baselineMetric: 'b5', operator: 'max_ratio', threshold: -0.5 },
         ],
       }),
     );
-    assert.equal(parsedReq.metricThresholds.length, 3);
+    assert.equal(parsedReq.metricThresholds.length, 5);
+    assert.equal(parsedReq.metricThresholds[3]?.kind === 'comparative' && parsedReq.metricThresholds[3].threshold, -0.25);
+    assert.equal(parsedReq.metricThresholds[4]?.kind === 'comparative' && parsedReq.metricThresholds[4].threshold, -0.5);
     assert.equal(verifyRelaySignature(CONTROLLER_SECRET, 'abc', 'not-hex'), false);
     assert.equal(verifyBenchmarkVerdictSignature(CONTROLLER_SECRET, { status: 'approved' }, '0'.repeat(64)), false);
 
@@ -1231,7 +1235,28 @@ test('baseTree anchor, denied verdict with structured findings, cross-job worker
       },
       {
         ...makeBenchmarkRequest(),
-        metricThresholds: [{ kind: 'comparative', metric: 'm1', baselineMetric: 'b1', operator: 'min_ratio', threshold: -1 }],
+        metricThresholds: [{ kind: 'comparative', metric: 'm1', baselineMetric: 'b1', operator: 'min_ratio', threshold: -0 }],
+      },
+      {
+        ...makeBenchmarkRequest(),
+        metricThresholds: [{ kind: 'comparative', metric: 'm1', baselineMetric: 'b1', operator: 'max_ratio', threshold: Number.POSITIVE_INFINITY }],
+      },
+      {
+        ...makeBenchmarkRequest(),
+        candidateArtifacts: {
+          entries: [],
+          deleted: [],
+          baseTreeBundle: { digest: { algorithm: 'sha256', hex: shaOpA }, byteLength: 32 },
+        },
+      },
+      {
+        ...makeBenchmarkRequest(),
+        candidateArtifacts: {
+          entries: [],
+          deleted: [],
+          baseTree: { objectFormat: 'sha1', commitOid: 'a'.repeat(40), treeOid: 'b'.repeat(40) },
+          baseTreeBundle: { digest: { algorithm: 'sha256', hex: shaOpA }, byteLength: 11 },
+        },
       },
       {
         ...makeBenchmarkRequest(),

@@ -3002,10 +3002,25 @@ function buildDeviceVisibilityEnv(targetHardware: HardwareTargetSpec): Record<st
   return {};
 }
 
-function boundDiagnosticSnippet(text: string, scrubber: SecretScrubber, maxChars = 2_048): string {
+function boundDiagnosticSnippet(text: string, scrubber: SecretScrubber, maxChars = LIMITS.findingEvidence): string {
   const scrubbed = scrubber.scrub(text).trim();
   if (!scrubbed) return '';
-  return scrubbed.length <= maxChars ? scrubbed : `${scrubbed.slice(0, maxChars)}...(truncated)`;
+  if (scrubbed.length <= maxChars) return scrubbed;
+  const suffix = '...(truncated)';
+  if (maxChars <= suffix.length) {
+    let end = Math.max(0, maxChars);
+    if (end > 0) {
+      const lastCode = scrubbed.charCodeAt(end - 1);
+      if (lastCode >= 0xd800 && lastCode <= 0xdbff) end -= 1;
+    }
+    return scrubbed.slice(0, end);
+  }
+  let end = maxChars - suffix.length;
+  if (end > 0) {
+    const lastCode = scrubbed.charCodeAt(end - 1);
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) end -= 1;
+  }
+  return `${scrubbed.slice(0, end)}${suffix}`;
 }
 
 function buildSupervisorStageBFailureDiag(result: StageProcessExecutionResult): string {
@@ -3601,7 +3616,11 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
           severity: 'high' as const,
           evidence: thresholdViolation,
         });
-        finalFindings = Object.freeze([...(finalFindings ?? []), thresholdFinding]);
+        const existing = finalFindings ?? [];
+        finalFindings = Object.freeze([
+          ...existing.slice(0, Math.max(0, LIMITS.findings - 1)),
+          thresholdFinding,
+        ]);
       }
     }
 

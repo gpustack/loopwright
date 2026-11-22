@@ -362,9 +362,6 @@ function parseMetricThresholdRule(value: unknown, path: string): MetricThreshold
       wireInvalid('invalid comparative operator', `${path}/operator`);
     }
     const threshold = parseFiniteControlNumber(obj.threshold, `${path}/threshold`);
-    if ((obj.operator === 'min_ratio' || obj.operator === 'max_ratio') && threshold < 0) {
-      wireInvalid('ratio threshold must be >= 0', `${path}/threshold`);
-    }
     return Object.freeze({
       kind: 'comparative',
       metric,
@@ -411,10 +408,7 @@ function parseBaseTreeBundle(value: unknown, maxBlobBytes: number, path: string)
   );
   const digest = parseDigest(obj.digest, `${path}/digest`);
   const upperBound = Math.min(maxBlobBytes, VERIFIER_ARTIFACT_LIMITS.maxFileBytes);
-  const byteLength = parseIntStrict(obj.byteLength, 0, upperBound, `${path}/byteLength`);
-  if ((byteLength === 0) !== (digest.hex === EMPTY_SHA256_HEX)) {
-    wireInvalid('empty-file digest mismatch', `${path}/digest`);
-  }
+  const byteLength = parseIntStrict(obj.byteLength, 12, upperBound, `${path}/byteLength`);
   return Object.freeze({ digest, byteLength });
 }
 
@@ -499,6 +493,9 @@ function parseCandidateArtifacts(value: unknown, maxBlobBytes: number, path: str
   const baseTreeBundle = Object.hasOwn(obj, 'baseTreeBundle')
     ? parseBaseTreeBundle(obj.baseTreeBundle, maxBlobBytes, `${path}/baseTreeBundle`)
     : undefined;
+  if (baseTreeBundle !== undefined && baseTree === undefined) {
+    wireInvalid('baseTreeBundle requires baseTree anchor', `${path}/baseTreeBundle`);
+  }
 
   return Object.freeze({
     entries: Object.freeze(entries),
