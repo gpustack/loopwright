@@ -141,27 +141,48 @@ If `$VER` already exists locally or as an unpublished remote tag and the operato
 2. If a draft/pre-release object exists on GitHub, export its notes before deletion (`gh release view "$VER" --json body --jq '.body'`).
 3. Obtain explicit operator confirmation before deleting the old tag (`git tag -d "$VER"` / `gh release delete "$VER" --yes --cleanup-tag`) and recreating `git tag -a "$VER"`.
 
-### Phase 6: Remote Push & Pre-Release Publication Gate (Explicit Confirmation Required)
+### Phase 6: Remote Tag Push & Draft Release Verification Gate (Explicit Confirmation Required)
 
 Only after separate explicit operator confirmation in the active turn:
 
 ```bash
 git push origin "$VER"
-gh release create "$VER" \
-  --title "$VER" \
-  --notes-file <release-notes-file> \
-  --prerelease
 ```
 
-For `-rc.N` (or `-rcN`) candidate tags, stop after pre-release publication (`--prerelease` remains set; note `.github/workflows/ci.yml` also attaches `dist-release/*` and publishes `@gpustack/loopwright` under the `next` dist-tag on `v*` tag push).
+Pushing `v*` triggers `.github/workflows/ci.yml` (`verify` → `release`), which packages `dist-release/*` and stages a **Draft** GitHub Release with `generate_release_notes: true` as an initial fallback. Do **not** run a competing `gh release create` while CI is staging the draft release.
 
-### Phase 7: Official Release Promotion & Summary (Explicit Confirmation Required)
-
-For a final GA version (`^v[0-9]+\.[0-9]+\.[0-9]+$`), request separate operator confirmation after verifying published release artifacts, then promote:
+Wait for the tag CI run to finish and inspect the staged draft release and uploaded assets:
 
 ```bash
-gh release edit "$VER" --prerelease=false --latest
-gh release view "$VER" --json tagName,isPrerelease,isDraft,url
+gh run watch <run-id> --exit-status
+gh release view "$VER" --json tagName,isDraft,isPrerelease,assets
+```
+
+For `-rc.N` (or `-rcN`) candidate tags, request separate operator confirmation after verifying the staged assets, then publish the draft as a pre-release with the curated release notes (including `## Known Residual Boundaries`):
+
+```bash
+gh release edit "$VER" \
+  --title "$VER" \
+  --notes-file <release-notes-file> \
+  --draft=false \
+  --prerelease=true
+gh release view "$VER" --json tagName,isPrerelease,isDraft,url,assets
+```
+
+Stop here for `-rc` candidate tags (when npm Trusted Publishers is enabled, `.github/workflows/ci.yml` `publish-npm` uses the `next` dist-tag for pre-release tags).
+
+### Phase 7: Official Release Publication & Summary (Explicit Confirmation Required)
+
+For a final GA version (`^v[0-9]+\.[0-9]+\.[0-9]+$`), request separate operator confirmation after verifying the staged draft release assets in Phase 6, then publish the draft release with the curated release notes (including `## Known Residual Boundaries`) and mark it latest:
+
+```bash
+gh release edit "$VER" \
+  --title "$VER" \
+  --notes-file <release-notes-file> \
+  --draft=false \
+  --prerelease=false \
+  --latest
+gh release view "$VER" --json tagName,isPrerelease,isDraft,url,assets
 ```
 
 Record the immutable commit SHA, tag name, verification gate summary, and `Known Residual Boundaries` in the final operator report.

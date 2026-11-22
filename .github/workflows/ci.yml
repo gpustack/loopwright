@@ -98,17 +98,13 @@ jobs:
         with:
           name: release-bundle
           path: dist-release
-      - name: Build changelog
-        id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish release
+      - name: Stage draft release
         uses: softprops/action-gh-release@v2
         with:
           files: dist-release/*
+          draft: true
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-alpha') || contains(github.ref, '-beta') }}
-          body: ${{ steps.build_changelog.outputs.changelog }}
+          generate_release_notes: true
 
   publish-npm:
     # Temporarily disabled until @gpustack/loopwright is bootstrapped on npmjs.com.
