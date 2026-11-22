@@ -29,18 +29,51 @@ Scan existing sync scripts, Dockerfiles, dependency manifests (`go.mod`, `packag
 
 ### Operating mode selection
 
-Confirm whether the repository needs Mode 1 (`.loopwright/taskpack.yaml` or `.auto-sync/<domain>.taskpack.yaml` with Action or App) or Mode 2 (out-of-repo `TrustedRegistry` and `ControllerConfig`). When Mode 2 applies, jump to [Managed Controller mode](#managed-controller-mode) after Stage 1.
+Confirm whether the repository needs Mode 1 (`.loopwright/taskpack.yaml` or a multi-domain `TaskpackSuite` under `.auto-sync/suite.yaml` with Action or App) or Mode 2 (out-of-repo `TrustedRegistry` and `ControllerConfig`). When Mode 2 applies, jump to [Managed Controller mode](#managed-controller-mode) after Stage 1.
 
 ### Modular domain decomposition
 
 Non-trivial repositories mix independent toolchains, release cadences, and ownership boundaries. Split automation into independent domains with mutually exclusive `scope.writable` `/**` directories instead of one monolith taskpack.
 
-Place multi-domain manifests directly under `.auto-sync/` as `.auto-sync/<domain>.taskpack.yaml`. That keeps `.auto-sync` as the shared control root, protects `.auto-sync/**` assets, and permits `.auto-sync/memory/<domain>-sync`.
+Single-taskpack repositories omit `suite.yaml`. For `2..32` domains, place domain manifests under `.auto-sync/<domain>-taskpack.yaml` (or `.loopwright/<domain>/taskpack.yaml`) and declare one `TaskpackSuite` manifest (`.auto-sync/suite.yaml` or `.loopwright/suite.yaml`).
+
+`TaskpackSuite` enforces the suite-wide protected-path union (`<= 128` patterns), pairwise prefix-disjoint `headBranchPrefix` values per `targetBranch`, and collision-free carved-out `spec.proposal.path` files (for example `.auto-sync/proposals/<domain>.json`).
 
 | Repository shape | Recommended layout | Example domains |
 | --- | --- | --- |
 | Single-purpose repo | Single `.loopwright/taskpack.yaml` | `docs-sync` or `catalog-sync` |
-| Multi-component repo | `.auto-sync/<domain>.taskpack.yaml` | `charts`, `router`, `kv-transfer`, `k8s-deps`, `priors` |
+| Multi-component repo | `.auto-sync/suite.yaml` + `.auto-sync/<domain>-taskpack.yaml` | `charts`, `router`, `kv-transfer`, `k8s-deps`, `priors` |
+
+```yaml
+apiVersion: loopwright.dev/v1alpha1
+kind: TaskpackSuite
+metadata:
+  name: repo-auto-sync
+spec:
+  domains:
+    - id: charts
+      taskpack: .auto-sync/charts-taskpack.yaml
+      schedules: # Optional cron keys matching workflow on.schedule
+        - "0 2 * * 3"
+    - id: router
+      taskpack: .auto-sync/router-taskpack.yaml
+      stage: stage-a # Optional stage reference
+      schedules: # Optional
+        - "0 3 * * 2"
+  stages: # Optional 0..16 acyclic promotion stages
+    - id: stage-a
+    - id: stage-b
+      dependsOn:
+        - stage-a
+      readiness:
+        - id: router-release # Optional
+          kind: github-release
+          source: octocat/router
+          versionFrom: # Optional committed baseRevision version lookup
+            domain: router
+            path: .auto-sync/proposals/router.json
+            jsonPointer: /version
+```
 
 Ask one question at a time to confirm:
 
@@ -69,7 +102,7 @@ Prefer `github-release` with `allowPrerelease: false` over `git-tag` whenever an
 Confirm three version guardrails one question at a time:
 
 1. **Lockstep constraints**: Declare `spec.upstreamGroups[]` (`{ id, policy: lockstep | independent, members }`) so mismatched or partial lockstep releases resolve atomically as `held_back` without blocking sibling upstreams.
-2. **Two-stage promotion**: Whether image consumers need Stage A (recipe or Dockerfile sync) separate from Stage B (promoting built image tags via `target_tag` after registry publish). Drain pending Stage B promotions for un-held published images before starting a new Stage A sync cycle, so fast-moving upstreams cannot starve promotion.
+2. **Two-stage promotion**: Use declarative `TaskpackSuite` `spec.stages[]` readiness probes (`github-release`, `http-json`, `git-tag`, `git-commit` with `versionFrom`) when Stage B waits on an upstream release, tag, commit, or JSON feed without Git state ledgers. Keep multi-arch OCI manifest probing (such as `crane manifest` checking `linux/amd64` and `linux/arm64`) and explicit `target_tag` overrides in `spec.preflight` when registry-level multi-arch checks are required, draining un-held Stage B promotions before starting new Stage A syncs.
 3. **Setting-image holds**: Whether to keep a protected hold list (for example `.auto-sync/setting-image-holds.json` outside `scope.writable`) or use native `held_back` status so newer base images publish ahead of runtime default bumps.
 
 ## Stage 3: Bounded execution
@@ -101,6 +134,8 @@ Configure `verification.localChecks` with `json-artifact.v1`, `json-keys-guard.v
 
 - **Directory-mounted checks**: `command.v1` mounts the script's parent directory read-only (whole-tree SHA-256 digest so `./lib.sh` works), supports `toolchainPaths`, and exports `$LOOPWRIGHT_BASE_DIR`, `$LOOPWRIGHT_STAGED_DIR`, and `$LOOPWRIGHT_CHECK_OUT`.
 - **Inner sandboxes**: Checks running inner OS sandboxes (such as macOS `sandbox-exec`) should opt into `allowCheckNetwork: true` under dual-key `allow-privileged-execution` to prevent nested Seatbelt `EPERM`.
+- **Conditional rules and handoffs**: Split large instruction sets with conditional `{ path, when }` rules (`changedPaths`, `extensions`, `phases`, `failedChecks`, `failureCodes`) and use `spec.steps[].handoffs` (`markdown_heading`, `json_pointer`, `full`) in multi-step DAGs to bound prompt size.
+- **Baseline conflict alignment**: Enable `spec.baselineAlignment: { policy: extract-context }` (or `fail-fast`) for comment-revised PRs or detached `source_revision` preflight commits to detect 3-way conflicts in an isolated object store before spending model turns.
 
 ## Stage 4: Workflow governance
 
@@ -169,6 +204,8 @@ spec:
       - status
     commentPrefixes:
       - /auto-sync
+  baselineAlignment: # Optional isolated 3-way conflict check
+    policy: extract-context # Optional (off, fail-fast, or extract-context)
   models:
     - provider: zai
       id: glm-5.3
@@ -190,17 +227,18 @@ Use `mode: auto` in `.github/workflows/loopwright.yml` so Loopwright dispatches 
 | `force` | `boolean` | `false` | Bypasses `no_change` and open-PR deduplication on dispatch |
 | `target_tag` | `string` | `""` | Optional Stage B container image tag override |
 
-Follow three operational rules when authoring `.github/workflows/loopwright.yml`:
+Follow four operational rules when authoring `.github/workflows/loopwright.yml`:
 
-- **Comment routing**: On `issue_comment`, GitHub omits `pull_request.head.ref` and `inputs.domain`. Resolve the PR head branch first and match each domain's `headBranchPrefix` to select `domain` and its `concurrency` group.
+- **Suite matrix and comment routing**: For multi-domain repositories, run a `resolve-domains` job with `suite-path: .auto-sync/suite.yaml` and `resolve-suite-only: 'true'` to emit `outputs.matrix` (verifying PR ownership and blocking cross-fork comments automatically), then pass `suite-path` and `domain: ${{ matrix.domainId }}` in each matrix job.
+- **Staggered schedule parity**: When one workflow file carries staggered per-domain crons in `on.schedule`, mirror those cron strings in `suite.yaml` `domains[].schedules` and verify exact set parity in CI; omit `schedules` when domains share one cron or use separate trigger workflows.
 - **Revise checkout**: Check out `refs/heads/main` with `fetch-depth: 0` and `persist-credentials: false`. Fetch `+refs/pull/<number>/head` into `.git/objects` without checking it out so `/auto-sync revise` can materialize the PR head commit.
-- **Action auth and dual-key flags**: Prefer `github-app-id` and `github-app-private-key` (or explicit `with: github-token:`). Enable `allow-privileged-execution: 'true'` or `allow-workflow-writes: 'true'` only when the taskpack requires them.
+- **Action auth and diagnostics**: Prefer `github-app-id` and `github-app-private-key` (or explicit `with: github-token:`), enable `allow-privileged-execution: 'true'` or `allow-workflow-writes: 'true'` only when needed, and preserve `Run Health` (`run-eval.json`) diagnostics in step summaries or uploaded artifacts.
 
 ### Memory and secrets
 
 Ask the maintainer to confirm `spec.memory.apply`:
 
-- `separate-pull-request` (default for reviewed memory; remind maintainers to skip automated code review on `loopwright/memory/**` branches if desired)
+- `separate-pull-request` (default for reviewed memory; `@loopwright/memory` terminates `index.json` with a trailing `\n`, so no `end-of-file-fixer` exclusion is needed; skip automated code review on `loopwright/memory/**` branches if desired)
 - `local-only` (updates memory locally without opening remote PRs)
 - `disabled` (stateless runs)
 
@@ -214,21 +252,21 @@ Present a concise architecture summary table covering every confirmed decision a
 | --- | --- | --- | --- | --- | --- |
 | `<domain>` | `<id (kind)>` | `<cron/manual>` | `<writable / protected>` | `<localChecks>` | `<env names>` |
 
-Before emitting YAML, fetch the owning Mode 1 Markdown guides linked from `llms.txt` (`Taskpack` and `GitHub Action`). Verify exact `spec.execution`, `spec.preflight`, `command.v1` parameters, `spec.models[]` fields, and Action `with:` input names rather than guessing.
+Before emitting YAML, fetch the owning Mode 1 Markdown guides linked from `llms.txt` (`Taskpack` and `GitHub Action`). Verify exact `spec.execution`, `spec.preflight`, `command.v1` parameters, `spec.models[]`, `TaskpackSuite`, and Action `with:` input names rather than guessing.
 
 Once approved, generate:
 
-1. Two-space Pretty YAML taskpack manifests (`apiVersion: loopwright.dev/v1alpha1`, `kind: Taskpack`).
-2. Protected `spec.preflight` scripts, instruction files, and `command.v1` verification scripts (plus `digests.lock.json` via `loopwright digest sync` when `pinDigests: true`).
-3. Workflow YAML (`.github/workflows/loopwright.yml` or per-domain workflows) with `mode: auto` and least-privilege permissions.
-4. Lean, decoupled repo-side checks (`bash -n`, `shellcheck`, YAML/JSON/path integrity, and fail-closed contract guards) — avoid multi-thousand-line mock-repo selftests, hardcoded current version literals, or ad-hoc counterexample tests.
+1. Two-space Pretty YAML taskpack manifests (`apiVersion: loopwright.dev/v1alpha1`, `kind: Taskpack`), plus one `kind: TaskpackSuite` manifest (`.auto-sync/suite.yaml` or `.loopwright/suite.yaml`) whenever the repository has `>= 2` domains.
+2. Protected `spec.preflight` scripts, instruction files (with conditional `{ path, when }` rules when needed), and `command.v1` verification scripts (plus `digests.lock.json` via `loopwright digest sync` when `pinDigests: true`).
+3. Workflow YAML (`.github/workflows/loopwright.yml` or per-domain workflows) using `suite-path` + `resolve-suite-only: 'true'` for multi-domain suites, `mode: auto`, and least-privilege permissions.
+4. Lean, decoupled repo-side checks (`bash -n`, `shellcheck`, YAML/JSON/path integrity, schedule-set parity, and fail-closed contract guards) — avoid multi-thousand-line mock-repo selftests, hardcoded current version literals, or ad-hoc counterexample tests.
 
 ## Stage 6: Tiered qualification
 
 Qualify the generated configuration in three ordered tiers and report exact observed outcomes at each tier:
 
-1. **Tier 1 (Local offline)**: Run lean repository checks, taskpack schema validation, `loopwright digest sync --taskpack ... --check`, and `dry-run: 'true'` compilation.
-2. **Tier 2 (GitHub Actions dry run)**: Dispatch the live workflow with `dry-run=true` to verify preflight, App token minting, and compilation on the runner.
+1. **Tier 1 (Local offline)**: Run lean repository checks, `loopwright suite check --suite <suite-path> --verify-digests` (and `suite resolve`) for multi-domain suites or `loopwright digest sync --taskpack ... --check` for single-taskpack repos, plus `dry-run: 'true'` compilation.
+2. **Tier 2 (GitHub Actions dry run)**: Dispatch the live workflow with `dry-run=true` to verify suite matrix resolution, preflight, App token minting, and compilation on the runner.
 3. **Tier 3 (Live per-domain qualification)**: Dispatch each domain with `dry-run=false` (add `force=true` to test candidate authoring). Verify the opened PR and test `/auto-sync status` or `/auto-sync retry`.
 
 ## Managed Controller mode
