@@ -1399,5 +1399,55 @@ if (!/^ERR:(EPERM|EACCES|ENOENT)$/.test(String(unixOutcome))) {
         await rm(hostUnixSockPath, { force: true });
       }
     });
+
+    // 6) Failing runtime-gates test extracts structured failing test name, source .test.ts path, and assertion evidence into LOOPWRIGHT_CHECK_OUT
+    await withTempDir(async dir => {
+      const failingTestRunnerBody = `process.stdout.write([
+  '✔ ok-case (1.0ms)',
+  '✖ failing tests:',
+  '',
+  'test at .test-build/packages/agent-pi/test/pi-compat.test.js:42:5',
+  '✖ pi-1.6-compat-regression (12.3ms)',
+  '  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
+  "  actual: 'failed', expected: 'completed', operator: 'strictEqual'",
+  '',
+].join('\\n'));
+process.exit(1);
+`;
+      const { repoRoot: diagRepo } = await createMiniSelfUpgradeRepo(dir, {
+        testScriptBody: failingTestRunnerBody,
+      });
+      await mkdir(join(diagRepo, 'packages/agent-pi/test'), { recursive: true, mode: 0o755 });
+      await writeFile(
+        join(diagRepo, 'packages/agent-pi/test/pi-compat.test.ts'),
+        'export const marker = true;\n',
+        { mode: 0o600 },
+      );
+      const stageDir = join(dir, 'stage-diag');
+      await stageAndApplyCandidateUpgrade({
+        preflight,
+        repoRoot: diagRepo,
+        candidateDir: diagRepo,
+        stageDir,
+      });
+      const diagCheckOutPath = join(dir, 'diag-check-out.json');
+      const diagRes = runVerifyScript(diagRepo, {
+        SELF_UPGRADE_ALLOW_TEST_FIXTURE: '1',
+        SELF_UPGRADE_TEST_NODE_MODULES: hostNodeModules,
+        SELF_UPGRADE_REPO_ROOT: diagRepo,
+        LOOPWRIGHT_STAGED_DIR: stageDir,
+        LOOPWRIGHT_CHECK_OUT: diagCheckOutPath,
+      });
+      assert.equal(diagRes.status, 1);
+      const diagOut = JSON.parse(await readFile(diagCheckOutPath, 'utf8')) as {
+        detail: string;
+        findings: readonly { title: string; severity: string; path?: string; evidence: string }[];
+      };
+      assert.equal(diagOut.detail.includes('pi-1.6-compat-regression'), true, `expected detail to include failing test name: ${diagOut.detail}`);
+      assert.equal(diagOut.findings.length, 1);
+      assert.equal(diagOut.findings[0]?.title.includes('pi-1.6-compat-regression'), true);
+      assert.equal(diagOut.findings[0]?.path, 'packages/agent-pi/test/pi-compat.test.ts');
+      assert.equal(diagOut.findings[0]?.evidence.includes("expected: 'completed'"), true);
+    });
   });
 });
