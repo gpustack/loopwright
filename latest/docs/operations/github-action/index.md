@@ -79,7 +79,9 @@ Pass `source-revision` when preflight stages writable files onto a commit separa
 
 Native publication opens each verified CAS blob once (`O_RDONLY | O_NOFOLLOW`, `nlink === 1`), streams `1 MiB` chunks into `git hash-object -w --stdin` while verifying SHA-256 and Git blob OID, and commits via a temporary `GIT_INDEX_FILE` with DCO sign-off and `--force-with-lease`. It does not embed credentials in remote URLs. An uncertain external outcome remains `unknown`; do not silently retry it.
 
-Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `local-only`, or `disabled`) and opens cleanup PRs when stale entries retire. Separate memory PRs skip non-passing runs by default (`publishOnFailure: false`) and add `[skip ci]` before the DCO trailer (`skipCi: true`). Memory errors or skipped updates never block primary task completion.
+Memory finalization follows `spec.memory.apply` (`separate-pull-request`, `inline-with-candidate`, `local-only`, or `disabled`). `separate-pull-request` opens dedicated memory PRs, skips non-passing runs by default (`publishOnFailure: false`), and adds `[skip ci]` before the DCO trailer (`skipCi: true`).
+
+`inline-with-candidate` skips unless a candidate PR was published, then appends a host-signed memory-only commit onto that PR branch with `--force-with-lease` (`skipCi` defaults to `false` so required PR checks still run). Memory errors never block primary task completion.
 
 Local `command.v1` checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script's parent directory read-only with whole-tree SHA-256 verification and exposing `$LOOPWRIGHT_BASE_DIR`, `$LOOPWRIGHT_STAGED_DIR` (when `exposeToChecks: true`), and `$LOOPWRIGHT_CHECK_OUT`. If a check opts into a GitHub token, grant that token only the permissions the check may use.
 

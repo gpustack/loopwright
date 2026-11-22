@@ -75,7 +75,7 @@ loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST -
 
 When `--source-revision` differs from `HEAD`, `--baseline-alignment` probes 3-way merge conflicts in an isolated Git object directory before model calls (`fail-fast` halts as `baseline_merge_conflict`, exit `3`; `extract-context` stages scrubbed conflict hunks).
 
-Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate` when neither `preflight` nor `upstreams` is declared. Declaring `publication.mode: pull_request` or `memory.apply: separate-pull-request` fails closed with `TASKPACK_HOST_BINDING_INVALID`.
+Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate` when neither `preflight` nor `upstreams` is declared. Declaring `publication.mode: pull_request`, `memory.apply: separate-pull-request`, or `memory.apply: inline-with-candidate` fails closed with `TASKPACK_HOST_BINDING_INVALID`.
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
 

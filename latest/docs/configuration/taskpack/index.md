@@ -350,7 +350,7 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 | --- | --- | --- |
 | `publication.mode` / `targetBranch` | `'pull_request' \| 'disabled'` / branch | PR creation or local settlement (optional when `disabled`) |
 | `publication.headBranchPrefix` / `titleTemplate` | Prefix (`1..64`) / string (`1..256`) | Managed branch prefix and PR title (optional when `disabled`) |
-| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'local-only' \| 'disabled'` | Protected CAS memory path and mode (`ttlDays` `15`, `maxEntries` `128`, `maxPromptEntries` `32`) |
+| `memory.directory` / `apply` | `<controlRoot>/memory` / `'separate-pull-request' \| 'inline-with-candidate' \| 'local-only' \| 'disabled'` | Protected CAS memory path and mode (`ttlDays` `15`, `maxEntries` `128`, `maxPromptEntries` `32`) |
 | `memory.onNoModelBudget` | `'deterministic-observations-only' \| 'skip'` | Behavior without model budget (`checkCodeFingerprint`, `checkUpstreamVersions`, `publishOnFailure`, `skipCi`) |
 | `triggers.schedule` / `workflowDispatch` / `releasePublished` | Booleans | Permitted GitHub event triggers |
 | `triggers.commentCommands` / `commentPrefixes` | `['retry', 'revise', 'status']` / `['/loopwright']` | Authorized PR slash commands and command prefixes |

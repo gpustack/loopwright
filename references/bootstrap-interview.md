@@ -238,7 +238,8 @@ Follow four operational rules when authoring `.github/workflows/loopwright.yml`:
 
 Ask the maintainer to confirm `spec.memory.apply`:
 
-- `separate-pull-request` (default for reviewed memory; `@loopwright/memory` terminates `index.json` with a trailing `\n`, so no `end-of-file-fixer` exclusion is needed; skip automated code review on `loopwright/memory/**` branches if desired)
+- `inline-with-candidate` (recommended for low-noise PR workflows; appends a host-signed memory-only commit onto the published candidate PR branch with zero shadow memory PRs and `skipCi: false` by default)
+- `separate-pull-request` (dedicated `loopwright/memory/**` PRs including stale-entry cleanup; `@loopwright/memory` terminates `index.json` with a trailing `\n`)
 - `local-only` (updates memory locally without opening remote PRs)
 - `disabled` (stateless runs)
 
