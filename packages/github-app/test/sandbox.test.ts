@@ -272,6 +272,33 @@ describe('Linux Bubblewrap and seccomp compiler (AC-2)', () => {
       }
     });
   });
+
+  it('re-mounts /dev/shm read-only after --dev /dev only when policy or cwd paths live under /dev/shm', () => {
+    const shmWorkspace = '/dev/shm/lw-test-ws';
+    const shmCompiled = compileLinuxBwrapCommand(
+      { workspaceRoot: shmWorkspace, writablePaths: ['docs'], scratchDirectory: '/dev/shm/lw-test-scratch' },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    const devIdx = shmCompiled.args.findIndex((arg, idx) => arg === '--dev' && shmCompiled.args[idx + 1] === '/dev');
+    const shmRoIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--ro-bind' && shmCompiled.args[idx + 1] === '/dev/shm' && shmCompiled.args[idx + 2] === '/dev/shm',
+    );
+    const bindDocsIdx = shmCompiled.args.findIndex(
+      (arg, idx) => arg === '--bind' && shmCompiled.args[idx + 1] === '/dev/shm/lw-test-ws/docs',
+    );
+    assert.ok(devIdx > 0, 'must mount --dev /dev');
+    assert.ok(shmRoIdx > devIdx, 'must mount --ro-bind /dev/shm /dev/shm after --dev /dev');
+    assert.ok(bindDocsIdx > shmRoIdx, 'must mount writable --bind after --ro-bind /dev/shm /dev/shm');
+
+    const tmpCompiled = compileLinuxBwrapCommand(
+      { workspaceRoot: '/tmp/lw-test-ws', writablePaths: ['docs'] },
+      { platform: 'linux', arch: 'x64', homeDirectory: '/var/empty/nonexistent-home', probeExecutables: false },
+    );
+    const tmpShmRoIdx = tmpCompiled.args.findIndex(
+      (arg, idx) => arg === '--ro-bind' && tmpCompiled.args[idx + 1] === '/dev/shm' && tmpCompiled.args[idx + 2] === '/dev/shm',
+    );
+    assert.equal(tmpShmRoIdx, -1, 'must not emit /dev/shm bind when no policy path is under /dev/shm');
+  });
 });
 
 describe('fail-closed sandbox backend negotiation (AC-3)', () => {

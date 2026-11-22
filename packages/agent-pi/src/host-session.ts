@@ -558,14 +558,19 @@ function buildHostToolBashSpawnSpec(options: {
   }
   if (process.platform === 'linux') {
     if (canUseLinuxBwrap()) {
+      const underDevShm = [options.candidateDir, options.scratchDir, options.tmpDir].some(
+        p => p === '/dev/shm' || p.startsWith('/dev/shm/'),
+      );
       return {
         executable: '/usr/bin/bwrap',
         args: [
           '--ro-bind', '/', '/',
-          '--bind', options.scratchDir, options.scratchDir,
-          '--bind', options.tmpDir, options.tmpDir,
           '--dev', '/dev',
           '--proc', '/proc',
+          ...(underDevShm && existsSync('/dev/shm') ? ['--ro-bind', '/dev/shm', '/dev/shm'] : []),
+          '--ro-bind', options.candidateDir, options.candidateDir,
+          '--bind', options.scratchDir, options.scratchDir,
+          '--bind', options.tmpDir, options.tmpDir,
           '--unshare-pid',
           '--unshare-net',
           '--die-with-parent',

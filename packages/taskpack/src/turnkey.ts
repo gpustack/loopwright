@@ -3469,12 +3469,22 @@ export function buildCommandScriptInvocation(
         };
       }
 
+      const usesDevShm = [
+        ...canonicalDenied,
+        ...canonicalAllowedRo,
+        ...canonicalWritables,
+        ...(canonicalCwd !== undefined ? [canonicalCwd] : []),
+        ...(gitBind !== null ? [gitBind.sourceObjectsDir, gitBind.targetObjectsDir] : []),
+        ...canonicalHostMounts.flatMap(m => [m.source, m.target, ...(m.aliasTarget !== undefined ? [m.aliasTarget] : [])]),
+      ].some(p => p === '/dev/shm' || p.startsWith('/dev/shm/'));
+
       const bwrapArgs: string[] = [
         ...bwrapNamespaceFlags,
         '--die-with-parent',
         '--ro-bind', '/', '/',
         '--dev', '/dev',
         '--proc', '/proc',
+        ...(usesDevShm && (!probeHost || existsSync('/dev/shm')) ? ['--ro-bind', '/dev/shm', '/dev/shm'] : []),
       ];
 
       const preMountDenied = canonicalDenied.filter(

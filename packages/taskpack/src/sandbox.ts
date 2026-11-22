@@ -1551,6 +1551,20 @@ export function compileLinuxBwrapCommand(
   if (options?.provisionExactFiles ?? env.probeExecutables) {
     provisionSandboxExactWritablePaths(normalized, { createTargetFile: true });
   }
+  const targetCwd = options?.cwd === undefined
+    ? normalized.canonicalWorkspaceRoot
+    : canonicalizeAbsolutePath(options.cwd, 'cwd');
+  const usesDevShm = [
+    normalized.canonicalWorkspaceRoot,
+    ...(normalized.canonicalScratchDirectory !== null ? [normalized.canonicalScratchDirectory] : []),
+    targetCwd,
+    ...normalized.canonicalWritablePaths,
+    ...normalized.canonicalProtectedPaths,
+    ...normalized.canonicalAllowedReadOnlyPaths,
+    ...normalized.canonicalDeniedReadPaths,
+    ...normalized.canonicalReadOnlyBindMounts.flatMap(m => [m.sourcePath, m.targetPath]),
+  ].some(p => isSameOrSubpath(p, '/dev/shm'));
+
   const args: string[] = ['--unshare-all'];
   if (normalized.networkMode === 'allow-outbound') {
     args.push('--share-net');
@@ -1562,6 +1576,9 @@ export function compileLinuxBwrapCommand(
     '--proc', '/proc',
     '--dev', '/dev',
   );
+  if (usesDevShm && (!env.probeExecutables || existsSync('/dev/shm'))) {
+    args.push('--ro-bind', '/dev/shm', '/dev/shm');
+  }
   if (normalized.networkMode === 'none' && (!env.probeExecutables || existsSync('/etc/hosts'))) {
     args.push('--ro-bind-try', '/dev/null', '/etc/hosts');
   }
@@ -1619,9 +1636,6 @@ export function compileLinuxBwrapCommand(
     appendDeniedMask(deniedPath);
   }
 
-  const targetCwd = options?.cwd === undefined
-    ? normalized.canonicalWorkspaceRoot
-    : canonicalizeAbsolutePath(options.cwd, 'cwd');
   if (options?.inheritSpawnEnv === true) {
     args.push('--chdir', targetCwd);
     const pinnedEnv: Record<string, string> = {
