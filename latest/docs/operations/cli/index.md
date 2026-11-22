@@ -61,7 +61,7 @@ loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 D
 loopwright run --dry-run --taskpack .loopwright/taskpack.yaml --repo . --json
 ```
 
-These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed `run --dry-run` refuses `--allow-privileged` and `--allow-workflow-writes`.
+These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed `run --dry-run` (`--config`) refuses `--allow-privileged`, `--allow-workflow-writes`, and `--allow-host-mounts`, whereas `run --dry-run --taskpack` accepts them for static validation.
 
 ## Step 4: Run work
 
@@ -71,7 +71,7 @@ loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --re
 loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 ```
 
-`run --taskpack` runs a local declarative taskpack via `@loopwright/taskpack` without GitHub variables (`--taskpack` is mutually exclusive with `--config`/`--registry`/`--registry-sha256`). It accepts `--mode candidate|no-change|auto`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--role-model`, `--dry-run`, `--allow-privileged`, `--allow-workflow-writes`, `--json`, `--output-format`, and `--step-summary-file`.
+`run --taskpack` runs a local declarative taskpack via `@loopwright/taskpack` without GitHub variables (`--taskpack` is mutually exclusive with `--config`/`--registry`/`--registry-sha256`). It accepts `--mode candidate|no-change|auto`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--role-model`, `--dry-run`, `--allow-privileged`, `--allow-workflow-writes`, `--allow-host-mounts`, `--json`, `--output-format`, and `--step-summary-file`.
 
 When `--source-revision` differs from `HEAD`, `--baseline-alignment` probes 3-way merge conflicts in an isolated Git object directory before model calls (`fail-fast` halts as `baseline_merge_conflict`, exit `3`; `extract-context` stages scrubbed conflict hunks).
 
@@ -79,7 +79,7 @@ Under local CLI runs without a PR publisher, `mode: auto` defaults to `candidate
 
 Use `resume` for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.
 
-`run`, `resume`, `step next`, and `step submit` accept opt-in `--allow-privileged` (unlocks privileged execution capabilities) and `--allow-workflow-writes` (unlocks `.github/workflows/**` writes when the taskpack also enables them). `reconcile` accepts `--allow-workflow-writes` and refuses `--allow-privileged`. Other non-execution commands (`init`, `check`, `run --dry-run`, `status`, `inspect`, `closure`, `digest`, `app-serve`) refuse both flags.
+`run`, `resume`, `step next`, and `step submit` accept opt-in `--allow-privileged` and `--allow-workflow-writes`. `run`, `step next`, and `step submit` also accept `--allow-host-mounts <csv>` to authorize `command.v1` `parameters.mounts` sources. `reconcile` accepts `--allow-workflow-writes` only; other commands refuse all privilege flags.
 
 `run` and `step` runs wire live `@loopwright/decisions` adapters into `ControllerPorts.decisions` whenever `spec.decisions.enabled` is `true` (falling back deterministically when credentials or endpoints are unavailable).
 
@@ -136,7 +136,7 @@ loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --sta
 loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json
 ```
 
-Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--allow-privileged`, and `--allow-workflow-writes`. Pass the same privilege flags to `step submit` when running `command.v1` checks that require privileged host capabilities.
+Use `--action next`, `--action submit`, or `--action cancel` instead of a positional action. `step next` accepts `--mode candidate|no-change`, `--baseline-alignment off|fail-fast|extract-context`, `--source-revision <REV>`, `--allow-privileged`, `--allow-workflow-writes`, and `--allow-host-mounts <csv>`. Pass the same privilege flags to `step submit` when running `command.v1` checks that require privileged host capabilities or host mounts.
 
 A parked run rejects another pull unless `--reissue-lease` replaces a lost lease. Submit each single-use `--lease` token once. `--submission-file` supplies an artifact; `--status` accepts `completed`, `no_change`, `failed`, or `blocked`. Use `--reason` for a failure or block.
 
