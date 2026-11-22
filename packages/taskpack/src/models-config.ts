@@ -806,7 +806,15 @@ export interface ResolveModelCandidatesOptions {
   readonly scrubber?: SecretScrubber | undefined;
 }
 
-/** Shared provider credential env precedence used by both candidate resolution and implicit-author compilation. */
+/**
+ * Shared provider credential env precedence used by both candidate resolution and implicit-author compilation:
+ * 1. Host per-provider isolation binding (`credentialEnvMap.byProvider[provider]`) takes highest priority
+ *    so host-configured per-provider secrets cannot be overridden by ad-hoc options.
+ * 2. Caller `explicitProviderTokenEnv` (e.g. `provider-token-env`).
+ * 3. For single-model or pinned runs: `credentialEnvMap.provider` > `modelsJsonApiKeyEnv` > `manifestApiKeyEnv`.
+ *    For unpinned multi-model pools: `modelsJsonApiKeyEnv` > `manifestApiKeyEnv` > `credentialEnvMap.provider`
+ *    so one global fallback env does not clobber distinct providers' declared keys.
+ */
 export function resolveBoundProviderCredentialEnv(input: {
   readonly provider: string;
   readonly credentialEnvMap?: HostCredentialEnvMap | undefined;

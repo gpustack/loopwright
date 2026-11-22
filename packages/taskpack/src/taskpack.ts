@@ -2000,25 +2000,33 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   const lookupByCredRef = (refId: string): string | undefined =>
     byCredRef !== undefined && Object.hasOwn(byCredRef, refId) ? byCredRef[refId] : undefined;
 
+  const reservedGitHubTokenEnvs = new Set<string>(['GITHUB_TOKEN', 'GH_TOKEN']);
+
   const resolveGateCredPair = (
     rawRef: string | undefined,
     fallbackId: string,
     fallbackEnv: string | undefined,
     what: string,
   ): { readonly bindingId: string; readonly envName: string } => {
+    let pair: { readonly bindingId: string; readonly envName: string };
     if (rawRef !== undefined) {
       if (ENV_NAME_PATTERN.test(rawRef)) {
-        return { bindingId: fallbackId, envName: rawRef };
-      }
-      if (IDENTIFIER_PATTERN.test(rawRef)) {
+        pair = { bindingId: fallbackId, envName: rawRef };
+      } else if (IDENTIFIER_PATTERN.test(rawRef)) {
         const explicitMapped = lookupByCredRef(rawRef);
         const defaultEnv = `LOOPWRIGHT_GATE_${rawRef.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_SECRET`;
         const envName = requireEnvName(explicitMapped ?? fallbackEnv ?? defaultEnv, what);
-        return { bindingId: rawRef, envName };
+        pair = { bindingId: rawRef, envName };
+      } else {
+        bindingInvalid(`invalid ${what} credential reference "${rawRef}"`);
       }
-      bindingInvalid(`invalid ${what} credential reference "${rawRef}"`);
+    } else {
+      pair = { bindingId: fallbackId, envName: requireEnvName(fallbackEnv, what) };
     }
-    return { bindingId: fallbackId, envName: requireEnvName(fallbackEnv, what) };
+    if (reservedGitHubTokenEnvs.has(pair.envName)) {
+      bindingInvalid(`${what} credential cannot reuse reserved GitHub token env "${pair.envName}"`);
+    }
+    return pair;
   };
 
   const benchmarkEndpointIds = new Set<string>(
@@ -3162,6 +3170,10 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     classification: 'credential' as const,
     paths,
   }));
+  const capabilitiesForNonGateCheck = (implementation: string): string[] =>
+    implementation === 'benchmark-gate.v1'
+      ? ['hardware_execution', 'read_only']
+      : ['inert_bytes', 'read_only'];
   const handlers = [
     ...compiledRoles.map(role => ({
       id: role.handlerId,
@@ -3197,9 +3209,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       parameters: check.parameters as Readonly<Record<string, Json>>,
       capabilities: check.implementation === 'gate.v1'
         ? ['external_service', 'read_only']
-        : check.implementation === 'benchmark-gate.v1'
-          ? ['hardware_execution', 'read_only']
-          : ['inert_bytes', 'read_only'],
+        : capabilitiesForNonGateCheck(check.implementation),
     })),
     {
       id: 'scope',

@@ -1301,14 +1301,24 @@ export async function runGitHubActionEntrypoint(
       }
     }
 
-    const modelsJsonApiKeyEnvs: string[] = [];
-    if (modelsConfig !== undefined) {
-      for (const providerCfg of modelsConfig.providers.values()) {
-        if (typeof providerCfg.apiKeyEnv === 'string' && providerCfg.apiKeyEnv.length > 0) {
+    const registerEnvSecrets = (names: Iterable<string>): void => {
+      for (const envName of names) {
+        const val = runtimeEnv[envName];
+        if (typeof val === 'string' && val.trim().length > 0) {
+          turnkeyScrubber.register(val.trim());
+        }
+      }
+    };
+    const collectModelsJsonApiKeyEnvs = (cfg: ParsedPiModelsJson | undefined): void => {
+      if (cfg === undefined) return;
+      for (const providerCfg of cfg.providers.values()) {
+        if (typeof providerCfg.apiKeyEnv === 'string' && providerCfg.apiKeyEnv.length > 0 && !modelsJsonApiKeyEnvs.includes(providerCfg.apiKeyEnv)) {
           modelsJsonApiKeyEnvs.push(providerCfg.apiKeyEnv);
         }
       }
-    }
+    };
+    const modelsJsonApiKeyEnvs: string[] = [];
+    collectModelsJsonApiKeyEnvs(modelsConfig);
     const preflightExcludedEnvs = new Set<string>([
       ...hostGateCredentialEnvs,
       ...(input.providerTokenEnv !== undefined && input.providerTokenEnv.length > 0 ? [input.providerTokenEnv] : []),
@@ -1319,12 +1329,7 @@ export async function runGitHubActionEntrypoint(
       input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
       input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
     ]);
-    for (const envName of preflightExcludedEnvs) {
-      const val = runtimeEnv[envName];
-      if (typeof val === 'string' && val.trim().length > 0) {
-        turnkeyScrubber.register(val.trim());
-      }
-    }
+    registerEnvSecrets(preflightExcludedEnvs);
 
     if (manifest.spec.preflight !== undefined && !isStatusComment) {
       try {
@@ -1587,6 +1592,8 @@ export async function runGitHubActionEntrypoint(
     if (modelsConfig === undefined && input.modelsJsonPath !== undefined) {
       try {
         modelsConfig = await loadPiModelsJson(input.modelsJsonPath);
+        collectModelsJsonApiKeyEnvs(modelsConfig);
+        registerEnvSecrets(modelsJsonApiKeyEnvs);
       } catch (error) {
         if (error instanceof GitHubAppError) {
           if (error.code === 'PROVIDER_OAUTH_UNSUPPORTED') {
@@ -1604,11 +1611,7 @@ export async function runGitHubActionEntrypoint(
     const publicationEnvName = input.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
     const publicationAuthEnvName = input.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
     const localCmdGateEnvName = input.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
-    if (typeof runtimeEnv[gateEnvName] === 'string') scrubber.register(runtimeEnv[gateEnvName]!);
-    if (typeof runtimeEnv[gateAuthEnvName] === 'string') scrubber.register(runtimeEnv[gateAuthEnvName]!);
-    if (typeof runtimeEnv[publicationEnvName] === 'string') scrubber.register(runtimeEnv[publicationEnvName]!);
-    if (typeof runtimeEnv[publicationAuthEnvName] === 'string') scrubber.register(runtimeEnv[publicationAuthEnvName]!);
-    if (typeof runtimeEnv[localCmdGateEnvName] === 'string') scrubber.register(runtimeEnv[localCmdGateEnvName]!);
+    registerEnvSecrets([gateEnvName, gateAuthEnvName, publicationEnvName, publicationAuthEnvName, localCmdGateEnvName]);
 
     const hasHostRoleOverrides = input.provider !== undefined
       || input.model !== undefined
@@ -1782,6 +1785,7 @@ export async function runGitHubActionEntrypoint(
         ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
         ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
         ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
+        ...modelsJsonApiKeyEnvs,
         gateEnvName,
         publicationEnvName,
         publicationAuthEnvName,
@@ -2049,6 +2053,7 @@ export async function runGitHubActionEntrypoint(
       ...(manifest.spec.roles?.map(role => resolveDefaultProviderTokenEnv(role.provider, { env: runtimeEnv })) ?? []),
       ...(input.providerTokenEnv !== undefined ? [input.providerTokenEnv] : []),
       ...(input.credentialEnvMap?.provider !== undefined ? [input.credentialEnvMap.provider] : []),
+      ...modelsJsonApiKeyEnvs,
       gateEnvName,
       gateAuthEnvName,
       publicationEnvName,

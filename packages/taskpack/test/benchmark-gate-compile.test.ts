@@ -2578,4 +2578,55 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({ disposition
       }
     });
   });
+
+  it('rejects reserved GitHub token envs on ordinary gate.v1 credentials', async () => {
+    await withTempDir(async dir => {
+      const repoRoot = join(dir, 'repo');
+      await mkdir(join(repoRoot, 'src'), { recursive: true });
+      await writeFile(join(repoRoot, 'src', 'app.txt'), 'v1\n', 'utf8');
+
+      const ordinaryGateManifest = parseTaskpackManifest(
+        serializePrettyYaml({
+          apiVersion: 'loopwright.dev/v1alpha1',
+          kind: 'Taskpack',
+          metadata: { name: 'ordinary-gate-gh-guard' },
+          spec: {
+            goal: { candidate: 'Update app', noChange: 'Confirm clean' },
+            scope: { writable: ['src/**'] },
+            verification: {
+              localChecks: [],
+              externalGates: [
+                {
+                  id: 'gate-a',
+                  gateId: 'gate-a',
+                  endpointId: 'ep-a',
+                  implementation: 'gate.v1',
+                  required: true,
+                  url: 'https://gate-a.example.test/v1/gate',
+                  signingCredentialRef: 'ordinary-gate-signing',
+                },
+              ],
+            },
+          },
+        }),
+        { policyProfile: 'local' },
+      );
+
+      for (const forbidden of ['GITHUB_TOKEN', 'GH_TOKEN']) {
+        await assert.rejects(
+          () => compileDeclarativeTaskpack(ordinaryGateManifest, {
+            mode: 'candidate',
+            executionMode: 'pi',
+            repository: 'local/ordinary-gate-repo',
+            repositoryRoot: repoRoot,
+            baseRevision: BASE_SHA,
+            sourceRevision: BASE_SHA,
+            budgets: DEFAULT_HOST_BUDGETS,
+            credentialEnvMap: { byCredentialRef: { 'ordinary-gate-signing': forbidden } },
+          }),
+          (err: unknown) => err instanceof TaskpackError && err.code === 'TASKPACK_HOST_BINDING_INVALID',
+        );
+      }
+    });
+  });
 });

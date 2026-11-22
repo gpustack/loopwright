@@ -1739,7 +1739,7 @@ function requireMetricKey(value: unknown, path: string): string {
     manifestInvalid(`expected a metric key of 1..${LIMITS.metricKey} characters`, path);
   }
   if (FORBIDDEN_KEYS.has(value) || !METRIC_KEY_RE.test(value)) {
-    manifestInvalid(`invalid metric key "${value}"`, path);
+    manifestInvalid(`invalid metric key ${JSON.stringify(value)}`, path);
   }
   return value;
 }
