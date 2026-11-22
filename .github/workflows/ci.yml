@@ -107,8 +107,7 @@ jobs:
           generate_release_notes: true
 
   publish-npm:
-    # Temporarily disabled until @gpustack/loopwright is bootstrapped on npmjs.com.
-    if: false && startsWith(github.ref, 'refs/tags/v') && github.repository == 'gpustack/loopwright'
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'gpustack/loopwright'
     needs:
       - verify
     runs-on: ubuntu-24.04
@@ -127,9 +126,11 @@ jobs:
         with:
           name: release-bundle
           path: dist-release
-      # Idempotent publish aligned with gpustack/core-ui: uses npm Trusted Publishers (OIDC id-token: write,
-      # zero NPM_TOKEN secret) and succeeds cleanly on workflow re-runs if the version is already on the registry.
+      # Idempotent publish: uses CI_NPM_TOKEN when provided (for initial package bootstrap) and
+      # falls back to npm Trusted Publishers (OIDC id-token: write) when CI_NPM_TOKEN is unset.
       - name: Publish @gpustack/loopwright to npmjs.com
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.CI_NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           if npm view "@gpustack/loopwright@${VERSION}" version --prefer-online >/dev/null 2>&1; then
@@ -140,5 +141,12 @@ jobs:
             DIST_TAG="next"
           else
             DIST_TAG="latest"
+          fi
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            NPMRC_TMP="$(mktemp "${RUNNER_TEMP}/npmrc.XXXXXX")"
+            chmod 600 "${NPMRC_TMP}"
+            printf '//registry.npmjs.org/:_authToken=%s\n' "${NODE_AUTH_TOKEN}" > "${NPMRC_TMP}"
+            trap 'rm -f "${NPMRC_TMP}"' EXIT
+            export NPM_CONFIG_USERCONFIG="${NPMRC_TMP}"
           fi
           npm publish "dist-release/gpustack-loopwright-${VERSION}.tgz" --provenance --access public --ignore-scripts --tag "${DIST_TAG}"
