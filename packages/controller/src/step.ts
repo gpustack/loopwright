@@ -347,10 +347,10 @@ async function resolveCurrentFileModes(
   }
   if (head && !same(head.progress.candidate.workspace, context.source.workspace)) {
     let isDelegatedWorkspace = false;
+    const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+    const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+    const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
     try {
-      const bounds = overlayManifestBounds(context.plan.budgets.overlay);
-      const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
-      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
       const parsed = parsePrivateJson(Buffer.from(wsBytes), maxWsBytes, bounds.collectionLimit);
       if (isRecord(parsed) && (parsed.format === 'delegated-capture.v1' || parsed.format === 'delegated-capture.v2') && Array.isArray(parsed.overlay)) {
         isDelegatedWorkspace = true;
@@ -361,10 +361,10 @@ async function resolveCurrentFileModes(
         }
       }
     } catch (error) {
-      if (!(error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_SYNTAX')) {
+      if (!(error instanceof ControllerFailure && (error.diagnostic.code === 'CONFIG_SYNTAX' || error.diagnostic.code === 'ARTIFACT_INVALID'))) {
         throw error;
       }
-      // Non-JSON workspace (e.g., native Pi capture).
+      // Non-JSON workspace (e.g., native Pi capture; parsePrivateJson wraps non-JSON syntax errors as ARTIFACT_INVALID).
     }
     if (!isDelegatedWorkspace && context.source.version === 1) {
       // Native Pi classic (v1) materializes every file as 0o444 (100644) and capture records explicit 100644.

@@ -1543,8 +1543,9 @@ async function registerRunnerConfigSecrets(
         if (typeof val === 'string' && val.length > 0) scrubber.register(val);
       }
     };
-    const scalarPattern = options.scalarEnvFields.join('|');
-    const listPattern = options.listEnvFields.join('|');
+    const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const scalarPattern = options.scalarEnvFields.map(escapeRegExp).join('|');
+    const listPattern = options.listEnvFields.map(escapeRegExp).join('|');
     // Best-effort fallback extraction before YAML parsing so malformed YAML diagnostics stay scrubbed.
     for (const match of text.matchAll(/\benv:([A-Z][A-Z0-9_]{0,127})\b/g)) {
       registerEnvName(match[1]);

@@ -592,10 +592,10 @@ async function reconcileBenchmarkGate(
               }
             }
           } catch (error) {
-            if (!(error instanceof ControllerFailure && error.diagnostic.code === 'CONFIG_SYNTAX')) {
+            if (!(error instanceof ControllerFailure && (error.diagnostic.code === 'CONFIG_SYNTAX' || error.diagnostic.code === 'ARTIFACT_INVALID'))) {
               throw error;
             }
-            // Native Pi capture (non-JSON workspace).
+            // Native Pi capture (non-JSON workspace; parsePrivateJson wraps non-JSON syntax errors as ARTIFACT_INVALID).
           }
           if (!isDelegatedWorkspace && source.version === 1) {
             // Native Pi classic (v1) materializes every file as 0o444 (100644) and capture records explicit 100644.
