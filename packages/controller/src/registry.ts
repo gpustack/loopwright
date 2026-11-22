@@ -4,11 +4,11 @@ import { digestArtifact } from '@loopwright/core';
 import { validateSelection } from '@loopwright/agent-pi/catalog';
 import { isExternalMcpToolName } from '@loopwright/agent-pi/mcp';
 import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Handler, type Implementation, type GateEndpoint, type PublicationEndpoint } from './types.js';
-import { digestValue, id, integer, list, record, same, text, type Scalar } from './schema.js';
+import { digestValue, id, integer, isRecord, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
 import { refuse, type ControllerDiagnostic } from './errors.js';
 import { RFC6901_POINTER_PATTERN } from './verifier-protocol.js';
-const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'no-change.v1', 'gate.v1'];
+const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'no-change.v1', 'gate.v1', 'benchmark-gate.v1'];
 function unique(value: readonly { readonly id: string }[], path: string): void { if (new Set(value.map(item => item.id)).size !== value.length) refuse('CONFIG_SCHEMA', path); }
 function enumValue(value: unknown, values: readonly string[], path: string): void { if (typeof value !== 'string' || !values.includes(value)) refuse('CONFIG_SCHEMA', path); }
 export function labelValue(value: unknown, path: string): string {
@@ -32,7 +32,11 @@ export function validateHandler(raw: unknown, path: string): Handler {
   const implementation = value.implementation as Implementation, agent = implementation.startsWith('pi.');
   if (value.kind !== (agent ? 'agent' : 'check')) refuse('CONFIG_SCHEMA', path + '/kind');
   const capabilities = list(value.capabilities, path + '/capabilities').map(item => text(item, path + '/capabilities', 64));
-  const expected = agent ? implementation === 'pi.compact.v1' ? ['pi', 'compaction'] : ['pi'] : implementation === 'gate.v1' ? ['external_service', 'read_only'] : ['inert_bytes', 'read_only'];
+  const expected = agent
+    ? implementation === 'pi.compact.v1' ? ['pi', 'compaction'] : ['pi']
+    : implementation === 'gate.v1' ? ['external_service', 'read_only']
+    : implementation === 'benchmark-gate.v1' ? ['hardware_execution', 'read_only']
+    : ['inert_bytes', 'read_only'];
   if (!same(capabilities, expected)) refuse('CAPABILITY_UNSUPPORTED', path + '/capabilities');
   if (implementation === 'pi.agent.v1') {
     const parameters = record(value.parameters, ['prompt', 'purpose'], path + '/parameters'); text(parameters.prompt, path + '/parameters/prompt'); enumValue(parameters.purpose, ['task', 'review'], path + '/parameters/purpose');
@@ -40,6 +44,22 @@ export function validateHandler(raw: unknown, path: string): Handler {
   else if (implementation === 'gate.v1') {
     const parameters = record(value.parameters, ['checkId', 'endpointRef', 'gateId'], path + '/parameters');
     id(parameters.checkId, path + '/parameters/checkId'); id(parameters.endpointRef, path + '/parameters/endpointRef'); text(parameters.gateId, path + '/parameters/gateId', 128);
+  } else if (implementation === 'benchmark-gate.v1') {
+    if (!isRecord(value.parameters)) refuse('CONFIG_SCHEMA', path + '/parameters');
+    const hasMaxPreemptions = Object.hasOwn(value.parameters, 'maxPreemptions');
+    const parameters = record(
+      value.parameters,
+      ['checkId', 'endpointRef', 'gateId', 'heldOutWorkloadId', ...(hasMaxPreemptions ? ['maxPreemptions' as const] : [])],
+      path + '/parameters',
+    );
+    id(parameters.checkId, path + '/parameters/checkId');
+    id(parameters.endpointRef, path + '/parameters/endpointRef');
+    const gateId = text(parameters.gateId, path + '/parameters/gateId', 128);
+    if (gateId.length < 1 || gateId.trim() !== gateId || !/^[\x20-\x7E]+$/.test(gateId)) {
+      refuse('CONFIG_SCHEMA', path + '/parameters/gateId');
+    }
+    id(parameters.heldOutWorkloadId, path + '/parameters/heldOutWorkloadId');
+    if (hasMaxPreemptions) integer(parameters.maxPreemptions, 0, 16, path + '/parameters/maxPreemptions');
   } else if (implementation === 'json-keys-guard.v1') {
     const parameters = record(value.parameters, ['checkId', 'path', 'allowedPointers'], path + '/parameters');
     id(parameters.checkId, path + '/parameters/checkId');

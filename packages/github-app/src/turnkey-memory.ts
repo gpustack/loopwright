@@ -35,6 +35,7 @@ import {
   isPlainRecord,
   listTreeEntriesAtRevision,
   MAX_REASON_CODEPOINTS,
+  projectMemoryTargetMatrixCell,
   readRegularJsonBounded,
   removePathsFromIndex,
   REPOSITORY_FULL_NAME_PATTERN,
@@ -723,9 +724,10 @@ export async function finalizeAndPublishTurnkeyMemory(
     const checkCodeFingerprint = options.manifest.spec.memory.checkCodeFingerprint === true;
     const checkUpstreamVersions = options.manifest.spec.memory.checkUpstreamVersions === true;
     const manifestMatrix = options.manifest.spec.target?.matrix;
-    const targetMatrix = options.targetMatrix !== undefined
+    const rawTargetMatrix = options.targetMatrix !== undefined
       ? options.targetMatrix
       : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
+    const targetMatrix = projectMemoryTargetMatrixCell(rawTargetMatrix);
 
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,

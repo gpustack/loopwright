@@ -11,6 +11,7 @@ import {
   OVERLAY_LIMITS,
   resolveOverlayLimits,
   validateDocument,
+  type MetricThresholdRule,
   type OverlayLimits,
   type ResourceActivationRule,
   type ReworkPolicy,
@@ -61,6 +62,7 @@ import {
 import { alignBaselineRevisions, deriveManifestCompiledScope } from './baseline-align.js';
 import {
   loadPiModelsJson,
+  resolveBoundProviderCredentialEnv,
   resolveDefaultProviderTokenEnv,
   resolveTaskpackModelCandidates,
   resolveTaskpackModelSelection,
@@ -108,6 +110,7 @@ import {
   type CompiledLocalCommandGate,
   type CompiledTaskpack,
   type ExecutionHostPolicy,
+  type HostCredentialEnvMap,
   type HostGateEndpointPlan,
   type HostRoleSelection,
   type HostTaskpackBindings,
@@ -185,7 +188,21 @@ export const GUIDANCE_CONTRACT_PREFIXES = ['REQUIRED:', 'NEVER:'] as const;
 export const DIAGNOSTIC_LOG_LIMIT = 4000;
 export const ACTIONS_RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/([0-9]+)(?:\/job\/([0-9]+))?\/?$/;
 
-const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const ENV_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const CONTROLLER_ID_MAX_LEN = 64;
+
+function isControllerId(value: string): boolean {
+  return value.length >= 1 && value.length <= CONTROLLER_ID_MAX_LEN && IDENTIFIER_PATTERN.test(value);
+}
+
+function boundedGateDestinationRef(prefix: 'gate-sign' | 'gate-auth', endpointId: string): string {
+  const direct = `${prefix}-${endpointId}`;
+  if (direct.length <= CONTROLLER_ID_MAX_LEN) return direct;
+  const hash = createHash('sha256').update(endpointId, 'utf8').digest('hex').slice(0, 12);
+  const maxHeadLen = CONTROLLER_ID_MAX_LEN - prefix.length - 1 - 1 - hash.length;
+  const trimmedHead = endpointId.slice(0, maxHeadLen).replace(/[._-]+$/, '');
+  return trimmedHead.length > 0 ? `${prefix}-${trimmedHead}-${hash}` : `${prefix}-${hash}`;
+}
 const REVISION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DRAIN_RESERVE_MS = 120_000;
 export const INSTRUCTION_MAX_AGGREGATE_BYTES = 262_144;
@@ -922,6 +939,88 @@ function filterExternalMcpToolsForRole(
   });
 }
 
+/** Collect host-configured external/local gate credential env names (isolated from provider and publication slots). */
+export function collectHostGateCredentialEnvNames(input: {
+  readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
+  readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
+}): ReadonlySet<string> {
+  const names = new Set<string>();
+  const addStrictEnv = (raw: string | undefined | null, label: string): void => {
+    if (raw === undefined || raw === null) return;
+    if (typeof raw !== 'string' || !ENV_NAME_PATTERN.test(raw)) {
+      bindingInvalid(`${label} credential environment name must match [A-Z][A-Z0-9_]{0,63}`);
+    }
+    names.add(raw);
+  };
+  const envMap = input.credentialEnvMap;
+  if (envMap !== undefined) {
+    addStrictEnv(envMap.gate, 'gate');
+    addStrictEnv(envMap.gateAuth, 'gateAuth');
+    addStrictEnv(envMap.localCommandGate, 'localCommandGate');
+    if (envMap.byCredentialRef !== undefined) {
+      for (const key of Object.keys(envMap.byCredentialRef)) {
+        if (Object.hasOwn(envMap.byCredentialRef, key)) {
+          addStrictEnv(envMap.byCredentialRef[key], `byCredentialRef[${key}]`);
+        }
+      }
+    }
+  }
+  if (input.gateEndpoints !== undefined) {
+    for (const plan of input.gateEndpoints) {
+      if (typeof plan.signingCredentialRef !== 'string' || !isControllerId(plan.signingCredentialRef)) {
+        bindingInvalid(`gate endpoint "${plan.id}" has invalid signingCredentialRef "${String(plan.signingCredentialRef)}"`);
+      }
+      if (
+        envMap?.byCredentialRef !== undefined
+        && Object.hasOwn(envMap.byCredentialRef, plan.signingCredentialRef)
+      ) {
+        addStrictEnv(envMap.byCredentialRef[plan.signingCredentialRef], `byCredentialRef[${plan.signingCredentialRef}]`);
+      }
+      if (plan.authCredentialRef !== undefined && plan.authCredentialRef !== null) {
+        if (typeof plan.authCredentialRef !== 'string' || !isControllerId(plan.authCredentialRef)) {
+          bindingInvalid(`gate endpoint "${plan.id}" has invalid authCredentialRef "${String(plan.authCredentialRef)}"`);
+        }
+        if (
+          envMap?.byCredentialRef !== undefined
+          && Object.hasOwn(envMap.byCredentialRef, plan.authCredentialRef)
+        ) {
+          addStrictEnv(envMap.byCredentialRef[plan.authCredentialRef], `byCredentialRef[${plan.authCredentialRef}]`);
+        }
+      }
+    }
+  }
+  return names;
+}
+
+/** Collect all host-configured credential env variable names (fixed slots, per-provider, per-ID, and gate endpoint bindings). */
+export function collectHostCredentialEnvNames(input: {
+  readonly credentialEnvMap?: HostCredentialEnvMap | undefined;
+  readonly gateEndpoints?: readonly HostGateEndpointPlan[] | undefined;
+}): ReadonlySet<string> {
+  const names = new Set<string>(collectHostGateCredentialEnvNames(input));
+  const addStrictEnv = (raw: string | undefined | null, label: string): void => {
+    if (raw === undefined || raw === null) return;
+    if (typeof raw !== 'string' || !ENV_NAME_PATTERN.test(raw)) {
+      bindingInvalid(`${label} credential environment name must match [A-Z][A-Z0-9_]{0,63}`);
+    }
+    names.add(raw);
+  };
+  const envMap = input.credentialEnvMap;
+  if (envMap !== undefined) {
+    addStrictEnv(envMap.provider, 'provider');
+    addStrictEnv(envMap.publication, 'publication');
+    addStrictEnv(envMap.publicationAuth, 'publicationAuth');
+    if (envMap.byProvider !== undefined) {
+      for (const key of Object.keys(envMap.byProvider)) {
+        if (Object.hasOwn(envMap.byProvider, key)) {
+          addStrictEnv(envMap.byProvider[key], `byProvider[${key}]`);
+        }
+      }
+    }
+  }
+  return names;
+}
+
 /**
  * Compile a validated manifest with trusted host bindings into registry/config documents accepted by
  * `validateDocument`, `loadTrustedConfiguration`, and `compilePlan`. Signing secrets appear only inside
@@ -1003,16 +1102,16 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     'Your final assistant message MUST be ONLY one raw UTF-8 JSON object matching:',
     '{"verdict":"pass"|"rework"|"fail"|"human","summary":"<non-empty summary>","findings":[{"title":"<title>","severity":"critical"|"high"|"medium"|"low","path":"<repo-relative-path or null>","line":1,"evidence":"<evidence>"}]}',
   ].join(' ');
-  const modelsConfig = (!isDelegated && bindings.modelsJsonPath !== undefined)
-    ? await loadPiModelsJson(bindings.modelsJsonPath)
-    : undefined;
+  const modelsConfig = isDelegated
+    ? undefined
+    : (bindings.modelsConfig ?? (bindings.modelsJsonPath !== undefined ? await loadPiModelsJson(bindings.modelsJsonPath) : undefined));
   const hasManifestRoles = manifest.spec.roles !== undefined && manifest.spec.roles.length > 0;
   const resolvedCandidates = isDelegated
     ? []
     : resolveTaskpackModelCandidates(manifest, bindings, { modelsConfig });
-  const providerEnv = (isDelegated || hasManifestRoles || checkOnlyNoChange)
-    ? (bindings.credentialEnvMap?.provider !== undefined ? requireEnvName(bindings.credentialEnvMap.provider, 'provider') : null)
-    : requireEnvName(bindings.credentialEnvMap?.provider, 'provider');
+  const providerEnv = bindings.credentialEnvMap?.provider !== undefined
+    ? requireEnvName(bindings.credentialEnvMap.provider, 'provider')
+    : null;
   const runtime = isDelegated ? null : await runtimeIdentity();
   const installed = await installedHandlerDigests();
 
@@ -1048,7 +1147,21 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         'read', 'write', 'edit', 'bash', 'delete',
         ...(bindings.externalMcpTools ?? []),
       ]);
-      const { selection } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
+      const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, bindings, modelsConfig);
+      const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
+      const boundAuthorEnv = resolveBoundProviderCredentialEnv({
+        provider: selection.provider,
+        credentialEnvMap: bindings.credentialEnvMap,
+        modelsJsonApiKeyEnv,
+        manifestApiKeyEnv: apiKeyEnv,
+        hasMultipleModels: (manifest.spec.models?.length ?? 0) > 1,
+        hasPinnedCandidate: bindings.roleSelection?.provider !== undefined
+          || bindings.roleSelection?.model !== undefined
+          || bindings.candidateIndex !== undefined,
+      });
+      const resolvedAuthorProviderEnv = checkOnlyNoChange
+        ? (boundAuthorEnv ?? resolveDefaultProviderTokenEnv(selection.provider))
+        : requireEnvName(boundAuthorEnv, 'provider');
       compiledRoles.push({
         roleId: 'author',
         profileId: 'taskpack-author-role',
@@ -1061,7 +1174,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         tools,
         selection,
         providerCredentialRef: 'taskpack-provider-token',
-        providerEnvName: providerEnv ?? resolveDefaultProviderTokenEnv(selection.provider),
+        providerEnvName: resolvedAuthorProviderEnv,
       });
     }
   } else {
@@ -1134,9 +1247,9 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         };
         const { selection, apiKeyEnv } = resolveTaskpackModelSelection(manifest, roleBindings, modelsConfig);
         const credRef = roleIdx === 0 ? 'taskpack-provider-token' : `taskpack-provider-token-${role.id}`;
-        const credentialMapRecord = bindings.credentialEnvMap as Readonly<Record<string, string | undefined>> | undefined;
-        const explicitRoleProviderEnv = credentialMapRecord !== undefined && Object.hasOwn(credentialMapRecord, selection.provider)
-          ? credentialMapRecord[selection.provider]
+        const byProvider = bindings.credentialEnvMap?.byProvider;
+        const explicitRoleProviderEnv = byProvider !== undefined && Object.hasOwn(byProvider, selection.provider)
+          ? byProvider[selection.provider]
           : undefined;
         const modelsJsonApiKeyEnv = modelsConfig?.providers.get(selection.provider)?.apiKeyEnv;
         const resolvedRoleProviderEnv = requireEnvName(
@@ -1380,6 +1493,10 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       'LOOPWRIGHT_PROVIDER_TOKEN',
       ...(providerEnv !== null ? [providerEnv] : []),
       ...compiledRoles.map(r => r.providerEnvName).filter((v): v is string => v !== null),
+      ...collectHostCredentialEnvNames({
+        credentialEnvMap: bindings.credentialEnvMap,
+        gateEndpoints: bindings.gateEndpoints,
+      }),
       ...(bindings.credentialEnvMap?.provider !== undefined ? [bindings.credentialEnvMap.provider] : []),
       ...(bindings.sourceTokenEnvNames ?? []),
       ...resolvedCandidates.flatMap(cand => [
@@ -1623,7 +1740,11 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         ? buildUpstreamVersionsMap(bindings.upstreamRecords)
         : null;
       const targetCell = effectiveTargetMatrix !== null && effectiveTargetMatrix.length === 1
-        ? effectiveTargetMatrix[0]!
+        ? Object.freeze({
+          id: effectiveTargetMatrix[0]!.id,
+          platform: effectiveTargetMatrix[0]!.platform,
+          variant: effectiveTargetMatrix[0]!.variant,
+        })
         : null;
       const selectorContractStub = {
         apiVersion: 'loopwright.dev/v1alpha1',
@@ -1855,9 +1976,15 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
   if (candidate && manifest.spec.publication.mode === 'pull_request' && !isDelegated && (publicationEndpoint === undefined || publicationEndpoint === null)) {
     bindingInvalid('candidate mode with pull_request publication requires a publicationEndpoint host binding');
   }
+  const publicationAuthEnabled = publicationEnabled
+    && publicationEndpoint != null
+    && publicationEndpoint.authCredentialRef != null
+    && publicationEndpoint.authCredentialRef !== publicationEndpoint.signingCredentialRef;
 
   interface GateCredentialSpec {
     readonly id: string;
+    readonly endpointId: string;
+    readonly purpose: 'sign' | 'auth';
     readonly destinationRef: string;
     readonly envName: string;
   }
@@ -1868,7 +1995,12 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       : [];
   const gates = candidate ? manifest.spec.verification.externalGates : [];
   const gateCredentialSpecs = new Map<string, GateCredentialSpec>();
-  const credMapRecord = bindings.credentialEnvMap as Readonly<Record<string, string | undefined>> | undefined;
+  const byCredRef = bindings.credentialEnvMap?.byCredentialRef;
+
+  const lookupByCredRef = (refId: string): string | undefined =>
+    byCredRef !== undefined && Object.hasOwn(byCredRef, refId) ? byCredRef[refId] : undefined;
+
+  const reservedGitHubTokenEnvs = new Set<string>(['GITHUB_TOKEN', 'GH_TOKEN']);
 
   const resolveGateCredPair = (
     rawRef: string | undefined,
@@ -1876,78 +2008,386 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     fallbackEnv: string | undefined,
     what: string,
   ): { readonly bindingId: string; readonly envName: string } => {
+    let pair: { readonly bindingId: string; readonly envName: string };
     if (rawRef !== undefined) {
       if (ENV_NAME_PATTERN.test(rawRef)) {
-        return { bindingId: fallbackId, envName: rawRef };
-      }
-      if (IDENTIFIER_PATTERN.test(rawRef)) {
-        const explicitMapped = credMapRecord !== undefined && Object.hasOwn(credMapRecord, rawRef)
-          ? credMapRecord[rawRef]
-          : undefined;
+        pair = { bindingId: fallbackId, envName: rawRef };
+      } else if (IDENTIFIER_PATTERN.test(rawRef)) {
+        const explicitMapped = lookupByCredRef(rawRef);
         const defaultEnv = `LOOPWRIGHT_GATE_${rawRef.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_SECRET`;
         const envName = requireEnvName(explicitMapped ?? fallbackEnv ?? defaultEnv, what);
-        return { bindingId: rawRef, envName };
+        pair = { bindingId: rawRef, envName };
+      } else {
+        bindingInvalid(`invalid ${what} credential reference "${rawRef}"`);
       }
-      bindingInvalid(`invalid ${what} credential reference "${rawRef}"`);
+    } else {
+      pair = { bindingId: fallbackId, envName: requireEnvName(fallbackEnv, what) };
     }
-    return { bindingId: fallbackId, envName: requireEnvName(fallbackEnv, what) };
+    if (reservedGitHubTokenEnvs.has(pair.envName)) {
+      bindingInvalid(`${what} credential cannot reuse reserved GitHub token env "${pair.envName}"`);
+    }
+    return pair;
   };
+
+  const benchmarkEndpointIds = new Set<string>(
+    gates.filter(g => g.implementation === 'benchmark-gate.v1').map(g => g.endpointId),
+  );
+  const reservedBenchmarkCredIds = new Map<string, { readonly endpointId: string; readonly purpose: 'sign' | 'auth' }>();
+  const reservedBenchmarkCredEnvs = new Map<string, { readonly endpointId: string; readonly purpose: 'sign' | 'auth' }>();
+
+  const validateBenchmarkHostPlan = (
+    hostPlan: HostGateEndpointPlan,
+  ): {
+    readonly signingBindingId: string;
+    readonly signingEnvRaw: string;
+    readonly authBindingId: string | null;
+    readonly authEnvRaw: string | null;
+  } => {
+    if (typeof hostPlan.id !== 'string' || !isControllerId(hostPlan.id)) {
+      bindingInvalid(
+        `benchmark-gate.v1 host gateEndpoints binding requires a valid 1..64 char id`,
+      );
+    }
+    if (typeof hostPlan.url !== 'string' || hostPlan.url.trim().length === 0) {
+      bindingInvalid(
+        `benchmark-gate.v1 host gateEndpoints binding for "${hostPlan.id}" requires a non-empty url`,
+      );
+    }
+    if (typeof hostPlan.signingCredentialRef !== 'string' || !isControllerId(hostPlan.signingCredentialRef)) {
+      bindingInvalid(
+        `benchmark-gate.v1 host gateEndpoints binding for "${hostPlan.id}" requires a valid 1..64 char signingCredentialRef`,
+      );
+    }
+    if (
+      hostPlan.authCredentialRef !== undefined
+      && hostPlan.authCredentialRef !== null
+      && (typeof hostPlan.authCredentialRef !== 'string' || !isControllerId(hostPlan.authCredentialRef))
+    ) {
+      bindingInvalid(
+        `benchmark-gate.v1 host gateEndpoints binding for "${hostPlan.id}" has an invalid authCredentialRef`,
+      );
+    }
+    const reservedLocalCmdGateEnv = bindings.credentialEnvMap?.localCommandGate ?? DEFAULT_LOCAL_COMMAND_GATE_ENV;
+    const reservedGitHubTokenEnvs = new Set<string>(['GITHUB_TOKEN', 'GH_TOKEN']);
+    const reservedPublisherEnvs = new Set<string>([
+      ...(publicationEnabled ? [bindings.credentialEnvMap?.publication ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET'] : []),
+      ...(publicationAuthEnabled ? [bindings.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN'] : []),
+    ]);
+    const signingBindingId = hostPlan.signingCredentialRef;
+    const signingEnvRaw = lookupByCredRef(signingBindingId) ?? bindings.credentialEnvMap?.gate;
+    if (typeof signingEnvRaw !== 'string' || !ENV_NAME_PATTERN.test(signingEnvRaw)) {
+      bindingInvalid(
+        `benchmark-gate.v1 host binding "${hostPlan.id}" requires an explicit 1..64 char signing credential env mapping for "${signingBindingId}"`,
+      );
+    }
+    if (signingEnvRaw === reservedLocalCmdGateEnv) {
+      bindingInvalid(
+        `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse local command gate credential env "${reservedLocalCmdGateEnv}"`,
+      );
+    }
+    if (reservedGitHubTokenEnvs.has(signingEnvRaw)) {
+      bindingInvalid(
+        `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse GitHub token env "${signingEnvRaw}"`,
+      );
+    }
+    if (reservedPublisherEnvs.has(signingEnvRaw)) {
+      bindingInvalid(
+        `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse active publication credential env "${signingEnvRaw}"`,
+      );
+    }
+    const prevSignOwner = reservedBenchmarkCredIds.get(signingBindingId);
+    if (prevSignOwner !== undefined && (prevSignOwner.endpointId !== hostPlan.id || prevSignOwner.purpose !== 'sign')) {
+      bindingInvalid(
+        `benchmark-gate.v1 signingCredentialRef "${signingBindingId}" cannot be shared across distinct endpoints or credential purposes`,
+      );
+    }
+    const prevSignEnvOwner = reservedBenchmarkCredEnvs.get(signingEnvRaw);
+    if (prevSignEnvOwner !== undefined && (prevSignEnvOwner.endpointId !== hostPlan.id || prevSignEnvOwner.purpose !== 'sign')) {
+      bindingInvalid(
+        `benchmark-gate.v1 signing credential env "${signingEnvRaw}" cannot be aliased across distinct endpoints or credential purposes`,
+      );
+    }
+    benchmarkEndpointIds.add(hostPlan.id);
+    reservedBenchmarkCredIds.set(signingBindingId, { endpointId: hostPlan.id, purpose: 'sign' });
+    reservedBenchmarkCredEnvs.set(signingEnvRaw, { endpointId: hostPlan.id, purpose: 'sign' });
+
+    let authBindingId: string | null = null;
+    let authEnvRaw: string | null = null;
+    if (hostPlan.authCredentialRef != null) {
+      authBindingId = hostPlan.authCredentialRef;
+      if (authBindingId === signingBindingId) {
+        bindingInvalid(
+          `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse signingCredentialRef "${signingBindingId}" as authCredentialRef`,
+        );
+      }
+      const rawAuthEnv = lookupByCredRef(authBindingId) ?? bindings.credentialEnvMap?.gateAuth;
+      if (typeof rawAuthEnv !== 'string' || !ENV_NAME_PATTERN.test(rawAuthEnv)) {
+        bindingInvalid(
+          `benchmark-gate.v1 host binding "${hostPlan.id}" requires an explicit 1..64 char auth credential env mapping for "${authBindingId}"`,
+        );
+      }
+      if (rawAuthEnv === reservedLocalCmdGateEnv) {
+        bindingInvalid(
+          `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse local command gate credential env "${reservedLocalCmdGateEnv}"`,
+        );
+      }
+      if (reservedGitHubTokenEnvs.has(rawAuthEnv)) {
+        bindingInvalid(
+          `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse GitHub token env "${rawAuthEnv}"`,
+        );
+      }
+      if (reservedPublisherEnvs.has(rawAuthEnv)) {
+        bindingInvalid(
+          `benchmark-gate.v1 host binding "${hostPlan.id}" cannot reuse active publication credential env "${rawAuthEnv}"`,
+        );
+      }
+      authEnvRaw = rawAuthEnv;
+      const prevAuthOwner = reservedBenchmarkCredIds.get(authBindingId);
+      if (prevAuthOwner !== undefined && (prevAuthOwner.endpointId !== hostPlan.id || prevAuthOwner.purpose !== 'auth')) {
+        bindingInvalid(
+          `benchmark-gate.v1 authCredentialRef "${authBindingId}" cannot be shared across distinct endpoints or credential purposes`,
+        );
+      }
+      const prevAuthEnvOwner = reservedBenchmarkCredEnvs.get(authEnvRaw);
+      if (prevAuthEnvOwner !== undefined && (prevAuthEnvOwner.endpointId !== hostPlan.id || prevAuthEnvOwner.purpose !== 'auth')) {
+        bindingInvalid(
+          `benchmark-gate.v1 auth credential env "${authEnvRaw}" cannot be aliased across distinct endpoints or credential purposes`,
+        );
+      }
+      reservedBenchmarkCredIds.set(authBindingId, { endpointId: hostPlan.id, purpose: 'auth' });
+      reservedBenchmarkCredEnvs.set(authEnvRaw, { endpointId: hostPlan.id, purpose: 'auth' });
+    }
+    return { signingBindingId, signingEnvRaw, authBindingId, authEnvRaw };
+  };
+
+  // Pass 0: reserve ALL host-designated benchmark-gate.v1 endpoints and credentials regardless of manifest declarations.
+  for (const plan of gatePlans) {
+    if (plan.implementation === 'benchmark-gate.v1') {
+      validateBenchmarkHostPlan(plan);
+    }
+  }
 
   if (gates.length > 0) {
     const resolvedPlansById = new Map<string, HostGateEndpointPlan>();
     for (const plan of gatePlans) {
-      if (plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID && !gates.some(g => g.endpointId === plan.id)) continue;
+      if (plan.id === LOCAL_COMMAND_GATE_ENDPOINT_ID && !hasCommandChecks && !gates.some(g => g.endpointId === plan.id)) continue;
+      if (plan.implementation === 'benchmark-gate.v1' && !gates.some(g => g.endpointId === plan.id)) continue;
       resolvedPlansById.set(plan.id, plan);
     }
+
+    const recordGateCredentialSpec = (spec: GateCredentialSpec, isBenchmark: boolean): void => {
+      const existing = gateCredentialSpecs.get(spec.id);
+      if (existing !== undefined) {
+        if (
+          existing.endpointId !== spec.endpointId
+          || existing.purpose !== spec.purpose
+          || existing.destinationRef !== spec.destinationRef
+          || existing.envName !== spec.envName
+        ) {
+          if (isBenchmark) {
+            bindingInvalid(
+              `conflicting host credential binding "${spec.id}" across benchmark endpoints`,
+              '/spec/verification/externalGates',
+            );
+          }
+          manifestInvalid(
+            `external gate credential "${spec.id}" conflicts with an existing endpoint binding`,
+            '/spec/verification/externalGates',
+          );
+        }
+        return;
+      }
+      gateCredentialSpecs.set(spec.id, spec);
+    };
+
+    // Pass 1: validate and reserve ALL manifest benchmark-gate.v1 endpoints and credentials first so
+    // ordinary gate.v1 entries can never collide with, reuse, or overwrite benchmark credentials in any order.
     for (const gate of gates) {
+      if (gate.implementation !== 'benchmark-gate.v1') continue;
+      if (
+        gate.url !== undefined
+        || gate.signingCredentialRef !== undefined
+        || gate.authCredentialRef !== undefined
+      ) {
+        manifestInvalid(
+          `benchmark-gate.v1 external gate endpoint "${gate.endpointId}" forbids manifest-level endpoint or credential overrides`,
+          '/spec/verification/externalGates',
+        );
+      }
       const hostPlan = gatePlans.find(item => item.id === gate.endpointId);
+      if (hostPlan === undefined) {
+        bindingInvalid(
+          `benchmark-gate.v1 external gate "${gate.id}" requires a host gateEndpoints binding for endpoint "${gate.endpointId}"`,
+        );
+      }
+      if (hostPlan.implementation === 'gate.v1') {
+        bindingInvalid(
+          `benchmark-gate.v1 external gate "${gate.id}" cannot bind to host endpoint "${gate.endpointId}" designated for gate.v1`,
+        );
+      }
+      const validated = validateBenchmarkHostPlan(hostPlan);
+      recordGateCredentialSpec(
+        {
+          id: validated.signingBindingId,
+          endpointId: gate.endpointId,
+          purpose: 'sign',
+          destinationRef: boundedGateDestinationRef('gate-sign', gate.endpointId),
+          envName: validated.signingEnvRaw,
+        },
+        true,
+      );
+      if (validated.authBindingId !== null && validated.authEnvRaw !== null) {
+        recordGateCredentialSpec(
+          {
+            id: validated.authBindingId,
+            endpointId: gate.endpointId,
+            purpose: 'auth',
+            destinationRef: boundedGateDestinationRef('gate-auth', gate.endpointId),
+            envName: validated.authEnvRaw,
+          },
+          true,
+        );
+      }
+
+      const synthesizedPlan: HostGateEndpointPlan = {
+        id: gate.endpointId,
+        url: hostPlan.url,
+        signingCredentialRef: validated.signingBindingId,
+        authCredentialRef: validated.authBindingId,
+        timeoutMs: hostPlan.timeoutMs ?? 30_000,
+        maxPollMs: hostPlan.maxPollMs ?? 120_000,
+        pollInitialMs: hostPlan.pollInitialMs ?? 200,
+        pollMaxMs: hostPlan.pollMaxMs ?? 5_000,
+        jitter: hostPlan.jitter ?? 100,
+      };
+      resolvedPlansById.set(gate.endpointId, synthesizedPlan);
+    }
+
+    // Pass 2: compile ordinary gate.v1 entries, rejecting any collision with reserved benchmark endpoints or credentials.
+    for (const gate of gates) {
+      if (gate.implementation === 'benchmark-gate.v1') continue;
+      const hostPlan = gatePlans.find(item => item.id === gate.endpointId);
+      if (benchmarkEndpointIds.has(gate.endpointId)) {
+        manifestInvalid(
+          `ordinary external gate "${gate.id}" cannot reuse benchmark-gate.v1 endpoint "${gate.endpointId}"`,
+          '/spec/verification/externalGates',
+        );
+      }
+      if (hostPlan !== undefined && gate.url !== undefined && gate.url !== hostPlan.url) {
+        manifestInvalid(
+          `ordinary external gate "${gate.id}" cannot override url of host-bound endpoint "${gate.endpointId}"`,
+          '/spec/verification/externalGates',
+        );
+      }
       const effectiveUrl = gate.url ?? hostPlan?.url;
       if (effectiveUrl === undefined) {
         if (gatePlans.length === 0) bindingInvalid('external gates require gateEndpoints host bindings or per-gate url');
         bindingInvalid(`external gate "${gate.id}" references unknown endpoint "${gate.endpointId}"`);
       }
-      const signingFallbackId = hostPlan?.signingCredentialRef ?? `taskpack-gate-signing-${gate.endpointId}`;
+      if (hostPlan !== undefined && !isControllerId(hostPlan.signingCredentialRef)) {
+        bindingInvalid(
+          `host gateEndpoints binding for "${gate.endpointId}" requires a valid 1..64 char signingCredentialRef`,
+        );
+      }
+      const signingFallbackId = hostPlan?.signingCredentialRef ?? boundedGateDestinationRef('gate-sign', gate.endpointId);
+      const explicitSigningEnv = hostPlan !== undefined ? lookupByCredRef(signingFallbackId) : undefined;
       const signing = resolveGateCredPair(
         gate.signingCredentialRef,
         signingFallbackId,
-        bindings.credentialEnvMap?.gate,
+        explicitSigningEnv ?? bindings.credentialEnvMap?.gate,
         'gate',
       );
-      gateCredentialSpecs.set(signing.bindingId, {
-        id: signing.bindingId,
-        destinationRef: signing.bindingId === 'taskpack-gate-signing' ? 'taskpack-gate-signing' : `gate-sign-${gate.endpointId}`,
-        envName: signing.envName,
-      });
+      if (!isControllerId(signing.bindingId)) {
+        bindingInvalid(`gate signing credential id "${signing.bindingId}" exceeds controller 1..64 char identifier bounds`);
+      }
+      if (
+        reservedBenchmarkCredIds.has(signing.bindingId)
+        || reservedBenchmarkCredEnvs.has(signing.envName)
+      ) {
+        manifestInvalid(
+          `ordinary external gate "${gate.id}" cannot reference a host benchmark-gate.v1 credential`,
+          '/spec/verification/externalGates',
+        );
+      }
+      recordGateCredentialSpec(
+        {
+          id: signing.bindingId,
+          endpointId: gate.endpointId,
+          purpose: 'sign',
+          destinationRef: signing.bindingId === 'taskpack-gate-signing'
+            ? 'taskpack-gate-signing'
+            : boundedGateDestinationRef('gate-sign', gate.endpointId),
+          envName: signing.envName,
+        },
+        false,
+      );
 
       let authBindingId: string | null = null;
       if (gate.authCredentialRef !== undefined) {
         const auth = resolveGateCredPair(
           gate.authCredentialRef,
-          `taskpack-gate-auth-${gate.endpointId}`,
-          credMapRecord?.['gateAuth'] ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN',
+          boundedGateDestinationRef('gate-auth', gate.endpointId),
+          bindings.credentialEnvMap?.gateAuth ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN',
           'gateAuth',
         );
+        if (!isControllerId(auth.bindingId)) {
+          bindingInvalid(`gate auth credential id "${auth.bindingId}" exceeds controller 1..64 char identifier bounds`);
+        }
+        if (
+          reservedBenchmarkCredIds.has(auth.bindingId)
+          || reservedBenchmarkCredEnvs.has(auth.envName)
+        ) {
+          manifestInvalid(
+            `ordinary external gate "${gate.id}" cannot reference a host benchmark-gate.v1 auth credential`,
+            '/spec/verification/externalGates',
+          );
+        }
         authBindingId = auth.bindingId;
-        gateCredentialSpecs.set(auth.bindingId, {
-          id: auth.bindingId,
-          destinationRef: `gate-auth-${gate.endpointId}`,
-          envName: auth.envName,
-        });
+        recordGateCredentialSpec(
+          {
+            id: auth.bindingId,
+            endpointId: gate.endpointId,
+            purpose: 'auth',
+            destinationRef: boundedGateDestinationRef('gate-auth', gate.endpointId),
+            envName: auth.envName,
+          },
+          false,
+        );
       } else if (hostPlan?.authCredentialRef != null) {
         authBindingId = hostPlan.authCredentialRef;
-        if (!gateCredentialSpecs.has(authBindingId)) {
-          const authEnv = requireEnvName(
-            (credMapRecord !== undefined && Object.hasOwn(credMapRecord, authBindingId) ? credMapRecord[authBindingId] : undefined)
-              ?? credMapRecord?.['gateAuth']
-              ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN',
-            'gateAuth',
+        if (!isControllerId(authBindingId)) {
+          bindingInvalid(
+            `host gateEndpoints binding for "${gate.endpointId}" has an invalid authCredentialRef`,
           );
-          gateCredentialSpecs.set(authBindingId, {
-            id: authBindingId,
-            destinationRef: `gate-auth-${gate.endpointId}`,
-            envName: authEnv,
-          });
         }
+        if (reservedBenchmarkCredIds.has(authBindingId)) {
+          manifestInvalid(
+            `ordinary external gate "${gate.id}" cannot share a host benchmark-gate.v1 auth credential`,
+            '/spec/verification/externalGates',
+          );
+        }
+        const authEnv = requireEnvName(
+          lookupByCredRef(authBindingId)
+            ?? bindings.credentialEnvMap?.gateAuth
+            ?? 'LOOPWRIGHT_GATE_AUTH_TOKEN',
+          'gateAuth',
+        );
+        if (reservedBenchmarkCredEnvs.has(authEnv)) {
+          manifestInvalid(
+            `ordinary external gate "${gate.id}" cannot share a host benchmark-gate.v1 auth credential environment variable`,
+            '/spec/verification/externalGates',
+          );
+        }
+        recordGateCredentialSpec(
+          {
+            id: authBindingId,
+            endpointId: gate.endpointId,
+            purpose: 'auth',
+            destinationRef: boundedGateDestinationRef('gate-auth', gate.endpointId),
+            envName: authEnv,
+          },
+          false,
+        );
       }
 
       const synthesizedPlan: HostGateEndpointPlan = {
@@ -1975,24 +2415,113 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       }
       resolvedPlansById.set(gate.endpointId, synthesizedPlan);
     }
+
     gatePlans.length = 0;
     for (const plan of resolvedPlansById.values()) gatePlans.push(plan);
+  } else if (gatePlans.some(plan => plan.implementation === 'benchmark-gate.v1')) {
+    const kept = gatePlans.filter(plan => plan.implementation !== 'benchmark-gate.v1');
+    gatePlans.length = 0;
+    gatePlans.push(...kept);
+  }
+
+  // Defense-in-depth cross-consumer isolation: host gate and benchmark credential env names must NEVER
+  // overlap command.v1 checks, repository MCP servers, or Pi provider role credentials.
+  const protectedGateEnvs = new Set<string>([
+    ...collectHostGateCredentialEnvNames({
+      credentialEnvMap: bindings.credentialEnvMap,
+      gateEndpoints: bindings.gateEndpoints,
+    }),
+    ...reservedBenchmarkCredEnvs.keys(),
+    ...[...gateCredentialSpecs.values()].map(spec => spec.envName),
+  ]);
+  if (protectedGateEnvs.size > 0) {
+    for (const cmdGate of commandGateMetaByCheckId.values()) {
+      for (const envName of cmdGate.env) {
+        if (protectedGateEnvs.has(envName)) {
+          manifestInvalid(
+            `command.v1 env "${envName}" must not reference a host gate credential environment variable`,
+            '/spec/verification/localChecks',
+          );
+        }
+      }
+      if (cmdGate.envMap !== undefined) {
+        for (const envKey of Object.keys(cmdGate.envMap)) {
+          if (protectedGateEnvs.has(envKey)) {
+            manifestInvalid(
+              `command.v1 env "${envKey}" must not reference a host gate credential environment variable`,
+              '/spec/verification/localChecks',
+            );
+          }
+        }
+      }
+    }
+    for (const mcpEnvName of collectMcpReferencedEnvNames(manifest.spec.mcp?.servers)) {
+      if (protectedGateEnvs.has(mcpEnvName)) {
+        manifestInvalid(
+          `MCP server must not reference host gate credential environment variable "${mcpEnvName}"`,
+          '/spec/mcp/servers',
+        );
+      }
+    }
+    if (!isDelegated) {
+      const externalGateEnvs = new Set<string>([
+        ...reservedBenchmarkCredEnvs.keys(),
+        ...[...gateCredentialSpecs.values()].map(spec => spec.envName),
+        ...collectHostGateCredentialEnvNames({
+          credentialEnvMap: bindings.credentialEnvMap !== undefined
+            ? { ...bindings.credentialEnvMap, localCommandGate: undefined }
+            : undefined,
+          gateEndpoints: bindings.gateEndpoints?.filter(ep => ep.id !== LOCAL_COMMAND_GATE_ENDPOINT_ID),
+        }),
+      ]);
+      if (providerEnv !== null && externalGateEnvs.has(providerEnv)) {
+        bindingInvalid(
+          `provider credential environment variable "${providerEnv}" must not overlap a host external gate credential`,
+          '/spec/roles',
+        );
+      }
+      for (const role of compiledRoles) {
+        if (role.providerEnvName !== null && externalGateEnvs.has(role.providerEnvName)) {
+          bindingInvalid(
+            `role "${role.roleId}" provider credential environment variable "${role.providerEnvName}" must not overlap a host external gate credential`,
+            '/spec/roles',
+          );
+        }
+      }
+    }
+    if (manifest.spec.decisions?.enabled === true && reservedBenchmarkCredEnvs.size > 0) {
+      const decisionProvider = manifest.spec.decisions.provider ?? DEFAULT_DECISION_POLICY.provider;
+      for (const decisionEnvName of DECISION_PROVIDER_API_KEY_ENV[decisionProvider]) {
+        if (reservedBenchmarkCredEnvs.has(decisionEnvName)) {
+          bindingInvalid(
+            `decision provider "${decisionProvider}" credential environment variable "${decisionEnvName}" must not overlap a host benchmark-gate.v1 credential`,
+            '/spec/decisions',
+          );
+        }
+      }
+    }
   }
 
   const publicationEnv = publicationEnabled ? requireEnvName(bindings.credentialEnvMap?.publication, 'publication') : null;
-  const publicationAuthEnabled = publicationEnabled
-    && publicationEndpoint != null
-    && publicationEndpoint.authCredentialRef != null
-    && publicationEndpoint.authCredentialRef !== publicationEndpoint.signingCredentialRef;
   const publicationAuthEnv = publicationAuthEnabled
     ? requireEnvName(bindings.credentialEnvMap?.publicationAuth ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN', 'publicationAuth')
     : null;
 
   interface ActiveCheck {
     readonly id: string;
-    readonly implementation: 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'gate.v1' | 'json-keys-guard.v1' | 'line-section-guard.v1';
+    readonly implementation:
+      | 'json-artifact.v1'
+      | 'scope.v1'
+      | 'no-change.v1'
+      | 'gate.v1'
+      | 'benchmark-gate.v1'
+      | 'json-keys-guard.v1'
+      | 'line-section-guard.v1';
     readonly parameters: Record<string, unknown>;
-    readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service')[];
+    readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service' | 'hardware_execution')[];
+    readonly targetCellId?: string | undefined;
+    readonly allowSyntheticHardwareProbe?: boolean | undefined;
+    readonly metricThresholds?: readonly MetricThresholdRule[] | undefined;
   }
   const activeChecks: ActiveCheck[] = [];
   const localCommandGates: CompiledLocalCommandGate[] = [];
@@ -2067,12 +2596,46 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
     for (const gate of gates) {
       const plan = gatePlans.find(item => item.id === gate.endpointId);
       if (plan === undefined) bindingInvalid(`external gate "${gate.id}" references unknown endpoint "${gate.endpointId}"`);
-      activeChecks.push({
-        id: gate.id,
-        implementation: 'gate.v1',
-        parameters: { checkId: gate.id, endpointRef: gate.endpointId, gateId: gate.gateId },
-        allowedEvidenceLevels: ['external_service'],
-      });
+      if (gate.implementation === 'benchmark-gate.v1') {
+        if (gate.targetCellId === undefined || gate.heldOutWorkloadId === undefined) {
+          manifestInvalid(
+            `benchmark-gate.v1 external gate "${gate.id}" requires targetCellId and heldOutWorkloadId`,
+            '/spec/verification/externalGates',
+          );
+        }
+        const targetCell = effectiveTargetMatrix?.find(cell => cell.id === gate.targetCellId);
+        if (targetCell === undefined || targetCell.hardware === undefined) {
+          bindingInvalid(
+            `benchmark-gate.v1 external gate "${gate.id}" targetCellId "${gate.targetCellId}" must match a hardware target.matrix cell`,
+          );
+        }
+        activeChecks.push({
+          id: gate.id,
+          implementation: 'benchmark-gate.v1',
+          parameters: {
+            checkId: gate.id,
+            endpointRef: gate.endpointId,
+            gateId: gate.gateId,
+            heldOutWorkloadId: gate.heldOutWorkloadId,
+            ...(gate.maxPreemptions !== undefined ? { maxPreemptions: gate.maxPreemptions } : {}),
+          },
+          allowedEvidenceLevels: ['hardware_execution'],
+          targetCellId: gate.targetCellId,
+          ...(gate.allowSyntheticHardwareProbe !== undefined
+            ? { allowSyntheticHardwareProbe: gate.allowSyntheticHardwareProbe }
+            : {}),
+          ...(gate.metricThresholds !== undefined
+            ? { metricThresholds: gate.metricThresholds }
+            : {}),
+        });
+      } else {
+        activeChecks.push({
+          id: gate.id,
+          implementation: 'gate.v1',
+          parameters: { checkId: gate.id, endpointRef: gate.endpointId, gateId: gate.gateId },
+          allowedEvidenceLevels: ['external_service'],
+        });
+      }
     }
   }
 
@@ -2402,7 +2965,15 @@ interface AssembleInput {
   readonly localCmdGateSigningRef: string | null;
   readonly publicationEnv: string | null;
   readonly publicationAuthEnv: string | null;
-  readonly activeChecks: readonly { readonly id: string; readonly implementation: string; readonly parameters: Record<string, unknown>; readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service')[] }[];
+  readonly activeChecks: readonly {
+    readonly id: string;
+    readonly implementation: string;
+    readonly parameters: Record<string, unknown>;
+    readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service' | 'hardware_execution')[];
+    readonly targetCellId?: string | undefined;
+    readonly allowSyntheticHardwareProbe?: boolean | undefined;
+    readonly metricThresholds?: readonly MetricThresholdRule[] | undefined;
+  }[];
   readonly steps: readonly CompiledStepSpec[];
   readonly extraAgentHandlers: readonly ExtraAgentHandlerSpec[];
   readonly required: readonly string[];
@@ -2494,7 +3065,40 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     input.steps.filter(s => s.kind === 'agent' && s.roleId !== null).map(s => s.roleId!),
   );
   const credentialBindings: { id: string; consumer: 'provider' | 'gate' | 'publisher'; destinationRef: string; environmentNames: readonly string[]; template: string }[] = [];
-  const usedCredIds = new Set<string>();
+  const usedCredById = new Map<string, { readonly consumer: 'provider' | 'gate' | 'publisher'; readonly destinationRef: string; readonly template: string }>();
+  const addCredentialBinding = (binding: {
+    readonly id: string;
+    readonly consumer: 'provider' | 'gate' | 'publisher';
+    readonly destinationRef: string;
+    readonly environmentNames: readonly string[];
+    readonly template: string;
+  }): void => {
+    const existing = usedCredById.get(binding.id);
+    if (existing !== undefined) {
+      if (
+        existing.consumer === binding.consumer
+        && existing.destinationRef === binding.destinationRef
+        && existing.template === binding.template
+      ) {
+        return;
+      }
+      bindingInvalid(
+        `credential binding id "${binding.id}" conflicts across consumers or destinations (${existing.consumer}/${existing.destinationRef} vs ${binding.consumer}/${binding.destinationRef})`,
+      );
+    }
+    usedCredById.set(binding.id, {
+      consumer: binding.consumer,
+      destinationRef: binding.destinationRef,
+      template: binding.template,
+    });
+    credentialBindings.push({
+      id: binding.id,
+      consumer: binding.consumer,
+      destinationRef: binding.destinationRef,
+      environmentNames: binding.environmentNames,
+      template: binding.template,
+    });
+  };
   if (!isDelegated) {
     const providerBindingByProvider = new Map<string, string>();
     for (const role of compiledRoles) {
@@ -2503,8 +3107,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       const existingId = providerBindingByProvider.get(role.selection.provider);
       if (existingId !== undefined) continue;
       providerBindingByProvider.set(role.selection.provider, role.providerCredentialRef);
-      usedCredIds.add(role.providerCredentialRef);
-      credentialBindings.push({
+      addCredentialBinding({
         id: role.providerCredentialRef,
         consumer: 'provider',
         destinationRef: role.selection.provider,
@@ -2514,9 +3117,7 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     }
   }
   for (const gateCred of input.gateCredentials) {
-    if (usedCredIds.has(gateCred.id)) continue;
-    usedCredIds.add(gateCred.id);
-    credentialBindings.push({
+    addCredentialBinding({
       id: gateCred.id,
       consumer: 'gate',
       destinationRef: gateCred.destinationRef,
@@ -2527,10 +3128,8 @@ function assemble(input: AssembleInput): CompiledTaskpack {
   if (
     input.localCmdGateEnv !== null
     && input.localCmdGateSigningRef !== null
-    && !usedCredIds.has(input.localCmdGateSigningRef)
   ) {
-    usedCredIds.add(input.localCmdGateSigningRef);
-    credentialBindings.push({
+    addCredentialBinding({
       id: input.localCmdGateSigningRef,
       consumer: 'gate',
       destinationRef: 'taskpack-local-command-signing',
@@ -2539,23 +3138,18 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     });
   }
   if (input.publicationEnv !== null && input.publicationEndpoint !== undefined && input.publicationEndpoint !== null) {
-    if (!usedCredIds.has(input.publicationEndpoint.signingCredentialRef)) {
-      usedCredIds.add(input.publicationEndpoint.signingCredentialRef);
-      credentialBindings.push({
-        id: input.publicationEndpoint.signingCredentialRef,
-        consumer: 'publisher',
-        destinationRef: 'taskpack-publication-signing',
-        environmentNames: [input.publicationEnv],
-        template: `\${${input.publicationEnv}}`,
-      });
-    }
+    addCredentialBinding({
+      id: input.publicationEndpoint.signingCredentialRef,
+      consumer: 'publisher',
+      destinationRef: 'taskpack-publication-signing',
+      environmentNames: [input.publicationEnv],
+      template: `\${${input.publicationEnv}}`,
+    });
     if (
       input.publicationAuthEnv !== null
       && input.publicationEndpoint.authCredentialRef != null
-      && !usedCredIds.has(input.publicationEndpoint.authCredentialRef)
     ) {
-      usedCredIds.add(input.publicationEndpoint.authCredentialRef);
-      credentialBindings.push({
+      addCredentialBinding({
         id: input.publicationEndpoint.authCredentialRef,
         consumer: 'publisher',
         destinationRef: 'taskpack-publication-auth',
@@ -2576,6 +3170,10 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     classification: 'credential' as const,
     paths,
   }));
+  const capabilitiesForNonGateCheck = (implementation: string): string[] =>
+    implementation === 'benchmark-gate.v1'
+      ? ['hardware_execution', 'read_only']
+      : ['inert_bytes', 'read_only'];
   const handlers = [
     ...compiledRoles.map(role => ({
       id: role.handlerId,
@@ -2598,11 +3196,20 @@ function assemble(input: AssembleInput): CompiledTaskpack {
     ...input.activeChecks.map(check => ({
       id: check.id,
       kind: 'check' as const,
-      implementation: check.implementation as 'json-artifact.v1' | 'scope.v1' | 'no-change.v1' | 'gate.v1' | 'json-keys-guard.v1' | 'line-section-guard.v1',
+      implementation: check.implementation as
+        | 'json-artifact.v1'
+        | 'scope.v1'
+        | 'no-change.v1'
+        | 'gate.v1'
+        | 'benchmark-gate.v1'
+        | 'json-keys-guard.v1'
+        | 'line-section-guard.v1',
       version: 1 as const,
       digest: { ...installed[check.implementation]! },
       parameters: check.parameters as Readonly<Record<string, Json>>,
-      capabilities: check.implementation === 'gate.v1' ? ['external_service', 'read_only'] : ['inert_bytes', 'read_only'],
+      capabilities: check.implementation === 'gate.v1'
+        ? ['external_service', 'read_only']
+        : capabilitiesForNonGateCheck(check.implementation),
     })),
     {
       id: 'scope',
@@ -2877,6 +3484,17 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       id: cell.id,
       platform: cell.platform,
       variant: cell.variant,
+      ...(cell.hardware !== undefined
+        ? {
+          hardware: {
+            accelerator: cell.hardware.accelerator,
+            isolationMode: cell.hardware.isolationMode,
+            ...(cell.hardware.deviceCount !== undefined ? { deviceCount: cell.hardware.deviceCount } : {}),
+            ...(cell.hardware.driverConstraint !== undefined ? { driverConstraint: cell.hardware.driverConstraint } : {}),
+            ...(cell.hardware.topology !== undefined ? { topology: cell.hardware.topology } : {}),
+          },
+        }
+        : {}),
     }));
   const task = {
     apiVersion: 'loopwright.dev/v1alpha1' as const,
@@ -2920,7 +3538,34 @@ function assemble(input: AssembleInput): CompiledTaskpack {
       })),
       acceptance: {
         required: [...input.required],
-        checks: input.activeChecks.map(check => ({ id: check.id, allowedEvidenceLevels: [...check.allowedEvidenceLevels] })),
+        checks: input.activeChecks.map(check => ({
+          id: check.id,
+          allowedEvidenceLevels: [...check.allowedEvidenceLevels],
+          ...(check.targetCellId !== undefined ? { targetCellId: check.targetCellId } : {}),
+          ...(check.allowSyntheticHardwareProbe !== undefined
+            ? { allowSyntheticHardwareProbe: check.allowSyntheticHardwareProbe }
+            : {}),
+          ...(check.metricThresholds !== undefined
+            ? {
+              metricThresholds: check.metricThresholds.map(rule => (
+                rule.kind === 'bounds'
+                  ? {
+                    kind: 'bounds' as const,
+                    metric: rule.metric,
+                    ...(rule.min !== undefined ? { min: rule.min } : {}),
+                    ...(rule.max !== undefined ? { max: rule.max } : {}),
+                  }
+                  : {
+                    kind: 'comparative' as const,
+                    metric: rule.metric,
+                    baselineMetric: rule.baselineMetric,
+                    operator: rule.operator,
+                    threshold: rule.threshold,
+                  }
+              )),
+            }
+            : {}),
+        })),
       },
     },
   };
@@ -3020,6 +3665,8 @@ export interface CreateTaskpackDecisionPortOptions {
   readonly transport?: DecisionTransport | undefined;
   readonly scrubber?: SecretScrubber | undefined;
   readonly hasPinnedRoles?: boolean | undefined;
+  /** Host gate/benchmark credential environment variable names forbidden from decision provider lookup. */
+  readonly excludedEnvNames?: ReadonlySet<string> | readonly string[] | undefined;
 }
 
 export function createTaskpackDecisionPort(
@@ -3049,9 +3696,28 @@ export function createTaskpackDecisionPort(
     allowImages: decl.allowImages ?? false,
   });
 
-  const resolvedApiKey = options?.apiKey ?? DECISION_PROVIDER_API_KEY_ENV[provider]
-    .map(envName => env[envName]?.trim())
-    .find((val): val is string => typeof val === 'string' && val.length > 0);
+  const excludedDecisionEnvs = options?.excludedEnvNames instanceof Set
+    ? options.excludedEnvNames
+    : new Set<string>(options?.excludedEnvNames ?? []);
+  const trimmedExplicitApiKey = typeof options?.apiKey === 'string' ? options.apiKey.trim() : '';
+  let resolvedApiKey: string | undefined;
+  if (trimmedExplicitApiKey.length > 0) {
+    resolvedApiKey = trimmedExplicitApiKey;
+  } else {
+    if (excludedDecisionEnvs.size > 0) {
+      for (const envName of DECISION_PROVIDER_API_KEY_ENV[provider]) {
+        if (excludedDecisionEnvs.has(envName)) {
+          bindingInvalid(
+            `decision provider "${provider}" credential environment variable "${envName}" must not overlap a host gate credential`,
+            '/spec/decisions',
+          );
+        }
+      }
+    }
+    resolvedApiKey = DECISION_PROVIDER_API_KEY_ENV[provider]
+      .map(envName => env[envName]?.trim())
+      .find((val): val is string => typeof val === 'string' && val.length > 0);
+  }
   if (resolvedApiKey !== undefined && resolvedApiKey.length > 0) {
     options?.scrubber?.register(resolvedApiKey);
   }
@@ -3336,9 +4002,23 @@ export interface ResolveExternalMcpConfigsOptions {
   readonly githubToken?: string | undefined;
   readonly allowLoopbackHttp: boolean;
   readonly scrubber: SecretScrubber;
+  /** Host gate/benchmark credential environment variable names forbidden from repository MCP servers. */
+  readonly excludedEnvNames?: ReadonlySet<string> | readonly string[] | undefined;
 }
 
 export function resolveExternalMcpConfigs(options: ResolveExternalMcpConfigsOptions): readonly ExternalMcpServerConfig[] {
+  const excludedEnvSet = options.excludedEnvNames instanceof Set
+    ? options.excludedEnvNames
+    : new Set<string>(options.excludedEnvNames ?? []);
+  const assertMcpEnvAllowed = (declId: string, sourceName: string): void => {
+    if (excludedEnvSet.has(sourceName)) {
+      throw new TaskpackError(
+        'TASKPACK_MANIFEST_INVALID',
+        `MCP server "${declId}" must not reference host credential environment variable "${sourceName}"`,
+        `/spec/mcp/servers/${declId}`,
+      );
+    }
+  };
   const configs: ExternalMcpServerConfig[] = [];
   for (const decl of options.declarations) {
     const required = decl.required !== false;
@@ -3347,6 +4027,7 @@ export function resolveExternalMcpConfigs(options: ResolveExternalMcpConfigsOpti
       const mergedEnv: Record<string, string> = { ...(decl.env ?? {}) };
       let missingRequiredEnv: string | null = null;
       for (const [targetName, sourceName] of Object.entries(decl.envFrom ?? {})) {
+        assertMcpEnvAllowed(decl.id, sourceName);
         const val = resolveHostEnvSecret(sourceName, options.runtimeEnv, options.githubToken);
         if (val === undefined) {
           missingRequiredEnv = sourceName;
@@ -3379,6 +4060,7 @@ export function resolveExternalMcpConfigs(options: ResolveExternalMcpConfigsOpti
       const mergedHeaders: Record<string, string> = { ...(decl.headers ?? {}) };
       let missingRequiredEnv: string | null = null;
       for (const [headerName, sourceName] of Object.entries(decl.headersFrom ?? {})) {
+        assertMcpEnvAllowed(decl.id, sourceName);
         const val = resolveHostEnvSecret(sourceName, options.runtimeEnv, options.githubToken);
         if (val === undefined) {
           missingRequiredEnv = sourceName;
@@ -3388,6 +4070,7 @@ export function resolveExternalMcpConfigs(options: ResolveExternalMcpConfigsOpti
         mergedHeaders[headerName] = val;
       }
       if (missingRequiredEnv === null && decl.bearerTokenEnv !== undefined) {
+        assertMcpEnvAllowed(decl.id, decl.bearerTokenEnv);
         const bearerVal = resolveHostEnvSecret(decl.bearerTokenEnv, options.runtimeEnv, options.githubToken);
         if (bearerVal === undefined) {
           missingRequiredEnv = decl.bearerTokenEnv;

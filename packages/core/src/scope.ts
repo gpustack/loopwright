@@ -1,8 +1,44 @@
 import { snapshot } from './boundary.js';
 import { attempt, fail, type Result } from './diagnostics.js';
-import { LIMITS } from './limits.js';
+import { LIMITS, VERIFIER_ARTIFACT_LIMITS } from './limits.js';
 
 const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+const SLOT_IDENTIFIER_RE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+
+export interface VerifierArtifactPath {
+  readonly slotId: string;
+  readonly relativePath: string;
+}
+
+export function isVerifierNamespacePath(name: string): boolean {
+  if (typeof name !== 'string' || !name.length) return false;
+  const slash = name.indexOf('/');
+  const first = slash === -1 ? name : name.slice(0, slash);
+  return first.toLowerCase() === VERIFIER_ARTIFACT_LIMITS.prefix;
+}
+
+function validVerifierSlotId(slotId: string): boolean {
+  if (!validSegmentBase(slotId)) return false;
+  if (slotId.startsWith('check.')) {
+    const checkId = slotId.slice(6);
+    return checkId.length >= 1 && checkId.length <= LIMITS.identifier && SLOT_IDENTIFIER_RE.test(checkId);
+  }
+  return slotId.length >= 1 && slotId.length <= LIMITS.identifier && SLOT_IDENTIFIER_RE.test(slotId);
+}
+
+export function parseVerifierArtifactPath(name: string): VerifierArtifactPath | null {
+  if (typeof name !== 'string' || !name.length || name.length > LIMITS.path) return null;
+  const segments = name.split('/');
+  if (segments.length < 3 || segments.length > LIMITS.segments) return null;
+  if (segments[0] !== VERIFIER_ARTIFACT_LIMITS.prefix) return null;
+  const slotId = segments[1]!;
+  if (!validVerifierSlotId(slotId)) return null;
+  for (let index = 2; index < segments.length; index++) {
+    const segment = segments[index]!;
+    if (!validSegmentBase(segment) || !/^[A-Za-z0-9._-]+$/.test(segment)) return null;
+  }
+  return { slotId, relativePath: segments.slice(2).join('/') };
+}
 
 function validSegmentBase(segment: string): boolean {
   return segment.length > 0 && segment !== '.' && segment !== '..'

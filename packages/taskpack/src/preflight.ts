@@ -88,6 +88,8 @@ export interface RunTaskpackPreflightOptions {
   readonly hostPolicy?: ExecutionHostPolicy | undefined;
   readonly scrubber: SecretScrubber;
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /** Additional host-bound credential environment variable names to strip and scrub from preflight subprocesses. */
+  readonly excludedEnvNames?: ReadonlySet<string> | readonly string[] | undefined;
   /** Explicit operator-brokered env map permitted past credential stripping (cannot override Loopwright preflight paths). */
   readonly brokeredEnv?: Readonly<Record<string, string>> | undefined;
   readonly tempRoot?: string | undefined;
@@ -1459,7 +1461,14 @@ export async function runTaskpackPreflight(
     await mkdir(stagingInputDir, { mode: 0o700 });
     const stagingRoot = await resolveSafeDirectory(stagingInputDir, 'preflight staging directory');
 
-    const manifestSecretEnvNames = collectManifestSecretEnvNames(options.manifest);
+    const manifestSecretEnvNames = new Set<string>(collectManifestSecretEnvNames(options.manifest));
+    if (options.excludedEnvNames !== undefined) {
+      for (const envName of options.excludedEnvNames) {
+        if (typeof envName === 'string' && envName.length > 0) {
+          manifestSecretEnvNames.add(envName);
+        }
+      }
+    }
     const hostEnv = options.env ?? process.env;
     const strippedScrubber = new SecretScrubber();
     for (const [key, val] of Object.entries(hostEnv)) {

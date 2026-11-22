@@ -87,13 +87,15 @@ export function validatePortsAgainstHostPolicy(
 }
 
 export function resolveStoreLeaseMs(configuration: LoadedConfiguration, plan: CompiledPlan): number {
-  let maxEndpointTimeoutMs = 0;
+  let maxEndpointDurationMs = 0;
   for (const slot of plan.verifierSlots) {
-    if (slot.handler.implementation !== 'gate.v1') continue;
+    if (slot.handler.implementation !== 'gate.v1' && slot.handler.implementation !== 'benchmark-gate.v1') continue;
     const ep = configuration.registry.spec.gateEndpoints.find(item => item.id === slot.handler.parameters.endpointRef);
-    if (ep && ep.timeoutMs > maxEndpointTimeoutMs) maxEndpointTimeoutMs = ep.timeoutMs;
+    if (!ep) continue;
+    const durationMs = slot.handler.implementation === 'benchmark-gate.v1' ? Math.max(ep.timeoutMs, ep.maxPollMs) : ep.timeoutMs;
+    if (durationMs > maxEndpointDurationMs) maxEndpointDurationMs = durationMs;
   }
-  return maxEndpointTimeoutMs > 58000 ? Math.min(3700000, maxEndpointTimeoutMs + 30000) : 60000;
+  return maxEndpointDurationMs > 58000 ? Math.min(3700000, maxEndpointDurationMs + 30000) : 60000;
 }
 
 function retainedRoleModelOverrides(raw: unknown): readonly RoleModelOverride[] | undefined {

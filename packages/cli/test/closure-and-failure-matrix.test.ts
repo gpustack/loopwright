@@ -39,6 +39,17 @@ test('closure: freezes the 23-row ledger with honest summary counts', () => {
   assert.deepEqual(oauthRow.evidencePaths, ['packages/taskpack/src/qualification.ts']);
   const external = CLOSURE_CAPABILITY_LEDGER.filter(entry => entry.evidenceLevel === 'unprovisioned_external');
   for (const entry of external) { assert.notEqual(entry.verificationStatus, 'passed'); assert.ok(entry.unlockPrerequisite !== null && entry.unlockPrerequisite.length > 0); }
+  const accelRow = CLOSURE_CAPABILITY_LEDGER.find(entry => entry.id === 'external-build-and-accelerator-matrix')!;
+  assert.equal(accelRow.disposition, 'blocked_external');
+  assert.equal(accelRow.verificationStatus, 'blocked');
+  assert.equal(accelRow.evidenceLevel, 'unprovisioned_external');
+  assert.deepEqual(accelRow.evidencePaths, [
+    'packages/hardware-runner/src/relay-server.ts',
+    'packages/hardware-runner/src/worker.ts',
+    'packages/hardware-runner/src/evaluator.ts',
+    'packages/hardware-runner/test/e2e-nat-loopback.test.ts',
+    'docs/configuration/sandbox-backends.md',
+  ]);
 });
 test('closure: evaluates the committed repository evidence with clean integrity', async () => {
   const report = await evaluateClosureMatrix({ repoRoot: REPO_ROOT });
@@ -76,6 +87,19 @@ test('closure: refuses unprovisioned external upgrades without a hash-bound rece
   const accepted = await evaluateClosureMatrix({ entries: [{ ...forged, unlockPrerequisite: null }], receipts: [receipt] });
   assert.equal(accepted.falsificationDetected, false);
   assert.equal(accepted.diagnostics.length, 0);
+
+  const hwRunnerEntry: ClosureCapabilityEntry = {
+    ...external,
+    ownerPackage: '@loopwright/hardware-runner',
+  };
+  const hwBlocked = await evaluateClosureMatrix({ entries: [hwRunnerEntry] });
+  assert.equal(hwBlocked.falsificationDetected, false);
+  assert.deepEqual(hwBlocked.diagnostics, []);
+  const hwForged = await evaluateClosureMatrix({
+    entries: [{ ...hwRunnerEntry, disposition: 'closed_local', verificationStatus: 'passed', unlockPrerequisite: null }],
+  });
+  assert.equal(hwForged.falsificationDetected, true);
+  assert.ok(hwForged.diagnostics.some(diagnostic => diagnostic.code === CLOSURE_FALSIFICATION_FORBIDDEN));
 });
 test('closure: verifies evidence containment and refuses missing or symlinked files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lw-closure-integrity-'));

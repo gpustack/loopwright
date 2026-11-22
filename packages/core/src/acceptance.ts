@@ -1,8 +1,9 @@
 import { overlaySnapshotBounds, snapshotWithDeferredManifest, type Json, type SnapshotBounds } from './boundary.js';
 import {
   arrayOf, boolean, checkStatus, document, enumeration, findingsSchema, identifier,
-  metricsSchema, nullable, object, optional, record, resolveOverlayOptions, text,
-  type Infer, type MetricsMap, type MetricValue, type StructuredFinding,
+  matchesDriverConstraint, metricsSchema, nullable, object, optional, record, resolveOverlayOptions, text,
+  type HardwareTargetSpec, type Infer, type MetricThresholdRule, type MetricsMap, type MetricValue,
+  type StructuredFinding,
 } from './contracts.js';
 import { DIAGNOSTIC_CODES, attempt, fail, type Diagnostic, type Result } from './diagnostics.js';
 import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifactInput } from './artifacts.js';
@@ -10,6 +11,66 @@ import { claimSchema, evidenceSchema, type Evidence, type SubmittedCheck } from 
 import { unique } from './graph.js';
 import { deriveSubject, lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
 import { LIMITS, type OverlayLimitOptions, type OverlayLimits } from './limits.js';
+
+export { matchesDriverConstraint };
+
+export function matchesHardwareTarget(
+  expected: HardwareTargetSpec,
+  expectedCellId: string,
+  allowSyntheticProbe: boolean,
+  observed: Evidence['spec']['hardwareProvenance'],
+): boolean {
+  if (observed === undefined) return false;
+  if (!allowSyntheticProbe && observed.probeKind !== 'physical') return false;
+  if (observed.targetCellId !== expectedCellId) return false;
+  if (observed.accelerator !== expected.accelerator) return false;
+  if (observed.isolationMode !== expected.isolationMode) return false;
+  if (expected.deviceCount !== undefined && observed.deviceCount !== expected.deviceCount) return false;
+  if (expected.topology !== undefined && observed.topology !== expected.topology) return false;
+  if (expected.driverConstraint !== undefined && !matchesDriverConstraint(expected.driverConstraint, observed.driverVersion)) {
+    return false;
+  }
+  return true;
+}
+
+function readFiniteMetric(metrics: MetricsMap, key: string): number | undefined {
+  if (!Object.hasOwn(metrics, key)) return undefined;
+  const raw = metrics[key];
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
+  return Object.is(raw, -0) ? 0 : raw;
+}
+
+function evaluateMetricThresholds(
+  rules: readonly MetricThresholdRule[],
+  metrics: MetricsMap | undefined,
+): boolean {
+  if (rules.length === 0) return true;
+  if (metrics === undefined) return false;
+  for (const rule of rules) {
+    const value = readFiniteMetric(metrics, rule.metric);
+    if (value === undefined) return false;
+    if (rule.kind === 'bounds') {
+      if (rule.min !== undefined && value < rule.min) return false;
+      if (rule.max !== undefined && value > rule.max) return false;
+      continue;
+    }
+    const baseline = readFiniteMetric(metrics, rule.baselineMetric);
+    if (baseline === undefined) return false;
+    if (rule.operator === 'min_ratio') {
+      if (!(baseline > 0)) return false;
+      const ratio = value / baseline;
+      if (Number.isNaN(ratio) || ratio < rule.threshold) return false;
+    } else if (rule.operator === 'max_ratio') {
+      if (!(baseline > 0)) return false;
+      const ratio = value / baseline;
+      if (Number.isNaN(ratio) || ratio > rule.threshold) return false;
+    } else {
+      const delta = value - baseline;
+      if (Number.isNaN(delta) || delta > rule.threshold) return false;
+    }
+  }
+  return true;
+}
 
 export interface EvaluationInput {
   readonly trusted: {
@@ -57,8 +118,17 @@ function parseEvaluationInput(
   })(value, path);
 }
 export const diagnosticSchema = record({ code: enumeration(...DIAGNOSTIC_CODES), path: text(0, LIMITS.path), checkId: nullable(identifier) });
-const reasonSchema = enumeration('observed_pass', 'submitted_failed', 'submitted_blocked', 'submitted_not_run',
-  'missing_submission', 'missing_evidence', 'evidence_level_disallowed', 'artifact_missing', 'artifact_length_mismatch', 'artifact_digest_mismatch');
+const reasonSchema = enumeration(
+  'observed_pass', 'submitted_failed', 'submitted_blocked', 'submitted_not_run',
+  'missing_submission', 'missing_evidence', 'evidence_level_disallowed',
+  'artifact_missing', 'artifact_length_mismatch', 'artifact_digest_mismatch',
+  'hardware_provenance_mismatch', 'metric_threshold_failed',
+);
+const BLOCKED_REASONS = new Set<Infer<typeof reasonSchema>>([
+  'submitted_blocked', 'missing_evidence', 'evidence_level_disallowed',
+  'artifact_missing', 'artifact_length_mismatch', 'artifact_digest_mismatch',
+  'hardware_provenance_mismatch', 'metric_threshold_failed',
+]);
 const rowSchema = record({
   checkId: identifier, status: checkStatus, evidenceId: nullable(identifier), reason: reasonSchema, detail: nullable(text()),
   metrics: optional(metricsSchema),
@@ -127,7 +197,7 @@ export function verificationSchema(input: Json, path = ''): VerificationResult {
     if (row.status === 'passed' && (row.reason !== 'observed_pass' || row.evidenceId === null)) fail('VALUE_ENUM', location);
     if (row.status === 'failed' && row.reason !== 'submitted_failed') fail('VALUE_ENUM', location);
     if (row.status === 'not_run' && (row.evidenceId !== null || !['missing_submission', 'submitted_not_run'].includes(row.reason))) fail('VALUE_ENUM', location);
-    if (row.status === 'blocked' && !['submitted_blocked', 'missing_evidence', 'evidence_level_disallowed', 'artifact_missing', 'artifact_length_mismatch', 'artifact_digest_mismatch'].includes(row.reason)) fail('VALUE_ENUM', location);
+    if (row.status === 'blocked' && !BLOCKED_REASONS.has(row.reason)) fail('VALUE_ENUM', location);
     if (row.reason.startsWith('submitted_') && row.detail === null) fail('VALUE_RANGE', `${location}/detail`);
     if (!row.reason.startsWith('submitted_') && row.reason !== 'observed_pass') {
       if (row.detail !== null) fail('VALUE_RANGE', `${location}/detail`);
@@ -150,9 +220,11 @@ export function evaluateValidated(
   const effectiveOverlay = resolveOverlayOptions(options) ?? lock.spec.contract.spec.budgets.overlay;
   const subject = deriveSubject(lock, manifest), acceptance = lock.spec.contract.spec.acceptance;
   const requirements = new Map(acceptance.checks.map(check => [check.id, check]));
+  const matrixCells = new Map((lock.spec.contract.spec.target.matrix ?? []).map(cell => [cell.id, cell] as const));
   unique(input.claims.map(claim => claim.checkId), claimsPath);
   const claims = new Map(input.claims.map(claim => [claim.checkId, claim]));
   const evidenceById = new Map<string, typeof eligibleEvidence[number]>();
+  const evidenceIndexById = new Map<string, number>();
   const evidenceByCheck = new Map<string, typeof eligibleEvidence[number]>();
   eligibleEvidence.forEach((evidence, index) => {
     const path = `/trusted/eligibleEvidence/${index}`, observation = evidence.spec;
@@ -160,7 +232,9 @@ export function evaluateValidated(
     if (evidenceById.has(evidence.metadata.id)) fail('EVIDENCE_DUPLICATE', `${path}/metadata/id`, checkId);
     const previous = evidenceByCheck.get(observation.checkId);
     if (previous) fail(previous.spec.observedStatus === observation.observedStatus ? 'EVIDENCE_DUPLICATE' : 'EVIDENCE_CONTRADICTORY', `${path}/spec/checkId`, checkId);
-    evidenceById.set(evidence.metadata.id, evidence); evidenceByCheck.set(observation.checkId, evidence);
+    evidenceById.set(evidence.metadata.id, evidence);
+    evidenceIndexById.set(evidence.metadata.id, index);
+    evidenceByCheck.set(observation.checkId, evidence);
   });
   // Complete each validation phase before advancing to the next observation phase.
   input.claims.forEach((claim, index) => {
@@ -237,11 +311,33 @@ export function evaluateValidated(
       return { checkId, status: 'blocked', evidenceId: claim.evidenceId, reason, detail: null };
     };
     if (!evidence) return blocked('EVIDENCE_MISSING', 'missing_evidence', claimsPath);
-    if (!requirements.get(checkId)!.allowedEvidenceLevels.includes(evidence.spec.level)) return blocked('EVIDENCE_LEVEL_DISALLOWED', 'evidence_level_disallowed', claimsPath);
+    const requirement = requirements.get(checkId)!;
+    if (!requirement.allowedEvidenceLevels.includes(evidence.spec.level)) return blocked('EVIDENCE_LEVEL_DISALLOWED', 'evidence_level_disallowed', claimsPath);
     const invalidArtifact: ArtifactIssue | null = candidateIssue ?? issue;
     if (invalidArtifact) {
       const reasons = { ARTIFACT_MISSING: 'artifact_missing', ARTIFACT_LENGTH_MISMATCH: 'artifact_length_mismatch', ARTIFACT_DIGEST_MISMATCH: 'artifact_digest_mismatch' } as const;
       return blocked(invalidArtifact.code, reasons[invalidArtifact.code], invalidArtifact.path);
+    }
+    const evidenceIndex = evidenceIndexById.get(evidence.metadata.id)!;
+    const evidenceSpecPath = `/trusted/eligibleEvidence/${evidenceIndex}/spec`;
+    if (requirement.allowedEvidenceLevels.includes('hardware_execution')) {
+      const cell = requirement.targetCellId === undefined ? undefined : matrixCells.get(requirement.targetCellId);
+      if (
+        !cell || !cell.hardware || requirement.targetCellId === undefined
+        || !matchesHardwareTarget(
+          cell.hardware,
+          requirement.targetCellId,
+          requirement.allowSyntheticHardwareProbe === true,
+          evidence.spec.hardwareProvenance,
+        )
+      ) {
+        return blocked('HARDWARE_PROVENANCE_MISMATCH', 'hardware_provenance_mismatch', `${evidenceSpecPath}/hardwareProvenance`);
+      }
+    }
+    if (requirement.metricThresholds !== undefined && requirement.metricThresholds.length > 0) {
+      if (!evaluateMetricThresholds(requirement.metricThresholds, evidence.spec.metrics)) {
+        return blocked('METRIC_THRESHOLD_FAILED', 'metric_threshold_failed', `${evidenceSpecPath}/metrics`);
+      }
     }
     return withMetadata(
       { checkId, status: 'passed', evidenceId: evidence.metadata.id, reason: 'observed_pass', detail: evidence.spec.detail ?? null },

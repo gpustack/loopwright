@@ -43,8 +43,7 @@ export function compilePlan(loaded: LoadedConfiguration) {
     const state = approvedState(loaded), config = loaded.configuration, task = config.spec.task, registry = loaded.registry.spec;
     if (
       task.spec.steps.length > CONTROLLER_LIMITS.maxCompiledDagSteps ||
-      task.spec.roles.length > CONTROLLER_LIMITS.maxCompiledRoles ||
-      task.spec.acceptance.checks.some(check => check.allowedEvidenceLevels.includes('hardware_execution'))
+      task.spec.roles.length > CONTROLLER_LIMITS.maxCompiledRoles
     ) {
       refuse('CAPABILITY_UNSUPPORTED', '/spec/task', 'compile');
     }
@@ -124,8 +123,28 @@ export function compilePlan(loaded: LoadedConfiguration) {
       const matches = registry.handlers.filter(handler => handler.kind === 'check' && handler.parameters.checkId === check.id);
       if (matches.length !== 1) refuse('CONFIG_REFERENCE', '/spec/task/spec/acceptance', 'compile');
       const handler = matches[0]!;
+      const requiresHardware = check.allowedEvidenceLevels.includes('hardware_execution');
+      if (requiresHardware) {
+        if (check.allowedEvidenceLevels.length !== 1 || !check.targetCellId) {
+          refuse('CONFIG_SCHEMA', '/spec/task/spec/acceptance', 'compile');
+        }
+        const cell = (task.spec.target.matrix ?? []).find(item => item.id === check.targetCellId);
+        if (!cell || cell.hardware === undefined) {
+          refuse('CONFIG_SCHEMA', '/spec/task/spec/acceptance', 'compile');
+        }
+        if (handler.implementation !== 'benchmark-gate.v1') {
+          refuse('CAPABILITY_UNSUPPORTED', '/spec/task/spec/acceptance', 'compile');
+        }
+      } else if (handler.implementation === 'benchmark-gate.v1') {
+        refuse('CAPABILITY_UNSUPPORTED', '/spec/task/spec/acceptance', 'compile');
+      }
       if (handler.implementation === 'gate.v1') {
         if (!check.allowedEvidenceLevels.includes('external_service')) refuse('CONFIG_SCHEMA', '/spec/task/spec/acceptance', 'compile');
+        const endpoint = registry.gateEndpoints.find(item => item.id === handler.parameters.endpointRef);
+        if (!endpoint) refuse('CONFIG_REFERENCE', '/registry/spec/gateEndpoints', 'compile');
+        networkCredential(endpoint.signingCredentialRef, 'gate', '/registry/spec/gateEndpoints');
+        if (endpoint.authCredentialRef !== null) networkCredential(endpoint.authCredentialRef, 'gate', '/registry/spec/gateEndpoints');
+      } else if (handler.implementation === 'benchmark-gate.v1') {
         const endpoint = registry.gateEndpoints.find(item => item.id === handler.parameters.endpointRef);
         if (!endpoint) refuse('CONFIG_REFERENCE', '/registry/spec/gateEndpoints', 'compile');
         networkCredential(endpoint.signingCredentialRef, 'gate', '/registry/spec/gateEndpoints');

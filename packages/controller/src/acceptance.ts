@@ -1,13 +1,346 @@
-import { bindSubject, evaluateAcceptance, constructRunResult, type ArtifactManifest, type Evidence, type RequestUsage, type ResolvedArtifactInput, type RunResult, type RunStatus, type SubmittedCheck, type TaskLock, type VerificationResult } from '@loopwright/core';
+import { createHash } from 'node:crypto';
+import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs';
+import { lstat, open } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import {
+  VERIFIER_ARTIFACT_LIMITS,
+  bindSubject,
+  constructRunResult,
+  evaluateAcceptance,
+  isVerifierNamespacePath,
+  parseVerifierArtifactPath,
+  type ArtifactManifest,
+  type ArtifactRef,
+  type Evidence,
+  type RequestUsage,
+  type ResolvedArtifactInput,
+  type RunResult,
+  type RunStatus,
+  type SubmittedCheck,
+  type TaskLock,
+  type VerificationResult,
+} from '@loopwright/core';
 import type { LocalRunStore } from '@loopwright/state';
 import { authenticatedCheck, authenticatedRefusal, type PreflightRefusal, type VerifiedCheck } from './verification.js';
 import { authenticatedGate } from './gate.js';
+import { authenticatedBenchmarkGate } from './benchmark-gate.js';
+import { STREAM_CHUNK_BYTES, inside } from './files.js';
 import { journal } from './progress.js';
 import { canonical, freeze, hash, same } from './schema.js';
-import { refuse } from './errors.js';
+import { ControllerFailure, refuse } from './errors.js';
 import type { ControllerDiagnostic } from './errors.js';
 import type { CandidateFileEntry, CompiledPlan } from './types.js';
 import type { Submission } from './submission.js';
+
+const EMPTY_SHA256_HEX = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+interface PreverifiedCasStamp {
+  readonly artifactsDir: string;
+  readonly slotId: string;
+  readonly name: string;
+  readonly byteLength: number;
+  readonly sha256: string;
+  readonly dev: number;
+  readonly ino: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+}
+
+export interface PreverifiedVerifierArtifacts {
+  readonly version: 1;
+}
+
+export interface VerifyControllerVerifierCasOptions {
+  readonly signal?: AbortSignal | undefined;
+  readonly checkAuthority?: (() => Promise<void> | void) | undefined;
+}
+
+const preverifiedTokens = new WeakMap<PreverifiedVerifierArtifacts, ReadonlyMap<string, PreverifiedCasStamp>>();
+
+function cancelledVerification(): ControllerFailure {
+  return new ControllerFailure({
+    version: 1,
+    code: 'CANCELLED',
+    phase: 'verification',
+    path: '',
+    stateCode: null,
+    piCode: null,
+    effect: 'none',
+    retryable: false,
+  });
+}
+
+function validateVerifierRefAndPath(
+  artifactsDir: string,
+  slotId: string,
+  ref: ArtifactRef,
+): string {
+  if (!isVerifierNamespacePath(ref.name)) refuse('ARTIFACT_INVALID', '', 'verification');
+  const parsed = parseVerifierArtifactPath(ref.name);
+  if (
+    parsed === null
+    || parsed.slotId !== slotId
+    || ref.digest.algorithm !== 'sha256'
+    || !/^[0-9a-f]{64}$/.test(ref.digest.hex)
+    || !Number.isSafeInteger(ref.byteLength)
+    || Object.is(ref.byteLength, -0)
+    || ref.byteLength < 0
+    || ref.byteLength > VERIFIER_ARTIFACT_LIMITS.maxFileBytes
+    || (ref.byteLength === 0) !== (ref.digest.hex === EMPTY_SHA256_HEX)
+    || ref.uri !== 'cas://sha256/' + ref.digest.hex
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  if (
+    typeof artifactsDir !== 'string'
+    || !isAbsolute(artifactsDir)
+    || resolve(artifactsDir) !== artifactsDir
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  const blobPath = join(artifactsDir, 'blobs', 'sha256', ref.digest.hex);
+  if (!inside(blobPath, artifactsDir) || blobPath === artifactsDir) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  return blobPath;
+}
+
+function verifyCanonicalPathSync(artifactsDir: string, blobPath: string): void {
+  let current = blobPath;
+  for (let depth = 0; depth < 128; depth++) {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(current);
+    } catch {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    if (st.isSymbolicLink()) refuse('ARTIFACT_INVALID', '', 'verification');
+    if (current === artifactsDir) break;
+    const parent = dirname(current);
+    if (parent === current) refuse('ARTIFACT_INVALID', '', 'verification');
+    current = parent;
+  }
+}
+
+async function verifyCanonicalPathAsync(artifactsDir: string, blobPath: string): Promise<void> {
+  let current = blobPath;
+  for (let depth = 0; depth < 128; depth++) {
+    let st: Awaited<ReturnType<typeof lstat>>;
+    try {
+      st = await lstat(current);
+    } catch {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    if (st.isSymbolicLink()) refuse('ARTIFACT_INVALID', '', 'verification');
+    if (current === artifactsDir) break;
+    const parent = dirname(current);
+    if (parent === current) refuse('ARTIFACT_INVALID', '', 'verification');
+    current = parent;
+  }
+}
+
+async function verifyLocalVerifierCasDescriptorAsync(
+  artifactsDir: string,
+  slotId: string,
+  ref: ArtifactRef,
+  options?: VerifyControllerVerifierCasOptions,
+): Promise<PreverifiedCasStamp> {
+  if (options?.checkAuthority) await options.checkAuthority();
+  if (options?.signal?.aborted) throw cancelledVerification();
+
+  const blobPath = validateVerifierRefAndPath(artifactsDir, slotId, ref);
+  await verifyCanonicalPathAsync(artifactsDir, blobPath);
+
+  let before: Awaited<ReturnType<typeof lstat>>;
+  try {
+    before = await lstat(blobPath);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  if (
+    before.isSymbolicLink()
+    || !before.isFile()
+    || before.nlink !== 1
+    || before.uid !== process.getuid?.()
+    || (before.mode & 0o7777) !== 0o400
+    || before.size !== ref.byteLength
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(blobPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  try {
+    const info = await handle.stat();
+    if (
+      !info.isFile()
+      || info.nlink !== 1
+      || info.dev !== before.dev
+      || info.ino !== before.ino
+      || info.uid !== process.getuid?.()
+      || info.size !== ref.byteLength
+      || (info.mode & 0o7777) !== 0o400
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    const sha = createHash('sha256');
+    const chunkBuf = Buffer.allocUnsafe(Math.min(STREAM_CHUNK_BYTES, Math.max(1, info.size)));
+    let offset = 0;
+    while (offset < info.size) {
+      if (options?.checkAuthority) await options.checkAuthority();
+      if (options?.signal?.aborted) throw cancelledVerification();
+      const toRead = Math.min(chunkBuf.byteLength, info.size - offset);
+      const { bytesRead } = await handle.read(chunkBuf, 0, toRead, offset);
+      if (bytesRead <= 0) break;
+      sha.update(chunkBuf.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    if (options?.checkAuthority) await options.checkAuthority();
+    if (options?.signal?.aborted) throw cancelledVerification();
+
+    const probe = Buffer.allocUnsafe(1);
+    const { bytesRead: extra } = await handle.read(probe, 0, 1, offset);
+    const after = await handle.stat();
+    if (
+      extra !== 0
+      || offset !== info.size
+      || !after.isFile()
+      || after.nlink !== 1
+      || after.dev !== info.dev
+      || after.ino !== info.ino
+      || after.uid !== process.getuid?.()
+      || after.size !== info.size
+      || after.mtimeMs !== info.mtimeMs
+      || after.ctimeMs !== info.ctimeMs
+      || (after.mode & 0o7777) !== 0o400
+      || sha.digest('hex') !== ref.digest.hex
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+    return freeze({
+      artifactsDir,
+      slotId,
+      name: ref.name,
+      byteLength: ref.byteLength,
+      sha256: ref.digest.hex,
+      dev: after.dev,
+      ino: after.ino,
+      mtimeMs: after.mtimeMs,
+      ctimeMs: after.ctimeMs,
+    });
+  } finally {
+    await handle.close();
+  }
+}
+
+function stampKey(operationId: string, ref: ArtifactRef): string {
+  return `${operationId}\0${ref.name}\0${ref.digest.hex}\0${String(ref.byteLength)}`;
+}
+
+/**
+ * Awaited, cancellable <= 1 MiB streaming verifier CAS hash pass run before pure acceptance evaluation
+ * so multi-MiB / GiB hardware outputs never block the controller event loop.
+ */
+export async function verifyControllerVerifierCasDescriptors(
+  plan: CompiledPlan,
+  checks: readonly VerifiedCheck[],
+  options?: VerifyControllerVerifierCasOptions,
+): Promise<PreverifiedVerifierArtifacts> {
+  const allStamps = new Map<string, PreverifiedCasStamp>();
+  for (const checked of checks) {
+    const slot = plan.verifierSlots.find(item => item.id === checked.slotId);
+    if (!slot || slot.handler.implementation !== 'benchmark-gate.v1') continue;
+    const bmObs = authenticatedBenchmarkGate(checked);
+    if (!same(bmObs.evidence.spec.artifacts, [checked.output, ...bmObs.verifierArtifacts])) {
+      refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+    }
+    for (const verifierRef of bmObs.verifierArtifacts) {
+      const stamp = await verifyLocalVerifierCasDescriptorAsync(
+        bmObs.artifactsDirectory,
+        slot.id,
+        verifierRef,
+        options,
+      );
+      const key = stampKey(checked.operationId, verifierRef);
+      allStamps.set(key, stamp);
+    }
+  }
+  const token: PreverifiedVerifierArtifacts = freeze({ version: 1 });
+  preverifiedTokens.set(token, allStamps);
+  return token;
+}
+
+function verifyPreverifiedCasStampSync(
+  stamp: PreverifiedCasStamp,
+  artifactsDir: string,
+  slotId: string,
+  ref: ArtifactRef,
+): { readonly name: string; readonly byteLength: number; readonly digest: { readonly algorithm: 'sha256'; readonly hex: string } } {
+  const blobPath = validateVerifierRefAndPath(artifactsDir, slotId, ref);
+  if (
+    stamp.artifactsDir !== artifactsDir
+    || stamp.slotId !== slotId
+    || stamp.name !== ref.name
+    || stamp.byteLength !== ref.byteLength
+    || stamp.sha256 !== ref.digest.hex
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  verifyCanonicalPathSync(artifactsDir, blobPath);
+  let before: ReturnType<typeof lstatSync>;
+  try {
+    before = lstatSync(blobPath);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  if (
+    before.isSymbolicLink()
+    || !before.isFile()
+    || before.nlink !== 1
+    || before.uid !== process.getuid?.()
+    || (before.mode & 0o7777) !== 0o400
+    || before.size !== stamp.byteLength
+    || before.dev !== stamp.dev
+    || before.ino !== stamp.ino
+    || before.mtimeMs !== stamp.mtimeMs
+    || before.ctimeMs !== stamp.ctimeMs
+  ) {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  let fd: number;
+  try {
+    fd = openSync(blobPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    refuse('ARTIFACT_INVALID', '', 'verification');
+  }
+  try {
+    const info = fstatSync(fd);
+    if (
+      !info.isFile()
+      || info.nlink !== 1
+      || info.uid !== process.getuid?.()
+      || (info.mode & 0o7777) !== 0o400
+      || info.size !== stamp.byteLength
+      || info.dev !== stamp.dev
+      || info.ino !== stamp.ino
+      || info.mtimeMs !== stamp.mtimeMs
+      || info.ctimeMs !== stamp.ctimeMs
+    ) {
+      refuse('ARTIFACT_INVALID', '', 'verification');
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return {
+    name: ref.name,
+    byteLength: ref.byteLength,
+    digest: { algorithm: 'sha256', hex: ref.digest.hex },
+  };
+}
 export interface AcceptanceObservation {
   readonly result: RunResult; readonly verification: VerificationResult; readonly requestedStatus: Submission['status'] | null; readonly diagnostic: ControllerDiagnostic['code'] | null;
   readonly preflightRefusals: readonly { readonly origin: 'controller_preflight'; readonly slotId: string; readonly checkId: string; readonly generation: number; readonly code: 'OUTPUT_LIMIT'; readonly record: import('@loopwright/core').ArtifactRef; readonly limits: import('./refusal-record.js').SizingDescription }[];
@@ -16,9 +349,24 @@ export interface AcceptanceObservation {
 }
 /** Core inputs are JSON-owned here so shared immutable source refs cannot create input aliases. */
 const tree = (input: unknown): unknown => JSON.parse(canonical(input));
+function authenticateCheckByImpl(impl: string | undefined, checked: VerifiedCheck) {
+  if (impl === 'gate.v1') return authenticatedGate(checked);
+  if (impl === 'benchmark-gate.v1') return authenticatedBenchmarkGate(checked);
+  return authenticatedCheck(checked);
+}
+function expectedProducerByImpl(impl: string | undefined): string {
+  if (impl === 'gate.v1') return 'loopwright.gate-verifier.v1';
+  if (impl === 'benchmark-gate.v1') return 'loopwright.benchmark-gate.v1';
+  return 'loopwright.byte-verifier.v1';
+}
 export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock, candidate: ArtifactManifest, candidateFiles: readonly (ResolvedArtifactInput | CandidateFileEntry)[], generation: number,
-  checks: readonly VerifiedCheck[], submission: Submission | null, store: LocalRunStore, forced: 'reconcile_required' | 'expired' | 'cancelled' | 'exhausted' | 'blocked' | 'failed' | null = null, graphComplete = true, refusals: readonly PreflightRefusal[] = [], forcedDiagnostic: ControllerDiagnostic['code'] | null = null): AcceptanceObservation {
+  checks: readonly VerifiedCheck[], submission: Submission | null, store: LocalRunStore, forced: 'reconcile_required' | 'expired' | 'cancelled' | 'exhausted' | 'blocked' | 'failed' | null = null, graphComplete = true, refusals: readonly PreflightRefusal[] = [], forcedDiagnostic: ControllerDiagnostic['code'] | null = null, preverified?: PreverifiedVerifierArtifacts): AcceptanceObservation {
   if (!same(plan.task, lock.spec.contract)) refuse('ARTIFACT_INVALID', '', 'verification');
+  let authenticatedStamps: ReadonlyMap<string, PreverifiedCasStamp> | undefined;
+  if (preverified !== undefined) {
+    authenticatedStamps = preverifiedTokens.get(preverified);
+    if (!authenticatedStamps) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+  }
   const overlayOpts = lock.spec.contract.spec.budgets.overlay ? { overlay: lock.spec.contract.spec.budgets.overlay } : undefined;
   const bound = bindSubject(lock, candidate, overlayOpts); if (!bound.ok) refuse('ARTIFACT_INVALID', '', 'verification'); const subject = bound.value, records = journal(store);
   const eligible: Evidence[] = [], artifacts: ResolvedArtifactInput[] = candidateFiles.map(file =>
@@ -27,13 +375,55 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
       : { name: file.name, byteLength: file.byteLength, digest: { algorithm: file.digest.algorithm, hex: file.digest.hex } },
   ), bySlot = new Map<string, VerifiedCheck>();
   for (const checked of checks) {
-    const original = plan.verifierSlots.find(slot => slot.id === checked.slotId)?.handler.implementation === 'gate.v1' ? authenticatedGate(checked) : authenticatedCheck(checked), slot = plan.verifierSlots.find(slot => slot.id === checked.slotId), operation = records.operations.find(item => item.intent.operationId === checked.operationId);
-    if (!slot || bySlot.has(slot.id) || checked.generation !== generation || checked.checkId !== slot.checkId || !same(original.subject, subject) || !same(original.evidence.spec.subject, subject)
-      || original.evidence.spec.observedStatus !== checked.status || original.evidence.spec.checkId !== slot.checkId || original.evidence.spec.producerId !== (slot.handler.implementation === 'gate.v1' ? 'loopwright.gate-verifier.v1' : 'loopwright.byte-verifier.v1')
-      || !same(original.planDigest, plan.planDigest) || !same(original.header.handlerDigest, slot.handler.digest) || original.header.handler !== slot.handler.implementation
-      || !same(original.header.candidate.ref.digest, hash(canonical(candidate))) || original.header.candidate.ref.byteLength !== Buffer.byteLength(canonical(candidate))
-      || !operation || operation.state !== 'confirmed' || !same(operation.intent.requestDigest, original.requestDigest) || !same(operation.reconciliation ?? operation.initialReceipt, original.receipt) || !same(original.receipt.evidence.artifact, checked.output)) refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
-    bySlot.set(slot.id, checked); artifacts.push({ name: checked.output.name, bytes: original.outputBytes }); if (slot.implicit === null) eligible.push(original.evidence);
+    const slot = plan.verifierSlots.find(item => item.id === checked.slotId);
+    const impl = slot?.handler.implementation;
+    const original = authenticateCheckByImpl(impl, checked);
+    const operation = records.operations.find(item => item.intent.operationId === checked.operationId);
+    const expectedProducer = expectedProducerByImpl(impl);
+    if (
+      !slot
+      || bySlot.has(slot.id)
+      || checked.generation !== generation
+      || checked.checkId !== slot.checkId
+      || !same(original.subject, subject)
+      || !same(original.evidence.spec.subject, subject)
+      || original.evidence.spec.observedStatus !== checked.status
+      || original.evidence.spec.checkId !== slot.checkId
+      || original.evidence.spec.producerId !== expectedProducer
+      || (impl === 'benchmark-gate.v1' && original.evidence.spec.level !== 'hardware_execution')
+      || !same(original.planDigest, plan.planDigest)
+      || !same(original.header.handlerDigest, slot.handler.digest)
+      || original.header.handler !== slot.handler.implementation
+      || !same(original.header.candidate.ref.digest, hash(canonical(candidate)))
+      || original.header.candidate.ref.byteLength !== Buffer.byteLength(canonical(candidate))
+      || !operation
+      || operation.state !== 'confirmed'
+      || !same(operation.intent.requestDigest, original.requestDigest)
+      || !same(operation.reconciliation ?? operation.initialReceipt, original.receipt)
+      || !same(original.receipt.evidence.artifact, checked.output)
+    ) {
+      refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+    }
+    bySlot.set(slot.id, checked);
+    artifacts.push({ name: checked.output.name, bytes: original.outputBytes });
+    if (impl === 'benchmark-gate.v1') {
+      const bmObs = authenticatedBenchmarkGate(checked);
+      if (!same(bmObs.evidence.spec.artifacts, [checked.output, ...bmObs.verifierArtifacts])) {
+        refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+      }
+      for (const verifierRef of bmObs.verifierArtifacts) {
+        if (!authenticatedStamps) {
+          refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+        }
+        const key = stampKey(checked.operationId, verifierRef);
+        const stamp = authenticatedStamps.get(key);
+        if (!stamp) {
+          refuse('EVIDENCE_UNAVAILABLE', '', 'verification');
+        }
+        artifacts.push(verifyPreverifiedCasStampSync(stamp, bmObs.artifactsDirectory, slot.id, verifierRef));
+      }
+    }
+    if (slot.implicit === null) eligible.push(original.evidence);
   }
   const negativeBySlot = new Map<string, PreflightRefusal>();
   const negativeObservations: AcceptanceObservation['preflightRefusals'][number][] = [];
@@ -50,7 +440,11 @@ export function evaluateControllerAcceptance(plan: CompiledPlan, lock: TaskLock,
     const slot = plan.verifierSlots.find(slot => slot.implicit === null && slot.checkId === check.id)!, verified = bySlot.get(slot.id);
     const negative = negativeBySlot.get(slot.id); if (negative) return { checkId: check.id, status: 'blocked', evidenceId: null, reason: negative.reason };
     if (!verified) return { checkId: check.id, status: 'not_run', evidenceId: null, reason: 'verifier_not_run' };
-    const evidence = slot.handler.implementation === 'gate.v1' ? authenticatedGate(verified).evidence : authenticatedCheck(verified).evidence;
+    const evidence = slot.handler.implementation === 'gate.v1'
+      ? authenticatedGate(verified).evidence
+      : slot.handler.implementation === 'benchmark-gate.v1'
+        ? authenticatedBenchmarkGate(verified).evidence
+        : authenticatedCheck(verified).evidence;
     return {
       checkId: check.id,
       status: verified.status,

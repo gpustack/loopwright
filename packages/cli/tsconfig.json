@@ -16,6 +16,7 @@
     { "path": "../core" },
     { "path": "../decisions" },
     { "path": "../github-app" },
+    { "path": "../hardware-runner" },
     { "path": "../memory" },
     { "path": "../state" },
     { "path": "../taskpack" },

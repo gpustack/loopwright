@@ -14,7 +14,7 @@ Loopwright is a TypeScript harness and GitHub Action/App control plane for bound
 
 1. **1. Admit**: Local CLI, Action, or webhook intake validates authority, parses `Taskpack` or `TaskContract`, and acquires a monotonic SQLite lease fence (`@loopwright/core`, `@loopwright/state`, `@loopwright/taskpack`, `@loopwright/github-app`).
 2. **2. Execute**: An isolated Pi session executes inside a native OS or container sandbox (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`, `docker`, or `direct-dedicated`) with physical send admission, CAS blob pointers, and optional System-One decision routing (`@loopwright/agent-pi`, `@loopwright/decisions`, `@loopwright/taskpack`), or external OAuth coding agents pull leased `adapter: delegated` role assignments via `loopwright step` (`next|submit|cancel`) with optional `--role-model` overrides (`@loopwright/controller`, `@loopwright/cli`).
-3. **3. Verify**: Independent verification hooks run against a clean base checkout and mint cryptographic HMAC `gate.v1` receipts (`@loopwright/controller`, `@loopwright/taskpack`, `@loopwright/taskpack-runner`).
+3. **3. Verify**: Independent verification hooks run against a clean base checkout and mint cryptographic HMAC `gate.v1` or hardware `benchmark-gate.v1` receipts (`@loopwright/controller`, `@loopwright/taskpack`, `@loopwright/taskpack-runner`, `@loopwright/hardware-runner`).
 4. **4. Publish & Remember**: Head-pinned pull requests (or local / `no_change` outcomes) settle safely, reviewed proposals compact into CAS memory (`@loopwright/memory`), and `loopwright closure` audits capability evidence (`@loopwright/cli`).
 
 Read [Architecture](../../../docs/getting-started/architecture.md) for the four-stage execution flow and [the shared module map](../../../docs/README.md#module-map) for source routing.
@@ -32,7 +32,8 @@ Read [Architecture](../../../docs/getting-started/architecture.md) for the four-
 | `@loopwright/decisions` | [packages/decisions](../../../packages/decisions/) | System-One 3-zone decision routing (`act`, `confirm`, `escalate`), 6 non-delegable intents, and `decisions.yaml` policy loader |
 | `@loopwright/taskpack` | [packages/taskpack](../../../packages/taskpack/) | Generic declarative `Taskpack` and `TaskpackSuite` parser/router, compiler, isolated 3-way `baselineAlignment`, OS sandbox backends, preflight/upstream staging, local `command.v1` gate, and turnkey execution (`local` and `github` policy profiles) |
 | `@loopwright/github-app` | [packages/github-app](../../../packages/github-app/) | GitHub webhook intake, suite PR ownership lookup, multi-domain fan-out routing, collaborator permission checks, `InstallationTokenBroker`, `TenantAdmissionQueue`, streamed 3-way CAS PR publisher, `github-app.yaml` loader, and Action entrypoint |
-| `@loopwright/cli` | [packages/cli](../../../packages/cli/) | Local operator CLI (`init`, `check`, `digest sync`, `suite check|resolve`, `run --taskpack`, `run`, `resume`, `step`, `status`, `inspect`, `reconcile`, `closure`, `app-serve`), `--baseline-alignment`, `--role-model` routing, and YAML draft generator |
+| `@loopwright/hardware-runner` | [packages/hardware-runner](../../../packages/hardware-runner/) | Outbound pull-lease benchmark relay, two-stage blind GPU/NPU evaluator (`native_os`/`docker`), `1 MiB` CAS streaming, and trusted hardware provenance probes |
+| `@loopwright/cli` | [packages/cli](../../../packages/cli/) | Local operator CLI (`init`, `check`, `digest sync`, `suite check|resolve`, `run --taskpack`, `run`, `resume`, `step`, `status`, `inspect`, `reconcile`, `closure`, `app-serve`, `runner relay\|worker`), `--baseline-alignment`, `--role-model` routing, and YAML draft generator |
 
 ## YAML-First Configuration Surfaces
 

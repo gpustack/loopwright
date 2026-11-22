@@ -17,7 +17,8 @@ export type ClosureCapabilityId =
 export type ClosureDisposition = 'closed_local' | 'deferred_owned' | 'blocked_external';
 export type ClosureEvidenceLevel = 'unit_and_integration' | 'controlled_local_qualification' | 'frozen_offline_parity' | 'unprovisioned_external';
 export type ClosureOwnerPackage = '@loopwright/core' | '@loopwright/state' | '@loopwright/agent-pi' | '@loopwright/controller' | '@loopwright/cli'
-  | '@loopwright/taskpack-runner' | '@loopwright/memory' | '@loopwright/taskpack' | '@loopwright/github-app' | '@loopwright/decisions';
+  | '@loopwright/taskpack-runner' | '@loopwright/memory' | '@loopwright/taskpack' | '@loopwright/github-app' | '@loopwright/decisions'
+  | '@loopwright/hardware-runner';
 export type ClosureSubsystem = string;
 export interface ClosureCapabilityEntry {
   readonly id: ClosureCapabilityId;
@@ -85,7 +86,7 @@ export interface ClosureMatrixReport {
 const DISPOSITIONS: readonly ClosureDisposition[] = ['closed_local', 'deferred_owned', 'blocked_external'];
 const EVIDENCE_LEVELS: readonly ClosureEvidenceLevel[] = ['unit_and_integration', 'controlled_local_qualification', 'frozen_offline_parity', 'unprovisioned_external'];
 const STATUSES: readonly ClosureCapabilityEntry['verificationStatus'][] = ['passed', 'failed', 'blocked', 'not_run'];
-const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/taskpack', '@loopwright/github-app', '@loopwright/decisions'];
+const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/taskpack', '@loopwright/github-app', '@loopwright/decisions', '@loopwright/hardware-runner'];
 function text(value: unknown): string { return typeof value === 'string' ? value : ''; }
 function entryShapeErrors(entry: ClosureCapabilityEntry, path: string): ClosureDiagnostic[] {
   const errors: ClosureDiagnostic[] = [];
@@ -174,7 +175,14 @@ export const CLOSURE_CAPABILITY_LEDGER: readonly ClosureCapabilityEntry[] = free
   EXTERNAL('external-build-and-accelerator-matrix', 'External build and accelerator matrix', 'external-build-matrix', '@loopwright/controller', 'blocked_external', 'blocked',
     'A qualified external build host must reproduce the accelerator matrix with attestations.',
     'No local host can close the multi-architecture accelerator matrix.',
-    'Provision a multi-architecture build host with physical accelerators and attach a hash-bound qualification receipt.', ['docs/configuration/sandbox-backends.md']),
+    'Provision a multi-architecture build host with physical accelerators and attach a hash-bound qualification receipt.',
+    [
+      'packages/hardware-runner/src/relay-server.ts',
+      'packages/hardware-runner/src/worker.ts',
+      'packages/hardware-runner/src/evaluator.ts',
+      'packages/hardware-runner/test/e2e-nat-loopback.test.ts',
+      'docs/configuration/sandbox-backends.md',
+    ]),
   EXTERNAL('remote-host-loss-and-durable-wake', 'Remote host loss and durable wake', 'remote-durability', '@loopwright/state', 'blocked_external', 'not_run',
     'A remote host loss with durable wake must retain fenced state across the outage.',
     'Local crash tests park owned children; remote loss stays unprovisioned.',

@@ -5,7 +5,7 @@
     {
       "path": ".auto-sync/checks",
       "kind": "directory",
-      "sha256": "74130039e5843151fc8346d6c34ba544952f80ab5fa7a2381b2f0a54a0f2cc5f"
+      "sha256": "b52bebb6ac608806b430062916ab8e7b1d23420ce996e089f0bc3cc9ee420ceb"
     },
     {
       "path": ".auto-sync/instructions.md",
@@ -15,7 +15,7 @@
     {
       "path": "scripts/prepare-self-upgrade.mjs",
       "kind": "file",
-      "sha256": "4ff919da4a50e06281191982ca07b4f4fbc144e9df4b1661d7af70bb069f1d0d"
+      "sha256": "743fa0372866f9288161b2789b6ad037126475275afa36b638c069048c0d51e2"
     }
   ]
 }

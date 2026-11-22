@@ -41,26 +41,205 @@ test('compilePlan allows non-null target.matrix when no check requires hardware_
   }
 });
 
-test('compilePlan still refuses any check requiring hardware_execution with CAPABILITY_UNSUPPORTED', async () => {
-  for (const matrix of [null, [{ id: 'cuda-sm90', platform: 'linux-x64', variant: 'sm90' }]] as const) {
+test('hardware_execution checks enforce TaskContract targetCellId schema and bidirectional benchmark-gate.v1 compilePlan gates', async () => {
+  // 1. TaskContract / loadConfiguration rejects missing targetCellId (CONFIG_SCHEMA) and non-hardware cell (CONFIG_REFERENCE)
+  for (const [label, matrix, check, expectedCode] of [
+    [
+      'missing-targetCellId',
+      [{ id: 'cuda-sm90', platform: 'linux-x64', variant: 'sm90', hardware: { accelerator: 'sm_90a', isolationMode: 'whole_device' } }],
+      { id: 'tests', allowedEvidenceLevels: ['hardware_execution'] },
+      'CONFIG_SCHEMA',
+    ],
+    [
+      'cell-without-hardware',
+      [{ id: 'cuda-sm90', platform: 'linux-x64', variant: 'sm90' }],
+      { id: 'tests', allowedEvidenceLevels: ['hardware_execution'], targetCellId: 'cuda-sm90' },
+      'CONFIG_REFERENCE',
+    ],
+  ] as const) {
     const f = await configurationFixture();
     try {
       set(f.config, ['spec', 'task', 'spec', 'target', 'matrix'], matrix);
-      set(f.config, ['spec', 'task', 'spec', 'acceptance'], {
-        required: ['tests'],
-        checks: [{ id: 'tests', allowedEvidenceLevels: ['hardware_execution'] }],
-      });
+      set(f.config, ['spec', 'task', 'spec', 'acceptance'], { required: ['tests'], checks: [check] });
       await f.save();
-      const loaded = assertOk(await f.load(), 'load hardware_execution config');
-      const compiled = await compilePlan(loaded);
-      assert.equal(compiled.ok, false);
-      if (!compiled.ok) {
-        assert.equal(compiled.error.code, 'CAPABILITY_UNSUPPORTED');
-        assert.equal(compiled.error.phase, 'compile');
+      const loaded = await f.load();
+      assert.equal(loaded.ok, false, label);
+      if (!loaded.ok) {
+        assert.equal(loaded.error.code, expectedCode, label);
       }
     } finally {
       await f.cleanup();
     }
+  }
+
+  // 2. compilePlan rejects hardware_execution check bound to json-artifact.v1 or gate.v1 with CAPABILITY_UNSUPPORTED
+  for (const impl of ['json-artifact.v1', 'gate.v1'] as const) {
+    const f = await configurationFixture();
+    try {
+      const installed = await installedHandlerDigests();
+      if (impl === 'gate.v1') {
+        f.environment.GATE_SECRET = 'GATE_COMPILE_SECRET_Aa11Bb22Cc33';
+        set(f.registry, ['spec', 'credentialBindings'], [
+          ...f.registry.spec.credentialBindings,
+          { id: 'gate-signer', consumer: 'gate', destinationRef: 'gate-svc', environmentNames: ['GATE_SECRET'], template: '${GATE_SECRET}' },
+        ]);
+        set(f.registry, ['spec', 'environmentBindings'], [
+          ...f.registry.spec.environmentBindings,
+          { name: 'GATE_SECRET', classification: 'credential', paths: ['/spec/credentials/1/template'] },
+        ]);
+        set(f.config, ['spec', 'credentials'], [
+          ...f.config.spec.credentials,
+          { ref: 'gate-signer', template: '${GATE_SECRET}' },
+        ]);
+        set(f.registry, ['spec', 'gateEndpoints'], [
+          {
+            id: 'bench-ep',
+            url: 'https://relay.example.com/v1/benchmark/jobs',
+            signingCredentialRef: 'gate-signer',
+            authCredentialRef: null,
+            timeoutMs: 5000,
+            maxPollMs: 10000,
+            pollInitialMs: 200,
+            pollMaxMs: 1000,
+            jitter: 50,
+          },
+        ]);
+        set(f.registry, ['spec', 'handlers'], [
+          f.registry.spec.handlers[0]!,
+          {
+            id: 'tests',
+            kind: 'check',
+            implementation: 'gate.v1',
+            version: 1,
+            digest: installed['gate.v1'],
+            parameters: { checkId: 'tests', endpointRef: 'bench-ep', gateId: 'hw-gate' },
+            capabilities: ['external_service', 'read_only'],
+          },
+          f.registry.spec.handlers[2]!,
+          f.registry.spec.handlers[3]!,
+        ]);
+      }
+      set(f.config, ['spec', 'task', 'spec', 'target', 'matrix'], [
+        { id: 'cuda-sm90', platform: 'linux-x64', variant: 'sm90', hardware: { accelerator: 'sm_90a', isolationMode: 'whole_device' } },
+      ]);
+      set(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+        required: ['tests'],
+        checks: [{ id: 'tests', allowedEvidenceLevels: ['hardware_execution'], targetCellId: 'cuda-sm90' }],
+      });
+      await f.save();
+      const loaded = assertOk(await f.load(), `load hardware check bound to ${impl}`);
+      const compiled = await compilePlan(loaded);
+      assert.equal(compiled.ok, false, impl);
+      if (!compiled.ok) {
+        assert.equal(compiled.error.code, 'CAPABILITY_UNSUPPORTED', impl);
+        assert.equal(compiled.error.phase, 'compile', impl);
+      }
+    } finally {
+      await f.cleanup();
+    }
+  }
+
+  // 3. compilePlan rejects benchmark-gate.v1 bound to a non-hardware check AND succeeds on a host-bound hardware check
+  const f = await configurationFixture();
+  try {
+    const installed = await installedHandlerDigests();
+    f.environment.BENCH_SECRET = 'BENCH_COMPILE_SECRET_Dd44Ee55Ff66';
+    set(f.registry, ['spec', 'credentialBindings'], [
+      ...f.registry.spec.credentialBindings,
+      { id: 'bench-signer', consumer: 'gate', destinationRef: 'bench-relay', environmentNames: ['BENCH_SECRET'], template: '${BENCH_SECRET}' },
+    ]);
+    set(f.registry, ['spec', 'environmentBindings'], [
+      ...f.registry.spec.environmentBindings,
+      { name: 'BENCH_SECRET', classification: 'credential', paths: ['/spec/credentials/1/template'] },
+    ]);
+    set(f.config, ['spec', 'credentials'], [
+      ...f.config.spec.credentials,
+      { ref: 'bench-signer', template: '${BENCH_SECRET}' },
+    ]);
+    set(f.registry, ['spec', 'gateEndpoints'], [
+      {
+        id: 'bench-relay',
+        url: 'https://relay.example.com/v1/benchmark/jobs',
+        signingCredentialRef: 'bench-signer',
+        authCredentialRef: null,
+        timeoutMs: 10000,
+        maxPollMs: 60000,
+        pollInitialMs: 250,
+        pollMaxMs: 2000,
+        jitter: 50,
+      },
+    ]);
+    set(f.registry, ['spec', 'handlers'], [
+      f.registry.spec.handlers[0]!,
+      {
+        id: 'tests',
+        kind: 'check',
+        implementation: 'benchmark-gate.v1',
+        version: 1,
+        digest: installed['benchmark-gate.v1'],
+        parameters: { checkId: 'tests', endpointRef: 'bench-relay', gateId: 'gemm-gate', heldOutWorkloadId: 'gemm-fp16-v1', maxPreemptions: 3 },
+        capabilities: ['hardware_execution', 'read_only'],
+      },
+      f.registry.spec.handlers[2]!,
+      f.registry.spec.handlers[3]!,
+    ]);
+    set(f.config, ['spec', 'task', 'spec', 'target', 'matrix'], [
+      {
+        id: 'cuda-sm90',
+        platform: 'linux-x64',
+        variant: 'sm90',
+        hardware: { accelerator: 'sm_90a', isolationMode: 'whole_device', deviceCount: 1, driverConstraint: '>=550.54' },
+      },
+    ]);
+
+    // Non-hardware check bound to benchmark-gate.v1 -> CAPABILITY_UNSUPPORTED
+    set(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+      required: ['tests'],
+      checks: [{ id: 'tests', allowedEvidenceLevels: ['external_service'], targetCellId: 'cuda-sm90' }],
+    });
+    await f.save();
+    const nonHwLoaded = assertOk(await f.load(), 'load non-hardware benchmark-gate.v1');
+    const nonHwCompiled = await compilePlan(nonHwLoaded);
+    assert.equal(nonHwCompiled.ok, false);
+    if (!nonHwCompiled.ok) {
+      assert.equal(nonHwCompiled.error.code, 'CAPABILITY_UNSUPPORTED');
+      assert.equal(nonHwCompiled.error.phase, 'compile');
+    }
+
+    // Valid host-bound benchmark-gate.v1 hardware check -> compiles cleanly
+    set(f.config, ['spec', 'task', 'spec', 'acceptance'], {
+      required: ['tests'],
+      checks: [
+        {
+          id: 'tests',
+          allowedEvidenceLevels: ['hardware_execution'],
+          targetCellId: 'cuda-sm90',
+          metricThresholds: [{ kind: 'bounds', metric: 'latency_us', max: 100 }],
+        },
+      ],
+    });
+    await f.save();
+    const okLoaded = assertOk(await f.load(), 'load valid benchmark-gate.v1');
+    const plan = assertOk(await compilePlan(okLoaded), 'compile valid benchmark-gate.v1');
+    const slot = plan.verifierSlots.find(item => item.checkId === 'tests');
+    assert.equal(slot?.handler.implementation, 'benchmark-gate.v1');
+    assert.deepEqual(plan.evidenceNeeds, [{ checkId: 'tests', levels: ['hardware_execution'] }]);
+
+    // P7: gateId must be trimmed printable ASCII (1..128) at registry load
+    for (const badGateId of ['GPU-測試', ' bench ', 'bench ', ' bench', 'bench\t1', 'bench\n1', '', 'g'.repeat(129)]) {
+      set(f.registry, ['spec', 'handlers', 1, 'parameters', 'gateId'], badGateId);
+      await f.save();
+      const badGateLoaded = await f.load();
+      assert.equal(badGateLoaded.ok, false, `expected CONFIG_SCHEMA for gateId=${JSON.stringify(badGateId)}`);
+      if (!badGateLoaded.ok) {
+        assert.equal(badGateLoaded.error.code, 'CONFIG_SCHEMA');
+      }
+    }
+    set(f.registry, ['spec', 'handlers', 1, 'parameters', 'gateId'], 'sm90 gemm-gate.v1');
+    await f.save();
+    assertOk(await f.load(), 'load printable ASCII gateId');
+  } finally {
+    await f.cleanup();
   }
 });
 

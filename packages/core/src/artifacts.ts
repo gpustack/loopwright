@@ -7,7 +7,10 @@ import {
   type ArtifactRef, type Digest, type Infer, type Schema,
 } from './contracts.js';
 import { attempt, fail, type DiagnosticCode, type Result } from './diagnostics.js';
-import { LIMITS, OVERLAY_LIMITS, type OverlayLimitOptions } from './limits.js';
+import { LIMITS, OVERLAY_LIMITS, VERIFIER_ARTIFACT_LIMITS, type OverlayLimitOptions } from './limits.js';
+import { isVerifierNamespacePath, parseVerifierArtifactPath, type VerifierArtifactPath } from './scope.js';
+
+export { isVerifierNamespacePath, parseVerifierArtifactPath, type VerifierArtifactPath };
 
 const EMPTY_SHA256_HEX = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
@@ -101,7 +104,15 @@ function parseArtifactMetadataFields(
   };
   if (Object.hasOwn(snapshotted, 'uri')) {
     const parsedUri = nullable(artifactUri)(snapshotted.uri!, `${metadataPath}/uri`);
-    if (parsedUri !== null) ref.uri = parsedUri;
+    if (parsedUri !== null) {
+      if (isVerifierNamespacePath(validName) && parsedUri !== `cas://sha256/${validDigest.hex}`) {
+        fail(
+          parsedUri.startsWith('cas://sha256/') ? 'ARTIFACT_DIGEST_MISMATCH' : 'VALUE_RANGE',
+          `${metadataPath}/uri`,
+        );
+      }
+      ref.uri = parsedUri;
+    }
   }
   if (Object.hasOwn(snapshotted, 'mediaType')) {
     const parsedMediaType = nullable(mediaType)(snapshotted.mediaType!, `${metadataPath}/mediaType`);
@@ -113,11 +124,25 @@ function parseArtifactMetadataFields(
 export function digestArtifact(name: unknown, bytes: Uint8Array, options?: ArtifactRefOptions): Result<ArtifactRef> {
   return attempt(() => {
     const validName = nameSchema(object(snapshot({ name }), '').name!, '/name');
+    if (isVerifierNamespacePath(validName) && parseVerifierArtifactPath(validName) === null) {
+      fail('PATH_INVALID', '/name');
+    }
     const owned = byteView(bytes, '/bytes').slice();
-    const ref: Record<string, unknown> = { name: validName, digest: byteDigest(owned), byteLength: owned.byteLength };
+    const digest = byteDigest(owned);
+    const ref: Record<string, unknown> = { name: validName, digest, byteLength: owned.byteLength };
     if (options !== undefined) {
       const parsedOptions = artifactOptionsSchema(object(snapshot({ options }), '').options!, '');
-      if (Object.hasOwn(parsedOptions, 'uri')) ref.uri = parsedOptions.uri;
+      if (Object.hasOwn(parsedOptions, 'uri')) {
+        const parsedUri = parsedOptions.uri;
+        if (
+          parsedUri !== undefined && parsedUri !== null
+          && isVerifierNamespacePath(validName)
+          && parsedUri !== `cas://sha256/${digest.hex}`
+        ) {
+          fail(parsedUri.startsWith('cas://sha256/') ? 'ARTIFACT_DIGEST_MISMATCH' : 'VALUE_RANGE', '/uri');
+        }
+        ref.uri = parsedUri;
+      }
       if (Object.hasOwn(parsedOptions, 'mediaType')) ref.mediaType = parsedOptions.mediaType;
     }
     return ref as ArtifactRef;
@@ -127,6 +152,9 @@ export function digestArtifact(name: unknown, bytes: Uint8Array, options?: Artif
 export function digestArtifactFromMetadata(name: unknown, metadata: ArtifactMetadataInput): Result<ArtifactRef> {
   return attempt(() => {
     const validName = nameSchema(object(snapshot({ name }), '').name!, '/name');
+    if (isVerifierNamespacePath(validName) && parseVerifierArtifactPath(validName) === null) {
+      fail('PATH_INVALID', '/name');
+    }
     return parseArtifactMetadataFields(validName, metadata, '/metadata', Number.MAX_SAFE_INTEGER);
   });
 }
@@ -196,11 +224,15 @@ export function manifestSchema(value: Json, path = '', maxOverlayEntries: number
   const shape = maxOverlayEntries === LIMITS.overlayEntries ? defaultManifestShape : createManifestShape(maxOverlayEntries);
   const manifest = shape(value, path);
   const spec = manifest.spec;
+  spec.entries.forEach((entry, index) => {
+    if (isVerifierNamespacePath(entry.name)) fail('PATH_INVALID', `${path}/spec/entries/${index}/name`);
+  });
   if (spec.baseTree) {
     spec.entries.forEach((entry, index) => {
       validateGitPath(entry.name, `${path}/spec/entries/${index}/name`);
     });
     spec.deleted.forEach((name, index) => {
+      if (isVerifierNamespacePath(name)) fail('PATH_INVALID', `${path}/spec/deleted/${index}`);
       validateGitPath(name, `${path}/spec/deleted/${index}`);
     });
     requireAscending(spec.entries, entry => entry.name, index => `${path}/spec/entries/${index}/name`);
@@ -247,14 +279,21 @@ export function resolveInventory(
   options?: OverlayLimitOptions,
 ): ReadonlyMap<string, ArtifactBytes> {
   const overlay = resolveOverlayOptions(options);
-  const maxArtifacts = overlay ? Math.max(LIMITS.resolvedArtifacts, overlay.maxFiles + NON_OVERLAY_ARTIFACTS) : LIMITS.resolvedArtifacts;
+  const maxNonVerifierArtifacts = overlay
+    ? Math.max(LIMITS.resolvedArtifacts, overlay.maxFiles + NON_OVERLAY_ARTIFACTS)
+    : LIMITS.resolvedArtifacts;
+  const maxCombinedArtifacts = maxNonVerifierArtifacts + VERIFIER_ARTIFACT_LIMITS.maxTotalFiles;
   if (!Array.isArray(input) || Object.getPrototypeOf(input) !== Array.prototype) fail('INPUT_UNSUPPORTED', '/artifacts');
   const count = Object.getOwnPropertyDescriptor(input, 'length')!.value as number;
-  if (count > maxArtifacts) fail('LIMIT_COLLECTION', '/artifacts');
+  if (count > maxCombinedArtifacts) fail('LIMIT_COLLECTION', '/artifacts');
   if (Reflect.ownKeys(input).length !== count + 1) fail('INPUT_UNSUPPORTED', '/artifacts');
   const names = new Set<string>(), entries: PendingInventoryEntry[] = [];
+  const verifierSlotCounts = new Map<string, number>();
+  let nonVerifierCount = 0;
+  let verifierCount = 0;
   let rawTotal = 0;
   let verifiedTotal = 0;
+  let verifierBytesTotal = 0;
   for (let index = 0; index < count; index++) {
     const path = `/artifacts/${index}`;
     const itemDescriptor = Object.getOwnPropertyDescriptor(input, String(index));
@@ -269,14 +308,32 @@ export function resolveInventory(
     if (!isRaw && !isVerified) fail('INPUT_UNSUPPORTED', path);
     const nameDescriptor = Object.getOwnPropertyDescriptor(item, 'name')!;
     if (!('value' in nameDescriptor) || !nameDescriptor.enumerable) fail('INPUT_UNSUPPORTED', path);
+    const name = nameSchema(object(snapshot({ name: nameDescriptor.value }), '').name!, `${path}/name`);
+    if (names.has(name.toLowerCase())) fail('ARTIFACT_DUPLICATE', `${path}/name`);
+    names.add(name.toLowerCase());
+    const verifierNamespace = isVerifierNamespacePath(name);
+    let verifierPath: VerifierArtifactPath | null = null;
+    if (verifierNamespace) {
+      verifierPath = parseVerifierArtifactPath(name);
+      if (verifierPath === null) fail('PATH_INVALID', `${path}/name`);
+      verifierCount++;
+      if (verifierCount > VERIFIER_ARTIFACT_LIMITS.maxTotalFiles) fail('LIMIT_COLLECTION', path);
+      const slotCount = (verifierSlotCounts.get(verifierPath.slotId) ?? 0) + 1;
+      if (slotCount > VERIFIER_ARTIFACT_LIMITS.maxFilesPerSlot) fail('LIMIT_COLLECTION', path);
+      verifierSlotCounts.set(verifierPath.slotId, slotCount);
+    } else {
+      nonVerifierCount++;
+      if (nonVerifierCount > maxNonVerifierArtifacts) fail('LIMIT_COLLECTION', path);
+    }
     if (isRaw) {
       const bytesDescriptor = Object.getOwnPropertyDescriptor(item, 'bytes')!;
       if (!('value' in bytesDescriptor) || !bytesDescriptor.enumerable) fail('INPUT_UNSUPPORTED', path);
-      const name = nameSchema(object(snapshot({ name: nameDescriptor.value }), '').name!, `${path}/name`);
-      if (names.has(name.toLowerCase())) fail('ARTIFACT_DUPLICATE', `${path}/name`);
-      names.add(name.toLowerCase());
       const view = byteView(bytesDescriptor.value, `${path}/bytes`);
       if (view.byteLength > LIMITS.resolvedBytes - rawTotal) fail('LIMIT_RESOLVED_BYTES', path);
+      if (verifierPath !== null) {
+        if (view.byteLength > VERIFIER_ARTIFACT_LIMITS.maxTotalBytes - verifierBytesTotal) fail('LIMIT_RESOLVED_BYTES', path);
+        verifierBytesTotal += view.byteLength;
+      }
       rawTotal += view.byteLength;
       entries.push({ kind: 'raw', name, view });
     } else {
@@ -288,16 +345,21 @@ export function resolveInventory(
       ) {
         fail('INPUT_UNSUPPORTED', path);
       }
-      const name = nameSchema(object(snapshot({ name: nameDescriptor.value }), '').name!, `${path}/name`);
-      if (names.has(name.toLowerCase())) fail('ARTIFACT_DUPLICATE', `${path}/name`);
-      names.add(name.toLowerCase());
       const metadataObj: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
       metadataObj.digest = digestDescriptor.value;
       metadataObj.byteLength = byteLengthDescriptor.value;
-      const verified = parseArtifactMetadataFields(name, metadataObj, path, OVERLAY_LIMITS.maxMaxBytes);
-      const verifiedBudget = overlay?.maxBytes ?? OVERLAY_LIMITS.maxMaxBytes;
-      if (verified.byteLength > verifiedBudget - verifiedTotal) fail('LIMIT_RESOLVED_BYTES', path);
-      verifiedTotal += verified.byteLength;
+      const maxFileBytes = verifierPath !== null ? VERIFIER_ARTIFACT_LIMITS.maxFileBytes : OVERLAY_LIMITS.maxMaxBytes;
+      const verified = parseArtifactMetadataFields(name, metadataObj, path, maxFileBytes);
+      if (verifierPath !== null) {
+        if (verified.byteLength > VERIFIER_ARTIFACT_LIMITS.maxTotalBytes - verifierBytesTotal) {
+          fail('LIMIT_RESOLVED_BYTES', path);
+        }
+        verifierBytesTotal += verified.byteLength;
+      } else {
+        const verifiedBudget = overlay?.maxBytes ?? OVERLAY_LIMITS.maxMaxBytes;
+        if (verified.byteLength > verifiedBudget - verifiedTotal) fail('LIMIT_RESOLVED_BYTES', path);
+        verifiedTotal += verified.byteLength;
+      }
       entries.push({
         kind: 'verified',
         name: verified.name,

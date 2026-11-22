@@ -1,12 +1,15 @@
 import type { PiHost, PiHostV2, AdapterPolicyV2 } from '@loopwright/agent-pi';
 import { resolveProviderDestination } from '@loopwright/agent-pi/catalog';
 import { refuse } from './errors.js';
+import { STREAM_CHUNK_BYTES } from './files.js';
 import { canonical, id, list, record, text } from './schema.js';
 import type { TrustedRegistry } from './types.js';
 
 export interface CredentialStreamChecker {
   readonly push: (chunk: Uint8Array) => void;
   readonly finish: () => void;
+  readonly overlapBytes?: number;
+  readonly maxObservedWindowBytes?: number;
 }
 
 export interface CredentialVault {
@@ -77,26 +80,44 @@ function hasGenericCredentialPattern(bytes: Buffer, isFinal: boolean, minMatchEn
 function createCredentialStreamCheckerFromBuffers(formBuffers: readonly Buffer[]): CredentialStreamChecker {
   const maxDerivedFormByteLength = formBuffers.reduce((max, buf) => Math.max(max, buf.byteLength), 0);
   const overlap = Math.max(16_384, maxDerivedFormByteLength);
+  if (overlap > 262_144) {
+    refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+  }
+  const maxWindowSlice = STREAM_CHUNK_BYTES - overlap;
   let carryTail: Buffer = Buffer.alloc(0);
+  let maxWindowBytes = 0;
   return Object.freeze({
+    overlapBytes: overlap,
+    get maxObservedWindowBytes(): number {
+      return maxWindowBytes;
+    },
     push: (chunk: Uint8Array): void => {
       if (chunk.byteLength === 0) return;
       const view = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      const prevCarryLen = carryTail.byteLength;
-      const combined = prevCarryLen === 0 ? view : Buffer.concat([carryTail, view]);
-      if (formBuffers.some(form => combined.includes(form)) || hasGenericCredentialPattern(combined, false, prevCarryLen)) {
+      for (let offset = 0; offset < view.byteLength; offset += maxWindowSlice) {
+        const sub = view.subarray(offset, Math.min(view.byteLength, offset + maxWindowSlice));
+        const prevCarryLen = carryTail.byteLength;
+        const combined = prevCarryLen === 0 ? sub : Buffer.concat([carryTail, sub]);
+        if (combined.byteLength > maxWindowBytes) {
+          maxWindowBytes = combined.byteLength;
+        }
+        if (formBuffers.some(form => combined.includes(form)) || hasGenericCredentialPattern(combined, false, prevCarryLen)) {
+          if (carryTail.byteLength > 0) carryTail.fill(0);
+          carryTail = Buffer.alloc(0);
+          refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+        }
+        const keep = Math.min(overlap, combined.byteLength);
         if (carryTail.byteLength > 0) carryTail.fill(0);
-        carryTail = Buffer.alloc(0);
-        refuse('CONFIG_CREDENTIAL_INVALID', '/spec/credentials');
+        carryTail = Buffer.from(combined.subarray(combined.byteLength - keep));
       }
-      const keep = Math.min(overlap, combined.byteLength);
-      if (carryTail.byteLength > 0) carryTail.fill(0);
-      carryTail = Buffer.from(combined.subarray(combined.byteLength - keep));
     },
     finish: (): void => {
       const tail = carryTail;
       carryTail = Buffer.alloc(0);
       try {
+        if (tail.byteLength > maxWindowBytes) {
+          maxWindowBytes = tail.byteLength;
+        }
         if (
           tail.byteLength > 0
           && (formBuffers.some(form => tail.includes(form)) || hasGenericCredentialPattern(tail, true, tail.byteLength))

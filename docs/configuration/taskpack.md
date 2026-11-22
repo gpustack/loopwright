@@ -264,7 +264,7 @@ spec:
 | `spec.goal.candidate` / `noChange` | Yes | Strings (`1..1024` chars) | Role objectives for candidate and `no_change` runs |
 | `spec.scope.writable` / `protected` | No | String lists (`1..128` / `0..128`) | Explicit `/**` directories, exact files, or single-segment `*`/`?` globs |
 | `spec.instructions` / `skills` | No | Entry or list (`1..16` entries) | Protected UTF-8 files as paths or `{ path, when }` rules (`<= 256 KiB` total) |
-| `spec.target.matrix` | No | `null` or `1..64` `{ id, platform, variant }` | Target matrix metadata passed to `TaskContract` and memory |
+| `spec.target.matrix` | No | `null` or `1..64` cells | `{ id, platform, variant, hardware? }`; `hardware` adds `accelerator`, `isolationMode`, `deviceCount?`, `driverConstraint?`, `topology?` |
 | `spec.proposal` | No | `{ path, requiredFields, schemaVersion }` | Optional writable `.yaml`/`.yml`/`.json` proposal ledger |
 | `spec.submission` | No | `{ path, required? }` | Optional writable `.json` agent deliverable path |
 
@@ -317,9 +317,8 @@ spec:
 
 ### Execution limits
 
-Action `with:` inputs override `spec.limits`, which override `LOOPWRIGHT_*` env vars. Key bounds: `wallTimeSeconds` (`60..21600`), `totalTokens` (`1000..1e9`), `maxModelCalls` (`1..1024`), `maxAttempts` (`1..16`, within 256 checkpoints), `commandTimeoutSeconds` (`1..3600`), and `limits.overlay: { maxFiles: 1..16384, maxBytes: 1024..17179869184 }` (default `128` / `4 MiB`, up to `16,384` files and `16 GiB` via `1 MiB` CAS streaming and single-descriptor staging).
-
-Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session dispatch; when omitted, defaults derive from compiled `maxModelCalls` and `maxImplementationRepairs`. Unlike fallback `LOOPWRIGHT_*` env vars above, `LOOPWRIGHT_MAX_TURNS` and `LOOPWRIGHT_MAX_REPAIR_TURNS` take precedence over `spec.limits` at runtime.
+- **Bounds and precedence**: Action `with:` inputs override `spec.limits`, which override `LOOPWRIGHT_*` env vars. Key bounds: `wallTimeSeconds` (`60..21600`), `totalTokens` (`1000..1e9`), `maxModelCalls` (`1..1024`), `maxAttempts` (`1..16`, within 256 checkpoints), `commandTimeoutSeconds` (`1..3600`), and `limits.overlay: { maxFiles: 1..16384, maxBytes: 1024..17179869184 }` (default `128` / `4 MiB`, up to `16,384` files and `16 GiB` via `1 MiB` CAS streaming and single-descriptor staging).
+- **Turn caps**: Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session dispatch (defaulting from compiled `maxModelCalls` and `maxImplementationRepairs`); `LOOPWRIGHT_MAX_TURNS` and `LOOPWRIGHT_MAX_REPAIR_TURNS` override `spec.limits` at runtime.
 
 ## Verification checks
 
@@ -340,11 +339,12 @@ Optional `maxTurns` and `maxRepairTurns` (`1..1024`) cap turns per host-session 
 - **Mounted environment**: `command.v1` mounts the disposable per-check `$LOOPWRIGHT_CANDIDATE_DIR` writable (discarded after exit; `.git/objects` stays `--ro-bind` when `mountReadOnlyGit: true`) and keeps `$LOOPWRIGHT_BASE_DIR`, the script directory, and `$LOOPWRIGHT_STAGED_DIR` read-only. Existing host directories passed via `parameters.env` (and safe direct child symlink targets) mount read-only, while `/etc`, `/tmp`, `repoRoot`, `runRoot`, and `$HOME` secrets remain denied. Default `PATH` is `/usr/local/bin:/usr/bin:/bin`, so use `toolchainPaths` only for extra host directories.
 - **Explicit host mounts (`parameters.mounts[]`)**: Declare `0..16` Docker-style bind entries `{ source, target?, mode?: 'ro' | 'rw' }` (`target` defaults to `source`; `mode` defaults to `'ro'`) for host files, directories, or Unix domain sockets (for example `{ source: /var/run/docker.sock, mode: rw }`). Every `source` requires dual-key `allow-privileged-execution: 'true'` (`--allow-privileged`) plus an explicit entry in `allow-host-mounts` (`--allow-host-mounts`). Broad roots, `/etc`, `/proc`, `/sys`, `/dev`, `/var/lib`, control-plane directories, and `$HOME` secrets are always refused; under `/run` and `/var/run`, only Unix domain sockets are permitted. Missing sources, or socket, `rw`, and remapped mounts without Linux `bwrap`, fail closed (`SANDBOX_CAPABILITY_INSUFFICIENT`).
 - **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`; unknown keys such as `passed` or `summary` fail closed) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
-- **Inner sandboxes and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
+- **Inner sandboxes and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `gate.v1` entries in `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
+- **External benchmark gates (`benchmark-gate.v1`)**: Requires `targetCellId` (matching a `spec.target.matrix` cell with `hardware`), `heldOutWorkloadId`, and optional `maxPreemptions` (`0..16`), `allowSyntheticHardwareProbe`, and `metricThresholds` (`bounds`/`comparative`). Manifest-level `url`, `signingCredentialRef`, and `authCredentialRef` overrides are forbidden; host `gateEndpoints` bindings enforce strict credential isolation across endpoints, local command gates, `GH_TOKEN`/`GITHUB_TOKEN`, and publication.
 
 ## Publication and triggers
 
-`spec.publication`, `spec.memory`, and `spec.triggers` are optional in `'local'` mode (`publication` defaults to `{ mode: 'disabled' }`; `memory` defaults to `{ directory: '<controlRoot>/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }`). GitHub entrypoints enforce `spec.triggers` before preflight and require PR fields when `publication.mode` is `'pull_request'`.
+`spec.publication`, `spec.memory`, and `spec.triggers` are optional in `'local'` mode (`publication` defaults to `{ mode: 'disabled' }`; `memory` defaults to `{ directory: '<controlRoot>/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }`). GitHub entrypoints enforce `spec.triggers` before preflight and require PR fields when `publication.mode` is `'pull_request'`. Memory finalization projects `targetMatrix` cells to `{ id, platform, variant }` while `TaskContract` keeps `hardware`.
 
 | Field path | Type and values | Meaning |
 | --- | --- | --- |

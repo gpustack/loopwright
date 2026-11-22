@@ -85,9 +85,10 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
     };
     assert.equal(installedManifest.name, '@gpustack/loopwright');
     assert.equal(installedManifest.version, '0.1.0-rc1');
-    assert.equal(installedManifest.bundledDependencies.length, 10);
+    assert.equal(installedManifest.bundledDependencies.length, 11);
     assert.ok(installedManifest.bundledDependencies.includes('@loopwright/taskpack'));
     assert.ok(installedManifest.bundledDependencies.includes('@loopwright/github-app'));
+    assert.ok(installedManifest.bundledDependencies.includes('@loopwright/hardware-runner'));
     assert.equal(installedManifest.dependencies['minimatch'], '11.0.1');
 
     const resolveCheck = spawnSync(
@@ -95,7 +96,7 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
       [
         '--input-type=module',
         '-e',
-        "const tp = await import('@loopwright/taskpack'); const gh = await import('@loopwright/github-app'); if (tp.TaskpackError !== gh.GitHubAppError) throw new Error('error identity mismatch');",
+        "const tp = await import('@loopwright/taskpack'); const gh = await import('@loopwright/github-app'); const hr = await import('@loopwright/hardware-runner'); if (tp.TaskpackError !== gh.GitHubAppError) throw new Error('error identity mismatch'); if (hr.HARDWARE_RUNNER_PACKAGE_NAME !== '@loopwright/hardware-runner') throw new Error('hardware-runner export mismatch');",
       ],
       { cwd: installedPkgRoot, encoding: 'utf8', timeout: 10000 },
     );
@@ -115,6 +116,14 @@ test('pack-npm: builds single @gpustack/loopwright tarball, keeps workspace pack
     assert.match(helpRun.stdout, /suite check --suite FILE/);
     assert.match(helpRun.stdout, /suite resolve --suite FILE/);
     assert.match(helpRun.stdout, /app-serve --config FILE/);
+    assert.match(helpRun.stdout, /runner relay --config FILE/);
+    assert.match(helpRun.stdout, /runner worker --config FILE/);
+
+    const runnerHelpRun = spawnSync(process.execPath, [binPath, 'runner', '--help'], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(runnerHelpRun.status, 0, `loopwright runner --help failed: ${runnerHelpRun.stderr}`);
+    assert.match(runnerHelpRun.stdout, /^loopwright 0\.1\.0-rc1 runner\n/);
+    assert.match(runnerHelpRun.stdout, /runner relay --config FILE/);
+    assert.match(runnerHelpRun.stdout, /runner worker --config FILE/);
 
     const draftDir = join(sandbox, 'drafts');
     const initRun = spawnSync(process.execPath, [binPath, 'init', '--directory', draftDir, '--json'], {

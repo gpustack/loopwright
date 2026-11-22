@@ -1,0 +1,28 @@
+{
+  "name": "@loopwright/hardware-runner",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "26.x"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "pretest": "node ../../scripts/build.mjs --ensure && tsc -p ../../tsconfig.test.json",
+    "test": "node --test ../../.test-build/packages/hardware-runner/test/*.test.js"
+  },
+  "dependencies": {
+    "@loopwright/core": "0.0.0",
+    "@loopwright/taskpack": "0.0.0"
+  }
+}

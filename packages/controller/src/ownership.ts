@@ -30,6 +30,13 @@ async function writeAll(stream: Writable, data: Uint8Array): Promise<void> {
     }
   }
 }
+export interface GitBatchBlobEntry {
+  readonly name: string;
+  readonly mode: '100644' | '100755';
+  readonly oid: string;
+  readonly byteLength: number;
+}
+
 class BatchStreamReader {
   readonly #chunks: Buffer[] = [];
   #headOffset = 0;
@@ -38,7 +45,13 @@ class BatchStreamReader {
   #streamError: Error | null = null;
   #waiter: (() => void) | null = null;
   readonly #hash = createHash('sha256');
-  constructor(private readonly stdout: Readable, private readonly signal: AbortSignal, private readonly isFailed: () => boolean, private readonly isTimedOut: () => boolean) {
+  constructor(
+    private readonly stdout: Readable,
+    private readonly signal: AbortSignal,
+    private readonly isFailed: () => boolean,
+    private readonly isTimedOut: () => boolean,
+    private readonly phase: ControllerDiagnostic['phase'] = 'execution',
+  ) {
     stdout.on('data', (part: Buffer) => {
       this.#hash.update(part);
       if (part.length > 0) {
@@ -53,15 +66,15 @@ class BatchStreamReader {
   digest(): Digest { return { algorithm: 'sha256', hex: this.#hash.digest('hex') }; }
   #notify(): void { if (this.#waiter) { const w = this.#waiter; this.#waiter = null; w(); } }
   async #waitMore(): Promise<boolean> {
-    if (this.signal.aborted) refuse('CANCELLED', '', 'execution');
-    if (this.isTimedOut()) refuse('DEADLINE', '', 'execution');
-    if (this.isFailed()) refuse('TARGET_MISMATCH', '', 'execution');
+    if (this.signal.aborted) refuse('CANCELLED', '', this.phase);
+    if (this.isTimedOut()) refuse('DEADLINE', '', this.phase);
+    if (this.isFailed()) refuse('TARGET_MISMATCH', '', this.phase);
     if (this.#streamError) throw this.#streamError;
     if (this.#ended) return false;
     await new Promise<void>(resolve => { this.#waiter = resolve; });
-    if (this.signal.aborted) refuse('CANCELLED', '', 'execution');
-    if (this.isTimedOut()) refuse('DEADLINE', '', 'execution');
-    if (this.isFailed()) refuse('TARGET_MISMATCH', '', 'execution');
+    if (this.signal.aborted) refuse('CANCELLED', '', this.phase);
+    if (this.isTimedOut()) refuse('DEADLINE', '', this.phase);
+    if (this.isFailed()) refuse('TARGET_MISMATCH', '', this.phase);
     if (this.#streamError) throw this.#streamError;
     return this.#chunks.length > 0 || !this.#ended;
   }
@@ -73,36 +86,36 @@ class BatchStreamReader {
   async readLine(maxBytes = 256): Promise<string> {
     const parts: Buffer[] = []; let total = 0;
     for (;;) {
-      if (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', 'execution'); continue; }
+      if (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', this.phase); continue; }
       const head = this.#chunks[0]!, nl = head.indexOf(10, this.#headOffset);
       if (nl !== -1) {
         const piece = head.subarray(this.#headOffset, nl);
-        if (total + piece.length > maxBytes) refuse('TARGET_MISMATCH', '', 'execution');
+        if (total + piece.length > maxBytes) refuse('TARGET_MISMATCH', '', this.phase);
         parts.push(piece); this.#consumeHead(nl - this.#headOffset + 1);
         return Buffer.concat(parts).toString('utf8');
       }
       const piece = head.subarray(this.#headOffset);
-      total += piece.length; if (total > maxBytes) refuse('TARGET_MISMATCH', '', 'execution');
+      total += piece.length; if (total > maxBytes) refuse('TARGET_MISMATCH', '', this.phase);
       parts.push(piece); this.#consumeHead(piece.length);
     }
   }
   async streamBytes(length: number, sink: (slice: Buffer) => Promise<void>): Promise<void> {
     let remaining = length;
     while (remaining > 0) {
-      if (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', 'execution'); continue; }
-      const head = this.#chunks[0]!, take = Math.min(remaining, head.length - this.#headOffset);
+      if (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', this.phase); continue; }
+      const head = this.#chunks[0]!, take = Math.min(remaining, 1_048_576, head.length - this.#headOffset);
       await sink(head.subarray(this.#headOffset, this.#headOffset + take));
       this.#consumeHead(take); remaining -= take;
     }
   }
   async readExactByte(expected: number): Promise<void> {
-    while (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', 'execution'); }
-    if (this.#chunks[0]![this.#headOffset]! !== expected) refuse('TARGET_MISMATCH', '', 'execution');
+    while (this.#chunks.length === 0) { if (!(await this.#waitMore())) refuse('TARGET_MISMATCH', '', this.phase); }
+    if (this.#chunks[0]![this.#headOffset]! !== expected) refuse('TARGET_MISMATCH', '', this.phase);
     this.#consumeHead(1);
   }
   async assertExhausted(): Promise<void> {
     while (!this.#ended) await this.#waitMore();
-    if (this.#queuedBytes !== 0) refuse('TARGET_MISMATCH', '', 'execution');
+    if (this.#queuedBytes !== 0) refuse('TARGET_MISMATCH', '', this.phase);
   }
 }
 export async function processBirth(pid: number): Promise<string | null> {
@@ -210,13 +223,44 @@ export class ControllerOwner {
   }
   async materializeGitBatch(
     repository: string,
-    entries: readonly { readonly name: string; readonly mode: '100644' | '100755'; readonly oid: string; readonly byteLength: number }[],
+    entries: readonly GitBatchBlobEntry[],
     baselineDir: string,
     signal: AbortSignal = new AbortController().signal,
     timeoutMs = 10_000,
   ): Promise<void> {
     if (this.#active) refuse('OWNER_BUSY', '', 'execution'); this.#active = true;
     try { await this.#materializeGitBatch(repository, entries, baselineDir, signal, timeoutMs); } finally { this.#active = false; }
+  }
+  async streamGitBatch(
+    repository: string,
+    entries: readonly GitBatchBlobEntry[],
+    onEntry: (
+      entry: GitBatchBlobEntry,
+      readChunks: (sink: (slice: Buffer) => Promise<void>) => Promise<void>,
+    ) => Promise<void>,
+    options?: {
+      readonly intentScope?: Record<string, unknown>;
+      readonly phase?: ControllerDiagnostic['phase'];
+      readonly signal?: AbortSignal;
+      readonly timeoutMs?: number;
+    },
+  ): Promise<void> {
+    const phase = options?.phase ?? 'execution';
+    if (this.#active) refuse('OWNER_BUSY', '', phase);
+    this.#active = true;
+    try {
+      await this.#streamGitBatch(
+        repository,
+        entries,
+        onEntry,
+        options?.intentScope,
+        phase,
+        options?.signal ?? new AbortController().signal,
+        options?.timeoutMs ?? 120_000,
+      );
+    } finally {
+      this.#active = false;
+    }
   }
   async #runReader<T>(
     repository: string,
@@ -300,29 +344,34 @@ export class ControllerOwner {
       throw error;
     }
   }
-  async #materializeGitBatch(
+  async #streamGitBatch(
     repository: string,
-    entries: readonly { readonly name: string; readonly mode: '100644' | '100755'; readonly oid: string; readonly byteLength: number }[],
-    baselineDir: string,
+    entries: readonly GitBatchBlobEntry[],
+    onEntry: (
+      entry: GitBatchBlobEntry,
+      readChunks: (sink: (slice: Buffer) => Promise<void>) => Promise<void>,
+    ) => Promise<void>,
+    intentScope: Record<string, unknown> | undefined,
+    phase: ControllerDiagnostic['phase'],
     signal: AbortSignal,
     timeoutMs: number,
   ): Promise<void> {
     await this.assertCurrent();
-    if (signal.aborted) refuse('CANCELLED', '', 'execution');
-    if (timeoutMs <= 0) refuse('DEADLINE', '', 'execution');
-    await rm(baselineDir, { recursive: true, force: true });
-    await mkdir(baselineDir, { recursive: true, mode: 0o755 });
+    if (signal.aborted) refuse('CANCELLED', '', phase);
+    if (timeoutMs <= 0) refuse('DEADLINE', '', phase);
     if (entries.length === 0) return;
     const entriesHash = createHash('sha256');
-    entriesHash.update(canonical({ baselineDir }) + '\n');
+    if (intentScope !== undefined) {
+      entriesHash.update(canonical(intentScope) + '\n');
+    }
     for (const entry of entries) {
       entriesHash.update(canonical({ name: entry.name, mode: entry.mode, oid: entry.oid, byteLength: entry.byteLength }) + '\n');
     }
     const args = ['cat-file', '--batch'] as const;
     const intentDigest = hash(canonical({ repository, args, entriesDigest: { algorithm: 'sha256', hex: entriesHash.digest('hex') } }));
     const effectiveTimeout = Math.min(timeoutMs, 120_000);
-    await this.#runReader(repository, args, intentDigest, effectiveTimeout, 'execution', signal, (child, stop, isFailed, isTimedOut) => {
-      const stream = new BatchStreamReader(child.stdout!, signal, isFailed, isTimedOut);
+    await this.#runReader(repository, args, intentDigest, effectiveTimeout, phase, signal, (child, stop, isFailed, isTimedOut) => {
+      const stream = new BatchStreamReader(child.stdout!, signal, isFailed, isTimedOut, phase);
       return {
         digest: () => stream.digest(),
         run: async nonce => {
@@ -337,47 +386,29 @@ export class ControllerOwner {
             child.stdin!.end();
           };
           const readBatch = async () => {
-            const createdDirs = new Set<string>(['']);
             for (const entry of entries) {
-              if (signal.aborted) refuse('CANCELLED', '', 'execution');
+              if (signal.aborted) refuse('CANCELLED', '', phase);
               const header = await stream.readLine(256);
               const space1 = header.indexOf(' '), space2 = space1 === -1 ? -1 : header.indexOf(' ', space1 + 1);
-              if (space1 === -1 || space2 === -1 || header.indexOf(' ', space2 + 1) !== -1) refuse('TARGET_MISMATCH', '', 'execution');
+              if (space1 === -1 || space2 === -1 || header.indexOf(' ', space2 + 1) !== -1) refuse('TARGET_MISMATCH', '', phase);
               const oid = header.slice(0, space1), kind = header.slice(space1 + 1, space2), sizeStr = header.slice(space2 + 1);
               if (oid !== entry.oid || kind !== 'blob' || !/^(?:0|[1-9][0-9]*)$/.test(sizeStr) || Number(sizeStr) !== entry.byteLength) {
-                refuse('TARGET_MISMATCH', '', 'execution');
+                refuse('TARGET_MISMATCH', '', phase);
               }
-              if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.oid)) refuse('TARGET_MISMATCH', '', 'execution');
+              if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(entry.oid)) refuse('TARGET_MISMATCH', '', phase);
               const objectFormat = entry.oid.length === 64 ? 'sha256' : 'sha1';
               const blobHash = createHash(objectFormat).update(`blob ${entry.byteLength}\0`);
-              const targetPath = join(baselineDir, entry.name);
-              const slash = entry.name.lastIndexOf('/');
-              if (slash !== -1) {
-                const relDir = entry.name.slice(0, slash);
-                if (!createdDirs.has(relDir)) {
-                  await mkdir(join(baselineDir, relDir), { recursive: true, mode: 0o755 });
-                  let pos = relDir.indexOf('/');
-                  while (pos !== -1) { createdDirs.add(relDir.slice(0, pos)); pos = relDir.indexOf('/', pos + 1); }
-                  createdDirs.add(relDir);
-                }
-              }
-              const fileMode = entry.mode === '100755' ? 0o555 : 0o444;
-              const descriptor = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, fileMode);
-              try {
+              let bodyConsumed = false;
+              await onEntry(entry, async sink => {
+                if (bodyConsumed) refuse('TARGET_MISMATCH', '', phase);
+                bodyConsumed = true;
                 await stream.streamBytes(entry.byteLength, async slice => {
                   blobHash.update(slice);
-                  let offset = 0;
-                  while (offset < slice.length) {
-                    const { bytesWritten } = await descriptor.write(slice, offset, slice.length - offset);
-                    if (bytesWritten <= 0) refuse('TARGET_MISMATCH', '', 'execution');
-                    offset += bytesWritten;
-                  }
+                  await sink(slice);
                 });
-                if (blobHash.digest('hex') !== entry.oid) refuse('TARGET_MISMATCH', '', 'execution');
-                await descriptor.chmod(fileMode);
-              } finally {
-                await descriptor.close();
-              }
+                if (blobHash.digest('hex') !== entry.oid) refuse('TARGET_MISMATCH', '', phase);
+              });
+              if (!bodyConsumed) refuse('TARGET_MISMATCH', '', phase);
               await stream.readExactByte(10);
             }
             await stream.assertExhausted();
@@ -390,6 +421,57 @@ export class ControllerOwner {
         result: () => undefined,
       };
     });
+  }
+  async #materializeGitBatch(
+    repository: string,
+    entries: readonly GitBatchBlobEntry[],
+    baselineDir: string,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): Promise<void> {
+    await this.assertCurrent();
+    if (signal.aborted) refuse('CANCELLED', '', 'execution');
+    if (timeoutMs <= 0) refuse('DEADLINE', '', 'execution');
+    await rm(baselineDir, { recursive: true, force: true });
+    await mkdir(baselineDir, { recursive: true, mode: 0o755 });
+    if (entries.length === 0) return;
+    const createdDirs = new Set<string>(['']);
+    await this.#streamGitBatch(
+      repository,
+      entries,
+      async (entry, readChunks) => {
+        const targetPath = join(baselineDir, entry.name);
+        const slash = entry.name.lastIndexOf('/');
+        if (slash !== -1) {
+          const relDir = entry.name.slice(0, slash);
+          if (!createdDirs.has(relDir)) {
+            await mkdir(join(baselineDir, relDir), { recursive: true, mode: 0o755 });
+            let pos = relDir.indexOf('/');
+            while (pos !== -1) { createdDirs.add(relDir.slice(0, pos)); pos = relDir.indexOf('/', pos + 1); }
+            createdDirs.add(relDir);
+          }
+        }
+        const fileMode = entry.mode === '100755' ? 0o555 : 0o444;
+        const descriptor = await open(targetPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, fileMode);
+        try {
+          await readChunks(async slice => {
+            let offset = 0;
+            while (offset < slice.length) {
+              const { bytesWritten } = await descriptor.write(slice, offset, slice.length - offset);
+              if (bytesWritten <= 0) refuse('TARGET_MISMATCH', '', 'execution');
+              offset += bytesWritten;
+            }
+          });
+          await descriptor.chmod(fileMode);
+        } finally {
+          await descriptor.close();
+        }
+      },
+      { baselineDir },
+      'execution',
+      signal,
+      timeoutMs,
+    );
   }
   async release(): Promise<void> {
     if (this.#released) return; if (this.#active || this.#pending.size || this.#heldActivities) refuse('CLEANUP_FAILED', '', 'finalization'); await this.assertCurrent();

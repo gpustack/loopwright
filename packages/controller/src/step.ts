@@ -44,7 +44,11 @@ import {
   type HostPathProtectionOptions,
 } from './source.js';
 import { isVerdictStep, normalizeSubmission, validateStepVerdictObject, type RetainedSubmission, type Submission } from './submission.js';
-import { evaluateControllerAcceptance, type AcceptanceObservation } from './acceptance.js';
+import {
+  evaluateControllerAcceptance,
+  verifyControllerVerifierCasDescriptors,
+  type AcceptanceObservation,
+} from './acceptance.js';
 import { descendants, nextNode } from './scheduler.js';
 import { formatPolicy, reworkPrompt } from './repair.js';
 import { countDelegatedBudgets, observeParentExhaustion, storeFactsCertain, refuseFromRoleOutcome } from './budget-observations.js';
@@ -325,7 +329,11 @@ async function cleanupRunWorkspaces(
   }
 }
 
-async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead | null): Promise<Map<string, '100644' | '100755'>> {
+async function resolveCurrentFileModes(
+  context: CycleContext,
+  head: ProgressHead | null,
+  candidateFiles?: readonly { readonly name: string; readonly mode?: '100644' | '100755' | undefined }[],
+): Promise<Map<string, '100644' | '100755'>> {
   const modes = new Map<string, '100644' | '100755'>();
   if (context.source.version === 2) {
     for (const entry of context.source.baselineEntries ?? []) modes.set(entry.name, entry.mode);
@@ -338,20 +346,38 @@ async function resolveCurrentFileModes(context: CycleContext, head: ProgressHead
     }
   }
   if (head && !same(head.progress.candidate.workspace, context.source.workspace)) {
+    let isDelegatedWorkspace = false;
+    const bounds = overlayManifestBounds(context.plan.budgets.overlay);
+    const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
+    const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
     try {
-      const bounds = overlayManifestBounds(context.plan.budgets.overlay);
-      const maxWsBytes = Math.max(bounds.v2WorkspaceJsonMaxBytes, bounds.workspaceMaxBytes);
-      const wsBytes = await context.artifacts.read(head.progress.candidate.workspace, maxWsBytes);
       const parsed = parsePrivateJson(Buffer.from(wsBytes), maxWsBytes, bounds.collectionLimit);
       if (isRecord(parsed) && (parsed.format === 'delegated-capture.v1' || parsed.format === 'delegated-capture.v2') && Array.isArray(parsed.overlay)) {
+        isDelegatedWorkspace = true;
         for (const item of parsed.overlay) {
           if (isRecord(item) && typeof item.name === 'string' && (item.mode === '100644' || item.mode === '100755')) {
             modes.set(item.name, item.mode);
           }
         }
       }
-    } catch {
-      // Non-JSON workspace (e.g., pi capture) keeps baseline modes or defaults to 100644 for new overlay files.
+    } catch (error) {
+      if (!(error instanceof ControllerFailure && (error.diagnostic.code === 'CONFIG_SYNTAX' || error.diagnostic.code === 'ARTIFACT_INVALID'))) {
+        throw error;
+      }
+      // Non-JSON workspace (e.g., native Pi capture; parsePrivateJson wraps non-JSON syntax errors as ARTIFACT_INVALID).
+    }
+    if (!isDelegatedWorkspace && context.source.version === 1) {
+      // Native Pi classic (v1) materializes every file as 0o444 (100644) and capture records explicit 100644.
+      for (const entry of head.manifest.spec.entries) {
+        modes.set(entry.name, '100644');
+      }
+    }
+  }
+  if (candidateFiles) {
+    for (const file of candidateFiles) {
+      if (file.mode === '100644' || file.mode === '100755') {
+        modes.set(file.name, file.mode);
+      }
     }
   }
   return modes;
@@ -391,7 +417,7 @@ async function materializeAttemptWorkspace(
   try {
     const effectiveTools = repair === 'format' ? [] : role.policy.tools;
     const readOnlyRole = repair === 'format' || !effectiveTools.some(tool => tool === 'write' || tool === 'edit' || tool === 'delete' || tool === 'bash');
-    const modes = await resolveCurrentFileModes(context, cycle.head);
+    const modes = await resolveCurrentFileModes(context, cycle.head, cycle.candidate.files);
 
     if (source.version === 2) {
       await materializeBaseline(source, stagingCandidateDir, owner, cycle.deadline);
@@ -710,9 +736,9 @@ async function advanceStepCycle(
             hostProtectionFromPolicy(meta.hostPolicy),
           );
           if (disallowMutations) {
-            const priorModes = await resolveCurrentFileModes(cycle.context, cycle.head);
+            const priorModes = await resolveCurrentFileModes(cycle.context, cycle.head, cycle.candidate.files);
             for (const entry of captured.artifacts) {
-              if (!('bytes' in entry) && entry.mode !== undefined && entry.mode !== (priorModes.get(entry.name) ?? '100644')) {
+              if (entry.mode !== undefined && entry.mode !== (priorModes.get(entry.name) ?? '100644')) {
                 refuse('ARTIFACT_INVALID', '', 'recovery');
               }
             }
@@ -793,6 +819,14 @@ async function advanceStepCycle(
     }
     await cycle.verifyEligible();
     await cycle.ensureSubmissionForAcceptance();
+    const checks = cycle.currentChecks();
+    const preverified = await verifyControllerVerifierCasDescriptors(plan, checks, {
+      signal: cycle.deadline.abort.signal,
+      checkAuthority: async () => {
+        cycle.deadline.assert(true);
+        await cycle.context.owner.assertCurrent();
+      },
+    });
     const verdictHalt = cycle.haltedVerdictStatus();
     const acceptance = evaluateControllerAcceptance(
       plan,
@@ -800,12 +834,14 @@ async function advanceStepCycle(
       cycle.candidate.manifest,
       cycle.candidate.files,
       cycle.generation,
-      cycle.currentChecks(),
+      checks,
       cycle.submission!.value,
       cycle.context.store,
       verdictHalt,
       cycle.draft.nodes.every(node => node.state === 'completed'),
       cycle.currentRefusals(),
+      null,
+      preverified,
     );
     if (verdictHalt === null && acceptance.result.spec.status === 'failed') {
       const repairSpec = await cycle.prepareImplementationRepair();
@@ -878,19 +914,27 @@ async function runStepTickWithCycle(
         ? diagnostic.code
         : null;
       try {
+        const checks = cycle.currentChecks();
+        const preverified = await verifyControllerVerifierCasDescriptors(context.plan, checks, {
+          ...(diagnostic.code !== 'CANCELLED' && diagnostic.code !== 'DEADLINE' && !context.signal.aborted
+            ? { signal: context.signal }
+            : {}),
+          checkAuthority: () => context.owner.assertCurrent(),
+        });
         primary = evaluateControllerAcceptance(
           context.plan,
           context.lock,
           cycle.candidate.manifest,
           cycle.candidate.files,
           cycle.generation,
-          cycle.currentChecks(),
+          checks,
           cycle.submission?.value ?? null,
           context.store,
           forced,
           cycle.draft.nodes.every(node => node.state === 'completed'),
           cycle.currentRefusals(),
           forcedDiagnostic,
+          preverified,
         );
       } catch {
         primary = incident(
@@ -1158,18 +1202,25 @@ async function settleForcedStepRun(
       ...(cycle.head?.progress.verifierRefusals ?? []),
     ].filter(row => row.generation === cycle.generation);
     for (const row of retained) await cycle.runVerifier(row.slot);
+    const checks = cycle.currentChecks();
+    const preverified = await verifyControllerVerifierCasDescriptors(context.plan, checks, {
+      ...(!context.signal.aborted ? { signal: context.signal } : {}),
+      checkAuthority: () => context.owner.assertCurrent(),
+    });
     primary = evaluateControllerAcceptance(
       context.plan,
       context.lock,
       cycle.candidate.manifest,
       cycle.candidate.files,
       cycle.generation,
-      cycle.currentChecks(),
+      checks,
       cycle.submission?.value ?? null,
       context.store,
       forcedStatus === 'reconcile_required' ? null : forcedStatus,
       cycle.draft.nodes.every(node => node.state === 'completed'),
       cycle.currentRefusals(),
+      null,
+      preverified,
     );
   } catch (error) {
     primary = incident(
@@ -1939,7 +1990,7 @@ export function stepSubmit(input: StepSubmitInput, ports: ControllerPorts = {}) 
     let scanned: Awaited<ReturnType<typeof scanCandidateDirectory>>;
     let explicitSubmissionBytes: Uint8Array | null = explicitVerdictBytes;
     try {
-      previousModes = await resolveCurrentFileModes(context, head);
+      previousModes = await resolveCurrentFileModes(context, head, candidate.files);
       scanned = await scanCandidateDirectory(
         candidateDir,
         context.source,

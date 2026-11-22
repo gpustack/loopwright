@@ -46,7 +46,8 @@ export type Implementation =
   | 'json-keys-guard.v1'
   | 'line-section-guard.v1'
   | 'no-change.v1'
-  | 'gate.v1';
+  | 'gate.v1'
+  | 'benchmark-gate.v1';
 export type RoleAdapterKind = 'pi' | 'delegated';
 export type ControllerPolicyProfile = 'local' | 'github';
 export interface PersistedHostPolicy {
@@ -56,6 +57,7 @@ export interface PersistedHostPolicy {
 export interface RawCandidateFile {
   readonly name: string;
   readonly bytes: Uint8Array;
+  readonly mode?: '100644' | '100755' | undefined;
 }
 export interface CasCandidateFile {
   readonly name: string;

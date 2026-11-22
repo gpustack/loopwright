@@ -8,6 +8,8 @@ import {
   resolveOverlayLimits,
   validateRelativePath,
   validateScopePattern,
+  type HardwareTargetSpec,
+  type MetricThresholdRule,
   type OverlayLimits,
   type ResourceActivationPhase,
   type ResourceActivationRule,
@@ -44,7 +46,7 @@ import {
   type TaskpackDecisionTriageRuleKind, type TaskpackDecisionTriageSeverity,
   type TaskpackExecutionCapabilitiesDeclaration, type TaskpackExecutionDeclaration,
   type TaskpackExecutionDigestsDeclaration, type TaskpackExecutionMode,
-  type TaskpackExternalGateDeclaration, type TaskpackHttpMcpServerDeclaration,
+  type TaskpackExternalGateDeclaration, type TaskpackExternalGateImplementation, type TaskpackHttpMcpServerDeclaration,
   type TaskpackLimitsDeclaration, type TaskpackManifest, type TaskpackManifestWithProposal, type TaskpackMcpDeclaration,
   type TaskpackMcpServerDeclaration, type TaskpackMemoryApplyMode, type TaskpackMemoryDeclaration,
   type TaskpackMemoryNoBudgetMode, type TaskpackModelDeclaration, type TaskpackOutputDeclaration,
@@ -89,6 +91,10 @@ const RESERVED_COMMAND_ENV_PREFIXES = [
   'LOOPWRIGHT_', 'INPUT_', 'GITHUB_APP_', 'ACTIONS_', 'RUNNER_', 'LD_', 'DYLD_', 'GIT_',
 ] as const;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+const DOTTED_VERSION_RE = /^\d+(?:\.\d+)*$/;
+const METRIC_KEY_RE = /^[A-Za-z_][A-Za-z0-9._-]*$/;
+const PRINTABLE_ASCII_RE = /^[\x20-\x7E]+$/;
 const MAX_NODES = 4096;
 const MAX_DEPTH = 16;
 const MAX_COLLECTION = 512;
@@ -1642,10 +1648,153 @@ function requireIdentifier(value: unknown, path: string): string {
   return text;
 }
 
+function requireNullProtoObject(value: unknown, path: string, fields: readonly string[]): Record<string, Json> {
+  const raw = requireObject(value, path, fields);
+  const out = Object.create(null) as Record<string, Json>;
+  for (const key of fields) {
+    if (Object.hasOwn(raw, key)) {
+      out[key] = raw[key]!;
+    }
+  }
+  return out;
+}
+
 function requireLabel(value: unknown, path: string): string {
   const text = requireString(value, path, 1, 128);
-  if (/[\s\p{C}]/u.test(text)) manifestInvalid('expected a 1..128 character non-whitespace label', path);
+  if (/[\s\p{C}]/u.test(text) || LONE_SURROGATE_RE.test(text)) {
+    manifestInvalid('expected a 1..128 character non-whitespace label', path);
+  }
   return text;
+}
+
+function requirePrintableAscii(value: unknown, path: string, min: number, max: number): string {
+  if (typeof value !== 'string' || value.length < min || value.length > max) {
+    manifestInvalid(`expected a printable ASCII string of ${min}..${max} characters`, path);
+  }
+  if (value.trim() !== value || !PRINTABLE_ASCII_RE.test(value)) {
+    manifestInvalid('expected trimmed printable ASCII characters', path);
+  }
+  return value;
+}
+
+function requirePrintableText(value: unknown, path: string, min: number, max: number): string {
+  if (typeof value !== 'string' || value.length < min || value.length > max) {
+    manifestInvalid(`expected a printable string of ${min}..${max} characters`, path);
+  }
+  if (value.trim() !== value || /[\r\n\t\p{C}]/u.test(value) || LONE_SURROGATE_RE.test(value)) {
+    manifestInvalid('expected trimmed printable text without control characters or lone surrogates', path);
+  }
+  return value;
+}
+
+function requireFiniteNumber(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Object.is(value, -0)) {
+    manifestInvalid('expected a finite number (not NaN, Infinity, or -0)', path);
+  }
+  return value;
+}
+
+function isValidDottedVersion(value: string): boolean {
+  if (!value.length || !DOTTED_VERSION_RE.test(value)) return false;
+  for (const part of value.split('.')) {
+    const parsed = Number(part);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) return false;
+  }
+  return true;
+}
+
+function validateHardwareTargetSpec(value: unknown, path: string): HardwareTargetSpec {
+  const raw = requireNullProtoObject(value, path, [
+    'accelerator', 'isolationMode', 'deviceCount', 'driverConstraint', 'topology',
+  ]);
+  const accelerator = requirePrintableAscii(raw['accelerator'], `${path}/accelerator`, 1, 64);
+  const rawIsolation = raw['isolationMode'];
+  if (rawIsolation !== 'whole_device' && rawIsolation !== 'sliced') {
+    manifestInvalid('hardware.isolationMode must be "whole_device" or "sliced"', `${path}/isolationMode`);
+  }
+  const deviceCount = raw['deviceCount'] === undefined
+    ? undefined
+    : requireSafeIntInRange(raw['deviceCount'], `${path}/deviceCount`, 1, 64);
+  let driverConstraint: string | undefined;
+  if (raw['driverConstraint'] !== undefined) {
+    driverConstraint = requirePrintableText(raw['driverConstraint'], `${path}/driverConstraint`, 1, 128);
+    if (driverConstraint.startsWith('>=') && !isValidDottedVersion(driverConstraint.slice(2))) {
+      manifestInvalid('hardware.driverConstraint ">=" comparator requires a dotted version', `${path}/driverConstraint`);
+    }
+  }
+  const topology = raw['topology'] === undefined
+    ? undefined
+    : requirePrintableText(raw['topology'], `${path}/topology`, 1, 128);
+  return Object.freeze({
+    accelerator,
+    isolationMode: rawIsolation,
+    ...(deviceCount === undefined ? {} : { deviceCount }),
+    ...(driverConstraint === undefined ? {} : { driverConstraint }),
+    ...(topology === undefined ? {} : { topology }),
+  });
+}
+
+function requireMetricKey(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > LIMITS.metricKey) {
+    manifestInvalid(`expected a metric key of 1..${LIMITS.metricKey} characters`, path);
+  }
+  if (FORBIDDEN_KEYS.has(value) || !METRIC_KEY_RE.test(value)) {
+    manifestInvalid(`invalid metric key ${JSON.stringify(value)}`, path);
+  }
+  return value;
+}
+
+function validateMetricThresholdRule(value: unknown, path: string): MetricThresholdRule {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    manifestInvalid('expected a metric threshold rule object', path);
+  }
+  const proto: unknown = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) {
+    manifestInvalid('expected a metric threshold rule object', path);
+  }
+  const rawRecord = value as Record<string, Json>;
+  if (!Object.hasOwn(rawRecord, 'kind')) {
+    manifestInvalid('metric threshold rule requires "kind"', `${path}/kind`);
+  }
+  const kind = rawRecord['kind'];
+  if (kind === 'bounds') {
+    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'min', 'max']);
+    const metric = requireMetricKey(raw['metric'], `${path}/metric`);
+    const min = raw['min'] === undefined ? undefined : requireFiniteNumber(raw['min'], `${path}/min`);
+    const max = raw['max'] === undefined ? undefined : requireFiniteNumber(raw['max'], `${path}/max`);
+    if (min === undefined && max === undefined) {
+      manifestInvalid('bounds metric threshold requires at least one of "min" or "max"', path);
+    }
+    if (min !== undefined && max !== undefined && min > max) {
+      manifestInvalid('bounds metric threshold requires min <= max', path);
+    }
+    return Object.freeze({
+      kind: 'bounds' as const,
+      metric,
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
+    });
+  }
+  if (kind === 'comparative') {
+    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'baselineMetric', 'operator', 'threshold']);
+    const metric = requireMetricKey(raw['metric'], `${path}/metric`);
+    const baselineMetric = requireMetricKey(raw['baselineMetric'], `${path}/baselineMetric`);
+    const operator = raw['operator'];
+    if (operator !== 'min_ratio' && operator !== 'max_ratio' && operator !== 'max_delta') {
+      manifestInvalid('comparative metric threshold operator must be "min_ratio", "max_ratio", or "max_delta"', `${path}/operator`);
+    }
+    // Reject -0/NaN/Infinity on untrusted manifest input (stricter than @loopwright/core's -0 -> 0 normalization)
+    // while matching @loopwright/core's allowance of finite negative comparative thresholds (e.g. -0.25).
+    const threshold = requireFiniteNumber(raw['threshold'], `${path}/threshold`);
+    return Object.freeze({
+      kind: 'comparative' as const,
+      metric,
+      baselineMetric,
+      operator,
+      threshold,
+    });
+  }
+  manifestInvalid('metric threshold rule kind must be "bounds" or "comparative"', `${path}/kind`);
 }
 
 function requireStringList(value: unknown, path: string, min: number, max: number): readonly string[] {
@@ -3150,13 +3299,21 @@ function validateTaskpackManifestInternal(
       const seenCellIds = new Set<string>();
       const cells: TargetMatrixCell[] = rawMatrix.map((item, idx) => {
         const cPath = `/spec/target/matrix/${idx}`;
-        const rawCell = requireObject(item, cPath, ['id', 'platform', 'variant']);
+        const rawCell = requireNullProtoObject(item, cPath, ['id', 'platform', 'variant', 'hardware']);
         const id = requireIdentifier(rawCell['id'], `${cPath}/id`);
         if (seenCellIds.has(id)) manifestInvalid(`duplicate target matrix cell id "${id}"`, `${cPath}/id`);
         seenCellIds.add(id);
         const platform = requireLabel(rawCell['platform'], `${cPath}/platform`);
         const variant = requireLabel(rawCell['variant'], `${cPath}/variant`);
-        return Object.freeze({ id, platform, variant });
+        const hardware = rawCell['hardware'] === undefined
+          ? undefined
+          : validateHardwareTargetSpec(rawCell['hardware'], `${cPath}/hardware`);
+        return Object.freeze({
+          id,
+          platform,
+          variant,
+          ...(hardware === undefined ? {} : { hardware }),
+        });
       });
       target = Object.freeze({ matrix: Object.freeze(cells) });
     }
@@ -3580,10 +3737,114 @@ function validateTaskpackManifestInternal(
     .map(c => String(c.parameters?.['script'] ?? ''))
     .filter(s => s.length > 0);
 
+  const targetMatrixById = new Map<string, TargetMatrixCell>(
+    (target?.matrix ?? []).map(cell => [cell.id, cell] as const),
+  );
+
   const externalGates: TaskpackExternalGateDeclaration[] = externalGatesValue.map((item, index) => {
     const gPath = `/spec/verification/externalGates/${index}`;
-    const gate = requireObject(item, gPath, [
-      'id', 'gateId', 'endpointId', 'required', 'signingCredentialRef', 'authCredentialRef', 'url',
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      manifestInvalid('expected an object', gPath);
+    }
+    const proto: unknown = Object.getPrototypeOf(item);
+    if (proto !== Object.prototype && proto !== null) {
+      manifestInvalid('expected an object', gPath);
+    }
+    const rawGateRecord = item as Record<string, Json>;
+    let declaredImplementation: TaskpackExternalGateImplementation | undefined;
+    if (Object.hasOwn(rawGateRecord, 'implementation') && rawGateRecord['implementation'] !== undefined) {
+      const rawImpl = rawGateRecord['implementation'];
+      if (rawImpl !== 'gate.v1' && rawImpl !== 'benchmark-gate.v1') {
+        manifestInvalid('external gate implementation must be "gate.v1" or "benchmark-gate.v1"', `${gPath}/implementation`);
+      }
+      declaredImplementation = rawImpl;
+    }
+    const effectiveImplementation: TaskpackExternalGateImplementation = declaredImplementation ?? 'gate.v1';
+
+    if (effectiveImplementation === 'benchmark-gate.v1') {
+      for (const forbidden of ['url', 'signingCredentialRef', 'authCredentialRef'] as const) {
+        if (Object.hasOwn(rawGateRecord, forbidden)) {
+          manifestInvalid(
+            `benchmark-gate.v1 external gate forbids manifest-level "${forbidden}" override; bind endpoints via host gateEndpoints`,
+            `${gPath}/${forbidden}`,
+          );
+        }
+      }
+      const gate = requireNullProtoObject(item, gPath, [
+        'id',
+        'implementation',
+        'gateId',
+        'endpointId',
+        'required',
+        'targetCellId',
+        'heldOutWorkloadId',
+        'maxPreemptions',
+        'allowSyntheticHardwareProbe',
+        'metricThresholds',
+      ]);
+      const gateCheckId = requireIdentifier(gate['id'], `${gPath}/id`);
+      if (checkIds.has(gateCheckId)) manifestInvalid('duplicate check id across localChecks and externalGates', `${gPath}/id`);
+      if (reservedIds.has(gateCheckId)) manifestInvalid(`check id "${gateCheckId}" is reserved by the compiler`, `${gPath}/id`);
+      checkIds.add(gateCheckId);
+      const endpointId = requireIdentifier(gate['endpointId'], `${gPath}/endpointId`);
+      if (endpointId === LOCAL_COMMAND_GATE_ENDPOINT_ID) {
+        manifestInvalid(
+          `endpointId "${LOCAL_COMMAND_GATE_ENDPOINT_ID}" is reserved for command.v1 local checks`,
+          `${gPath}/endpointId`,
+        );
+      }
+      const gateId = requirePrintableAscii(gate['gateId'], `${gPath}/gateId`, 1, 128);
+      const required = requireBoolean(gate['required'], `${gPath}/required`);
+      const targetCellId = requireIdentifier(gate['targetCellId'], `${gPath}/targetCellId`);
+      const matchedCell = targetMatrixById.get(targetCellId);
+      if (matchedCell === undefined) {
+        manifestInvalid(
+          `benchmark-gate.v1 targetCellId "${targetCellId}" does not match any declared spec.target.matrix cell`,
+          `${gPath}/targetCellId`,
+        );
+      }
+      if (matchedCell.hardware === undefined) {
+        manifestInvalid(
+          `benchmark-gate.v1 targetCellId "${targetCellId}" references a spec.target.matrix cell without hardware metadata`,
+          `${gPath}/targetCellId`,
+        );
+      }
+      const heldOutWorkloadId = requireIdentifier(gate['heldOutWorkloadId'], `${gPath}/heldOutWorkloadId`);
+      const maxPreemptions = gate['maxPreemptions'] === undefined
+        ? undefined
+        : requireSafeIntInRange(gate['maxPreemptions'], `${gPath}/maxPreemptions`, 0, 16);
+      const allowSyntheticHardwareProbe = gate['allowSyntheticHardwareProbe'] === undefined
+        ? undefined
+        : requireBoolean(gate['allowSyntheticHardwareProbe'], `${gPath}/allowSyntheticHardwareProbe`);
+      let metricThresholds: readonly MetricThresholdRule[] | undefined;
+      if (gate['metricThresholds'] !== undefined) {
+        const rawThresholds = gate['metricThresholds'];
+        if (!Array.isArray(rawThresholds) || rawThresholds.length > LIMITS.metricThresholds) {
+          manifestInvalid(
+            `benchmark-gate.v1 metricThresholds must contain 0..${LIMITS.metricThresholds} entries`,
+            `${gPath}/metricThresholds`,
+          );
+        }
+        metricThresholds = Object.freeze(
+          rawThresholds.map((rule, rIdx) => validateMetricThresholdRule(rule, `${gPath}/metricThresholds/${rIdx}`)),
+        );
+      }
+      return Object.freeze({
+        id: gateCheckId,
+        implementation: 'benchmark-gate.v1' as const,
+        gateId,
+        endpointId,
+        required,
+        targetCellId,
+        heldOutWorkloadId,
+        ...(maxPreemptions === undefined ? {} : { maxPreemptions }),
+        ...(allowSyntheticHardwareProbe === undefined ? {} : { allowSyntheticHardwareProbe }),
+        ...(metricThresholds === undefined ? {} : { metricThresholds }),
+      });
+    }
+
+    const gate = requireNullProtoObject(item, gPath, [
+      'id', 'implementation', 'gateId', 'endpointId', 'required', 'signingCredentialRef', 'authCredentialRef', 'url',
     ]);
     const gateCheckId = requireIdentifier(gate['id'], `${gPath}/id`);
     if (checkIds.has(gateCheckId)) manifestInvalid('duplicate check id across localChecks and externalGates', `${gPath}/id`);
@@ -3636,6 +3897,7 @@ function validateTaskpackManifestInternal(
     }
     return Object.freeze({
       id: gateCheckId,
+      ...(declaredImplementation === undefined ? {} : { implementation: declaredImplementation }),
       gateId: requireIdentifier(gate['gateId'], `${gPath}/gateId`),
       endpointId,
       required: requireBoolean(gate['required'], `${gPath}/required`),

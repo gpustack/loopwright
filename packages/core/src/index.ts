@@ -1,13 +1,20 @@
 export { API_VERSION } from './boundary.js';
-export { LIMITS, OVERLAY_LIMITS, HANDOFF_LIMITS, type OverlayLimits, type OverlayLimitsInput, type OverlayLimitOptions } from './limits.js';
-export { DIAGNOSTIC_CODES, type DiagnosticCode, type Diagnostic, type Result } from './diagnostics.js';
-export { matchesScopePattern, validateScopePattern, validateRelativePath } from './scope.js';
 export {
-  isWritablePath, resolveOverlayLimits,
+  LIMITS, OVERLAY_LIMITS, HANDOFF_LIMITS, VERIFIER_ARTIFACT_LIMITS,
+  type OverlayLimits, type OverlayLimitsInput, type OverlayLimitOptions,
+} from './limits.js';
+export { DIAGNOSTIC_CODES, type DiagnosticCode, type Diagnostic, type Result } from './diagnostics.js';
+export {
+  matchesScopePattern, validateScopePattern, validateRelativePath,
+  isVerifierNamespacePath, parseVerifierArtifactPath, type VerifierArtifactPath,
+} from './scope.js';
+export {
+  isWritablePath, resolveOverlayLimits, matchesDriverConstraint,
   type TaskContract, type ReworkPolicy, type Digest, type ArtifactRef, type EvidenceLevel, type CheckStatus,
   type MetricValue, type MetricsMap, type FindingSeverity, type StructuredFinding,
   type StepHandoffSource, type StepHandoffSelect, type StepHandoffSelector,
   type ResourceActivationPhase, type ResourceActivationRule,
+  type HardwareTargetSpec, type MetricBoundsRule, type MetricComparativeRule, type MetricThresholdRule,
 } from './contracts.js';
 export { admitTask, identifyManifest, bindSubject, type TaskLock, type Subject } from './identity.js';
 export {
@@ -15,8 +22,11 @@ export {
   type ArtifactManifest, type ArtifactMetadataInput, type ArtifactRefOptions, type ArtifactBytes,
   type BaseTreeAnchor, type ResolvedArtifact, type ResolvedArtifactInput, type VerifiedArtifactDescriptor,
 } from './artifacts.js';
-export { evaluateAcceptance, type VerificationResult, type EvaluatedCheck } from './acceptance.js';
-export type { Evidence, SubmittedCheck } from './evidence.js';
+export {
+  evaluateAcceptance, matchesHardwareTarget,
+  type VerificationResult, type EvaluatedCheck,
+} from './acceptance.js';
+export type { Evidence, HardwareProvenance, SubmittedCheck } from './evidence.js';
 export { aggregateUsage, type RequestUsage, type Quantity, type Aggregate, type UsageSummary } from './usage.js';
 export { SecretScrubber } from './scrubber.js';
 export { constructRunResult, type RunResult, type RunStatus, type MemoryObservation, type NoChangeVerification } from './results.js';

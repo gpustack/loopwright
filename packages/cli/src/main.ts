@@ -8,7 +8,8 @@ import { pathToFileURL } from 'node:url';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RoleModelOverride, type RunReportInput, type StepTickResult } from '@loopwright/controller';
-import { alignBaselineRevisions, assertCleanArtifact, BASELINE_CONFLICT_REASON, buildDefaultAuthorPrompt, checkTaskpackSuite, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseAllowedHostMounts, parseBaselineAlignmentPolicy, parseLoopwrightEnvLimits, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, resolveTaskpackSuite, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type BaselineAlignmentOverride, type BaselineAlignmentResult, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LoadedTaskpackSuite, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type SuiteResolutionResult, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
+import { alignBaselineRevisions, assertCleanArtifact, BASELINE_CONFLICT_REASON, buildDefaultAuthorPrompt, checkTaskpackSuite, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseAllowedHostMounts, parseBaselineAlignmentPolicy, parseLoopwrightEnvLimits, parseYamlDocument, readBoundedRegularFile, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, resolveTaskpackSuite, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type BaselineAlignmentOverride, type BaselineAlignmentResult, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LoadedTaskpackSuite, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type SuiteResolutionResult, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
+import type { HardwareRunnerErrorCode, RunHardwareWorkerResult, WorkerJobSettlementSummary } from '@loopwright/hardware-runner';
 import { parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
@@ -20,7 +21,8 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nsuite check --suite FILE [--repo DIR] [--verify-digests] [--json]\nsuite resolve --suite FILE [--repo DIR] [--event NAME] [--schedule KEY] [--comment-body TEXT] [--pr-head-ref REF] [--pr-base-ref REF] [--domain ID] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nsuite check --suite FILE [--repo DIR] [--verify-digests] [--json]\nsuite resolve --suite FILE [--repo DIR] [--event NAME] [--schedule KEY] [--comment-body TEXT] [--pr-head-ref REF] [--pr-base-ref REF] [--domain ID] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nrunner relay --config FILE [--json]\nrunner worker --config FILE [--once] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const RUNNER_HELP = `loopwright ${CLI_VERSION} runner\nrunner relay --config FILE [--json]\nrunner worker --config FILE [--once] [--json]\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest' | 'suite'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -206,6 +208,33 @@ export function taskpackExitCode(code: TaskpackErrorCode, reason?: string | null
   }
 }
 export { taskpackExitCode as gitHubAppExitCode };
+/** Map every HardwareRunnerErrorCode exhaustively to its documented CLI exit code. */
+export function hardwareRunnerExitCode(code: HardwareRunnerErrorCode): number {
+  switch (code) {
+    case 'CONFIG_INVALID':
+    case 'PAYLOAD_TOO_LARGE':
+      return 2;
+    case 'AUTH_UNAUTHORIZED':
+    case 'AUTH_FORBIDDEN':
+    case 'RUNNER_SANDBOX_FAILED':
+      return 3;
+    case 'ARTIFACT_INVALID':
+    case 'ARTIFACT_MISSING':
+    case 'NOT_FOUND':
+      return 4;
+    case 'QUEUE_CAPACITY_EXCEEDED':
+      return 5;
+    case 'QUEUE_LEASE_FENCED':
+    case 'QUEUE_JOB_CONFLICT':
+      return 7;
+    case 'QUEUE_STATE_INVALID':
+      return 8;
+    default: {
+      const _exhaustive: never = code;
+      return _exhaustive;
+    }
+  }
+}
 function createCliScrubber(extraKeys: readonly string[] = []): SecretScrubber {
   const scrubber = new SecretScrubber();
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraKeys]) {
@@ -1255,14 +1284,16 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
         gateEndpoints: activeGateEndpoints,
         publicationEndpoint: null,
         credentialEnvMap: {
-          provider: candidate !== undefined
-            ? candidate.providerEnvName
+          ...(candidate !== undefined
+            ? { provider: candidate.providerEnvName }
             : (roleSelection?.provider !== undefined
-                ? resolveDefaultProviderTokenEnv(roleSelection.provider, {
-                    modelsJsonApiKeyEnv: modelsConfig?.providers.get(roleSelection.provider)?.apiKeyEnv,
-                    env: process.env,
-                  })
-                : 'LOOPWRIGHT_PROVIDER_TOKEN'),
+                ? {
+                    provider: resolveDefaultProviderTokenEnv(roleSelection.provider, {
+                      modelsJsonApiKeyEnv: modelsConfig?.providers.get(roleSelection.provider)?.apiKeyEnv,
+                      env: process.env,
+                    }),
+                  }
+                : {})),
           gate: 'LOOPWRIGHT_GATE_SIGNING_SECRET',
           publication: 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET',
           publicationAuth: 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN',
@@ -1489,8 +1520,295 @@ async function runTaskpackCommand(args: Arguments, json: boolean, emit: EmitFn):
     }
   }
 }
+async function registerRunnerConfigSecrets(
+  configPath: string,
+  scrubber: SecretScrubber,
+  env: Readonly<Record<string, string | undefined>>,
+  options: {
+    readonly maxConfigBytes: number;
+    readonly assertNoSymlinkAncestors: (
+      targetPath: string,
+      opts?: { readonly checkLeaf?: boolean; readonly code?: 'CONFIG_INVALID'; readonly diagPath?: string },
+    ) => Promise<void>;
+    readonly scalarEnvFields: readonly string[];
+    readonly listEnvFields: readonly string[];
+  },
+): Promise<void> {
+  try {
+    await options.assertNoSymlinkAncestors(configPath, {
+      checkLeaf: true,
+      code: 'CONFIG_INVALID',
+      diagPath: '/',
+    });
+    const rawBytes = await readBoundedRegularFile(configPath, options.maxConfigBytes, () => {
+      throw new Error('UNBOUNDED');
+    });
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(rawBytes);
+    const registerEnvName = (envName: string | undefined): void => {
+      if (envName !== undefined && Object.hasOwn(env, envName)) {
+        const val = env[envName];
+        if (typeof val === 'string' && val.length > 0) scrubber.register(val);
+      }
+    };
+    const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const scalarPattern = options.scalarEnvFields.map(escapeRegExp).join('|');
+    const listPattern = options.listEnvFields.map(escapeRegExp).join('|');
+    // Best-effort fallback extraction before YAML parsing so malformed YAML diagnostics stay scrubbed.
+    for (const match of text.matchAll(/\benv:([A-Z][A-Z0-9_]{0,127})\b/g)) {
+      registerEnvName(match[1]);
+    }
+    if (scalarPattern.length > 0) {
+      const scalarRe = new RegExp(`['"]?(?:${scalarPattern})['"]?\\s*:\\s*['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?`, 'g');
+      for (const match of text.matchAll(scalarRe)) {
+        registerEnvName(match[1]);
+      }
+    }
+    if (listPattern.length > 0) {
+      const flowListRe = new RegExp(`['"]?(?:${listPattern})['"]?\\s*:\\s*\\[([^\\]]*)\\]`, 'g');
+      for (const listMatch of text.matchAll(flowListRe)) {
+        for (const item of listMatch[1]!.matchAll(/\b(?:env:)?([A-Z][A-Z0-9_]{0,127})\b/g)) {
+          registerEnvName(item[1]);
+        }
+      }
+      const blockListRe = new RegExp(`['"]?(?:${listPattern})['"]?\\s*:\\s*\\n((?:[ \\t]+-[ \\t]+[^\\n]+\\n?)+)`, 'g');
+      for (const blockListMatch of text.matchAll(blockListRe)) {
+        for (const item of blockListMatch[1]!.matchAll(/^[ \t]+-[ \t]+['"]?(?:env:)?([A-Z][A-Z0-9_]{0,127})['"]?/gm)) {
+          registerEnvName(item[1]);
+        }
+      }
+    }
+    const parsed = parseYamlDocument(text);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const rec = parsed as Record<string, unknown>;
+      for (const field of options.scalarEnvFields) {
+        const ref = Object.hasOwn(rec, field) ? rec[field] : undefined;
+        if (typeof ref === 'string') {
+          registerEnvName(ref.startsWith('env:') ? ref.slice(4) : ref);
+        }
+      }
+      for (const listField of options.listEnvFields) {
+        const list = Object.hasOwn(rec, listField) ? rec[listField] : undefined;
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            if (typeof item === 'string') {
+              registerEnvName(item.startsWith('env:') ? item.slice(4) : item);
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Best-effort pre-registration before strict config validation runs.
+  }
+}
+
+function scrubSettlement(summary: WorkerJobSettlementSummary, scrubber: SecretScrubber): WorkerJobSettlementSummary {
+  return {
+    ...summary,
+    jobId: scrubber.scrub(summary.jobId),
+    operationId: scrubber.scrub(summary.operationId),
+  };
+}
+
+async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> {
+  const get = (key: string) => args.values.get(key)!;
+  const configPath = resolve(get('config'));
+  const scrubber = createCliScrubber();
+
+  const {
+    assertNoSymlinkAncestors,
+    MAX_RUNNER_CONFIG_BYTES,
+    RUNNER_SECRET_ENV_FIELDS,
+    RUNNER_SECRET_ENV_LIST_FIELDS,
+    loadRelayConfig,
+    loadWorkerConfig,
+    startRelayServer,
+    runHardwareWorker,
+    HardwareRunnerError,
+    isRunnerTeardownError,
+    isRunnerTransportError,
+  } = await import('@loopwright/hardware-runner');
+  await registerRunnerConfigSecrets(configPath, scrubber, process.env, {
+    maxConfigBytes: MAX_RUNNER_CONFIG_BYTES,
+    assertNoSymlinkAncestors,
+    scalarEnvFields: RUNNER_SECRET_ENV_FIELDS,
+    listEnvFields: RUNNER_SECRET_ENV_LIST_FIELDS,
+  });
+
+  try {
+    if (args.runnerAction === 'relay') {
+      const config = await loadRelayConfig(configPath, { env: process.env });
+      scrubber.register(config.controllerSigningSecret);
+      if (config.controllerAuthToken !== undefined) scrubber.register(config.controllerAuthToken);
+      for (const token of config.workerTokens) scrubber.register(token);
+
+      const handle = await startRelayServer(config);
+      let caughtSignal: 'SIGINT' | 'SIGTERM' | null = null;
+      let resolveSignal!: (sig: 'SIGINT' | 'SIGTERM') => void;
+      const signalPromise = new Promise<'SIGINT' | 'SIGTERM'>(resolveSig => {
+        resolveSignal = resolveSig;
+      });
+      const onSigint = () => {
+        if (caughtSignal === null) {
+          caughtSignal = 'SIGINT';
+          resolveSignal('SIGINT');
+        }
+      };
+      const onSigterm = () => {
+        if (caughtSignal === null) {
+          caughtSignal = 'SIGTERM';
+          resolveSignal('SIGTERM');
+        }
+      };
+      process.on('SIGINT', onSigint);
+      process.on('SIGTERM', onSigterm);
+      try {
+        await emit(
+          'status',
+          {
+            role: 'relay',
+            host: handle.host,
+            port: handle.port,
+            url: handle.url,
+            relayBootId: handle.relayBootId,
+          },
+          `listening: ${handle.url}`,
+        );
+        caughtSignal = await signalPromise;
+      } finally {
+        try {
+          await handle.close();
+        } finally {
+          process.off('SIGINT', onSigint);
+          process.off('SIGTERM', onSigterm);
+        }
+      }
+      return caughtSignal === 'SIGTERM' ? 143 : 130;
+    }
+
+    const config = await loadWorkerConfig(configPath, { env: process.env });
+    scrubber.register(config.workerToken);
+
+    const shutdownController = new AbortController();
+    const preemptController = new AbortController();
+    let caughtSignal: 'SIGINT' | 'SIGTERM' | null = null;
+    let sawUnknownSettlement = false;
+    let sawFencedSettlement = false;
+    const onSigint = () => {
+      caughtSignal ??= 'SIGINT';
+      shutdownController.abort();
+    };
+    const onSigterm = () => {
+      caughtSignal ??= 'SIGTERM';
+      preemptController.abort();
+    };
+    process.on('SIGINT', onSigint);
+    process.on('SIGTERM', onSigterm);
+
+    const settlements: WorkerJobSettlementSummary[] = [];
+    let workerResult: RunHardwareWorkerResult;
+    try {
+      workerResult = await runHardwareWorker({
+        config,
+        once: args.flags.has('once'),
+        signal: shutdownController.signal,
+        preemptSignal: preemptController.signal,
+        registerProcessSignalHandlers: false,
+        onJobSettled: summary => {
+          if (summary.outcome === 'unknown' || summary.acknowledgment === 'unknown') {
+            sawUnknownSettlement = true;
+          }
+          if (summary.outcome === 'fenced' || summary.acknowledgment === 'fenced') {
+            sawFencedSettlement = true;
+          }
+          if (settlements.length >= 64) settlements.shift();
+          settlements.push(scrubSettlement(summary, scrubber));
+        },
+      });
+    } finally {
+      process.off('SIGINT', onSigint);
+      process.off('SIGTERM', onSigterm);
+    }
+
+    const lastSettlement = workerResult.lastSettlement !== null
+      ? scrubSettlement(workerResult.lastSettlement, scrubber)
+      : null;
+    const safeWorkerId = scrubber.scrub(config.workerId);
+    await emit(
+      'status',
+      {
+        role: 'worker',
+        workerId: safeWorkerId,
+        exitReason: workerResult.exitReason,
+        polls: workerResult.polls,
+        jobsProcessed: workerResult.jobsProcessed,
+        lastSettlement,
+        settlements,
+      },
+      `worker ${safeWorkerId}: ${workerResult.exitReason} (jobsProcessed=${workerResult.jobsProcessed})`,
+    );
+
+    if (
+      sawUnknownSettlement
+      || (
+        workerResult.lastSettlement !== null
+        && (
+          workerResult.lastSettlement.outcome === 'unknown'
+          || workerResult.lastSettlement.acknowledgment === 'unknown'
+        )
+      )
+    ) {
+      return 8;
+    }
+    if (
+      sawFencedSettlement
+      || (
+        workerResult.lastSettlement !== null
+        && (
+          workerResult.lastSettlement.outcome === 'fenced'
+          || workerResult.lastSettlement.acknowledgment === 'fenced'
+        )
+      )
+    ) {
+      return 7;
+    }
+    if (caughtSignal === 'SIGTERM' || workerResult.exitReason === 'preempted') return 143;
+    if (caughtSignal === 'SIGINT' || workerResult.exitReason === 'aborted') return 130;
+    return 0;
+  } catch (err) {
+    if (err instanceof HardwareRunnerError) {
+      const isTeardown = isRunnerTeardownError(err);
+      const isTransport = isRunnerTransportError(err);
+      let code: string = err.code;
+      if (isTeardown) {
+        code = 'RUNNER_TEARDOWN_FAILED';
+      } else if (isTransport) {
+        code = 'RUNNER_TRANSPORT_ERROR';
+      }
+      const message = scrubber.scrub(err.message);
+      const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
+      await emit(
+        'diagnostic',
+        { version: 1, code, message, ...(path !== null ? { path } : {}) },
+        `${code}: ${message}`,
+      );
+      return isTeardown || isTransport ? 8 : hardwareRunnerExitCode(err.code);
+    }
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = scrubber.scrub(rawMessage);
+    await emit(
+      'diagnostic',
+      { version: 1, code: 'RUNNER_UNAVAILABLE', message },
+      `RUNNER_UNAVAILABLE: ${message}`,
+    );
+    return 8;
+  }
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
+  if (argv.length === 2 && argv[0] === 'runner' && argv[1] === '--help') { await stdout(RUNNER_HELP); return 0; }
+  if (argv.length === 3 && argv[0] === 'runner' && (argv[1] === 'relay' || argv[1] === 'worker') && argv[2] === '--help') { await stdout(RUNNER_HELP); return 0; }
   if (argv.length === 1 && argv[0] === '--version') { await stdout(`${CLI_VERSION}\n`); return 0; }
   let sequence = 0, runId: string | null = null, json = argv.includes('--json');
   const emit = async (kind: Envelope['kind'], data: unknown, summary?: string) => { const envelope: Envelope = { version: 1, kind, sequence: ++sequence, runId, data }; if (!json && kind === 'diagnostic') { await stderr(encoded(summary ?? kind) + '\n'); return; } await stdout(json ? encoded(envelope) + '\n' : encoded(summary ?? kind) + '\n'); };
@@ -1571,6 +1889,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     if (args.command === 'suite') {
       return await runSuiteCommand(args, emit);
+    }
+    if (args.command === 'runner') {
+      return await runRunnerCommand(args, emit);
     }
     if (args.command === 'step') {
       runId = get('run-id');
