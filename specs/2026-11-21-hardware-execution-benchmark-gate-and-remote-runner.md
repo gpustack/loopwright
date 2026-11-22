@@ -335,7 +335,7 @@ Key conventions:
       Acceptance: `@loopwright/taskpack` compiles hardware `target.matrix` cells, `targetCellId`, `metricThresholds`, and `maxPreemptions` into `benchmark-gate.v1` checks, rejects manifest-level `url`/credential overrides on `benchmark-gate.v1`, and projects `{ id, platform, variant }` cleanly in both `taskpack` and `github-app` memory finalizers.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack && node scripts/run-tests.mjs --pkg github-app`
 
-- [ ] **T6 · Outbound worker loop, trusted GPU probes, two-stage blind sandbox evaluator, and loopback/SSH smoke tests**
+- [x] **T6 · Outbound worker loop, trusted GPU probes, two-stage blind sandbox evaluator, and loopback/SSH smoke tests**
       Blocked by: T3, T5
       Owns: `packages/hardware-runner/src/provenance.ts`, `packages/hardware-runner/src/evaluator.ts`, `packages/hardware-runner/src/worker.ts`, `packages/hardware-runner/src/index.ts`, `packages/hardware-runner/test/provenance.test.ts`, `packages/hardware-runner/test/evaluator.test.ts`, `packages/hardware-runner/test/worker.test.ts`, `packages/hardware-runner/test/e2e-nat-loopback.test.ts`, `packages/hardware-runner/test/live-ssh-smoke.test.ts`
       Gate: review

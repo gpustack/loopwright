@@ -5,3 +5,11 @@ export interface HardwareRunnerDescriptor {
   readonly name: typeof HARDWARE_RUNNER_PACKAGE_NAME;
   readonly version: typeof HARDWARE_RUNNER_SCAFFOLD_VERSION;
 }
+
+export * from './types.js';
+export * from './config.js';
+export * from './queue.js';
+export * from './relay-server.js';
+export * from './provenance.js';
+export * from './evaluator.js';
+export * from './worker.js';
