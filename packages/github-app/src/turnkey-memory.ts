@@ -777,23 +777,34 @@ export async function finalizeAndPublishTurnkeyMemory(
       const expectedReceiptBranch = isInlineMode
         ? (candidatePublication?.branchName ?? null)
         : memoryBranch;
-      const inlineReceiptBranchInvalid = isInlineMode && (
-        expectedReceiptBranch === null
-        || expectedReceiptBranch === targetBranch
-        || !isSafeBranchName(expectedReceiptBranch)
-      );
+      if (expectedReceiptBranch === null) {
+        return Object.freeze({
+          status: 'refused',
+          directory: existingReceipt.directory,
+          proposalId: existingReceipt.proposalId,
+          entryCount: 0,
+          rebased: existingReceipt.rebased,
+          branchName: existingReceipt.branchName,
+          pullRequestUrl: existingReceipt.pullRequestUrl,
+          pullRequestNumber: existingReceipt.pullRequestNumber,
+          reason: scrubTurnkeyReason(
+            'inline memory receipt cannot be replayed without matching candidate pull request publication',
+            scrubber,
+          ),
+        });
+      }
+      let inlineMismatchReason: string | null = null;
+      if (isInlineMode && (expectedReceiptBranch === targetBranch || !isSafeBranchName(expectedReceiptBranch))) {
+        inlineMismatchReason = `inline memory receipt branch "${expectedReceiptBranch}" is invalid or targets "${targetBranch}"`;
+      }
       const retainedRunMismatch = await verifyRetainedRunDescriptorIfPresent(options.runRoot, expectedBindings);
-      const bindingMismatchReason = (inlineReceiptBranchInvalid
-        ? (expectedReceiptBranch === null
-          ? 'inline memory receipt cannot be replayed without matching candidate pull request publication'
-          : `inline memory receipt branch "${expectedReceiptBranch}" is invalid or targets "${targetBranch}"`)
-        : null)
+      const bindingMismatchReason = inlineMismatchReason
         ?? validateReceiptBindings(existingReceipt, {
           repositoryFullName: options.repositoryFullName,
           taskpack,
           targetBranch,
           memoryDirectory,
-          memoryBranch: expectedReceiptBranch!,
+          memoryBranch: expectedReceiptBranch,
         })
         ?? retainedRunMismatch;
       if (bindingMismatchReason !== null) {
