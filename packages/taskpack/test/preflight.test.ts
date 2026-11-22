@@ -8,6 +8,8 @@ import {
   cloneVerifiedStagedFileForChecks,
   computeFileDigest,
   formatWorkspaceResourcesManifest,
+  isCredentialPreflightEnvName,
+  isForbiddenPreflightEnvName,
   PREFLIGHT_MAX_OUTPUT_JSON_BYTES,
   PREFLIGHT_MAX_PROMPT_RESOURCE_BYTES,
   PREFLIGHT_MAX_PROMPT_RESOURCES_TOTAL_BYTES,
@@ -423,6 +425,129 @@ writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
         assert.equal((await lstat(checkSentinelFull)).mode & 0o777, 0o640, 'existing check sentinel mode must not be chmodded to 0o444');
         assert.deepEqual(await readdir(checkSentinelDir), ['sentinel.txt'], 'private .lw-stage-* temp file must be cleaned up');
       }
+    });
+  });
+
+  it('strips non-secret GitHub Actions INPUT_*/RUNNER_* vars from preflight child env without registering their values as leaked secrets', async () => {
+    for (const nonSecret of [
+      'INPUT_DRY-RUN',
+      'INPUT_FORCE',
+      'INPUT_MODE',
+      'INPUT_DOMAIN',
+      'INPUT_ALLOW-PRIVILEGED-EXECUTION',
+      'INPUT_PROVIDER-TOKEN-ENV',
+      'INPUT_TOTAL-TOKENS',
+      'INPUT_MAX-OUTPUT-TOKENS',
+      'INPUT_GITHUB-APP-ID',
+      'GITHUB_APP_ID',
+      'RUNNER_OS',
+      'RUNNER_TEMP',
+      'ACTIONS_ID_TOKEN_REQUEST_URL',
+      'GIT_AUTHOR_NAME',
+    ]) {
+      assert.equal(isForbiddenPreflightEnvName(nonSecret), true, `${nonSecret} must still be stripped from preflight child env`);
+      assert.equal(isCredentialPreflightEnvName(nonSecret), false, `${nonSecret} must not be registered as secret material`);
+    }
+    for (const credential of [
+      'INPUT_GITHUB-TOKEN',
+      'INPUT_GITHUB-APP-PRIVATE-KEY',
+      'GITHUB_TOKEN',
+      'GH_TOKEN',
+      'LOOPWRIGHT_PROVIDER_TOKEN',
+      'ACTIONS_RUNTIME_TOKEN',
+      'ACTIONS_ID_TOKEN_REQUEST_TOKEN',
+      'CUSTOM_SERVICE_SECRET',
+    ]) {
+      assert.equal(isCredentialPreflightEnvName(credential), true, `${credential} must be registered as secret material`);
+    }
+
+    await withTempDirs(async (repoRoot, _outsideDir, tempRoot) => {
+      const scriptPath = join(repoRoot, '.loopwright', 'scripts', 'preflight.mjs');
+      const actionsHostEnv: NodeJS.ProcessEnv = {
+        PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+        'INPUT_DRY-RUN': 'false',
+        'INPUT_ALLOW-PRIVILEGED-EXECUTION': 'true',
+        'INPUT_MODE': 'auto',
+        'INPUT_DOMAIN': 'slicing',
+        'INPUT_PROVIDER-TOKEN-ENV': 'LOOPWRIGHT_PROVIDER_TOKEN',
+        'INPUT_TOTAL-TOKENS': '20000000',
+        'INPUT_GITHUB-APP-ID': '123456',
+        'INPUT_GITHUB-TOKEN': 'ghs_realActionInputTokenValue99887766',
+        RUNNER_OS: 'Linux',
+        ACTIONS_ID_TOKEN_REQUEST_URL: 'https://oidc.example.invalid/request',
+        ACTIONS_RUNTIME_TOKEN: 'rt_live_actions_runtime_secret_554433',
+      };
+
+      // 1. Staged JSON/text containing ordinary booleans/strings ("false", "true", "auto", "slicing", "Linux", "LOOPWRIGHT_PROVIDER_TOKEN") succeeds
+      await writeFile(
+        scriptPath,
+        `import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const childHasInputs = Boolean(process.env['INPUT_DRY-RUN'] || process.env['RUNNER_OS'] || process.env['INPUT_GITHUB-TOKEN']);
+const payload = JSON.stringify({
+  enabled: true,
+  dryRun: false,
+  mode: 'auto',
+  domain: 'slicing',
+  os: 'Linux',
+  providerEnv: 'LOOPWRIGHT_PROVIDER_TOKEN',
+  appId: 123456,
+  childHasInputs,
+});
+writeFileSync(join(process.env.LOOPWRIGHT_STAGING_DIR, 'report.json'), payload + '\\n', 'utf8');
+writeFileSync(join(process.env.LOOPWRIGHT_STAGING_DIR, 'bundle.txt'), payload + '\\n', 'utf8');
+writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
+  disposition: 'candidate',
+  stagedResources: [
+    { id: 'report', kind: 'document', path: 'report.json', mount: 'prompt' },
+    { id: 'bundle', kind: 'document', path: 'bundle.txt', mount: 'workspace' },
+  ],
+}));`,
+        'utf8',
+      );
+      const okRes = await runTaskpackPreflight({
+        manifest: makePreflightManifest(),
+        repositoryRoot: repoRoot,
+        authorized: true,
+        scrubber: new SecretScrubber(),
+        tempRoot,
+        env: actionsHostEnv,
+      });
+      try {
+        assert.equal(okRes.disposition, 'candidate');
+        assert.equal(okRes.promptResources.length, 1);
+        assert.equal(okRes.workspaceResources.length, 1);
+        const parsedReport = JSON.parse(okRes.promptResources[0]!.content) as { childHasInputs: boolean; dryRun: boolean; mode: string };
+        assert.equal(parsedReport.childHasInputs, false);
+        assert.equal(parsedReport.dryRun, false);
+        assert.equal(parsedReport.mode, 'auto');
+      } finally {
+        await okRes.cleanup();
+      }
+
+      // 2. Actual hyphenated INPUT_GITHUB-TOKEN leaked into staged resource still fails closed with TOKEN_SECRET_LEAK_DETECTED
+      await writeFile(
+        scriptPath,
+        `import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+writeFileSync(join(process.env.LOOPWRIGHT_STAGING_DIR, 'leak.txt'), 'token=ghs_realActionInputTokenValue99887766\\n', 'utf8');
+writeFileSync(process.env.LOOPWRIGHT_PREFLIGHT_OUT, JSON.stringify({
+  disposition: 'candidate',
+  stagedResources: [{ id: 'leak', kind: 'document', path: 'leak.txt', mount: 'workspace' }],
+}));`,
+        'utf8',
+      );
+      await expectPreflightError(
+        {
+          manifest: makePreflightManifest(),
+          repositoryRoot: repoRoot,
+          authorized: true,
+          scrubber: new SecretScrubber(),
+          tempRoot,
+          env: actionsHostEnv,
+        },
+        'TOKEN_SECRET_LEAK_DETECTED',
+      );
     });
   });
 });
