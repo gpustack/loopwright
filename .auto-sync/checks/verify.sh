@@ -1404,9 +1404,9 @@ class StageOutputCapture:
                 chunk = pipe.read(16384)  # type: ignore[attr-defined]
                 if not chunk:
                     break
+                self.append(stream_name, chunk)
                 if self._stop.is_set():
                     break
-                self.append(stream_name, chunk)
                 try:
                     target_stream.write(chunk)  # type: ignore[attr-defined]
                     target_stream.flush()  # type: ignore[attr-defined]
@@ -2115,6 +2115,13 @@ def run_contained(
                 t.join(timeout=remaining)
             if any(t.is_alive() for t in pump_threads):
                 capture.stop()
+            elif proc is not None:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
             tamper_reason = restore_and_verify_masks(real_ro_masks, dir_modes, file_snap)
             if tamper_reason is not None:
                 sys.stderr.write(f"verify.sh: {tamper_reason} in stage {stage_label!r}\n")
@@ -2428,7 +2435,7 @@ def run_contained(
                 try:
                     os.killpg(pgid, signal.SIGKILL)
                 except OSError as exc:
-                    if exc.errno == errno.ESRCH:
+                    if exc.errno != errno.EINTR:
                         break
                 if time.monotonic() >= kill_deadline:
                     break
@@ -2439,6 +2446,13 @@ def run_contained(
             t.join(timeout=remaining)
         if any(t.is_alive() for t in pump_threads):
             capture.stop()
+        elif proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
     if returncode != 0:
         detail_msg, stage_findings = build_stage_failure_diagnostics(stage_label, returncode, capture, stage_cwd)
         write_phase3_check_out(detail_msg, findings=stage_findings)
