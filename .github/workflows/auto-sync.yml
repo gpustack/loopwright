@@ -144,29 +144,29 @@ jobs:
 
       - name: Run Loopwright
         id: loopwright
+        uses: gpustack/loopwright@9fc93a1f0b48844f24d76dafb16575fd562947aa # v0.0.1
+        with:
+          taskpack-path: .auto-sync/taskpack.yaml
+          mode: auto
+          allow-privileged-execution: 'true'
+          event-name: ${{ github.event_name }}
+          event-path: ${{ github.event_path }}
+          run-root: ${{ runner.temp }}/loopwright-auto-sync
+          run-id: auto-sync-${{ github.run_id }}-${{ github.run_attempt }}
+          storage-profile: actions-basic
+          dry-run: ${{ inputs.dry-run && 'true' || 'false' }}
+          force: ${{ inputs.force && 'true' || 'false' }}
+          github-app-id: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_ID || vars.CI_GPUSTACK_LOOPWRIGHT_APP_ID || secrets.LOOPWRIGHT_APP_ID }}
+          github-app-private-key: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_PRIVATE_KEY || secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
+          output: json,github-step-summary
         env:
           GITHUB_SHA: ${{ steps.main_ref.outputs.sha }}
           GITHUB_REF: refs/heads/main
-          INPUT_TASKPACK-PATH: .auto-sync/taskpack.yaml
-          INPUT_MODE: auto
-          INPUT_ALLOW-PRIVILEGED-EXECUTION: 'true'
-          INPUT_EVENT-NAME: ${{ github.event_name }}
-          INPUT_EVENT-PATH: ${{ github.event_path }}
-          INPUT_RUN-ROOT: ${{ runner.temp }}/loopwright-auto-sync
-          INPUT_RUN-ID: auto-sync-${{ github.run_id }}-${{ github.run_attempt }}
-          INPUT_STORAGE-PROFILE: actions-basic
-          INPUT_DRY-RUN: ${{ inputs.dry-run && 'true' || 'false' }}
-          INPUT_FORCE: ${{ inputs.force && 'true' || 'false' }}
-          INPUT_GITHUB-APP-ID: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_ID || vars.CI_GPUSTACK_LOOPWRIGHT_APP_ID || secrets.LOOPWRIGHT_APP_ID }}
-          INPUT_GITHUB-APP-PRIVATE-KEY: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_APP_PRIVATE_KEY || secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}
-          INPUT_OUTPUT: json,github-step-summary
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LOOPWRIGHT_PROVIDER_TOKEN: ${{ secrets.CI_GPUSTACK_LOOPWRIGHT_LLM_AUTH_TOKEN || secrets.CI_GPUSTACK_CODEREVIEW_LLM_AUTH_TOKEN }}
           SELF_UPGRADE_FORCE: ${{ inputs.force && 'true' || 'false' }}
           SELF_UPGRADE_RUN_ROOT: ${{ runner.temp }}/loopwright-auto-sync
           SELF_UPGRADE_REQUIRE_HUGO: '1'
-        run: |
-          node "${GITHUB_WORKSPACE}/packages/github-app/dist/action.js"
 
       - name: Upload diagnostics
         if: always()

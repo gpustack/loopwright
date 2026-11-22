@@ -746,15 +746,15 @@ with tarfile.open(sys.argv[1], "w:gz") as tf:
       true,
     );
     assert.equal(
-      workflowRaw.includes('INPUT_TASKPACK-PATH: .auto-sync/taskpack.yaml'),
+      workflowRaw.includes('taskpack-path: .auto-sync/taskpack.yaml'),
       true,
     );
-    assert.equal(workflowRaw.includes('INPUT_MODE: auto'), true);
-    assert.equal(workflowRaw.includes("INPUT_ALLOW-PRIVILEGED-EXECUTION: 'true'"), true);
-    assert.equal(workflowRaw.includes('INPUT_ALLOW-WORKFLOW-WRITES'), false);
+    assert.equal(workflowRaw.includes('mode: auto'), true);
+    assert.equal(workflowRaw.includes("allow-privileged-execution: 'true'"), true);
+    assert.equal(workflowRaw.includes('allow-workflow-writes'), false);
     assert.equal(workflowRaw.includes('bootstrap-loopwright'), false);
     assert.equal(workflowRaw.includes('92d90440b9e48cac42dd7ef058da1e8c48ec858c'), false);
-    assert.equal(workflowRaw.includes('node "${GITHUB_WORKSPACE}/packages/github-app/dist/action.js"'), true);
+    assert.match(workflowRaw, /uses: gpustack\/loopwright@[0-9a-f]{40} # v\d+\.\d+\.\d+/);
     assert.equal(workflowRaw.includes('name: Run preflight'), false);
     assert.equal(workflowRaw.includes('name: Resolve mode'), false);
     assert.equal(workflowRaw.includes('name: Verify no-change'), false);
