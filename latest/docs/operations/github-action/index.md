@@ -57,7 +57,7 @@ jobs:
 - **Mode `auto`**: Runs `spec.preflight` or upstream discovery, dispatches `candidate` when updates exist or `force` is `'true'`, and compiles a check-only `no-change` run with zero agent model calls when settled.
 - **Suite matrix**: Pass `suite-path` with `resolve-suite-only: 'true'` to emit `outputs.matrix` (`{ include: [...] }`), then run each matrix job with `domain: ${{ matrix.domainId }}` for per-job revalidation.
 - **Comment checkout**: Workflows triggered on `issue_comment` should fetch the PR head commit when running candidate checkout (`Suite` lookup verifies `head.repo.full_name`, `base.ref`, `head.ref`, and `head.sha`).
-- **Dual-key authority**: Even under `spec.execution.mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'`. Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writes: 'true'`.
+- **Dual-key authority**: Even under `spec.execution.mode: strict`, enabling `allowHostEnv`, `allowHostPath`, `mountReadOnlyGit`, `allowCheckNetwork`, `allowAgentNetwork`, or `command.v1` `mountReadOnlyGit: true` requires `allow-privileged-execution: 'true'`. Enabling `allowWorkflowWrites: true` independently requires `allow-workflow-writes: 'true'`, and `allowDockerSocket: true` independently requires `allow-docker-socket: 'true'` (with `allow-privileged-execution: 'true'` and `allowCheckNetwork: true`).
 - **Provider**: Set the token variable for the selected model, not necessarily `ZAI_API_KEY`.
 - **Runtime**: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.
 
