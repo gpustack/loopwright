@@ -1319,6 +1319,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import signal
 import socket
@@ -1326,9 +1327,203 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 
 check_out_env = os.environ.get("LOOPWRIGHT_CHECK_OUT", "").strip()
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+SAFE_FINDING_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+RESERVED_DEV_NAME_RE = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
+STAGE_PATH_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9._/-])((?:\.test-build/)?(?:packages|docs|scripts|\.auto-sync)/[A-Za-z0-9._/-]+\.(?:[cm]?[jt]sx?|json|md|ya?ml|sh))"
+)
+STAGE_ERROR_LINE_RE = re.compile(
+    r"(?:\berror TS\d+:|^\s*\d+:\d+\s+error\b|^\s*✖\s+|^\s*not ok\b|^\s*(?:AssertionError|TypeError|SyntaxError|ReferenceError|RangeError|Error):|\b(?:AssertionError|ERR_[A-Z0-9_]+)\b|^\s*npm error\b|^\s*ERROR\b)"
+)
+
+
+def sanitize_finding_rel_path(raw: str, base_root: str | None = None) -> str | None:
+    cand = raw.strip().strip("'\"()[]")
+    while cand.startswith("./"):
+        cand = cand[2:]
+    if cand.startswith(".test-build/") and cand.endswith(".js"):
+        ts_cand = cand[len(".test-build/") : -3] + ".ts"
+        stripped = cand[len(".test-build/") :]
+        if base_root and os.path.isfile(os.path.join(base_root, ts_cand)):
+            cand = ts_cand
+        elif base_root and os.path.isfile(os.path.join(base_root, stripped)):
+            cand = stripped
+        else:
+            return None
+    if not cand or len(cand) > 256 or cand.startswith("/") or "\\" in cand:
+        return None
+    segs = cand.split("/")
+    if len(segs) > 32:
+        return None
+    for seg in segs:
+        if (
+            not seg
+            or seg in (".", "..")
+            or seg.endswith(".")
+            or not SAFE_FINDING_SEG_RE.match(seg)
+            or RESERVED_DEV_NAME_RE.match(seg)
+        ):
+            return None
+    if base_root and not os.path.isfile(os.path.join(base_root, cand)):
+        return None
+    return cand
+
+
+class StageOutputCapture:
+    MAX_BYTES = 131_072
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._bufs: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def append(self, stream_name: str, data: bytes) -> None:
+        if not data:
+            return
+        with self._lock:
+            buf = self._bufs[stream_name]
+            if len(data) >= self.MAX_BYTES:
+                buf[:] = data[-self.MAX_BYTES :]
+            else:
+                buf.extend(data)
+                excess = len(buf) - self.MAX_BYTES
+                if excess > 0:
+                    del buf[:excess]
+
+    def pump_stream(self, pipe: object, stream_name: str, target_stream: object) -> None:
+        try:
+            while not self._stop.is_set():
+                chunk = pipe.read(16384)  # type: ignore[attr-defined]
+                if not chunk:
+                    break
+                self.append(stream_name, chunk)
+                if self._stop.is_set():
+                    break
+                try:
+                    target_stream.write(chunk)  # type: ignore[attr-defined]
+                    target_stream.flush()  # type: ignore[attr-defined]
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        finally:
+            try:
+                pipe.close()  # type: ignore[attr-defined]
+            except OSError:
+                pass
+
+    def text(self, stream_name: str) -> str:
+        with self._lock:
+            raw = bytes(self._bufs[stream_name])
+        cleaned = ANSI_ESCAPE_RE.sub("", raw.decode("utf-8", errors="replace"))
+        return cleaned.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def build_stage_failure_diagnostics(
+    stage_label: str,
+    returncode: int,
+    capture: StageOutputCapture,
+    stage_cwd: str,
+) -> tuple[str, list[dict[str, object]]]:
+    base_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
+    stdout_txt = capture.text("stdout")
+    stderr_txt = capture.text("stderr")
+    combined = "\n".join(part for part in (stdout_txt, stderr_txt) if part.strip())
+
+    # 1. Extract structured Node test runner `✖ failing tests:` summary when present
+    marker = "✖ failing tests:"
+    marker_idx = combined.rfind(marker)
+    if marker_idx != -1:
+        fail_section = combined[marker_idx + len(marker) :].strip()
+        blocks: list[str] = []
+        current: list[str] = []
+        for line in fail_section.splitlines():
+            if line.lstrip().startswith("test at ") and current:
+                blocks.append("\n".join(current).strip())
+                current = [line]
+            elif line.strip() or current:
+                current.append(line)
+        if current:
+            blocks.append("\n".join(current).strip())
+
+        findings: list[dict[str, object]] = []
+        summary_names: list[str] = []
+        for block in blocks[:8]:
+            block_lines = [ln for ln in block.splitlines() if ln.strip()]
+            loc_line = block_lines[0] if block_lines else ""
+            name_line = next((ln.strip() for ln in block_lines if ln.lstrip().startswith("✖")), loc_line)
+            test_name = name_line.lstrip("✖ ").strip() or f"stage {stage_label} test failure"
+            summary_names.append(test_name)
+            finding: dict[str, object] = {
+                "title": f"Test failed: {test_name}"[:256],
+                "severity": "high",
+                "evidence": block[:1800] if block else base_msg,
+            }
+            path_match = STAGE_PATH_TOKEN_RE.search(loc_line) or STAGE_PATH_TOKEN_RE.search(block)
+            if path_match is not None:
+                rel_path = sanitize_finding_rel_path(path_match.group(1), stage_cwd)
+                if rel_path is not None:
+                    finding["path"] = rel_path
+            findings.append(finding)
+
+        if findings:
+            names_preview = "; ".join(summary_names[:4])
+            if len(blocks) > 4:
+                names_preview += f" (+{len(blocks) - 4} more)"
+            first_excerpt = " | ".join(
+                ln.strip() for ln in blocks[0].splitlines()[:8] if ln.strip()
+            )
+            detail = f"{base_msg} — {names_preview}: {first_excerpt}"[:2048]
+            return detail, findings
+
+    # 2. Extract targeted error lines (tsc, eslint, check-docs, hugo, closure, npm) or tail excerpt
+    all_lines = [ln.rstrip() for ln in combined.splitlines() if ln.strip()]
+    matched_indices = [
+        idx
+        for idx, ln in enumerate(all_lines)
+        if not ln.lstrip().startswith(("✔", "ℹ")) and STAGE_ERROR_LINE_RE.search(ln)
+    ]
+    if matched_indices:
+        selected_idx: set[int] = set()
+        for idx in matched_indices[-20:]:
+            selected_idx.add(idx)
+            if idx + 1 < len(all_lines):
+                selected_idx.add(idx + 1)
+        excerpt = "\n".join(all_lines[i] for i in sorted(selected_idx))
+    else:
+        excerpt = "\n".join(all_lines[-40:])
+
+    excerpt = excerpt.strip()
+    if not excerpt:
+        return base_msg, [
+            {
+                "title": f"Contained stage '{stage_label}' failed"[:256],
+                "severity": "high",
+                "evidence": base_msg[:1800],
+            }
+        ]
+
+    finding_item: dict[str, object] = {
+        "title": f"Contained stage '{stage_label}' failed"[:256],
+        "severity": "high",
+        "evidence": excerpt[:1800],
+    }
+    path_match = STAGE_PATH_TOKEN_RE.search(excerpt)
+    if path_match is not None:
+        rel_path = sanitize_finding_rel_path(path_match.group(1), stage_cwd)
+        if rel_path is not None:
+            finding_item["path"] = rel_path
+    compact = " | ".join(ln.strip() for ln in excerpt.splitlines()[:6] if ln.strip())
+    detail = f"{base_msg}: {compact}"[:2048]
+    return detail, [finding_item]
 
 
 def write_phase3_check_out(
@@ -1336,12 +1531,15 @@ def write_phase3_check_out(
     finding_title: str | None = None,
     finding_evidence: str | None = None,
     metrics: dict[str, object] | None = None,
+    findings: list[dict[str, object]] | None = None,
 ) -> None:
     helper_code = os.environ.get("VERIFY_WRITE_CHECK_OUT_PY", "")
     if not check_out_env or not helper_code:
         return
     doc: dict[str, object] = {"detail": detail[:2048]}
-    if finding_title and finding_evidence:
+    if findings:
+        doc["findings"] = findings[:16]
+    elif finding_title and finding_evidence:
         doc["findings"] = [
             {
                 "title": finding_title[:256],
@@ -1840,6 +2038,8 @@ def run_contained(
     real_writables = sorted({os.path.realpath(p) for p in writable_paths})
     real_ro_masks = sorted({os.path.realpath(p) for p in readonly_subpaths_after_writable if os.path.exists(p)})
 
+    capture = StageOutputCapture()
+
     if is_dedicated_runner:
         # Trust boundary (`direct-dedicated` on ephemeral single-job GitHub-hosted runner VMs):
         # The VM itself is destroyed after the job, `actions/checkout` runs with `persist-credentials: false`,
@@ -1849,12 +2049,36 @@ def run_contained(
         dir_modes: dict[str, int] = {}
         file_snap: dict[str, tuple[int, str, int]] = {}
         proc: subprocess.Popen[bytes] | None = None
+        pump_threads: list[threading.Thread] = []
         returncode = 1
         tamper_reason: str | None = None
         kill_timed_out = False
         try:
             snapshot_and_lock_masks(real_ro_masks, dir_modes, file_snap)
-            proc = subprocess.Popen(argv, cwd=stage_cwd, env=stage_env, start_new_session=True)
+            proc = subprocess.Popen(
+                argv,
+                cwd=stage_cwd,
+                env=stage_env,
+                start_new_session=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if proc.stdout is not None:
+                t_out = threading.Thread(
+                    target=capture.pump_stream,
+                    args=(proc.stdout, "stdout", sys.stdout.buffer),
+                    daemon=True,
+                )
+                t_out.start()
+                pump_threads.append(t_out)
+            if proc.stderr is not None:
+                t_err = threading.Thread(
+                    target=capture.pump_stream,
+                    args=(proc.stderr, "stderr", sys.stderr.buffer),
+                    daemon=True,
+                )
+                t_err.start()
+                pump_threads.append(t_err)
             if hasattr(os, "waitid") and hasattr(os, "WEXITED") and hasattr(os, "WNOWAIT"):
                 os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
                 try:
@@ -1885,6 +2109,19 @@ def run_contained(
                         kill_timed_out = True
                         break
                     time.sleep(0.02)
+            drain_deadline = time.monotonic() + 5.0
+            for t in pump_threads:
+                remaining = max(0.0, drain_deadline - time.monotonic())
+                t.join(timeout=remaining)
+            if any(t.is_alive() for t in pump_threads):
+                capture.stop()
+            elif proc is not None:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
             tamper_reason = restore_and_verify_masks(real_ro_masks, dir_modes, file_snap)
             if tamper_reason is not None:
                 sys.stderr.write(f"verify.sh: {tamper_reason} in stage {stage_label!r}\n")
@@ -1899,9 +2136,9 @@ def run_contained(
             write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' integrity violation", detail_msg)
             sys.exit(1)
         if returncode != 0:
-            detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
-            write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
-            sys.stderr.write(detail_msg + "\n")
+            detail_msg, stage_findings = build_stage_failure_diagnostics(stage_label, returncode, capture, stage_cwd)
+            write_phase3_check_out(detail_msg, findings=stage_findings)
+            sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
             sys.exit(returncode)
         return
 
@@ -1943,6 +2180,7 @@ def run_contained(
                         stream_name = frame.get("stream")
                         if stream_name in ("stdout", "stderr") and isinstance(frame.get("data"), str):
                             decoded = base64.b64decode(frame["data"])
+                            capture.append(stream_name, decoded)
                             target_stream = sys.stdout.buffer if stream_name == "stdout" else sys.stderr.buffer
                             target_stream.write(decoded)
                             target_stream.flush()
@@ -1959,9 +2197,9 @@ def run_contained(
             sys.stderr.write(detail_msg + "\n")
             sys.exit(1)
         if helper_rc != 0:
-            detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {helper_rc}"
-            write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
-            sys.stderr.write(detail_msg + "\n")
+            detail_msg, stage_findings = build_stage_failure_diagnostics(stage_label, helper_rc, capture, stage_cwd)
+            write_phase3_check_out(detail_msg, findings=stage_findings)
+            sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {helper_rc}\n")
             sys.exit(helper_rc)
         return
 
@@ -2139,6 +2377,7 @@ def run_contained(
 
     seccomp_r: int | None = None
     proc: subprocess.Popen[bytes] | None = None
+    pump_threads: list[threading.Thread] = []
     returncode = 1
     try:
         if platform_name != "darwin":
@@ -2159,11 +2398,29 @@ def run_contained(
             cwd=stage_cwd,
             env=stage_env,
             start_new_session=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             pass_fds=(seccomp_r,) if seccomp_r is not None else (),
         )
         if seccomp_r is not None:
             os.close(seccomp_r)
             seccomp_r = None
+        if proc.stdout is not None:
+            t_out = threading.Thread(
+                target=capture.pump_stream,
+                args=(proc.stdout, "stdout", sys.stdout.buffer),
+                daemon=True,
+            )
+            t_out.start()
+            pump_threads.append(t_out)
+        if proc.stderr is not None:
+            t_err = threading.Thread(
+                target=capture.pump_stream,
+                args=(proc.stderr, "stderr", sys.stderr.buffer),
+                daemon=True,
+            )
+            t_err.start()
+            pump_threads.append(t_err)
         returncode = proc.wait()
     finally:
         if seccomp_r is not None:
@@ -2172,14 +2429,34 @@ def run_contained(
             except OSError:
                 pass
         if proc is not None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
+            pgid = proc.pid
+            kill_deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError as exc:
+                    if exc.errno != errno.EINTR:
+                        break
+                if time.monotonic() >= kill_deadline:
+                    break
+                time.sleep(0.02)
+        drain_deadline = time.monotonic() + 5.0
+        for t in pump_threads:
+            remaining = max(0.0, drain_deadline - time.monotonic())
+            t.join(timeout=remaining)
+        if any(t.is_alive() for t in pump_threads):
+            capture.stop()
+        elif proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
     if returncode != 0:
-        detail_msg = f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}"
-        write_phase3_check_out(detail_msg, f"Contained stage '{stage_label}' failed", detail_msg)
-        sys.stderr.write(detail_msg + "\n")
+        detail_msg, stage_findings = build_stage_failure_diagnostics(stage_label, returncode, capture, stage_cwd)
+        write_phase3_check_out(detail_msg, findings=stage_findings)
+        sys.stderr.write(f"verify.sh: contained stage {stage_label!r} failed with exit code {returncode}\n")
         sys.exit(returncode)
 
 
