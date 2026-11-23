@@ -11,7 +11,7 @@ npm test
 ```
 
 Dependencies are exactly locked. Core has no runtime dependencies; state consumes core, and the private Pi adapter
-uses pinned Pi 1.5.2 packages. The root minimatch override applies to the resolved graph, including SDK dependencies.
+uses pinned Pi 1.6.0 packages. The root minimatch override applies to the resolved graph, including SDK dependencies.
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 

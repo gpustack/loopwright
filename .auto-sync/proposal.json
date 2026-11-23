@@ -1,30 +1,30 @@
 {
   "schema_version": 1,
-  "summary": "Loopwright runtime dependency ledger for @earendil-works/pi-* 1.5.2 and yaml 2.9.1.",
+  "summary": "Loopwright runtime dependency ledger for @earendil-works/pi-* 1.6.0 and yaml 2.9.1.",
   "upstreams": {
     "pi-coding-agent": {
       "package": "@earendil-works/pi-coding-agent",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "pi-ai": {
       "package": "@earendil-works/pi-ai",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "pi-agent-core": {
       "package": "@earendil-works/pi-agent-core",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "pi-mcp": {
       "package": "@earendil-works/pi-mcp",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "pi-codemode": {
       "package": "@earendil-works/pi-codemode",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "pi-tui": {
       "package": "@earendil-works/pi-tui",
-      "version": "1.5.2"
+      "version": "1.6.0"
     },
     "yaml": {
       "package": "yaml",
@@ -33,12 +33,12 @@
   },
   "packages": {
     "packages/agent-pi": {
-      "@earendil-works/pi-agent-core": "1.5.2",
-      "@earendil-works/pi-ai": "1.5.2",
-      "@earendil-works/pi-codemode": "1.5.2",
-      "@earendil-works/pi-coding-agent": "1.5.2",
-      "@earendil-works/pi-mcp": "1.5.2",
-      "@earendil-works/pi-tui": "1.5.2"
+      "@earendil-works/pi-agent-core": "1.6.0",
+      "@earendil-works/pi-ai": "1.6.0",
+      "@earendil-works/pi-codemode": "1.6.0",
+      "@earendil-works/pi-coding-agent": "1.6.0",
+      "@earendil-works/pi-mcp": "1.6.0",
+      "@earendil-works/pi-tui": "1.6.0"
     },
     "packages/cli": {
       "yaml": "2.9.1"
