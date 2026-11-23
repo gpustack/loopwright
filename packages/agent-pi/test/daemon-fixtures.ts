@@ -5,7 +5,11 @@ import { join } from 'node:path';
 /** Counted synthetic CLI and a socket inode; never connects to or starts a Docker daemon. */
 export function daemonFixture(directory: string) {
   const socket = join(directory, 'fixture.sock'), executable = join(directory, 'docker-fixture'), identity = join(directory, 'daemon-id'), log = join(directory, 'daemon-calls');
-  execFileSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1],()=>process.exit(0))", socket], { timeout: 3000, stdio: 'pipe' });
+  execFileSync(
+    process.execPath,
+    ['-e', "require('node:net').createServer().listen('./fixture.sock',()=>process.exit(0))"],
+    { cwd: directory, timeout: 3000, stdio: 'pipe' },
+  );
   writeFileSync(identity, 'fixture-daemon-1'); writeFileSync(log, '');
   const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(executable, `#!/bin/sh

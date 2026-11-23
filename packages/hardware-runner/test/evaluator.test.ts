@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { createServer as createNetServer } from 'node:net';
 import { chmod, link, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { LIMITS, SecretScrubber } from '@loopwright/core';
 import { TRUSTED_DOCKER_PATHS } from '@loopwright/taskpack';
 import {
@@ -181,9 +181,25 @@ test('streaming LWTREE01 baseTreeBundle reconstruction (>1 MiB multi-chunk), dig
   }
 });
 
+async function listenUnixSocketRelative(server: ReturnType<typeof createNetServer>, socketPath: string): Promise<void> {
+  const prevCwd = process.cwd();
+  process.chdir(dirname(socketPath));
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(`./${basename(socketPath)}`, () => {
+        server.off('error', rejectListen);
+        resolveListen();
+      });
+    });
+  } finally {
+    process.chdir(prevCwd);
+  }
+}
+
 test('two-stage OS read-allowlist + kernel socket denial + immutable workload snapshot: blocks unrelated worker credentials, sibling workloads, and Unix/IP sockets in BOTH stages', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lw-eval-2stage-'));
-  const outsideCredDir = await mkdtemp(join(tmpdir(), 'lw-eval-unlisted-cred-'));
+  const outsideCredDir = await mkdtemp(join(tmpdir(), 'lw-cred-'));
   const workDir = join(root, 'work');
   const workloadsDir = join(root, 'held_out_workloads');
   const workloadPath = join(workloadsDir, 'gemm-4096');
@@ -208,7 +224,7 @@ test('two-stage OS read-allowlist + kernel socket denial + immutable workload sn
   // 4. Live host Unix domain socket to verify kernel socket denial
   const unixSockPath = join(outsideCredDir, 'host.sock');
   const unixSrv = createNetServer(sock => sock.end('PWNED'));
-  await new Promise<void>(r => unixSrv.listen(unixSockPath, () => r()));
+  await listenUnixSocketRelative(unixSrv, unixSockPath);
 
   const buildStrictSocketAndForkDenySnippet = (failBaseCode: number): string =>
     [
@@ -608,7 +624,7 @@ test('compileDockerSandboxCommand enforces --user uid:gid, disjoint socket-free 
     await mkdir(join(socketToolchainDir, 'bin'), { recursive: true, mode: 0o755 });
     const hiddenSockPath = join(socketToolchainDir, 'bin', 'runtime-ipc.sock');
     const sockSrv = createNetServer();
-    await new Promise<void>(r => sockSrv.listen(hiddenSockPath, () => r()));
+    await listenUnixSocketRelative(sockSrv, hiddenSockPath);
     try {
       assert.throws(
         () =>
