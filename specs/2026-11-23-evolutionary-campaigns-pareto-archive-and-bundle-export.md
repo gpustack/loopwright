@@ -491,7 +491,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `HardwareTargetSpec` accepts optional `forbiddenSymbolPatterns` (`0..64`), `maxRegisterCount`, and `maxLocalSpillBytes` without altering legacy canonical digests when omitted; `Evidence.spec` validates bounded `bucketMetrics` (`1..64` buckets, `<= 16` numeric metrics and `<= 8` dimension keys per bucket) and closed-enum `hardwareDiagnostics` (rejecting free-text strings, `-0`/`NaN`/`Infinity`, prototype keys, and secrets); `evaluateAcceptance` enforces `bucketScope` (`'aggregate' | 'all_buckets' | { bucketId }`); `diagnostics.ts` exports `STAGE_A_STATIC_AUDIT_FAILED`, `TEAM_ENVELOPE_VIOLATION`, and `EXPORT_UNVERIFIED_FORBIDDEN`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg core`
 
-- [ ] **T3 · System-One (`@loopwright/decisions`) novelty filter, strategy track router, and cascade escalation nodes**
+- [x] **T3 · System-One (`@loopwright/decisions`) novelty filter, strategy track router, and cascade escalation nodes**
       Blocked by: T1
       Owns: `packages/decisions/src/**`, `packages/decisions/test/**`
       Gate: review
