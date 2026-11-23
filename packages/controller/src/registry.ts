@@ -7,8 +7,13 @@ import { CONTROLLER_API_VERSION, type TrustedRegistry, type RoleProfile, type Ha
 import { digestValue, id, integer, isRecord, list, record, same, text, type Scalar } from './schema.js';
 import { template } from './interpolation.js';
 import { refuse, type ControllerDiagnostic } from './errors.js';
-import { RFC6901_POINTER_PATTERN } from './verifier-protocol.js';
-const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'no-change.v1', 'gate.v1', 'benchmark-gate.v1'];
+import {
+  EVOLVE_BLOCK_LIMITS,
+  RFC6901_POINTER_PATTERN,
+  isValidEvolveBlockId,
+  isValidEvolveGuardPath,
+} from './verifier-protocol.js';
+const implementations = ['pi.agent.v1', 'pi.compact.v1', 'scope.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'evolve-block-guard.v1', 'no-change.v1', 'gate.v1', 'benchmark-gate.v1'];
 function unique(value: readonly { readonly id: string }[], path: string): void { if (new Set(value.map(item => item.id)).size !== value.length) refuse('CONFIG_SCHEMA', path); }
 function enumValue(value: unknown, values: readonly string[], path: string): void { if (typeof value !== 'string' || !values.includes(value)) refuse('CONFIG_SCHEMA', path); }
 export function labelValue(value: unknown, path: string): string {
@@ -80,6 +85,53 @@ export function validateHandler(raw: unknown, path: string): Handler {
       /[\r\n]/.test(endMarker)
     ) {
       refuse('CONFIG_SCHEMA', path + '/parameters');
+    }
+  } else if (implementation === 'evolve-block-guard.v1') {
+    if (!isRecord(value.parameters)) refuse('CONFIG_SCHEMA', path + '/parameters');
+    const hasAllowedBlockIds = Object.hasOwn(value.parameters, 'allowedBlockIds');
+    const hasMaxBlockBytes = Object.hasOwn(value.parameters, 'maxBlockBytes');
+    const parameters = record(
+      value.parameters,
+      [
+        'checkId',
+        'files',
+        ...(hasAllowedBlockIds ? ['allowedBlockIds' as const] : []),
+        ...(hasMaxBlockBytes ? ['maxBlockBytes' as const] : []),
+      ],
+      path + '/parameters',
+    );
+    id(parameters.checkId, path + '/parameters/checkId');
+    const files = list(parameters.files, path + '/parameters/files', EVOLVE_BLOCK_LIMITS.maxFiles).map((item, idx) =>
+      text(item, `${path}/parameters/files/${idx}`, 1024),
+    );
+    if (files.length < 1) refuse('CONFIG_SCHEMA', path + '/parameters/files');
+    const seenFiles = new Set<string>();
+    for (let idx = 0; idx < files.length; idx++) {
+      const file = files[idx]!;
+      const folded = file.normalize('NFC').toLowerCase();
+      if (!isValidEvolveGuardPath(file) || seenFiles.has(folded)) {
+        refuse('CONFIG_SCHEMA', `${path}/parameters/files/${idx}`);
+      }
+      seenFiles.add(folded);
+    }
+    if (hasAllowedBlockIds) {
+      const allowedBlockIds = list(
+        parameters.allowedBlockIds,
+        path + '/parameters/allowedBlockIds',
+        EVOLVE_BLOCK_LIMITS.maxAllowedBlockIds,
+      ).map((item, idx) => text(item, `${path}/parameters/allowedBlockIds/${idx}`, EVOLVE_BLOCK_LIMITS.maxBlockIdLength));
+      if (allowedBlockIds.length < 1) refuse('CONFIG_SCHEMA', path + '/parameters/allowedBlockIds');
+      const seenBlockIds = new Set<string>();
+      for (let idx = 0; idx < allowedBlockIds.length; idx++) {
+        const blockId = allowedBlockIds[idx]!;
+        if (!isValidEvolveBlockId(blockId) || seenBlockIds.has(blockId)) {
+          refuse('CONFIG_SCHEMA', `${path}/parameters/allowedBlockIds/${idx}`);
+        }
+        seenBlockIds.add(blockId);
+      }
+    }
+    if (hasMaxBlockBytes) {
+      integer(parameters.maxBlockBytes, 1, Number.MAX_SAFE_INTEGER, path + '/parameters/maxBlockBytes');
     }
   } else {
     const fields = implementation === 'json-artifact.v1' ? ['checkId', 'path', 'required', 'equals'] : ['checkId'];

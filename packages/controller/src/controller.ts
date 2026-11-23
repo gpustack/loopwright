@@ -37,7 +37,7 @@ import {
   type Submission,
   type RetainedSubmission,
 } from './submission.js';
-import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
+import { prepareVerification, preflightVerification, Verifier, authenticatedCheck, verifierProofPaths, type PreflightRefusal, type VerifiedCheck, type ByteInventory, type PreparedVerification } from './verification.js';
 import { prepareGate, Gate, GATE_OUTPUT_BYTES, authenticatedGate, validateGateUrlOverrides, type PreparedGate } from './gate.js';
 import {
   prepareBenchmarkGate,
@@ -214,7 +214,7 @@ export async function createCycle(input: RunCycleInput, ports: ControllerPorts):
   try {
     owner = await ControllerOwner.acquire(directory, runId, plan.planDigest); const artifactDirectory = join(directory, 'artifacts'); await privateDirectory(artifactDirectory);
     const artifacts = new ArtifactStore(artifactDirectory, owner, state.vault);
-    const jsonPaths = plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path));
+    const jsonPaths = verifierProofPaths(plan.verifierSlots);
     const source = await freezeSource(repository, plan.task, owner, artifacts, jsonPaths);
     const overlayBounds = overlayManifestBounds(plan.budgets.overlay);
     const admitted = admitTask(plan.task, { admissionId: 'admission.' + hash('loopwright.dev/controller/admission/v1\0' + runId + '\0' + plan.planDigest.hex).hex.slice(0, 40), runId });

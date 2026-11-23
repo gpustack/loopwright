@@ -10,6 +10,7 @@ import { ControllerFailure, refuse, result } from './errors.js';
 import { ControllerOwner } from './ownership.js';
 import { admitRetainedRun, readRetained, validatePortPolicyFields, validatePortsAgainstHostPolicy } from './retained.js';
 import { resumeCycleWithPorts } from './recovery.js';
+import { verifierProofPaths } from './verification.js';
 import { overlayManifestBounds, restoreSource } from './source.js';
 import { ArtifactStore, checkedRef, overwriteAtomicMarker, publishAtomicMarker, stateValue } from './storage.js';
 import { readBoundedFile } from './files.js';
@@ -296,7 +297,16 @@ async function reconcileBenchmarkGate(
     const rawReceipt = parsePrivateJson(receiptBytes, RECEIPT_BYTES);
     if (!isRecord(rawReceipt)) refuse('EVIDENCE_UNAVAILABLE', '/receipt', 'recovery');
     const optionalVerdictKeys = (
-      ['retryablePreemption', 'detail', 'metrics', 'findings', 'hardwareProvenance', 'outputArtifacts'] as const
+      [
+        'retryablePreemption',
+        'detail',
+        'metrics',
+        'findings',
+        'hardwareProvenance',
+        'bucketMetrics',
+        'hardwareDiagnostics',
+        'outputArtifacts',
+      ] as const
     ).filter(key => Object.hasOwn(rawReceipt, key) && rawReceipt[key] !== undefined);
     let file: Record<string, unknown>;
     try {
@@ -537,13 +547,7 @@ async function reconcileBenchmarkGate(
       let baseTreeBundle: Awaited<ReturnType<typeof sealBenchmarkBaseTreeBundle>>;
       const entryModes = new Map<string, '100644' | '100755'>();
       if (rowManifest.spec.baseTree !== undefined || rowManifest.spec.entries.length > 0) {
-        const jsonPaths = [
-          ...new Set(
-            plan.verifierSlots
-              .filter(s => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(s.handler.implementation))
-              .map(s => text(s.handler.parameters.path)),
-          ),
-        ];
+        const jsonPaths = verifierProofPaths(plan.verifierSlots);
         const source = await restoreSource(
           descriptor.repository,
           plan.task,
@@ -702,6 +706,8 @@ async function reconcileBenchmarkGate(
           ...(parsedVerdict.metrics !== undefined ? { metrics: parsedVerdict.metrics } : {}),
           ...(parsedVerdict.findings !== undefined ? { findings: parsedVerdict.findings } : {}),
           ...(parsedVerdict.hardwareProvenance !== undefined ? { hardwareProvenance: parsedVerdict.hardwareProvenance } : {}),
+          ...(parsedVerdict.bucketMetrics !== undefined ? { bucketMetrics: parsedVerdict.bucketMetrics } : {}),
+          ...(parsedVerdict.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: parsedVerdict.hardwareDiagnostics } : {}),
         };
         const evidenceResult = validateDocument(
           { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },

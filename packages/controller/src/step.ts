@@ -22,6 +22,7 @@ import {
   validatePortsAgainstHostPolicy,
 } from './retained.js';
 import { reconcileInterruptedOperations, restoredCandidate, retainedPrimary } from './recovery.js';
+import { verifierProofPaths } from './verification.js';
 import { ProgressStore, journal, stableId, type ProgressHead } from './progress.js';
 import {
   adoptDelegatedCapture,
@@ -1059,7 +1060,7 @@ async function reopenStepContext(input: {
     ).authority;
     const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
     await artifacts.cleanCasTempFiles();
-    const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
+    const jsonPaths = verifierProofPaths(plan.verifierSlots);
     const source = await restoreSource(descriptor.repository, plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
     const progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source);
     let head = await progress.read();

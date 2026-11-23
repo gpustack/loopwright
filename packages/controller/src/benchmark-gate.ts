@@ -8,15 +8,20 @@ import {
   VERIFIER_ARTIFACT_LIMITS,
   bindSubject,
   digestArtifactFromMetadata,
+  evaluateMetricThresholds,
   isVerifierNamespacePath,
   matchesHardwareTarget,
+  validateBucketMetrics,
   validateDocument,
+  validateHardwareDiagnostics,
   validateRelativePath,
   type ArtifactManifest,
   type ArtifactRef,
   type BaseTreeAnchor,
+  type BucketMetricEntry,
   type Digest,
   type Evidence,
+  type HardwareDiagnostics,
   type HardwareProvenance,
   type HardwareTargetSpec,
   type MetricThresholdRule,
@@ -153,6 +158,8 @@ export interface BenchmarkVerdict {
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
   readonly hardwareProvenance?: HardwareProvenance;
+  readonly bucketMetrics?: readonly BucketMetricEntry[];
+  readonly hardwareDiagnostics?: HardwareDiagnostics;
   readonly outputArtifacts?: readonly BenchmarkOutputArtifact[];
 }
 
@@ -280,43 +287,12 @@ export function checkedVerifierArtifactRef(
   return freeze(res.value);
 }
 
-function readFiniteMetric(metrics: MetricsMap, key: string): number | undefined {
-  if (!Object.hasOwn(metrics, key)) return undefined;
-  const raw = metrics[key];
-  if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
-  return Object.is(raw, -0) ? 0 : raw;
-}
-
 export function evaluateBenchmarkThresholds(
   rules: readonly MetricThresholdRule[],
   metrics: MetricsMap | undefined,
+  bucketMetrics?: readonly BucketMetricEntry[],
 ): boolean {
-  if (rules.length === 0) return true;
-  if (metrics === undefined) return false;
-  for (const rule of rules) {
-    const value = readFiniteMetric(metrics, rule.metric);
-    if (value === undefined) return false;
-    if (rule.kind === 'bounds') {
-      if (rule.min !== undefined && value < rule.min) return false;
-      if (rule.max !== undefined && value > rule.max) return false;
-      continue;
-    }
-    const baseline = readFiniteMetric(metrics, rule.baselineMetric);
-    if (baseline === undefined) return false;
-    if (rule.operator === 'min_ratio') {
-      if (!(baseline > 0)) return false;
-      const ratio = value / baseline;
-      if (Number.isNaN(ratio) || ratio < rule.threshold) return false;
-    } else if (rule.operator === 'max_ratio') {
-      if (!(baseline > 0)) return false;
-      const ratio = value / baseline;
-      if (Number.isNaN(ratio) || ratio > rule.threshold) return false;
-    } else {
-      const delta = value - baseline;
-      if (Number.isNaN(delta) || delta > rule.threshold) return false;
-    }
-  }
-  return true;
+  return evaluateMetricThresholds(rules, metrics, bucketMetrics);
 }
 
 function checkedPrintableText(raw: unknown, max: number): string {
@@ -459,6 +435,8 @@ export function checkedBenchmarkVerdict(raw: unknown, expected: Record<string, u
     const hasMetrics = Object.hasOwn(raw, 'metrics') && raw.metrics !== undefined;
     const hasFindings = Object.hasOwn(raw, 'findings') && raw.findings !== undefined;
     const hasProvenance = Object.hasOwn(raw, 'hardwareProvenance') && raw.hardwareProvenance !== undefined;
+    const hasBucketMetrics = Object.hasOwn(raw, 'bucketMetrics') && raw.bucketMetrics !== undefined;
+    const hasHardwareDiagnostics = Object.hasOwn(raw, 'hardwareDiagnostics') && raw.hardwareDiagnostics !== undefined;
     const hasOutputArtifacts = Object.hasOwn(raw, 'outputArtifacts') && raw.outputArtifacts !== undefined;
     const value = record(raw, [
       'version',
@@ -481,6 +459,8 @@ export function checkedBenchmarkVerdict(raw: unknown, expected: Record<string, u
       ...(hasMetrics ? ['metrics' as const] : []),
       ...(hasFindings ? ['findings' as const] : []),
       ...(hasProvenance ? ['hardwareProvenance' as const] : []),
+      ...(hasBucketMetrics ? ['bucketMetrics' as const] : []),
+      ...(hasHardwareDiagnostics ? ['hardwareDiagnostics' as const] : []),
       ...(hasOutputArtifacts ? ['outputArtifacts' as const] : []),
     ]);
     const binding = {
@@ -547,6 +527,18 @@ export function checkedBenchmarkVerdict(raw: unknown, expected: Record<string, u
       refuse('ARTIFACT_INVALID', '', 'verification');
     }
     const hardwareProvenance = hasProvenance ? checkedHardwareProvenance(value.hardwareProvenance) : undefined;
+    let bucketMetrics: readonly BucketMetricEntry[] | undefined;
+    if (hasBucketMetrics) {
+      const validatedBuckets = validateBucketMetrics(value.bucketMetrics);
+      if (!validatedBuckets.ok) refuse('ARTIFACT_INVALID', '', 'verification');
+      bucketMetrics = freeze(validatedBuckets.value);
+    }
+    let hardwareDiagnostics: HardwareDiagnostics | undefined;
+    if (hasHardwareDiagnostics) {
+      const validatedDiagnostics = validateHardwareDiagnostics(value.hardwareDiagnostics);
+      if (!validatedDiagnostics.ok) refuse('ARTIFACT_INVALID', '', 'verification');
+      hardwareDiagnostics = freeze(validatedDiagnostics.value);
+    }
 
     const slotId = typeof expected.slotId === 'string' && expected.slotId.length > 0
       ? expected.slotId
@@ -566,6 +558,8 @@ export function checkedBenchmarkVerdict(raw: unknown, expected: Record<string, u
     if (metrics !== undefined) out.metrics = metrics;
     if (findings !== undefined) out.findings = findings;
     if (hardwareProvenance !== undefined) out.hardwareProvenance = hardwareProvenance;
+    if (bucketMetrics !== undefined) out.bucketMetrics = bucketMetrics;
+    if (hardwareDiagnostics !== undefined) out.hardwareDiagnostics = hardwareDiagnostics;
     if (outputArtifacts !== undefined) out.outputArtifacts = outputArtifacts;
     return freeze(out as unknown as BenchmarkVerdict);
   } catch (error) {
@@ -616,15 +610,29 @@ export function resolveBenchmarkSlotMetadata(plan: CompiledPlan, slot: VerifierS
     ...(cell.hardware.deviceCount !== undefined ? { deviceCount: cell.hardware.deviceCount } : {}),
     ...(cell.hardware.driverConstraint !== undefined ? { driverConstraint: cell.hardware.driverConstraint } : {}),
     ...(cell.hardware.topology !== undefined ? { topology: cell.hardware.topology } : {}),
+    ...(cell.hardware.forbiddenSymbolPatterns !== undefined
+      ? { forbiddenSymbolPatterns: freeze([...cell.hardware.forbiddenSymbolPatterns]) }
+      : {}),
+    ...(cell.hardware.maxRegisterCount !== undefined ? { maxRegisterCount: cell.hardware.maxRegisterCount } : {}),
+    ...(cell.hardware.maxLocalSpillBytes !== undefined ? { maxLocalSpillBytes: cell.hardware.maxLocalSpillBytes } : {}),
   });
   const metricThresholds: readonly MetricThresholdRule[] = freeze(
-    (check.metricThresholds ?? []).map(rule =>
-      rule.kind === 'bounds'
+    (check.metricThresholds ?? []).map(rule => {
+      const bucketScopeField = rule.bucketScope !== undefined
+        ? {
+            bucketScope:
+              typeof rule.bucketScope === 'string'
+                ? rule.bucketScope
+                : freeze({ bucketId: rule.bucketScope.bucketId }),
+          }
+        : {};
+      return rule.kind === 'bounds'
         ? freeze({
             kind: 'bounds' as const,
             metric: rule.metric,
             ...(rule.min !== undefined ? { min: rule.min } : {}),
             ...(rule.max !== undefined ? { max: rule.max } : {}),
+            ...bucketScopeField,
           })
         : freeze({
             kind: 'comparative' as const,
@@ -632,8 +640,9 @@ export function resolveBenchmarkSlotMetadata(plan: CompiledPlan, slot: VerifierS
             baselineMetric: rule.baselineMetric,
             operator: rule.operator,
             threshold: rule.threshold,
-          }),
-    ),
+            ...bucketScopeField,
+          });
+    }),
   );
   return {
     gateId,
@@ -1552,7 +1561,7 @@ export function shouldPullBenchmarkOutputs(input: {
         input.allowSyntheticHardwareProbe,
         verdict.hardwareProvenance,
       )
-      && evaluateBenchmarkThresholds(input.metricThresholds, verdict.metrics)
+      && evaluateBenchmarkThresholds(input.metricThresholds, verdict.metrics, verdict.bucketMetrics)
     );
   }
   return false;
@@ -1680,7 +1689,7 @@ export function computeBenchmarkDisposition(input: {
   ) {
     return freeze({ status: 'blocked', reason: 'HARDWARE_PROVENANCE_MISMATCH', method: 'benchmark-gate.v1', ...preemptionField });
   }
-  if (!evaluateBenchmarkThresholds(input.metricThresholds, verdict.metrics)) {
+  if (!evaluateBenchmarkThresholds(input.metricThresholds, verdict.metrics, verdict.bucketMetrics)) {
     return freeze({ status: 'blocked', reason: 'METRIC_THRESHOLD_FAILED', method: 'benchmark-gate.v1', ...preemptionField });
   }
   if (input.casOutcome === 'gate_timeout') {
@@ -1994,6 +2003,8 @@ export async function validateStoredBenchmarkProof(input: {
     ...(verdict?.metrics !== undefined ? { metrics: verdict.metrics } : {}),
     ...(verdict?.findings !== undefined ? { findings: verdict.findings } : {}),
     ...(verdict?.hardwareProvenance !== undefined ? { hardwareProvenance: verdict.hardwareProvenance } : {}),
+    ...(verdict?.bucketMetrics !== undefined ? { bucketMetrics: verdict.bucketMetrics } : {}),
+    ...(verdict?.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: verdict.hardwareDiagnostics } : {}),
   };
   const evidence = validateDocument(
     { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },
@@ -2884,6 +2895,8 @@ export class BenchmarkGate {
         ...(settledVerdict?.metrics !== undefined ? { metrics: settledVerdict.metrics } : {}),
         ...(settledVerdict?.findings !== undefined ? { findings: settledVerdict.findings } : {}),
         ...(settledVerdict?.hardwareProvenance !== undefined ? { hardwareProvenance: settledVerdict.hardwareProvenance } : {}),
+        ...(settledVerdict?.bucketMetrics !== undefined ? { bucketMetrics: settledVerdict.bucketMetrics } : {}),
+        ...(settledVerdict?.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: settledVerdict.hardwareDiagnostics } : {}),
       };
       const evidenceResult = validateDocument(
         { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },
@@ -2982,6 +2995,8 @@ export class BenchmarkGate {
           ...(settledVerdict?.metrics !== undefined ? { metrics: settledVerdict.metrics } : {}),
           ...(settledVerdict?.findings !== undefined ? { findings: settledVerdict.findings } : {}),
           ...(settledVerdict?.hardwareProvenance !== undefined ? { hardwareProvenance: settledVerdict.hardwareProvenance } : {}),
+          ...(settledVerdict?.bucketMetrics !== undefined ? { bucketMetrics: settledVerdict.bucketMetrics } : {}),
+          ...(settledVerdict?.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: settledVerdict.hardwareDiagnostics } : {}),
         };
         const expiredEvidenceRes = validateDocument(
           { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: expiredEvidenceSpec },
@@ -3392,6 +3407,8 @@ export class BenchmarkGate {
       ...(validated.verdict?.metrics !== undefined ? { metrics: validated.verdict.metrics } : {}),
       ...(validated.verdict?.findings !== undefined ? { findings: validated.verdict.findings } : {}),
       ...(validated.verdict?.hardwareProvenance !== undefined ? { hardwareProvenance: validated.verdict.hardwareProvenance } : {}),
+      ...(validated.verdict?.bucketMetrics !== undefined ? { bucketMetrics: validated.verdict.bucketMetrics } : {}),
+      ...(validated.verdict?.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: validated.verdict.hardwareDiagnostics } : {}),
     };
     const evidenceResult = validateDocument(
       { apiVersion: 'loopwright.dev/v1alpha1', kind: 'Evidence', metadata: { id: 'evidence.' + suffix }, spec: evidenceSpec },

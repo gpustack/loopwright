@@ -133,9 +133,17 @@ export function checkedRefusalRecord(input: unknown, plan: CompiledPlan, lock: T
   const overlay = lock.spec.contract.spec.budgets.overlay;
   const bounds = overlayProtocolBounds(overlay);
   const impl = slot?.handler.implementation;
-  const isFileHandler = impl === 'json-artifact.v1' || impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1';
+  const isFileHandler =
+    impl === 'json-artifact.v1' ||
+    impl === 'json-keys-guard.v1' ||
+    impl === 'line-section-guard.v1' ||
+    impl === 'evolve-block-guard.v1';
   const payloadKind: VerifierHeader['payloadKind'] =
-    impl === 'json-artifact.v1' ? 'json' : impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1' ? 'guard' : 'inventories';
+    impl === 'json-artifact.v1'
+      ? 'json'
+      : impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1' || impl === 'evolve-block-guard.v1'
+        ? 'guard'
+        : 'inventories';
   const packetAllowed = maxPacketBytes({ payloadKind, ...(overlay ? { overlay } : {}) });
 
   const expectedAllowed =

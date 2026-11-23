@@ -505,7 +505,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `MemoryEntry.scope` supports optional `hardwareScope` (`accelerator`, optional `driverConstraint`, `operatorFamily`, `boundPipeline`) omitted when undefined so all legacy v1 `storeDigest` and `proposalDigest` fixtures remain byte-for-byte identical; `verifier.ts` enforces a 6th gate rejecting `hardwareScope` `fact`/`invariant` upserts that lack a passing `hardware_execution` `evidenceRef` (`MEMORY_HARDWARE_EVIDENCE_REQUIRED` in `packages/memory/src/types.ts`) while admitting `failure_observation`; `selector.ts` filters active prompt memories by matching target cell `accelerator` and `driverConstraint`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg memory`
 
-- [ ] **T5 · Controller `evolve-block-guard.v1` verifier and `benchmark-gate.v1` Stage A/B receipt forwarding**
+- [x] **T5 · Controller `evolve-block-guard.v1` verifier and `benchmark-gate.v1` Stage A/B receipt forwarding**
       Blocked by: T2
       Owns: `packages/controller/src/**`, `packages/controller/test/**`
       Gate: review
