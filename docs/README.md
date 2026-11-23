@@ -18,7 +18,7 @@
 - Use for: author task contracts and bind verification evidence
 - Aliases: contracts
 - Guides: [configuration/task-contract.md](configuration/task-contract.md), [contribute/identity.md](contribute/identity.md), [contribute/evidence.md](contribute/evidence.md)
-- Specs: [Specification](../specs/2026-11-05-task-contracts-and-evidence.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md)
+- Specs: [Specification](../specs/2026-11-05-task-contracts-and-evidence.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md)
 - Code: [core](../packages/core/)
 - Related: [state](#persistent-state-store), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -40,7 +40,7 @@
 - Use for: run admitted Pi roles under isolation
 - Aliases: pi-adapter
 - Guides: [configuration/sandbox-backends.md](configuration/sandbox-backends.md), [contribute/pi-adapter.md](contribute/pi-adapter.md)
-- Specs: [Specification](../specs/2026-11-05-isolated-pi-adapter.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md)
+- Specs: [Specification](../specs/2026-11-05-isolated-pi-adapter.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md)
 - Code: [agent-pi](../packages/agent-pi/)
 - Related: [state](#persistent-state-store), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -51,7 +51,7 @@
 - Use for: compile trusted configuration and coordinate bounded runs
 - Aliases: controller
 - Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
-- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md), [Hardware Execution and Remote Runner](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)
+- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md), [Hardware Execution and Remote Runner](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)
 - Code: [controller](../packages/controller/), [hardware-runner](../packages/hardware-runner/), [cli](../packages/cli/)
 - Related: [contracts](#contracts-and-evidence), [state](#persistent-state-store)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
@@ -62,7 +62,7 @@
 - Use for: author taskpacks, run local taskpacks, and assess offline runner parity
 - Aliases: taskpacks
 - Guides: [walkthroughs/declarative-taskpack.md](walkthroughs/declarative-taskpack.md), [configuration/taskpack.md](configuration/taskpack.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/runner-taskpack.md](contribute/runner-taskpack.md)
-- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md), [Decouple Taskpack and CAS Blob Pointers](../specs/2026-11-20-decouple-taskpack-and-cas-blob-pointers.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md)
+- Specs: [Specification](../specs/2026-11-10-runner-taskpack-and-offline-parity.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md), [Decouple Taskpack and CAS Blob Pointers](../specs/2026-11-20-decouple-taskpack-and-cas-blob-pointers.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md)
 - Code: [taskpack](../packages/taskpack/), [taskpack-runner](../packages/taskpack-runner/), [github-app](../packages/github-app/)
 - Related: [github-app](#github-app-and-action-control-plane), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
@@ -73,7 +73,7 @@
 - Use for: review memory proposals and compact retained context
 - Aliases: memory
 - Guides: [contribute/memory.md](contribute/memory.md)
-- Specs: [Specification](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md), [Lightweight Lifecycle and GC](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md)
+- Specs: [Specification](../specs/2026-11-11-reviewed-memory-and-cas-compaction.md), [Lightweight Lifecycle and GC](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md)
 - Code: [memory](../packages/memory/)
 - Related: [controller](#bounded-controller-and-cli), [decisions](#system-one-decision-routing)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -84,7 +84,7 @@
 - Use for: configure App intake, Action execution, and sandboxes
 - Aliases: github-app
 - Guides: [operations/github-action.md](operations/github-action.md), [operations/github-app.md](operations/github-app.md), [contribute/github-app-internals.md](contribute/github-app-internals.md)
-- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md), [Turnkey Execution](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md), [Phase 2 Suites, Handoffs, and RunEval](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md)
+- Specs: [Specification](../specs/2026-11-11-github-app-control-plane-and-declarative-taskpack.md), [OS Sandbox Backends](../specs/2026-11-11-native-os-sandbox-execution-backends.md), [Turnkey Execution](../specs/2026-11-13-turnkey-taskpack-execution-scope-and-output-modes.md), [Self-Upgrade Dogfooding](../specs/2026-11-15-self-upgrade-dogfooding.md), [Taskpack 2.0](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md)
 - Code: [github-app](../packages/github-app/)
 - Related: [taskpacks](#declarative-taskpacks-and-runner-parity), [controller](#bounded-controller-and-cli)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)
@@ -135,8 +135,8 @@
 | [2026-11-19-lightweight-memory-lifecycle-and-gc.md](../specs/2026-11-19-lightweight-memory-lifecycle-and-gc.md) | Lightweight memory lifecycle, eager cleanup, and configurable GC |
 | [2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md](../specs/2026-11-19-taskpack-v2-orchestration-and-extensible-contracts.md) | Taskpack 2.0 orchestration, trust modes, preflight, and extensible contracts |
 | [2026-11-20-decouple-taskpack-and-cas-blob-pointers.md](../specs/2026-11-20-decouple-taskpack-and-cas-blob-pointers.md) | Decoupled `@loopwright/taskpack` package, policy profiles, and CAS blob pointers |
-| [2026-11-21-phase2-suite-handoff-and-run-eval.md](../specs/2026-11-21-phase2-suite-handoff-and-run-eval.md) | Multi-domain `TaskpackSuite`, compact handoffs, conditional rules, `RunEval`, and baseline alignment |
 | [2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md) | Hardware execution, benchmark-gate.v1, and outbound remote runner |
+| [2026-11-21-multi-domain-suite-handoff-and-run-eval.md](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md) | Multi-domain `TaskpackSuite`, compact handoffs, conditional rules, `RunEval`, and baseline alignment |
 
 ## All pages
 

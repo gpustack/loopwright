@@ -24,13 +24,13 @@ Success is measured by:
 - Eliminating text-field path smuggling and cutting [`scripts/prepare-self-upgrade.mjs`](../scripts/prepare-self-upgrade.mjs) down to thin domain-specific logic under [`.auto-sync/taskpack.yaml`](../.auto-sync/taskpack.yaml).
 - Running interleaved `agent` -> `check` -> `review` -> `rejectTo` rework loops with per-role instructions, skills, and MCP isolation under raised bounded checkpoints (`<= 256`).
 - Supporting multi-upstream lockstep groups, per-upstream `held_back`, directory-mounted `command.v1` scripts with shared helpers, explicit `/**` and `*`/`?` glob `scope`, built-in structural guards, and live `spec.decisions` routing.
-- Passing all repository build, typecheck, lint, test, closure, docs, and site gates with Taskpack 2.0 contracts and Phase 3 forward-compatible core schemas in place.
+- Passing all repository build, typecheck, lint, test, closure, docs, and site gates with Taskpack 2.0 contracts and forward-compatible quantitative verification core schemas in place.
 
 ### Non-Goals
 
 - Preserving backward compatibility with legacy Taskpack v1 YAML fields when a cleaner Taskpack 2.0 schema replaces them.
-- Implementing multi-domain repository suite routing, cross-cycle stage promotion, Markdown heading compact handoff, or post-run `RunEval` recommendation reports (reserved for Phase 2).
-- Implementing remote outbound GPU/hardware benchmark runners (`benchmark-gate.v1`), `'hardware_execution'` check execution, or outer multi-generation MCTS / MAP-Elites campaign controllers (reserved for Phase 3).
+- Implementing multi-domain repository suite routing, cross-cycle stage promotion, Markdown heading compact handoff, or post-run `RunEval` recommendation reports (deferred to follow-up specification [`2026-11-21-multi-domain-suite-handoff-and-run-eval.md`](2026-11-21-multi-domain-suite-handoff-and-run-eval.md)).
+- Implementing remote outbound GPU/hardware benchmark runners (`benchmark-gate.v1`), `'hardware_execution'` check execution, or outer multi-generation MCTS / MAP-Elites campaign controllers (deferred to follow-up specifications; hardware execution and `benchmark-gate.v1` are covered in [`2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md`](2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)).
 - Adding a centralized web service, database server, or host Docker socket passthrough into untrusted agent sandboxes.
 
 ## Proposal
@@ -52,7 +52,7 @@ As a repository maintainer, I want `command.v1` to mount the check directory (pr
 As an operator running Loopwright on a trusted repository or CI runner, I want an explicit opt-in `privileged` execution mode alongside the `strict` default (gated by operator host flags and separate high-risk agent switches) and automatic runtime digesting (with optional CLI lockfile syncing), so that changing one line in a script runs immediately without manual SHA-256 editing.
 
 #### Story 5
-As a platform engineer preparing for long-horizon engineering governance and self-evolving inference kernel workflows, I want `spec.decisions` wired into live runs and `@loopwright/core` upgraded to support optional quantitative `metrics` on passing checks, extensible `ArtifactRef` pointers, and `target.matrix` metadata passthrough, so that Phase 3 hardware gates and multi-generation loops plug in additively.
+As a platform engineer preparing for long-horizon engineering governance and self-evolving inference kernel workflows, I want `spec.decisions` wired into live runs and `@loopwright/core` upgraded to support optional quantitative `metrics` on passing checks, extensible `ArtifactRef` pointers, and `target.matrix` metadata passthrough, so that future remote hardware gates and multi-generation optimization loops plug in additively.
 
 ### Core Features & Acceptance Criteria
 
@@ -152,7 +152,7 @@ As a platform engineer preparing for long-horizon engineering governance and sel
   - `json-keys-guard.v1` and `line-section-guard.v1` fail deterministically on out-of-region edits and pass on in-region edits.
   - A `spec.limits.overlay: { maxFiles: 512, maxBytes: 16_777_216 }` run succeeds through `candidate.ts`, `step submit`, and `json-artifact.v1` without hitting `OUTPUT_LIMIT`.
 
-#### 5. Live `spec.decisions` via `ControllerPorts.decisions` and Phase 3 Forward-Compatible Core Contracts (`@loopwright/core`, `@loopwright/controller`, `@loopwright/decisions`, `@loopwright/github-app`, `@loopwright/cli`)
+#### 5. Live `spec.decisions` via `ControllerPorts.decisions` and Forward-Compatible Quantitative Verification Contracts (`@loopwright/core`, `@loopwright/controller`, `@loopwright/decisions`, `@loopwright/github-app`, `@loopwright/cli`)
 - Wire `spec.decisions` without circular package dependencies:
   - Define zero-dependency `AdvisoryDecisionPort` on `ControllerPorts` in [`packages/controller/src/types.ts`](../packages/controller/src/types.ts) (preserving `@loopwright/controller`'s dependency set `{core, state, agent-pi}`).
   - Add optional `triageRules` to `spec.decisions` in [`packages/github-app/src/schema.ts`](../packages/github-app/src/schema.ts) (skipping `triageCandidateDiff` cleanly when empty instead of throwing `DECISION_BATCH_SIZE_INVALID`).
@@ -162,11 +162,11 @@ As a platform engineer preparing for long-horizon engineering governance and sel
     3. `advise_soft_compaction` prior to `pi.compact.v1` steps.
     4. `triage_candidate_diff` after candidate capture as an advisory pre-publication signal when `triageRules` are configured.
   - Enforce all six `DECISION_FORBIDDEN_AUTHORITY_INTENTS` strictly with deterministic fallback per `fallbackAction`.
-- Phase 3 forward-compatible upgrades in `@loopwright/core` and `@loopwright/controller`:
+- Forward-compatible quantitative verification upgrades in `@loopwright/core` and `@loopwright/controller`:
   - **Finite float admission + quantitative `metrics` & `findings`**: relax `snapshot()` in [`packages/core/src/boundary.ts`](../packages/core/src/boundary.ts) to accept finite floats (normalizing `-0` to `0`, refusing `NaN`/`Infinity`) while preserving `integer()` strictness on all existing integer fields. Add optional `metrics?: Readonly<Record<string, number | string | boolean>>` (bounded entry count and string lengths), `findings?: readonly StructuredFinding[]`, and optional `detail` on `Evidence` ([`packages/core/src/evidence.ts`](../packages/core/src/evidence.ts)), `SubmittedCheck`, and `EvaluatedCheck` ([`packages/core/src/acceptance.ts`](../packages/core/src/acceptance.ts)), allowed even when `status === 'passed'` (keeping `Evidence.spec.reason === null` on `passed`).
   - **Extensible `ArtifactRef`**: add optional `uri?: string | null` and `mediaType?: string | null` to `artifactRefSchema` in [`packages/core/src/contracts.ts`](../packages/core/src/contracts.ts), omitted from canonical serialization when unset so existing local CAS manifest digests stay identical.
   - **Unblock `target.matrix` metadata**: accept optional `spec.target.matrix` in `Taskpack`, allow non-null `task.spec.target.matrix` in [`packages/controller/src/compile.ts`](../packages/controller/src/compile.ts) whenever no check requires `'hardware_execution'`, and forward single-cell matrix bindings to `MemoryFinalizerConfig.targetMatrix` for platform-scoped memory isolation. Keep refusing `'hardware_execution'` check handlers with `CAPABILITY_UNSUPPORTED` and preserve the 23-row closure split (`18` `closedLocal`, `5` `unprovisionedExternal`).
-  - **Unified verification result envelope**: standardize local check and external HMAC `gate.v1` outcomes around `{ status, reason, detail, metrics, findings, artifacts, retryablePreemption? }`, preparing for preemptible remote hardware queues in Phase 3.
+  - **Unified verification result envelope**: standardize local check and external HMAC `gate.v1` outcomes around `{ status, reason, detail, metrics, findings, artifacts, retryablePreemption? }`, preparing for preemptible remote hardware benchmark queues.
 - **Acceptance criteria**:
   - Passing `Evidence` and `VerificationResult` records carrying `metrics: { latency_us: 42.5, speedup: 1.18, delta: -0 }` normalize `-0` to `0`, reject `NaN`/`Infinity` with `VALUE_RANGE`, and round-trip cleanly through `gate.v1` -> `reconcile.ts` -> `evaluateValidated` -> `constructRunResult`.
   - A `Taskpack` declaring `spec.target.matrix` compiles cleanly when all checks use `local_execution` or `external_service`, forwards `targetMatrix` into memory finalization, and still refuses `'hardware_execution'` checks with `CAPABILITY_UNSUPPORTED`.
@@ -490,8 +490,8 @@ code solid enough prior to committing the changes necessary to implement this en
    - *Rejected*: Coalescing pre/post checkpoints blurs crash-recovery boundaries around external effects and tool execution. Raising the numeric ceiling across `schema.ts`/`connection.ts`/`boundary.ts`/`checkpoint.ts` (`64 -> 256`) preserves crash-recovery granularity cleanly.
 5. **Flat attempt-level retries without `rejectTo` targeted rework**:
    - *Rejected*: Re-running the entire pipeline from the first role wastes tokens when a late review rejects an implementation step, and fails to deliver structured findings to the responsible role. Bounded subgraph resets via `onRework.rejectTo` give precise quality feedback with deterministic stopping bounds.
-6. **Adding Phase 3 `CampaignStore` SQLite tables and remote GPU runner stubs now**:
-   - *Rejected*: Guessing remote queue schemas before hardware runner validation creates throwaway migration debt. Landing only stable data-plane contract extensions (`metrics`, `findings`, `ArtifactRef.uri`, `target.matrix`, unified verification envelope) now prepares Phase 3 cleanly with zero dead code.
+6. **Adding multi-generation `CampaignStore` SQLite tables and remote GPU runner stubs now**:
+   - *Rejected*: Guessing remote queue schemas before hardware runner validation creates throwaway migration debt. Landing only stable data-plane contract extensions (`metrics`, `findings`, `ArtifactRef.uri`, `target.matrix`, unified verification envelope) now prepares future hardware runners and multi-generation campaign controllers cleanly with zero dead code.
 
 ## Open Questions
 
