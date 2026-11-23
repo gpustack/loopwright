@@ -540,7 +540,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `exportEvolutionBundle` stages deterministic `dir` and `oci-layout` (`oci-layout` + `index.json` + `blobs/sha256/<hex>`) bundles containing `manifest.json` (`kind: EvolutionBundle`, `version: 1`), `dispatch-manifest.json` (`fallback: 'baseline'`), and unmodified HMAC-signed `receipts/<individualId>.verdict.json` files after `O_NOFOLLOW`, `nlink === 1`, SHA-256/`byteLength`, and `SecretScrubber` checks; refuses unverified or `synthetic_fixture` receipts (`EXPORT_UNVERIFIED_FORBIDDEN`) unless `allowSyntheticProbe: true` is explicitly set; repeated exports produce byte-identical digests.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node --test build-test/packages/evolution/test/bundle.test.js`
 
-- [ ] **T10 · `@loopwright/evolution` plateau `team-supervisor.ts`, `specialist-then-portfolio` synthesis, and `campaign.ts` orchestrator**
+- [x] **T10 · `@loopwright/evolution` plateau `team-supervisor.ts`, `specialist-then-portfolio` synthesis, and `campaign.ts` orchestrator**
       Blocked by: T3, T6, T7, T8, T9
       Owns: `packages/evolution/src/team-supervisor.ts`, `packages/evolution/src/campaign.ts`, `packages/evolution/src/index.ts`, `packages/evolution/test/team-supervisor.test.ts`, `packages/evolution/test/campaign-e2e.test.ts`
       Gate: review

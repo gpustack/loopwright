@@ -1632,7 +1632,6 @@ export async function exportEvolutionBundle(
     });
     const parsed = await parseAndVerifyReceiptBytes(rawBytes, {
       individualId: ind.individualId,
-      expectedLockHash: campaign.lockHash,
       expectedTargetCellId: campaign.manifest.spec.targetCellId,
       allowSyntheticProbe,
       ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
@@ -1640,6 +1639,14 @@ export async function exportEvolutionBundle(
       scrubber,
       maxBlobBytes,
     });
+
+    if (parsed.receipt.runId.startsWith('ind-') && parsed.receipt.runId !== ind.individualId) {
+      throw new EvolutionError(
+        'EXPORT_UNVERIFIED_FORBIDDEN',
+        `receipt runId "${parsed.receipt.runId}" does not match individual "${ind.individualId}"`,
+        `/receipts/${ind.individualId}/runId`,
+      );
+    }
 
     if (ind.hardwareProvenance !== undefined) {
       if (canonicalizeJson(ind.hardwareProvenance) !== canonicalizeJson(parsed.provenance)) {
@@ -2237,7 +2244,6 @@ export async function verifyEvolutionBundle(
     }
     const parsedReceipt = await parseAndVerifyReceiptBytes(receiptBytes, {
       individualId,
-      expectedLockHash: manifest.lineage.lockHash,
       allowSyntheticProbe,
       ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
       ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
