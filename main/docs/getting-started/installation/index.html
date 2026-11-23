@@ -411,26 +411,28 @@
  before executing isolated agent steps.</p>
 <h2 id="step-1-install-cli">Step 1: Install CLI</h2>
 <h3 id="npm-package">npm package</h3>
-<p>Install the single-package CLI globally from <code>npmjs.com</code> using <code>npm</code> or <code>pnpm</code> (<code>--ignore-scripts</code> skips optional transitive lifecycle scripts required by <code>pnpm</code> v10+ build hygiene):</p>
+<p>Install <a href="https://www.npmjs.com/package/@gpustack/loopwright"><code>@gpustack/loopwright</code></a>
+ globally from <code>npmjs.com</code> using <code>npm</code> or <code>pnpm</code>. Pass <code>--ignore-scripts</code> to skip optional transitive lifecycle scripts.</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">npm install -g --ignore-scripts @gpustack/loopwright
 </span></span><span class="line"><span class="cl"><span class="c1"># or with pnpm:</span>
 </span></span><span class="line"><span class="cl">pnpm add -g --ignore-scripts @gpustack/loopwright</span></span></code></pre></div>
 </div>
-<p>To run one-off commands without a global install, invoke <code>npx</code> or <code>pnpm dlx</code>:</p>
+<p>Run one-off commands without a global install using <code>npx</code> or <code>pnpm dlx</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">npx --ignore-scripts @gpustack/loopwright --help
 </span></span><span class="line"><span class="cl"><span class="c1"># or with pnpm:</span>
 </span></span><span class="line"><span class="cl">pnpm --ignore-scripts dlx @gpustack/loopwright --help</span></span></code></pre></div>
 </div>
+<p>Each release publishes from GitHub Actions via npm Trusted Publishers with signed SLSA build provenance.</p>
 <h3 id="release-archive">Release archive</h3>
-<p>Install an immutable release archive directly from <a href="https://github.com/gpustack/loopwright/releases">GitHub Releases</a>
- (replace <code>0.1.0</code> with the published version):</p>
+<p>Install an immutable release archive from <a href="https://github.com/gpustack/loopwright/releases">GitHub Releases</a>
+ and verify its matching <code>.sha256</code> checksum (replace <code>0.0.3</code> with your target version):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">npm install -g --ignore-scripts https://github.com/gpustack/loopwright/releases/download/v0.1.0/gpustack-loopwright-0.1.0.tgz</span></span></code></pre></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">npm install -g --ignore-scripts https://github.com/gpustack/loopwright/releases/download/v0.0.3/gpustack-loopwright-0.0.3.tgz</span></span></code></pre></div>
 </div>
 <h3 id="source-build">Source build</h3>
 <p>Clone the repository to develop locally or test unreleased commits:</p>
