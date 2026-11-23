@@ -1,6 +1,7 @@
 # Loopwright
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-5b4b9e)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@gpustack/loopwright?color=2e7d9b)](https://www.npmjs.com/package/@gpustack/loopwright)
 [![Documentation](https://img.shields.io/badge/Docs-Connected_Guides-2e7d9b)](./docs/README.md)
 
 <img src="./site/assets/images/logo.png" width="100" height="100" alt="Loopwright logo">
