@@ -22,6 +22,7 @@ const PACKAGES = [
   'taskpack',
   'github-app',
   'hardware-runner',
+  'evolution',
   'cli',
 ];
 

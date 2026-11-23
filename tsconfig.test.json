@@ -29,6 +29,8 @@
     "packages/github-app/src/**/*.ts",
     "packages/github-app/test/**/*.ts",
     "packages/hardware-runner/src/**/*.ts",
-    "packages/hardware-runner/test/**/*.ts"
+    "packages/hardware-runner/test/**/*.ts",
+    "packages/evolution/src/**/*.ts",
+    "packages/evolution/test/**/*.ts"
   ]
 }

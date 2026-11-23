@@ -23,6 +23,7 @@ const PACKAGES = [
   'taskpack',
   'github-app',
   'hardware-runner',
+  'evolution',
 ];
 
 const PACKAGE_SET = new Set(PACKAGES);

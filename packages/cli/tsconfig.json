@@ -15,6 +15,7 @@
     { "path": "../controller" },
     { "path": "../core" },
     { "path": "../decisions" },
+    { "path": "../evolution" },
     { "path": "../github-app" },
     { "path": "../hardware-runner" },
     { "path": "../memory" },

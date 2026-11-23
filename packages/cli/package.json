@@ -11,6 +11,7 @@
     "@loopwright/controller": "0.0.0",
     "@loopwright/core": "0.0.0",
     "@loopwright/decisions": "0.0.0",
+    "@loopwright/evolution": "0.0.0",
     "@loopwright/github-app": "0.0.0",
     "@loopwright/hardware-runner": "0.0.0",
     "@loopwright/memory": "0.0.0",
