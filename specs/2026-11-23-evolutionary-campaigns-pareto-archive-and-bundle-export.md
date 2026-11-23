@@ -533,7 +533,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `Taskpack` schema and compiler accept `'evolve-block-guard.v1'` checks and optional Stage A static audit fields without changing `TaskContract` or `TaskLock` digests on existing v2 taskpacks that omit them; `turnkey-memory.ts` in both `@loopwright/taskpack` and `@loopwright/github-app` projects optional `hardwareScope` (`accelerator`, `driverConstraint`) from matched hardware `target.matrix` cells onto reviewed memory proposals and active memory selection.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg taskpack && node scripts/run-tests.mjs --pkg github-app`
 
-- [ ] **T9 · `@loopwright/evolution` deterministic `evolution-bundle.v1` exporter (`dir` and `oci-layout`)**
+- [x] **T9 · `@loopwright/evolution` deterministic `evolution-bundle.v1` exporter (`dir` and `oci-layout`)**
       Blocked by: T7
       Owns: `packages/evolution/src/bundle.ts`, `packages/evolution/test/bundle.test.ts`
       Gate: review
