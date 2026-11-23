@@ -2,6 +2,7 @@ import type {
   Digest,
   HardwareTargetSpec,
   MetricBoundsRule,
+  MetricBucketScope,
   MetricComparativeRule,
   MetricThresholdRule,
   OverlayLimits,
@@ -26,6 +27,7 @@ export type {
   ClockSample,
   HardwareTargetSpec,
   MetricBoundsRule,
+  MetricBucketScope,
   MetricComparativeRule,
   MetricThresholdRule,
   PiCustomModelCompat,
@@ -376,7 +378,8 @@ export type LegacyTaskpackCheckImplementation = 'json-artifact.v1' | 'scope.v1' 
 export type TaskpackV2CheckImplementation =
   | LegacyTaskpackCheckImplementation
   | 'json-keys-guard.v1'
-  | 'line-section-guard.v1';
+  | 'line-section-guard.v1'
+  | 'evolve-block-guard.v1';
 
 export interface TaskpackCheckDeclaration {
   readonly id: string;

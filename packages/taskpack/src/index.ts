@@ -477,6 +477,7 @@ export {
   buildMemoryProtectedPaths,
   finalizeLocalTurnkeyMemory,
   finalizeTurnkeyProposal,
+  projectMemoryHardwareScope,
   projectMemoryTargetMatrixCell,
   readRegularJsonBounded,
   resolveSafeRunDirectory,

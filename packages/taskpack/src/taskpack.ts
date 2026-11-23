@@ -95,6 +95,7 @@ import {
   type Json,
 } from './schema.js';
 import { SecretScrubber } from './scrubber.js';
+import { projectMemoryHardwareScope, projectMemoryTargetMatrixCell } from './turnkey-memory.js';
 import {
   AUTHORIZED_ASSOCIATIONS,
   CANONICAL_TASKPACK_STEP_GATE_URL,
@@ -1739,13 +1740,11 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       const currentUpstreamVersions = checkUpstreamVersions
         ? buildUpstreamVersionsMap(bindings.upstreamRecords)
         : null;
-      const targetCell = effectiveTargetMatrix !== null && effectiveTargetMatrix.length === 1
-        ? Object.freeze({
-          id: effectiveTargetMatrix[0]!.id,
-          platform: effectiveTargetMatrix[0]!.platform,
-          variant: effectiveTargetMatrix[0]!.variant,
-        })
+      const rawSingleTargetCell = effectiveTargetMatrix !== null && effectiveTargetMatrix.length === 1
+        ? effectiveTargetMatrix[0]!
         : null;
+      const targetCell = projectMemoryTargetMatrixCell(rawSingleTargetCell);
+      const hardwareScope = projectMemoryHardwareScope(rawSingleTargetCell);
       const selectorContractStub = {
         apiVersion: 'loopwright.dev/v1alpha1',
         kind: 'TaskContract',
@@ -1775,6 +1774,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         currentCodeFingerprint,
         currentUpstreamVersions,
         targetCell,
+        ...(hardwareScope !== undefined ? { hardwareScope } : {}),
         maxEntries: maxPromptEntries,
         maxBytes: DEFAULT_MEMORY_MAX_PROMPT_BYTES,
       });
@@ -1796,6 +1796,7 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
           currentCodeFingerprint: null,
           currentUpstreamVersions: null,
           targetCell,
+          ...(hardwareScope !== undefined ? { hardwareScope } : {}),
           maxEntries: maxPromptEntries,
           maxBytes: clampedBytes,
         });
@@ -2516,7 +2517,8 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       | 'gate.v1'
       | 'benchmark-gate.v1'
       | 'json-keys-guard.v1'
-      | 'line-section-guard.v1';
+      | 'line-section-guard.v1'
+      | 'evolve-block-guard.v1';
     readonly parameters: Record<string, unknown>;
     readonly allowedEvidenceLevels: readonly ('local_execution' | 'external_service' | 'hardware_execution')[];
     readonly targetCellId?: string | undefined;
@@ -2567,6 +2569,24 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
             path: declared.parameters?.['path'],
             startMarker: declared.parameters?.['startMarker'],
             endMarker: declared.parameters?.['endMarker'],
+          },
+          allowedEvidenceLevels: ['local_execution'],
+        });
+        continue;
+      }
+      if (declared.implementation === 'evolve-block-guard.v1') {
+        activeChecks.push({
+          id: declared.id,
+          implementation: 'evolve-block-guard.v1',
+          parameters: {
+            checkId: declared.id,
+            files: declared.parameters?.['files'],
+            ...(declared.parameters?.['allowedBlockIds'] !== undefined
+              ? { allowedBlockIds: declared.parameters['allowedBlockIds'] }
+              : {}),
+            ...(declared.parameters?.['maxBlockBytes'] !== undefined
+              ? { maxBlockBytes: declared.parameters['maxBlockBytes'] }
+              : {}),
           },
           allowedEvidenceLevels: ['local_execution'],
         });
@@ -3203,7 +3223,8 @@ function assemble(input: AssembleInput): CompiledTaskpack {
         | 'gate.v1'
         | 'benchmark-gate.v1'
         | 'json-keys-guard.v1'
-        | 'line-section-guard.v1',
+        | 'line-section-guard.v1'
+        | 'evolve-block-guard.v1',
       version: 1 as const,
       digest: { ...installed[check.implementation]! },
       parameters: check.parameters as Readonly<Record<string, Json>>,
@@ -3492,6 +3513,11 @@ function assemble(input: AssembleInput): CompiledTaskpack {
             ...(cell.hardware.deviceCount !== undefined ? { deviceCount: cell.hardware.deviceCount } : {}),
             ...(cell.hardware.driverConstraint !== undefined ? { driverConstraint: cell.hardware.driverConstraint } : {}),
             ...(cell.hardware.topology !== undefined ? { topology: cell.hardware.topology } : {}),
+            ...(cell.hardware.forbiddenSymbolPatterns !== undefined
+              ? { forbiddenSymbolPatterns: [...cell.hardware.forbiddenSymbolPatterns] }
+              : {}),
+            ...(cell.hardware.maxRegisterCount !== undefined ? { maxRegisterCount: cell.hardware.maxRegisterCount } : {}),
+            ...(cell.hardware.maxLocalSpillBytes !== undefined ? { maxLocalSpillBytes: cell.hardware.maxLocalSpillBytes } : {}),
           },
         }
         : {}),
@@ -3554,6 +3580,13 @@ function assemble(input: AssembleInput): CompiledTaskpack {
                     metric: rule.metric,
                     ...(rule.min !== undefined ? { min: rule.min } : {}),
                     ...(rule.max !== undefined ? { max: rule.max } : {}),
+                    ...(rule.bucketScope !== undefined
+                      ? {
+                        bucketScope: typeof rule.bucketScope === 'string'
+                          ? rule.bucketScope
+                          : { bucketId: rule.bucketScope.bucketId },
+                      }
+                      : {}),
                   }
                   : {
                     kind: 'comparative' as const,
@@ -3561,6 +3594,13 @@ function assemble(input: AssembleInput): CompiledTaskpack {
                     baselineMetric: rule.baselineMetric,
                     operator: rule.operator,
                     threshold: rule.threshold,
+                    ...(rule.bucketScope !== undefined
+                      ? {
+                        bucketScope: typeof rule.bucketScope === 'string'
+                          ? rule.bucketScope
+                          : { bucketId: rule.bucketScope.bucketId },
+                      }
+                      : {}),
                   }
               )),
             }

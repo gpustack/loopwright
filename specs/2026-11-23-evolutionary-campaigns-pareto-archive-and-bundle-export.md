@@ -526,7 +526,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: Null-prototype parsers validate `EvolutionCampaign` (`<= 65,536` bytes), `team-patch.v1` (`<= 32,768` bytes), and `dispatch-manifest.json`; `store.ts` manages `<campaignRoot>/campaign.sqlite` (`journal_mode = DELETE`, `synchronous = FULL`, `STRICT` tables `campaign_meta`, `campaigns`, `islands`, `team_configs`, `individuals`, `lineage_edges`, `O_NOFOLLOW`, `1,000ms` clock-drift guard, and single-writer in-process coordinator serialization); `pareto.ts` computes deterministic NSGA-II ranks, crowding distances, and hypervolume deltas; `sampler.ts` implements **Island Elitism** ring migration, novelty-decayed stepping-stone parent weights, `0o400` multi-parent `contextFiles`, and UCB1 model bandit updates; `scratchpad.ts` writes `SecretScrubber`-clean `<= 16 KiB` CAS snapshots.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg evolution --concurrency 1`
 
-- [ ] **T8 · Taskpack and GitHub App `evolve-block-guard.v1` compilation, Stage A audit schema, and `hardwareScope` memory projection**
+- [x] **T8 · Taskpack and GitHub App `evolve-block-guard.v1` compilation, Stage A audit schema, and `hardwareScope` memory projection**
       Blocked by: T4, T5
       Owns: `packages/taskpack/src/**`, `packages/taskpack/test/**`, `packages/github-app/src/turnkey-memory.ts`, `packages/github-app/test/turnkey-memory*.test.ts`
       Gate: review

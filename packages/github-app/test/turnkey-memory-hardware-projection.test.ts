@@ -269,6 +269,162 @@ describe('github-app turnkey-memory hardware TargetMatrixCell projection', () =>
         platform: 'linux/amd64',
         variant: 'cuda12',
       });
+      assert.deepEqual({ ...loadedStore.index.entries[0]?.scope.hardwareScope }, {
+        accelerator: 'sm_90a',
+        driverConstraint: '>=550.54',
+      });
+    } finally {
+      await githubServer.close();
+      await rm(work, { recursive: true, force: true });
+    }
+  });
+
+  it('omits hardwareScope completely for non-hardware target.matrix cells in separate-pull-request publication', async () => {
+    const baseTmp = await realpath(tmpdir());
+    const work = await mkdtemp(join(baseTmp, 'lw-gh-nohw-mem-'));
+    const bareRemote = join(work, 'remote.git');
+    const repo = join(work, 'repo');
+    const runRoot = join(work, 'runs');
+    await mkdir(bareRemote, { recursive: true });
+    await mkdir(repo, { recursive: true });
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+
+    const githubServer = await startHttpServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/repos/acme/cpu-repo/pulls') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify([]));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/repos/acme/cpu-repo/pulls') {
+        const chunks: Buffer[] = [];
+        for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
+        const headRef = String(body['head'] ?? '');
+        const lsOut = await git(repo, ['ls-remote', bareRemote, `refs/heads/${headRef}`]);
+        const remoteSha = lsOut.split(/\s+/)[0] ?? '';
+        const baseSha = await git(repo, ['rev-parse', 'HEAD']);
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          number: 89,
+          state: 'open',
+          html_url: 'https://github.invalid/acme/cpu-repo/pull/89',
+          head: { ref: headRef, sha: remoteSha, repo: { full_name: 'acme/cpu-repo', fork: false } },
+          base: { ref: 'main', sha: baseSha, repo: { full_name: 'acme/cpu-repo', fork: false } },
+        }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: 'not found' }));
+    });
+
+    try {
+      await git(bareRemote, ['init', '--bare', '-b', 'main']);
+      await git(repo, ['init', '-b', 'main']);
+      await mkdir(join(repo, '.auto-sync'), { recursive: true });
+      await mkdir(join(repo, 'src'), { recursive: true });
+      await writeFile(join(repo, 'src', 'app.ts'), '// app\n', 'utf8');
+
+      const manifestObj = {
+        apiVersion: 'loopwright.dev/v1alpha1',
+        kind: 'Taskpack',
+        metadata: { name: 'cpu-task' },
+        spec: {
+          goal: { candidate: 'Update app.', noChange: 'No change.' },
+          scope: { writable: ['src/**'], protected: [] },
+          target: {
+            matrix: [{ id: 'cpu-linux', platform: 'linux/amd64', variant: 'node26' }],
+          },
+          verification: {
+            localChecks: [{ id: 'scope-check', implementation: 'scope.v1' }],
+            externalGates: [],
+          },
+          publication: {
+            mode: 'pull_request',
+            targetBranch: 'main',
+            headBranchPrefix: 'loopwright/',
+            titleTemplate: 'chore: update app',
+          },
+          memory: {
+            directory: '.auto-sync/memory/cpu-task',
+            apply: 'separate-pull-request',
+            onNoModelBudget: 'deterministic-observations-only',
+            publishOnFailure: true,
+          },
+          triggers: { schedule: false, workflowDispatch: true, releasePublished: false, commentCommands: [] },
+        },
+      };
+      await writeFile(join(repo, '.auto-sync', 'taskpack.yaml'), serializePrettyYaml(manifestObj), 'utf8');
+      await git(repo, ['add', '.']);
+      await git(repo, ['commit', '-m', 'init']);
+      await git(repo, ['remote', 'add', 'origin', bareRemote]);
+      await git(repo, ['push', '-u', 'origin', 'main']);
+      const headSha = await git(repo, ['rev-parse', 'HEAD']);
+
+      const manifest = validateTaskpackV2Manifest(manifestObj as Json, {
+        policyProfile: 'github',
+        controlRoot: '.auto-sync',
+        manifestPath: '.auto-sync/taskpack.yaml',
+      });
+      const compiled = await compileDeclarativeTaskpack(manifest, {
+        mode: 'candidate',
+        executionMode: 'delegated',
+        hostPolicy: { policyProfile: 'github' },
+        repository: 'acme/cpu-repo',
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        baseRevision: headSha,
+        sourceRevision: headSha,
+        budgets: DEFAULT_HOST_BUDGETS,
+      });
+
+      const runId = 'run-gh-nohw-mem-1';
+      const locked = admitTask(compiled.config.spec.task, { admissionId: 'adm-gh-nohw-1', runId });
+      assert.equal(locked.ok, true);
+      if (!locked.ok) throw new Error('admitTask failed');
+      const runDir = join(runRoot, runId);
+      const artifactsDir = join(runDir, 'artifacts');
+      await mkdir(artifactsDir, { recursive: true });
+      await writeFile(join(runDir, 'run.json'), JSON.stringify({ version: 1, identity: { lock: locked.value } }), 'utf8');
+      const planBytes = Buffer.from(JSON.stringify({ stage: 'execution', note: 'cpu timeout' }), 'utf8');
+      const planRef = digestArtifact('plan-incident.bin', planBytes);
+      assert.equal(planRef.ok, true);
+      if (!planRef.ok) throw new Error('digestArtifact failed');
+      await writeFile(join(artifactsDir, planRef.value.name), planBytes);
+      const incident: ControllerIncident = {
+        version: 1,
+        code: 'DEADLINE',
+        runId,
+        lockHash: locked.value.spec.lockHash,
+        stage: 'execution',
+        knownReferences: [planRef.value],
+        unavailable: ['candidate'],
+        cleanup: 'complete',
+      };
+      await writeFile(join(artifactsDir, `incident-${runId}.bin`), JSON.stringify(incident), 'utf8');
+
+      const scrubber = new SecretScrubber();
+      scrubber.register('ghp_nohw_mem_token_123456');
+      const published = await finalizeAndPublishTurnkeyMemory({
+        repositoryRoot: repo,
+        taskpackPath: '.auto-sync/taskpack.yaml',
+        manifest,
+        repositoryFullName: 'acme/cpu-repo',
+        baseRevision: headSha,
+        runRoot,
+        runId,
+        scrubber,
+        githubToken: 'ghp_nohw_mem_token_123456',
+        apiBaseUrl: githubServer.url,
+        remoteUrl: bareRemote,
+      });
+      assert.equal(published.status, 'published', JSON.stringify(published));
+      const memClone = join(work, 'mem-clone');
+      await git(work, ['clone', '--branch', 'loopwright/memory/cpu-task/main', bareRemote, memClone]);
+      const loadedStore = await loadMemoryStore(memClone, 'cpu-task', 'acme/cpu-repo', '.auto-sync/memory');
+      assert.equal(loadedStore.index.entries.length, 1);
+      const scope = loadedStore.index.entries[0]!.scope as unknown as Record<string, unknown>;
+      assert.equal(Object.hasOwn(scope, 'hardwareScope'), false);
     } finally {
       await githubServer.close();
       await rm(work, { recursive: true, force: true });

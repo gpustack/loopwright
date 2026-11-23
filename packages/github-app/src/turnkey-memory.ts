@@ -35,6 +35,7 @@ import {
   isPlainRecord,
   listTreeEntriesAtRevision,
   MAX_REASON_CODEPOINTS,
+  projectMemoryHardwareScope,
   projectMemoryTargetMatrixCell,
   readRegularJsonBounded,
   removePathsFromIndex,
@@ -728,6 +729,7 @@ export async function finalizeAndPublishTurnkeyMemory(
       ? options.targetMatrix
       : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
     const targetMatrix = projectMemoryTargetMatrixCell(rawTargetMatrix);
+    const hardwareScope = projectMemoryHardwareScope(rawTargetMatrix);
 
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,
@@ -748,6 +750,7 @@ export async function finalizeAndPublishTurnkeyMemory(
       checkCodeFingerprint,
       checkUpstreamVersions,
       targetMatrix,
+      ...(hardwareScope !== undefined ? { hardwareScope } : {}),
       upstreamVersions: buildUpstreamMemoryVersions(options.upstreamRecords as readonly UpstreamAcquisitionRecord[] | undefined),
     };
 
