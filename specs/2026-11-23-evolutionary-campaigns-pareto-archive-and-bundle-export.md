@@ -519,7 +519,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `evaluator.ts` audits sealed Stage A `.so`/`.o`/`.cubin`/`.ptx`/`.sass` outputs (`O_NOFOLLOW`, `1 MiB` cap) and denies `forbiddenSymbolPatterns` (`cublas`, `rocblas`, `aclnn`, `at::native`) or `maxRegisterCount`/`maxLocalSpillBytes` breaches with `STAGE_A_STATIC_AUDIT_FAILED` before Stage B starts; Stage B parses bounded `bucketMetrics` + sanitized `hardwareDiagnostics` (`<= 49,152` bytes, zero exported files, `all_buckets` threshold enforcement); `provenance.ts` and `worker.ts` run post-crash/timeout accelerator health probes (`Xid`/ECC/hang) and fail closed into `WORKER_DEVICE_QUARANTINED` (exit code `3`) before polling `/v1/runner/leases:acquire`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg hardware-runner`
 
-- [ ] **T7 · `@loopwright/evolution` schemas, fenced `campaign.sqlite` store, NSGA-II Pareto engine, UCB1 sampler, and CAS scratchpad**
+- [x] **T7 · `@loopwright/evolution` schemas, fenced `campaign.sqlite` store, NSGA-II Pareto engine, UCB1 sampler, and CAS scratchpad**
       Blocked by: T2
       Owns: `packages/evolution/src/types.ts`, `packages/evolution/src/schema.ts`, `packages/evolution/src/store.ts`, `packages/evolution/src/pareto.ts`, `packages/evolution/src/sampler.ts`, `packages/evolution/src/scratchpad.ts`, `packages/evolution/test/schema-and-store.test.ts`, `packages/evolution/test/pareto-and-sampler.test.ts`, `packages/evolution/test/scratchpad.test.ts`
       Gate: review
