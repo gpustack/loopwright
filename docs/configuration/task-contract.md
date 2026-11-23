@@ -10,6 +10,7 @@
 - [Roles and steps](#roles-and-steps)
 - [Budgets and enforcement](#budgets-and-enforcement)
 - [Acceptance and evidence](#acceptance-and-evidence)
+- [EvolutionCampaign](#evolutioncampaign)
 
 ## TaskContract
 
@@ -244,7 +245,7 @@ Otherwise, admission selects `tree_overlay` with `{ baseTree, entries, deleted }
 
 Verifier-namespaced descriptors (`.loopwright-verifier/<slotId>/*`) use a dedicated verifier output budget (`64` files per slot, `256` total files, and `16 GiB` total bytes) separate from candidate `budgets.overlay.maxBytes`.
 
-`ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence` and `EvaluatedCheck` accept optional `metrics` (finite numbers, strings, or booleans), `findings`, and `detail` even on `passed` (`Evidence.spec.reason` stays `null`).
+`ArtifactRef` accepts optional `uri` (`<= 2048` chars) and `mediaType` (`<= 128` chars), omitted from canonical serialization when unset. `Evidence.spec` accepts optional `metrics`, `findings`, `detail`, `bucketMetrics` (`1..64` buckets, `<= 16` numeric metrics and `<= 8` dimensions per bucket), and closed-enum `hardwareDiagnostics` (`boundPipeline`: `hbm | l2 | smem_lds_ub | tensor_cube | vector_valu | host_launch | comm | unknown`, optional counters/percentages/stalls).
 
 ### Acceptance fields
 
@@ -279,13 +280,85 @@ Each `spec.target.matrix[]` cell accepts an optional `hardware` block alongside 
 | `hardware.deviceCount` | No | Safe integer (`1..64`) | Expected device count verified against observed `hardwareProvenance` |
 | `hardware.driverConstraint` | No | Printable string (`1..128`) | Exact driver match or `>=<dotted-version>` minimum version constraint |
 | `hardware.topology` | No | Printable string (`1..128`) | Optional interconnect or device topology constraint |
+| `hardware.forbiddenSymbolPatterns` | No | `0..64` ASCII substrings (`<= 128`) | Glob-free Stage A symbol denylist (`cublas`, `rocblas`, `aclnn`) |
+| `hardware.maxRegisterCount` | No | Safe integer (`>= 0`) | Stage A per-thread register ceiling before Stage B |
+| `hardware.maxLocalSpillBytes` | No | Safe integer (`>= 0`) | Stage A local memory spill ceiling (`STAGE_A_STATIC_AUDIT_FAILED`) |
 
 ### Thresholds and provenance
 
-- **Bounds rules**: `{ kind: 'bounds', metric, min?, max? }` requires at least one finite endpoint (`min <= max`; `-0` normalizes to `0`).
-- **Comparative rules**: `{ kind: 'comparative', metric, baselineMetric, operator, threshold }` supports `min_ratio`, `max_ratio`, and `max_delta` (`baseline > 0` for ratios).
+- **Bounds and comparative rules**: `bounds` requires `{ metric, min?, max? }`; `comparative` requires `{ metric, baselineMetric, operator, threshold }` (`min_ratio`, `max_ratio`, `max_delta`). Both accept optional `bucketScope` (`'aggregate' | 'all_buckets' | { bucketId }`).
 - **Hardware provenance**: Passing `hardware_execution` `Evidence` requires `hardwareProvenance` (`targetCellId`, `probeKind: 'physical' | 'synthetic_fixture'`, `vendor`, `deviceModel`, `accelerator`, `isolationMode`, `deviceCount`, `driverVersion`, `runtimeVersion`, `topology?`, `workloadDigest`, `clockLockMode: 'locked' | 'unlocked' | 'unknown'`).
-- **Independent core check**: `evaluateAcceptance` requires `probeKind: 'physical'` unless `allowSyntheticHardwareProbe` is `true`, and blocks mismatches (`hardware_provenance_mismatch`, `metric_threshold_failed`).
+- **Independent core check**: `evaluateAcceptance` enforces `bucketScope` across `bucketMetrics`, requires `probeKind: 'physical'` unless `allowSyntheticHardwareProbe` is `true`, and blocks mismatches (`hardware_provenance_mismatch`, `metric_threshold_failed`).
+
+## EvolutionCampaign
+
+`EvolutionCampaign` (`<= 64 KiB`) coordinates bounded multi-generation search over an isolated `campaign.sqlite` archive and child `LocalRunStore` runs.
+
+```yaml
+apiVersion: loopwright.dev/v1alpha1
+kind: EvolutionCampaign
+metadata:
+  name: flash-decode-sm90a
+spec:
+  taskpack: .loopwright/taskpack.yaml
+  targetCellId: cuda-h100-whole
+  tracks: [triton, cute, cuda_raw] # Optional 1..32 track IDs
+  stages: # Optional (defaults to single-target)
+    mode: specialist-then-portfolio # Optional single-target or specialist-then-portfolio
+    specialistBuckets:
+      - id: bs1-isl4k
+        heldOutWorkloadId: decode-bs1-4k
+      - id: bs16-isl8k
+        heldOutWorkloadId: decode-bs16-8k
+    portfolioHeldOutWorkloadId: decode-portfolio-holdout
+  population:
+    islands: 4
+    migrationIntervalGenerations: 8
+    maxMigrationElites: 1
+    nicheAxes:
+      - id: bound_pipeline
+        kind: enum
+        values: [hbm, l2, smem_lds_ub, tensor_cube, vector_valu]
+      - id: occupancy_band
+        kind: numeric_bins
+        edges: [0, 25, 50, 75, 100]
+  sampling:
+    noveltyDecayLambda: 1.0
+    mutationWeights:
+      diff_tune: 0.5
+      full_rewrite: 0.3
+      crossover: 0.2
+    modelBandit: ucb1 # Optional deterministic-round-robin or ucb1
+    maxCrossoversPerPrompt: 2
+  teamEvolution: # Optional plateau-triggered bounded role synthesis
+    enabled: true
+    supervisorRoleId: supervisor
+    allowedArchetypeRoles: [probe-readonly, mutator-sandboxed, reviewer]
+    stallGenerations: 4 # Optional (1..32)
+    minHypervolumeDelta: 0.001 # Optional (>= 0)
+    triggerOnRunEvalPathology: true # Optional (defaults to true)
+    trialGenerations: 2 # Optional (1..8)
+    maxTeamSize: 3 # Optional (1..4)
+    maxTeamSteps: 4 # Optional (1..6)
+  objectives:
+    - metric: latency_us_p50
+      direction: minimize
+    - metric: goodput_rps
+      direction: maximize
+  budgets:
+    maxGenerations: 40
+    maxEvaluations: 160
+    maxConcurrentEvaluations: 4
+    targetRooflineHeadroom: 1.08 # Optional early-stop ratio >= 1.0
+    scratchpadIntervalGenerations: 5 # Optional (1..32)
+  export: # Optional auto-export on completion
+    format: oci-layout # Optional dir or oci-layout
+    outputDir: .loopwright-out/bundles/flash-decode-sm90a
+```
+
+- **Population and sampling**: `islands` (`1..16`), `nicheAxes` (`1..4` axes), and `maxCrossoversPerPrompt` (`0..4`) preserve stepping-stone diversity.
+- **Team synthesis**: `teamEvolution` runs a read-only supervisor on plateaus, enforcing archetype envelopes and `trialGenerations` rollback.
+- **Budgets and export**: `maxConcurrentEvaluations` (`1..64 <= maxEvaluations`) serializes `campaign.sqlite` writes; `export` emits `evolution-bundle.v1` (`dir` or `oci-layout`).
 
 ---
 

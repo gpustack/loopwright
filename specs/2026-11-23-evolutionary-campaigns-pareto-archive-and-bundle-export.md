@@ -1,6 +1,6 @@
 # Spec: Evolutionary campaigns, Pareto archive, and bundle export
 
-Status: Building
+Status: Built
 Type: Feature
 
 ## Summary
@@ -554,7 +554,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `loopwright evolve check|run|resume|status|inspect|export` parses cleanly in `arguments.ts` and executes via lazy `await import('@loopwright/evolution')` in `main.ts` (preserving `runner-cli.test.ts` zero-static-import invariant and exit codes `0`, `2..8`, `130/143`); `closure.ts` registers `'@loopwright/evolution'` in `OWNER_PACKAGES` while preserving the exact `18` `closedLocal` / `5` `unprovisionedExternal` split and `CLOSURE_FALSIFICATION_FORBIDDEN` guard.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg cli && node scripts/run-tests.mjs --pkg taskpack-runner && node packages/cli/dist/main.js closure --verify-failures --json`
 
-- [ ] **T12 · Connected documentation, Hugo site sync, skill references, and full 12-package verification**
+- [x] **T12 · Connected documentation, Hugo site sync, skill references, and full 12-package verification**
       Blocked by: T11
       Owns: `docs/**`, `site/**`, `README.md`, `AGENTS.md`, `.agents/skills/**`, `packages/cli/test/check-docs-rules.test.ts`
       Acceptance: Connected user/contributor docs (`docs/getting-started/architecture.md`, `docs/contribute/internals.md`, configuration/operations guides, `README.md`, `AGENTS.md`, `.agents/skills/loopwright-overview/SKILL.md`), Pretty YAML examples, and Hugo `site/` pages document `@loopwright/evolution`, `EvolutionCampaign`, `evolve-block-guard.v1`, `teamEvolution`, `hardwareScope`, and `evolution-bundle.v1` with zero banned filler words, zero broken links, and green full-workspace CI checks.

@@ -21,7 +21,7 @@ Read each row as an evidence boundary. Local closure covers its stated criterion
 | `blocked_external` | External qualification remains blocked. |
 | `deferred_owned` | An owned external qualification remains deferred. |
 
-`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows across all 11 workspace packages (`@loopwright/hardware-runner` is registered in `OWNER_PACKAGES`; `@loopwright/taskpack` owns `qualified-host-clock-and-storage-profile` and `interactive-mcp-oauth-browser-flow`).
+`CLOSURE_CAPABILITY_LEDGER` is a deeply frozen array of exactly 23 `ClosureCapabilityEntry` rows across all 12 workspace packages (`@loopwright/hardware-runner` and `@loopwright/evolution` are registered in `OWNER_PACKAGES`; `@loopwright/taskpack` owns `qualified-host-clock-and-storage-profile` and `interactive-mcp-oauth-browser-flow`).
 
 Eighteen rows are `closed_local` with `verificationStatus: 'passed'` (`unit_and_integration`, `controlled_local_qualification`, or `frozen_offline_parity`). Five rows carry `evidenceLevel: 'unprovisioned_external'` and stay honestly blocked:
 

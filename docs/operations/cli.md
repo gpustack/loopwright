@@ -164,6 +164,12 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | `app-serve` | `--config` | `--repo`, `--json` | Start the opt-in GitHub App HTTP webhook and token listener |
 | `runner relay` | `--config` | `--json` | Start the outbound-pull benchmark relay and CAS server |
 | `runner worker` | `--config` | `--once`, `--json` | Poll relay leases and execute two-stage hardware benchmarks |
+| `evolve check` | `--campaign` | `--repo`, `--json` | Validate an `EvolutionCampaign`, taskpack, and target cell |
+| `evolve run` | `--campaign`, `--state` | `--repo`, `--out`, `--format`, `--allow-synthetic-probe`, `--json` | Run an evolutionary campaign over isolated child runs |
+| `evolve resume` | `--campaign` (or `--root`) | `--repo`, `--out`, `--format`, `--allow-synthetic-probe`, `--json` | Resume a paused or preempted campaign from `campaign.sqlite` |
+| `evolve status` | `--campaign` (or `--root`) | `--json` | Read campaign stage, generation, evaluations, and island state |
+| `evolve inspect` | `--campaign` (or `--root`) | `--island`, `--individual`, `--json` | Inspect Pareto frontier, niches, teams, and lineage edges |
+| `evolve export` | `--campaign` (or `--root`), `--out` | `--format`, `--allow-synthetic-probe`, `--overwrite`, `--json` | Export a verified `evolution-bundle.v1` package |
 
 ### Suite commands
 
@@ -198,18 +204,31 @@ loopwright runner worker --config worker.yaml --once --json
 - **Fenced lease (`7`)**: Exits `7` when the relay rejects a stale `leaseEpoch` or `relayBootId` (`QUEUE_LEASE_FENCED`).
 - **Unknown or teardown (`8`)**: Exits `8` on `unknown` acknowledgment, `RUNNER_TEARDOWN_FAILED`, or `RUNNER_TRANSPORT_ERROR`.
 
+### Evolution campaigns
+
+```sh
+loopwright evolve check --campaign campaign.yaml --repo . --json
+loopwright evolve run --campaign campaign.yaml --state ./campaign-state --repo . --allow-synthetic-probe --json
+loopwright evolve resume --campaign ./campaign-state --repo . --json
+loopwright evolve status --campaign ./campaign-state --json
+loopwright evolve inspect --campaign ./campaign-state --island 0 --json
+loopwright evolve export --campaign ./campaign-state --out ./bundle --format oci-layout --json
+```
+
+`evolve` lazily loads `@loopwright/evolution`, persists campaign state in `<state>/campaign.sqlite`, and dispatches each candidate into an isolated child `LocalRunStore`. `--state` accepts `--campaign-dir` or `--root` aliases, and `evolve export` refuses unverified or `synthetic_fixture` receipts (`EXPORT_UNVERIFIED_FORBIDDEN`) unless `--allow-synthetic-probe` is passed.
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Completed, no change, successful static command, or `suite` `eligible`/`deferred`/`ignored` |
-| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite` manifest rejected |
-| 3 | Unsupported capability or runtime `blocked` (`baseline_merge_conflict`, stage probe, branch mismatch) |
-| 4 | Execution or acceptance failed |
-| 5 | Allowance exhausted |
+| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite`/`EvolutionCampaign` manifest rejected |
+| 3 | Unsupported capability, blocked work, `TEAM_ENVELOPE_VIOLATION`, `EXPORT_UNVERIFIED_FORBIDDEN`, or `WORKER_DEVICE_QUARANTINED` |
+| 4 | Execution, acceptance, or artifact validation failed |
+| 5 | Allowance or campaign budget exhausted |
 | 6 | Deadline expired |
-| 7 | Reconciliation, ownership needed, or fenced runner lease |
-| 8 | Authoritative result unavailable, incident, or runner teardown failure |
+| 7 | Reconciliation, `EVOLUTION_CONFLICT`, `EVOLUTION_LEASE_FENCED`, `EVOLUTION_CLOCK_DRIFT`, or fenced runner lease |
+| 8 | Authoritative result unavailable, incident, store corruption, or runner teardown failure |
 | 130 | Step cancellation or accounted SIGINT, subject to uncertainty precedence |
 | 143 | Accounted SIGTERM, subject to uncertainty precedence |
 
