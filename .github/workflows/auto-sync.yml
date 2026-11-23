@@ -157,7 +157,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo mkdir -p /mnt/lw-tmp
-          sudo mount -t tmpfs -o size=4G,mode=1777,exec tmpfs /mnt/lw-tmp
+          sudo mount -t tmpfs -o size=3G,mode=1777,exec tmpfs /mnt/lw-tmp
           echo "TMPDIR=/mnt/lw-tmp" >> "$GITHUB_ENV"
 
       - name: Run Loopwright
