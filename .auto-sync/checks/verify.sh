@@ -1301,7 +1301,7 @@ set -euo pipefail
 
 "$VERIFY_NODE_BIN" packages/cli/dist/main.js closure --verify-failures
 if [[ -z "${LW_TEST_CONCURRENCY:-}" ]]; then
-  LW_TEST_CONCURRENCY="$("$VERIFY_NODE_BIN" -e 'const os = require("node:os"); console.log(Math.min(6, Math.max(2, os.availableParallelism())));' 2>/dev/null || echo 4)"
+  LW_TEST_CONCURRENCY="$("$VERIFY_NODE_BIN" -e 'const os = require("node:os"); console.log(Math.min(12, Math.max(2, os.availableParallelism())));' 2>/dev/null || echo 4)"
 fi
 LW_TEST_CONCURRENCY="$LW_TEST_CONCURRENCY" "$VERIFY_NODE_BIN" scripts/run-tests.mjs
 EOF
