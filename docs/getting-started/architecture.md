@@ -62,7 +62,7 @@ Deployment host qualification (`qualifyDeploymentHostProfile`) enforces these ba
 | Host platform | `darwin/arm64`, `linux/arm64`, `linux/x64` | Unlisted OS or architecture targets fail closed |
 | Storage and clock | Local POSIX filesystem; `<= 1000 ms` clock drift | Network mounts (`nfs`, `smb`, `fuse`, `sshfs`) and clock jumps fail closed |
 | Sandbox backend | Seatbelt, bubblewrap, Landlock, or Docker | Negotiated against taskpack `spec.sandbox` policy |
-| Optional tools | Python `3.11+` (runner bridge); Hugo extended `0.152.2+` (docs site) | Needed only when exercising runner helpers or building `site/` |
+| Optional tools | Python `3.11+` (runner bridge); Hugo extended `0.170.1+` (docs site) | Needed only when exercising runner helpers or building `site/` |
 
 ## Trust boundaries
 

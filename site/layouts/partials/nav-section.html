@@ -25,13 +25,13 @@
       {{ range $items }}
         {{ $p := site.GetPage . }}
         {{ if $p }}
-          {{ $label := index site.Data.navigation.labels (partial "page-key.html" $p) | default (partial "page-title.html" $p) }}
+          {{ $label := index hugo.Data.navigation.labels (partial "page-key.html" $p) | default (partial "page-title.html" $p) }}
           <a title="{{ partial "page-title.html" $p }}" href="{{ $p.RelPermalink }}" {{ if eq $current.RelPermalink $p.RelPermalink }}aria-current="page"{{ end }}>{{ $label }}</a>
         {{ end }}
       {{ end }}
     {{ else if $page }}
       {{ if $page.Content }}
-        {{ $overviewLabels := site.Data.navigation.overview_labels | default dict }}
+        {{ $overviewLabels := hugo.Data.navigation.overview_labels | default dict }}
         {{ $overviewLabel := index $overviewLabels (partial "page-key.html" $page) | default "Overview" }}
         <a title="{{ partial "page-title.html" $page }}" href="{{ $page.RelPermalink }}" {{ if eq $current.RelPermalink $page.RelPermalink }}aria-current="page"{{ end }}>{{ $overviewLabel }}</a>
       {{ end }}

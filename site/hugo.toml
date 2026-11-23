@@ -6,8 +6,8 @@ defaultContentLanguage = "en"
 defaultContentLanguageInSubdir = false
 
 [languages.en]
-  languageCode = "en"
-  languageName = "English"
+  locale = "en"
+  label = "English"
   weight = 1
 
 [params]
@@ -65,7 +65,7 @@ defaultContentLanguageInSubdir = false
   [[module.mounts]]
     source = "../docs"
     target = "content/docs"
-    excludeFiles = ["README.md", "assets/**", "development.md", "contribute/**", "references/**"]
+    files = ["! README.md", "! assets/**", "! development.md", "! contribute/**", "! references/**"]
   [[module.mounts]]
     source = "../docs/assets"
     target = "static/docs/assets"
@@ -84,4 +84,4 @@ defaultContentLanguageInSubdir = false
   [[module.mounts]]
     source = "../docs"
     target = "assets/doc-index"
-    includeFiles = ["README.md"]
+    files = ["README.md"]
