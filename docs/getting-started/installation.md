@@ -29,7 +29,7 @@ Local CLI and `app-serve` hosts must satisfy the [runtime baseline](architecture
 
 ### npm package
 
-Install the single-package CLI globally from `npmjs.com` using `npm` or `pnpm` (`--ignore-scripts` skips optional transitive lifecycle scripts required by `pnpm` v10+ build hygiene):
+Install [`@gpustack/loopwright`](https://www.npmjs.com/package/@gpustack/loopwright) globally from `npmjs.com` using `npm` or `pnpm`. Pass `--ignore-scripts` to skip optional transitive lifecycle scripts.
 
 ```sh
 npm install -g --ignore-scripts @gpustack/loopwright
@@ -37,7 +37,7 @@ npm install -g --ignore-scripts @gpustack/loopwright
 pnpm add -g --ignore-scripts @gpustack/loopwright
 ```
 
-To run one-off commands without a global install, invoke `npx` or `pnpm dlx`:
+Run one-off commands without a global install using `npx` or `pnpm dlx`:
 
 ```sh
 npx --ignore-scripts @gpustack/loopwright --help
@@ -45,12 +45,14 @@ npx --ignore-scripts @gpustack/loopwright --help
 pnpm --ignore-scripts dlx @gpustack/loopwright --help
 ```
 
+Each release publishes from GitHub Actions via npm Trusted Publishers with signed SLSA build provenance.
+
 ### Release archive
 
-Install an immutable release archive directly from [GitHub Releases](https://github.com/gpustack/loopwright/releases) (replace `0.1.0` with the published version):
+Install an immutable release archive from [GitHub Releases](https://github.com/gpustack/loopwright/releases) and verify its matching `.sha256` checksum (replace `0.0.3` with your target version):
 
 ```sh
-npm install -g --ignore-scripts https://github.com/gpustack/loopwright/releases/download/v0.1.0/gpustack-loopwright-0.1.0.tgz
+npm install -g --ignore-scripts https://github.com/gpustack/loopwright/releases/download/v0.0.3/gpustack-loopwright-0.0.3.tgz
 ```
 
 ### Source build
