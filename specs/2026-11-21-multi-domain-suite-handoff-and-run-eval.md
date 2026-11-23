@@ -1,11 +1,11 @@
-# Spec: Phase 2 multi-domain suites, compact handoffs, and deterministic run diagnostics
+# Spec: Multi-domain suites, compact handoffs, and deterministic run diagnostics
 
 Status: Shipped
 Type: Feature
 
 ## Summary
 
-Extend Loopwright with four deterministic Phase 2 capabilities across `@loopwright/core`, `@loopwright/agent-pi`, `@loopwright/controller`, `@loopwright/taskpack`, `@loopwright/github-app`, `@loopwright/cli`, and `@loopwright/memory`. Add a declarative `.loopwright/suite.yaml` manifest (`kind: TaskpackSuite`) for multi-domain matrix resolution, pull-request comment routing, and stateless cross-cycle staged promotion. Add zero-LLM section-level role handoffs and signal-driven conditional rule loading across `TaskContract`, Pi preflight, and controller execution. Add deterministic post-run health diagnostics (`RunEval`), optional isolated 3-way baseline conflict pre-alignment, and trailing-newline formatting on all `@loopwright/memory` JSON writes.
+Extend Loopwright with four deterministic workflow and diagnostics capabilities across `@loopwright/core`, `@loopwright/agent-pi`, `@loopwright/controller`, `@loopwright/taskpack`, `@loopwright/github-app`, `@loopwright/cli`, and `@loopwright/memory`. Add a declarative `.loopwright/suite.yaml` manifest (`kind: TaskpackSuite`) for multi-domain matrix resolution, pull-request comment routing, and stateless cross-cycle staged promotion. Add zero-LLM section-level role handoffs and signal-driven conditional rule loading across `TaskContract`, Pi preflight, and controller execution. Add deterministic post-run health diagnostics (`RunEval`), optional isolated 3-way baseline conflict pre-alignment, and trailing-newline formatting on all `@loopwright/memory` JSON writes.
 
 ## Motivation
 
@@ -446,7 +446,7 @@ Tasks are vertical tracer bullets across five waves. Tasks without a transitive 
 - [x] **T11 · Connected documentation, Hugo site sync, and workspace verification**
       Blocked by: T9, T10
       Owns: `docs/**`, `site/**`, `README.md`, `.agents/skills/**`, `packages/cli/test/check-docs-rules.test.ts`, `packages/cli/test/docs-and-site.test.ts`
-      Acceptance: Owning `docs/configuration/**`, `docs/operations/**`, `docs/contribute/**`, `docs/README.md`, `README.md`, and `.agents/skills/**` pages document Phase 2 contracts within line and STE100 limits. `npm run lint:docs`, `npm run site`, `npm test`, `npm run typecheck`, and `npm run lint` pass cleanly.
+      Acceptance: Owning `docs/configuration/**`, `docs/operations/**`, `docs/contribute/**`, `docs/README.md`, `README.md`, and `.agents/skills/**` pages document the suite, handoff, conditional-rule, `RunEval`, and baseline-alignment contracts within line and STE100 limits. `npm run lint:docs`, `npm run site`, `npm test`, `npm run typecheck`, and `npm run lint` pass cleanly.
       Verify: `npm run build && npm run typecheck && npm run lint && npm run lint:docs && npm run site && npm test && node packages/cli/dist/main.js closure --verify-failures --json`
 
 ### Test Plan

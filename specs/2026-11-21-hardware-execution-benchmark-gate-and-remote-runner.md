@@ -29,7 +29,7 @@ Target users are kernel engineers, ML systems developers, verification owners, a
 
 ### Non-Goals
 
-- Multi-generation evolutionary search, lineage trees, MCTS, or MAP-Elites campaign stores (deferred to Phase 3.3).
+- Multi-generation evolutionary search, lineage trees, MCTS, or MAP-Elites campaign stores (deferred to a future multi-generation campaign orchestration specification).
 - Benchmark suite manifests (`suite.yaml`), compact agent handoff formats, or local deterministic evaluation harnesses.
 - Centralized external databases, multi-node consensus stores, or web dashboards.
 - Built-in RFC 6455 WebSocket server framing or any new third-party runtime npm dependency.
@@ -389,13 +389,13 @@ Every added unit of code has unit-test coverage with the following per-package t
 ## Alternatives
 
 1. **Place the runner worker and pull-lease relay inside `@loopwright/taskpack` or `@loopwright/controller` instead of `@loopwright/hardware-runner`**:
-   - Rejected. `@loopwright/controller` cannot import `@loopwright/taskpack` (`SandboxReadOnlyBindMount`) without a package cycle. Adding worker modules to `controller` would also churn `installedHandlerDigests()` ([`handlers.ts`](../packages/controller/src/handlers.ts)) on every edit. Putting cluster daemons into `@loopwright/taskpack` (~18k LOC) would recreate the monolith split in [`2026-11-20-decouple-taskpack-and-cas-blob-pointers.md`](2026-11-20-decouple-taskpack-and-cas-blob-pointers.md) and force a breaking extraction in Phase 3.3.
+   - Rejected. `@loopwright/controller` cannot import `@loopwright/taskpack` (`SandboxReadOnlyBindMount`) without a package cycle. Adding worker modules to `controller` would also churn `installedHandlerDigests()` ([`handlers.ts`](../packages/controller/src/handlers.ts)) on every edit. Putting cluster daemons into `@loopwright/taskpack` (~18k LOC) would recreate the monolith split in [`2026-11-20-decouple-taskpack-and-cas-blob-pointers.md`](2026-11-20-decouple-taskpack-and-cas-blob-pointers.md) and force a breaking extraction when multi-generation campaign search is added later.
 2. **Mint new controller `OperationIntent`s and `verify.<gen>.<slot>.<attempt>` checkpoints across `resumeCycle` on preemption**:
    - Rejected. Multiplying verifier slots by `(1 + maxPreemptions)` in [`compile.ts`](../packages/controller/src/compile.ts) overflows the `D <= 256` checkpoint limit on multi-step and `onRework` DAGs. It also requires rewriting [`progress.ts`](../packages/controller/src/progress.ts) and overturning the single-request crash rule in [`gate.ts`](../packages/controller/src/gate.ts). Relay-owned requeue (`leaseEpoch + 1`) covers worker eviction, while `loopwright reconcile` covers controller restarts.
 3. **Require a built-in WebSocket (`wss://`) server control stream alongside HTTPS long-poll**:
    - Rejected. Node `v26.13.1` lacks a built-in WebSocket server parser, and workspace rules forbid unapproved npm dependencies (`ws`). Hand-rolling an RFC 6455 server adds ~500 lines of framing code, doubles transport tests, and fails behind proxies that block `Upgrade: websocket`. Standard HTTPS long-poll + heartbeat (with optional `text/event-stream` watch) and `1 MiB` HTTP `GET`/`PUT` CAS streaming use built-in HTTP primitives with zero head-of-line blocking.
 4. **Enforce `hardwareProvenance` and `metricThresholds` only in `@loopwright/controller` handler parameters**:
-   - Rejected. Leaving `@loopwright/core` blind to hardware mismatch and threshold violations weakens `evaluateAcceptance` / `constructRunResult` anti-cheating guarantees. It also duplicates parsers across three packages and forces Phase 3.3 search to parse private `gate-output` blobs instead of typed `Evidence`.
+   - Rejected. Leaving `@loopwright/core` blind to hardware mismatch and threshold violations weakens `evaluateAcceptance` / `constructRunResult` anti-cheating guarantees. It also duplicates parsers across three packages and would force future multi-generation campaign search to parse private `gate-output` blobs instead of typed `Evidence`.
 5. **Compile and benchmark candidate code inside one sandbox mount with `held_out_workloads` present**:
    - Rejected. A single stage that both reads `held_out_workloads` and exports `.cubin`/`.sass` binaries lets malicious candidate code embed private test inputs or reference answers into returned artifacts. Two-stage isolation seals Stage A binaries before mounting `held_out_workloads` in Stage B with zero file exports.
 
