@@ -2483,7 +2483,7 @@ printf '{"detail":"verified-once"}\\n' > "$LOOPWRIGHT_CHECK_OUT"
 set -euo pipefail
 parent_pid="$$"
 pid_ns="$(readlink /proc/self/ns/pid 2>/dev/null || true)"
-bash -c 'printf "%s %s %s\\n" "$1" "$$" "$2" > "$HOME/pids.txt.tmp" && mv "$HOME/pids.txt.tmp" "$HOME/pids.txt"; sleep 30' '${longSleepMarker}' "$parent_pid" "$pid_ns" &
+bash -c 'printf "%s %s %s\\n" "$1" "$$" "$2" > "$HOME/pids.txt.tmp" && mv "$HOME/pids.txt.tmp" "$HOME/pids.txt"; sleep 30; true' '${longSleepMarker}' "$parent_pid" "$pid_ns" &
 bg_pid=$!
 wait "$bg_pid"
 `;
