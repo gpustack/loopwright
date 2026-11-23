@@ -21,8 +21,8 @@
   
   
   
-  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/main/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/main/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/main/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/main/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
   <meta name="robots" content="noindex, follow">
   <title>Taskpack · Loopwright</title>
   
@@ -36,7 +36,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     
-    <a class="brand" href="/loopwright/main/" aria-label="Loopwright home"><img src="/loopwright/main/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <a class="brand" href="/loopwright/main/" aria-label="Loopwright home"><img src="/loopwright/main/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
     <nav class="top-links" aria-label="Main navigation">
       <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
         <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
@@ -381,39 +381,39 @@
 <h2 id="compilation-model">Compilation model</h2>
 <p>When <code>loopwright run --taskpack</code>, <code>loopwright step</code>, a GitHub Action, or the GitHub App processes a taskpack, the compiler generates three runtime artifacts:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Generated artifact</th>
-          <th>Manifest inputs</th>
-          <th>Compiler defaults</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>TaskContract</code></td>
-          <td><code>metadata.name</code>, <code>spec.goal</code>, <code>spec.scope</code>, <code>spec.steps</code>, <code>spec.verification</code>, <code>spec.limits</code></td>
-          <td>Applies policy-profile protected paths, 256-checkpoint scaling, and default budgets (<code>wallTimeMs: 3600000</code>, <code>maxModelCalls: 256</code>)</td>
-      </tr>
-      <tr>
-          <td><code>TrustedRegistry</code></td>
-          <td><code>spec.preflight</code>, <code>spec.proposal</code>, <code>spec.verification</code>, <code>spec.publication</code>, <code>spec.mcp</code></td>
-          <td>Computes runtime SHA-256 digests for handlers, directories, instructions, skills, and CAS-staged resources</td>
-      </tr>
-      <tr>
-          <td><code>ControllerConfig</code></td>
-          <td>Binds compiled <code>TaskContract</code>, <code>TrustedRegistry</code> SHA-256, and optional <code>spec.decisions</code></td>
-          <td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 5</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> templates (<code>0600</code>)</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Generated artifact</th>
+					<th>Manifest inputs</th>
+					<th>Compiler defaults</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>TaskContract</code></td>
+					<td><code>metadata.name</code>, <code>spec.goal</code>, <code>spec.scope</code>, <code>spec.steps</code>, <code>spec.verification</code>, <code>spec.limits</code></td>
+					<td>Applies policy-profile protected paths, 256-checkpoint scaling, and default budgets (<code>wallTimeMs: 3600000</code>, <code>maxModelCalls: 256</code>)</td>
+			</tr>
+			<tr>
+					<td><code>TrustedRegistry</code></td>
+					<td><code>spec.preflight</code>, <code>spec.proposal</code>, <code>spec.verification</code>, <code>spec.publication</code>, <code>spec.mcp</code></td>
+					<td>Computes runtime SHA-256 digests for handlers, directories, instructions, skills, and CAS-staged resources</td>
+			</tr>
+			<tr>
+					<td><code>ControllerConfig</code></td>
+					<td>Binds compiled <code>TaskContract</code>, <code>TrustedRegistry</code> SHA-256, and optional <code>spec.decisions</code></td>
+					<td>Sets <code>drainReserveMs: 120000</code>, <code>maxAttempts: 5</code>, <code>repeatFailureLimit: 2</code>, and <code>${ENV}</code> templates (<code>0600</code>)</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="taskpack-1">Taskpack</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">catalog-sync</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Update catalog manifests from upstream releases and pass checks.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm upstream versions match current manifests and settle cleanly.</span><span class="w">
@@ -474,7 +474,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">handoffs</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..16 compact ancestor extracts</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">fromStep</span><span class="p">:</span><span class="w"> </span><span class="l">author-step</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">submission }</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">select</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">kind: json_pointer, pointers</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/summary] }</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">select</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="nt">json_pointer, pointers</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/summary] }</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional (64..65536)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">onRework</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional bounded rework edge</span><span class="w">
@@ -616,55 +616,55 @@
 <p><code>allowWorkflowWrites: true</code> requires <code>allow-workflow-writes: 'true'</code> (<code>--allow-workflow-writes</code>), and <code>command.v1</code> <code>parameters.mounts[]</code> requires privileged authority plus an explicit <code>allow-host-mounts</code> (<code>--allow-host-mounts</code>) allowlist entry per <code>source</code>. Multi-tenant webhook runs refuse self-granted privileges (<code>TASKPACK_HOST_BINDING_INVALID</code> / <code>TASKPACK_SCOPE_VIOLATION</code>).</p>
 <h3 id="trust-capabilities">Trust capabilities</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Strict / privileged</th>
-          <th>Runtime scope</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>execution.mode</code></td>
-          <td><code>'strict'</code></td>
-          <td><code>'strict'</code> or <code>'privileged'</code>; <code>privileged</code> sets first four capabilities <code>true</code></td>
-      </tr>
-      <tr>
-          <td><code>capabilities.allowHostEnv</code></td>
-          <td><code>false</code> / <code>true</code></td>
-          <td>Inherits host env for <code>preflight</code> and <code>command.v1</code> while stripping Loopwright/provider/GitHub secrets</td>
-      </tr>
-      <tr>
-          <td><code>capabilities.allowHostPath</code></td>
-          <td><code>false</code> / <code>true</code></td>
-          <td>Inherits host <code>PATH</code> for <code>preflight</code> and <code>command.v1</code> checks</td>
-      </tr>
-      <tr>
-          <td><code>capabilities.mountReadOnlyGit</code></td>
-          <td><code>false</code> / <code>true</code></td>
-          <td>Stages sanitized <code>.git</code> skeleton (<code>hooksPath=/dev/null</code>, config stripped) plus <code>--ro-bind</code> or read-only <code>1 MiB</code> streamed <code>.git/objects</code> for <code>command.v1</code></td>
-      </tr>
-      <tr>
-          <td><code>capabilities.allowCheckNetwork</code></td>
-          <td><code>false</code> / <code>true</code></td>
-          <td>Grants outbound network for <code>command.v1</code> checks; avoids nested macOS Seatbelt <code>EPERM</code> when checks run inner sandboxes</td>
-      </tr>
-      <tr>
-          <td><code>capabilities.allowWorkflowWrites</code></td>
-          <td><code>false</code> / <code>false</code></td>
-          <td>Dual-key unlock permitting agent edits under <code>.github/workflows/**</code> on GitHub policy profile runs</td>
-      </tr>
-      <tr>
-          <td><code>capabilities.allowAgentNetwork</code></td>
-          <td><code>false</code> / <code>false</code></td>
-          <td>Governs <code>resolveEffectiveTaskpackSandboxPolicy</code> / <code>executeSandboxedCommand</code>; turnkey <code>agent-pi</code> <code>bash</code> stays offline-isolated</td>
-      </tr>
-      <tr>
-          <td><code>digests.pinDigests</code> / <code>lockfile</code></td>
-          <td><code>false</code> / <code>&lt;controlRoot&gt;/digests.lock.json</code></td>
-          <td>Runtime SHA-256 digests freeze runs when <code>false</code>; <code>true</code> enforces lockfile parity via <code>loopwright digest sync</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Strict / privileged</th>
+					<th>Runtime scope</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>execution.mode</code></td>
+					<td><code>'strict'</code></td>
+					<td><code>'strict'</code> or <code>'privileged'</code>; <code>privileged</code> sets first four capabilities <code>true</code></td>
+			</tr>
+			<tr>
+					<td><code>capabilities.allowHostEnv</code></td>
+					<td><code>false</code> / <code>true</code></td>
+					<td>Inherits host env for <code>preflight</code> and <code>command.v1</code> while stripping Loopwright/provider/GitHub secrets</td>
+			</tr>
+			<tr>
+					<td><code>capabilities.allowHostPath</code></td>
+					<td><code>false</code> / <code>true</code></td>
+					<td>Inherits host <code>PATH</code> for <code>preflight</code> and <code>command.v1</code> checks</td>
+			</tr>
+			<tr>
+					<td><code>capabilities.mountReadOnlyGit</code></td>
+					<td><code>false</code> / <code>true</code></td>
+					<td>Stages sanitized <code>.git</code> skeleton (<code>hooksPath=/dev/null</code>, config stripped) plus <code>--ro-bind</code> or read-only <code>1 MiB</code> streamed <code>.git/objects</code> for <code>command.v1</code></td>
+			</tr>
+			<tr>
+					<td><code>capabilities.allowCheckNetwork</code></td>
+					<td><code>false</code> / <code>true</code></td>
+					<td>Grants outbound network for <code>command.v1</code> checks; avoids nested macOS Seatbelt <code>EPERM</code> when checks run inner sandboxes</td>
+			</tr>
+			<tr>
+					<td><code>capabilities.allowWorkflowWrites</code></td>
+					<td><code>false</code> / <code>false</code></td>
+					<td>Dual-key unlock permitting agent edits under <code>.github/workflows/**</code> on GitHub policy profile runs</td>
+			</tr>
+			<tr>
+					<td><code>capabilities.allowAgentNetwork</code></td>
+					<td><code>false</code> / <code>false</code></td>
+					<td>Governs <code>resolveEffectiveTaskpackSandboxPolicy</code> / <code>executeSandboxedCommand</code>; turnkey <code>agent-pi</code> <code>bash</code> stays offline-isolated</td>
+			</tr>
+			<tr>
+					<td><code>digests.pinDigests</code> / <code>lockfile</code></td>
+					<td><code>false</code> / <code>&lt;controlRoot&gt;/digests.lock.json</code></td>
+					<td>Runtime SHA-256 digests freeze runs when <code>false</code>; <code>true</code> enforces lockfile parity via <code>loopwright digest sync</code></td>
+			</tr>
+	</tbody>
 </table>
 <ul>
 <li><strong><code>spec.vars</code> AST interpolation</strong>: Declare <code>0..64</code> static non-secret strings (<code>[A-Z][A-Z0-9_]*</code>, <code>&lt;= 512</code> chars). Post-parse single-pass interpolation replaces <code>${VAR}</code> only in <code>goal.*</code>, <code>publication.titleTemplate</code>/<code>bodyTemplate</code>, <code>roles[].prompt</code>, <code>preflight.env[]</code>, and <code>localChecks[].parameters</code> (<code>args[]</code>, <code>env</code>, <code>startMarker</code>, <code>endMarker</code>, <code>allowedPointers[]</code>). Undeclared or secret <code>${...}</code> expressions refuse with <code>TASKPACK_UNTRUSTED_INTERPOLATION</code>.</li>
@@ -672,64 +672,64 @@
 </ul>
 <h2 id="scope-and-proposal">Scope and proposal</h2>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Required</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>apiVersion</code> / <code>kind</code></td>
-          <td>Yes</td>
-          <td><code>'loopwright.dev/v1alpha1'</code> / <code>'Taskpack'</code></td>
-          <td>Schema version and manifest kind (<code>&lt;= 64 KiB</code>)</td>
-      </tr>
-      <tr>
-          <td><code>metadata.name</code></td>
-          <td>Yes</td>
-          <td>Slug (<code>1..64</code> chars)</td>
-          <td>Lowercase identifier (<code>[a-z][a-z0-9._-]*</code>)</td>
-      </tr>
-      <tr>
-          <td><code>spec.goal.candidate</code> / <code>noChange</code></td>
-          <td>Yes</td>
-          <td>Strings (<code>1..1024</code> chars)</td>
-          <td>Role objectives for candidate and <code>no_change</code> runs</td>
-      </tr>
-      <tr>
-          <td><code>spec.scope.writable</code> / <code>protected</code></td>
-          <td>No</td>
-          <td>String lists (<code>1..128</code> / <code>0..128</code>)</td>
-          <td>Explicit <code>/**</code> directories, exact files, or single-segment <code>*</code>/<code>?</code> globs</td>
-      </tr>
-      <tr>
-          <td><code>spec.instructions</code> / <code>skills</code></td>
-          <td>No</td>
-          <td>Entry or list (<code>1..16</code> entries)</td>
-          <td>Protected UTF-8 files as paths or <code>{ path, when }</code> rules (<code>&lt;= 256 KiB</code> total)</td>
-      </tr>
-      <tr>
-          <td><code>spec.target.matrix</code></td>
-          <td>No</td>
-          <td><code>null</code> or <code>1..64</code> cells</td>
-          <td><code>{ id, platform, variant, hardware? }</code>; <code>hardware</code> adds <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount?</code>, <code>driverConstraint?</code>, <code>topology?</code></td>
-      </tr>
-      <tr>
-          <td><code>spec.proposal</code></td>
-          <td>No</td>
-          <td><code>{ path, requiredFields, schemaVersion }</code></td>
-          <td>Optional writable <code>.yaml</code>/<code>.yml</code>/<code>.json</code> proposal ledger</td>
-      </tr>
-      <tr>
-          <td><code>spec.submission</code></td>
-          <td>No</td>
-          <td><code>{ path, required? }</code></td>
-          <td>Optional writable <code>.json</code> agent deliverable path</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>apiVersion</code> / <code>kind</code></td>
+					<td>Yes</td>
+					<td><code>'loopwright.dev/v1alpha1'</code> / <code>'Taskpack'</code></td>
+					<td>Schema version and manifest kind (<code>&lt;= 64 KiB</code>)</td>
+			</tr>
+			<tr>
+					<td><code>metadata.name</code></td>
+					<td>Yes</td>
+					<td>Slug (<code>1..64</code> chars)</td>
+					<td>Lowercase identifier (<code>[a-z][a-z0-9._-]*</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.goal.candidate</code> / <code>noChange</code></td>
+					<td>Yes</td>
+					<td>Strings (<code>1..1024</code> chars)</td>
+					<td>Role objectives for candidate and <code>no_change</code> runs</td>
+			</tr>
+			<tr>
+					<td><code>spec.scope.writable</code> / <code>protected</code></td>
+					<td>No</td>
+					<td>String lists (<code>1..128</code> / <code>0..128</code>)</td>
+					<td>Explicit <code>/**</code> directories, exact files, or single-segment <code>*</code>/<code>?</code> globs</td>
+			</tr>
+			<tr>
+					<td><code>spec.instructions</code> / <code>skills</code></td>
+					<td>No</td>
+					<td>Entry or list (<code>1..16</code> entries)</td>
+					<td>Protected UTF-8 files as paths or <code>{ path, when }</code> rules (<code>&lt;= 256 KiB</code> total)</td>
+			</tr>
+			<tr>
+					<td><code>spec.target.matrix</code></td>
+					<td>No</td>
+					<td><code>null</code> or <code>1..64</code> cells</td>
+					<td><code>{ id, platform, variant, hardware? }</code>; <code>hardware</code> adds <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount?</code>, <code>driverConstraint?</code>, <code>topology?</code></td>
+			</tr>
+			<tr>
+					<td><code>spec.proposal</code></td>
+					<td>No</td>
+					<td><code>{ path, requiredFields, schemaVersion }</code></td>
+					<td>Optional writable <code>.yaml</code>/<code>.yml</code>/<code>.json</code> proposal ledger</td>
+			</tr>
+			<tr>
+					<td><code>spec.submission</code></td>
+					<td>No</td>
+					<td><code>{ path, required? }</code></td>
+					<td>Optional writable <code>.json</code> agent deliverable path</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="scope-and-conditional-rules">Scope and conditional rules</h3>
 <ul>
@@ -747,35 +747,35 @@
 </ul>
 <h3 id="upstream-kinds">Upstream kinds</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Field or value</th>
-          <th>Type or behavior</th>
-          <th>Constraint or default</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>upstreams[].kind</code></td>
-          <td><code>'github-release'</code>, <code>'git-tag'</code>, <code>'git-commit'</code>, <code>'http-json'</code>, <code>'custom-table'</code></td>
-          <td><code>watchedPaths</code> (<code>0..64</code> paths) wired into intake context; <code>allowPrerelease</code> optional</td>
-      </tr>
-      <tr>
-          <td><code>versionPath</code> / <code>monotonicSemver</code></td>
-          <td>Dot/bracket selector and downgrade guard (<code>http-json</code> only)</td>
-          <td><code>monotonicSemver</code> defaults <code>true</code>; marks downgrades <code>'held_back'</code></td>
-      </tr>
-      <tr>
-          <td><code>upstreamGroups[]</code></td>
-          <td><code>{ id, policy: 'lockstep' | 'independent', members: [...] }</code></td>
-          <td>Under <code>'lockstep'</code>, version mismatch or unavailability marks the whole group <code>'held_back'</code> atomically</td>
-      </tr>
-      <tr>
-          <td><code>'held_back'</code> status</td>
-          <td><code>UpstreamAcquisitionStatus</code> value alongside <code>available</code>, <code>up_to_date</code>, <code>blocked</code>, <code>failed</code></td>
-          <td>Allows sibling <code>available</code> upstreams to proceed while keeping <code>currentVersion</code> in memory</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field or value</th>
+					<th>Type or behavior</th>
+					<th>Constraint or default</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>upstreams[].kind</code></td>
+					<td><code>'github-release'</code>, <code>'git-tag'</code>, <code>'git-commit'</code>, <code>'http-json'</code>, <code>'custom-table'</code></td>
+					<td><code>watchedPaths</code> (<code>0..64</code> paths) wired into intake context; <code>allowPrerelease</code> optional</td>
+			</tr>
+			<tr>
+					<td><code>versionPath</code> / <code>monotonicSemver</code></td>
+					<td>Dot/bracket selector and downgrade guard (<code>http-json</code> only)</td>
+					<td><code>monotonicSemver</code> defaults <code>true</code>; marks downgrades <code>'held_back'</code></td>
+			</tr>
+			<tr>
+					<td><code>upstreamGroups[]</code></td>
+					<td><code>{ id, policy: 'lockstep' | 'independent', members: [...] }</code></td>
+					<td>Under <code>'lockstep'</code>, version mismatch or unavailability marks the whole group <code>'held_back'</code> atomically</td>
+			</tr>
+			<tr>
+					<td><code>'held_back'</code> status</td>
+					<td><code>UpstreamAcquisitionStatus</code> value alongside <code>available</code>, <code>up_to_date</code>, <code>blocked</code>, <code>failed</code></td>
+					<td>Allows sibling <code>available</code> upstreams to proceed while keeping <code>currentVersion</code> in memory</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="roles-and-steps">Roles and steps</h2>
 <p><code>spec.roles</code> declares <code>1..16</code> roles (<code>id</code>, <code>provider</code>, <code>model</code>, <code>purpose: task | review</code>, <code>thinking</code>, <code>tools</code>: <code>read | write | edit | bash | delete</code>, <code>dependsOn</code>, per-role <code>instructions</code>, <code>skills</code>, <code>handoffs</code>, <code>prompt</code>, <code>mcpServers</code>, <code>models</code>). Review roles default <code>tools</code> to <code>['read']</code> and <code>mcpServers</code> to <code>[]</code>.</p>
@@ -785,35 +785,35 @@
 <h3 id="model-fields">Model fields</h3>
 <p><code>spec.models</code> (<code>1..8</code> items; defaults <code>zai</code> / <code>glm-5.3</code> / <code>high</code>) accepts token-authenticated Pi HTTP providers and custom <code>baseUrl</code> gateways (<code>allow-custom-base-url: 'true'</code>); interactive OAuth/CLI providers fail closed (<code>PROVIDER_OAUTH_UNSUPPORTED</code>).</p>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Type and bounds</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>models[].provider</code> / <code>id</code></td>
-          <td>Slug (<code>1..64</code>) / ID (<code>1..128</code>)</td>
-          <td>Token-based Pi provider or custom provider ID and model identifier</td>
-      </tr>
-      <tr>
-          <td><code>models[].thinking</code> / <code>api</code></td>
-          <td><code>'off'..'max'</code> / wire API</td>
-          <td>Reasoning effort and wire dialect (<code>anthropic-messages</code>, <code>openai-completions</code>, <code>openai-responses</code>)</td>
-      </tr>
-      <tr>
-          <td><code>models[].apiKeyEnv</code> / <code>baseUrl</code></td>
-          <td>Env var name / <code>https://</code> URL</td>
-          <td>Host token env var (<code>[A-Z][A-Z0-9_]*</code>) and optional custom gateway URL</td>
-      </tr>
-      <tr>
-          <td><code>models[].cost</code> / <code>compat</code></td>
-          <td><code>{ input, output }</code> / dialect flags</td>
-          <td>Optional USD per million tokens and Pi <code>models.json</code> compatibility options</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Type and bounds</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>models[].provider</code> / <code>id</code></td>
+					<td>Slug (<code>1..64</code>) / ID (<code>1..128</code>)</td>
+					<td>Token-based Pi provider or custom provider ID and model identifier</td>
+			</tr>
+			<tr>
+					<td><code>models[].thinking</code> / <code>api</code></td>
+					<td><code>'off'..'max'</code> / wire API</td>
+					<td>Reasoning effort and wire dialect (<code>anthropic-messages</code>, <code>openai-completions</code>, <code>openai-responses</code>)</td>
+			</tr>
+			<tr>
+					<td><code>models[].apiKeyEnv</code> / <code>baseUrl</code></td>
+					<td>Env var name / <code>https://</code> URL</td>
+					<td>Host token env var (<code>[A-Z][A-Z0-9_]*</code>) and optional custom gateway URL</td>
+			</tr>
+			<tr>
+					<td><code>models[].cost</code> / <code>compat</code></td>
+					<td><code>{ input, output }</code> / dialect flags</td>
+					<td>Optional USD per million tokens and Pi <code>models.json</code> compatibility options</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="mcp-and-limits">MCP and limits</h3>
 <p><code>spec.mcp.servers</code> (<code>0..16</code> items) supports <code>stdio</code> (<code>command</code>, <code>args</code>, <code>env</code>, <code>envFrom</code>, <code>readOnly</code>, <code>timeoutSeconds: 1..600</code>) and <code>http</code> (<code>url</code>, <code>headers</code>, <code>headersFrom</code>, <code>bearerTokenEnv</code>, <code>includeTools</code>). OAuth MCP configs fail closed (<code>MCP_OAUTH_UNSUPPORTED</code>).</p>
@@ -826,40 +826,40 @@
 <p><code>spec.verification.localChecks</code> (<code>0..32</code> items) and <code>externalGates</code> (<code>0..32</code> items) evaluate candidate artifacts and scripts inside isolated verifiers.</p>
 <h3 id="local-implementations">Local implementations</h3>
 <table>
-  <thead>
-      <tr>
-          <th>Implementation</th>
-          <th>Key parameters</th>
-          <th>Behavior</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>json-artifact.v1</code></td>
-          <td>Scalar expectations (binds <code>spec.proposal</code>)</td>
-          <td>Validates JSON/YAML keys and scalar equality</td>
-      </tr>
-      <tr>
-          <td><code>json-keys-guard.v1</code></td>
-          <td><code>path</code>, <code>allowedPointers</code> (<code>/json/pointer</code>)</td>
-          <td>Fails if any JSON key outside <code>allowedPointers</code> changed vs baseline</td>
-      </tr>
-      <tr>
-          <td><code>line-section-guard.v1</code></td>
-          <td><code>path</code>, <code>startMarker</code>, <code>endMarker</code></td>
-          <td>Fails if any line outside delimited marker sections changed vs baseline</td>
-      </tr>
-      <tr>
-          <td><code>scope.v1</code> / <code>no-change.v1</code></td>
-          <td><code>checkId</code> (plus implicit guards)</td>
-          <td>Verifies writable/protected scope or untouched tree parity</td>
-      </tr>
-      <tr>
-          <td><code>command.v1</code></td>
-          <td><code>script</code>, <code>args</code>, <code>env</code>, <code>toolchainPaths</code>, <code>mountReadOnlyGit</code>, <code>preserveRepoDirName</code>, <code>mounts</code></td>
-          <td>Mounts the script&rsquo;s parent directory read-only (whole-tree SHA-256 digest so <code>./lib.sh</code> works)</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Implementation</th>
+					<th>Key parameters</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>json-artifact.v1</code></td>
+					<td>Scalar expectations (binds <code>spec.proposal</code>)</td>
+					<td>Validates JSON/YAML keys and scalar equality</td>
+			</tr>
+			<tr>
+					<td><code>json-keys-guard.v1</code></td>
+					<td><code>path</code>, <code>allowedPointers</code> (<code>/json/pointer</code>)</td>
+					<td>Fails if any JSON key outside <code>allowedPointers</code> changed vs baseline</td>
+			</tr>
+			<tr>
+					<td><code>line-section-guard.v1</code></td>
+					<td><code>path</code>, <code>startMarker</code>, <code>endMarker</code></td>
+					<td>Fails if any line outside delimited marker sections changed vs baseline</td>
+			</tr>
+			<tr>
+					<td><code>scope.v1</code> / <code>no-change.v1</code></td>
+					<td><code>checkId</code> (plus implicit guards)</td>
+					<td>Verifies writable/protected scope or untouched tree parity</td>
+			</tr>
+			<tr>
+					<td><code>command.v1</code></td>
+					<td><code>script</code>, <code>args</code>, <code>env</code>, <code>toolchainPaths</code>, <code>mountReadOnlyGit</code>, <code>preserveRepoDirName</code>, <code>mounts</code></td>
+					<td>Mounts the script&rsquo;s parent directory read-only (whole-tree SHA-256 digest so <code>./lib.sh</code> works)</td>
+			</tr>
+	</tbody>
 </table>
 <h3 id="command-parameters">Command parameters</h3>
 <ul>
@@ -872,62 +872,62 @@
 <h2 id="publication-and-triggers">Publication and triggers</h2>
 <p><code>spec.publication</code>, <code>spec.memory</code>, and <code>spec.triggers</code> are optional in <code>'local'</code> mode (<code>publication</code> defaults to <code>{ mode: 'disabled' }</code>; <code>memory</code> defaults to <code>{ directory: '&lt;controlRoot&gt;/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }</code>). GitHub entrypoints enforce <code>spec.triggers</code> before preflight and require PR fields when <code>publication.mode</code> is <code>'pull_request'</code>. Memory finalization projects <code>targetMatrix</code> cells to <code>{ id, platform, variant }</code> while <code>TaskContract</code> keeps <code>hardware</code>.</p>
 <table>
-  <thead>
-      <tr>
-          <th>Field path</th>
-          <th>Type and values</th>
-          <th>Meaning</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>publication.mode</code> / <code>targetBranch</code></td>
-          <td><code>'pull_request' | 'disabled'</code> / branch</td>
-          <td>PR creation or local settlement (optional when <code>disabled</code>)</td>
-      </tr>
-      <tr>
-          <td><code>publication.headBranchPrefix</code> / <code>titleTemplate</code></td>
-          <td>Prefix (<code>1..64</code>) / string (<code>1..256</code>)</td>
-          <td>Managed branch prefix and PR title (optional when <code>disabled</code>)</td>
-      </tr>
-      <tr>
-          <td><code>memory.directory</code> / <code>apply</code></td>
-          <td><code>&lt;controlRoot&gt;/memory</code> / <code>'separate-pull-request' | 'inline-with-candidate' | 'local-only' | 'disabled'</code></td>
-          <td>Protected CAS memory path and mode (<code>ttlDays</code> <code>15</code>, <code>maxEntries</code> <code>128</code>, <code>maxPromptEntries</code> <code>32</code>)</td>
-      </tr>
-      <tr>
-          <td><code>memory.onNoModelBudget</code></td>
-          <td><code>'deterministic-observations-only' | 'skip'</code></td>
-          <td>Behavior without model budget (<code>checkCodeFingerprint</code>, <code>checkUpstreamVersions</code>, <code>publishOnFailure</code>, <code>skipCi</code>)</td>
-      </tr>
-      <tr>
-          <td><code>triggers.schedule</code> / <code>workflowDispatch</code> / <code>releasePublished</code></td>
-          <td>Booleans</td>
-          <td>Permitted GitHub event triggers</td>
-      </tr>
-      <tr>
-          <td><code>triggers.commentCommands</code> / <code>commentPrefixes</code></td>
-          <td><code>['retry', 'revise', 'status']</code> / <code>['/loopwright']</code></td>
-          <td>Authorized PR slash commands and command prefixes</td>
-      </tr>
-      <tr>
-          <td><code>spec.sandbox</code> / <code>spec.decisions</code> / <code>spec.output</code></td>
-          <td>Objects</td>
-          <td>Isolation (<a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Type and values</th>
+					<th>Meaning</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>publication.mode</code> / <code>targetBranch</code></td>
+					<td><code>'pull_request' | 'disabled'</code> / branch</td>
+					<td>PR creation or local settlement (optional when <code>disabled</code>)</td>
+			</tr>
+			<tr>
+					<td><code>publication.headBranchPrefix</code> / <code>titleTemplate</code></td>
+					<td>Prefix (<code>1..64</code>) / string (<code>1..256</code>)</td>
+					<td>Managed branch prefix and PR title (optional when <code>disabled</code>)</td>
+			</tr>
+			<tr>
+					<td><code>memory.directory</code> / <code>apply</code></td>
+					<td><code>&lt;controlRoot&gt;/memory</code> / <code>'separate-pull-request' | 'inline-with-candidate' | 'local-only' | 'disabled'</code></td>
+					<td>Protected CAS memory path and mode (<code>ttlDays</code> <code>15</code>, <code>maxEntries</code> <code>128</code>, <code>maxPromptEntries</code> <code>32</code>)</td>
+			</tr>
+			<tr>
+					<td><code>memory.onNoModelBudget</code></td>
+					<td><code>'deterministic-observations-only' | 'skip'</code></td>
+					<td>Behavior without model budget (<code>checkCodeFingerprint</code>, <code>checkUpstreamVersions</code>, <code>publishOnFailure</code>, <code>skipCi</code>)</td>
+			</tr>
+			<tr>
+					<td><code>triggers.schedule</code> / <code>workflowDispatch</code> / <code>releasePublished</code></td>
+					<td>Booleans</td>
+					<td>Permitted GitHub event triggers</td>
+			</tr>
+			<tr>
+					<td><code>triggers.commentCommands</code> / <code>commentPrefixes</code></td>
+					<td><code>['retry', 'revise', 'status']</code> / <code>['/loopwright']</code></td>
+					<td>Authorized PR slash commands and command prefixes</td>
+			</tr>
+			<tr>
+					<td><code>spec.sandbox</code> / <code>spec.decisions</code> / <code>spec.output</code></td>
+					<td>Objects</td>
+					<td>Isolation (<a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
 ), triage (<a href="/loopwright/main/docs/configuration/decision-routing/">Decision Routing</a>
 ), and outputs (<code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, <code>text</code>)</td>
-      </tr>
-  </tbody>
+			</tr>
+	</tbody>
 </table>
 <h2 id="taskpacksuite">TaskpackSuite</h2>
 <p><code>TaskpackSuite</code> (default <code>.loopwright/suite.yaml</code>, <code>&lt;= 64 KiB</code>) coordinates <code>1..32</code> domain taskpacks and <code>0..16</code> acyclic promotion stages without storing suite state in Git.</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskpackSuite</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TaskpackSuite</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">repo-automation</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">domains</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/docs.taskpack.yaml</span><span class="w">
@@ -948,7 +948,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">docs-release</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l">octocat/engine</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">versionFrom</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">domain: docs, path: docs/version.json, jsonPointer</span><span class="p">:</span><span class="w"> </span><span class="l">/version }</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">versionFrom</span><span class="p">:</span><span class="w"> </span>{<span class="w"> </span><span class="nt">domain</span><span class="p">:</span><span class="w"> </span><span class="nt">docs, path</span><span class="p">:</span><span class="w"> </span><span class="nt">docs/version.json, jsonPointer</span><span class="p">:</span><span class="w"> </span><span class="l">/version }</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
 </div>
 <ul>
 <li><strong>Suite protection</strong>: Action (<code>suite-path</code>) and App (<code>suitePath</code>) domain runs enforce the suite-wide protected union across <code>.loopwright/suite.yaml</code> and peer control paths (<code>&lt;= 128</code> patterns); gate standalone CLI <code>--taskpack</code> runs with <code>suite check</code>.</li>

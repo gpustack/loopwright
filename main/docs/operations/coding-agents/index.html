@@ -21,8 +21,8 @@
   
   
   
-  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/main/images/logo_hu_ef169d6c363295df.3b907f6ddb897e188ca8c4f5e172ccdde55f4d2c25ccc092666ccd2e59111856.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/main/images/logo_hu_90b015dd418204d9.f7018fba3843b4b28ddbafa2b3cd566eb4bd2c3636a8667504765088a2795aca.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/loopwright/main/images/logo_hu_aebf313dad664680.8dfcd6a6909d121a4f4e9cf40b298600526e7e60b350f40eb0d9443367dc9c57.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/loopwright/main/images/logo_hu_26148784bb4e8d8b.20009204f8ce0c077de9b006b9be7537900b67ab2b44849722ca06e453bf5e17.png">
   <meta name="robots" content="noindex, follow">
   <title>Coding Agents · Loopwright</title>
   
@@ -36,7 +36,7 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     
-    <a class="brand" href="/loopwright/main/" aria-label="Loopwright home"><img src="/loopwright/main/images/logo_hu_72b2e0d8fb22ffa2.7aa7cfbf568b33218252ff52c4e3788a7be1904dd5fe995594694f6baba85490.png" width="30" height="30" alt=""><span>Loopwright</span></a>
+    <a class="brand" href="/loopwright/main/" aria-label="Loopwright home"><img src="/loopwright/main/images/logo_hu_3ef7981c6e36e22.3a67bde1a9653790083e7482a4a417861ea9497865dd094c4e16ab87c63ec05b.png" width="30" height="30" alt=""><span>Loopwright</span></a>
     <nav class="top-links" aria-label="Main navigation">
       <a class="top-github-link" href="https://github.com/gpustack/loopwright" aria-label="GitHub repository">
         <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
@@ -377,25 +377,25 @@
 <p>Delegated stepping turns Loopwright into a pull-based local coroutine (<code>loopwright step next | submit | cancel</code>). Your host coding agent supplies model execution over its existing OAuth or subscription session, while Loopwright enforces SQLite lease fencing, workspace confinement, and independent check verification.</p>
 <p>Zero Loopwright provider credentials, GitHub App keys, or workflow secrets are required on disk or in environment variables. Both operating modes share identical <code>StepYield</code> envelopes and verification gates:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Operating mode</th>
-          <th>Entry flags</th>
-          <th>Role compilation</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Declarative Taskpack</td>
-          <td><code>--taskpack .loopwright/taskpack.yaml</code></td>
-          <td>Compiles manifest roles as <code>adapter: delegated</code> with <code>publication.mode: disabled</code></td>
-      </tr>
-      <tr>
-          <td>Managed Controller</td>
-          <td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
-          <td>Uses <code>adapter: delegated</code> profiles; set <code>publication.mode: disabled</code> for local-only runs</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Operating mode</th>
+					<th>Entry flags</th>
+					<th>Role compilation</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Declarative Taskpack</td>
+					<td><code>--taskpack .loopwright/taskpack.yaml</code></td>
+					<td>Compiles manifest roles as <code>adapter: delegated</code> with <code>publication.mode: disabled</code></td>
+			</tr>
+			<tr>
+					<td>Managed Controller</td>
+					<td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
+					<td>Uses <code>adapter: delegated</code> profiles; set <code>publication.mode: disabled</code> for local-only runs</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="skill-and-prompt">Skill and prompt</h2>
 <h3 id="portable-skill">Portable skill</h3>
@@ -419,11 +419,11 @@
 </span></span><span class="line"><span class="cl"><span class="nv">RUN_ID</span><span class="o">=</span><span class="s2">&#34;local-sync-01&#34;</span>
 </span></span><span class="line"><span class="cl">
 </span></span><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .loopwright/taskpack.yaml <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo . <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl">  --taskpack .loopwright/taskpack.yaml <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --repo . <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <h3 id="host-preflight">Host preflight</h3>
 <p><code>step next --taskpack</code> runs <code>spec.preflight</code> natively without manual staging scripts or <code>--mode auto</code>, and accepts <code>--baseline-alignment</code> and <code>--source-revision</code>. Pass <code>--allow-privileged</code> when the taskpack declares privileged preflight or execution capabilities:</p>
@@ -432,101 +432,101 @@
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REPO</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">&#34;</span>
 </span></span><span class="line"><span class="cl">
 </span></span><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .auto-sync/taskpack.yaml <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo <span class="s2">&#34;</span><span class="nv">$REPO</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --allow-privileged <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl">  --taskpack .auto-sync/taskpack.yaml <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --repo <span class="s2">&#34;</span><span class="nv">$REPO</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --allow-privileged <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <p>Or start a Managed Controller run, pinning <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> (<code>--mode candidate|no-change</code> is optional):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/registry.yaml&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --registry-sha256 &lt;hex&gt; <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo . <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl">  --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/registry.yaml&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --registry-sha256 &lt;hex&gt; <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --repo . <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <p>With <code>--json</code>, stdout emits a versioned NDJSON <code>Envelope</code> (<code>{ version: 1, kind, sequence, runId, data }</code>). When <code>kind</code> is <code>&quot;step&quot;</code>, <code>data</code> is a <code>StepYield</code> assignment:</p>
 <table>
-  <thead>
-      <tr>
-          <th>Yield field</th>
-          <th>Type</th>
-          <th>Contract</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>status</code></td>
-          <td><code>&quot;awaiting_role&quot;</code></td>
-          <td>Run is parked at <code>role_pre</code> awaiting external role execution</td>
-      </tr>
-      <tr>
-          <td><code>attemptId</code>, <code>stepId</code></td>
-          <td><code>string</code></td>
-          <td>Monotonic attempt identifier and compiled DAG step identifier</td>
-      </tr>
-      <tr>
-          <td><code>roleId</code>, <code>purpose</code></td>
-          <td><code>string</code></td>
-          <td>Role identifier and runtime purpose (<code>&quot;task&quot;</code> or <code>&quot;reviewer&quot;</code>)</td>
-      </tr>
-      <tr>
-          <td><code>repair</code></td>
-          <td><code>string</code></td>
-          <td>Repair turn kind (<code>&quot;none&quot;</code>, <code>&quot;format&quot;</code>, or <code>&quot;implementation&quot;</code>)</td>
-      </tr>
-      <tr>
-          <td><code>selection</code></td>
-          <td><code>object</code></td>
-          <td>Resolved <code>{ provider, model, thinking }</code> target for role dispatch</td>
-      </tr>
-      <tr>
-          <td><code>allowedTools</code></td>
-          <td><code>string[]</code></td>
-          <td>Permitted tool names (<code>[]</code> when <code>repair</code> equals <code>&quot;format&quot;</code>)</td>
-      </tr>
-      <tr>
-          <td><code>scope</code></td>
-          <td><code>object</code></td>
-          <td><code>{ writable, protected }</code> path rules enforced during capture</td>
-      </tr>
-      <tr>
-          <td><code>candidateDir</code></td>
-          <td><code>string</code></td>
-          <td>Staged working tree (<code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;/&lt;attemptId&gt;/candidate</code>)</td>
-      </tr>
-      <tr>
-          <td><code>contextFiles</code></td>
-          <td><code>string[]</code></td>
-          <td>Read-only (<code>0o400</code>) context artifacts under <code>.../context</code></td>
-      </tr>
-      <tr>
-          <td><code>prompt</code></td>
-          <td><code>string</code></td>
-          <td>Effective task, review, or format-repair prompt text</td>
-      </tr>
-      <tr>
-          <td><code>submissionMode</code></td>
-          <td><code>&quot;artifact_or_assistant&quot;</code></td>
-          <td>Accepts <code>--submission-file</code> or structured <code>--status</code> metadata</td>
-      </tr>
-      <tr>
-          <td><code>submissionPath</code></td>
-          <td><code>string | null</code></td>
-          <td>Expected relative artifact path inside <code>candidateDir</code> when configured</td>
-      </tr>
-      <tr>
-          <td><code>leaseToken</code></td>
-          <td><code>string</code></td>
-          <td>Single-use 64-character lowercase hex token required on submit</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Yield field</th>
+					<th>Type</th>
+					<th>Contract</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>status</code></td>
+					<td><code>&quot;awaiting_role&quot;</code></td>
+					<td>Run is parked at <code>role_pre</code> awaiting external role execution</td>
+			</tr>
+			<tr>
+					<td><code>attemptId</code>, <code>stepId</code></td>
+					<td><code>string</code></td>
+					<td>Monotonic attempt identifier and compiled DAG step identifier</td>
+			</tr>
+			<tr>
+					<td><code>roleId</code>, <code>purpose</code></td>
+					<td><code>string</code></td>
+					<td>Role identifier and runtime purpose (<code>&quot;task&quot;</code> or <code>&quot;reviewer&quot;</code>)</td>
+			</tr>
+			<tr>
+					<td><code>repair</code></td>
+					<td><code>string</code></td>
+					<td>Repair turn kind (<code>&quot;none&quot;</code>, <code>&quot;format&quot;</code>, or <code>&quot;implementation&quot;</code>)</td>
+			</tr>
+			<tr>
+					<td><code>selection</code></td>
+					<td><code>object</code></td>
+					<td>Resolved <code>{ provider, model, thinking }</code> target for role dispatch</td>
+			</tr>
+			<tr>
+					<td><code>allowedTools</code></td>
+					<td><code>string[]</code></td>
+					<td>Permitted tool names (<code>[]</code> when <code>repair</code> equals <code>&quot;format&quot;</code>)</td>
+			</tr>
+			<tr>
+					<td><code>scope</code></td>
+					<td><code>object</code></td>
+					<td><code>{ writable, protected }</code> path rules enforced during capture</td>
+			</tr>
+			<tr>
+					<td><code>candidateDir</code></td>
+					<td><code>string</code></td>
+					<td>Staged working tree (<code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;/&lt;attemptId&gt;/candidate</code>)</td>
+			</tr>
+			<tr>
+					<td><code>contextFiles</code></td>
+					<td><code>string[]</code></td>
+					<td>Read-only (<code>0o400</code>) context artifacts under <code>.../context</code></td>
+			</tr>
+			<tr>
+					<td><code>prompt</code></td>
+					<td><code>string</code></td>
+					<td>Effective task, review, or format-repair prompt text</td>
+			</tr>
+			<tr>
+					<td><code>submissionMode</code></td>
+					<td><code>&quot;artifact_or_assistant&quot;</code></td>
+					<td>Accepts <code>--submission-file</code> or structured <code>--status</code> metadata</td>
+			</tr>
+			<tr>
+					<td><code>submissionPath</code></td>
+					<td><code>string | null</code></td>
+					<td>Expected relative artifact path inside <code>candidateDir</code> when configured</td>
+			</tr>
+			<tr>
+					<td><code>leaseToken</code></td>
+					<td><code>string</code></td>
+					<td>Single-use 64-character lowercase hex token required on submit</td>
+			</tr>
+	</tbody>
 </table>
 <h2 id="step-2-execute-role">Step 2: Execute role</h2>
 <p>Execute the yielded prompt inside <code>candidateDir</code> while obeying every confinement invariant:</p>
@@ -542,39 +542,39 @@
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step submit <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --lease <span class="s2">&#34;</span><span class="nv">$LEASE_TOKEN</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --status completed <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --lease <span class="s2">&#34;</span><span class="nv">$LEASE_TOKEN</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --status completed <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <p>Pass <code>--submission-file &lt;path&gt;</code> when supplying an external JSON artifact, or set <code>--status</code> (<code>completed</code>, <code>no_change</code>, <code>failed</code>, or <code>blocked</code>) with <code>--reason &quot;&lt;summary&gt;&quot;</code> on non-completed turns. Loopwright captures the overlay, runs independent checks (<code>scope.v1</code>, <code>json-artifact.v1</code>, <code>no-change.v1</code>, and local <code>command.v1</code> hooks), and emits either the next <code>StepYield</code> (<code>kind: &quot;step&quot;</code>) or a terminal <code>result</code> / <code>incident</code> envelope.</p>
 <p>Pre-commit scan failures (symlinks, hardlinks, size ceilings, or read-only invariance violations) release authority without consuming <code>leaseToken</code> or deleting <code>candidateDir</code>, so the agent can fix the workspace and re-submit.</p>
 <table>
-  <thead>
-      <tr>
-          <th>Condition</th>
-          <th>Diagnostic code</th>
-          <th>Exit code</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td>Duplicate <code>step next</code> while parked</td>
-          <td><code>OWNER_BUSY</code></td>
-          <td><code>7</code></td>
-      </tr>
-      <tr>
-          <td>Replay or stale <code>leaseToken</code> after rotation</td>
-          <td><code>AUTHORITY_REFUSED</code></td>
-          <td><code>7</code></td>
-      </tr>
-      <tr>
-          <td>Unattended <code>run</code> or <code>resume</code> on delegated role</td>
-          <td><code>CAPABILITY_UNSUPPORTED</code></td>
-          <td><code>3</code></td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Condition</th>
+					<th>Diagnostic code</th>
+					<th>Exit code</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td>Duplicate <code>step next</code> while parked</td>
+					<td><code>OWNER_BUSY</code></td>
+					<td><code>7</code></td>
+			</tr>
+			<tr>
+					<td>Replay or stale <code>leaseToken</code> after rotation</td>
+					<td><code>AUTHORITY_REFUSED</code></td>
+					<td><code>7</code></td>
+			</tr>
+			<tr>
+					<td>Unattended <code>run</code> or <code>resume</code> on delegated role</td>
+					<td><code>CAPABILITY_UNSUPPORTED</code></td>
+					<td><code>3</code></td>
+			</tr>
+	</tbody>
 </table>
 <p>Recover a lost lease from a crashed worker by rotating the token explicitly (<code>contextFiles</code> reconstruct from CAS for active handoffs), or abort the run cleanly (exit <code>130</code>):</p>
 <div class="code-block">
@@ -589,10 +589,10 @@
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">multi-role-sync</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w"></span><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">goal</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">candidate</span><span class="p">:</span><span class="w"> </span><span class="l">Refresh version manifests from upstream releases and pass every local check.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noChange</span><span class="p">:</span><span class="w"> </span><span class="l">Confirm tracked manifests match upstream releases and settle as no change.</span><span class="w">
@@ -658,13 +658,13 @@
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --taskpack .loopwright/taskpack.yaml <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --repo . <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --role-model <span class="nv">author</span><span class="o">=</span>anthropic/claude-opus-4-6:high <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --role-model <span class="nv">review</span><span class="o">=</span>openai-codex/gpt-5.4:high <span class="se">\
-</span></span></span><span class="line"><span class="cl"><span class="se"></span>  --json</span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl">  --taskpack .loopwright/taskpack.yaml <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --repo . <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --role-model <span class="nv">author</span><span class="o">=</span>anthropic/claude-opus-4-6:high <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --role-model <span class="nv">review</span><span class="o">=</span>openai-codex/gpt-5.4:high <span class="se">\
+</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <h2 id="step-4-apply-overlay">Step 4: Apply overlay</h2>
 <p><code>step next --taskpack</code> sets <code>publication.mode: disabled</code> and pins <code>target.sourceRevision</code> to <code>HEAD</code>&rsquo;s commit OID automatically. For local-only Managed Controller runs, set <code>publication.mode: disabled</code> and pin <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> in <code>controller.yaml</code>. Terminal <code>step submit</code> deletes <code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;</code> (<code>candidateDir</code>) while retaining verified artifacts under <code>&lt;runRoot&gt;/&lt;runId&gt;</code>.</p>
@@ -803,54 +803,54 @@
 <p>Review <code>git status</code> and <code>git diff</code>, run project tests if desired, and commit on your branch.</p>
 <h2 id="exit-codes">Exit codes</h2>
 <table>
-  <thead>
-      <tr>
-          <th>Exit code</th>
-          <th>Outcome</th>
-      </tr>
-  </thead>
-  <tbody>
-      <tr>
-          <td><code>0</code></td>
-          <td><code>step next</code> or <code>step submit</code> yielded <code>awaiting_role</code>, or run settled <code>completed</code> / <code>no_change</code></td>
-      </tr>
-      <tr>
-          <td><code>2</code></td>
-          <td>CLI flag, configuration schema, <code>--run-root</code> overlap, or <code>Taskpack</code> manifest error</td>
-      </tr>
-      <tr>
-          <td><code>3</code></td>
-          <td>Run settled <code>blocked</code>, or unsupported capability (<code>CAPABILITY_UNSUPPORTED</code>)</td>
-      </tr>
-      <tr>
-          <td><code>4</code></td>
-          <td>Verification check or role execution settled <code>failed</code></td>
-      </tr>
-      <tr>
-          <td><code>5</code></td>
-          <td>Allowance settled <code>exhausted</code> (<code>BUDGET_EXHAUSTED</code>, <code>ATTEMPT_LIMIT</code>, <code>REPEAT_FAILURE</code>)</td>
-      </tr>
-      <tr>
-          <td><code>6</code></td>
-          <td>Wall-clock deadline settled <code>expired</code> (<code>DEADLINE</code>)</td>
-      </tr>
-      <tr>
-          <td><code>7</code></td>
-          <td>Lease or recovery conflict (<code>OWNER_BUSY</code>, <code>AUTHORITY_REFUSED</code>, <code>RECOVERY_REQUIRED</code>)</td>
-      </tr>
-      <tr>
-          <td><code>8</code></td>
-          <td>State, artifact (<code>ARTIFACT_INVALID</code>), limit (<code>OUTPUT_LIMIT</code>), or cleanup incident</td>
-      </tr>
-      <tr>
-          <td><code>130</code></td>
-          <td>Run settled <code>cancelled</code> (<code>step cancel</code> or accounted <code>SIGINT</code>)</td>
-      </tr>
-      <tr>
-          <td><code>143</code></td>
-          <td>Accounted <code>SIGTERM</code> termination</td>
-      </tr>
-  </tbody>
+	<thead>
+			<tr>
+					<th>Exit code</th>
+					<th>Outcome</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>0</code></td>
+					<td><code>step next</code> or <code>step submit</code> yielded <code>awaiting_role</code>, or run settled <code>completed</code> / <code>no_change</code></td>
+			</tr>
+			<tr>
+					<td><code>2</code></td>
+					<td>CLI flag, configuration schema, <code>--run-root</code> overlap, or <code>Taskpack</code> manifest error</td>
+			</tr>
+			<tr>
+					<td><code>3</code></td>
+					<td>Run settled <code>blocked</code>, or unsupported capability (<code>CAPABILITY_UNSUPPORTED</code>)</td>
+			</tr>
+			<tr>
+					<td><code>4</code></td>
+					<td>Verification check or role execution settled <code>failed</code></td>
+			</tr>
+			<tr>
+					<td><code>5</code></td>
+					<td>Allowance settled <code>exhausted</code> (<code>BUDGET_EXHAUSTED</code>, <code>ATTEMPT_LIMIT</code>, <code>REPEAT_FAILURE</code>)</td>
+			</tr>
+			<tr>
+					<td><code>6</code></td>
+					<td>Wall-clock deadline settled <code>expired</code> (<code>DEADLINE</code>)</td>
+			</tr>
+			<tr>
+					<td><code>7</code></td>
+					<td>Lease or recovery conflict (<code>OWNER_BUSY</code>, <code>AUTHORITY_REFUSED</code>, <code>RECOVERY_REQUIRED</code>)</td>
+			</tr>
+			<tr>
+					<td><code>8</code></td>
+					<td>State, artifact (<code>ARTIFACT_INVALID</code>), limit (<code>OUTPUT_LIMIT</code>), or cleanup incident</td>
+			</tr>
+			<tr>
+					<td><code>130</code></td>
+					<td>Run settled <code>cancelled</code> (<code>step cancel</code> or accounted <code>SIGINT</code>)</td>
+			</tr>
+			<tr>
+					<td><code>143</code></td>
+					<td>Accounted <code>SIGTERM</code> termination</td>
+			</tr>
+	</tbody>
 </table>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
