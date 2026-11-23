@@ -547,7 +547,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `campaign.ts` orchestrates async multi-island generations over fenced child `LocalRunStore` runs (`<campaignRoot>/runs/<individualId>/`), integrating `@loopwright/decisions` pre-filters, periodic `scratchpad` mounts, graceful `SIGTERM` / `BENCHMARK_PREEMPTED` resume without double-counting `maxEvaluations`, and two-stage `specialist-then-portfolio` dispatch verification on `portfolioHeldOutWorkloadId`; `team-supervisor.ts` triggers `tools: ['read']` supervisor runs only on `stallGenerations` or consecutive `RunEval` `pingPong`/`toolRepeats` pathologies, enforces the fail-closed Archetype Capability Envelope (`TEAM_ENVELOPE_VIOLATION`, `tools <= archetype.tools`, `StepHandoffSelector` relays, `D <= 256` precheck), promotes advancing `'trial'` `team_configs`, and auto-rolls back stalled trials after `trialGenerations`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg evolution --concurrency 1`
 
-- [ ] **T11 · CLI lazy-loaded `loopwright evolve` subcommands, offline parity check, and honest 23-row closure ledger**
+- [x] **T11 · CLI lazy-loaded `loopwright evolve` subcommands, offline parity check, and honest 23-row closure ledger**
       Blocked by: T10
       Owns: `packages/cli/src/**`, `packages/cli/test/arguments.test.ts`, `packages/cli/test/closure-and-failure-matrix.test.ts`, `packages/cli/test/evolve-cli.test.ts`, `packages/taskpack-runner/test/**`
       Gate: review

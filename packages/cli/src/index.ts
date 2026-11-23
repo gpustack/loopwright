@@ -1,6 +1,6 @@
-export { parseArguments, UsageError, type Arguments, type DigestAction, type RunnerAction, type StepAction, type SuiteAction } from './arguments.js';
+export { parseArguments, UsageError, type Arguments, type DigestAction, type EvolveAction, type RunnerAction, type StepAction, type SuiteAction } from './arguments.js';
 export { canonicalPath, initDraft, writeOutput, appendStepSummary } from './draft.js';
-export { encoded, diagnosticExit, executionExit, closureExitCode, hardwareRunnerExitCode, taskpackExitCode, gitHubAppExitCode, main, type Envelope } from './main.js';
+export { encoded, diagnosticExit, executionExit, closureExitCode, evolutionExitCode, hardwareRunnerExitCode, taskpackExitCode, gitHubAppExitCode, main, type Envelope } from './main.js';
 export {
   CLOSURE_CAPABILITY_LEDGER,
   CLOSURE_EVIDENCE_MISSING,

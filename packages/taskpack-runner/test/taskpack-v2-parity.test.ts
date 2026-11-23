@@ -703,4 +703,110 @@ describe('Taskpack 2.0 runner parity alignment', () => {
       (err: unknown) => err instanceof RunnerTaskpackError && err.code === 'CONFIG_INVALID',
     );
   });
+
+  it('compiles and enforces evolve-block-guard.v1 and Stage A static audit targetMatrix fields offline', async () => {
+    const baselineKernel = [
+      '#include <stdint.h>',
+      'static constexpr int ABI_VER = 1;',
+      '// EVOLVE-BLOCK-START: kernel_body',
+      'int kernel_impl() { return 0; }',
+      '// EVOLVE-BLOCK-END: kernel_body',
+      '',
+    ].join('\n');
+    const repo = await initGitRepo({
+      'src/kernel.cu': baselineKernel,
+    });
+    cleanupRoots.push(repo.path);
+
+    await withEnvAndDirs(async paths => {
+      const targetMatrix = [
+        {
+          id: 'cuda-sm90-whole',
+          platform: 'linux/amd64' as const,
+          variant: 'cuda12',
+          hardware: {
+            accelerator: 'sm_90a',
+            isolationMode: 'whole_device' as const,
+            deviceCount: 1,
+            forbiddenSymbolPatterns: ['cublas', 'cudnn'],
+            maxRegisterCount: 64,
+            maxLocalSpillBytes: 0,
+          },
+        },
+      ];
+      const bundle = await compileRunnerTaskpack({
+        mode: 'candidate',
+        repository: 'example-org/runtime-runner',
+        baseRevision: repo.headSha,
+        sourceRevision: repo.headSha,
+        publication: { mode: 'disabled' },
+        proposal: null,
+        scope: { writable: ['src/**'] },
+        targetMatrix,
+        localChecks: [
+          {
+            id: 'evolve-guard',
+            implementation: 'evolve-block-guard.v1',
+            parameters: {
+              files: ['src/kernel.cu'],
+              allowedBlockIds: ['kernel_body'],
+              maxBlockBytes: 4096,
+            },
+          },
+        ],
+      });
+
+      const compiledMatrix = bundle.config.spec.task.spec.target.matrix;
+      assert.ok(compiledMatrix !== null && compiledMatrix !== undefined);
+      assert.deepEqual(compiledMatrix[0]?.hardware?.forbiddenSymbolPatterns, ['cublas', 'cudnn']);
+      assert.equal(compiledMatrix[0]?.hardware?.maxRegisterCount, 64);
+      assert.equal(compiledMatrix[0]?.hardware?.maxLocalSpillBytes, 0);
+
+      const { loaded, plan } = await loadAndCompile(bundle, paths);
+      const guardSlot = plan.verifierSlots.find(s => s.checkId === 'evolve-guard');
+      assert.ok(guardSlot !== undefined);
+      assert.equal(guardSlot.handler.implementation, 'evolve-block-guard.v1');
+
+      // 1. Inside-block edit passes evolve-block-guard.v1
+      const inBlockEdit = baselineKernel.replace('return 0;', 'return 42;');
+      const passExec = await runCycleWithPorts(
+        { configuration: loaded, repository: repo.path, runRoot: paths.runRoot, runId: 'v2-evolve-guard-pass' },
+        {
+          openAdapter: deterministicFakeAdapter({
+            attempts: [{
+              proposal: null,
+              edits: [{ path: 'src/kernel.cu', content: inBlockEdit }],
+              submission: { status: 'completed', reason: null },
+            }],
+          }),
+        },
+      );
+      assert.equal(passExec.ok, true);
+      if (!passExec.ok || passExec.value.kind !== 'result') throw new Error('expected result');
+      assert.equal(passExec.value.result.spec.status, 'completed');
+      const passRow = passExec.value.result.spec.verification.spec.required.find(r => r.checkId === 'evolve-guard');
+      assert.equal(passRow?.status, 'passed');
+
+      // 2. Single-character edit outside EVOLVE-BLOCK markers fails evolve-block-guard.v1
+      const outsideEdit = baselineKernel.replace('ABI_VER = 1;', 'ABI_VER = 2;');
+      const failExec = await runCycleWithPorts(
+        { configuration: loaded, repository: repo.path, runRoot: paths.runRoot, runId: 'v2-evolve-guard-fail' },
+        {
+          openAdapter: deterministicFakeAdapter({
+            attempts: [{
+              proposal: null,
+              edits: [{ path: 'src/kernel.cu', content: outsideEdit }],
+              submission: { status: 'completed', reason: null },
+            }],
+          }),
+        },
+      );
+      assert.equal(failExec.ok, true);
+      if (!failExec.ok || failExec.value.kind !== 'result') throw new Error('expected result');
+      assert.equal(failExec.value.result.spec.status, 'exhausted');
+      const failRow = failExec.value.result.spec.verification.spec.required.find(r => r.checkId === 'evolve-guard');
+      assert.equal(failRow?.status, 'failed');
+      assert.ok((failRow?.findings?.length ?? 0) >= 1);
+    });
+  });
 });

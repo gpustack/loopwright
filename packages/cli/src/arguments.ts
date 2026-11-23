@@ -5,12 +5,14 @@ export type StepAction = 'next' | 'submit' | 'cancel';
 export type DigestAction = 'sync';
 export type SuiteAction = 'check' | 'resolve';
 export type RunnerAction = 'relay' | 'worker';
+export type EvolveAction = 'check' | 'run' | 'resume' | 'status' | 'inspect' | 'export';
 export interface Arguments {
-  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest' | 'suite' | 'runner';
+  readonly command: 'init' | 'check' | 'run' | 'resume' | 'reconcile' | 'status' | 'inspect' | 'closure' | 'app-serve' | 'step' | 'digest' | 'suite' | 'runner' | 'evolve';
   readonly stepAction?: StepAction;
   readonly digestAction?: DigestAction;
   readonly suiteAction?: SuiteAction;
   readonly runnerAction?: RunnerAction;
+  readonly evolveAction?: EvolveAction;
   readonly roleModelOverrides?: readonly RoleModelOverride[];
   readonly values: ReadonlyMap<string, string>;
   readonly flags: ReadonlySet<string>;
@@ -21,7 +23,7 @@ interface CommandRule {
   readonly flags: readonly string[];
   readonly allowRoleModel?: boolean;
 }
-const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner'>, CommandRule> = {
+const commands: Record<Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner' | 'evolve'>, CommandRule> = {
   init: { required: ['directory'], values: ['directory'], flags: ['force', 'json'] },
   check: { required: ['config', 'registry', 'registry-sha256'], values: ['config', 'registry', 'registry-sha256', 'output'], flags: ['json'], allowRoleModel: true },
   run: { required: [], values: ['config', 'registry', 'registry-sha256', 'taskpack', 'mode', 'baseline-alignment', 'source-revision', 'repo', 'run-root', 'run-id', 'output', 'output-format', 'step-summary-file', 'allow-host-mounts'], flags: ['json', 'dry-run', 'allow-privileged', 'allow-workflow-writes'], allowRoleModel: true },
@@ -61,6 +63,38 @@ const runnerRules: Record<RunnerAction, CommandRule> = {
     required: ['config'],
     values: ['config'],
     flags: ['once', 'json'],
+  },
+};
+const evolveRules: Record<EvolveAction, CommandRule> = {
+  check: {
+    required: ['campaign'],
+    values: ['campaign', 'repo'],
+    flags: ['json'],
+  },
+  run: {
+    required: ['campaign'],
+    values: ['campaign', 'state', 'campaign-dir', 'root', 'repo', 'out', 'format'],
+    flags: ['allow-synthetic-probe', 'json'],
+  },
+  resume: {
+    required: [],
+    values: ['campaign', 'campaign-dir', 'root', 'repo', 'out', 'format'],
+    flags: ['allow-synthetic-probe', 'json'],
+  },
+  status: {
+    required: [],
+    values: ['campaign', 'campaign-dir', 'root'],
+    flags: ['json'],
+  },
+  inspect: {
+    required: [],
+    values: ['campaign', 'campaign-dir', 'root', 'island', 'individual'],
+    flags: ['json'],
+  },
+  export: {
+    required: ['out'],
+    values: ['campaign', 'campaign-dir', 'root', 'out', 'format'],
+    flags: ['allow-synthetic-probe', 'overwrite', 'json'],
   },
 };
 const stepRules: Record<StepAction, CommandRule> = {
@@ -274,7 +308,50 @@ export function parseArguments(argv: readonly string[]): Arguments {
     };
   }
 
-  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner'>;
+  if (rawCommand === 'evolve') {
+    const rawAction = argv[1];
+    if (
+      rawAction !== 'check'
+      && rawAction !== 'run'
+      && rawAction !== 'resume'
+      && rawAction !== 'status'
+      && rawAction !== 'inspect'
+      && rawAction !== 'export'
+    ) {
+      throw new UsageError();
+    }
+    const rule = evolveRules[rawAction];
+    parseOptions(2, key => rule.flags.includes(key), key => rule.values.includes(key), false);
+    if (rule.required.some(key => !values.has(key))) throw new UsageError();
+    for (const val of values.values()) {
+      if (val.trim().length === 0) throw new UsageError();
+    }
+    if (rawAction === 'run') {
+      const stateAliases = ['state', 'campaign-dir', 'root'].filter(k => values.has(k));
+      if (stateAliases.length !== 1) throw new UsageError();
+    } else if (rawAction === 'resume' || rawAction === 'status' || rawAction === 'inspect' || rawAction === 'export') {
+      const dirAliases = ['campaign', 'campaign-dir', 'root'].filter(k => values.has(k));
+      if (dirAliases.length !== 1) throw new UsageError();
+    }
+    if (values.has('format')) {
+      const fmt = values.get('format')!;
+      if (fmt !== 'dir' && fmt !== 'oci-layout') throw new UsageError();
+    }
+    if (values.has('island')) {
+      if (!/^(?:0|[1-9][0-9]{0,5})$/.test(values.get('island')!)) throw new UsageError();
+    }
+    if (values.has('individual')) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(values.get('individual')!)) throw new UsageError();
+    }
+    return {
+      command: 'evolve',
+      evolveAction: rawAction,
+      values,
+      flags,
+    };
+  }
+
+  const command = rawCommand as Exclude<Arguments['command'], 'step' | 'digest' | 'suite' | 'runner' | 'evolve'>;
   if (!Object.hasOwn(commands, command)) throw new UsageError();
   const rule = commands[command];
   parseOptions(1, key => rule.flags.includes(key), key => rule.values.includes(key), rule.allowRoleModel === true);
