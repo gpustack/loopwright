@@ -593,7 +593,7 @@ describe('five-gate proposal verifier', () => {
       const report = verifyMemoryProposal(verificationInput(broken as unknown as MemoryProposal, (await loadMemoryStore(root, 'demo', 'org/repo')).index, fixture, outcome.patch ?? ''));
       assert.deepEqual(gateOf(report, 'memory-schema').codes, ['MEMORY_SCHEMA_INVALID']);
       assert.equal(report.satisfied, false);
-      for (const name of ['provenance', 'scope', 'redaction', 'memory-review']) assert.equal(gateOf(report, name).status, 'failed');
+      for (const name of ['provenance', 'scope', 'redaction', 'memory-review', 'hardware-evidence']) assert.equal(gateOf(report, name).status, 'failed');
     });
   });
 
@@ -785,7 +785,7 @@ describe('five-gate proposal verifier', () => {
       const outcome = await finalize(fixture, root, finalizerConfig());
       const report = verifyMemoryProposal(verificationInput(outcome.proposal!, (await loadMemoryStore(root, 'demo', 'org/repo')).index, fixture, ''));
       assert.equal(report.satisfied, true);
-      assert.equal(report.gates.length, 5);
+      assert.equal(report.gates.length, 6);
     });
   });
 

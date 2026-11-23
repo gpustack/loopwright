@@ -20,11 +20,19 @@ export interface MemoryEvidenceRef {
   readonly artifact: ArtifactRef;
 }
 
+export interface HardwareMemoryScope {
+  readonly accelerator: string;
+  readonly driverConstraint?: string | undefined;
+  readonly operatorFamily?: string | undefined;
+  readonly boundPipeline?: string | undefined;
+}
+
 export interface MemoryEntryScope {
   readonly taskpack: string;
   readonly repository: string;
   readonly paths: readonly string[];
   readonly targetMatrix: null | { readonly id: string; readonly platform: string; readonly variant: string };
+  readonly hardwareScope?: HardwareMemoryScope | undefined;
 }
 
 export interface MemoryEntrySourceRef {
@@ -90,7 +98,13 @@ export interface MemoryProposal {
   readonly operations: readonly MemoryOperation[];
 }
 
-export type MemoryGateName = 'memory-schema' | 'provenance' | 'scope' | 'redaction' | 'memory-review';
+export type MemoryGateName =
+  | 'memory-schema'
+  | 'provenance'
+  | 'scope'
+  | 'redaction'
+  | 'memory-review'
+  | 'hardware-evidence';
 export type MemoryGateStatus = 'passed' | 'failed';
 
 export type MemoryErrorCode =
@@ -100,6 +114,7 @@ export type MemoryErrorCode =
   | 'MEMORY_SECRET_LEAK'
   | 'MEMORY_INJECTION_DETECTED'
   | 'MEMORY_CONFLICT_UNRESOLVED'
+  | 'MEMORY_HARDWARE_EVIDENCE_REQUIRED'
   | 'MEMORY_VERIFICATION_FAILED'
   | 'MEMORY_CAS_CONFLICT'
   | 'COMPACTION_UNSAFE_BOUNDARY'
@@ -174,6 +189,7 @@ export interface MemorySelectorInput {
   readonly currentCodeFingerprint?: Digest | null | undefined;
   readonly currentUpstreamVersions?: Readonly<Record<string, string>> | null | undefined;
   readonly targetCell: null | { readonly id: string; readonly platform: string; readonly variant: string };
+  readonly hardwareScope?: HardwareMemoryScope | null | undefined;
   readonly maxEntries?: number | undefined;
   readonly maxBytes?: number | undefined;
 }
@@ -228,6 +244,7 @@ export interface MemoryFinalizerConfig {
   readonly checkUpstreamVersions?: boolean | undefined;
   readonly maxEntries?: number | undefined;
   readonly targetMatrix?: MemoryEntry['scope']['targetMatrix'] | undefined;
+  readonly hardwareScope?: HardwareMemoryScope | undefined;
 }
 
 export type SettledCycleContext =
@@ -359,6 +376,7 @@ export interface CompactionSummaryInput {
     readonly currentCodeFingerprint?: Digest | null | undefined;
     readonly currentUpstreamVersions?: Readonly<Record<string, string>> | null | undefined;
     readonly targetCell: null | { readonly id: string; readonly platform: string; readonly variant: string };
+    readonly hardwareScope?: HardwareMemoryScope | null | undefined;
   };
 }
 

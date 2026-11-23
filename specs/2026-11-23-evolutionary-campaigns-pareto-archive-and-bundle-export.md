@@ -498,7 +498,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `DECISION_ALLOWED_AUTHORITY_INTENTS` includes `'advise_mutation_novelty'`, `'route_evolution_strategy'`, and `'advise_cascade_escalation'` while all six `DECISION_FORBIDDEN_AUTHORITY_INTENTS` still throw `DecisionError('DECISION_AUTHORITY_VIOLATION')`; `evaluateMutationNovelty` rejects exact whitespace/comment-normalized token-shingle clones (`Jaccard === 1.0`) with `0` network calls and queries Jev `noul` in `[noveltyThreshold, 1.0)` under `disclosurePolicy`; `routeEvolutionStrategy` and `evaluateCascadeEscalation` stamp `advisoryOnly: true` and `verificationCertified: false` with deterministic offline fallbacks.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg decisions`
 
-- [ ] **T4 · Hardware-scoped reviewed memory (`hardwareScope`) and `hardware_execution` evidence gate**
+- [x] **T4 · Hardware-scoped reviewed memory (`hardwareScope`) and `hardware_execution` evidence gate**
       Blocked by: T1
       Owns: `packages/memory/src/**`, `packages/memory/test/**`
       Gate: review

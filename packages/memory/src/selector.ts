@@ -24,6 +24,32 @@ function matrixMatches(entry: MemoryEntry, targetCell: MemorySelectorInput['targ
   return entry.scope.targetMatrix.id === targetCell.id && entry.scope.targetMatrix.platform === targetCell.platform
     && entry.scope.targetMatrix.variant === targetCell.variant;
 }
+function hardwareScopeMatches(
+  entryScope: MemoryEntry['scope']['hardwareScope'],
+  targetScope: MemorySelectorInput['hardwareScope'],
+): boolean {
+  if (entryScope === undefined) return true;
+  if (targetScope == null) return false;
+  if (entryScope.accelerator !== targetScope.accelerator) return false;
+  if (entryScope.driverConstraint !== undefined && entryScope.driverConstraint !== targetScope.driverConstraint) {
+    return false;
+  }
+  if (
+    entryScope.operatorFamily !== undefined
+    && targetScope.operatorFamily !== undefined
+    && entryScope.operatorFamily !== targetScope.operatorFamily
+  ) {
+    return false;
+  }
+  if (
+    entryScope.boundPipeline !== undefined
+    && targetScope.boundPipeline !== undefined
+    && entryScope.boundPipeline !== targetScope.boundPipeline
+  ) {
+    return false;
+  }
+  return true;
+}
 function exclusion(entry: MemoryEntry, reason: ExcludedMemoryEntry['reason'], detail: string): ExcludedMemoryEntry {
   return { entryId: entry.id, claimKey: entry.claimKey, reason, detail };
 }
@@ -34,6 +60,7 @@ function ownExclusion(
   currentCodeFingerprint: MemorySelectorInput['currentCodeFingerprint'],
   currentUpstreamVersions: MemorySelectorInput['currentUpstreamVersions'],
   targetCell: MemorySelectorInput['targetCell'],
+  hardwareScope: MemorySelectorInput['hardwareScope'],
 ): ExcludedMemoryEntry | null {
   if (
     currentCodeFingerprint != null
@@ -52,6 +79,9 @@ function ownExclusion(
   if (entry.scope.taskpack !== contract.spec.taskpack || entry.scope.repository !== contract.spec.target.repository || !matrixMatches(entry, targetCell)) {
     return exclusion(entry, 'scope_mismatch', 'entry scope does not match contract taskpack, repository, or target cell');
   }
+  if (!hardwareScopeMatches(entry.scope.hardwareScope, hardwareScope)) {
+    return exclusion(entry, 'scope_mismatch', 'entry hardwareScope does not match target hardware');
+  }
   const hasPassed = entry.evidenceRefs.some(reference => reference.observedStatus === 'passed');
   const hasFailed = entry.evidenceRefs.some(reference => reference.observedStatus === 'failed');
   if ((entry.kind === 'fact' || entry.kind === 'invariant') && (!hasPassed || hasFailed)) {
@@ -59,6 +89,13 @@ function ownExclusion(
   }
   if (entry.kind === 'fact' && entry.evidenceRefs.some(reference => reference.observedStatus === 'not_run' || reference.observedStatus === 'blocked')) {
     return exclusion(entry, 'hardware_or_gate_unproven', 'fact cites a not_run or blocked check as compatibility evidence');
+  }
+  if (
+    entry.scope.hardwareScope !== undefined
+    && (entry.kind === 'fact' || entry.kind === 'invariant')
+    && !entry.evidenceRefs.some(reference => reference.level === 'hardware_execution' && reference.observedStatus === 'passed')
+  ) {
+    return exclusion(entry, 'hardware_or_gate_unproven', 'hardware-scoped fact or invariant requires a passed hardware_execution evidence reference');
   }
   return null;
 }
@@ -88,13 +125,13 @@ function renderMarkdown(taskpack: string, activeEntries: readonly MemoryEntry[])
 }
 /** Excludes expired, superseded, drifted, and unproven entries; the returned snapshot is immutable. */
 export function selectActiveMemory(input: MemorySelectorInput): ActiveMemorySnapshot {
-  const { store, contract, nowMs, currentCodeFingerprint, currentUpstreamVersions, targetCell } = input;
+  const { store, contract, nowMs, currentCodeFingerprint, currentUpstreamVersions, targetCell, hardwareScope } = input;
   const indexed = [...store.entries].sort(byId);
   const currentEntryIds = new Set(indexed.map(entry => entry.id));
   const retiredOnly = store.retired.map(row => row.entry).filter(entry => !currentEntryIds.has(entry.id));
   const invalid = new Map<string, ExcludedMemoryEntry>();
   for (const entry of indexed) {
-    const reason = ownExclusion(entry, contract, currentCodeFingerprint, currentUpstreamVersions, targetCell);
+    const reason = ownExclusion(entry, contract, currentCodeFingerprint, currentUpstreamVersions, targetCell, hardwareScope);
     if (reason !== null) invalid.set(entry.id, reason);
   }
   const validSuccessorIds = new Set(indexed.filter(entry => !invalid.has(entry.id) && nowMs < entry.expiresAtMs).map(entry => entry.id));

@@ -3,7 +3,7 @@ import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
-import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
+import { canonical, controllerIncidentSchema, digestEqual, fail, hardwareMemoryScopeSchema, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
 import { clampMemoryMaxEntries, compareEntriesForEviction, computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import type {
   MemoryBudgetLedger,
@@ -221,6 +221,17 @@ function evidenceRefFor(row: { readonly checkId: string; readonly status: string
 function normalizeGateWorkdirPaths(text: string): string {
   return text.replace(EPHEMERAL_GATE_WORKDIR_PATTERN, '<gate-workdir>');
 }
+function hardwareScopeOverlaps(
+  candidateScope: MemoryEntry['scope']['hardwareScope'],
+  currentScope: MemoryEntry['scope']['hardwareScope'],
+): boolean {
+  if (candidateScope === undefined || currentScope === undefined) return true;
+  if (candidateScope.accelerator !== currentScope.accelerator) return false;
+  if (candidateScope.driverConstraint !== undefined && currentScope.driverConstraint !== undefined && candidateScope.driverConstraint !== currentScope.driverConstraint) return false;
+  if (candidateScope.operatorFamily !== undefined && currentScope.operatorFamily !== undefined && candidateScope.operatorFamily !== currentScope.operatorFamily) return false;
+  if (candidateScope.boundPipeline !== undefined && currentScope.boundPipeline !== undefined && candidateScope.boundPipeline !== currentScope.boundPipeline) return false;
+  return true;
+}
 function targetMatrixOverlaps(
   candidateMatrix: MemoryEntry['scope']['targetMatrix'],
   currentTargetMatrix: MemoryEntry['scope']['targetMatrix'],
@@ -270,6 +281,7 @@ function applyLifecycleSweepAndEviction(options: {
   const sortedBaseEntries = [...baseEntries].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const runSucceeded = settledStatus === 'completed' || settledStatus === 'no_change';
   const currentTargetMatrix = config.targetMatrix ?? null;
+  const currentHardwareScope = config.hardwareScope;
   for (const entry of sortedBaseEntries) {
     if (targetedOrSuperseded.has(entry.id)) continue;
     let retireReason: string | null = null;
@@ -283,6 +295,7 @@ function applyLifecycleSweepAndEviction(options: {
     } else if (
       entry.kind === 'failure_observation'
       && targetMatrixOverlaps(entry.scope.targetMatrix, currentTargetMatrix)
+      && hardwareScopeOverlaps(entry.scope.hardwareScope, currentHardwareScope)
       && (runSucceeded || passedCheckClaimKeys.has(entry.claimKey))
     ) {
       retireReason = 'Prior failure observation healed.';
@@ -422,15 +435,23 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       fail('MEMORY_SCHEMA_INVALID', '/contract/spec/scope/writable', 'writable scope length outside 1..128');
     }
     const targetMatrix = config.targetMatrix ?? null;
+    const hardwareScope = config.hardwareScope === undefined
+      ? undefined
+      : hardwareMemoryScopeSchema(config.hardwareScope, '/config/hardwareScope');
     const priorSameClaim = (claimKey: string): readonly string[] =>
       [...new Set(
         loaded.index.entries
-          .filter(candidate => candidate.claimKey === claimKey && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix))
+          .filter(candidate =>
+            candidate.claimKey === claimKey
+            && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
+            && hardwareScopeOverlaps(candidate.scope.hardwareScope, hardwareScope))
           .map(candidate => candidate.id),
       )].sort().slice(0, 32);
     const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry =>
-      ({ version: 1, id, claimKey, claim: boundedClaim(claim), kind, scope: { taskpack: config.taskpack, repository: contract.spec.target.repository,
-        paths: normalizedWritablePaths, targetMatrix }, sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
+      ({ version: 1, id, claimKey, claim: boundedClaim(claim), kind, scope: hardwareScope === undefined
+        ? { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix }
+        : { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix, hardwareScope },
+        sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
         validFor: validity, expiresAtMs: config.nowMs + config.ttlMs, supersedes: priorSameClaim(claimKey), evidenceRefs: refs });
     const deterministicEntries: MemoryEntry[] = [];
     const rows = settled.result === null ? [] : [...settled.result.spec.verification.spec.required, ...settled.result.spec.verification.spec.optional];

@@ -52,7 +52,7 @@ export function evaluateCompactionPolicy(input: CompactionPolicyInput): Compacti
 export function buildCompactionSummary(input: CompactionSummaryInput): { readonly summary: CompactionCheckpointSummary; readonly digest: Digest } {
   const snapshot = selectActiveMemory({ store: input.memory.store, contract: input.memory.contract, nowMs: input.memory.nowMs,
     currentCodeFingerprint: input.memory.currentCodeFingerprint, currentUpstreamVersions: input.memory.currentUpstreamVersions,
-    targetCell: input.memory.targetCell });
+    targetCell: input.memory.targetCell, hardwareScope: input.memory.hardwareScope });
   const summary: CompactionCheckpointSummary = { version: 1,
     goal: { goal: input.lock.spec.contract.spec.goal, nonGoals: [...input.nonGoals] },
     contractHash: { ...input.lock.spec.lockHash }, currentNodeId: input.currentNodeId,
