@@ -153,6 +153,13 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
 
+      - name: Mount tmpfs scratch directory (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /mnt/lw-tmp
+          sudo mount -t tmpfs -o size=4G,mode=1777,exec tmpfs /mnt/lw-tmp
+          echo "TMPDIR=/mnt/lw-tmp" >> "$GITHUB_ENV"
+
       - name: Run Loopwright
         id: loopwright
         uses: gpustack/loopwright@9fc93a1f0b48844f24d76dafb16575fd562947aa # v0.0.1

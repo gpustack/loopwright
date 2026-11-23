@@ -1194,12 +1194,11 @@ test('Docker ROCm sysfs/Ascend device validation, prepareStageSandboxInvocation 
     );
     assert.equal(validDeniedEnv.reason, 'BENCHMARK_DENIED');
     assert.equal(validDeniedEnv.findings?.[0]?.line, 42);
-
-    await chmod(mockDockerRoot, 0o700);
-    await chmod(join(mockDockerRoot, 'usr'), 0o700);
-    await chmod(join(mockDockerRoot, 'usr', 'bin'), 0o700);
-    await chmod(join(root, 'seccomp.json'), 0o600).catch(() => {});
   } finally {
+    await chmod(join(root, 'mock-docker'), 0o700).catch(() => {});
+    await chmod(join(root, 'mock-docker', 'usr'), 0o700).catch(() => {});
+    await chmod(join(root, 'mock-docker', 'usr', 'bin'), 0o700).catch(() => {});
+    await chmod(join(root, 'seccomp.json'), 0o600).catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -72,6 +72,19 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function hasLinuxProcCmdlineMarker(marker: string): Promise<boolean> {
+  const entries = await readdir('/proc').catch(() => []);
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    if (Number(entry) === process.pid) continue;
+    const raw = await readFile(`/proc/${entry}/cmdline`).catch(() => null);
+    if (raw !== null && raw.toString('utf8').includes(marker)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function initGitRepository(
@@ -638,7 +651,9 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
         'const outDir = process.env.LOOPWRIGHT_STAGE_A_OUT;',
         'const pidFile = path.join(outDir, "e2e-pids.txt");',
         'fs.writeFileSync(path.join(outDir, "k.cubin"), "cubin-ok\\n", "utf8");',
-        'fs.writeFileSync(pidFile, String(process.pid) + "\\n", "utf8");',
+        'let pidNs = "";',
+        'try { pidNs = fs.readlinkSync("/proc/self/ns/pid"); } catch {}',
+        'fs.writeFileSync(pidFile, String(process.pid) + (pidNs ? " " + pidNs : "") + "\\n", "utf8");',
         'setTimeout(() => {',
         '  try { fs.unlinkSync(pidFile); } catch {}',
         '  process.exit(0);',
@@ -659,24 +674,42 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
         out1 += c.toString('utf8');
       });
       let stagePid = 0;
+      let stagePidNs = '';
+      let stageJobDir = '';
       const pidDeadline = Date.now() + 8_000;
       while (Date.now() < pidDeadline && stagePid === 0) {
         const dirs = await readdir(workerWorkDir).catch(() => []);
         for (const d of dirs) {
           const txt = await readFile(join(workerWorkDir, d, 'stage-a', 'stage-a-out', 'e2e-pids.txt'), 'utf8').catch(() => '');
-          const parsedPid = Number.parseInt(txt.trim(), 10);
+          const [pidToken = '', nsToken = ''] = txt.trim().split(/\s+/);
+          const parsedPid = Number.parseInt(pidToken, 10);
           if (Number.isSafeInteger(parsedPid) && parsedPid > 0) {
             stagePid = parsedPid;
+            stagePidNs = nsToken;
+            stageJobDir = d;
             break;
           }
         }
         if (stagePid === 0) await new Promise(r => setTimeout(r, 15));
       }
       assert.equal(stagePid > 0, true);
+      const selfPidNs = process.platform === 'linux'
+        ? await readlink('/proc/self/ns/pid').catch(() => '')
+        : '';
+      const samePidNamespace = process.platform !== 'linux'
+        || stagePidNs === ''
+        || selfPidNs === ''
+        || stagePidNs === selfPidNs;
+      if (!samePidNamespace) {
+        assert.equal(await hasLinuxProcCmdlineMarker(stageJobDir), true);
+      }
       process.kill(child1.pid!, 'SIGTERM');
       const code1 = await new Promise<number | null>(r => child1.on('close', c => r(c)));
       assert.equal(code1, 0);
-      assert.equal(isPidAlive(stagePid), false);
+      assert.equal(
+        samePidNamespace ? isPidAlive(stagePid) : await hasLinuxProcCmdlineMarker(stageJobDir),
+        false,
+      );
       assert.match(out1, /"outcome":"preempted"/);
 
       // Epochs 2 & 3: preempt via real worker subprocesses receiving OS SIGTERM as well

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -848,6 +848,20 @@ test('validateRuntimeSshTarget, POSIX single-command SSH quoting, pinned arch va
     assert.equal(checkRes.code, 0, `standalone bundle import failed: ${checkRes.stderr}`);
     assert.equal(checkRes.stdout.trim(), 'CLOSURE_IMPORT_OK');
   } finally {
+    const restoreWritableTree = async (target: string): Promise<void> => {
+      const st = await lstat(target).catch(() => null);
+      if (st === null || st.isSymbolicLink()) return;
+      if (st.isDirectory()) {
+        await chmod(target, 0o700).catch(() => {});
+        const entries = await readdir(target).catch(() => []);
+        for (const entry of entries) {
+          await restoreWritableTree(join(target, entry));
+        }
+      } else {
+        await chmod(target, 0o600).catch(() => {});
+      }
+    };
+    await restoreWritableTree(isolatedDir);
     await rm(isolatedDir, { recursive: true, force: true });
   }
 });
