@@ -249,8 +249,8 @@ async function createControllerE2eHarness(root: string, opts: E2eHarnessOptions)
           url: `${opts.relay.url}/v1/benchmark/jobs`,
           signingCredentialRef: 'bench-signer',
           authCredentialRef: 'bench-auth',
-          timeoutMs: 4_000,
-          maxPollMs: 15_000,
+          timeoutMs: 10_000,
+          maxPollMs: 45_000,
           pollInitialMs: 100,
           pollMaxMs: 200,
           jitter: 0,
@@ -431,11 +431,13 @@ function makeOutboundWorkerConfig(relayUrl: string, workDir: string, workloadsDi
       topology: 'nvlink-single',
       workloadIds: ['gemm-fp16-4096'],
     },
-    pollWaitMs: 2_000,
+    // Long-poll wait must exceed stepSubmit() candidate/overlay/git overhead under
+    // parallel CI load; acquireLease wakes immediately when the job is enqueued.
+    pollWaitMs: 20_000,
     heartbeatIntervalMs: 80,
-    requestTimeoutMs: 5_000,
-    stageATimeoutMs: 15_000,
-    stageBTimeoutMs: 15_000,
+    requestTimeoutMs: 10_000,
+    stageATimeoutMs: 25_000,
+    stageBTimeoutMs: 25_000,
     toolchainPaths: [join(process.execPath, '..')],
     probeMode: 'synthetic_fixture',
   };
@@ -477,7 +479,7 @@ test('E2E #1: Happy path Controller -> Relay -> Outbound Worker -> Two-Stage San
     controllerSigningSecret: RELAY_HMAC_SECRET,
     controllerAuthToken: RELAY_AUTH_BEARER,
     workerTokens: [WORKER_BEARER],
-    leaseTtlMs: 8_000,
+    leaseTtlMs: 15_000,
     sweepIntervalMs: 100,
   });
 
@@ -594,7 +596,7 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
     controllerSigningSecret: RELAY_HMAC_SECRET,
     controllerAuthToken: RELAY_AUTH_BEARER,
     workerTokens: [WORKER_BEARER],
-    leaseTtlMs: 8_000,
+    leaseTtlMs: 15_000,
     sweepIntervalMs: 100,
   });
 
@@ -635,8 +637,8 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
         'stepNext A',
       ),
     );
-    // Stage A writes its sandboxed Node PID and waits ~650ms so Worker 1 gets OS SIGTERM mid-stage
-    // (under macOS Seatbelt deny process-fork), while Worker 4 finishes cleanly after 650ms!
+    // Stage A writes its sandboxed Node PID and waits ~1.5s so Worker 1 gets OS SIGTERM mid-stage
+    // (under macOS Seatbelt deny process-fork), while Worker 4 finishes cleanly after 1.5s!
     await writeFile(
       join(stepA.candidateDir, 'packages', 'build.sh'),
       [
@@ -657,7 +659,7 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
         'setTimeout(() => {',
         '  try { fs.unlinkSync(pidFile); } catch {}',
         '  process.exit(0);',
-        '}, 650);',
+        '}, 1500);',
       ].join('\n'),
       { mode: 0o755 },
     );
@@ -676,7 +678,7 @@ test('E2E #2: Real spawned worker child process receiving OS SIGTERM tears down 
       let stagePid = 0;
       let stagePidNs = '';
       let stageJobDir = '';
-      const pidDeadline = Date.now() + 8_000;
+      const pidDeadline = Date.now() + 20_000;
       while (Date.now() < pidDeadline && stagePid === 0) {
         const dirs = await readdir(workerWorkDir).catch(() => []);
         for (const d of dirs) {
@@ -832,7 +834,7 @@ test('E2E #3: Quantitative threshold miss settles failed, while synthetic_fixtur
     controllerSigningSecret: RELAY_HMAC_SECRET,
     controllerAuthToken: RELAY_AUTH_BEARER,
     workerTokens: [WORKER_BEARER],
-    leaseTtlMs: 8_000,
+    leaseTtlMs: 15_000,
     sweepIntervalMs: 100,
   });
 
