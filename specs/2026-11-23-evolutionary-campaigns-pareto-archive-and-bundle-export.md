@@ -484,7 +484,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `@loopwright/evolution` builds, typechecks, lints, packs as the 12th bundled workspace package with zero new third-party runtime dependencies, passes `.opencodereview/rule.json` coverage assertions, updates self-upgrade `UNMANAGED_WORKSPACES` and `.auto-sync/digests.lock.json`, and keeps `@loopwright/state` `expectedSchema()` byte-identical.
       Verify: `npm run build && npm run typecheck && npm run lint && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg evolution --concurrency 1 && node --test build-test/packages/cli/test/build-incremental.test.js build-test/packages/cli/test/npm-pack.test.js build-test/packages/cli/test/docs-and-site.test.js build-test/packages/github-app/test/self-upgrade.test.js`
 
-- [ ] **T2 · Core Stage A static audit contracts, `bucketScope` thresholds, `bucketMetrics`, and `hardwareDiagnostics`**
+- [x] **T2 · Core Stage A static audit contracts, `bucketScope` thresholds, `bucketMetrics`, and `hardwareDiagnostics`**
       Blocked by: T1
       Owns: `packages/core/src/**`, `packages/core/test/**`
       Gate: review

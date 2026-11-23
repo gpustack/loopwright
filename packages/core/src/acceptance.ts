@@ -7,7 +7,7 @@ import {
 } from './contracts.js';
 import { DIAGNOSTIC_CODES, attempt, fail, type Diagnostic, type Result } from './diagnostics.js';
 import { artifactIssue, manifestSchema, resolveInventory, type ArtifactIssue, type ArtifactManifest, type ResolvedArtifactInput } from './artifacts.js';
-import { claimSchema, evidenceSchema, type Evidence, type SubmittedCheck } from './evidence.js';
+import { claimSchema, evidenceSchema, type BucketMetricEntry, type Evidence, type SubmittedCheck } from './evidence.js';
 import { unique } from './graph.js';
 import { deriveSubject, lockSchema, matchSubject, subjectSchema, type TaskLock } from './identity.js';
 import { LIMITS, type OverlayLimitOptions, type OverlayLimits } from './limits.js';
@@ -40,36 +40,75 @@ function readFiniteMetric(metrics: MetricsMap, key: string): number | undefined 
   return Object.is(raw, -0) ? 0 : raw;
 }
 
-function evaluateMetricThresholds(
+function evaluateSingleMetricRule(rule: MetricThresholdRule, metrics: MetricsMap): boolean {
+  const value = readFiniteMetric(metrics, rule.metric);
+  if (value === undefined) return false;
+  if (rule.kind === 'bounds') {
+    if (rule.min !== undefined && value < rule.min) return false;
+    if (rule.max !== undefined && value > rule.max) return false;
+    return true;
+  }
+  // Comparative rules always evaluate both metric and baselineMetric within the same scope
+  // (aggregate or the same bucket), never falling back across scopes.
+  const baseline = readFiniteMetric(metrics, rule.baselineMetric);
+  if (baseline === undefined) return false;
+  if (rule.operator === 'min_ratio') {
+    if (!(baseline > 0)) return false;
+    const ratio = value / baseline;
+    return !Number.isNaN(ratio) && ratio >= rule.threshold;
+  }
+  if (rule.operator === 'max_ratio') {
+    if (!(baseline > 0)) return false;
+    const ratio = value / baseline;
+    return !Number.isNaN(ratio) && ratio <= rule.threshold;
+  }
+  const delta = value - baseline;
+  return !Number.isNaN(delta) && delta <= rule.threshold;
+}
+
+function findMetricThresholdFailurePath(
   rules: readonly MetricThresholdRule[],
   metrics: MetricsMap | undefined,
-): boolean {
-  if (rules.length === 0) return true;
-  if (metrics === undefined) return false;
+  bucketMetrics: readonly BucketMetricEntry[] | undefined,
+  evidenceSpecPath: string,
+): string | null {
+  if (rules.length === 0) return null;
   for (const rule of rules) {
-    const value = readFiniteMetric(metrics, rule.metric);
-    if (value === undefined) return false;
-    if (rule.kind === 'bounds') {
-      if (rule.min !== undefined && value < rule.min) return false;
-      if (rule.max !== undefined && value > rule.max) return false;
+    const scope = rule.bucketScope ?? 'aggregate';
+    if (scope === 'aggregate') {
+      if (metrics === undefined || !evaluateSingleMetricRule(rule, metrics)) {
+        return `${evidenceSpecPath}/metrics`;
+      }
       continue;
     }
-    const baseline = readFiniteMetric(metrics, rule.baselineMetric);
-    if (baseline === undefined) return false;
-    if (rule.operator === 'min_ratio') {
-      if (!(baseline > 0)) return false;
-      const ratio = value / baseline;
-      if (Number.isNaN(ratio) || ratio < rule.threshold) return false;
-    } else if (rule.operator === 'max_ratio') {
-      if (!(baseline > 0)) return false;
-      const ratio = value / baseline;
-      if (Number.isNaN(ratio) || ratio > rule.threshold) return false;
-    } else {
-      const delta = value - baseline;
-      if (Number.isNaN(delta) || delta > rule.threshold) return false;
+    if (bucketMetrics === undefined || bucketMetrics.length === 0) {
+      return `${evidenceSpecPath}/bucketMetrics`;
+    }
+    if (scope === 'all_buckets') {
+      for (let index = 0; index < bucketMetrics.length; index++) {
+        if (!evaluateSingleMetricRule(rule, bucketMetrics[index]!.metrics)) {
+          return `${evidenceSpecPath}/bucketMetrics/${index}/metrics`;
+        }
+      }
+      continue;
+    }
+    const bucketIndex = bucketMetrics.findIndex(entry => entry.bucketId === scope.bucketId);
+    if (bucketIndex === -1) {
+      return `${evidenceSpecPath}/bucketMetrics`;
+    }
+    if (!evaluateSingleMetricRule(rule, bucketMetrics[bucketIndex]!.metrics)) {
+      return `${evidenceSpecPath}/bucketMetrics/${bucketIndex}/metrics`;
     }
   }
-  return true;
+  return null;
+}
+
+export function evaluateMetricThresholds(
+  rules: readonly MetricThresholdRule[],
+  metrics: MetricsMap | undefined,
+  bucketMetrics?: readonly BucketMetricEntry[],
+): boolean {
+  return findMetricThresholdFailurePath(rules, metrics, bucketMetrics, '') === null;
 }
 
 export interface EvaluationInput {
@@ -335,8 +374,14 @@ export function evaluateValidated(
       }
     }
     if (requirement.metricThresholds !== undefined && requirement.metricThresholds.length > 0) {
-      if (!evaluateMetricThresholds(requirement.metricThresholds, evidence.spec.metrics)) {
-        return blocked('METRIC_THRESHOLD_FAILED', 'metric_threshold_failed', `${evidenceSpecPath}/metrics`);
+      const failedThresholdPath = findMetricThresholdFailurePath(
+        requirement.metricThresholds,
+        evidence.spec.metrics,
+        evidence.spec.bucketMetrics,
+        evidenceSpecPath,
+      );
+      if (failedThresholdPath !== null) {
+        return blocked('METRIC_THRESHOLD_FAILED', 'metric_threshold_failed', failedThresholdPath);
       }
     }
     return withMetadata(
