@@ -4,10 +4,13 @@ import { constants, lstatSync, realpathSync, type Stats } from 'node:fs';
 import { chmod, lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
+  LIMITS,
+  SecretScrubber,
   VERIFIER_ARTIFACT_LIMITS,
   type Digest,
   type HardwareProvenance,
   type HardwareTargetSpec,
+  type StructuredFinding,
 } from '@loopwright/core';
 import {
   assertNoSymlinkAncestors,
@@ -17,6 +20,8 @@ import {
 import { MAX_CAS_CHUNK_BYTES } from './relay-server.js';
 import {
   HardwareRunnerError,
+  type AcceleratorFaultKind,
+  type AcceleratorHealthProbeResult,
   type WorkerCapabilities,
 } from './types.js';
 
@@ -1904,4 +1909,776 @@ export async function collectHardwareProvenance(
   out.workloadDigest = Object.freeze({ algorithm: 'sha256' as const, hex: workloadDigest.hex });
   out.clockLockMode = probed.clockLockMode;
   return Object.freeze(out as unknown as HardwareProvenance);
+}
+
+export const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 10_000;
+
+export interface ProbeAcceleratorHealthOptions {
+  readonly probeMode: 'physical' | 'synthetic_fixture';
+  readonly capabilities: WorkerCapabilities;
+  readonly targetHardware?: HardwareTargetSpec;
+  readonly allocatedDeviceIndices?: readonly number[];
+  readonly executableOverrides?: {
+    readonly nvidiaSmiPath?: string;
+    readonly rocmSmiPath?: string;
+    readonly npuSmiPath?: string;
+  };
+  readonly commandRunner?: ProbeCommandRunner;
+  readonly verifyExecutable?: (binaryPath: string, trustedAllowlist: readonly string[]) => Promise<string>;
+  readonly scrubber?: SecretScrubber;
+  readonly extraSecrets?: readonly string[];
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
+function scrubHealthSnippet(raw: string, scrubber: SecretScrubber, maxLen = 512): string {
+  const scrubbed = stripAnsiSequences(scrubber.scrub(raw))
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!scrubbed) return '';
+  if (scrubbed.length <= maxLen) return scrubbed;
+  return `${scrubbed.slice(0, Math.max(1, maxLen - 14))}...(truncated)`;
+}
+
+function buildHealthFinding(title: string, evidence: string, scrubber: SecretScrubber): StructuredFinding {
+  const safeTitle = scrubHealthSnippet(title, scrubber, LIMITS.findingTitle) || 'Accelerator health fault';
+  const safeEvidence = scrubHealthSnippet(evidence, scrubber, LIMITS.findingEvidence) || safeTitle;
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  out.title = safeTitle;
+  out.severity = 'critical';
+  out.evidence = safeEvidence;
+  return Object.freeze(out as unknown as StructuredFinding);
+}
+
+function buildUnhealthyProbeResult(options: {
+  readonly probeKind: 'physical' | 'synthetic_fixture';
+  readonly vendor: 'nvidia' | 'amd' | 'huawei' | 'synthetic';
+  readonly checkedDeviceIndices: readonly number[];
+  readonly faultKind: AcceleratorFaultKind;
+  readonly externalHostLoss?: boolean;
+  readonly title: string;
+  readonly detail: string;
+  readonly scrubber: SecretScrubber;
+}): AcceleratorHealthProbeResult {
+  const safeSummary =
+    scrubHealthSnippet(options.detail, options.scrubber, 512)
+    || `Accelerator health check failed (${options.faultKind})`;
+  const finding = buildHealthFinding(options.title, safeSummary, options.scrubber);
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  out.healthy = false;
+  out.quarantineRequired = true;
+  out.probeKind = options.probeKind;
+  out.vendor = options.vendor;
+  out.checkedDeviceIndices = Object.freeze([...options.checkedDeviceIndices]);
+  out.faultKind = options.faultKind;
+  if (options.externalHostLoss === true) {
+    out.externalHostLoss = true;
+  }
+  out.summary = safeSummary;
+  out.findings = Object.freeze([finding]);
+  return Object.freeze(out as unknown as AcceleratorHealthProbeResult);
+}
+
+function parseOptionalNonNegativeCounter(raw: string): number | null {
+  const cleaned = raw.trim().replace(/^\[|\]$/g, '').trim();
+  if (
+    cleaned.length === 0
+    || /^(?:n\/a|not\s+supported|disabled|none|unknown|-)$/i.test(cleaned)
+  ) {
+    return null;
+  }
+  const m = /^(\d+)\b/.exec(cleaned);
+  if (m === null) return null;
+  const n = Number.parseInt(m[1]!, 10);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+
+function classifyFailedProbeOutput(
+  vendor: 'nvidia' | 'amd' | 'huawei',
+  combinedOutput: string,
+): { readonly faultKind: AcceleratorFaultKind; readonly externalHostLoss: boolean } {
+  const cleaned = stripAnsiSequences(combinedOutput);
+  if (/\bxid\b/i.test(cleaned)) {
+    return { faultKind: 'xid_error', externalHostLoss: false };
+  }
+  if (
+    /no devices were found|driver.*not loaded|failed to initialize nvml|no amd gpus|no npu/i.test(cleaned)
+  ) {
+    return { faultKind: 'device_lost', externalHostLoss: true };
+  }
+  if (/gpu is lost|fallen off the bus|unable to determine the device handle/i.test(cleaned)) {
+    return { faultKind: 'device_lost', externalHostLoss: false };
+  }
+  if (/gpu requires reset|reset required|gpu reset|gpu hang|gpu recovery|wedged/i.test(cleaned)) {
+    return { faultKind: 'gpu_reset_required', externalHostLoss: false };
+  }
+  if (/uncorrectable|double\s+bit\s+ecc|remapping\s+failure/i.test(cleaned)) {
+    return { faultKind: 'ecc_uncorrectable', externalHostLoss: false };
+  }
+  void vendor;
+  return { faultKind: 'probe_failed', externalHostLoss: false };
+}
+
+export function parseNvidiaHealthOutput(
+  queryOutput: string,
+  detailOutput: string,
+  checkedDeviceIndices: readonly number[],
+  scrubber: SecretScrubber,
+): AcceleratorHealthProbeResult {
+  const combined = `${queryOutput}\n${detailOutput}`;
+  if (/\bxid\b[:\s#-]*\d*/i.test(combined) && /\bxid\b/i.test(combined)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'nvidia',
+      checkedDeviceIndices,
+      faultKind: 'xid_error',
+      title: 'NVIDIA sticky Xid fault detected',
+      detail: combined,
+      scrubber,
+    });
+  }
+  if (/gpu is lost|fallen off the bus|unable to determine the device handle/i.test(combined)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'nvidia',
+      checkedDeviceIndices,
+      faultKind: 'device_lost',
+      title: 'NVIDIA GPU lost on bus',
+      detail: combined,
+      scrubber,
+    });
+  }
+  if (/no devices were found|failed to initialize nvml/i.test(combined)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'nvidia',
+      checkedDeviceIndices,
+      faultKind: 'device_lost',
+      externalHostLoss: true,
+      title: 'NVIDIA host devices unavailable',
+      detail: combined,
+      scrubber,
+    });
+  }
+  if (/gpu requires reset|reset required/i.test(combined)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'nvidia',
+      checkedDeviceIndices,
+      faultKind: 'gpu_reset_required',
+      title: 'NVIDIA GPU requires reset',
+      detail: combined,
+      scrubber,
+    });
+  }
+
+  const lines = stripAnsiSequences(queryOutput)
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(l => l.length > 0);
+  if (lines.length === 0) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'nvidia',
+      checkedDeviceIndices,
+      faultKind: 'probe_failed',
+      title: 'Empty nvidia-smi health output',
+      detail: 'nvidia-smi returned empty GPU health output',
+      scrubber,
+    });
+  }
+
+  const rowsByIndex = new Map<number, readonly string[]>();
+  lines.forEach((line, positionalIdx) => {
+    const cols = line.split(',').map(c => c.trim());
+    const parsedIdx = /^\d+$/.test(cols[0] ?? '') ? Number.parseInt(cols[0]!, 10) : positionalIdx;
+    rowsByIndex.set(parsedIdx, cols);
+  });
+
+  for (const idx of checkedDeviceIndices) {
+    const row = rowsByIndex.get(idx);
+    if (row === undefined) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'nvidia',
+        checkedDeviceIndices,
+        faultKind: 'device_lost',
+        title: `NVIDIA GPU ${idx} missing from health query`,
+        detail: `Allocated GPU index ${idx} was not reported by nvidia-smi`,
+        scrubber,
+      });
+    }
+    if (row.some(col => /\b(?:err!|unknown error|gpu is lost)\b/i.test(col))) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'nvidia',
+        checkedDeviceIndices,
+        faultKind: 'health_degraded',
+        title: `NVIDIA GPU ${idx} reported error state`,
+        detail: row.join(', '),
+        scrubber,
+      });
+    }
+    // Columns 6 and 7 are ecc.errors.uncorrected.volatile.total and aggregate.total when present;
+    // on GeForce SKUs (e.g. RTX 4090) these report "[N/A]", which is healthy.
+    for (const colIdx of [6, 7]) {
+      if (colIdx < row.length) {
+        const count = parseOptionalNonNegativeCounter(row[colIdx]!);
+        if (count !== null && count > 0) {
+          return buildUnhealthyProbeResult({
+            probeKind: 'physical',
+            vendor: 'nvidia',
+            checkedDeviceIndices,
+            faultKind: 'ecc_uncorrectable',
+            title: `NVIDIA GPU ${idx} uncorrectable ECC error`,
+            detail: `GPU ${idx} reported ${count} uncorrectable ECC error(s)`,
+            scrubber,
+          });
+        }
+      }
+    }
+  }
+
+  if (detailOutput.trim().length > 0) {
+    const cleanedDetail = stripAnsiSequences(detailOutput);
+    if (/Remapping\s+Failure\s+Occurred\s*:\s*Yes/i.test(cleanedDetail)) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'nvidia',
+        checkedDeviceIndices,
+        faultKind: 'ecc_uncorrectable',
+        title: 'NVIDIA HBM/GDDR row remapping failure',
+        detail: 'nvidia-smi reported Remapping Failure Occurred: Yes',
+        scrubber,
+      });
+    }
+    if (/(?:Channel|TPC)\s+Repair\s+Pending\s*:\s*Yes|Unrepairable\s+Memory\s*:\s*Yes|Pending\s+Page\s+Blacklist\s*:\s*Yes/i.test(cleanedDetail)) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'nvidia',
+        checkedDeviceIndices,
+        faultKind: 'ecc_uncorrectable',
+        title: 'NVIDIA memory repair/blacklist pending or unrepairable',
+        detail: cleanedDetail,
+        scrubber,
+      });
+    }
+    for (const m of cleanedDetail.matchAll(
+      /^\s*(?:SRAM\s+Uncorrectable[^\r\n:]*|DRAM\s+Uncorrectable|Double\s+Bit\s+ECC|Uncorrectable\s+Error)\s*:\s*([^\r\n]+)$/gim,
+    )) {
+      // Ignore "Inactive Uncorrectable Error" historical counters when active Uncorrectable Error is 0;
+      // the regex anchors at start of line whitespace so "Inactive Uncorrectable Error" does not match.
+      const cnt = parseOptionalNonNegativeCounter(m[1]!);
+      if (cnt !== null && cnt > 0) {
+        return buildUnhealthyProbeResult({
+          probeKind: 'physical',
+          vendor: 'nvidia',
+          checkedDeviceIndices,
+          faultKind: 'ecc_uncorrectable',
+          title: 'NVIDIA uncorrectable memory error counter > 0',
+          detail: `${m[0]!.trim()}`,
+          scrubber,
+        });
+      }
+    }
+  }
+
+  return Object.freeze({
+    healthy: true,
+    quarantineRequired: false,
+    probeKind: 'physical',
+    vendor: 'nvidia',
+    checkedDeviceIndices: Object.freeze([...checkedDeviceIndices]),
+    summary: `NVIDIA GPU health OK (${checkedDeviceIndices.join(',')})`,
+    findings: Object.freeze([]),
+  });
+}
+
+export function parseRocmHealthOutput(
+  rocmOutput: string,
+  checkedDeviceIndices: readonly number[],
+  scrubber: SecretScrubber,
+): AcceleratorHealthProbeResult {
+  const cleaned = stripAnsiSequences(rocmOutput);
+  if (cleaned.trim().length === 0) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'amd',
+      checkedDeviceIndices,
+      faultKind: 'probe_failed',
+      title: 'Empty rocm-smi health output',
+      detail: 'rocm-smi returned empty health output',
+      scrubber,
+    });
+  }
+  if (/no amd gpus specified|no amd gpus found/i.test(cleaned)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'amd',
+      checkedDeviceIndices,
+      faultKind: 'device_lost',
+      externalHostLoss: true,
+      title: 'AMD ROCm GPUs unavailable on host',
+      detail: cleaned,
+      scrubber,
+    });
+  }
+  if (/\b(?:gpu\s+hang|gpu\s+reset|gpu\s+recovery|device\s+lost|wedged|ras\s+fatal)\b/i.test(cleaned)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'amd',
+      checkedDeviceIndices,
+      faultKind: 'gpu_reset_required',
+      title: 'AMD ROCm GPU reset or hang detected',
+      detail: cleaned,
+      scrubber,
+    });
+  }
+
+  // Real rocm-smi --json on Radeon GPUs in runtime PM can emit leading "WARNING: AMD GPU device(s) is/are in a low-power state..."
+  // lines on stdout before the JSON payload `{...}`. Extract the JSON object cleanly after any non-JSON preamble.
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const jsonSlice = cleaned.slice(firstBrace, lastBrace + 1);
+    let parsed: unknown;
+    try {
+      parsed = parseStrictJsonBytes(
+        Buffer.from(jsonSlice, 'utf8'),
+        MAX_PROBE_OUTPUT_BYTES,
+        'RUNNER_SANDBOX_FAILED',
+        '/rocmHealth',
+      );
+    } catch {
+      parsed = null;
+    }
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const root = parsed as Readonly<Record<string, unknown>>;
+      const inspectCardFaults = (node: unknown, cardIdx: number, keyPath: string): AcceleratorHealthProbeResult | null => {
+        if (node === null || node === undefined) return null;
+        if (typeof node === 'string' || typeof node === 'number') {
+          const textVal = String(node);
+          const lowerPath = keyPath.toLowerCase();
+          if (
+            (lowerPath.includes('uncorrectable') || /(?:^|[/._ -])ue$/i.test(lowerPath) || lowerPath.includes('unreservable'))
+          ) {
+            const cnt = parseOptionalNonNegativeCounter(textVal);
+            if (cnt !== null && cnt > 0) {
+              return buildUnhealthyProbeResult({
+                probeKind: 'physical',
+                vendor: 'amd',
+                checkedDeviceIndices,
+                faultKind: 'ecc_uncorrectable',
+                title: `AMD GPU ${cardIdx} RAS/ECC uncorrectable error`,
+                detail: `card${cardIdx} ${keyPath}=${textVal}`,
+                scrubber,
+              });
+            }
+          }
+          if (/\b(?:gpu\s+hang|gpu\s+reset|wedged|unresponsive|err!|fatal)\b/i.test(textVal)) {
+            return buildUnhealthyProbeResult({
+              probeKind: 'physical',
+              vendor: 'amd',
+              checkedDeviceIndices,
+              faultKind: 'gpu_reset_required',
+              title: `AMD GPU ${cardIdx} degraded state`,
+              detail: `card${cardIdx} ${keyPath}=${textVal}`,
+              scrubber,
+            });
+          }
+          return null;
+        }
+        if (typeof node === 'object' && !Array.isArray(node)) {
+          const rec = node as Readonly<Record<string, unknown>>;
+          for (const k of Object.keys(rec).sort()) {
+            if (!Object.hasOwn(rec, k)) continue;
+            const sub = inspectCardFaults(rec[k], cardIdx, keyPath ? `${keyPath}.${k}` : k);
+            if (sub !== null) return sub;
+          }
+        }
+        return null;
+      };
+
+      for (const idx of checkedDeviceIndices) {
+        const cardObj = Object.hasOwn(root, `card${idx}`)
+          ? root[`card${idx}`]
+          : Object.hasOwn(root, `gpu${idx}`)
+            ? root[`gpu${idx}`]
+            : undefined;
+        if (cardObj === undefined || cardObj === null || typeof cardObj !== 'object') {
+          return buildUnhealthyProbeResult({
+            probeKind: 'physical',
+            vendor: 'amd',
+            checkedDeviceIndices,
+            faultKind: 'device_lost',
+            title: `AMD GPU ${idx} missing from rocm-smi JSON`,
+            detail: `Expected card${idx} in rocm-smi JSON output`,
+            scrubber,
+          });
+        }
+        const fault = inspectCardFaults(cardObj, idx, '');
+        if (fault !== null) return fault;
+      }
+
+      return Object.freeze({
+        healthy: true,
+        quarantineRequired: false,
+        probeKind: 'physical',
+        vendor: 'amd',
+        checkedDeviceIndices: Object.freeze([...checkedDeviceIndices]),
+        summary: `AMD ROCm GPU health OK (${checkedDeviceIndices.join(',')})`,
+        findings: Object.freeze([]),
+      });
+    }
+  }
+
+  // Plain-text rocm-smi fallback: check allocated GPU presence and RAS uncorrectable error counts
+  const seenGpus = new Set<number>();
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const gpuMatch = /^(?:GPU|card)\[(\d+)\]/i.exec(line);
+    if (gpuMatch !== null) {
+      seenGpus.add(Number.parseInt(gpuMatch[1]!, 10));
+    }
+    const ueKv = /Uncorrectable\s+Error[s]?\s*:\s*(\d+)/i.exec(line);
+    if (ueKv !== null && Number.parseInt(ueKv[1]!, 10) > 0) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'amd',
+        checkedDeviceIndices,
+        faultKind: 'ecc_uncorrectable',
+        title: 'AMD ROCm RAS uncorrectable error',
+        detail: line,
+        scrubber,
+      });
+    }
+    // RAS table row: <Block> <Status> <Correctable> <Uncorrectable>
+    const rasRow = /^[A-Za-z0-9_]+\s+(?:ENABLED|ACTIVE|OK)\s+(\d+)\s+(\d+)\s*$/i.exec(line);
+    if (rasRow !== null && Number.parseInt(rasRow[2]!, 10) > 0) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'amd',
+        checkedDeviceIndices,
+        faultKind: 'ecc_uncorrectable',
+        title: 'AMD ROCm RAS block uncorrectable error',
+        detail: line,
+        scrubber,
+      });
+    }
+  }
+
+  for (const idx of checkedDeviceIndices) {
+    if (!seenGpus.has(idx)) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'amd',
+        checkedDeviceIndices,
+        faultKind: 'device_lost',
+        title: `AMD GPU ${idx} missing from rocm-smi output`,
+        detail: `GPU[${idx}] not present in rocm-smi health output`,
+        scrubber,
+      });
+    }
+  }
+
+  return Object.freeze({
+    healthy: true,
+    quarantineRequired: false,
+    probeKind: 'physical',
+    vendor: 'amd',
+    checkedDeviceIndices: Object.freeze([...checkedDeviceIndices]),
+    summary: `AMD ROCm GPU health OK (${checkedDeviceIndices.join(',')})`,
+    findings: Object.freeze([]),
+  });
+}
+
+export function parseNpuHealthOutput(
+  npuOutput: string,
+  checkedDeviceIndices: readonly number[],
+  scrubber: SecretScrubber,
+): AcceleratorHealthProbeResult {
+  const cleaned = stripAnsiSequences(npuOutput);
+  if (cleaned.trim().length === 0) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'huawei',
+      checkedDeviceIndices,
+      faultKind: 'probe_failed',
+      title: 'Empty npu-smi health output',
+      detail: 'npu-smi returned empty output',
+      scrubber,
+    });
+  }
+  if (/no npu|device not found/i.test(cleaned)) {
+    return buildUnhealthyProbeResult({
+      probeKind: 'physical',
+      vendor: 'huawei',
+      checkedDeviceIndices,
+      faultKind: 'device_lost',
+      externalHostLoss: true,
+      title: 'Ascend NPU unavailable on host',
+      detail: cleaned,
+      scrubber,
+    });
+  }
+
+  const healthByIndex = new Map<number, string>();
+  let activeKvIdx: number | null = null;
+  for (const rawLine of cleaned.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) continue;
+    // Table row: | 0     910B3               | OK            | 92.4 ... |
+    const tableRow = /^\|\s*(\d+)\s+(?:Ascend[\s_-]*)?[0-9]{3}[A-Za-z0-9_-]*\s*\|\s*([A-Za-z0-9_-]+)\s*\|/i.exec(trimmed);
+    if (tableRow !== null) {
+      const idx = Number.parseInt(tableRow[1]!, 10);
+      healthByIndex.set(idx, tableRow[2]!);
+      continue;
+    }
+    const kvId = /^(?:NPU\s+ID|NPU)\s*:\s*(\d+)\s*$/i.exec(trimmed);
+    if (kvId !== null) {
+      activeKvIdx = Number.parseInt(kvId[1]!, 10);
+      continue;
+    }
+    const kvHealth = /^Health(?:\s+Status)?\s*:\s*([A-Za-z0-9_-]+)\s*$/i.exec(trimmed);
+    if (kvHealth !== null) {
+      const targetIdx = activeKvIdx ?? 0;
+      healthByIndex.set(targetIdx, kvHealth[1]!);
+      continue;
+    }
+    const kvEcc = /(?:Uncorrectable|Double\s+Bit)[^\r\n:]*:\s*(\d+)/i.exec(trimmed);
+    if (kvEcc !== null && Number.parseInt(kvEcc[1]!, 10) > 0) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'huawei',
+        checkedDeviceIndices,
+        faultKind: 'ecc_uncorrectable',
+        title: 'Ascend NPU uncorrectable ECC fault',
+        detail: trimmed,
+        scrubber,
+      });
+    }
+  }
+
+  for (const idx of checkedDeviceIndices) {
+    const health = healthByIndex.get(idx);
+    if (health === undefined) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'huawei',
+        checkedDeviceIndices,
+        faultKind: 'device_lost',
+        title: `Ascend NPU ${idx} missing from npu-smi info`,
+        detail: `Allocated NPU ${idx} missing from npu-smi health output`,
+        scrubber,
+      });
+    }
+    if (health.toUpperCase() !== 'OK') {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'huawei',
+        checkedDeviceIndices,
+        faultKind: 'health_degraded',
+        title: `Ascend NPU ${idx} reported non-OK health (${health})`,
+        detail: `NPU ${idx} health status is "${health}"`,
+        scrubber,
+      });
+    }
+  }
+
+  return Object.freeze({
+    healthy: true,
+    quarantineRequired: false,
+    probeKind: 'physical',
+    vendor: 'huawei',
+    checkedDeviceIndices: Object.freeze([...checkedDeviceIndices]),
+    summary: `Ascend NPU health OK (${checkedDeviceIndices.join(',')})`,
+    findings: Object.freeze([]),
+  });
+}
+
+/**
+ * Execute an out-of-band trusted host accelerator health probe (`nvidia-smi`, `rocm-smi`, `npu-smi`)
+ * to detect sticky GPU/NPU faults (`Xid`, uncorrectable ECC, row-remap failure, GPU reset/hang, or
+ * unresponsive device) after a Stage B timeout, crash signal, or non-zero exit.
+ *
+ * Always scrubs probe outputs through `SecretScrubber` and returns a structured
+ * `AcceleratorHealthProbeResult` (`quarantineRequired: true` on any unresponsive or degraded state).
+ */
+export async function probeAcceleratorHealth(
+  options: ProbeAcceleratorHealthOptions,
+): Promise<AcceleratorHealthProbeResult> {
+  const scrubber = options.scrubber ?? new SecretScrubber();
+  if (options.extraSecrets !== undefined) {
+    for (const sec of options.extraSecrets) {
+      if (typeof sec === 'string' && sec.length > 0) {
+        scrubber.register(sec);
+      }
+    }
+  }
+
+  const family = inferAcceleratorFamily(options.capabilities.accelerator);
+  const requestedCount = options.targetHardware?.deviceCount ?? (options.allocatedDeviceIndices?.length ?? 1);
+  const safeCount = Math.min(Math.max(1, requestedCount), Math.max(1, options.capabilities.deviceCount));
+  const checkedDeviceIndices: readonly number[] = options.allocatedDeviceIndices !== undefined && options.allocatedDeviceIndices.length > 0
+    ? Object.freeze([...options.allocatedDeviceIndices])
+    : Object.freeze(Array.from({ length: safeCount }, (_, i) => i));
+
+  if (options.probeMode === 'synthetic_fixture' && options.commandRunner === undefined) {
+    const syntheticVendor = family === 'unknown' ? 'synthetic' : family;
+    return Object.freeze({
+      healthy: true,
+      quarantineRequired: false,
+      probeKind: 'synthetic_fixture',
+      vendor: syntheticVendor,
+      checkedDeviceIndices,
+      summary: `Synthetic accelerator fixture healthy (${options.capabilities.accelerator})`,
+      findings: Object.freeze([]),
+    });
+  }
+
+  if (family === 'unknown') {
+    return buildUnhealthyProbeResult({
+      probeKind: options.probeMode,
+      vendor: 'synthetic',
+      checkedDeviceIndices,
+      faultKind: 'probe_failed',
+      title: 'Unsupported accelerator family for physical health probe',
+      detail: `Unsupported accelerator "${options.capabilities.accelerator}"`,
+      scrubber,
+    });
+  }
+
+  const timeoutMs = options.timeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
+  const runner = options.commandRunner ?? defaultProbeCommandRunner;
+  const verifier = options.verifyExecutable ?? ((binPath: string, allowlist: readonly string[]) =>
+    verifyTrustedProbeExecutable(binPath, allowlist));
+  const runOpts = { timeoutMs, ...(options.signal !== undefined ? { signal: options.signal } : {}) };
+
+  try {
+    if (family === 'nvidia') {
+      const nvidiaBin = await resolveFirstTrustedProbeExecutable(
+        options.executableOverrides?.nvidiaSmiPath,
+        TRUSTED_NVIDIA_SMI_PATHS,
+        verifier,
+      );
+      const queryRes = await runner(
+        nvidiaBin,
+        [
+          '--query-gpu=index,name,uuid,pci.bus_id,pstate,ecc.mode.current,ecc.errors.uncorrected.volatile.total,ecc.errors.uncorrected.aggregate.total',
+          '--format=csv,noheader,nounits',
+        ],
+        runOpts,
+      );
+      if (queryRes.exitCode !== 0) {
+        const combined = `${queryRes.stdout}\n${queryRes.stderr}`;
+        const classified = classifyFailedProbeOutput('nvidia', combined);
+        return buildUnhealthyProbeResult({
+          probeKind: options.probeMode,
+          vendor: 'nvidia',
+          checkedDeviceIndices,
+          faultKind: classified.faultKind,
+          externalHostLoss: classified.externalHostLoss,
+          title: `nvidia-smi health query failed (exit ${queryRes.exitCode})`,
+          detail: combined || `nvidia-smi exited with status ${queryRes.exitCode}`,
+          scrubber,
+        });
+      }
+      const targetIdsCsv = checkedDeviceIndices.join(',');
+      let detailRes = await runner(
+        nvidiaBin,
+        ['-i', targetIdsCsv, '-q', '-d', 'ECC,PAGE_RETIREMENT,ROW_REMAPPER'],
+        runOpts,
+      );
+      if (
+        detailRes.exitCode !== 0
+        && /failed to parse --display\/-d flags/i.test(`${detailRes.stdout}\n${detailRes.stderr}`)
+      ) {
+        detailRes = await runner(nvidiaBin, ['-i', targetIdsCsv, '-q'], runOpts);
+      }
+      if (detailRes.exitCode !== 0) {
+        const combined = `${detailRes.stdout}\n${detailRes.stderr}`;
+        const classified = classifyFailedProbeOutput('nvidia', combined);
+        return buildUnhealthyProbeResult({
+          probeKind: options.probeMode,
+          vendor: 'nvidia',
+          checkedDeviceIndices,
+          faultKind: classified.faultKind,
+          externalHostLoss: classified.externalHostLoss,
+          title: `nvidia-smi detail health query failed (exit ${detailRes.exitCode})`,
+          detail: combined || `nvidia-smi -q exited with status ${detailRes.exitCode}`,
+          scrubber,
+        });
+      }
+      return parseNvidiaHealthOutput(queryRes.stdout, detailRes.stdout, checkedDeviceIndices, scrubber);
+    }
+
+    if (family === 'amd') {
+      const rocmBin = await resolveFirstTrustedProbeExecutable(
+        options.executableOverrides?.rocmSmiPath,
+        TRUSTED_ROCM_SMI_PATHS,
+        verifier,
+      );
+      let smiRes = await runner(
+        rocmBin,
+        ['--showproductname', '--showuse', '--showrasinfo', 'all', '--showretiredpages', '--json'],
+        runOpts,
+      );
+      if (
+        smiRes.exitCode !== 0
+        && /unrecognized arguments/i.test(`${smiRes.stdout}\n${smiRes.stderr}`)
+      ) {
+        smiRes = await runner(rocmBin, ['--showproductname', '--showuse', '--json'], runOpts);
+      }
+      if (smiRes.exitCode !== 0) {
+        const combined = `${smiRes.stdout}\n${smiRes.stderr}`;
+        const classified = classifyFailedProbeOutput('amd', combined);
+        return buildUnhealthyProbeResult({
+          probeKind: options.probeMode,
+          vendor: 'amd',
+          checkedDeviceIndices,
+          faultKind: classified.faultKind,
+          externalHostLoss: classified.externalHostLoss,
+          title: `rocm-smi health query failed (exit ${smiRes.exitCode})`,
+          detail: combined || `rocm-smi exited with status ${smiRes.exitCode}`,
+          scrubber,
+        });
+      }
+      return parseRocmHealthOutput(smiRes.stdout, checkedDeviceIndices, scrubber);
+    }
+
+    const npuBin = await resolveFirstTrustedProbeExecutable(
+      options.executableOverrides?.npuSmiPath,
+      TRUSTED_NPU_SMI_PATHS,
+      verifier,
+    );
+    const npuRes = await runner(npuBin, ['info'], runOpts);
+    if (npuRes.exitCode !== 0) {
+      const combined = `${npuRes.stdout}\n${npuRes.stderr}`;
+      const classified = classifyFailedProbeOutput('huawei', combined);
+      return buildUnhealthyProbeResult({
+        probeKind: options.probeMode,
+        vendor: 'huawei',
+        checkedDeviceIndices,
+        faultKind: classified.faultKind,
+        externalHostLoss: classified.externalHostLoss,
+        title: `npu-smi health query failed (exit ${npuRes.exitCode})`,
+        detail: combined || `npu-smi info exited with status ${npuRes.exitCode}`,
+        scrubber,
+      });
+    }
+    return parseNpuHealthOutput(npuRes.stdout, checkedDeviceIndices, scrubber);
+  } catch (err: unknown) {
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const isTimeout = /timed?\s*out|exceeded bounds|ETIMEDOUT/i.test(rawMsg);
+    return buildUnhealthyProbeResult({
+      probeKind: options.probeMode,
+      vendor: family,
+      checkedDeviceIndices,
+      faultKind: isTimeout ? 'probe_timeout' : 'probe_failed',
+      title: isTimeout ? 'Accelerator health probe timed out (device unresponsive)' : 'Accelerator health probe failed',
+      detail: rawMsg,
+      scrubber,
+    });
+  }
 }

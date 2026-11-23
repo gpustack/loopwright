@@ -217,6 +217,7 @@ export function hardwareRunnerExitCode(code: HardwareRunnerErrorCode): number {
     case 'AUTH_UNAUTHORIZED':
     case 'AUTH_FORBIDDEN':
     case 'RUNNER_SANDBOX_FAILED':
+    case 'WORKER_DEVICE_QUARANTINED':
       return 3;
     case 'ARTIFACT_INVALID':
     case 'ARTIFACT_MISSING':

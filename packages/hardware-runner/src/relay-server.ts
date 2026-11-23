@@ -15,13 +15,18 @@ import {
   isVerifierNamespacePath,
   LIMITS,
   SecretScrubber,
+  validateBucketMetrics,
+  validateHardwareDiagnostics,
   validateRelativePath,
   VERIFIER_ARTIFACT_LIMITS,
   type BaseTreeAnchor,
+  type BucketMetricEntry,
   type Digest,
   type FindingSeverity,
+  type HardwareDiagnostics,
   type HardwareProvenance,
   type HardwareTargetSpec,
+  type MetricBucketScope,
   type MetricThresholdRule,
   type MetricsMap,
   type MetricValue,
@@ -61,6 +66,7 @@ import {
   type PreemptLeaseInput,
   type RelayServerHandle,
   type RelayServerOptions,
+  type StageAStaticAuditSpec,
 } from './types.js';
 
 export const MAX_CONTROL_BODY_BYTES = 65_536;
@@ -261,7 +267,18 @@ const HARDWARE_TARGET_KEYS: ReadonlySet<string> = new Set([
   'deviceCount',
   'driverConstraint',
   'topology',
+  'forbiddenSymbolPatterns',
+  'maxRegisterCount',
+  'maxLocalSpillBytes',
 ]);
+const STAGE_A_AUDIT_KEYS: ReadonlySet<string> = new Set([
+  'forbiddenSymbolPatterns',
+  'maxRegisterCount',
+  'maxLocalSpillBytes',
+]);
+const BUCKET_SCOPE_TARGET_KEYS: ReadonlySet<string> = new Set(['bucketId']);
+const BUCKET_ID_WIRE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const FORBIDDEN_SYMBOL_GLOB_WIRE_RE = /[*?[\]]/;
 
 function isValidDottedVersion(value: string): boolean {
   if (!value.length || !DOTTED_VERSION_RE.test(value)) return false;
@@ -269,6 +286,53 @@ function isValidDottedVersion(value: string): boolean {
     const n = Number(seg);
     return Number.isSafeInteger(n) && n >= 0;
   });
+}
+
+function parseStageAStaticAuditFields(
+  obj: Record<string, Json>,
+  path: string,
+): StageAStaticAuditSpec {
+  let forbiddenSymbolPatterns: readonly string[] | undefined;
+  if (Object.hasOwn(obj, 'forbiddenSymbolPatterns')) {
+    const rawList = obj.forbiddenSymbolPatterns;
+    if (!Array.isArray(rawList) || rawList.length > LIMITS.forbiddenSymbolPatterns) {
+      wireInvalid(
+        `forbiddenSymbolPatterns must contain 0..${LIMITS.forbiddenSymbolPatterns} patterns`,
+        `${path}/forbiddenSymbolPatterns`,
+      );
+    }
+    const seen = new Set<string>();
+    const parsedPatterns = rawList.map((entry, idx) => {
+      const pPath = `${path}/forbiddenSymbolPatterns/${idx}`;
+      const pat = parsePrintableText(entry, 1, LIMITS.forbiddenSymbolPattern, pPath, true);
+      if (FORBIDDEN_SYMBOL_GLOB_WIRE_RE.test(pat)) {
+        wireInvalid('glob wildcards are forbidden in forbiddenSymbolPatterns', pPath);
+      }
+      if (seen.has(pat)) {
+        wireInvalid(`duplicate forbiddenSymbolPattern "${pat}"`, pPath);
+      }
+      seen.add(pat);
+      return pat;
+    });
+    forbiddenSymbolPatterns = Object.freeze(parsedPatterns);
+  }
+  const maxRegisterCount = Object.hasOwn(obj, 'maxRegisterCount')
+    ? parseIntStrict(obj.maxRegisterCount, 0, Number.MAX_SAFE_INTEGER, `${path}/maxRegisterCount`)
+    : undefined;
+  const maxLocalSpillBytes = Object.hasOwn(obj, 'maxLocalSpillBytes')
+    ? parseIntStrict(obj.maxLocalSpillBytes, 0, Number.MAX_SAFE_INTEGER, `${path}/maxLocalSpillBytes`)
+    : undefined;
+
+  return Object.freeze({
+    ...(forbiddenSymbolPatterns !== undefined ? { forbiddenSymbolPatterns } : {}),
+    ...(maxRegisterCount !== undefined ? { maxRegisterCount } : {}),
+    ...(maxLocalSpillBytes !== undefined ? { maxLocalSpillBytes } : {}),
+  });
+}
+
+function parseStageAStaticAuditSpec(value: unknown, path: string): StageAStaticAuditSpec {
+  const obj = expectNullProtoRecord(value, STAGE_A_AUDIT_KEYS, [], 'ARTIFACT_INVALID', path);
+  return parseStageAStaticAuditFields(obj, path);
 }
 
 function parseHardwareTarget(value: unknown, path: string): HardwareTargetSpec {
@@ -296,6 +360,7 @@ function parseHardwareTarget(value: unknown, path: string): HardwareTargetSpec {
   const topology = Object.hasOwn(obj, 'topology')
     ? parsePrintableText(obj.topology, 1, 128, `${path}/topology`, false)
     : undefined;
+  const auditFields = parseStageAStaticAuditFields(obj, path);
 
   return Object.freeze({
     accelerator,
@@ -303,11 +368,38 @@ function parseHardwareTarget(value: unknown, path: string): HardwareTargetSpec {
     ...(deviceCount !== undefined ? { deviceCount } : {}),
     ...(driverConstraint !== undefined ? { driverConstraint } : {}),
     ...(topology !== undefined ? { topology } : {}),
+    ...(auditFields.forbiddenSymbolPatterns !== undefined
+      ? { forbiddenSymbolPatterns: auditFields.forbiddenSymbolPatterns }
+      : {}),
+    ...(auditFields.maxRegisterCount !== undefined ? { maxRegisterCount: auditFields.maxRegisterCount } : {}),
+    ...(auditFields.maxLocalSpillBytes !== undefined ? { maxLocalSpillBytes: auditFields.maxLocalSpillBytes } : {}),
   });
 }
 
-const BOUNDS_RULE_KEYS: ReadonlySet<string> = new Set(['kind', 'metric', 'min', 'max']);
-const COMPARATIVE_RULE_KEYS: ReadonlySet<string> = new Set(['kind', 'metric', 'baselineMetric', 'operator', 'threshold']);
+const BOUNDS_RULE_KEYS: ReadonlySet<string> = new Set(['kind', 'metric', 'min', 'max', 'bucketScope']);
+const COMPARATIVE_RULE_KEYS: ReadonlySet<string> = new Set([
+  'kind',
+  'metric',
+  'baselineMetric',
+  'operator',
+  'threshold',
+  'bucketScope',
+]);
+
+function parseMetricBucketScope(value: unknown, path: string): MetricBucketScope {
+  if (value === 'aggregate' || value === 'all_buckets') {
+    return value;
+  }
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    const obj = expectNullProtoRecord(value, BUCKET_SCOPE_TARGET_KEYS, ['bucketId'], 'ARTIFACT_INVALID', path);
+    const bucketId = parseStringStrict(obj.bucketId, 1, LIMITS.bucketId, `${path}/bucketId`);
+    if (FORBIDDEN_METRIC_KEYS.has(bucketId) || !BUCKET_ID_WIRE_RE.test(bucketId)) {
+      wireInvalid('invalid bucketScope.bucketId', `${path}/bucketId`);
+    }
+    return Object.freeze({ bucketId });
+  }
+  wireInvalid('invalid metric threshold bucketScope', path);
+}
 
 function parseMetricKey(value: unknown, path: string): string {
   const key = parseStringStrict(value, 1, LIMITS.metricKey, path);
@@ -341,11 +433,15 @@ function parseMetricThresholdRule(value: unknown, path: string): MetricThreshold
     if (min !== undefined && max !== undefined && min > max) {
       wireInvalid('bounds min must not exceed max', path);
     }
+    const bucketScope = Object.hasOwn(obj, 'bucketScope')
+      ? parseMetricBucketScope(obj.bucketScope, `${path}/bucketScope`)
+      : undefined;
     return Object.freeze({
       kind: 'bounds',
       metric,
       ...(min !== undefined ? { min } : {}),
       ...(max !== undefined ? { max } : {}),
+      ...(bucketScope !== undefined ? { bucketScope } : {}),
     });
   }
   if (rawObj.kind === 'comparative') {
@@ -362,12 +458,16 @@ function parseMetricThresholdRule(value: unknown, path: string): MetricThreshold
       wireInvalid('invalid comparative operator', `${path}/operator`);
     }
     const threshold = parseFiniteControlNumber(obj.threshold, `${path}/threshold`);
+    const bucketScope = Object.hasOwn(obj, 'bucketScope')
+      ? parseMetricBucketScope(obj.bucketScope, `${path}/bucketScope`)
+      : undefined;
     return Object.freeze({
       kind: 'comparative',
       metric,
       baselineMetric,
       operator: obj.operator,
       threshold,
+      ...(bucketScope !== undefined ? { bucketScope } : {}),
     });
   }
   wireInvalid('unsupported threshold rule kind', `${path}/kind`);
@@ -521,6 +621,7 @@ const BENCHMARK_REQUEST_KEYS: ReadonlySet<string> = new Set([
   'subject',
   'targetCellId',
   'targetHardware',
+  'stageAAudit',
   'heldOutWorkloadId',
   'metricThresholds',
   'maxPreemptions',
@@ -576,6 +677,9 @@ export function parseBenchmarkRequest(
   }
   const targetCellId = parseIdentifier(root.targetCellId, '/targetCellId');
   const targetHardware = parseHardwareTarget(root.targetHardware, '/targetHardware');
+  const stageAAudit = Object.hasOwn(root, 'stageAAudit')
+    ? parseStageAStaticAuditSpec(root.stageAAudit, '/stageAAudit')
+    : undefined;
   const heldOutWorkloadId = parsePrintableText(root.heldOutWorkloadId, 1, 128, '/heldOutWorkloadId', true);
   if (!SAFE_FILENAME_ID_RE.test(heldOutWorkloadId)) {
     wireInvalid('invalid heldOutWorkloadId', '/heldOutWorkloadId');
@@ -613,6 +717,7 @@ export function parseBenchmarkRequest(
     subject,
     targetCellId,
     targetHardware,
+    ...(stageAAudit !== undefined ? { stageAAudit } : {}),
     heldOutWorkloadId,
     metricThresholds,
     maxPreemptions,
@@ -633,6 +738,8 @@ const COMPLETE_KEYS: ReadonlySet<string> = new Set([
   'metrics',
   'findings',
   'hardwareProvenance',
+  'bucketMetrics',
+  'hardwareDiagnostics',
   'outputArtifacts',
 ]);
 const PROVENANCE_KEYS: ReadonlySet<string> = new Set([
@@ -672,6 +779,8 @@ const SIGNED_RECEIPT_KEYS: ReadonlySet<string> = new Set([
   'metrics',
   'findings',
   'hardwareProvenance',
+  'bucketMetrics',
+  'hardwareDiagnostics',
   'outputArtifacts',
   'signature',
 ]);
@@ -941,7 +1050,80 @@ function parseOutputArtifacts(
   return Object.freeze(out);
 }
 
-function parseCompleteInput(raw: Json, maxBlobBytes: number): CompleteLeaseInput {
+const DEFAULT_WIRE_SCRUBBER = new SecretScrubber();
+
+function assertNoRawInvalidWireNumbers(value: unknown, path: string, depth = 0): void {
+  if (depth > 32) {
+    wireInvalid('wire structure exceeds maximum depth', path);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      wireInvalid('numeric value must be finite and not -0', path);
+    }
+    return;
+  }
+  if (typeof value === 'string') {
+    if (hasLoneSurrogate(value)) {
+      wireInvalid('string contains lone UTF-16 surrogate', path);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      assertNoRawInvalidWireNumbers(value[i], `${path}/${i}`, depth + 1);
+    }
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    const rec = value as Readonly<Record<string, unknown>>;
+    for (const key of Reflect.ownKeys(rec)) {
+      if (typeof key !== 'string' || FORBIDDEN_METRIC_KEYS.has(key) || hasLoneSurrogate(key)) {
+        wireInvalid('forbidden object key', path);
+      }
+      assertNoRawInvalidWireNumbers(rec[key], `${path}/${key}`, depth + 1);
+    }
+  }
+}
+
+function parseWireBucketMetrics(
+  value: unknown,
+  path: string,
+  scrubber: SecretScrubber = DEFAULT_WIRE_SCRUBBER,
+): readonly BucketMetricEntry[] {
+  assertNoRawInvalidWireNumbers(value, path);
+  const validated = validateBucketMetrics(value, scrubber);
+  if (!validated.ok) {
+    const first = validated.errors[0];
+    wireInvalid(
+      `invalid bucketMetrics (${first?.code ?? 'INVALID'})`,
+      first?.path ? `${path}${first.path}` : path,
+    );
+  }
+  return validated.value;
+}
+
+function parseWireHardwareDiagnostics(
+  value: unknown,
+  path: string,
+  scrubber: SecretScrubber = DEFAULT_WIRE_SCRUBBER,
+): HardwareDiagnostics {
+  assertNoRawInvalidWireNumbers(value, path);
+  const validated = validateHardwareDiagnostics(value, scrubber);
+  if (!validated.ok) {
+    const first = validated.errors[0];
+    wireInvalid(
+      `invalid hardwareDiagnostics (${first?.code ?? 'INVALID'})`,
+      first?.path ? `${path}${first.path}` : path,
+    );
+  }
+  return validated.value;
+}
+
+function parseCompleteInput(
+  raw: Json,
+  maxBlobBytes: number,
+  scrubber: SecretScrubber = DEFAULT_WIRE_SCRUBBER,
+): CompleteLeaseInput {
   const obj = expectNullProtoRecord(
     raw,
     COMPLETE_KEYS,
@@ -971,6 +1153,12 @@ function parseCompleteInput(raw: Json, maxBlobBytes: number): CompleteLeaseInput
   if (obj.status === 'approved' && hardwareProvenance === undefined) {
     wireInvalid('approved verdict requires hardwareProvenance', '/hardwareProvenance');
   }
+  const bucketMetrics = Object.hasOwn(obj, 'bucketMetrics')
+    ? parseWireBucketMetrics(obj.bucketMetrics, '/bucketMetrics', scrubber)
+    : undefined;
+  const hardwareDiagnostics = Object.hasOwn(obj, 'hardwareDiagnostics')
+    ? parseWireHardwareDiagnostics(obj.hardwareDiagnostics, '/hardwareDiagnostics', scrubber)
+    : undefined;
   const outputArtifacts = Object.hasOwn(obj, 'outputArtifacts')
     ? parseOutputArtifacts(obj.outputArtifacts, maxBlobBytes, '/outputArtifacts')
     : undefined;
@@ -983,6 +1171,8 @@ function parseCompleteInput(raw: Json, maxBlobBytes: number): CompleteLeaseInput
     ...(metrics !== undefined ? { metrics } : {}),
     ...(findings !== undefined ? { findings } : {}),
     ...(hardwareProvenance !== undefined ? { hardwareProvenance } : {}),
+    ...(bucketMetrics !== undefined ? { bucketMetrics } : {}),
+    ...(hardwareDiagnostics !== undefined ? { hardwareDiagnostics } : {}),
     ...(outputArtifacts !== undefined ? { outputArtifacts } : {}),
   });
 }
@@ -1072,6 +1262,12 @@ function parseAuthenticatedReceiptBytes(
   if (status === 'approved' && hardwareProvenance === undefined) {
     wireInvalid('approved receipt requires hardwareProvenance', '/receipt/hardwareProvenance');
   }
+  const bucketMetrics = Object.hasOwn(obj, 'bucketMetrics')
+    ? parseWireBucketMetrics(obj.bucketMetrics, '/receipt/bucketMetrics', scrubber)
+    : undefined;
+  const hardwareDiagnostics = Object.hasOwn(obj, 'hardwareDiagnostics')
+    ? parseWireHardwareDiagnostics(obj.hardwareDiagnostics, '/receipt/hardwareDiagnostics', scrubber)
+    : undefined;
   const outputArtifacts = Object.hasOwn(obj, 'outputArtifacts')
     ? parseOutputArtifacts(obj.outputArtifacts, maxBlobBytes, '/receipt/outputArtifacts')
     : undefined;
@@ -1097,6 +1293,8 @@ function parseAuthenticatedReceiptBytes(
     ...(metrics !== undefined ? { metrics } : {}),
     ...(findings !== undefined ? { findings } : {}),
     ...(hardwareProvenance !== undefined ? { hardwareProvenance } : {}),
+    ...(bucketMetrics !== undefined ? { bucketMetrics } : {}),
+    ...(hardwareDiagnostics !== undefined ? { hardwareDiagnostics } : {}),
     ...(outputArtifacts !== undefined ? { outputArtifacts } : {}),
   });
 
@@ -3091,7 +3289,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
           }
 
           if (action === 'complete') {
-            const completeInput = parseCompleteInput(jsonBody, config.maxBlobBytes);
+            const completeInput = parseCompleteInput(jsonBody, config.maxBlobBytes, secretScrubber);
             await withSerialLock(jobCompletionChains, jobId, async () => {
               const prepared = queue.prepareCompleteLease(jobId, completeInput);
               let stagedReceipt: Awaited<ReturnType<typeof stageSignedVerdictReceiptTemp>> | null = null;

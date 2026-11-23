@@ -169,6 +169,7 @@ test('runner-cli: hardwareRunnerExitCode covers every HardwareRunnerErrorCode ex
     AUTH_UNAUTHORIZED: 3,
     AUTH_FORBIDDEN: 3,
     RUNNER_SANDBOX_FAILED: 3,
+    WORKER_DEVICE_QUARANTINED: 3,
     ARTIFACT_INVALID: 4,
     ARTIFACT_MISSING: 4,
     NOT_FOUND: 4,

@@ -6,6 +6,12 @@ export interface HardwareRunnerDescriptor {
   readonly version: typeof HARDWARE_RUNNER_SCAFFOLD_VERSION;
 }
 
+export {
+  HARDWARE_BOUND_PIPELINES,
+  STAGE_A_STATIC_AUDIT_FAILED,
+  validateBucketMetrics,
+  validateHardwareDiagnostics,
+} from '@loopwright/core';
 export * from './types.js';
 export * from './config.js';
 export * from './queue.js';

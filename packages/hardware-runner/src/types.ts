@@ -1,13 +1,32 @@
 import type {
   BaseTreeAnchor,
+  BucketDimensionValue,
+  BucketDimensionsMap,
+  BucketMetricEntry,
   Digest,
+  HardwareBoundPipeline,
+  HardwareDiagnostics,
   HardwareProvenance,
+  HardwareStallReason,
   HardwareTargetSpec,
+  MetricBucketScope,
   MetricThresholdRule,
   MetricsMap,
   StructuredFinding,
   Subject,
 } from '@loopwright/core';
+
+export type {
+  BucketDimensionValue,
+  BucketDimensionsMap,
+  BucketMetricEntry,
+  HardwareBoundPipeline,
+  HardwareDiagnostics,
+  HardwareStallReason,
+  MetricBucketScope,
+};
+
+export type HardwareDiagnosticsSummary = HardwareDiagnostics;
 
 export type HardwareRunnerErrorCode =
   | 'CONFIG_INVALID'
@@ -21,7 +40,36 @@ export type HardwareRunnerErrorCode =
   | 'AUTH_FORBIDDEN'
   | 'PAYLOAD_TOO_LARGE'
   | 'NOT_FOUND'
-  | 'RUNNER_SANDBOX_FAILED';
+  | 'RUNNER_SANDBOX_FAILED'
+  | 'WORKER_DEVICE_QUARANTINED';
+
+export interface StageAStaticAuditSpec {
+  readonly forbiddenSymbolPatterns?: readonly string[];
+  readonly maxRegisterCount?: number;
+  readonly maxLocalSpillBytes?: number;
+}
+
+export type AcceleratorFaultKind =
+  | 'xid_error'
+  | 'ecc_uncorrectable'
+  | 'row_remap_failure'
+  | 'gpu_reset_required'
+  | 'device_lost'
+  | 'probe_timeout'
+  | 'probe_failed'
+  | 'health_degraded';
+
+export interface AcceleratorHealthProbeResult {
+  readonly healthy: boolean;
+  readonly quarantineRequired: boolean;
+  readonly probeKind: 'physical' | 'synthetic_fixture';
+  readonly vendor: 'nvidia' | 'amd' | 'huawei' | 'synthetic';
+  readonly checkedDeviceIndices: readonly number[];
+  readonly faultKind?: AcceleratorFaultKind;
+  readonly externalHostLoss?: boolean;
+  readonly summary: string;
+  readonly findings: readonly StructuredFinding[];
+}
 
 export class HardwareRunnerError extends Error {
   readonly code: HardwareRunnerErrorCode;
@@ -154,6 +202,7 @@ export interface BenchmarkRequest {
   readonly subject: Subject;
   readonly targetCellId: string;
   readonly targetHardware: HardwareTargetSpec;
+  readonly stageAAudit?: StageAStaticAuditSpec;
   readonly heldOutWorkloadId: string;
   readonly metricThresholds: readonly MetricThresholdRule[];
   readonly maxPreemptions: number;
@@ -183,6 +232,8 @@ export interface BenchmarkVerdict {
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
   readonly hardwareProvenance?: HardwareProvenance;
+  readonly bucketMetrics?: readonly BucketMetricEntry[];
+  readonly hardwareDiagnostics?: HardwareDiagnostics;
   readonly outputArtifacts?: readonly BenchmarkOutputArtifact[];
 }
 
@@ -198,6 +249,7 @@ export interface WorkerJobPayload {
   readonly subject: Subject;
   readonly targetCellId: string;
   readonly targetHardware: HardwareTargetSpec;
+  readonly stageAAudit?: StageAStaticAuditSpec;
   readonly heldOutWorkloadId: string;
   readonly metricThresholds: readonly MetricThresholdRule[];
   readonly maxPreemptions: number;
@@ -276,6 +328,8 @@ export interface CompleteLeaseInput extends LeaseCredentials {
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
   readonly hardwareProvenance?: HardwareProvenance;
+  readonly bucketMetrics?: readonly BucketMetricEntry[];
+  readonly hardwareDiagnostics?: HardwareDiagnostics;
   readonly outputArtifacts?: readonly BenchmarkOutputArtifact[];
 }
 

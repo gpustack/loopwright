@@ -512,7 +512,7 @@ Parallel execution waves (`my-build evolutionary-campaigns-pareto-archive-and-bu
       Acceptance: `handlers.ts`, `registry.ts`, and `verifier-protocol.ts` implement deterministic `'evolve-block-guard.v1'` (`1..32` `EVOLVE-BLOCK-START/END` pairs per file, rejecting nested/duplicate/reordered/unclosed markers, `maxBlockBytes` overflow, `allowedBlockIds` violations, or any single-byte mutation outside mutable blocks against `baseRevision` SHA-256); `benchmark-gate.ts` forwards Stage A static audit fields, `bucketMetrics`, and `hardwareDiagnostics` onto recorded `Evidence` while keeping `D <= 256` `phaseSchedule` untouched and resolving handler digests cleanly via `installedHandlerDigests()`.
       Verify: `npm run build && npm run typecheck && npx tsc -p tsconfig.test.json && node scripts/run-tests.mjs --pkg controller`
 
-- [ ] **T6 · Hardware-runner Stage A symbol/spill static audits, Stage B bucket/Roofline parser, and post-crash GPU quarantine**
+- [x] **T6 · Hardware-runner Stage A symbol/spill static audits, Stage B bucket/Roofline parser, and post-crash GPU quarantine**
       Blocked by: T2
       Owns: `packages/hardware-runner/src/**`, `packages/hardware-runner/test/**`
       Gate: review

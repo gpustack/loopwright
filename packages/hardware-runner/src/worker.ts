@@ -5,7 +5,7 @@ import { request as httpRequest, type IncomingMessage, type RequestOptions } fro
 import { Agent as HttpsAgent, request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
 import { resolve } from 'node:path';
 import type { TLSSocket } from 'node:tls';
-import { OVERLAY_LIMITS, SecretScrubber } from '@loopwright/core';
+import { LIMITS, OVERLAY_LIMITS, SecretScrubber, type StructuredFinding } from '@loopwright/core';
 import { readBoundedRegularFile } from '@loopwright/taskpack';
 import {
   assertNoSymlinkAncestors,
@@ -20,7 +20,11 @@ import {
   type BenchmarkJobEvaluator,
   type EvaluatedBenchmarkJob,
 } from './evaluator.js';
-import type { CollectHardwareProvenanceOptions } from './provenance.js';
+import {
+  probeAcceleratorHealth,
+  type CollectHardwareProvenanceOptions,
+  type ProbeAcceleratorHealthOptions,
+} from './provenance.js';
 import {
   EMPTY_SHA256_HEX,
   MAX_CAS_CHUNK_BYTES,
@@ -29,6 +33,7 @@ import {
 } from './relay-server.js';
 import {
   HardwareRunnerError,
+  type AcceleratorHealthProbeResult,
   type CompleteLeaseInput,
   type HardwareRunnerErrorCode,
   type HeartbeatResponse,
@@ -66,6 +71,7 @@ export interface RunHardwareWorkerOptions {
   readonly clock?: WorkerMonotonicClock;
   readonly evaluator?: BenchmarkJobEvaluator;
   readonly probe?: (options: CollectHardwareProvenanceOptions) => ReturnType<typeof import('./provenance.js').collectHardwareProvenance>;
+  readonly healthProbe?: (options: ProbeAcceleratorHealthOptions) => Promise<AcceleratorHealthProbeResult>;
   readonly onLeaseAcquired?: (grant: LeaseGrant) => void | Promise<void>;
   readonly onJobSettled?: (summary: WorkerJobSettlementSummary) => void | Promise<void>;
 }
@@ -142,6 +148,7 @@ const VALID_ERROR_CODES: ReadonlySet<HardwareRunnerErrorCode> = new Set([
   'PAYLOAD_TOO_LARGE',
   'NOT_FOUND',
   'RUNNER_SANDBOX_FAILED',
+  'WORKER_DEVICE_QUARANTINED',
 ]);
 const DETERMINISTIC_EVAL_ERROR_CODES: ReadonlySet<HardwareRunnerErrorCode> = new Set([
   'ARTIFACT_INVALID',
@@ -452,6 +459,7 @@ function parseLeaseGrantPayload(bytes: Buffer, maxBlobBytes: number): LeaseGrant
       subject: jobObj.subject,
       targetCellId: jobObj.targetCellId,
       targetHardware: jobObj.targetHardware,
+      ...(Object.hasOwn(jobObj, 'stageAAudit') ? { stageAAudit: jobObj.stageAAudit } : {}),
       heldOutWorkloadId: jobObj.heldOutWorkloadId,
       ...(Object.hasOwn(jobObj, 'metricThresholds') ? { metricThresholds: jobObj.metricThresholds } : {}),
       ...(Object.hasOwn(jobObj, 'maxPreemptions') ? { maxPreemptions: jobObj.maxPreemptions } : {}),
@@ -477,6 +485,7 @@ function parseLeaseGrantPayload(bytes: Buffer, maxBlobBytes: number): LeaseGrant
     subject: validatedReq.subject,
     targetCellId: validatedReq.targetCellId,
     targetHardware: validatedReq.targetHardware,
+    ...(validatedReq.stageAAudit !== undefined ? { stageAAudit: validatedReq.stageAAudit } : {}),
     heldOutWorkloadId: validatedReq.heldOutWorkloadId,
     metricThresholds: validatedReq.metricThresholds,
     maxPreemptions: validatedReq.maxPreemptions,
@@ -1141,12 +1150,17 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
 
   const client = await createOutboundHttpClient(config);
   const evaluator: BenchmarkJobEvaluator = options.evaluator ?? evaluateBenchmarkJob;
+  const healthProbeRunner = options.healthProbe ?? probeAcceleratorHealth;
   let polls = 0;
   let jobsProcessed = 0;
   let lastSettlement: WorkerJobSettlementSummary | null = null;
+  let quarantineError: HardwareRunnerError | null = null;
 
   try {
     while (true) {
+      if (quarantineError !== null) {
+        throw quarantineError;
+      }
       if (preemptSignal.aborted) {
         return { polls, jobsProcessed, lastSettlement, exitReason: 'preempted' };
       }
@@ -1532,6 +1546,7 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
       let ackedOutputCount = 0;
       let unackedUploadFailure = false;
       let jobCleanupAttempted = false;
+      let forcePreemptForExternalDeviceLoss = false;
       const shouldPreserveSealedOutputs = (): boolean => {
         if (evaluated === null || evaluated.sealedOutputs.length === 0) {
           return false;
@@ -1540,7 +1555,8 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           return true;
         }
         if (
-          abortState.cause === 'preempt'
+          forcePreemptForExternalDeviceLoss
+          || abortState.cause === 'preempt'
           || preemptSignal.aborted
           || abortState.cause === 'cancel'
           || abortState.cause === 'shutdown'
@@ -1570,9 +1586,81 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
 
       let bodyLoopErr: unknown = null;
       try {
+        // Post-crash / post-timeout out-of-band accelerator health probe MUST execute BEFORE reporting
+        // completion/preemption or polling `/v1/runner/leases:acquire` for another job!
+        const stageBCrashedOrTimedOut =
+          teardownFailure === null
+          && evaluatorInfraError === null
+          && evaluated !== null
+          && (
+            evaluated.stageBFailure !== undefined
+            || evaluated.reason === 'STAGE_B_TIMEOUT'
+            || evaluated.reason === 'STAGE_B_EXECUTION_FAILED'
+          );
+
+        if (stageBCrashedOrTimedOut && evaluated !== null && !shutdownSignal.aborted) {
+          let healthResult: AcceleratorHealthProbeResult;
+          try {
+            healthResult = await healthProbeRunner({
+              probeMode: config.probeMode,
+              capabilities: config.capabilities,
+              targetHardware: grant.job.targetHardware,
+              scrubber,
+            });
+          } catch (probeErr: unknown) {
+            const safeProbeErr = scrubber.scrub(probeErr instanceof Error ? probeErr.message : String(probeErr)).trim()
+              || 'post-crash accelerator health probe failed';
+            healthResult = Object.freeze({
+              healthy: false,
+              quarantineRequired: true,
+              probeKind: config.probeMode,
+              vendor: 'synthetic',
+              checkedDeviceIndices: Object.freeze([0]),
+              faultKind: 'probe_failed',
+              summary: safeProbeErr,
+              findings: Object.freeze([
+                Object.freeze({
+                  title: 'Post-crash accelerator health probe failed',
+                  severity: 'critical' as const,
+                  evidence: safeProbeErr,
+                }),
+              ]),
+            });
+          }
+
+          if (!healthResult.healthy || healthResult.quarantineRequired) {
+            const safeSummary =
+              scrubber.scrub(healthResult.summary).trim()
+              || 'worker accelerator device quarantined after Stage B crash/timeout';
+            quarantineError = new HardwareRunnerError('WORKER_DEVICE_QUARANTINED', safeSummary);
+
+            if (healthResult.externalHostLoss === true) {
+              forcePreemptForExternalDeviceLoss = true;
+            } else if (healthResult.findings.length > 0) {
+              const scrubbedHealthFindings: StructuredFinding[] = healthResult.findings.map(f => {
+                const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+                copy.title = (scrubber.scrub(f.title).trim() || 'Accelerator fault').slice(0, LIMITS.findingTitle);
+                copy.severity = f.severity;
+                copy.evidence = (scrubber.scrub(f.evidence).trim() || safeSummary).slice(0, LIMITS.findingEvidence);
+                return Object.freeze(copy as unknown as StructuredFinding);
+              });
+              const existingFindings = evaluated.findings ?? [];
+              const keepCount = Math.max(0, LIMITS.findings - scrubbedHealthFindings.length);
+              evaluated = Object.freeze({
+                ...evaluated,
+                findings: Object.freeze([
+                  ...existingFindings.slice(0, keepCount),
+                  ...scrubbedHealthFindings.slice(0, LIMITS.findings),
+                ]),
+              });
+            }
+          }
+        }
+
         // Upload sealed Stage A output blobs while heartbeat and local lease authority remain active.
         if (
-          teardownFailure === null
+          !forcePreemptForExternalDeviceLoss
+          && teardownFailure === null
           && evaluated !== null
           && evaluatorInfraError === null
           && assertAuthorityLive()
@@ -1630,7 +1718,7 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           throw teardownFailure;
         }
 
-        if (abortState.cause === 'preempt' || preemptSignal.aborted) {
+        if (abortState.cause === 'preempt' || preemptSignal.aborted || forcePreemptForExternalDeviceLoss) {
           hbStopped = true;
           clearLeaseDeadlineTimer();
           jobAbort.abort();
@@ -1645,7 +1733,7 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
                 relayBootId: creds.relayBootId,
                 leaseEpoch: creds.leaseEpoch,
                 leaseToken: creds.leaseToken,
-                reason: 'worker_preempted',
+                reason: forcePreemptForExternalDeviceLoss ? 'worker_device_lost' : 'worker_preempted',
               },
               timeoutMs: config.requestTimeoutMs,
             });
@@ -1700,6 +1788,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           if (options.onJobSettled !== undefined) {
             await options.onJobSettled(lastSettlement);
           }
+          if (quarantineError !== null) {
+            throw quarantineError;
+          }
           return { polls, jobsProcessed, lastSettlement, exitReason: 'preempted' };
         }
 
@@ -1748,6 +1839,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           if (options.onJobSettled !== undefined) {
             await options.onJobSettled(lastSettlement);
           }
+          if (quarantineError !== null) {
+            throw quarantineError;
+          }
           if (options.once === true) {
             return { polls, jobsProcessed, lastSettlement, exitReason: 'once_completed' };
           }
@@ -1759,6 +1853,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           clearLeaseDeadlineTimer();
           jobAbort.abort();
           await heartbeatLoop.catch(() => {});
+          if (quarantineError !== null) {
+            throw quarantineError;
+          }
           return { polls, jobsProcessed, lastSettlement, exitReason: 'aborted' };
         }
 
@@ -1772,6 +1869,8 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           ...(evaluated.metrics !== undefined ? { metrics: evaluated.metrics } : {}),
           ...(evaluated.findings !== undefined ? { findings: evaluated.findings } : {}),
           ...(evaluated.hardwareProvenance !== undefined ? { hardwareProvenance: evaluated.hardwareProvenance } : {}),
+          ...(evaluated.bucketMetrics !== undefined ? { bucketMetrics: evaluated.bucketMetrics } : {}),
+          ...(evaluated.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: evaluated.hardwareDiagnostics } : {}),
           ...(evaluated.sealedOutputs.length > 0
             ? { outputArtifacts: evaluated.sealedOutputs.map(item => item.artifact) }
             : {}),
@@ -1827,6 +1926,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
             });
             if (options.onJobSettled !== undefined) {
               await options.onJobSettled(lastSettlement);
+            }
+            if (quarantineError !== null) {
+              throw quarantineError;
             }
             if (options.once === true) {
               return { polls, jobsProcessed, lastSettlement, exitReason: 'once_completed' };
@@ -1884,6 +1986,10 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
         });
         if (options.onJobSettled !== undefined) {
           await options.onJobSettled(lastSettlement);
+        }
+
+        if (quarantineError !== null) {
+          throw quarantineError;
         }
 
         if (options.once === true) {

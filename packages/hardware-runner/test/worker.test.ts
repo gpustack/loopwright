@@ -1954,6 +1954,7 @@ test('delayed acquisition pre-start renewal, shorter renewal TTL shrinking deadl
     scenario = 'preempt_docker_rm_fail';
     preemptCalls = 0;
     const mockDockerDir = join(root, 'mock-docker-fail');
+    const mockDockerStartedFlag = join(root, 'mock-docker-started.flag');
     await mkdir(mockDockerDir, { recursive: true, mode: 0o755 });
     const mockDockerScript = join(mockDockerDir, 'docker');
     await writeFile(
@@ -1964,6 +1965,7 @@ test('delayed acquisition pre-start renewal, shorter renewal TTL shrinking deadl
         '  echo "docker daemon unreachable during rm -f" >&2',
         '  exit 1',
         'fi',
+        `: > "${mockDockerStartedFlag}"`,
         'sleep 10',
       ].join('\n'),
       { mode: 0o555 },
@@ -1987,7 +1989,17 @@ test('delayed acquisition pre-start renewal, shorter renewal TTL shrinking deadl
             preemptSignal: dockerFailPreempt.signal,
             registerProcessSignalHandlers: false,
             evaluator: opts => {
-              setTimeout(() => dockerFailPreempt.abort(), 40);
+              void (async () => {
+                for (let i = 0; i < 400 && !dockerFailPreempt.signal.aborted; i += 1) {
+                  const started = await lstat(mockDockerStartedFlag).then(() => true, () => false);
+                  if (started) {
+                    dockerFailPreempt.abort();
+                    return;
+                  }
+                  await new Promise<void>(r => setTimeout(r, 10));
+                }
+                dockerFailPreempt.abort();
+              })();
               return realEval({
                 ...opts,
                 stageACommand: { command: '/bin/sleep', args: ['10'] },
