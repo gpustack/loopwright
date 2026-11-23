@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
@@ -221,6 +221,19 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+async function hasLinuxProcCmdlineMarker(marker: string): Promise<boolean> {
+  const entries = await readdir('/proc').catch(() => []);
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    if (Number(entry) === process.pid) continue;
+    const raw = await readFile(`/proc/${entry}/cmdline`).catch(() => null);
+    if (raw !== null && raw.toString('utf8').includes(marker)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function generateSelfSignedCert(certPath: string, keyPath: string, sanExtension: string): void {
   execFileSync(
     'openssl',
@@ -409,7 +422,9 @@ test('real child-process worker receiving OS SIGTERM kills default evaluator sta
       '}',
       'const outDir = process.env.LOOPWRIGHT_STAGE_A_OUT;',
       'fs.writeFileSync(path.join(outDir, "k.cubin"), "cubin", "utf8");',
-      'fs.writeFileSync(path.join(outDir, "pids.txt"), String(process.pid) + "\\n", "utf8");',
+      'let pidNs = "";',
+      'try { pidNs = fs.readlinkSync("/proc/self/ns/pid"); } catch {}',
+      'fs.writeFileSync(path.join(outDir, "pids.txt"), String(process.pid) + (pidNs ? " " + pidNs : "") + "\\n", "utf8");',
       'setTimeout(() => {}, 30_000);',
     ].join('\n');
     const req1 = await stageInputAndSubmitJob(
@@ -447,15 +462,20 @@ test('real child-process worker receiving OS SIGTERM kills default evaluator sta
 
     // Wait until real default Stage A inside OS sandbox writes its PID
     let stagePid = 0;
+    let stagePidNs = '';
+    let stageJobDir = '';
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline && stagePid === 0) {
       const jobDirs = await readdir(workDir).catch(() => []);
       for (const jd of jobDirs) {
         const pidFile = join(workDir, jd, 'stage-a', 'stage-a-out', 'pids.txt');
         const txt = await readFile(pidFile, 'utf8').catch(() => '');
-        const parsedPid = Number.parseInt(txt.trim(), 10);
+        const [pidToken = '', nsToken = ''] = txt.trim().split(/\s+/);
+        const parsedPid = Number.parseInt(pidToken, 10);
         if (Number.isSafeInteger(parsedPid) && parsedPid > 0) {
           stagePid = parsedPid;
+          stagePidNs = nsToken;
+          stageJobDir = jd;
           break;
         }
       }
@@ -464,7 +484,17 @@ test('real child-process worker receiving OS SIGTERM kills default evaluator sta
       }
     }
     assert.equal(stagePid > 0, true, `stage did not start; stderr=${workerStderr}`);
-    assert.equal(isPidAlive(stagePid), true);
+    const selfPidNs = process.platform === 'linux'
+      ? await readlink('/proc/self/ns/pid').catch(() => '')
+      : '';
+    const samePidNamespace = process.platform !== 'linux'
+      || stagePidNs === ''
+      || selfPidNs === ''
+      || stagePidNs === selfPidNs;
+    assert.equal(
+      samePidNamespace ? isPidAlive(stagePid) : await hasLinuxProcCmdlineMarker(stageJobDir),
+      true,
+    );
 
     // Send real OS SIGTERM to the worker Node process!
     process.kill(workerChild.pid!, 'SIGTERM');
@@ -472,7 +502,10 @@ test('real child-process worker receiving OS SIGTERM kills default evaluator sta
     assert.equal(exitCode, 0, `worker exited ${String(exitCode)}; stderr=${workerStderr}`);
 
     // Sandboxed Stage A process MUST be dead immediately upon worker exit, and workDir cleaned!
-    assert.equal(isPidAlive(stagePid), false);
+    assert.equal(
+      samePidNamespace ? isPidAlive(stagePid) : await hasLinuxProcCmdlineMarker(stageJobDir),
+      false,
+    );
     assert.deepEqual(await readdir(workDir), []);
 
     const resultLine = workerStdout.split(/\r?\n/).find(l => l.startsWith('WORKER_RESULT:'));

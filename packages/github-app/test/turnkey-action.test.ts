@@ -2454,6 +2454,7 @@ printf '{"detail":"verified-once"}\\n' > "$LOOPWRIGHT_CHECK_OUT"
     return work;
   })();
   let sharedWork = '';
+  let longSleepMarker = '';
   let sharedSeed: {
     readonly repo: string;
     readonly runRoot: string;
@@ -2461,14 +2462,29 @@ printf '{"detail":"verified-once"}\\n' > "$LOOPWRIGHT_CHECK_OUT"
     readonly scriptSha256ByRel: Readonly<Record<string, string>>;
   } | undefined;
 
+  async function hasLinuxProcCmdlineMarker(marker: string): Promise<boolean> {
+    const entries = await readdir('/proc').catch(() => []);
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      if (Number(entry) === process.pid) continue;
+      const raw = await readFile(`/proc/${entry}/cmdline`).catch(() => null);
+      if (raw !== null && raw.toString('utf8').includes(marker)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   before(async () => {
     sharedWork = await sharedWorkDirPromise;
+    longSleepMarker = `lw-gate-close-${String(process.pid)}-${String(Date.now())}`;
     const longSleepRel = '.auto-sync/checks/long-sleep.sh';
     const longSleepContent = `#!/usr/bin/env bash
 set -euo pipefail
-sleep 30 &
+parent_pid="$$"
+pid_ns="$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+bash -c 'printf "%s %s %s\\n" "$1" "$$" "$2" > "$HOME/pids.txt.tmp" && mv "$HOME/pids.txt.tmp" "$HOME/pids.txt"; sleep 30' '${longSleepMarker}' "$parent_pid" "$pid_ns" &
 bg_pid=$!
-printf '%s %s\\n' "$$" "$bg_pid" > "$HOME/pids.txt"
 wait "$bg_pid"
 `;
     const tailScriptRel = '.auto-sync/checks/verify-tail.sh';
@@ -2564,12 +2580,27 @@ exit 1
         }
       }
       assert.notEqual(pidFileContent, null, 'long-running gate child must have started');
-      const [childPidStr, grandchildPidStr] = pidFileContent!.trim().split(/\s+/);
+      const [childPidStr, grandchildPidStr, childPidNs = ''] = pidFileContent!.trim().split(/\s+/);
       const childPid = Number(childPidStr);
       const grandchildPid = Number(grandchildPidStr);
       assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
       assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 0);
       assert.equal(existsSync(scratchBasePath), true);
+
+      const selfPidNs = process.platform === 'linux'
+        ? await readlink('/proc/self/ns/pid').catch(() => '')
+        : '';
+      const samePidNamespace = process.platform !== 'linux'
+        || childPidNs === ''
+        || selfPidNs === ''
+        || childPidNs === selfPidNs;
+      if (!samePidNamespace) {
+        assert.equal(
+          await hasLinuxProcCmdlineMarker(longSleepMarker),
+          true,
+          'sandboxed child process group marker should be visible before close()',
+        );
+      }
 
       const closeStarted = performance.now();
       await gateServer.close();
@@ -2580,18 +2611,30 @@ exit 1
       assert.equal(existsSync(scratchBasePath), false, 'owned scratchBase must be cleanly removed after in-flight jobs settle');
 
       // Verify both script PID and its background grandchild PID are terminated.
-      for (const pid of [childPid, grandchildPid]) {
+      if (samePidNamespace) {
+        for (const pid of [childPid, grandchildPid]) {
+          let alive = true;
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            try {
+              process.kill(pid, 0);
+              await new Promise(r => setTimeout(r, 20));
+            } catch {
+              alive = false;
+              break;
+            }
+          }
+          assert.equal(alive, false, `process ${pid} in child process group should be dead after close()`);
+        }
+      } else {
         let alive = true;
         for (let attempt = 0; attempt < 20; attempt += 1) {
-          try {
-            process.kill(pid, 0);
-            await new Promise(r => setTimeout(r, 20));
-          } catch {
+          if (!(await hasLinuxProcCmdlineMarker(longSleepMarker))) {
             alive = false;
             break;
           }
+          await new Promise(r => setTimeout(r, 20));
         }
-        assert.equal(alive, false, `process ${pid} in child process group should be dead after close()`);
+        assert.equal(alive, false, `sandboxed child process group (${longSleepMarker}) should be dead after close()`);
       }
     } finally {
       await gateServer?.close();

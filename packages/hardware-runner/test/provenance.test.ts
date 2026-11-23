@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { digestArtifactFromMetadata, matchesHardwareTarget, validateDocument } from '@loopwright/core';
@@ -180,9 +180,20 @@ test('parseRocmSmiOutput and parseNpuSmiOutput measure real topology and never f
 });
 
 test('verifyTrustedProbeExecutable enforces uid===0 + non-writable parents on system paths and rejects owner-writable or writable-parent binaries', async () => {
-  // 1. Real root-owned OS binary (/bin/sh) passes production verification with zero test overrides
-  const realSh = await verifyTrustedProbeExecutable('/bin/sh', ['/bin/sh']);
-  assert.equal(realSh.length > 0, true);
+  const shLinkStat = await lstat('/bin/sh');
+  const shTargetStat = await lstat(await realpath('/bin/sh'));
+  if (shLinkStat.uid === 0 && shTargetStat.uid === 0) {
+    // 1. Real root-owned OS binary (/bin/sh) passes production verification with zero test overrides
+    const realSh = await verifyTrustedProbeExecutable('/bin/sh', ['/bin/sh']);
+    assert.equal(realSh.length > 0, true);
+  } else {
+    // Inside an unprivileged Linux user namespace (e.g. bwrap --unshare-user), host root maps to overflowuid
+    // and production verification must still fail closed on non-zero uid.
+    await assert.rejects(
+      () => verifyTrustedProbeExecutable('/bin/sh', ['/bin/sh']),
+      (err: unknown) => err instanceof HardwareRunnerError && err.code === 'RUNNER_SANDBOX_FAILED' && /uid 0/.test(err.message),
+    );
+  }
 
   const dir = await mkdtemp(join(tmpdir(), 'lw-prov-exec-'));
   await chmod(dir, 0o700);
