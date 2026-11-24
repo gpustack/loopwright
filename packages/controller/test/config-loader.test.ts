@@ -351,7 +351,9 @@ test('loadTrustedConfiguration binds vault credentials and approvedState.environ
     const loaded = good(await loadTrustedConfiguration({ ...f.input, environment: envFn }));
     const plan = good(await compilePlan(loaded));
     const state = approvedState(loaded);
-    assert.equal(state.environment, envFn);
+    assert.equal(state.environment('PROVIDER_TOKEN'), isolatedToken);
+    assert.equal(state.environment('UNRELATED_KEY'), undefined);
+    assert.equal(state.environment('x'.repeat(300)), undefined);
     const resolvers = state.vault.bind({
       runId: 'run-env-iso',
       roleId: 'builder',

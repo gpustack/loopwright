@@ -242,8 +242,25 @@ export function loadTrustedConfiguration(
       refuse('CONFIG_SCHEMA');
     });
   }
-  const environment = (envDescriptor.value as ((name: string) => string | undefined) | undefined)
-    ?? ((name: string) => process.env[name]);
+  const rawEnvironment = envDescriptor.value as ((name: string) => string | undefined) | undefined;
+  /**
+   * Trusted host-caller boundary: `loadTrustedConfiguration` accepts an optional environment
+   * lookup callback strictly from trusted in-process hosts (CLI / taskpack / evolution) to avoid
+   * mutating global `process.env`. Bound key/value types and length defensively here.
+   */
+  const environment: (name: string) => string | undefined = rawEnvironment === undefined
+    ? (name => process.env[name])
+    : (name => {
+        if (typeof name !== 'string' || name.length === 0 || name.length > 256) return undefined;
+        let value: unknown;
+        try {
+          value = rawEnvironment(name);
+        } catch {
+          return undefined;
+        }
+        if (typeof value !== 'string' || value.length > 65_536) return undefined;
+        return value;
+      });
   const descriptors = Object.getOwnPropertyDescriptors(input);
   Reflect.deleteProperty(descriptors, 'environment');
   const sanitized = Object.defineProperties(Object.create(null) as object, descriptors) as LoadConfigurationInput;

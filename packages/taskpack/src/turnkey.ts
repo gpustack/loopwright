@@ -6480,6 +6480,9 @@ export async function executeTurnkeyCycle(
   const scrubber = options.scrubber ?? new SecretScrubber();
   const attemptRunId = makeAttemptRunId(options.runId, options.attemptSeq);
   const effectiveEnv: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
+  // Intentional isolation: when a caller supplies runtimeEnv it is authoritative over ambient
+  // process.env (preventing ambient secret leakage and concurrent process.env races), with an
+  // explicit read-only fallback for LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV below.
   const baseEnv = options.runtimeEnv ?? process.env;
   for (const [key, value] of Object.entries(baseEnv)) {
     if (value !== undefined) {
