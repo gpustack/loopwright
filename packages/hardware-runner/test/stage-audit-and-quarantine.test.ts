@@ -771,6 +771,26 @@ test('Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, an
     assert.equal(fatAudit.passed, false);
     assert.match(fatAudit.findings[0]?.title ?? '', /Unsupported Mach-O/i);
 
+    // Universal Mach-O disguised with a .class extension must STILL fail closed (content-based check)
+    const spoofedFatPath = join(tamperDir, 'spoofed.class');
+    await writeFile(spoofedFatPath, fatMachOBuf, { mode: 0o400 });
+    const spoofedFatAudit = await auditSealedStageAOutputs({
+      sealedOutputs: [
+        {
+          artifact: {
+            name: 'spoofed.class',
+            digest: { algorithm: 'sha256', hex: sha256Hex(fatMachOBuf) },
+            byteLength: fatMachOBuf.byteLength,
+          },
+          sealedFilePath: spoofedFatPath,
+        },
+      ],
+      auditSpec: { forbiddenSymbolPatterns: ['cublas'] },
+      scrubber: new SecretScrubber(),
+    });
+    assert.equal(spoofedFatAudit.passed, false);
+    assert.match(spoofedFatAudit.findings[0]?.title ?? '', /Unsupported Mach-O/i);
+
     const javaClassPath = join(tamperDir, 'Helper.class');
     const javaClassBuf = Buffer.alloc(32, 0);
     javaClassBuf.writeUInt32BE(0xcafebabe, 0);

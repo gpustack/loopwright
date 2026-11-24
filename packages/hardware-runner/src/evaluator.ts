@@ -3757,12 +3757,13 @@ export async function auditSealedStageAOutputs(
       const magic32 = magicLen >= 4 ? magicHeader.readUInt32LE(0) : 0;
       const isMachO64 = magicLen >= 4 && (magic32 === 0xfeedfacf || magic32 === 0xcffaedfe);
       const isMachO32 = magicLen >= 4 && (magic32 === 0xfeedface || magic32 === 0xcefaedfe);
-      // Universal Mach-O fat magic is BE 0xCAFEBABE (LE 0xbebafeca), which overlaps with Java .class files.
-      // Distinguish Mach-O fat binaries (nfat_arch in 1..20, non-.class) from Java bytecode (major_version >= 45).
+      // Universal Mach-O fat magic is BE 0xCAFEBABE (LE 0xbebafeca), which collides with Java
+      // .class files. Bytes 4-7 encode (minor_version << 16) | major_version for Java (major >= 45)
+      // and nfat_arch for Mach-O fat (1..20), so the 1..20 content bound alone disambiguates
+      // without trusting the filename extension.
       const isMachOFat =
         magicLen >= 8
         && magic32 === 0xbebafeca
-        && !relName.toLowerCase().endsWith('.class')
         && magicHeader.readUInt32BE(4) >= 1
         && magicHeader.readUInt32BE(4) <= 20;
 
