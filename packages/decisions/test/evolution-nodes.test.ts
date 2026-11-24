@@ -107,17 +107,41 @@ describe('evaluateMutationNovelty', () => {
     }
   `;
 
-  it('normalizes comments (//, /* */, #) and whitespace while preserving string literals, preprocessor directives, and private fields', () => {
+  it('normalizes comments (//, /* */, #) and whitespace while preserving string/template literals, preprocessor directives, and private fields', () => {
     const withComments = `
       # python-style comment
       #pragma unroll 4
       const char* tag = "keep // # /* inside */"; // trailing
+      const tpl = \`keep // # /* inside template */\`;
       /* multi-line
          comment */
       int   x   =   obj.#secretVal + 2;
     `;
     const normalized = normalizeEvolveBlockSource(withComments);
-    assert.equal(normalized, '#pragma unroll 4 const char* tag = "keep // # /* inside */"; int x = obj.#secretVal + 2;');
+    assert.equal(
+      normalized,
+      '#pragma unroll 4 const char* tag = "keep // # /* inside */"; const tpl = `keep // # /* inside template */`; int x = obj.#secretVal + 2;',
+    );
+  });
+
+  it('bounds multi-byte UTF-8 and emoji novelty slices under DECISION_MAX_STATE_BYTES without splitting surrogate pairs', async () => {
+    const emojiBlock = 'const char* s = "' + '\u{1F680}'.repeat(7_000) + '";';
+    const candidateBlock = `${emojiBlock}\nint v = 2;`;
+    const historyBlock = `${emojiBlock}\nint v = 1;`;
+    const transport = transportFor(() => ({
+      answers: { 'mutation-cosmetic-clone': { noul: 0.1 } },
+    }));
+    const result = await evaluateMutationNovelty({
+      ...base({ transport }),
+      novelty: {
+        candidateId: 'cand-utf8-emoji',
+        candidateSlice: candidateBlock,
+        historySlices: [{ id: 'hist-emoji', sourceSlice: historyBlock }],
+        noveltyThreshold: 0.5,
+      },
+    });
+    assert.equal(result.action, 'accept');
+    assert.equal(result.source, 'jev');
   });
 
   it('rejects exact whitespace/comment-only clones (Jaccard === 1.0) with 0 transport calls', async () => {

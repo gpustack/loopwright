@@ -397,6 +397,24 @@ function mergeDecisionState(baseState: unknown, key: string, payload: Record<str
   return merged;
 }
 
+const DECISION_NOVELTY_STATE_SLICE_MAX_BYTES = 16_384;
+
+function truncateUtf8CodePointSafe(text: string, maxBytes: number, maxChars: number): string {
+  if (maxBytes <= 0 || maxChars <= 0 || text.length === 0) return '';
+  let byteCount = 0;
+  let charEnd = 0;
+  while (charEnd < text.length && charEnd < maxChars) {
+    const cp = text.codePointAt(charEnd)!;
+    const stepChars = cp > 0xffff ? 2 : 1;
+    if (charEnd + stepChars > maxChars) break;
+    const stepBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    if (byteCount + stepBytes > maxBytes) break;
+    byteCount += stepBytes;
+    charEnd += stepChars;
+  }
+  return text.slice(0, charEnd);
+}
+
 /**
  * Normalize an `EVOLVE-BLOCK` source slice by stripping `//`, `/* ... *\/`, and `#` comments
  * (preserving string literals) and collapsing all whitespace to single spaces.
@@ -408,7 +426,7 @@ export function normalizeEvolveBlockSource(source: string): string {
   while (i < len) {
     const ch = source.charAt(i);
     const next = i + 1 < len ? source.charAt(i + 1) : '';
-    if (ch === '"' || ch === '\'') {
+    if (ch === '"' || ch === '\'' || ch === '`') {
       const quote = ch;
       out += ch;
       i += 1;
@@ -625,8 +643,16 @@ export async function evaluateMutationNovelty(
     candidateId: validated.candidateId,
     matchedHistoryId,
     maxSimilarity,
-    normalizedCandidateSlice: normalizedCandidate.slice(0, DECISION_NOVELTY_STATE_SLICE_CHARS),
-    normalizedMatchedSlice: matchedNormalized.slice(0, DECISION_NOVELTY_STATE_SLICE_CHARS),
+    normalizedCandidateSlice: truncateUtf8CodePointSafe(
+      normalizedCandidate,
+      DECISION_NOVELTY_STATE_SLICE_MAX_BYTES,
+      DECISION_NOVELTY_STATE_SLICE_CHARS,
+    ),
+    normalizedMatchedSlice: truncateUtf8CodePointSafe(
+      matchedNormalized,
+      DECISION_NOVELTY_STATE_SLICE_MAX_BYTES,
+      DECISION_NOVELTY_STATE_SLICE_CHARS,
+    ),
   });
   const evaluation = await evaluateDecision({ ...request, state, questions, fallback: () => null });
   const outcome = evaluation.outcomes.find(entry => entry.output.id === 'mutation-cosmetic-clone');
@@ -889,7 +915,7 @@ export async function routeEvolutionStrategy(
     verificationCertified: false,
     source: evaluation.fallbackReason === null && evaluation.mode !== 'jev' ? 'deterministic_heuristic' : 'deterministic_fallback',
     zone: evaluation.aggregateZone,
-    fallbackReason: evaluation.fallbackReason ?? (evaluation.mode === 'jev' ? 'invalid_response' : 'low_confidence'),
+    fallbackReason: evaluation.fallbackReason ?? (evaluation.mode === 'jev' ? 'invalid_response' : null),
     transportCalls: evaluation.transportCalls,
   };
 }
@@ -1041,7 +1067,7 @@ export async function evaluateCascadeEscalation(
     verificationCertified: false,
     source: evaluation.fallbackReason === null && evaluation.mode !== 'jev' ? 'deterministic_heuristic' : 'deterministic_fallback',
     zone: evaluation.aggregateZone,
-    fallbackReason: evaluation.fallbackReason ?? (evaluation.mode === 'jev' ? 'invalid_response' : 'low_confidence'),
+    fallbackReason: evaluation.fallbackReason ?? (evaluation.mode === 'jev' ? 'invalid_response' : null),
     transportCalls: evaluation.transportCalls,
   };
 }
