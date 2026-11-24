@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import {
   SecretScrubber as CoreSecretScrubber,
   type Digest,
@@ -273,7 +276,7 @@ async function extractCandidateGuardedCodeSlice(
     if (inspected !== null && inspected.ok) {
       const rawCandidate = await readFile(join(tmpHolder, 'bundle', 'candidate.files.json'), 'utf8').catch(() => null);
       if (rawCandidate !== null) {
-        const parsed = JSON.parse(rawCandidate) as {
+        let parsed: {
           readonly files?: readonly {
             readonly name?: unknown;
             readonly sha256?: unknown;
@@ -281,6 +284,11 @@ async function extractCandidateGuardedCodeSlice(
             readonly body?: unknown;
           }[];
         };
+        try {
+          parsed = JSON.parse(rawCandidate) as typeof parsed;
+        } catch {
+          parsed = {};
+        }
         if (Array.isArray(parsed.files)) {
           for (const entry of parsed.files) {
             if (typeof entry.name !== 'string') continue;
@@ -533,16 +541,21 @@ export function createCliEvolutionEvaluator(options: {
     const gateEndpoints: HostGateEndpointPlan[] = [];
     const byCredentialRef: Record<string, string> = {};
     const benchmarkGateEnvUrl = process.env['LOOPWRIGHT_BENCHMARK_GATE_URL']?.trim();
-    const defaultBenchSecretEnv = process.env['LOOPWRIGHT_GATE_SIGNING_SECRET']?.trim()
-      ? 'LOOPWRIGHT_GATE_SIGNING_SECRET'
-      : process.env['BENCH_SIGNING_SECRET']?.trim()
-        ? 'BENCH_SIGNING_SECRET'
-        : 'LOOPWRIGHT_GATE_SIGNING_SECRET';
+    let defaultBenchSecretEnv = 'LOOPWRIGHT_GATE_SIGNING_SECRET';
+    if (!process.env['LOOPWRIGHT_GATE_SIGNING_SECRET']?.trim() && process.env['BENCH_SIGNING_SECRET']?.trim()) {
+      defaultBenchSecretEnv = 'BENCH_SIGNING_SECRET';
+    }
 
     for (const extGate of scopedTaskpack.spec.verification.externalGates) {
       if (extGate.implementation !== 'benchmark-gate.v1') continue;
       const url = extGate.url ?? benchmarkGateEnvUrl;
-      if (url === undefined || url.length === 0) continue;
+      if (url === undefined || url.length === 0) {
+        throw new evolution.EvolutionError(
+          'EVOLUTION_SCHEMA_INVALID',
+          `declared benchmark-gate.v1 "${extGate.id}" requires either gate.url or LOOPWRIGHT_BENCHMARK_GATE_URL`,
+          `/spec/verification/externalGates/${extGate.id}`,
+        );
+      }
       const signingRef = extGate.signingCredentialRef ?? 'bench-sign';
       byCredentialRef[signingRef] = defaultBenchSecretEnv;
       if (extGate.authCredentialRef !== undefined) {
@@ -910,6 +923,25 @@ export function createCliEvolutionEvaluator(options: {
         failureReason = collected.dispositionReason ?? cycleReasonCode ?? 'LOCAL_VERIFICATION_FAILED';
       }
 
+      let evidenceDigest: Digest | null = null;
+      if (finalStatus === 'passed') {
+        if (collected.rawVerdictReceiptBytes !== undefined) {
+          evidenceDigest = evolution.sha256Digest(collected.rawVerdictReceiptBytes);
+        } else {
+          const candidateDigest = cycleResult.ok && cycleResult.value.kind === 'result'
+            ? cycleResult.value.result.spec.subject.candidateDigest.hex
+            : null;
+          evidenceDigest = evolution.sha256Digest(
+            JSON.stringify({
+              candidateDigest,
+              metrics: collected.metrics,
+              bucketMetrics: collected.bucketMetrics ?? null,
+              outputArtifacts: collected.outputArtifacts.map(a => ({ name: a.name, digest: a.digest.hex, byteLength: a.byteLength })),
+            }),
+          );
+        }
+      }
+
       return Object.freeze({
         status: finalStatus,
         failureReason,
@@ -922,7 +954,7 @@ export function createCliEvolutionEvaluator(options: {
         outputArtifacts: collected.outputArtifacts,
         ...(collected.stageABlobs.length > 0 ? { stageABlobs: collected.stageABlobs } : {}),
         ...(collected.rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes: collected.rawVerdictReceiptBytes } : {}),
-        evidenceDigest: finalStatus === 'passed' ? evolution.sha256Digest(`${proposal.individualId}:${attemptRunId}:passed`) : null,
+        evidenceDigest,
         childRunRelPath,
         ...(runEvalReport !== undefined ? { runEvalReport } : {}),
         ...(noveltyDecisionOut !== undefined ? { noveltyDecision: noveltyDecisionOut } : {}),
@@ -980,11 +1012,20 @@ export function createCliEvolutionSupervisorRunner(options: {
         });
 
         const workspaceDir = join(turn.stagingDir, 'workspace');
-        const workspaceHeadRev = execFileSync('git', ['rev-parse', 'HEAD'], {
-          cwd: workspaceDir,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-        }).trim().toLowerCase();
+        let workspaceHeadRev: string;
+        try {
+          const { stdout: revOut } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+            cwd: workspaceDir,
+            encoding: 'utf8',
+            maxBuffer: 1024 * 64,
+          });
+          workspaceHeadRev = revOut.trim().toLowerCase();
+        } catch (gitErr: unknown) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_STORE_ERROR',
+            `failed to resolve supervisor workspace HEAD revision: ${gitErr instanceof Error ? gitErr.message : String(gitErr)}`,
+          );
+        }
 
         const supervisorTaskpack: TaskpackManifest = parseTaskpackManifest(
           JSON.stringify({

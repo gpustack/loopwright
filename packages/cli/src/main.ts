@@ -270,9 +270,16 @@ export function evolutionExitCode(code: EvolutionErrorCode): number {
     }
   }
 }
+const BASE_CLI_SECRET_ENV_KEYS = [
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'INPUT_GITHUB-TOKEN',
+  'INPUT_GITHUB-APP-PRIVATE-KEY',
+] as const;
+
 function createCliScrubber(extraKeys: readonly string[] = []): SecretScrubber {
   const scrubber = new SecretScrubber();
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraKeys]) {
+  for (const key of [...BASE_CLI_SECRET_ENV_KEYS, ...extraKeys]) {
     const value = process.env[key];
     if (typeof value === 'string' && value.length > 0) scrubber.register(value);
   }
@@ -1851,7 +1858,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
   ];
   const scrubber = createCliScrubber(extraSecretKeys);
   const coreScrubber = new CoreSecretScrubber();
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraSecretKeys]) {
+  for (const key of [...BASE_CLI_SECRET_ENV_KEYS, ...extraSecretKeys]) {
     const value = process.env[key];
     if (typeof value === 'string' && value.length > 0) coreScrubber.register(value);
   }
@@ -1995,6 +2002,12 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
       });
       try {
         const campaigns = await store.listCampaigns();
+        if (campaigns.length > 1) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_CONFLICT',
+            `campaign store holds ${campaigns.length} campaigns; export requires a single campaign`,
+          );
+        }
         const target = campaigns[0];
         if (target === undefined) {
           throw new evolution.EvolutionError('EVOLUTION_NOT_FOUND', 'no campaigns found in campaign.sqlite');
@@ -2118,8 +2131,8 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
     const message = scrubber.scrub(rawMessage);
     await emit(
       'diagnostic',
-      { version: 1, code: 'EVOLUTION_UNAVAILABLE', message },
-      `EVOLUTION_UNAVAILABLE: ${message}`,
+      { version: 1, code: 'CLI_EVOLUTION_UNAVAILABLE', message },
+      `CLI_EVOLUTION_UNAVAILABLE: ${message}`,
     );
     return 8;
   }

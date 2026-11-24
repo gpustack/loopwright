@@ -310,17 +310,11 @@ export function parseArguments(argv: readonly string[]): Arguments {
 
   if (rawCommand === 'evolve') {
     const rawAction = argv[1];
-    if (
-      rawAction !== 'check'
-      && rawAction !== 'run'
-      && rawAction !== 'resume'
-      && rawAction !== 'status'
-      && rawAction !== 'inspect'
-      && rawAction !== 'export'
-    ) {
+    if (typeof rawAction !== 'string' || !Object.hasOwn(evolveRules, rawAction)) {
       throw new UsageError();
     }
-    const rule = evolveRules[rawAction];
+    const action = rawAction as keyof typeof evolveRules;
+    const rule = evolveRules[action];
     parseOptions(2, key => rule.flags.includes(key), key => rule.values.includes(key), false);
     if (rule.required.some(key => !values.has(key))) throw new UsageError();
     for (const val of values.values()) {
@@ -345,7 +339,7 @@ export function parseArguments(argv: readonly string[]): Arguments {
     }
     return {
       command: 'evolve',
-      evolveAction: rawAction,
+      evolveAction: action,
       values,
       flags,
     };
