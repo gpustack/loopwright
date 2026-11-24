@@ -1079,6 +1079,37 @@ describe('finalizer hardwareScope gating integration', () => {
       const persistedHw = finalStore.entries.find(e => e.claimKey === 'claim.check.benchmark-gate.v1');
       assert.ok(persistedLocal !== undefined && Object.hasOwn(persistedLocal.scope, 'hardwareScope') === false);
       assert.ok(persistedHw !== undefined && persistedHw.scope.hardwareScope?.accelerator === 'sm_100a');
+
+      // 3. A local_execution pass on gfx942 must NOT silently widen and clobber sm_100a's hardware-scoped benchmark fact
+      const gfxScope: HardwareMemoryScope = { accelerator: 'gfx942', driverConstraint: '>=6.2.0' };
+      const gfxRun = buildMixedHardwareRun({ runId: 'run.gfx.pass', status: 'completed', accelerator: 'gfx942' });
+      const gfxLocalOnlyEvidence = gfxRun.evidence.map(ev =>
+        ev.spec.checkId === 'benchmark-gate.v1'
+          ? { ...ev, spec: { ...ev.spec, level: 'local_execution' as const } }
+          : ev,
+      );
+      const gfxOutcome = await finalizeRunMemory({
+        context: {
+          kind: 'summary',
+          repository: root,
+          summary: {
+            lock: gfxRun.lock,
+            result: gfxRun.result,
+            incident: null,
+            observations: [],
+            evidence: gfxLocalOnlyEvidence,
+            ledger,
+            candidateManifest: gfxRun.manifest.spec.entries,
+            artifacts: gfxRun.artifactRefs,
+          },
+        },
+        config: { ...makeConfig(3000), hardwareScope: gfxScope },
+      });
+      assert.equal(
+        gfxOutcome.deterministicEntries.some(e => e.claimKey === 'claim.check.benchmark-gate.v1'),
+        false,
+        'local_execution pass on gfx942 must not emit hardware-universal fact clobbering sm_100a entry',
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

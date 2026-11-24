@@ -1,7 +1,7 @@
 import type { Evidence, VerificationResult } from '@loopwright/core';
-import { diagnostic, digestEqual, hasControlCharacter, incidentReferenceDigest, MEMORY_CREDENTIAL_PATTERNS, memoryProposalSchema, renderEntryMarkdown } from './schema.js';
+import { diagnostic, digestEqual, hardwareScopesOverlap, hasControlCharacter, incidentReferenceDigest, MEMORY_CREDENTIAL_PATTERNS, memoryProposalSchema, renderEntryMarkdown } from './schema.js';
 import { compileScopePattern, isMemoryManagedPath, matchScopePattern, memoryDirectoryFor, normalizeMemoryRoot } from './store.js';
-import type { HardwareMemoryScope, MemoryDiagnostic, MemoryGateResult, MemoryGateName, MemoryOperation, MemoryProposal, MemoryVerificationInput, MemoryVerificationReport } from './types.js';
+import type { MemoryDiagnostic, MemoryGateResult, MemoryGateName, MemoryOperation, MemoryProposal, MemoryVerificationInput, MemoryVerificationReport } from './types.js';
 
 const CREDENTIAL_PATTERNS = MEMORY_CREDENTIAL_PATTERNS;
 const INJECTION_PATTERNS: readonly { readonly source: RegExp; readonly label: string }[] = [
@@ -183,17 +183,6 @@ function redactionGate(input: MemoryVerificationInput, proposal: MemoryProposal)
     if (hasControlCharacter(content)) diagnostics.push({ code: 'MEMORY_INJECTION_DETECTED', path, detail: 'control character in proposal text' });
   }
   return gate('redaction', diagnostics);
-}
-function hardwareScopesOverlap(
-  a: HardwareMemoryScope | undefined,
-  b: HardwareMemoryScope | undefined,
-): boolean {
-  if (a === undefined || b === undefined) return true;
-  if (a.accelerator !== b.accelerator) return false;
-  if (a.driverConstraint !== undefined && b.driverConstraint !== undefined && a.driverConstraint !== b.driverConstraint) return false;
-  if (a.operatorFamily !== undefined && b.operatorFamily !== undefined && a.operatorFamily !== b.operatorFamily) return false;
-  if (a.boundPipeline !== undefined && b.boundPipeline !== undefined && a.boundPipeline !== b.boundPipeline) return false;
-  return true;
 }
 function hardwareEvidenceGate(proposal: MemoryProposal): MemoryGateResult {
   const diagnostics: MemoryDiagnostic[] = [];

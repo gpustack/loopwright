@@ -3,9 +3,10 @@ import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
-import { canonical, controllerIncidentSchema, digestEqual, fail, hardwareMemoryScopeSchema, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
+import { canonical, controllerIncidentSchema, digestEqual, fail, hardwareMemoryScopeSchema, hardwareScopesOverlap, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
 import { clampMemoryMaxEntries, compareEntriesForEviction, computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import type {
+  HardwareMemoryScope,
   MemoryBudgetLedger,
   MemoryCuratorRequest,
   MemoryEntry,
@@ -221,17 +222,6 @@ function evidenceRefFor(row: { readonly checkId: string; readonly status: string
 function normalizeGateWorkdirPaths(text: string): string {
   return text.replace(EPHEMERAL_GATE_WORKDIR_PATTERN, '<gate-workdir>');
 }
-function hardwareScopeOverlaps(
-  candidateScope: MemoryEntry['scope']['hardwareScope'],
-  currentScope: MemoryEntry['scope']['hardwareScope'],
-): boolean {
-  if (candidateScope === undefined || currentScope === undefined) return true;
-  if (candidateScope.accelerator !== currentScope.accelerator) return false;
-  if (candidateScope.driverConstraint !== undefined && currentScope.driverConstraint !== undefined && candidateScope.driverConstraint !== currentScope.driverConstraint) return false;
-  if (candidateScope.operatorFamily !== undefined && currentScope.operatorFamily !== undefined && candidateScope.operatorFamily !== currentScope.operatorFamily) return false;
-  if (candidateScope.boundPipeline !== undefined && currentScope.boundPipeline !== undefined && candidateScope.boundPipeline !== currentScope.boundPipeline) return false;
-  return true;
-}
 function targetMatrixOverlaps(
   candidateMatrix: MemoryEntry['scope']['targetMatrix'],
   currentTargetMatrix: MemoryEntry['scope']['targetMatrix'],
@@ -295,7 +285,7 @@ function applyLifecycleSweepAndEviction(options: {
     } else if (
       entry.kind === 'failure_observation'
       && targetMatrixOverlaps(entry.scope.targetMatrix, currentTargetMatrix)
-      && hardwareScopeOverlaps(entry.scope.hardwareScope, currentHardwareScope)
+      && hardwareScopesOverlap(entry.scope.hardwareScope, currentHardwareScope)
       && (runSucceeded || passedCheckClaimKeys.has(entry.claimKey))
     ) {
       retireReason = 'Prior failure observation healed.';
@@ -444,15 +434,32 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
           .filter(candidate =>
             candidate.claimKey === claimKey
             && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
-            && hardwareScopeOverlaps(candidate.scope.hardwareScope, entryHardwareScope))
+            && hardwareScopesOverlap(candidate.scope.hardwareScope, entryHardwareScope))
           .map(candidate => candidate.id),
       )].sort().slice(0, 32);
-    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry => {
-      const entryHardwareScope = hardwareScope === undefined
-        ? undefined
-        : kind === 'fact' || kind === 'invariant'
-          ? (refs.some(ref => ref.level === 'hardware_execution' && ref.observedStatus === 'passed') ? hardwareScope : undefined)
-          : hardwareScope;
+    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry | null => {
+      let entryHardwareScope: HardwareMemoryScope | undefined;
+      if (hardwareScope !== undefined) {
+        const requiresHardwareEvidence = kind === 'fact' || kind === 'invariant';
+        const hasPassingHardwareEvidence = refs.some(ref => ref.level === 'hardware_execution' && ref.observedStatus === 'passed');
+        if (!requiresHardwareEvidence || hasPassingHardwareEvidence) {
+          entryHardwareScope = hardwareScope;
+        } else {
+          // Do not silently widen a fact/invariant to hardware-universal if an active entry for a
+          // different hardware accelerator already exists on this claimKey.
+          const wouldClobberOtherHardware = loaded.index.entries.some(
+            candidate =>
+              candidate.claimKey === claimKey
+              && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
+              && candidate.scope.hardwareScope !== undefined
+              && !hardwareScopesOverlap(candidate.scope.hardwareScope, hardwareScope),
+          );
+          if (wouldClobberOtherHardware) {
+            return null;
+          }
+          entryHardwareScope = undefined;
+        }
+      }
       return {
         version: 1,
         id,
@@ -480,8 +487,9 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       for (const row of rows.filter(row => row.status === 'passed')) {
         const reference = evidenceRefFor(row, settled.evidence);
         if (reference === null) continue;
-        deterministicEntries.push(buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
-          `Check ${row.checkId} passed on run ${runId} with ${reference.level} evidence.`, 'fact', [reference]));
+        const built = buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
+          `Check ${row.checkId} passed on run ${runId} with ${reference.level} evidence.`, 'fact', [reference]);
+        if (built !== null) deterministicEntries.push(built);
       }
     } else if (settled.result !== null && OBSERVATION_STATUSES.includes(settled.result.spec.status as (typeof OBSERVATION_STATUSES)[number])) {
       for (const row of rows.filter(row => row.status !== 'passed')) {
@@ -494,16 +502,18 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
           ? `gate_denied: ${gateReason}`
           : baseDetail;
         const rawClaim = `Check ${row.checkId} ended ${row.status} on run ${runId} (${row.reason}${detailText === null ? '' : `: ${detailText}`}).`;
-        deterministicEntries.push(buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
+        const built = buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
           normalizeGateWorkdirPaths(rawClaim),
-          'failure_observation', [reference]));
+          'failure_observation', [reference]);
+        if (built !== null) deterministicEntries.push(built);
       }
     }
     if (settled.result === null && settled.incident !== null) {
       const incident = settled.incident, artifact = incident.knownReferences[0] ?? syntheticIncidentArtifact(incident);
-      deterministicEntries.push(buildEntry(`entry.${runToken}.incident`, `claim.incident.${runToken}`,
+      const built = buildEntry(`entry.${runToken}.incident`, `claim.incident.${runToken}`,
         normalizeGateWorkdirPaths(`Run ${runId} settled as incident ${incident.code} at stage ${incident.stage}; cleanup ${incident.cleanup}.`),
-        'failure_observation', [{ evidenceId: INCIDENT_EVIDENCE_ID, checkId: INCIDENT_CHECK_ID, level: 'local_execution', observedStatus: 'not_run', artifact }]));
+        'failure_observation', [{ evidenceId: INCIDENT_EVIDENCE_ID, checkId: INCIDENT_CHECK_ID, level: 'local_execution', observedStatus: 'not_run', artifact }]);
+      if (built !== null) deterministicEntries.push(built);
     }
     let operations: readonly MemoryOperation[] = deterministicEntries
       .slice(0, MAX_PROPOSAL_OPERATIONS)

@@ -24,6 +24,12 @@ function matrixMatches(entry: MemoryEntry, targetCell: MemorySelectorInput['targ
   return entry.scope.targetMatrix.id === targetCell.id && entry.scope.targetMatrix.platform === targetCell.platform
     && entry.scope.targetMatrix.variant === targetCell.variant;
 }
+/**
+ * Directional hardware scope match for memory selection (entry scope vs current target scope).
+ * `driverConstraint` fails closed when the target omits it (preventing unverified driver transfers),
+ * while `operatorFamily` and `boundPipeline` are optional narrowers that match when unspecified on
+ * the target and exclude only explicit mismatches.
+ */
 function hardwareScopeMatches(
   entryScope: MemoryEntry['scope']['hardwareScope'],
   targetScope: MemorySelectorInput['hardwareScope'],

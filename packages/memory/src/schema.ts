@@ -281,6 +281,22 @@ export function hardwareMemoryScopeSchema(value: unknown, path = '/hardwareScope
   }
   return Object.freeze(out) as unknown as HardwareMemoryScope;
 }
+/**
+ * Symmetric overlap check for two optional hardware scopes (used by conflict and supersession gates).
+ * An omitted scope or optional sub-field is treated as wildcard-compatible for overlap purposes;
+ * directional query selection uses `hardwareScopeMatches` in `selector.ts`.
+ */
+export function hardwareScopesOverlap(
+  a: HardwareMemoryScope | undefined,
+  b: HardwareMemoryScope | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return true;
+  if (a.accelerator !== b.accelerator) return false;
+  if (a.driverConstraint !== undefined && b.driverConstraint !== undefined && a.driverConstraint !== b.driverConstraint) return false;
+  if (a.operatorFamily !== undefined && b.operatorFamily !== undefined && a.operatorFamily !== b.operatorFamily) return false;
+  if (a.boundPipeline !== undefined && b.boundPipeline !== undefined && a.boundPipeline !== b.boundPipeline) return false;
+  return true;
+}
 const ENTRY_KINDS = ['fact', 'failure_observation', 'invariant'] as const;
 export function memoryEntrySchema(value: unknown, path = ''): MemoryEntry {
   const input = objectShape(value, path);
