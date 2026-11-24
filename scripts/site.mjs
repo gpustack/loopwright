@@ -6,11 +6,35 @@ import { execSync, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL, URL } from "node:url";
 import { checkDocs, PUBLIC_SITE_DOC_REL_PATHS, REPO_ONLY_DOC_REL_PATHS, slugify } from "./check-docs.mjs";
 
+const MODULE_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function readSiteHugoParams(rootDir) {
+  const params = {
+    repoSlug: "gpustack/loopwright",
+    repoNavLabel: "Repository navigation",
+    repoNavDescription: "Module relationships, design records, code entry points and applicable skills for contributors."
+  };
+  const hugoConfigPath = path.join(rootDir, "site", "hugo.toml");
+  if (!fs.existsSync(hugoConfigPath)) {
+    return params;
+  }
+  const text = fs.readFileSync(hugoConfigPath, "utf8");
+  for (const key of Object.keys(params)) {
+    const match = text.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, "m"));
+    if (match?.[1]) {
+      params[key] = match[1];
+    }
+  }
+  return params;
+}
+
+function repoBlobBaseForRoot(rootDir) {
+  return `https://github.com/${readSiteHugoParams(rootDir).repoSlug}/blob`;
+}
+
 export const DEFAULT_DOCS_PREFIX = "../docs";
 export const DEFAULT_SOURCE_REF = "main";
-export const DEFAULT_REPO_BLOB_BASE = "https://github.com/gpustack/loopwright/blob";
-
-const MODULE_REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const DEFAULT_REPO_BLOB_BASE = repoBlobBaseForRoot(MODULE_REPO_ROOT);
 const FENCE_OPEN_LINE_RE = /^((?: {0,3}> ?)*) {0,3}(`{3,}|~{3,})([^\r\n]*?)(\r?\n|$)/;
 const REF_DEF_START_RE = /^(?: {0,3}> ?)* {0,3}\[/;
 const LIST_ITEM_RE = /^(?: {0,3}> ?)* {0,3}(?:[-*+]|\d+[.)])[ \t]/;
@@ -837,11 +861,12 @@ export function stageReferenceDocs({
   sourceDir,
   stagingDir,
   docsPrefix = DEFAULT_DOCS_PREFIX,
-  repoBlobBase = DEFAULT_REPO_BLOB_BASE,
+  repoBlobBase,
   sourceRef = DEFAULT_SOURCE_REF,
   rebaseFrom = null
 } = {}) {
   const resolvedRoot = path.resolve(rootDir);
+  const resolvedRepoBlobBase = repoBlobBase ?? repoBlobBaseForRoot(resolvedRoot);
   const resolvedDocsDir = path.resolve(docsDir ?? path.join(resolvedRoot, "docs"));
   const resolvedSiteDir = path.join(resolvedRoot, "site");
   let resolvedSourceDir = sourceDir ? path.resolve(sourceDir) : null;
@@ -881,7 +906,7 @@ export function stageReferenceDocs({
     validateNonEmpty(docsPrefix, "docsPrefix", { stripSlash: true });
   } else {
     validateNonEmpty(docsPrefix, "docsPrefix", { stripSlash: true });
-    validateNonEmpty(repoBlobBase, "repoBlobBase", { stripSlash: true });
+    validateNonEmpty(resolvedRepoBlobBase, "repoBlobBase", { stripSlash: true });
     validateNonEmpty(sourceRef, "sourceRef");
   }
 
@@ -904,7 +929,7 @@ export function stageReferenceDocs({
     const rewritten =
       rebaseFrom !== null && rebaseFrom !== undefined
         ? rebaseReferenceMarkdown(raw, { fromPrefix: rebaseFrom, toPrefix: docsPrefix })
-        : rewriteReferenceMarkdown(raw, { docsPrefix, repoBlobBase, sourceRef });
+        : rewriteReferenceMarkdown(raw, { docsPrefix, repoBlobBase: resolvedRepoBlobBase, sourceRef });
     staged.push([entry.name, rewritten]);
   }
 
@@ -1205,35 +1230,13 @@ function decodeXmlEntities(text) {
     .replace(/&apos;/g, "'");
 }
 
-function readSiteHugoParams(rootDir) {
-  const params = {
-    siteHost: "docs.gpustack.ai",
-    repoSlug: "gpustack/loopwright",
-    repoNavLabel: "Repository navigation",
-    repoNavDescription: "Module relationships, design records, code entry points and applicable skills for contributors."
-  };
-  const hugoConfigPath = path.join(rootDir, "site", "hugo.toml");
-  if (!fs.existsSync(hugoConfigPath)) {
-    return params;
-  }
-  const text = fs.readFileSync(hugoConfigPath, "utf8");
-  for (const key of Object.keys(params)) {
-    const match = text.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, "m"));
-    if (match?.[1]) {
-      params[key] = match[1];
-    }
-  }
-  return params;
-}
-
 export function verifySite(rootDir = process.cwd(), options = {}) {
   const root = path.resolve(rootDir);
   const publicDir = path.resolve(options.publicDir || path.join(root, "site", "public"));
   const docsDir = path.resolve(options.docsDir || path.join(root, "docs"));
   const indexFile = path.join(docsDir, "README.md");
   const hugoParams = readSiteHugoParams(root);
-  const derivedRepoBlobBase = `https://github.com/${hugoParams.repoSlug}/blob`;
-  const repoBlobBase = validateNonEmpty(options.repoBlobBase || derivedRepoBlobBase, "repoBlobBase", { stripSlash: true });
+  const repoBlobBase = validateNonEmpty(options.repoBlobBase || repoBlobBaseForRoot(root), "repoBlobBase", { stripSlash: true });
   const errors = [];
 
   const rawBaseUrl = String(options.baseURL || process.env.SITE_BASE_URL || "/").trim();
@@ -1979,7 +1982,7 @@ export function buildSite(rootDir = process.cwd(), options = {}) {
   const baseURL = options.baseURL || process.env.SITE_BASE_URL || "/";
   const env = { ...process.env, ...(options.hugoEnv || {}) };
   const sourceRef = options.sourceRef || env.HUGO_PARAMS_SOURCEREF || DEFAULT_SOURCE_REF;
-  const repoBlobBase = options.repoBlobBase || DEFAULT_REPO_BLOB_BASE;
+  const repoBlobBase = options.repoBlobBase || repoBlobBaseForRoot(root);
 
   stageReferenceDocs({
     rootDir: root,
@@ -2149,7 +2152,7 @@ export function serveSite(rootDir = process.cwd(), options = {}) {
     HUGO_PARAMS_RELEASEKIND: process.env.HUGO_PARAMS_RELEASEKIND || "development"
   };
   const sourceRef = options.sourceRef || env.HUGO_PARAMS_SOURCEREF || DEFAULT_SOURCE_REF;
-  const repoBlobBase = options.repoBlobBase || DEFAULT_REPO_BLOB_BASE;
+  const repoBlobBase = options.repoBlobBase || repoBlobBaseForRoot(root);
 
   stageReferenceDocs({
     rootDir: root,
