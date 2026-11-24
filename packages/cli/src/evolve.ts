@@ -95,6 +95,12 @@ async function writeCompiledEvolutionDir(
       const relPath = `.loopwright-evo/parents/parent-${i}.json`;
       const dstPath = join(registryDirectory, relPath);
       const bytes = await readFile(pf.filePath);
+      if (scrubber.containsSecret(bytes.toString('utf8'))) {
+        throw new evolution.EvolutionError(
+          'SECRET_LEAK_DETECTED',
+          `staged evolution parent context "${relPath}" contained a registered secret and was refused`,
+        );
+      }
       await writeFile(dstPath, bytes, { mode: 0o400 });
       await chmod(dstPath, 0o400);
       extraResources.push({
@@ -110,6 +116,12 @@ async function writeCompiledEvolutionDir(
     const scDir = join(registryDirectory, '.loopwright-evo', 'scratchpad');
     await mkdir(scDir, { recursive: true, mode: 0o700 });
     const scBytes = await readFile(proposal.stagedScratchpadPath);
+    if (scrubber.containsSecret(scBytes.toString('utf8'))) {
+      throw new evolution.EvolutionError(
+        'SECRET_LEAK_DETECTED',
+        'staged evolution scratchpad contained a registered secret and was refused',
+      );
+    }
     const relPath = '.loopwright-evo/scratchpad/latest.md';
     const dstPath = join(registryDirectory, relPath);
     await writeFile(dstPath, scBytes, { mode: 0o400 });
@@ -363,11 +375,13 @@ function createEvolutionOpenAdapter(options: {
     const wrappedHost = {
       ...host,
       resolveCredential: async (binding: Parameters<typeof host.resolveCredential>[0]) => {
+        let originalError: unknown;
         try {
           const bound = await host.resolveCredential(binding);
           if (bound.bearerToken.length > 0) return bound;
-        } catch {
+        } catch (err: unknown) {
           // Fall through to active candidate token only for taskpack provider bindings.
+          originalError = err;
         }
         const bindingMeta = binding as { readonly env?: unknown; readonly ref?: unknown };
         const hasExplicitMeta = bindingMeta.env !== undefined || bindingMeta.ref !== undefined;
@@ -403,7 +417,10 @@ function createEvolutionOpenAdapter(options: {
             return { bearerToken: active };
           }
         }
-        throw new Error('missing provider credential for active candidate');
+        throw new Error(
+          'missing provider credential for active candidate',
+          originalError !== undefined ? { cause: originalError } : undefined,
+        );
       },
     };
 
@@ -726,9 +743,22 @@ export function createCliEvolutionEvaluator(options: {
       const evolveGuardDecl = scopedTaskpack.spec.verification.localChecks.find(
         c => c.implementation === 'evolve-block-guard.v1',
       );
-      const guardedFiles = Array.isArray(evolveGuardDecl?.parameters?.['files'])
-        ? (evolveGuardDecl.parameters['files'] as readonly string[])
-        : [];
+      const rawGuardedFiles = evolveGuardDecl?.parameters?.['files'];
+      let guardedFiles: readonly string[] = [];
+      if (rawGuardedFiles !== undefined) {
+        if (
+          !Array.isArray(rawGuardedFiles)
+          || rawGuardedFiles.length === 0
+          || !rawGuardedFiles.every(f => typeof f === 'string' && f.length > 0)
+        ) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_SCHEMA_INVALID',
+            'evolve-block-guard.v1 parameters.files must be a non-empty array of non-empty strings',
+            '/spec/verification/localChecks',
+          );
+        }
+        guardedFiles = rawGuardedFiles as readonly string[];
+      }
       const allAgentStepIds = writtenTaskpack.config.spec.task.spec.steps
         .filter(s => s.kind === 'agent')
         .map(s => s.id);
@@ -1294,10 +1324,12 @@ export function createCliEvolutionSupervisorRunner(options: {
           },
         );
 
+        // Keep TEAM_ENVELOPE_VIOLATION so runPlateauSupervisorTurn safely retains the incumbent
+        // team instead of aborting the campaign, while embedding controller error code + stage for triage.
         if (!supCycle.ok) {
           throw new evolution.EvolutionError(
             'TEAM_ENVELOPE_VIOLATION',
-            `read-only Pi supervisor cycle failed: ${supCycle.error.code}`,
+            `read-only Pi supervisor execution failed (code=${supCycle.error.code}, path=${supCycle.error.path})`,
           );
         }
         if (supCycle.value.kind !== 'result') {

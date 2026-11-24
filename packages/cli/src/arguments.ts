@@ -97,6 +97,7 @@ const evolveRules: Record<EvolveAction, CommandRule> = {
     flags: ['allow-synthetic-probe', 'overwrite', 'json'],
   },
 };
+export const EVOLVE_ACTIONS: readonly EvolveAction[] = Object.freeze(Object.keys(evolveRules) as EvolveAction[]);
 const stepRules: Record<StepAction, CommandRule> = {
   next: {
     required: ['run-root', 'run-id'],

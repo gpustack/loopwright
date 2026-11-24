@@ -11,7 +11,7 @@ import { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RoleModelOverride, type RunReportInput, type StepTickResult } from '@loopwright/controller';
 import { alignBaselineRevisions, assertCleanArtifact, BASELINE_CONFLICT_REASON, buildDefaultAuthorPrompt, checkTaskpackSuite, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseAllowedHostMounts, parseBaselineAlignmentPolicy, parseLoopwrightEnvLimits, parseYamlDocument, readBoundedRegularFile, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, resolveTaskpackSuite, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type BaselineAlignmentOverride, type BaselineAlignmentResult, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LoadedTaskpackSuite, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type SuiteResolutionResult, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
 import type { HardwareRunnerErrorCode, RunHardwareWorkerResult, WorkerJobSettlementSummary } from '@loopwright/hardware-runner';
-import { parseArguments, UsageError, type Arguments } from './arguments.js';
+import { EVOLVE_ACTIONS, parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
 function resolveCliVersion(): string {
@@ -1847,6 +1847,20 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
   }
 }
 
+function scrubJsonPayload(value: unknown, scrubber: SecretScrubber, depth = 0): unknown {
+  if (depth > 32) return value;
+  if (typeof value === 'string') return scrubber.scrub(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map(item => scrubJsonPayload(item, scrubber, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = scrubJsonPayload(v, scrubber, depth + 1);
+  }
+  return out;
+}
+
 async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> {
   const get = (key: string) => args.values.get(key)!;
   const extraSecretKeys = [
@@ -1913,7 +1927,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
       });
       await emit(
         'status',
-        status,
+        scrubJsonPayload(status, scrubber),
         scrubber.scrub(
           `evolve status: ${status.campaign.campaignId} status=${status.campaign.status} gen=${status.campaign.currentGeneration} evals=${status.campaign.evaluationsUsed}`,
         ),
@@ -1980,7 +1994,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
       };
       await emit(
         'inspection',
-        payload,
+        scrubJsonPayload(payload, scrubber),
         scrubber.scrub(
           `evolve inspect: ${inspection.campaign.campaignId} individuals=${individuals.length} pareto=${paretoFrontier.length}`,
         ),
@@ -2024,7 +2038,7 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
         });
         await emit(
           'result',
-          exported,
+          scrubJsonPayload(exported, scrubber),
           scrubber.scrub(`evolve export: ok (${exported.format}, individuals=${exported.exportedIndividualIds.length}, blobs=${exported.blobCount})`),
         );
         return 0;
@@ -2096,15 +2110,20 @@ async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> 
 
     const { store: _unusedStore, ...serializable } = runResult;
     void _unusedStore;
+    const exportSkipped = outDir !== undefined && exportedBundle === undefined;
     const payload = {
       ...serializable,
       ...(exportedBundle !== undefined ? { exportedBundle } : {}),
+      ...(exportSkipped ? { exportSkippedReason: caughtSignal !== null ? `signal:${caughtSignal}` : `campaign_${runResult.campaign.status}` } : {}),
     };
+    const exportNote = exportSkipped
+      ? ` export=skipped(${caughtSignal !== null ? caughtSignal : runResult.campaign.status})`
+      : '';
     await emit(
       'result',
-      payload,
+      scrubJsonPayload(payload, scrubber),
       scrubber.scrub(
-        `evolve ${action}: ${runResult.campaign.campaignId} status=${runResult.campaign.status} evals=${runResult.campaign.evaluationsUsed} pareto=${runResult.paretoFrontier.length}`,
+        `evolve ${action}: ${runResult.campaign.campaignId} status=${runResult.campaign.status} evals=${runResult.campaign.evaluationsUsed} pareto=${runResult.paretoFrontier.length}${exportNote}`,
       ),
     );
     if (caughtSignal === 'SIGTERM') return 143;
@@ -2143,7 +2162,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 2 && argv[0] === 'runner' && argv[1] === '--help') { await stdout(RUNNER_HELP); return 0; }
   if (argv.length === 3 && argv[0] === 'runner' && (argv[1] === 'relay' || argv[1] === 'worker') && argv[2] === '--help') { await stdout(RUNNER_HELP); return 0; }
   if (argv.length === 2 && argv[0] === 'evolve' && argv[1] === '--help') { await stdout(EVOLVE_HELP); return 0; }
-  if (argv.length === 3 && argv[0] === 'evolve' && ['check', 'run', 'resume', 'status', 'inspect', 'export'].includes(argv[1]!) && argv[2] === '--help') { await stdout(EVOLVE_HELP); return 0; }
+  if (argv.length === 3 && argv[0] === 'evolve' && (EVOLVE_ACTIONS as readonly string[]).includes(argv[1]!) && argv[2] === '--help') { await stdout(EVOLVE_HELP); return 0; }
   if (argv.length === 1 && argv[0] === '--version') { await stdout(`${CLI_VERSION}\n`); return 0; }
   let sequence = 0, runId: string | null = null, json = argv.includes('--json');
   const emit = async (kind: Envelope['kind'], data: unknown, summary?: string) => { const envelope: Envelope = { version: 1, kind, sequence: ++sequence, runId, data }; if (!json && kind === 'diagnostic') { await stderr(encoded(summary ?? kind) + '\n'); return; } await stdout(json ? encoded(envelope) + '\n' : encoded(summary ?? kind) + '\n'); };
