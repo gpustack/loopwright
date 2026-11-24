@@ -747,6 +747,51 @@ test('Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, an
     assert.equal(machO32Audit.passed, false);
     assert.match(machO32Audit.findings[0]?.title ?? '', /Unsupported Mach-O/i);
 
+    // Universal Mach-O fat binary (.dylib with CA FE BA BE + nfat_arch=2) fails closed,
+    // while a Java .class file (CA FE BA BE + minor=0, major=61) is NOT misclassified as Mach-O
+    const fatMachOPath = join(tamperDir, 'universal.dylib');
+    const fatMachOBuf = Buffer.alloc(32, 0);
+    fatMachOBuf.writeUInt32BE(0xcafebabe, 0);
+    fatMachOBuf.writeUInt32BE(2, 4);
+    await writeFile(fatMachOPath, fatMachOBuf, { mode: 0o400 });
+    const fatAudit = await auditSealedStageAOutputs({
+      sealedOutputs: [
+        {
+          artifact: {
+            name: 'universal.dylib',
+            digest: { algorithm: 'sha256', hex: sha256Hex(fatMachOBuf) },
+            byteLength: fatMachOBuf.byteLength,
+          },
+          sealedFilePath: fatMachOPath,
+        },
+      ],
+      auditSpec: { forbiddenSymbolPatterns: ['cublas'] },
+      scrubber: new SecretScrubber(),
+    });
+    assert.equal(fatAudit.passed, false);
+    assert.match(fatAudit.findings[0]?.title ?? '', /Unsupported Mach-O/i);
+
+    const javaClassPath = join(tamperDir, 'Helper.class');
+    const javaClassBuf = Buffer.alloc(32, 0);
+    javaClassBuf.writeUInt32BE(0xcafebabe, 0);
+    javaClassBuf.writeUInt32BE(61, 4); // Java 17 major version
+    await writeFile(javaClassPath, javaClassBuf, { mode: 0o400 });
+    const javaAudit = await auditSealedStageAOutputs({
+      sealedOutputs: [
+        {
+          artifact: {
+            name: 'Helper.class',
+            digest: { algorithm: 'sha256', hex: sha256Hex(javaClassBuf) },
+            byteLength: javaClassBuf.byteLength,
+          },
+          sealedFilePath: javaClassPath,
+        },
+      ],
+      auditSpec: { forbiddenSymbolPatterns: ['cublas'] },
+      scrubber: new SecretScrubber(),
+    });
+    assert.equal(javaAudit.passed, true);
+
     const symPath = join(tamperDir, 'sym.ptx');
     await symlink(realFile, symPath);
     await assert.rejects(

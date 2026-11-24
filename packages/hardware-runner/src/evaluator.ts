@@ -3756,11 +3756,17 @@ export async function auditSealedStageAOutputs(
         && magicHeader[3] === 0x46;
       const magic32 = magicLen >= 4 ? magicHeader.readUInt32LE(0) : 0;
       const isMachO64 = magicLen >= 4 && (magic32 === 0xfeedfacf || magic32 === 0xcffaedfe);
-      const isUnsupportedMachO =
-        magicLen >= 4
-        && (magic32 === 0xfeedface || magic32 === 0xcefaedfe || magic32 === 0xbebafeca || magic32 === 0xcafebabe);
+      const isMachO32 = magicLen >= 4 && (magic32 === 0xfeedface || magic32 === 0xcefaedfe);
+      // Universal Mach-O fat magic is BE 0xCAFEBABE (LE 0xbebafeca), which overlaps with Java .class files.
+      // Distinguish Mach-O fat binaries (nfat_arch in 1..20, non-.class) from Java bytecode (major_version >= 45).
+      const isMachOFat =
+        magicLen >= 8
+        && magic32 === 0xbebafeca
+        && !relName.toLowerCase().endsWith('.class')
+        && magicHeader.readUInt32BE(4) >= 1
+        && magicHeader.readUInt32BE(4) <= 20;
 
-      if (isUnsupportedMachO) {
+      if (isMachO32 || isMachOFat) {
         pushAuditFinding(
           'Unsupported Mach-O binary format in Stage A static audit',
           relName,
