@@ -138,12 +138,16 @@ export function checkedRefusalRecord(input: unknown, plan: CompiledPlan, lock: T
     impl === 'json-keys-guard.v1' ||
     impl === 'line-section-guard.v1' ||
     impl === 'evolve-block-guard.v1';
-  const payloadKind: VerifierHeader['payloadKind'] =
-    impl === 'json-artifact.v1'
-      ? 'json'
-      : impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1' || impl === 'evolve-block-guard.v1'
-        ? 'guard'
-        : 'inventories';
+  let payloadKind: VerifierHeader['payloadKind'] = 'inventories';
+  if (impl === 'json-artifact.v1') {
+    payloadKind = 'json';
+  } else if (
+    impl === 'json-keys-guard.v1'
+    || impl === 'line-section-guard.v1'
+    || impl === 'evolve-block-guard.v1'
+  ) {
+    payloadKind = 'guard';
+  }
   const packetAllowed = maxPacketBytes({ payloadKind, ...(overlay ? { overlay } : {}) });
 
   const expectedAllowed =

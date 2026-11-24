@@ -573,23 +573,17 @@ export function prepareVerification(
       let validatedProof: ValidatedProof | null = null;
       let baseLogicalBytes = 0;
 
-      if (!baseTree) {
-        if (sourceSelected !== null) {
-          const resolved = resolveTargetOverlayFileSync(sourceFiles.get(path)!);
-          baseOverlayBytes = resolved.bytes;
-          hasBaseOverlay = true;
-          baselineParam = { kind: 'overlay' };
-          baseLogicalBytes = resolved.logicalBytes;
-        } else {
-          baselineParam = { kind: 'missing' };
+      if (sourceSelected !== null) {
+        const sourceFileEntry = sourceFiles.get(path);
+        if (sourceFileEntry === undefined) {
+          refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
         }
-      } else if (sourceSelected !== null) {
-        const resolved = resolveTargetOverlayFileSync(sourceFiles.get(path)!);
+        const resolved = resolveTargetOverlayFileSync(sourceFileEntry);
         baseOverlayBytes = resolved.bytes;
         hasBaseOverlay = true;
         baselineParam = { kind: 'overlay' };
         baseLogicalBytes = resolved.logicalBytes;
-      } else if (sourceDeleted) {
+      } else if (!baseTree || sourceDeleted) {
         baselineParam = { kind: 'missing' };
       } else {
         const rawProof =
@@ -608,6 +602,9 @@ export function prepareVerification(
           sawMerkle = true;
           maxMerkleTreeCount = Math.max(maxMerkleTreeCount, validatedProof.merkle.treeCount);
           totalMerkleProofBytes += validatedProof.merkle.treeProofBytes;
+          if (totalMerkleProofBytes > EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes) {
+            refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
+          }
         }
       }
 
@@ -616,22 +613,18 @@ export function prepareVerification(
       let hasCandOverlay = false;
       let candLogicalBytes = 0;
 
-      if (!baseTree) {
-        if (candSelected !== null) {
-          const resolved = resolveTargetOverlayFileSync(files.get(path)!);
-          candOverlayBytes = resolved.bytes;
-          hasCandOverlay = true;
-          candidateParam = { kind: 'overlay' };
-          candLogicalBytes = resolved.logicalBytes;
-        } else {
-          candidateParam = { kind: 'missing' };
+      if (candSelected !== null) {
+        const candFileEntry = files.get(path);
+        if (candFileEntry === undefined) {
+          refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
         }
-      } else if (candSelected !== null) {
-        const resolved = resolveTargetOverlayFileSync(files.get(path)!);
+        const resolved = resolveTargetOverlayFileSync(candFileEntry);
         candOverlayBytes = resolved.bytes;
         hasCandOverlay = true;
         candidateParam = { kind: 'overlay' };
         candLogicalBytes = resolved.logicalBytes;
+      } else if (!baseTree) {
+        candidateParam = { kind: 'missing' };
       } else if (candDeleted) {
         candidateParam = { kind: 'deleted' };
       } else {

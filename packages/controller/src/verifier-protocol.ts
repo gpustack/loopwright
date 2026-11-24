@@ -42,6 +42,7 @@ export const EVOLVE_BLOCK_LIMITS = Object.freeze({
   maxBlocksPerFile: 32,
   maxAllowedBlockIds: 64,
   maxBlockIdLength: 128,
+  maxMerkleTreeProofBytes: 262_144,
 });
 
 export function isValidEvolveGuardPath(filePath: string): boolean {
@@ -1401,9 +1402,9 @@ function evaluateSingleEvolveFile(
       };
     }
     for (let i = 0; i < base.blocks.length; i++) {
-      if (base.blocks[i]!.blockId !== cand.blocks[i]!.blockId) {
+      if (base.blocks[i]!.blockId !== cand.blocks[i]!.blockId || base.blocks[i]!.style !== cand.blocks[i]!.style) {
         const lineNo = cand.blocks[i]!.startLine;
-        const msg = `EVOLVE-BLOCK ordering or id changed in "${path}" at line ${lineNo}: expected "${base.blocks[i]!.blockId}", got "${cand.blocks[i]!.blockId}"`;
+        const msg = `EVOLVE-BLOCK ordering, style, or id changed in "${path}" at line ${lineNo}: expected "${base.blocks[i]!.blockId}" (${base.blocks[i]!.style}), got "${cand.blocks[i]!.blockId}" (${cand.blocks[i]!.style})`;
         return {
           reason: 'outside_block_modified',
           detail: clipText(msg, 1024),
@@ -1726,7 +1727,7 @@ export function evaluatePacket(bytes: Uint8Array): VerifierReply {
         record(spec.baseline, ['kind']);
       } else if (baseKind === 'merkle_blob') {
         const verified = verifyMerkleBlobSlice(bytes, view, pos, path, source.spec.baseTree!, spec.baseline, quota);
-        if ((totalMerkleTreeBytes += verified.treeProofBytes) > 262_144) {
+        if ((totalMerkleTreeBytes += verified.treeProofBytes) > EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes) {
           refuse('ARTIFACT_INVALID', '', 'verification');
         }
         baselineBytes = verified.blobSlice;
