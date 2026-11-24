@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
@@ -17,6 +17,9 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import {
   admitTask,
   LIMITS,
@@ -521,14 +524,15 @@ export function sanitizeRunId(raw: string): string {
   return cleaned;
 }
 
-function resolveGitHeadRevision(repositoryRoot: string | undefined): string {
+async function resolveGitHeadRevision(repositoryRoot: string | undefined): Promise<string> {
   if (repositoryRoot !== undefined && repositoryRoot.trim().length > 0) {
     try {
-      const out = execFileSync('git', ['rev-parse', 'HEAD'], {
+      const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
         cwd: resolve(repositoryRoot),
         encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
+        maxBuffer: 1024 * 64,
+      });
+      const out = stdout.trim();
       if (/^[0-9a-f]{40}$/i.test(out)) {
         return out.toLowerCase();
       }
@@ -716,17 +720,16 @@ export async function materializeGitCheckoutNoFollow(srcRepoDir: string, dstRepo
   if (dotGitStat.isDirectory()) {
     await copyGitMetadataDirNoFollow(dotGitPath, join(dstRepoDir, '.git'));
   } else if (dotGitStat.isFile()) {
-    execFileSync('git', ['clone', '--no-hardlinks', '--quiet', '--no-checkout', srcRepoDir, dstRepoDir], {
-      stdio: ['ignore', 'ignore', 'pipe'],
+    await execFileAsync('git', ['clone', '--no-hardlinks', '--quiet', '--no-checkout', srcRepoDir, dstRepoDir], {
+      maxBuffer: 1024 * 1024,
     });
     await rm(join(dstRepoDir, '.git', 'hooks'), { recursive: true, force: true }).catch(() => undefined);
   }
 
-  const rawTracked = execFileSync('git', ['ls-files', '-z'], {
+  const { stdout: rawTracked } = await execFileAsync('git', ['ls-files', '-z'], {
     cwd: srcRepoDir,
     encoding: 'buffer',
     maxBuffer: 64 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
   });
 
   const checkedParentDirs = new Set<string>();
@@ -3211,7 +3214,7 @@ export async function runEvolutionCampaign(
 
   const evaluator = resolveCampaignEvaluator(options.evaluator, options.controllerEvaluatorOptions);
   const campaignId = options.campaignId ?? `camp-${checked.manifest.metadata.name}-${randomBytes(4).toString('hex')}`;
-  const baseRevision = options.baseRevision ?? resolveGitHeadRevision(effectiveRepoRoot);
+  const baseRevision = options.baseRevision ?? await resolveGitHeadRevision(effectiveRepoRoot);
   const { lockHash, baseTaskContract } = await computeBaselineCampaignLockHash(
     checked.taskpack,
     campaignId,

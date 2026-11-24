@@ -1278,9 +1278,14 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
   };
   const computeReworkSubgraphIds = (rejectToId: string): ReadonlySet<string> => {
     const found = new Set<string>([rejectToId]);
-    for (const node of allOrderedSteps) {
-      if (node.dependsOn.some(parent => found.has(parent))) {
-        found.add(node.id);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of allOrderedSteps) {
+        if (!found.has(node.id) && node.dependsOn.some(parent => found.has(parent))) {
+          found.add(node.id);
+          changed = true;
+        }
       }
     }
     return found;
