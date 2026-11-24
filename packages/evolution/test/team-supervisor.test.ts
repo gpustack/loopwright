@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -24,6 +34,7 @@ import {
 import { parseEvolutionCampaignDocument } from '../src/schema.js';
 import { EvolutionCampaignStore } from '../src/store.js';
 import {
+  createLocalRunStoreSupervisorRunner,
   evaluateTeamEvolutionTrigger,
   hasRunEvalLoopPathology,
   recordTeamTrialOutcome,
@@ -1156,6 +1167,270 @@ test('team-supervisor: valid probe-readonly -> mutator-sandboxed StepHandoffSele
       assert.equal(promoteOutcome.nextStatus, 'promoted');
       assert.equal(promoteOutcome.activeTeamConfigId, trialTeam1Id);
       assert.equal((await store.getIsland('camp-trial-1', 1))?.activeTeamConfigId, trialTeam1Id);
+    } finally {
+      await store.close();
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('team-supervisor (S-C1 + P-W3): preserves role.thinking, role.timeoutSeconds (narrowing compiledRegistry toolWallMs), step.onRework, and rejects reworkGenerations D > 256 overflow', async () => {
+  const { taskpack, baseTaskContract, trustedRegistry } = await makeCompiledBaseFixtures();
+
+  const patchWithRework: TeamPatchV1 = {
+    kind: 'TeamPatch',
+    schemaVersion: 'team-patch.v1',
+    diagnosis: {
+      summary: 'Mutator needs reviewer rework loop with explicit thinking levels',
+      plateauCategory: 'correctness_ping_pong',
+      rationale: 'Forward thinking, timeoutSeconds, and onRework while accounting for reworkGenerations',
+    },
+    roles: [
+      {
+        id: 'mutator-worker',
+        archetypeRoleId: 'mutator-sandboxed',
+        purpose: 'task',
+        tools: ['read', 'edit'],
+        model: 'gpt-5.4',
+        thinking: 'low',
+        timeoutSeconds: 90,
+        prompt: 'Edit kernel inside EVOLVE-BLOCK.',
+      },
+      {
+        id: 'diff-reviewer',
+        archetypeRoleId: 'reviewer',
+        purpose: 'review',
+        tools: ['read'],
+        model: 'claude-sonnet-4-6',
+        thinking: 'high',
+        timeoutSeconds: 30,
+        prompt: 'Verify numerical invariants and request rework if violated.',
+      },
+    ],
+    steps: [
+      {
+        id: 'step-mutate',
+        roleId: 'mutator-worker',
+        dependsOn: [],
+      },
+      {
+        id: 'step-review',
+        roleId: 'diff-reviewer',
+        dependsOn: ['step-mutate'],
+        onRework: {
+          rejectTo: 'step-mutate',
+          maxReworks: 2,
+        },
+      },
+    ],
+  };
+
+  const compiled = validateAndCompileTeamPatch({
+    rawPatch: patchWithRework,
+    teamEvolution: TEAM_EVOLUTION_SPEC,
+    baseTaskContract,
+    taskpack,
+    trustedRegistry,
+  });
+
+  // 1. role.thinking preserved on resolvedRoleModels and TaskContract.spec.roles
+  const mutRole = compiled.taskContract.spec.roles.find(r => r.id === 'mutator-worker');
+  const revRole = compiled.taskContract.spec.roles.find(r => r.id === 'diff-reviewer');
+  assert.equal(mutRole?.thinking, 'low');
+  assert.equal(revRole?.thinking, 'high');
+
+  // 2. timeoutSeconds preserved on resolvedRoleModels and narrows compiledRegistry toolWallMs
+  assert.equal(compiled.resolvedRoleModels['mutator-worker']?.timeoutSeconds, 90);
+  assert.equal(compiled.resolvedRoleModels['diff-reviewer']?.timeoutSeconds, 30);
+  const mutProf = compiled.compiledRegistry?.spec.roleProfiles.find(p => p.id === 'taskpack.profile.mutator-worker');
+  const revProf = compiled.compiledRegistry?.spec.roleProfiles.find(p => p.id === 'taskpack.profile.diff-reviewer');
+  assert.equal(mutProf?.limits?.toolWallMs, 90_000);
+  assert.equal(revProf?.limits?.toolWallMs, 30_000);
+
+  // 3. step.onRework forwarded onto TaskContract.spec.steps
+  const reviewStep = compiled.taskContract.spec.steps.find(s => s.id === 'step-review');
+  assert.deepEqual({ ...reviewStep?.onRework }, { rejectTo: 'step-mutate', maxReworks: 2 });
+
+  // 4. High maxReworks + repair budget pushing D > 256 (even with small maxAttempts where R=0 would falsely pass!) fails closed
+  const highReworkPatch: TeamPatchV1 = {
+    ...patchWithRework,
+    steps: [
+      { id: 'step-mutate', roleId: 'mutator-worker', dependsOn: [] },
+      {
+        id: 'step-review',
+        roleId: 'diff-reviewer',
+        dependsOn: ['step-mutate'],
+        onRework: { rejectTo: 'step-mutate', maxReworks: 8 },
+      },
+    ],
+  };
+  const contractNearCeiling = validateDocument(
+    {
+      ...baseTaskContract,
+      spec: {
+        ...baseTaskContract.spec,
+        budgets: {
+          ...baseTaskContract.spec.budgets,
+          maxModelCalls: 64,
+          maxImplementationRepairs: 16,
+        },
+      },
+    },
+    'TaskContract',
+  );
+  assert.equal(contractNearCeiling.ok, true);
+  if (!contractNearCeiling.ok) throw new Error('unexpected');
+
+  assertEvolutionError(
+    () => validateAndCompileTeamPatch({
+      rawPatch: highReworkPatch,
+      teamEvolution: TEAM_EVOLUTION_SPEC,
+      baseTaskContract: contractNearCeiling.value,
+      taskpack,
+      trustedRegistry,
+      maxAttempts: 28,
+    }),
+    'TEAM_ENVELOPE_VIOLATION',
+  );
+});
+
+test('team-supervisor (P-M1): createLocalRunStoreSupervisorRunner executes supervisorRoleId in a fenced read-only LocalRunStore and refuses workspace mutations', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-supervisor-local-runstore-'));
+  try {
+    const repoDir = join(tempDir, 'repo');
+    mkdirSync(join(repoDir, 'src', 'kernels'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(repoDir, 'src', 'kernels', 'flash_decode.cu'), '// baseline\n', { mode: 0o644 });
+    chmodSync(join(repoDir, 'src', 'kernels', 'flash_decode.cu'), 0o644);
+
+    const { taskpack, baseTaskContract, trustedRegistry } = await makeCompiledBaseFixtures();
+    const store = await EvolutionCampaignStore.open({ campaignRoot: join(tempDir, 'campaign') });
+    try {
+      const lease = await store.acquireLease('pm1-owner');
+      const manifest = parseEvolutionCampaignDocument(CAMPAIGN_WITH_TEAM_YAML);
+      await store.createCampaign(lease, {
+        campaignId: 'camp-pm1',
+        manifest,
+        manifestDigest: makeDigest(CAMPAIGN_WITH_TEAM_YAML),
+        baseRevision: 'd'.repeat(40),
+        lockHash: makeDigest('lock-pm1'),
+        modelIds: ['claude-sonnet-4-6', 'gpt-5.4'],
+      });
+      await store.updateIslandProgress(lease, {
+        campaignId: 'camp-pm1',
+        islandId: 0,
+        currentGeneration: 4,
+        consecutiveNoGainGenerations: 4,
+      });
+      const island0 = (await store.getIsland('camp-pm1', 0))!;
+
+      const proposedPatch: TeamPatchV1 = {
+        kind: 'TeamPatch',
+        schemaVersion: 'team-patch.v1',
+        diagnosis: {
+          summary: 'Isolated read-only LocalRunStore plateau supervisor diagnosis',
+          plateauCategory: 'coupled_responsibilities',
+          rationale: 'Split read-only probe from mutator',
+        },
+        roles: [
+          {
+            id: 'probe-worker',
+            archetypeRoleId: 'probe-readonly',
+            purpose: 'task',
+            tools: ['read'],
+            model: 'claude-sonnet-4-6',
+            prompt: 'Inspect bottleneck.',
+          },
+          {
+            id: 'mutate-worker',
+            archetypeRoleId: 'mutator-sandboxed',
+            purpose: 'task',
+            tools: ['read', 'edit'],
+            model: 'gpt-5.4',
+            prompt: 'Edit kernel.',
+          },
+        ],
+        steps: [
+          { id: 'step-probe', roleId: 'probe-worker', dependsOn: [] },
+          { id: 'step-mutate', roleId: 'mutate-worker', dependsOn: ['step-probe'] },
+        ],
+      };
+
+      let observedTurnRole = '';
+      let observedContextCount = 0;
+      const stagingDirOk = join(tempDir, 'sup-runstore-ok');
+      const runnerOk = createLocalRunStoreSupervisorRunner({
+        executeReadOnlySupervisorTurn: async turn => {
+          observedTurnRole = turn.roleId;
+          observedContextCount = turn.contextFiles.length;
+          assert.deepEqual(turn.tools, ['read']);
+          for (const cf of turn.contextFiles) {
+            const content = readFileSync(cf, 'utf8');
+            assert.equal(content.includes('decode-bs1-4k'), false, 'heldOutWorkloadId must never enter supervisor context');
+          }
+          return JSON.stringify(proposedPatch);
+        },
+      });
+
+      const acceptedTurn = await runPlateauSupervisorTurn({
+        store,
+        lease,
+        campaignId: 'camp-pm1',
+        island: island0,
+        teamEvolution: TEAM_EVOLUTION_SPEC,
+        budgets: DEFAULT_BUDGETS,
+        evaluationsUsed: 8,
+        currentGeneration: 4,
+        baseTaskContract,
+        taskpack,
+        trustedRegistry,
+        stagingDir: stagingDirOk,
+        supervisorRunner: runnerOk,
+      });
+
+      assert.equal(acceptedTurn.invoked, true);
+      assert.equal(acceptedTurn.accepted, true);
+      assert.equal(observedTurnRole, 'supervisor');
+      assert.ok(observedContextCount >= 5);
+      assert.equal(existsSync(join(stagingDirOk, 'controller')), true);
+
+      // Negative path: supervisor turn attempting to create a file inside candidateDir MUST fail closed with TEAM_ENVELOPE_VIOLATION!
+      await store.updateIslandProgress(lease, {
+        campaignId: 'camp-pm1',
+        islandId: 1,
+        currentGeneration: 4,
+        consecutiveNoGainGenerations: 4,
+      });
+      const island1 = (await store.getIsland('camp-pm1', 1))!;
+      const incumbent1 = island1.activeTeamConfigId;
+
+      const mutatingRogueRunner = createLocalRunStoreSupervisorRunner({
+        executeReadOnlySupervisorTurn: async turn => {
+          writeFileSync(join(turn.candidateDir, 'rogue-write.txt'), 'illegal supervisor write\n', 'utf8');
+          return JSON.stringify(proposedPatch);
+        },
+      });
+
+      const rejectedRogueTurn = await runPlateauSupervisorTurn({
+        store,
+        lease,
+        campaignId: 'camp-pm1',
+        island: island1,
+        teamEvolution: TEAM_EVOLUTION_SPEC,
+        budgets: DEFAULT_BUDGETS,
+        evaluationsUsed: 10,
+        currentGeneration: 4,
+        baseTaskContract,
+        taskpack,
+        trustedRegistry,
+        stagingDir: join(tempDir, 'sup-runstore-rogue'),
+        supervisorRunner: mutatingRogueRunner,
+      });
+
+      assert.equal(rejectedRogueTurn.invoked, true);
+      assert.equal(rejectedRogueTurn.accepted, false);
+      assert.equal(rejectedRogueTurn.error?.code, 'TEAM_ENVELOPE_VIOLATION');
+      assert.equal((await store.getIsland('camp-pm1', 1))?.activeTeamConfigId, incumbent1);
     } finally {
       await store.close();
     }

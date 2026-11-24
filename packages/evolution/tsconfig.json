@@ -15,8 +15,6 @@
     { "path": "../core" },
     { "path": "../decisions" },
     { "path": "../hardware-runner" },
-    { "path": "../memory" },
-    { "path": "../state" },
     { "path": "../taskpack" }
   ]
 }

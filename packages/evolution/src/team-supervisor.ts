@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
-import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   LIMITS,
@@ -10,10 +12,17 @@ import {
   type StepHandoffSelector,
   type TaskContract,
 } from '@loopwright/core';
-import type {
-  CheckpointCapacity,
-  RunEvalReport,
-  TrustedRegistry,
+import {
+  CONTROLLER_API_VERSION,
+  installedHandlerDigests,
+  loadTrustedConfiguration,
+  stepCancel,
+  stepNext,
+  stepSubmit,
+  type CheckpointCapacity,
+  type ControllerPolicyProfile,
+  type RunEvalReport,
+  type TrustedRegistry,
 } from '@loopwright/controller';
 import type { TaskpackManifest, TaskpackToolName } from '@loopwright/taskpack';
 import {
@@ -162,13 +171,21 @@ export interface ValidateAndCompileTeamPatchInput {
   readonly scrubber?: SecretScrubber | undefined;
 }
 
+export interface CompiledRoleModelBinding {
+  readonly provider: string;
+  readonly model: string;
+  readonly thinking: string;
+  readonly timeoutSeconds?: number;
+}
+
 export interface CompiledTeamPatchResult {
   readonly patch: TeamPatchV1;
   readonly canonicalPatchJson: string;
   readonly patchDigest: Digest;
   readonly taskContract: TaskContract;
   readonly capacity: CheckpointCapacity;
-  readonly resolvedRoleModels: Readonly<Record<string, { readonly provider: string; readonly model: string; readonly thinking: string }>>;
+  readonly resolvedRoleModels: Readonly<Record<string, CompiledRoleModelBinding>>;
+  readonly compiledRegistry?: TrustedRegistry;
 }
 
 export interface RecordTeamTrialOutcomeInput {
@@ -204,6 +221,28 @@ export interface SupervisorExecutionContext {
 export type SupervisorRunnerPort = (
   context: SupervisorExecutionContext,
 ) => Promise<string | Uint8Array | Record<string, unknown>>;
+
+export interface ReadOnlySupervisorTurnContext extends SupervisorExecutionContext {
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly stepId: string;
+  readonly roleId: string;
+  readonly candidateDir: string;
+  readonly contextFiles: readonly string[];
+  readonly leaseToken: string;
+  readonly tools: readonly ['read'];
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface LocalRunStoreSupervisorRunnerOptions {
+  readonly executeReadOnlySupervisorTurn: (
+    turn: ReadOnlySupervisorTurnContext,
+  ) => Promise<string | Uint8Array | Record<string, unknown>>;
+  readonly environment?: ((name: string) => string | undefined) | undefined;
+  readonly policyProfile?: ControllerPolicyProfile | undefined;
+  readonly signal?: AbortSignal | undefined;
+  readonly scrubber?: SecretScrubber | undefined;
+}
 
 export interface RunPlateauSupervisorTurnInput {
   readonly store: EvolutionCampaignStore;
@@ -626,7 +665,7 @@ export async function stageSupervisorContext(input: StageSupervisorContextInput)
       },
       budgets: {
         ...input.baseTaskContract.spec.budgets,
-        wallTimeMs: Math.min(input.baseTaskContract.spec.budgets.wallTimeMs, 120_000),
+        wallTimeMs: Math.max(10_000, Math.min(input.baseTaskContract.spec.budgets.wallTimeMs, 120_000)),
         totalTokens: Math.min(input.baseTaskContract.spec.budgets.totalTokens, 100_000),
         maxModelCalls: 4,
         maxConcurrency: 1,
@@ -769,6 +808,10 @@ function resolveArchetypes(input: ValidateAndCompileTeamPatchInput): Map<string,
 
   if (input.taskpack !== undefined) {
     const firstModel = input.taskpack.spec.models?.[0];
+    const taskpackToolSec = input.taskpack.spec.limits?.toolTimeoutSeconds;
+    const effectiveDefaultWallSec = taskpackToolSec !== undefined
+      ? Math.min(defaultWallSec, taskpackToolSec)
+      : defaultWallSec;
     if (input.taskpack.spec.roles !== undefined && input.taskpack.spec.roles.length > 0) {
       for (const role of input.taskpack.spec.roles) {
         if (map.has(role.id)) continue;
@@ -785,7 +828,7 @@ function resolveArchetypes(input: ValidateAndCompileTeamPatchInput): Map<string,
           : (role.tools ?? defaultTools);
         const regMaxSec = regProf?.limits?.toolWallMs !== undefined
           ? Math.max(1, Math.floor(regProf.limits.toolWallMs / 1000))
-          : defaultWallSec;
+          : effectiveDefaultWallSec;
         map.set(role.id, {
           id: role.id,
           adapter: regProf?.adapter === 'pi' ? 'pi' : 'delegated',
@@ -802,7 +845,7 @@ function resolveArchetypes(input: ValidateAndCompileTeamPatchInput): Map<string,
       if (input.trustedRegistry === undefined || regProf !== undefined) {
         const regMaxSec = regProf?.limits?.toolWallMs !== undefined
           ? Math.max(1, Math.floor(regProf.limits.toolWallMs / 1000))
-          : defaultWallSec;
+          : effectiveDefaultWallSec;
         map.set('author', {
           id: 'author',
           adapter: 'delegated',
@@ -948,8 +991,9 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
   }
   const mergedResources = [...mergedResourcesMap.values()];
 
-  const resolvedRoleModels: Record<string, { readonly provider: string; readonly model: string; readonly thinking: string }> =
-    Object.create(null) as Record<string, { readonly provider: string; readonly model: string; readonly thinking: string }>;
+  const resolvedRoleModels: Record<string, CompiledRoleModelBinding> =
+    Object.create(null) as Record<string, CompiledRoleModelBinding>;
+  const archetypeByPatchRoleId = new Map<string, string>();
 
   type CoreRoleSpec = TaskContract['spec']['roles'][number];
   const compiledRoles: CoreRoleSpec[] = [];
@@ -982,6 +1026,7 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
         `${rolePath}/archetypeRoleId`,
       );
     }
+    archetypeByPatchRoleId.set(role.id, archetype.id);
 
     if (archetype.purpose === 'review' && role.purpose !== 'review') {
       throw new EvolutionError(
@@ -1011,8 +1056,8 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
       }
     }
 
-    // Invariant 3: Pinned models, resources, and timeouts
-    let modelBinding: { readonly provider: string; readonly model: string; readonly thinking: string };
+    // Invariant 3: Pinned models, thinking, resources, and timeouts
+    let baseModelBinding: { readonly provider: string; readonly model: string; readonly thinking: string };
     if (role.model !== undefined) {
       if (input.taskpack !== undefined) {
         const found = declaredModels.get(role.model);
@@ -1023,21 +1068,37 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
             `${rolePath}/model`,
           );
         }
-        modelBinding = found;
+        baseModelBinding = found;
       } else {
-        modelBinding = {
+        baseModelBinding = {
           provider: archetype.provider ?? 'delegated',
           model: role.model,
           thinking: archetype.thinking ?? 'medium',
         };
       }
     } else {
-      modelBinding = {
+      baseModelBinding = {
         provider: archetype.provider ?? 'delegated',
         model: archetype.defaultModel ?? 'default',
         thinking: archetype.thinking ?? 'medium',
       };
     }
+
+    if (role.timeoutSeconds !== undefined && role.timeoutSeconds > archetype.maxTimeoutSeconds) {
+      throw new EvolutionError(
+        'TEAM_ENVELOPE_VIOLATION',
+        `role "${role.id}" timeoutSeconds (${role.timeoutSeconds}) exceeds archetype "${archetype.id}" ceiling (${archetype.maxTimeoutSeconds}s)`,
+        `${rolePath}/timeoutSeconds`,
+      );
+    }
+
+    const effectiveThinking = role.thinking ?? baseModelBinding.thinking;
+    const modelBinding: CompiledRoleModelBinding = {
+      provider: baseModelBinding.provider,
+      model: baseModelBinding.model,
+      thinking: effectiveThinking,
+      ...(role.timeoutSeconds !== undefined ? { timeoutSeconds: role.timeoutSeconds } : {}),
+    };
     resolvedRoleModels[role.id] = modelBinding;
 
     if (role.resourceIds !== undefined) {
@@ -1050,14 +1111,6 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
           );
         }
       }
-    }
-
-    if (role.timeoutSeconds !== undefined && role.timeoutSeconds > archetype.maxTimeoutSeconds) {
-      throw new EvolutionError(
-        'TEAM_ENVELOPE_VIOLATION',
-        `role "${role.id}" timeoutSeconds (${role.timeoutSeconds}) exceeds archetype "${archetype.id}" ceiling (${archetype.maxTimeoutSeconds}s)`,
-        `${rolePath}/timeoutSeconds`,
-      );
     }
 
     compiledRoles.push({
@@ -1171,12 +1224,20 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
         mappedHandoffs.push(mapHandoffSourceForCore(h));
       }
     }
+    if (s.onRework !== undefined && !stepAnc.has(s.onRework.rejectTo)) {
+      throw new EvolutionError(
+        'TEAM_ENVELOPE_VIOLATION',
+        `step "${s.id}" onRework.rejectTo "${s.onRework.rejectTo}" must be a strict upstream dependency`,
+        '/steps',
+      );
+    }
     compiledAgentSteps.push({
       id: s.id,
       kind: 'agent',
       uses: sanitizeIdentifier(`handler.${s.roleId}`, `handler-${s.roleId}`),
       roleId: s.roleId,
       dependsOn: [...s.dependsOn],
+      ...(s.onRework !== undefined ? { onRework: { rejectTo: s.onRework.rejectTo, maxReworks: s.onRework.maxReworks } } : {}),
       ...(mappedHandoffs !== undefined ? { handoffs: mappedHandoffs } : {}),
     });
   }
@@ -1209,12 +1270,43 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
         : [sanitizeIdentifier(`check.${arr[idx - 1]!.id}`, `check-${idx - 1}`)],
     }));
 
-  const totalStepsCount = compiledAgentSteps.length + compiledCheckSteps.length;
+  const allOrderedSteps: readonly CoreStepSpec[] = [...compiledAgentSteps, ...compiledCheckSteps];
+  const isMutatingRoleId = (rId: string | null): boolean => {
+    if (rId === null) return false;
+    const declared = roleById.get(rId);
+    return Boolean(declared?.tools.some(t => MUTATING_OR_EXEC_TOOLS.has(t)));
+  };
+  const computeReworkSubgraphIds = (rejectToId: string): ReadonlySet<string> => {
+    const found = new Set<string>([rejectToId]);
+    for (const node of allOrderedSteps) {
+      if (node.dependsOn.some(parent => found.has(parent))) {
+        found.add(node.id);
+      }
+    }
+    return found;
+  };
+
+  let reworkGenerations = 0;
+  let checkReworkGenerations = 0;
+  for (const node of allOrderedSteps) {
+    if (node.onRework !== undefined) {
+      const subIds = computeReworkSubgraphIds(node.onRework.rejectTo);
+      const mutatingSubSteps = allOrderedSteps.filter(
+        item => subIds.has(item.id) && item.kind === 'agent' && isMutatingRoleId(item.roleId),
+      ).length;
+      reworkGenerations += node.onRework.maxReworks * (1 + mutatingSubSteps);
+      if (node.kind === 'check') {
+        checkReworkGenerations += node.onRework.maxReworks;
+      }
+    }
+  }
+
+  const totalStepsCount = allOrderedSteps.length;
   const N = compiledAgentSteps.length;
   const I = input.baseTaskContract.spec.budgets.maxImplementationRepairs;
   const C = input.baseTaskContract.spec.acceptance.checks.length + 2;
-  const K = compiledCheckSteps.reduce((sum, cs) => sum + (cs.onRework?.maxReworks ?? 0), 0);
-  const A = input.maxAttempts ?? Math.max(1, N + I + input.baseTaskContract.spec.budgets.maxFormatRepairs);
+  const K = checkReworkGenerations;
+  const A = input.maxAttempts ?? Math.min(64, Math.max(1, N + reworkGenerations + I + input.baseTaskContract.spec.budgets.maxFormatRepairs));
   const publicationEnabled = input.publicationEnabled === true;
 
   if (A < 1 || A > 64 || C < 2 || C > 34) {
@@ -1231,16 +1323,17 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
     maxImplementationRepairs: I,
     verifierSlotCount: C,
     publicationEnabled,
-    reworkGenerations: 0,
+    reworkGenerations,
     checkReworkGenerations: K,
   });
 
-  const proposedModelCalls = Math.max(input.baseTaskContract.spec.budgets.maxModelCalls, N);
+  const proposedModelCalls = Math.max(input.baseTaskContract.spec.budgets.maxModelCalls, N + reworkGenerations);
 
   if (
     compiledRoles.length > 16
     || totalStepsCount > 16
     || capacity.D > 256
+    || proposedModelCalls > 1024
     || proposedModelCalls + capacity.J + (publicationEnabled ? 2 : 0) + 3 * capacity.A > 2048
   ) {
     throw new EvolutionError(
@@ -1300,6 +1393,52 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
     );
   }
 
+  let compiledRegistry: TrustedRegistry | undefined;
+  if (input.trustedRegistry !== undefined) {
+    const baseProfiles = input.trustedRegistry.spec.roleProfiles;
+    const findBaseProfile = (archId: string) =>
+      baseProfiles.find(
+        p =>
+          p.id === archId
+          || p.id === `role.${archId}`
+          || p.id === `taskpack.profile.${archId}`
+          || (archId === 'author' && p.id === 'taskpack-author-role'),
+      );
+    const updatedRoleProfiles: TrustedRegistry['spec']['roleProfiles'][number][] = patch.roles.map(pr => {
+      const baseProf = findBaseProfile(pr.archetypeRoleId) ?? baseProfiles[0]!;
+      const binding = resolvedRoleModels[pr.id]!;
+      const nextToolWallMs = pr.timeoutSeconds !== undefined
+        ? Math.min(baseProf.limits?.toolWallMs ?? pr.timeoutSeconds * 1000, pr.timeoutSeconds * 1000)
+        : baseProf.limits?.toolWallMs;
+      return {
+        ...baseProf,
+        id: `taskpack.profile.${pr.id}`,
+        selection: {
+          ...baseProf.selection,
+          provider: binding.provider,
+          model: binding.model,
+          thinking: binding.thinking,
+        },
+        tools: [...pr.tools],
+        ...(baseProf.limits !== undefined || nextToolWallMs !== undefined
+          ? {
+            limits: {
+              ...baseProf.limits,
+              ...(nextToolWallMs !== undefined ? { toolWallMs: nextToolWallMs } : {}),
+            },
+          }
+          : {}),
+      } as TrustedRegistry['spec']['roleProfiles'][number];
+    });
+    compiledRegistry = {
+      ...input.trustedRegistry,
+      spec: {
+        ...input.trustedRegistry.spec,
+        roleProfiles: updatedRoleProfiles,
+      },
+    };
+  }
+
   const canonicalPatchJson = canonicalizeJson(patch);
   const patchDigest = sha256Digest(canonicalPatchJson);
 
@@ -1310,7 +1449,318 @@ export function validateAndCompileTeamPatch(input: ValidateAndCompileTeamPatchIn
     taskContract: validated.value,
     capacity,
     resolvedRoleModels: Object.freeze(resolvedRoleModels),
+    ...(compiledRegistry !== undefined ? { compiledRegistry } : {}),
   });
+}
+
+/**
+ * Create a fenced, strictly read-only child `LocalRunStore` plateau supervisor executor
+ * (`<stagingDir>/controller`) enforcing `tools: ['read']`, `scope.protected: ['**', ...]`,
+ * zero `held_out_workloads` mounts, and zero modified workspace files before accepting output.
+ */
+export function createLocalRunStoreSupervisorRunner(
+  options: LocalRunStoreSupervisorRunnerOptions,
+): SupervisorRunnerPort {
+  const scrubber = options.scrubber ?? DEFAULT_SUPERVISOR_SCRUBBER;
+  const envLookup = options.environment ?? ((name: string) => process.env[name]);
+
+  return async (context: SupervisorExecutionContext): Promise<string | Uint8Array | Record<string, unknown>> => {
+    const resolvedStagingDir = await realpath(await ensurePrivateNonSymlinkDir(context.stagingDir));
+    const controllerRunRoot = join(resolvedStagingDir, 'controller');
+    const configDir = join(resolvedStagingDir, 'config');
+    const workspaceDir = join(resolvedStagingDir, 'workspace');
+    await mkdir(controllerRunRoot, { recursive: true, mode: 0o700 });
+    await mkdir(configDir, { recursive: true, mode: 0o700 });
+    await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
+
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Loopwright Supervisor',
+      GIT_AUTHOR_EMAIL: 'supervisor@loopwright.dev',
+      GIT_COMMITTER_NAME: 'Loopwright Supervisor',
+      GIT_COMMITTER_EMAIL: 'supervisor@loopwright.dev',
+    };
+    if (!(await lstat(join(workspaceDir, '.git')).catch(() => null))) {
+      execFileSync('git', ['init', '-b', 'main'], { cwd: workspaceDir, env: gitEnv, stdio: 'ignore' });
+      execFileSync(
+        'git',
+        ['commit', '--allow-empty', '-m', 'Read-only plateau supervisor workspace'],
+        { cwd: workspaceDir, env: gitEnv, stdio: 'ignore' },
+      );
+    }
+    const workspaceHeadRev = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: workspaceDir,
+      env: gitEnv,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+      .trim()
+      .toLowerCase();
+
+    const rawContract = context.supervisorContract;
+    const contract: TaskContract = {
+      ...rawContract,
+      spec: {
+        ...rawContract.spec,
+        target: {
+          ...rawContract.spec.target,
+          baseRevision: workspaceHeadRev,
+          sourceRevision: workspaceHeadRev,
+        },
+      },
+    };
+    if (contract.spec.roles.length !== 1) {
+      throw new EvolutionError('TEAM_ENVELOPE_VIOLATION', 'supervisor TaskContract must declare exactly 1 role');
+    }
+    const supRole = contract.spec.roles[0]!;
+    if (supRole.tools.length !== 1 || supRole.tools[0] !== 'read') {
+      throw new EvolutionError('TEAM_ENVELOPE_VIOLATION', 'supervisor role must declare tools: ["read"] only');
+    }
+    if (!contract.spec.scope.protected.includes('**')) {
+      throw new EvolutionError('TEAM_ENVELOPE_VIOLATION', 'supervisor TaskContract must protect "**" against mutations');
+    }
+    if (
+      contract.spec.acceptance.checks.some(chk => chk.allowedEvidenceLevels.includes('hardware_execution'))
+      || contract.spec.trustedContext.resources.some(r => r.path.includes('held_out_workloads'))
+    ) {
+      throw new EvolutionError('TEAM_ENVELOPE_VIOLATION', 'supervisor TaskContract must never bind hardware_execution or held_out_workloads');
+    }
+
+    const runId = sanitizeIdentifier(
+      `sup-${context.campaignId}-i${context.island.islandId}-g${context.island.currentGeneration}-${randomBytes(3).toString('hex')}`,
+      `sup-${randomBytes(4).toString('hex')}`,
+    );
+
+    const realTmpRoot = await realpath(tmpdir());
+    const trustedTempDir = await mkdtemp(join(realTmpRoot, 'lw-evo-sup-reg-'));
+    await chmod(trustedTempDir, 0o700);
+
+    try {
+      for (const stagedFile of context.files) {
+        const dstPath = join(trustedTempDir, stagedFile.relativeResourcePath);
+        await mkdir(dirname(dstPath), { recursive: true, mode: 0o700 });
+        const rawBytes = await readFile(stagedFile.filePath);
+        const rawText = rawBytes.toString('utf8');
+        assertCleanSecrets(rawText, scrubber, stagedFile.relativeResourcePath);
+        await writeFile(dstPath, rawBytes, { mode: 0o400 });
+        await chmod(dstPath, 0o400);
+      }
+
+      const installed = await installedHandlerDigests();
+      const agentStep = contract.spec.steps.find(s => s.kind === 'agent');
+      if (agentStep === undefined) {
+        throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'supervisor TaskContract missing agent step');
+      }
+      const profileId = sanitizeIdentifier(`profile.${supRole.id}`, 'profile-supervisor');
+      const registryName = sanitizeIdentifier(`reg.${runId}`, 'reg-supervisor');
+
+      const registryObj = {
+        apiVersion: CONTROLLER_API_VERSION,
+        kind: 'TrustedRegistry' as const,
+        metadata: { name: registryName },
+        spec: {
+          version: 1 as const,
+          resourceVersion: contract.spec.trustedContext.revision,
+          handlers: [
+            {
+              id: agentStep.uses,
+              version: 1 as const,
+              digest: installed['pi.agent.v1'],
+              kind: 'agent' as const,
+              implementation: 'pi.agent.v1' as const,
+              parameters: {
+                prompt: contract.spec.goal,
+                purpose: 'task' as const,
+              },
+              capabilities: ['pi'],
+            },
+            {
+              id: 'supervisor-no-change',
+              version: 1 as const,
+              digest: installed['no-change.v1'],
+              kind: 'check' as const,
+              implementation: 'no-change.v1' as const,
+              parameters: { checkId: 'supervisor-no-change' },
+              capabilities: ['inert_bytes', 'read_only'],
+            },
+            {
+              id: 'implicit-scope',
+              version: 1 as const,
+              digest: installed['scope.v1'],
+              kind: 'check' as const,
+              implementation: 'scope.v1' as const,
+              parameters: { checkId: null },
+              capabilities: ['inert_bytes', 'read_only'],
+            },
+            {
+              id: 'implicit-no-change',
+              version: 1 as const,
+              digest: installed['no-change.v1'],
+              kind: 'check' as const,
+              implementation: 'no-change.v1' as const,
+              parameters: { checkId: null },
+              capabilities: ['inert_bytes', 'read_only'],
+            },
+          ],
+          roleProfiles: [
+            {
+              id: profileId,
+              adapter: 'delegated' as const,
+              selection: {
+                provider: supRole.provider,
+                model: supRole.model,
+                thinking: supRole.thinking,
+              },
+              tools: ['read'],
+              limits: {
+                toolWallMs: 60_000,
+              },
+              runtimeRef: null,
+              providerCredentialRef: null,
+              mcp: null,
+            },
+          ],
+          resources: contract.spec.trustedContext.resources.map(r => ({
+            id: r.id,
+            kind: r.kind,
+            path: r.path,
+            digest: r.digest,
+          })),
+          runtimeProfiles: [],
+          credentialBindings: [],
+          environmentBindings: [],
+          gateEndpoints: [],
+          publicationEndpoints: [],
+        },
+      };
+
+      const registryBytes = Buffer.from(`${JSON.stringify(registryObj, null, 2)}\n`, 'utf8');
+      const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
+      const registryPath = join(trustedTempDir, 'registry.json');
+      await writeFile(registryPath, registryBytes, { mode: 0o600 });
+      await chmod(registryPath, 0o600);
+
+      const drainReserveMs = Math.max(5_000, Math.min(30_000, Math.floor(contract.spec.budgets.wallTimeMs / 4)));
+      const configObj = {
+        apiVersion: CONTROLLER_API_VERSION,
+        kind: 'ControllerConfig' as const,
+        spec: {
+          task: contract,
+          registry: {
+            name: registryName,
+            digest: { algorithm: 'sha256' as const, hex: registrySha256 },
+          },
+          profiles: {
+            roles: [{ roleId: supRole.id, profileRef: profileId }],
+            steps: [
+              { stepId: agentStep.id, handlerRef: agentStep.uses },
+              { stepId: 'check-supervisor-readonly', handlerRef: 'supervisor-no-change' },
+            ],
+          },
+          credentials: [],
+          controls: {
+            drainReserveMs,
+            maxAttempts: 1,
+            repeatFailureLimit: 2,
+            submission: { mode: 'artifact_or_assistant' as const, path: null },
+          },
+          publication: { mode: 'disabled' as const },
+        },
+      };
+
+      const configBytes = Buffer.from(`${JSON.stringify(configObj, null, 2)}\n`, 'utf8');
+      const configPath = join(configDir, 'config.json');
+      await writeFile(configPath, configBytes, { mode: 0o600 });
+      await chmod(configPath, 0o600);
+
+      const loadedRes = await loadTrustedConfiguration({
+        configPath,
+        registryPath,
+        registrySha256,
+        untrustedRoots: [workspaceDir],
+        environment: envLookup,
+      });
+      if (!loadedRes.ok) {
+        throw new EvolutionError(
+          'EVOLUTION_STORE_ERROR',
+          `supervisor child loadTrustedConfiguration failed: ${loadedRes.error.code} (${loadedRes.error.path})`,
+        );
+      }
+
+      const tickRes = await stepNext({
+        configuration: loadedRes.value,
+        repository: workspaceDir,
+        runRoot: controllerRunRoot,
+        runId,
+        mode: 'no-change',
+        policyProfile: options.policyProfile ?? 'local',
+        allowWorkflowWrites: false,
+        environment: envLookup,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+      if (!tickRes.ok) {
+        throw new EvolutionError('EVOLUTION_STORE_ERROR', `supervisor child stepNext failed: ${tickRes.error.code}`);
+      }
+      if (tickRes.value.kind !== 'step') {
+        throw new EvolutionError('EVOLUTION_STORE_ERROR', 'supervisor child stepNext did not yield expected read-only step');
+      }
+
+      const tick = tickRes.value;
+      const rawOutput = await options.executeReadOnlySupervisorTurn({
+        ...context,
+        runRoot: controllerRunRoot,
+        runId,
+        stepId: tick.stepId,
+        roleId: tick.roleId,
+        candidateDir: tick.candidateDir,
+        contextFiles: tick.contextFiles,
+        leaseToken: tick.leaseToken,
+        tools: Object.freeze(['read'] as const),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+
+      const candidateEntries = await readdir(tick.candidateDir);
+      if (candidateEntries.length > 0) {
+        await stepCancel({ runRoot: controllerRunRoot, runId, environment: envLookup }).catch(() => undefined);
+        throw new EvolutionError(
+          'TEAM_ENVELOPE_VIOLATION',
+          `read-only supervisor turn illegally created or modified workspace files: ${candidateEntries.join(', ')}`,
+          '/scope/writable',
+        );
+      }
+
+      const submitRes = await stepSubmit({
+        runRoot: controllerRunRoot,
+        runId,
+        leaseToken: tick.leaseToken,
+        status: 'no_change',
+        reason: 'read-only plateau supervisor diagnosis completed',
+        environment: envLookup,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+      if (!submitRes.ok) {
+        await stepCancel({ runRoot: controllerRunRoot, runId, environment: envLookup }).catch(() => undefined);
+        throw new EvolutionError(
+          'TEAM_ENVELOPE_VIOLATION',
+          `supervisor child stepSubmit refused (${submitRes.error.code} at ${submitRes.error.path})`,
+        );
+      }
+      if (
+        submitRes.value.kind !== 'result'
+        || (submitRes.value.result.spec.status !== 'no_change' && submitRes.value.result.spec.status !== 'completed')
+      ) {
+        await stepCancel({ runRoot: controllerRunRoot, runId, environment: envLookup }).catch(() => undefined);
+        throw new EvolutionError(
+          'TEAM_ENVELOPE_VIOLATION',
+          `supervisor child run failed read-only no-change verification`,
+        );
+      }
+
+      return rawOutput;
+    } finally {
+      await rm(trustedTempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  };
 }
 
 /**
@@ -1396,19 +1846,19 @@ export async function runPlateauSupervisorTurn(
     scrubber: input.scrubber,
   });
 
-  const rawSupervisorOutput = await input.supervisorRunner({
-    campaignId: input.campaignId,
-    island: input.island,
-    triggerReason: decision.triggerReason,
-    stagingDir: stagedContext.stagingDir,
-    files: stagedContext.files,
-    supervisorContract: stagedContext.supervisorContract,
-    writablePaths: stagedContext.writablePaths,
-    prompt: stagedContext.prompt,
-  });
-
   let compiledPatch: CompiledTeamPatchResult;
   try {
+    const rawSupervisorOutput = await input.supervisorRunner({
+      campaignId: input.campaignId,
+      island: input.island,
+      triggerReason: decision.triggerReason,
+      stagingDir: stagedContext.stagingDir,
+      files: stagedContext.files,
+      supervisorContract: stagedContext.supervisorContract,
+      writablePaths: stagedContext.writablePaths,
+      prompt: stagedContext.prompt,
+    });
+
     compiledPatch = validateAndCompileTeamPatch({
       rawPatch: rawSupervisorOutput,
       teamEvolution: input.teamEvolution,

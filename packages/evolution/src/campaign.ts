@@ -16,7 +16,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import {
   admitTask,
   LIMITS,
@@ -41,17 +41,26 @@ import {
   type StepVerdict,
 } from '@loopwright/controller';
 import {
+  DECISION_NOVELTY_MAX_HISTORY_SLICES,
+  DECISION_NOVELTY_MAX_SLICE_BYTES,
+  DECISION_PROVIDER_API_KEY_ENV,
+  DECISION_PROVIDER_DEFAULTS,
   DecisionBudgetTracker,
   DEFAULT_DECISION_POLICY,
   evaluateCascadeEscalation,
   evaluateMutationNovelty,
+  HttpDecisionTransport,
   routeEvolutionStrategy,
   type DecisionCascadeEscalationResult,
+  type DecisionEvolutionMutationKind,
   type DecisionEvolutionStrategyResult,
   type DecisionHardwareDiagnostics,
   type DecisionMutationNoveltyHistoryEntry,
   type DecisionMutationNoveltyResult,
+  type DecisionPolicyConfig,
+  type DecisionTransport,
 } from '@loopwright/decisions';
+import { MAX_RECEIPT_FILE_BYTES } from '@loopwright/hardware-runner';
 import {
   compileDeclarativeTaskpack,
   loadDeclarativeTaskpack,
@@ -84,20 +93,24 @@ import {
   selectModelCandidate,
   selectRingMigrationElites,
   stageMultiParentContextFiles,
+  stagePortfolioSpecialistContextFiles,
   type ParentContextInput,
+  type PortfolioSpecialistContextInput,
   type SampledParentEntry,
   type StagedParentContextFile,
 } from './sampler.js';
 import {
   canonicalizeJson,
   loadEvolutionCampaignFile,
+  parseArtifactRefsJson,
   parseBucketMetricsJson,
   parseEvolutionCampaignDocument,
   parseHardwareDiagnosticsJson,
   parseHardwareProvenanceJson,
   parseMetricsRecordJson,
+  parseNullProtoJson,
   parseStructuredFindingsJson,
-  parseTeamPatchV1,
+  type NullProtoJson,
 } from './schema.js';
 import { synthesizeCampaignScratchpad } from './scratchpad.js';
 import { EvolutionCampaignStore } from './store.js';
@@ -105,6 +118,7 @@ import {
   hasRunEvalLoopPathology,
   recordTeamTrialOutcome,
   runPlateauSupervisorTurn,
+  validateAndCompileTeamPatch,
   type IslandTrajectoryEntry,
   type SupervisorRunnerPort,
 } from './team-supervisor.js';
@@ -204,6 +218,46 @@ export interface CandidateProposalContext {
   readonly portfolioSpecialists?: readonly IndividualRecord[] | undefined;
 }
 
+export interface ScreenCandidateNoveltyOptions {
+  readonly candidateId: string;
+  readonly candidateSlice: string;
+  readonly historySlices: readonly DecisionMutationNoveltyHistoryEntry[];
+  readonly policy?: DecisionPolicyConfig | undefined;
+  readonly budget?: DecisionBudgetTracker | undefined;
+  readonly transport?: DecisionTransport | undefined;
+  readonly apiKey?: string | undefined;
+  readonly noveltyThreshold?: number | undefined;
+  readonly shingleSize?: number | undefined;
+  readonly scrubber?: SecretScrubber | undefined;
+}
+
+export interface ScreenCandidateNoveltyOutcome {
+  readonly rejected: boolean;
+  readonly failureReason: 'NOVELTY_CLONE_REJECTED' | null;
+  readonly decision: DecisionMutationNoveltyResult;
+}
+
+export interface BuildStageScopedTaskpackOptions {
+  readonly taskpack: TaskpackManifest;
+  readonly heldOutWorkloadId: string;
+  readonly targetCellId: string;
+  readonly teamPatch?: TeamPatchV1 | undefined;
+}
+
+export interface CollectedChildBenchmarkArtifacts {
+  readonly hasBenchmarkProof: boolean;
+  readonly rawVerdictReceiptBytes?: Uint8Array | undefined;
+  readonly metrics: Readonly<Record<string, number>>;
+  readonly bucketMetrics?: readonly BucketMetricEntry[] | undefined;
+  readonly hardwareDiagnostics?: HardwareDiagnostics | undefined;
+  readonly hardwareProvenance?: HardwareProvenance | undefined;
+  readonly findings?: readonly StructuredFinding[] | undefined;
+  readonly outputArtifacts: readonly ArtifactRef[];
+  readonly stageABlobs: readonly StageABlobPayload[];
+  readonly dispositionReason: string | null;
+  readonly retryablePreemption: boolean;
+}
+
 export interface CandidateEvaluationProposal extends CandidateProposalContext {
   readonly campaignRoot: string;
   readonly childRunDir: string;
@@ -212,6 +266,8 @@ export interface CandidateEvaluationProposal extends CandidateProposalContext {
   readonly taskpack: TaskpackManifest;
   readonly teamPatch?: TeamPatchV1 | undefined;
   readonly proposedCodeSlice?: string | undefined;
+  readonly islandHistorySlices?: readonly DecisionMutationNoveltyHistoryEntry[] | undefined;
+  readonly noveltyGate?: ((candidateSlice: string) => Promise<ScreenCandidateNoveltyOutcome>) | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
@@ -239,6 +295,7 @@ export interface CandidateEvaluationResult {
   readonly evidenceDigest?: Digest | null | undefined;
   readonly childRunRelPath?: string | undefined;
   readonly runEvalReport?: RunEvalReport | undefined;
+  readonly noveltyDecision?: DecisionMutationNoveltyResult | undefined;
 }
 
 export type CandidateEvaluator = (
@@ -279,6 +336,10 @@ export interface ControllerChildRunEvaluatorOptions {
   readonly environment?: ((name: string) => string | undefined) | undefined;
   readonly allowLoopbackHttp?: boolean | undefined;
   readonly policyProfile?: ControllerPolicyProfile | undefined;
+  readonly decisionPolicy?: DecisionPolicyConfig | undefined;
+  readonly decisionBudget?: DecisionBudgetTracker | undefined;
+  readonly decisionTransport?: DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
   readonly agentDriver: (context: CandidateAgentStepContext) => Promise<CandidateAgentStepResult | void>;
   readonly onAfterChildEvaluation?: ((proposal: CandidateEvaluationProposal, result: CandidateEvaluationResult) => Promise<void> | void) | undefined;
   readonly scrubber?: SecretScrubber | undefined;
@@ -297,6 +358,10 @@ export interface RunEvolutionCampaignOptions {
   readonly controllerEvaluatorOptions?: ControllerChildRunEvaluatorOptions | undefined;
   readonly proposeCandidateSlice?: ((context: CandidateProposalContext) => Promise<string>) | undefined;
   readonly supervisorRunner?: SupervisorRunnerPort | undefined;
+  readonly decisionPolicy?: DecisionPolicyConfig | undefined;
+  readonly decisionTransport?: DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
+  readonly environment?: ((name: string) => string | undefined) | undefined;
   readonly clock?: CampaignClockSource | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport?: boolean | undefined;
@@ -316,6 +381,10 @@ export interface ResumeEvolutionCampaignOptions {
   readonly controllerEvaluatorOptions?: ControllerChildRunEvaluatorOptions | undefined;
   readonly proposeCandidateSlice?: ((context: CandidateProposalContext) => Promise<string>) | undefined;
   readonly supervisorRunner?: SupervisorRunnerPort | undefined;
+  readonly decisionPolicy?: DecisionPolicyConfig | undefined;
+  readonly decisionTransport?: DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
+  readonly environment?: ((name: string) => string | undefined) | undefined;
   readonly clock?: CampaignClockSource | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport?: boolean | undefined;
@@ -385,19 +454,69 @@ export interface EvolutionCampaignInspection {
   readonly scratchpadSnapshots: readonly ScratchpadSnapshotRecord[];
 }
 
-function sha256Digest(bytes: Uint8Array | string): Digest {
+const CONTROLLER_RUN_ID_RE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
+const FORBIDDEN_RUN_IDS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype']);
+const DEFAULT_MAX_CHILD_BLOB_BYTES = 67_108_864;
+
+/** Compute a frozen `{ algorithm: 'sha256', hex }` digest over UTF-8 string or raw bytes. */
+export function sha256Digest(bytes: Uint8Array | string): Digest {
   return Object.freeze({
     algorithm: 'sha256' as const,
     hex: createHash('sha256').update(bytes).digest('hex'),
   });
 }
 
-function sanitizeRunId(raw: string): string {
-  const cleaned = raw
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/^[^A-Za-z0-9]+/, '')
-    .slice(0, LIMITS.identifier);
-  return cleaned.length > 0 ? cleaned : `ind-${randomBytes(4).toString('hex')}`;
+function truncateUtf8ByBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const buf = Buffer.from(text, 'utf8');
+  let end = maxBytes;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return buf.subarray(0, end).toString('utf8');
+}
+
+/**
+ * Sanitize an arbitrary string into a strict controller-valid lowercase identifier
+ * matching `/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/` (`<= 64` chars), preserving any
+ * trailing hexadecimal nonce segment whenever truncation occurs.
+ */
+export function sanitizeRunId(raw: string): string {
+  let cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/[._-]{2,}/g, '-')
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+
+  if (cleaned.length === 0) {
+    return `ind-${randomBytes(4).toString('hex')}`;
+  }
+  if (!/^[a-z]/.test(cleaned)) {
+    cleaned = `r-${cleaned}`;
+  }
+  if (FORBIDDEN_RUN_IDS.has(cleaned)) {
+    cleaned = `id-${cleaned}`;
+  }
+
+  if (cleaned.length > LIMITS.identifier) {
+    const trailingNonceMatch = /[._-]([0-9a-f]{4,16})$/.exec(cleaned);
+    const suffix = trailingNonceMatch !== null
+      ? trailingNonceMatch[1]!
+      : createHash('sha256').update(raw, 'utf8').digest('hex').slice(0, 8);
+    const maxPrefixLen = Math.max(1, LIMITS.identifier - 1 - suffix.length);
+    let prefix = cleaned
+      .slice(0, maxPrefixLen)
+      .replace(/[^a-z0-9]+$/g, '');
+    if (prefix.length === 0 || !/^[a-z]/.test(prefix)) {
+      prefix = 'r';
+    }
+    cleaned = `${prefix}-${suffix}`;
+  }
+
+  if (!CONTROLLER_RUN_ID_RE.test(cleaned) || cleaned.length > LIMITS.identifier) {
+    return `ind-${randomBytes(4).toString('hex')}`;
+  }
+  return cleaned;
 }
 
 function resolveGitHeadRevision(repositoryRoot: string | undefined): string {
@@ -418,29 +537,249 @@ function resolveGitHeadRevision(repositoryRoot: string | undefined): string {
   return '0'.repeat(40);
 }
 
-async function copyDirectoryNoFollow(srcDir: string, dstDir: string): Promise<void> {
+async function resolveCanonicalPathAllowMissingLeaf(rawPath: string, label: string): Promise<string> {
+  if (typeof rawPath !== 'string' || rawPath.trim().length === 0 || rawPath.includes('\0')) {
+    throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `${label} must be a non-empty path`, `/${label}`);
+  }
+  const absPath = resolve(rawPath);
+  const missingSegments: string[] = [];
+  let cursor = absPath;
+
+  for (;;) {
+    const st = await lstat(cursor).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      if (err.code === 'ELOOP') {
+        throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink loop along ${absPath}`, `/${label}`);
+      }
+      throw err;
+    });
+    if (st !== null) {
+      const realExisting = await realpath(cursor).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ELOOP') {
+          throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink loop along ${absPath}`, `/${label}`);
+        }
+        throw err;
+      });
+      return missingSegments.length > 0
+        ? join(realExisting, ...missingSegments.reverse())
+        : realExisting;
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      return absPath;
+    }
+    missingSegments.push(cursor.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
+    cursor = parent;
+  }
+}
+
+async function assertDisjointCampaignAndRepositoryRoots(
+  campaignRoot: string,
+  repositoryRoot: string | undefined,
+): Promise<void> {
+  if (repositoryRoot === undefined || repositoryRoot.trim().length === 0) {
+    return;
+  }
+  const canonicalCampaign = await resolveCanonicalPathAllowMissingLeaf(campaignRoot, 'campaignRoot');
+  const canonicalRepo = await resolveCanonicalPathAllowMissingLeaf(repositoryRoot, 'repositoryRoot');
+  const campaignPrefix = canonicalCampaign.endsWith(sep) ? canonicalCampaign : `${canonicalCampaign}${sep}`;
+  const repoPrefix = canonicalRepo.endsWith(sep) ? canonicalRepo : `${canonicalRepo}${sep}`;
+
+  if (
+    canonicalCampaign === canonicalRepo
+    || canonicalCampaign.startsWith(repoPrefix)
+    || canonicalRepo.startsWith(campaignPrefix)
+  ) {
+    throw new EvolutionError(
+      'EVOLUTION_SCHEMA_INVALID',
+      'campaignRoot must live outside repositoryRoot',
+      '/campaignRoot',
+    );
+  }
+}
+
+async function copyRegularFileNoFollow(srcFile: string, dstFile: string, preserveExec: boolean): Promise<void> {
+  const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
+  const st = await lstat(srcFile);
+  if (st.isSymbolicLink()) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside repository tree: "${srcFile}"`, srcFile);
+  }
+  if (!st.isFile()) return;
+
+  const srcFh = await open(srcFile, constants.O_RDONLY | noFollow).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ELOOP' || err.code === 'EFTYPE') {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside repository tree: "${srcFile}"`, srcFile);
+    }
+    throw err;
+  });
+  let bytes: Buffer;
+  try {
+    const fdStat = await srcFh.stat();
+    if (!fdStat.isFile()) return;
+    bytes = await srcFh.readFile();
+  } finally {
+    await srcFh.close();
+  }
+
+  await mkdir(dirname(dstFile), { recursive: true, mode: 0o700 });
+  const execBit = preserveExec && (st.mode & 0o111) !== 0;
+  const mode = execBit ? 0o755 : 0o644;
+  const dstFh = await open(dstFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow, mode);
+  try {
+    await dstFh.writeFile(bytes);
+    if (execBit) await dstFh.chmod(0o755);
+  } finally {
+    await dstFh.close();
+  }
+}
+
+async function copyGitMetadataDirNoFollow(srcGitDir: string, dstGitDir: string): Promise<void> {
+  const st = await lstat(srcGitDir);
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `git directory must not be a symlink: "${srcGitDir}"`, srcGitDir);
+  }
+  await mkdir(dstGitDir, { recursive: true, mode: 0o700 });
+  const entries = await readdir(srcGitDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name === 'hooks') continue;
+    const srcChild = join(srcGitDir, entry.name);
+    const dstChild = join(dstGitDir, entry.name);
+    const childStat = await lstat(srcChild);
+    if (childStat.isSymbolicLink()) {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside .git metadata: "${srcChild}"`, srcChild);
+    }
+    if (childStat.isDirectory()) {
+      await copyGitMetadataDirNoFollow(srcChild, dstChild);
+    } else if (childStat.isFile()) {
+      await copyRegularFileNoFollow(srcChild, dstChild, false);
+    }
+  }
+}
+
+async function copyUntrackedFallbackTreeNoFollow(srcDir: string, dstDir: string): Promise<void> {
   const srcStat = await lstat(srcDir);
   if (srcStat.isSymbolicLink() || !srcStat.isDirectory()) {
-    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `source directory must be a non-symlink directory: "${srcDir}"`);
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `source directory must be a non-symlink directory: "${srcDir}"`, srcDir);
   }
   await mkdir(dstDir, { recursive: true, mode: 0o700 });
   const entries = await readdir(srcDir, { withFileTypes: true });
   for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === '.git') continue;
     const srcChild = join(srcDir, entry.name);
     const dstChild = join(dstDir, entry.name);
     const st = await lstat(srcChild);
     if (st.isSymbolicLink()) {
-      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside repository tree: "${srcChild}"`);
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden inside repository tree: "${srcChild}"`, srcChild);
     }
     if (st.isDirectory()) {
-      await copyDirectoryNoFollow(srcChild, dstChild);
+      await copyUntrackedFallbackTreeNoFollow(srcChild, dstChild);
     } else if (st.isFile()) {
-      const bytes = await readFile(srcChild);
-      const execBit = (st.mode & 0o111) !== 0;
-      const mode = execBit ? 0o755 : 0o644;
-      await writeFile(dstChild, bytes, { mode });
-      if (execBit) await chmod(dstChild, 0o755);
+      await copyRegularFileNoFollow(srcChild, dstChild, true);
     }
+  }
+}
+
+/**
+ * Materialize an isolated child Git checkout into `dstRepoDir` by copying tracked Git tree files
+ * (`git ls-files -z` with `O_NOFOLLOW` regular-file copy + preserving executable `0o755` mode,
+ * refusing any tracked symlink, and copying `.git` metadata without hardlinks or hooks) so
+ * untracked directories such as `node_modules/.bin/*` symlinks never cause crashes or recursion.
+ */
+export async function materializeGitCheckoutNoFollow(srcRepoDir: string, dstRepoDir: string): Promise<void> {
+  const srcStat = await lstat(srcRepoDir);
+  if (srcStat.isSymbolicLink() || !srcStat.isDirectory()) {
+    throw new EvolutionError(
+      'EVOLUTION_SYMLINK_FORBIDDEN',
+      `source directory must be a non-symlink directory: "${srcRepoDir}"`,
+      srcRepoDir,
+    );
+  }
+
+  const dotGitPath = join(srcRepoDir, '.git');
+  const dotGitStat = await lstat(dotGitPath).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  });
+
+  if (dotGitStat === null) {
+    await copyUntrackedFallbackTreeNoFollow(srcRepoDir, dstRepoDir);
+    return;
+  }
+  if (dotGitStat.isSymbolicLink()) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `.git cannot be a symlink: "${dotGitPath}"`, dotGitPath);
+  }
+
+  await mkdir(dstRepoDir, { recursive: true, mode: 0o700 });
+
+  if (dotGitStat.isDirectory()) {
+    await copyGitMetadataDirNoFollow(dotGitPath, join(dstRepoDir, '.git'));
+  } else if (dotGitStat.isFile()) {
+    execFileSync('git', ['clone', '--no-hardlinks', '--quiet', '--no-checkout', srcRepoDir, dstRepoDir], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    await rm(join(dstRepoDir, '.git', 'hooks'), { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  const rawTracked = execFileSync('git', ['ls-files', '-z'], {
+    cwd: srcRepoDir,
+    encoding: 'buffer',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const checkedParentDirs = new Set<string>();
+  let start = 0;
+  for (let i = 0; i <= rawTracked.byteLength; i += 1) {
+    if (i < rawTracked.byteLength && rawTracked[i] !== 0) continue;
+    if (i > start) {
+      const relPath = rawTracked.subarray(start, i).toString('utf8');
+      const parts = relPath.split('/');
+      if (
+        relPath.startsWith('/')
+        || parts.some(seg => seg.length === 0 || seg === '.' || seg === '..')
+      ) {
+        throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `invalid tracked Git path "${relPath}"`, relPath);
+      }
+
+      let cursorDir = srcRepoDir;
+      for (let p = 0; p < parts.length - 1; p += 1) {
+        cursorDir = join(cursorDir, parts[p]!);
+        if (!checkedParentDirs.has(cursorDir)) {
+          const dirSt = await lstat(cursorDir).catch((err: NodeJS.ErrnoException) => {
+            if (err.code === 'ENOENT') return null;
+            throw err;
+          });
+          if (dirSt !== null && dirSt.isSymbolicLink()) {
+            throw new EvolutionError(
+              'EVOLUTION_SYMLINK_FORBIDDEN',
+              `symlink directory forbidden inside tracked repository path: "${cursorDir}"`,
+              cursorDir,
+            );
+          }
+          checkedParentDirs.add(cursorDir);
+        }
+      }
+
+      const srcFile = join(srcRepoDir, ...parts);
+      const fileSt = await lstat(srcFile).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return null;
+        throw err;
+      });
+      if (fileSt !== null) {
+        if (fileSt.isSymbolicLink()) {
+          throw new EvolutionError(
+            'EVOLUTION_SYMLINK_FORBIDDEN',
+            `tracked symlink forbidden inside repository tree: "${srcFile}"`,
+            srcFile,
+          );
+        }
+        if (fileSt.isFile()) {
+          const dstFile = join(dstRepoDir, ...parts);
+          await copyRegularFileNoFollow(srcFile, dstFile, true);
+        }
+      }
+    }
+    start = i + 1;
   }
 }
 
@@ -484,7 +823,8 @@ async function writeReadOnlyScratchpadFile(
   });
 }
 
-function extractEvolveBlocksFromSource(text: string): string {
+/** Extract `EVOLVE-BLOCK-START:` .. `EVOLVE-BLOCK-END:` slices from source text, falling back to full text when absent. */
+export function extractEvolveBlocksFromSource(text: string): string {
   const lines = text.split('\n');
   const blocks: string[] = [];
   let inBlock = false;
@@ -505,6 +845,45 @@ function extractEvolveBlocksFromSource(text: string): string {
     }
   }
   return blocks.length > 0 ? `${blocks.join('\n')}\n` : text;
+}
+
+/**
+ * Screen a candidate's `EVOLVE-BLOCK` source slice against island history (`<= 64` newest slices)
+ * BEFORE dispatching `benchmark-gate.v1` Stage A/B, rejecting exact normalized clones (`Jaccard === 1.0`)
+ * with `0` network calls and Jev soft-band clones with `NOVELTY_CLONE_REJECTED`.
+ */
+export async function screenCandidateNoveltyBeforeDispatch(
+  options: ScreenCandidateNoveltyOptions,
+): Promise<ScreenCandidateNoveltyOutcome> {
+  const boundedHistory = options.historySlices
+    .slice(-DECISION_NOVELTY_MAX_HISTORY_SLICES)
+    .map(entry => ({
+      id: entry.id.slice(0, 128),
+      sourceSlice: truncateUtf8ByBytes(entry.sourceSlice, DECISION_NOVELTY_MAX_SLICE_BYTES),
+    }));
+  const boundedCandidateSlice = truncateUtf8ByBytes(options.candidateSlice, DECISION_NOVELTY_MAX_SLICE_BYTES);
+  const safeCandidateId = options.candidateId.trim().slice(0, 128) || 'candidate';
+  const decision = await evaluateMutationNovelty({
+    policy: options.policy ?? DEFAULT_DECISION_POLICY,
+    state: {},
+    budget: options.budget ?? new DecisionBudgetTracker(),
+    ...(options.transport !== undefined ? { transport: options.transport } : {}),
+    ...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
+    ...(options.scrubber !== undefined ? { scrubber: options.scrubber } : {}),
+    novelty: {
+      candidateId: safeCandidateId,
+      candidateSlice: boundedCandidateSlice,
+      historySlices: boundedHistory,
+      ...(options.noveltyThreshold !== undefined ? { noveltyThreshold: options.noveltyThreshold } : {}),
+      ...(options.shingleSize !== undefined ? { shingleSize: options.shingleSize } : {}),
+    },
+  });
+  const rejected = decision.action === 'reject_resample';
+  return Object.freeze({
+    rejected,
+    failureReason: rejected ? ('NOVELTY_CLONE_REJECTED' as const) : null,
+    decision,
+  });
 }
 
 /**
@@ -644,13 +1023,34 @@ export async function checkEvolutionCampaign(
   });
 }
 
-function buildStageScopedTaskpack(
+/**
+ * Build a stage-scoped `TaskpackManifest` rewriting `heldOutWorkloadId` ONLY on `benchmark-gate.v1`
+ * gates matching `targetCellId`, and applying validated `teamPatch` roles, `thinking`, `timeoutSeconds`,
+ * and `onRework` step policies when present.
+ */
+export function buildStageScopedTaskpack(options: BuildStageScopedTaskpackOptions): TaskpackManifest;
+export function buildStageScopedTaskpack(
   baseTaskpack: TaskpackManifest,
   heldOutWorkloadId: string,
   teamPatch: TeamPatchV1 | undefined,
+  targetCellId: string,
+): TaskpackManifest;
+export function buildStageScopedTaskpack(
+  first: BuildStageScopedTaskpackOptions | TaskpackManifest,
+  heldOutWorkloadIdArg?: string,
+  teamPatchArg?: TeamPatchV1 | undefined,
+  targetCellIdArg?: string,
 ): TaskpackManifest {
+  const isOptions = !('apiVersion' in first);
+  const baseTaskpack = isOptions ? first.taskpack : first;
+  const heldOutWorkloadId = isOptions ? first.heldOutWorkloadId : heldOutWorkloadIdArg!;
+  const targetCellId = isOptions ? first.targetCellId : targetCellIdArg!;
+  const teamPatch = isOptions ? first.teamPatch : teamPatchArg;
+
   const updatedGates = baseTaskpack.spec.verification.externalGates.map(gate => {
-    if (gate.implementation !== 'benchmark-gate.v1') return gate;
+    if (gate.implementation !== 'benchmark-gate.v1' || gate.targetCellId !== targetCellId) {
+      return gate;
+    }
     return {
       ...gate,
       heldOutWorkloadId,
@@ -659,6 +1059,7 @@ function buildStageScopedTaskpack(
 
   let roles = baseTaskpack.spec.roles;
   let steps = baseTaskpack.spec.steps;
+  let limits = baseTaskpack.spec.limits;
 
   if (teamPatch !== undefined) {
     const baseRoleById = new Map((baseTaskpack.spec.roles ?? []).map(r => [r.id, r] as const));
@@ -669,19 +1070,37 @@ function buildStageScopedTaskpack(
         id: pr.id,
         provider: arch?.provider ?? firstModel?.provider ?? 'delegated',
         model: pr.model ?? arch?.model ?? firstModel?.id ?? 'default',
-        thinking: arch?.thinking ?? firstModel?.thinking ?? 'medium',
+        thinking: pr.thinking ?? arch?.thinking ?? firstModel?.thinking ?? 'medium',
         purpose: pr.purpose,
         prompt: pr.prompt,
         tools: [...pr.tools] as TaskpackToolName[],
-        ...(pr.resourceIds !== undefined ? { resourceIds: [...pr.resourceIds] } : {}),
+        ...(arch?.instructions !== undefined ? { instructions: arch.instructions } : {}),
+        ...(arch?.skills !== undefined ? { skills: arch.skills } : {}),
+        ...(arch?.mcpServers !== undefined ? { mcpServers: arch.mcpServers } : {}),
       };
     });
+
+    const roleTimeouts = teamPatch.roles
+      .map(r => r.timeoutSeconds)
+      .filter((v): v is number => v !== undefined);
+    if (roleTimeouts.length > 0) {
+      const maxPatchTimeout = Math.max(...roleTimeouts);
+      const baseTimeout = baseTaskpack.spec.limits?.toolTimeoutSeconds;
+      const narrowedTimeout = baseTimeout !== undefined ? Math.min(baseTimeout, maxPatchTimeout) : maxPatchTimeout;
+      limits = {
+        ...baseTaskpack.spec.limits,
+        toolTimeoutSeconds: narrowedTimeout,
+      };
+    }
 
     const mappedAgentSteps: TaskpackStepDeclaration[] = teamPatch.steps.map(ps => ({
       id: ps.id,
       kind: 'agent',
       role: ps.roleId,
       dependsOn: [...ps.dependsOn],
+      ...(ps.onRework !== undefined
+        ? { onRework: { rejectTo: ps.onRework.rejectTo, maxReworks: ps.onRework.maxReworks } }
+        : {}),
       ...(ps.handoffs !== undefined
         ? {
           handoffs: ps.handoffs.map(h => ({
@@ -737,6 +1156,7 @@ function buildStageScopedTaskpack(
     ...baseTaskpack,
     spec: {
       ...baseTaskpack.spec,
+      ...(limits !== undefined ? { limits } : {}),
       ...(roles !== undefined ? { roles } : {}),
       ...(steps !== undefined ? { steps } : {}),
       verification: {
@@ -747,30 +1167,274 @@ function buildStageScopedTaskpack(
   };
 }
 
-function collectReferencedEnvNames(credentialEnvMap: HostCredentialEnvMap | undefined): readonly string[] {
-  if (credentialEnvMap === undefined) return [];
-  const names = new Set<string>();
-  for (const raw of [
-    credentialEnvMap.provider,
-    credentialEnvMap.gate,
-    credentialEnvMap.gateAuth,
-    credentialEnvMap.localCommandGate,
-    credentialEnvMap.publication,
-    credentialEnvMap.publicationAuth,
-  ]) {
-    if (typeof raw === 'string' && raw.length > 0) names.add(raw);
+async function readBoundedRegularBytesNoFollow(
+  filePath: string,
+  maxBytes: number,
+  pointer: string,
+): Promise<Buffer> {
+  const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
+  const preStat = await lstat(filePath).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ELOOP') {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink loop forbidden at "${filePath}"`, pointer);
+    }
+    throw err;
+  });
+  if (preStat.isSymbolicLink()) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink artifact forbidden at "${filePath}"`, pointer);
   }
-  if (credentialEnvMap.byCredentialRef !== undefined) {
-    for (const val of Object.values(credentialEnvMap.byCredentialRef)) {
-      if (typeof val === 'string' && val.length > 0) names.add(val);
+  if (!preStat.isFile()) {
+    throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `expected regular file at "${filePath}"`, pointer);
+  }
+  if (preStat.nlink > 1) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `hardlinked artifact (nlink=${preStat.nlink}) forbidden at "${filePath}"`, pointer);
+  }
+  if (preStat.size > maxBytes) {
+    throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `artifact at "${filePath}" exceeds ${maxBytes} bytes`, pointer);
+  }
+
+  const fh = await open(filePath, constants.O_RDONLY | noFollow).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ELOOP' || err.code === 'EFTYPE') {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink artifact forbidden at "${filePath}"`, pointer);
+    }
+    throw err;
+  });
+  try {
+    const fdStat = await fh.stat();
+    if (!fdStat.isFile()) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `expected regular file at "${filePath}"`, pointer);
+    }
+    if (fdStat.nlink > 1) {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `hardlinked artifact (nlink=${fdStat.nlink}) forbidden at "${filePath}"`, pointer);
+    }
+    if (fdStat.size > maxBytes) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `artifact at "${filePath}" exceeds ${maxBytes} bytes`, pointer);
+    }
+    const bytes = await fh.readFile();
+    if (bytes.byteLength > maxBytes) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `artifact at "${filePath}" exceeds ${maxBytes} bytes`, pointer);
+    }
+    return bytes;
+  } finally {
+    await fh.close();
+  }
+}
+
+async function readBoundedNullProtoJsonNoFollow(
+  filePath: string,
+  maxBytes: number,
+  pointer: string,
+): Promise<Readonly<Record<string, NullProtoJson>>> {
+  const bytes = await readBoundedRegularBytesNoFollow(filePath, maxBytes, pointer);
+  const parsed = parseNullProtoJson(bytes.toString('utf8'), maxBytes, pointer);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `expected JSON object at ${pointer}`, pointer);
+  }
+  return parsed as Readonly<Record<string, NullProtoJson>>;
+}
+
+/**
+ * Safely collect and validate benchmark proof JSON, signed `responseBytes`, hardware telemetry,
+ * and Stage A CAS blobs from a child controller run's `artifacts/` directory (`O_NOFOLLOW`, `nlink === 1`,
+ * `MAX_RECEIPT_FILE_BYTES`, null-prototype JSON parsing).
+ */
+export async function collectChildBenchmarkArtifacts(
+  artifactsDir: string,
+  runSucceeded: boolean,
+  scrubber: SecretScrubber = DEFAULT_CAMPAIGN_SCRUBBER,
+): Promise<CollectedChildBenchmarkArtifacts> {
+  const dirStat = await lstat(artifactsDir).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return null;
+    if (err.code === 'ELOOP') {
+      throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink artifacts directory forbidden: "${artifactsDir}"`, '/artifacts');
+    }
+    throw err;
+  });
+  if (dirStat === null) {
+    return Object.freeze({
+      hasBenchmarkProof: false,
+      metrics: Object.freeze({}),
+      outputArtifacts: Object.freeze([]),
+      stageABlobs: Object.freeze([]),
+      dispositionReason: null,
+      retryablePreemption: false,
+    });
+  }
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `artifacts path must be a non-symlink directory: "${artifactsDir}"`, '/artifacts');
+  }
+
+  const artifactNames = await readdir(artifactsDir);
+  const benchProofFiles = artifactNames
+    .filter(n => n.startsWith('benchmark-producer-') && n.endsWith('.proof.json'))
+    .sort();
+
+  if (benchProofFiles.length === 0) {
+    return Object.freeze({
+      hasBenchmarkProof: false,
+      metrics: Object.freeze({}),
+      outputArtifacts: Object.freeze([]),
+      stageABlobs: Object.freeze([]),
+      dispositionReason: null,
+      retryablePreemption: false,
+    });
+  }
+
+  const latestProofFile = join(artifactsDir, benchProofFiles[benchProofFiles.length - 1]!);
+  const proofJson = await readBoundedNullProtoJsonNoFollow(latestProofFile, MAX_RECEIPT_FILE_BYTES, '/proof');
+  const outputRaw = proofJson['output'];
+  let benchJson: Readonly<Record<string, NullProtoJson>> = Object.freeze(Object.create(null) as Record<string, NullProtoJson>);
+
+  if (outputRaw !== undefined && outputRaw !== null) {
+    if (typeof outputRaw !== 'object' || Array.isArray(outputRaw)) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'proof.output must be an object', '/proof/output');
+    }
+    const outputName = (outputRaw as Readonly<Record<string, NullProtoJson>>)['name'];
+    if (
+      typeof outputName !== 'string'
+      || outputName.length === 0
+      || outputName.includes('/')
+      || outputName.includes('\\')
+      || outputName === '.'
+      || outputName === '..'
+      || outputName.includes('..')
+      || outputName.includes('\0')
+    ) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'proof.output.name must be a safe single-segment filename', '/proof/output/name');
+    }
+    benchJson = await readBoundedNullProtoJsonNoFollow(
+      join(artifactsDir, outputName),
+      MAX_RECEIPT_FILE_BYTES,
+      '/benchmarkOutput',
+    );
+  }
+
+  let rawVerdictReceiptBytes: Uint8Array | undefined;
+  let metrics: Readonly<Record<string, number>> = Object.freeze({});
+  let bucketMetrics: readonly BucketMetricEntry[] | undefined;
+  let hardwareDiagnostics: HardwareDiagnostics | undefined;
+  let hardwareProvenance: HardwareProvenance | undefined;
+  let findings: readonly StructuredFinding[] | undefined;
+  let outputArtifacts: readonly ArtifactRef[] = Object.freeze([]);
+  const stageABlobs: StageABlobPayload[] = [];
+  let dispositionReason: string | null = null;
+  let retryablePreemption = false;
+
+  const responseB64 = benchJson['responseBytes'];
+  const responseSigRaw = benchJson['responseSignature'];
+  if (responseB64 !== undefined && responseB64 !== null) {
+    if (typeof responseB64 !== 'string' || Buffer.byteLength(responseB64, 'utf8') > MAX_RECEIPT_FILE_BYTES * 2) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'responseBytes must be a bounded base64 string', '/benchmarkOutput/responseBytes');
+    }
+    if (responseB64.length > 0) {
+      const decodedBytes = Buffer.from(responseB64, 'base64');
+      if (decodedBytes.byteLength > MAX_RECEIPT_FILE_BYTES) {
+        throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `decoded responseBytes exceeds ${MAX_RECEIPT_FILE_BYTES} bytes`, '/benchmarkOutput/responseBytes');
+      }
+      if (typeof responseSigRaw === 'string' && responseSigRaw.length > 0) {
+        const sigHex = responseSigRaw.startsWith('sha256=') ? responseSigRaw.slice(7) : responseSigRaw;
+        const parsedResp = parseNullProtoJson(decodedBytes.toString('utf8'), MAX_RECEIPT_FILE_BYTES, '/benchmarkOutput/responseBytes');
+        if (typeof parsedResp !== 'object' || parsedResp === null || Array.isArray(parsedResp)) {
+          throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'decoded responseBytes must be a JSON object', '/benchmarkOutput/responseBytes');
+        }
+        const signedObj = Object.assign(
+          Object.create(null) as Record<string, unknown>,
+          parsedResp as Record<string, unknown>,
+          { signature: sigHex },
+        );
+        rawVerdictReceiptBytes = Buffer.from(`${canonicalizeJson(signedObj)}\n`, 'utf8');
+      } else {
+        rawVerdictReceiptBytes = decodedBytes;
+      }
     }
   }
-  if (credentialEnvMap.byProvider !== undefined) {
-    for (const val of Object.values(credentialEnvMap.byProvider)) {
-      if (typeof val === 'string' && val.length > 0) names.add(val);
+
+  const dispRaw = benchJson['disposition'];
+  if (dispRaw !== undefined && dispRaw !== null) {
+    if (typeof dispRaw !== 'object' || Array.isArray(dispRaw)) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'disposition must be an object', '/benchmarkOutput/disposition');
+    }
+    const dispObj = dispRaw as Readonly<Record<string, NullProtoJson>>;
+    if (typeof dispObj['reason'] === 'string') {
+      dispositionReason = dispObj['reason'];
+    }
+    if (dispObj['retryablePreemption'] === true || dispositionReason === 'BENCHMARK_PREEMPTED') {
+      retryablePreemption = true;
     }
   }
-  return [...names];
+
+  const verdictRaw = benchJson['verdict'];
+  if (verdictRaw !== undefined && verdictRaw !== null) {
+    if (typeof verdictRaw !== 'object' || Array.isArray(verdictRaw)) {
+      throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'verdict must be an object or null', '/benchmarkOutput/verdict');
+    }
+    const verdictObj = verdictRaw as Readonly<Record<string, NullProtoJson>>;
+    if (verdictObj['metrics'] !== undefined && verdictObj['metrics'] !== null) {
+      metrics = parseMetricsRecordJson(verdictObj['metrics'] as unknown as Readonly<Record<string, number>>);
+    }
+    if (verdictObj['bucketMetrics'] !== undefined && verdictObj['bucketMetrics'] !== null) {
+      bucketMetrics = parseBucketMetricsJson(verdictObj['bucketMetrics'] as unknown as readonly BucketMetricEntry[], scrubber);
+    }
+    if (verdictObj['hardwareDiagnostics'] !== undefined && verdictObj['hardwareDiagnostics'] !== null) {
+      hardwareDiagnostics = parseHardwareDiagnosticsJson(verdictObj['hardwareDiagnostics'] as unknown as HardwareDiagnostics, scrubber);
+    }
+    if (verdictObj['hardwareProvenance'] !== undefined && verdictObj['hardwareProvenance'] !== null) {
+      hardwareProvenance = parseHardwareProvenanceJson(verdictObj['hardwareProvenance'] as unknown as HardwareProvenance);
+    }
+    if (verdictObj['findings'] !== undefined && verdictObj['findings'] !== null) {
+      findings = parseStructuredFindingsJson(verdictObj['findings'] as unknown as readonly StructuredFinding[], '/verdict/findings');
+    }
+    if (dispositionReason === null && typeof verdictObj['reason'] === 'string') {
+      dispositionReason = verdictObj['reason'];
+    }
+    if (verdictObj['outputArtifacts'] !== undefined && verdictObj['outputArtifacts'] !== null && runSucceeded) {
+      const validatedRefs = parseArtifactRefsJson(verdictObj['outputArtifacts'] as unknown as readonly ArtifactRef[], '/verdict/outputArtifacts');
+      for (const artRef of validatedRefs) {
+        const casPath = await resolveCanonicalCasBlobPath(artifactsDir, artRef.digest.hex);
+        const blobBytes = await readBoundedRegularBytesNoFollow(
+          casPath,
+          DEFAULT_MAX_CHILD_BLOB_BYTES,
+          `/verdict/outputArtifacts/${artRef.name}`,
+        );
+        if (blobBytes.byteLength !== artRef.byteLength) {
+          throw new EvolutionError(
+            'ARTIFACT_INVALID',
+            `Stage A CAS blob "${artRef.name}" byteLength mismatch (expected ${artRef.byteLength}, got ${blobBytes.byteLength})`,
+            `/verdict/outputArtifacts/${artRef.name}`,
+          );
+        }
+        const actualDigest = sha256Digest(blobBytes);
+        if (actualDigest.hex !== artRef.digest.hex) {
+          throw new EvolutionError(
+            'ARTIFACT_INVALID',
+            `Stage A CAS blob "${artRef.name}" SHA-256 mismatch`,
+            `/verdict/outputArtifacts/${artRef.name}`,
+          );
+        }
+        stageABlobs.push({
+          name: artRef.name,
+          bytes: blobBytes,
+          digest: artRef.digest,
+          byteLength: artRef.byteLength,
+          ...(artRef.mediaType !== undefined ? { mediaType: artRef.mediaType } : {}),
+        });
+      }
+      outputArtifacts = validatedRefs;
+    }
+  }
+
+  return Object.freeze({
+    hasBenchmarkProof: true,
+    ...(rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes } : {}),
+    metrics,
+    ...(bucketMetrics !== undefined ? { bucketMetrics } : {}),
+    ...(hardwareDiagnostics !== undefined ? { hardwareDiagnostics } : {}),
+    ...(hardwareProvenance !== undefined ? { hardwareProvenance } : {}),
+    ...(findings !== undefined ? { findings } : {}),
+    outputArtifacts,
+    stageABlobs: Object.freeze(stageABlobs),
+    dispositionReason,
+    retryablePreemption,
+  });
 }
 
 /**
@@ -796,28 +1460,19 @@ export function createControllerChildRunEvaluator(
 
     await mkdir(childConfigDir, { recursive: true, mode: 0o700 });
     await mkdir(childDiagRegistryDir, { recursive: true, mode: 0o700 });
-    await copyDirectoryNoFollow(realBaseRepo, childRepoDir);
+    await materializeGitCheckoutNoFollow(realBaseRepo, childRepoDir);
 
     const realTmpRoot = await realpath(tmpdir());
     const trustedTempDir = await mkdtemp(join(realTmpRoot, 'lw-evo-trusted-reg-'));
     await chmod(trustedTempDir, 0o700);
 
-    // Temporarily mirror any custom envLookup credential bindings onto process.env during loadTrustedConfiguration
-    const restoredEnvKeys: Array<{ readonly key: string; readonly previous: string | undefined }> = [];
-    for (const envName of collectReferencedEnvNames(options.credentialEnvMap)) {
-      const resolvedVal = envLookup(envName);
-      if (resolvedVal !== undefined && process.env[envName] !== resolvedVal) {
-        restoredEnvKeys.push({ key: envName, previous: process.env[envName] });
-        process.env[envName] = resolvedVal;
-      }
-    }
-
     try {
-      const scopedTaskpack = buildStageScopedTaskpack(
-        proposal.taskpack,
-        proposal.heldOutWorkloadId,
-        proposal.teamPatch,
-      );
+      const scopedTaskpack = buildStageScopedTaskpack({
+        taskpack: proposal.taskpack,
+        heldOutWorkloadId: proposal.heldOutWorkloadId,
+        targetCellId: proposal.manifest.spec.targetCellId,
+        ...(proposal.teamPatch !== undefined ? { teamPatch: proposal.teamPatch } : {}),
+      });
 
       const normalizedGateEndpoints = options.gateEndpoints?.map(ep => ({
         ...ep,
@@ -886,15 +1541,37 @@ export function createControllerChildRunEvaluator(
         });
       }
 
-      const finalRegistryObj = extraRegistryResources.length > 0
-        ? {
-          ...compiled.registry,
-          spec: {
-            ...compiled.registry.spec,
-            resources: [...compiled.registry.spec.resources, ...extraRegistryResources],
-          },
+      const patchRoleById = new Map(
+        (proposal.teamPatch?.roles ?? []).map(r => [r.id, r] as const),
+      );
+      const updatedRoleProfiles = compiled.registry.spec.roleProfiles.map(prof => {
+        for (const [rId, pr] of patchRoleById.entries()) {
+          if ((prof.id === rId || prof.id === `taskpack.profile.${rId}`) && pr.timeoutSeconds !== undefined) {
+            const requestedWallMs = pr.timeoutSeconds * 1000;
+            const currentWallMs = prof.limits?.toolWallMs;
+            const narrowedWallMs = currentWallMs !== undefined ? Math.min(currentWallMs, requestedWallMs) : requestedWallMs;
+            return {
+              ...prof,
+              limits: {
+                ...prof.limits,
+                toolWallMs: narrowedWallMs,
+              },
+            };
+          }
         }
-        : compiled.registry;
+        return prof;
+      });
+
+      const finalRegistryObj = {
+        ...compiled.registry,
+        spec: {
+          ...compiled.registry.spec,
+          resources: extraRegistryResources.length > 0
+            ? [...compiled.registry.spec.resources, ...extraRegistryResources]
+            : compiled.registry.spec.resources,
+          roleProfiles: updatedRoleProfiles,
+        },
+      };
 
       const registryBytes = Buffer.from(`${JSON.stringify(finalRegistryObj, null, 2)}\n`, 'utf8');
       const registrySha256 = createHash('sha256').update(registryBytes).digest('hex');
@@ -902,18 +1579,35 @@ export function createControllerChildRunEvaluator(
       await writeFile(registryPath, registryBytes, { mode: 0o600 });
       await chmod(registryPath, 0o600);
 
-      const finalTaskObj = extraRegistryResources.length > 0
-        ? {
-          ...compiled.config.spec.task,
-          spec: {
-            ...compiled.config.spec.task.spec,
-            trustedContext: {
+      const extraResourceIds = extraRegistryResources.map(r => r.id);
+      const updatedTaskRoles = compiled.config.spec.task.spec.roles.map(role => {
+        const pr = patchRoleById.get(role.id);
+        const baseResIds = pr?.resourceIds !== undefined ? [...pr.resourceIds] : role.resourceIds;
+        if (baseResIds === undefined) {
+          return role;
+        }
+        const mergedResIds = extraResourceIds.length > 0
+          ? Array.from(new Set([...baseResIds, ...extraResourceIds]))
+          : Array.from(new Set(baseResIds));
+        return {
+          ...role,
+          resourceIds: mergedResIds,
+        };
+      });
+
+      const finalTaskObj = {
+        ...compiled.config.spec.task,
+        spec: {
+          ...compiled.config.spec.task.spec,
+          roles: updatedTaskRoles,
+          trustedContext: extraRegistryResources.length > 0
+            ? {
               ...compiled.config.spec.task.spec.trustedContext,
               resources: [...compiled.config.spec.task.spec.trustedContext.resources, ...extraRegistryResources],
-            },
-          },
-        }
-        : compiled.config.spec.task;
+            }
+            : compiled.config.spec.task.spec.trustedContext,
+        },
+      };
 
       const finalConfigObj = {
         ...compiled.config,
@@ -940,6 +1634,7 @@ export function createControllerChildRunEvaluator(
         registryPath,
         registrySha256,
         untrustedRoots: [childRepoDir],
+        environment: envLookup,
       });
       if (!loadedRes.ok) {
         throw new EvolutionError(
@@ -947,6 +1642,43 @@ export function createControllerChildRunEvaluator(
           `child run loadTrustedConfiguration failed: ${loadedRes.error.code} (${loadedRes.error.path})`,
         );
       }
+
+      const evolveGuardDecl = scopedTaskpack.spec.verification.localChecks.find(
+        c => c.implementation === 'evolve-block-guard.v1',
+      );
+      const guardedFiles = Array.isArray(evolveGuardDecl?.parameters?.['files'])
+        ? (evolveGuardDecl.parameters['files'] as readonly string[])
+        : [];
+      const extractWorkspaceSlice = async (workspaceDir: string): Promise<string> => {
+        let slice = proposal.proposedCodeSlice ?? '';
+        if (guardedFiles.length > 0) {
+          const slices: string[] = [];
+          for (const rel of guardedFiles) {
+            const candidatePath = join(workspaceDir, rel);
+            const fallbackPath = join(childRepoDir, rel);
+            const content = await readFile(candidatePath, 'utf8').catch(() => readFile(fallbackPath, 'utf8').catch(() => ''));
+            if (content.length > 0) {
+              slices.push(extractEvolveBlocksFromSource(content));
+            }
+          }
+          if (slices.length > 0) {
+            slice = slices.join('\n');
+          }
+        }
+        if (slice.length === 0) {
+          slice = `// individual:${proposal.individualId}\n`;
+        }
+        return slice;
+      };
+
+      const allAgentStepIds = finalTaskObj.spec.steps
+        .filter(s => s.kind === 'agent')
+        .map(s => s.id);
+      const stepById = new Map(finalTaskObj.spec.steps.map(s => [s.id, s] as const));
+      const completedAgentStepIds = new Set<string>();
+      const childRunRelPath = `runs/${proposal.individualId}/controller/${runId}`;
+      let noveltyDecisionOut: DecisionMutationNoveltyResult | undefined;
+      let latestExtractedSlice: string | undefined;
 
       let latestWorkspacePath = childRepoDir;
       const tickRes = await stepNext({
@@ -987,13 +1719,87 @@ export function createControllerChildRunEvaluator(
           ...(proposal.signal !== undefined ? { signal: proposal.signal } : {}),
         });
 
+        const effectiveStepStatus = stepOut?.status ?? 'completed';
+        const stepDecl = stepById.get(tick.stepId);
+        if (stepOut?.verdict?.verdict === 'rework' && stepDecl?.onRework !== undefined) {
+          const resetQueue = [stepDecl.onRework.rejectTo];
+          const visited = new Set<string>();
+          while (resetQueue.length > 0) {
+            const cur = resetQueue.shift()!;
+            if (visited.has(cur)) continue;
+            visited.add(cur);
+            completedAgentStepIds.delete(cur);
+            for (const s of finalTaskObj.spec.steps) {
+              if (s.dependsOn.includes(cur)) {
+                resetQueue.push(s.id);
+              }
+            }
+          }
+        } else if (effectiveStepStatus === 'completed') {
+          completedAgentStepIds.add(tick.stepId);
+        }
+
+        const allAgentsFinished = allAgentStepIds.length > 0
+          && allAgentStepIds.every(id => completedAgentStepIds.has(id))
+          && effectiveStepStatus === 'completed'
+          && stepOut?.verdict?.verdict !== 'rework';
+
+        // Capture candidate EVOLVE-BLOCK slice BEFORE stepSubmit cleans up tick.candidateDir!
+        latestExtractedSlice = await extractWorkspaceSlice(tick.candidateDir);
+
+        if (
+          allAgentsFinished
+          && proposal.stagePhase !== 'portfolio'
+          && proposal.proposedCodeSlice === undefined
+          && (
+            proposal.noveltyGate !== undefined
+            || (proposal.islandHistorySlices !== undefined && proposal.islandHistorySlices.length > 0)
+            || options.decisionPolicy !== undefined
+            || options.decisionTransport !== undefined
+          )
+        ) {
+          const preGateSlice = latestExtractedSlice;
+          const noveltyOutcome = proposal.noveltyGate !== undefined
+            ? await proposal.noveltyGate(preGateSlice)
+            : await screenCandidateNoveltyBeforeDispatch({
+              candidateId: proposal.individualId,
+              candidateSlice: preGateSlice,
+              historySlices: proposal.islandHistorySlices ?? [],
+              ...(options.decisionPolicy !== undefined ? { policy: options.decisionPolicy } : {}),
+              ...(options.decisionBudget !== undefined ? { budget: options.decisionBudget } : {}),
+              ...(options.decisionTransport !== undefined
+                ? { transport: options.decisionTransport }
+                : (options.decisionPolicy?.enabled === true ? { transport: new HttpDecisionTransport() } : {})),
+              ...(options.decisionApiKey !== undefined ? { apiKey: options.decisionApiKey } : {}),
+              scrubber,
+            });
+          noveltyDecisionOut = noveltyOutcome.decision;
+          if (noveltyOutcome.rejected) {
+            await stepCancel({ runRoot: controllerRunRoot, runId, environment: envLookup }).catch(() => undefined);
+            const rejectedResult: CandidateEvaluationResult = Object.freeze({
+              status: 'failed',
+              failureReason: 'NOVELTY_CLONE_REJECTED',
+              codeSlice: preGateSlice,
+              metrics: Object.freeze({}),
+              outputArtifacts: Object.freeze([]),
+              evidenceDigest: null,
+              childRunRelPath,
+              noveltyDecision: noveltyOutcome.decision,
+            });
+            if (options.onAfterChildEvaluation !== undefined) {
+              await options.onAfterChildEvaluation(proposal, rejectedResult);
+            }
+            return rejectedResult;
+          }
+        }
+
         const submitRes = await stepSubmit({
           runRoot: controllerRunRoot,
           runId,
           leaseToken: tick.leaseToken,
           ...(stepOut?.submissionFile !== undefined ? { submissionFile: stepOut.submissionFile } : {}),
           ...(stepOut?.verdict !== undefined ? { verdict: stepOut.verdict } : {}),
-          status: stepOut?.status ?? 'completed',
+          status: effectiveStepStatus,
           ...(stepOut?.reason !== undefined ? { reason: stepOut.reason } : {}),
           environment: envLookup,
           ...(proposal.signal !== undefined ? { signal: proposal.signal } : {}),
@@ -1005,30 +1811,7 @@ export function createControllerChildRunEvaluator(
         tick = submitRes.value;
       }
 
-      const evolveGuardDecl = scopedTaskpack.spec.verification.localChecks.find(
-        c => c.implementation === 'evolve-block-guard.v1',
-      );
-      const guardedFiles = Array.isArray(evolveGuardDecl?.parameters?.['files'])
-        ? (evolveGuardDecl.parameters['files'] as readonly string[])
-        : [];
-      let extractedCodeSlice = proposal.proposedCodeSlice ?? '';
-      if (guardedFiles.length > 0) {
-        const slices: string[] = [];
-        for (const rel of guardedFiles) {
-          const candidatePath = join(latestWorkspacePath, rel);
-          const fallbackPath = join(childRepoDir, rel);
-          const content = await readFile(candidatePath, 'utf8').catch(() => readFile(fallbackPath, 'utf8').catch(() => ''));
-          if (content.length > 0) {
-            slices.push(extractEvolveBlocksFromSource(content));
-          }
-        }
-        if (slices.length > 0) {
-          extractedCodeSlice = slices.join('\n');
-        }
-      }
-      if (extractedCodeSlice.length === 0) {
-        extractedCodeSlice = `// individual:${proposal.individualId}\n`;
-      }
+      const extractedCodeSlice = latestExtractedSlice ?? await extractWorkspaceSlice(latestWorkspacePath);
 
       let runEvalReport: RunEvalReport | undefined;
       const inspectedRes = await inspectRun({
@@ -1043,104 +1826,12 @@ export function createControllerChildRunEvaluator(
       const terminalStatusLabel = tick.kind === 'result' ? tick.result.spec.status : 'incident';
 
       const artifactsDir = join(controllerRunRoot, runId, 'artifacts');
-      const artifactNames = await readdir(artifactsDir).catch(() => [] as string[]);
-      const benchProofFiles = artifactNames
-        .filter(n => n.startsWith('benchmark-producer-') && n.endsWith('.proof.json'))
-        .sort();
+      const collected = await collectChildBenchmarkArtifacts(artifactsDir, runSucceeded, scrubber);
 
-      let rawVerdictReceiptBytes: Uint8Array | undefined;
-      let metrics: Readonly<Record<string, number>> = Object.freeze({});
-      let bucketMetrics: readonly BucketMetricEntry[] | undefined;
-      let hardwareDiagnostics: HardwareDiagnostics | undefined;
-      let hardwareProvenance: HardwareProvenance | undefined;
-      let findings: readonly StructuredFinding[] | undefined;
-      let outputArtifacts: readonly ArtifactRef[] = Object.freeze([]);
-      const stageABlobs: StageABlobPayload[] = [];
-      let dispReason: string | null = null;
-      let retryablePreemption = false;
-
-      if (benchProofFiles.length > 0) {
-        const latestProofFile = join(artifactsDir, benchProofFiles[benchProofFiles.length - 1]!);
-        const proofJson = JSON.parse(await readFile(latestProofFile, 'utf8')) as Record<string, unknown>;
-        const outputRef = proofJson['output'] as { readonly name?: string } | undefined;
-        const outputName = outputRef?.name;
-        const benchJson: Record<string, unknown> = typeof outputName === 'string' && !outputName.includes('/') && !outputName.includes('..')
-          ? (JSON.parse(await readFile(join(artifactsDir, outputName), 'utf8')) as Record<string, unknown>)
-          : {};
-        const verdictObj = benchJson['verdict'] as Record<string, unknown> | null | undefined;
-        const dispObj = benchJson['disposition'] as Record<string, unknown> | undefined;
-        const responseB64 = benchJson['responseBytes'];
-        const responseSigRaw = benchJson['responseSignature'];
-
-        if (typeof responseB64 === 'string' && responseB64.length > 0) {
-          const decodedBytes = Buffer.from(responseB64, 'base64');
-          if (typeof responseSigRaw === 'string' && responseSigRaw.length > 0) {
-            const sigHex = responseSigRaw.startsWith('sha256=') ? responseSigRaw.slice(7) : responseSigRaw;
-            const parsedResp = JSON.parse(decodedBytes.toString('utf8')) as Record<string, unknown>;
-            rawVerdictReceiptBytes = Buffer.from(`${canonicalizeJson({ ...parsedResp, signature: sigHex })}\n`, 'utf8');
-          } else {
-            rawVerdictReceiptBytes = decodedBytes;
-          }
-        }
-        if (dispObj !== undefined && typeof dispObj['reason'] === 'string') {
-          dispReason = dispObj['reason'];
-        }
-        if (dispObj?.['retryablePreemption'] === true || dispReason === 'BENCHMARK_PREEMPTED') {
-          retryablePreemption = true;
-        }
-
-        if (verdictObj !== null && verdictObj !== undefined) {
-          if (verdictObj['metrics'] !== undefined) {
-            metrics = parseMetricsRecordJson(verdictObj['metrics'] as Readonly<Record<string, number>>);
-          }
-          if (verdictObj['bucketMetrics'] !== undefined) {
-            bucketMetrics = parseBucketMetricsJson(verdictObj['bucketMetrics'] as readonly BucketMetricEntry[], scrubber);
-          }
-          if (verdictObj['hardwareDiagnostics'] !== undefined) {
-            hardwareDiagnostics = parseHardwareDiagnosticsJson(verdictObj['hardwareDiagnostics'] as HardwareDiagnostics, scrubber);
-          }
-          if (verdictObj['hardwareProvenance'] !== undefined) {
-            hardwareProvenance = parseHardwareProvenanceJson(verdictObj['hardwareProvenance'] as HardwareProvenance);
-          }
-          if (verdictObj['findings'] !== undefined) {
-            findings = parseStructuredFindingsJson(verdictObj['findings'] as readonly StructuredFinding[], '/findings');
-          }
-          if (dispReason === null && typeof verdictObj['reason'] === 'string') {
-            dispReason = verdictObj['reason'];
-          }
-          if (Array.isArray(verdictObj['outputArtifacts']) && runSucceeded) {
-            const parsedArts: ArtifactRef[] = [];
-            for (const rawArt of verdictObj['outputArtifacts'] as Array<Record<string, unknown>>) {
-              const name = String(rawArt['name']);
-              const digObj = rawArt['digest'] as { readonly algorithm: 'sha256'; readonly hex: string };
-              const byteLength = Number(rawArt['byteLength']);
-              const mediaType = typeof rawArt['mediaType'] === 'string' ? rawArt['mediaType'] : undefined;
-              const casPath = await resolveCanonicalCasBlobPath(artifactsDir, digObj.hex);
-              const blobBytes = await readFile(casPath);
-              parsedArts.push({
-                name,
-                digest: { algorithm: 'sha256', hex: digObj.hex },
-                byteLength,
-                ...(mediaType !== undefined ? { mediaType } : {}),
-              });
-              stageABlobs.push({
-                name,
-                bytes: blobBytes,
-                digest: { algorithm: 'sha256', hex: digObj.hex },
-                byteLength,
-                ...(mediaType !== undefined ? { mediaType } : {}),
-              });
-            }
-            outputArtifacts = Object.freeze(parsedArts);
-          }
-        }
-      }
-
-      const childRunRelPath = `runs/${proposal.individualId}/controller/${runId}`;
       let finalStatus: IndividualStatus;
       let failureReason: string | null = null;
 
-      if (retryablePreemption) {
+      if (collected.retryablePreemption) {
         finalStatus = 'preempted';
         failureReason = 'BENCHMARK_PREEMPTED';
       } else if (runSucceeded) {
@@ -1148,24 +1839,26 @@ export function createControllerChildRunEvaluator(
         failureReason = null;
       } else {
         finalStatus = 'failed';
-        failureReason = dispReason ?? (benchProofFiles.length === 0 ? 'LOCAL_VERIFICATION_FAILED' : `RUN_${terminalStatusLabel.toUpperCase()}`);
+        failureReason = collected.dispositionReason
+          ?? (!collected.hasBenchmarkProof ? 'LOCAL_VERIFICATION_FAILED' : `RUN_${terminalStatusLabel.toUpperCase()}`);
       }
 
       const evalResult: CandidateEvaluationResult = Object.freeze({
         status: finalStatus,
         failureReason,
         codeSlice: extractedCodeSlice,
-        metrics,
-        ...(bucketMetrics !== undefined ? { bucketMetrics } : {}),
-        ...(hardwareDiagnostics !== undefined ? { hardwareDiagnostics } : {}),
-        ...(hardwareProvenance !== undefined ? { hardwareProvenance } : {}),
-        ...(findings !== undefined ? { findings } : {}),
-        outputArtifacts,
-        ...(stageABlobs.length > 0 ? { stageABlobs: Object.freeze(stageABlobs) } : {}),
-        ...(rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes } : {}),
+        metrics: collected.metrics,
+        ...(collected.bucketMetrics !== undefined ? { bucketMetrics: collected.bucketMetrics } : {}),
+        ...(collected.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: collected.hardwareDiagnostics } : {}),
+        ...(collected.hardwareProvenance !== undefined ? { hardwareProvenance: collected.hardwareProvenance } : {}),
+        ...(collected.findings !== undefined ? { findings: collected.findings } : {}),
+        outputArtifacts: collected.outputArtifacts,
+        ...(collected.stageABlobs.length > 0 ? { stageABlobs: collected.stageABlobs } : {}),
+        ...(collected.rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes: collected.rawVerdictReceiptBytes } : {}),
         evidenceDigest: runSucceeded ? sha256Digest(`${proposal.individualId}:${runId}:passed`) : null,
         childRunRelPath,
         ...(runEvalReport !== undefined ? { runEvalReport } : {}),
+        ...(noveltyDecisionOut !== undefined ? { noveltyDecision: noveltyDecisionOut } : {}),
       });
 
       if (options.onAfterChildEvaluation !== undefined) {
@@ -1174,13 +1867,6 @@ export function createControllerChildRunEvaluator(
 
       return evalResult;
     } finally {
-      for (const item of restoredEnvKeys) {
-        if (item.previous === undefined) {
-          delete process.env[item.key];
-        } else {
-          process.env[item.key] = item.previous;
-        }
-      }
       await rm(trustedTempDir, { recursive: true, force: true }).catch(() => undefined);
     }
   };
@@ -1292,6 +1978,66 @@ async function runWithConcurrencyLimit<T>(
   return results;
 }
 
+function resolveEffectiveDecisionPolicy(
+  explicitPolicy: DecisionPolicyConfig | undefined,
+  taskpack: TaskpackManifest,
+): DecisionPolicyConfig {
+  if (explicitPolicy !== undefined) {
+    return explicitPolicy;
+  }
+  const tpDec = taskpack.spec.decisions;
+  if (tpDec === undefined) {
+    return DEFAULT_DECISION_POLICY;
+  }
+  const provider = tpDec.provider ?? DEFAULT_DECISION_POLICY.provider;
+  const provDefaults = DECISION_PROVIDER_DEFAULTS[provider];
+  return Object.freeze({
+    enabled: tpDec.enabled,
+    disclosurePolicy: tpDec.disclosurePolicy ?? (tpDec.enabled ? 'repo-approved-redacted-evidence' : 'disabled'),
+    minConfidence: tpDec.minConfidence ?? DEFAULT_DECISION_POLICY.minConfidence,
+    confirmThreshold: tpDec.confirmThreshold ?? DEFAULT_DECISION_POLICY.confirmThreshold,
+    hardDeadlineMs: tpDec.hardDeadlineMs ?? DEFAULT_DECISION_POLICY.hardDeadlineMs,
+    maxAttempts: tpDec.maxAttempts ?? DEFAULT_DECISION_POLICY.maxAttempts,
+    fallbackRole: 'deterministic',
+    onFallbackUnavailable: 'deterministic_default',
+    provider,
+    endpoint: provDefaults.endpoint,
+    model: provDefaults.model,
+    startluxOptions: null,
+    allowImages: tpDec.allowImages ?? false,
+  });
+}
+
+function resolveDecisionApiKey(
+  explicitApiKey: string | undefined,
+  policy: DecisionPolicyConfig,
+  envLookup: ((name: string) => string | undefined) | undefined,
+  scrubber: SecretScrubber,
+): string | undefined {
+  let key = explicitApiKey;
+  if (key === undefined && envLookup !== undefined) {
+    for (const envName of DECISION_PROVIDER_API_KEY_ENV[policy.provider] ?? []) {
+      const val = envLookup(envName);
+      if (val !== undefined && val.length > 0) {
+        key = val;
+        break;
+      }
+    }
+  }
+  if (key !== undefined && key.length > 0) {
+    scrubber.register(key);
+  }
+  return key;
+}
+
+function resolveTargetDriverConstraint(
+  taskpack: TaskpackManifest,
+  targetCellId: string,
+): string | null {
+  const cell = taskpack.spec.target?.matrix?.find(item => item.id === targetCellId);
+  return cell?.hardware?.driverConstraint ?? null;
+}
+
 interface InternalDriverOptions {
   readonly store: EvolutionCampaignStore;
   readonly lease: CampaignLease;
@@ -1300,10 +2046,15 @@ interface InternalDriverOptions {
   readonly taskpack: TaskpackManifest;
   readonly baseTaskContract: TaskContract;
   readonly modelIds: readonly string[];
+  readonly driverConstraint: string | null;
   readonly repositoryRoot?: string | undefined;
   readonly evaluator: CandidateEvaluator;
   readonly proposeCandidateSlice?: ((context: CandidateProposalContext) => Promise<string>) | undefined;
   readonly supervisorRunner?: SupervisorRunnerPort | undefined;
+  readonly decisionPolicy?: DecisionPolicyConfig | undefined;
+  readonly decisionTransport?: DecisionTransport | undefined;
+  readonly decisionApiKey?: string | undefined;
+  readonly environment?: ((name: string) => string | undefined) | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly autoExport: boolean;
   readonly allowSyntheticProbe: boolean;
@@ -1320,25 +2071,50 @@ async function refreshStageParetoArchive(
   bucketId: string | null,
   objectives: readonly ObjectiveDirectionSpec[],
 ): Promise<readonly IndividualRecord[]> {
-  const allStagePassed = (await store.listIndividuals(campaignId, { status: ['passed'], bucketId })).filter(ind =>
+  const allStageEligible = (
+    await store.listIndividuals(campaignId, { status: ['passed', 'soft_passed'], bucketId })
+  ).filter(ind =>
     objectives.every(obj => typeof ind.metrics[obj.metric] === 'number' && Number.isFinite(ind.metrics[obj.metric])),
   );
-  if (allStagePassed.length === 0) return [];
+  if (allStageEligible.length === 0) return [];
 
   const stats = computeObjectiveReferenceStats(
-    allStagePassed.map(ind => ind.metrics),
+    allStageEligible.map(ind => ind.metrics),
     objectives,
   );
-  const ranked = computeNsga2Ranking(
-    allStagePassed.map(ind => ({ individualId: ind.individualId, metrics: ind.metrics })),
-    objectives,
-  );
-  const rankMap = new Map(ranked.map(r => [r.individualId, r] as const));
+  const passedInds = allStageEligible.filter(ind => ind.status === 'passed');
+  const softPassedInds = allStageEligible.filter(ind => ind.status === 'soft_passed');
+
+  const rankedPassed = passedInds.length > 0
+    ? computeNsga2Ranking(
+      passedInds.map(ind => ({ individualId: ind.individualId, metrics: ind.metrics })),
+      objectives,
+    )
+    : [];
+  const maxPassedRank = rankedPassed.reduce((acc, r) => Math.max(acc, r.paretoRank), 1);
+
+  const rankedSoft = softPassedInds.length > 0
+    ? computeNsga2Ranking(
+      softPassedInds.map(ind => ({ individualId: ind.individualId, metrics: ind.metrics })),
+      objectives,
+    )
+    : [];
+
+  const rankMap = new Map<string, { readonly paretoRank: number; readonly crowdingDistance: number }>();
+  for (const r of rankedPassed) {
+    rankMap.set(r.individualId, r);
+  }
+  for (const r of rankedSoft) {
+    rankMap.set(r.individualId, {
+      paretoRank: maxPassedRank + r.paretoRank,
+      crowdingDistance: r.crowdingDistance,
+    });
+  }
 
   await store.updateParetoRanks(
     lease,
     campaignId,
-    allStagePassed.map(ind => {
+    allStageEligible.map(ind => {
       const r = rankMap.get(ind.individualId)!;
       const sf = scalarizeFitness(ind.metrics, objectives, stats);
       return {
@@ -1350,7 +2126,7 @@ async function refreshStageParetoArchive(
     }),
   );
 
-  return store.listIndividuals(campaignId, { status: ['passed'], bucketId });
+  return store.listIndividuals(campaignId, { status: ['passed', 'soft_passed'], bucketId });
 }
 
 async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunEvolutionCampaignResult> {
@@ -1359,6 +2135,16 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
   const population = manifest.spec.population;
   const sampling = manifest.spec.sampling;
   const objectives = manifest.spec.objectives;
+  const declaredTracks = manifest.spec.tracks ?? AVAILABLE_EVOLUTION_TRACKS;
+  const effectiveDecisionPolicy = resolveEffectiveDecisionPolicy(opts.decisionPolicy, taskpack);
+  const effectiveDecisionTransport: DecisionTransport | undefined = opts.decisionTransport
+    ?? (effectiveDecisionPolicy.enabled ? new HttpDecisionTransport() : undefined);
+  const resolvedDecisionApiKey = resolveDecisionApiKey(
+    opts.decisionApiKey,
+    effectiveDecisionPolicy,
+    opts.environment ?? ((name: string) => process.env[name]),
+    scrubber,
+  );
 
   let noveltyRejectionsCount = 0;
   let cascadeSoftStopsCount = 0;
@@ -1374,6 +2160,29 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
     g => g.implementation === 'benchmark-gate.v1' && g.targetCellId === manifest.spec.targetCellId,
   )!;
   const defaultHeldOutWorkloadId = defaultBenchGate.heldOutWorkloadId!;
+
+  const loadValidatedActiveTeamPatch = async (teamConfigId: string): Promise<TeamPatchV1 | undefined> => {
+    const activeTeamRec = await store.getTeamConfig(teamConfigId);
+    if (activeTeamRec?.patchCasDigest === null || activeTeamRec?.patchCasDigest === undefined) {
+      return undefined;
+    }
+    if (manifest.spec.teamEvolution?.enabled !== true) {
+      throw new EvolutionError(
+        'TEAM_ENVELOPE_VIOLATION',
+        `team patch "${teamConfigId}" cannot execute when manifest.spec.teamEvolution.enabled is not true`,
+        '/spec/teamEvolution/enabled',
+      );
+    }
+    const rawPatchBytes = await store.readCasBlob(activeTeamRec.patchCasDigest.hex);
+    const compiledPatch = validateAndCompileTeamPatch({
+      rawPatch: rawPatchBytes,
+      teamEvolution: manifest.spec.teamEvolution,
+      baseTaskContract,
+      taskpack,
+      scrubber,
+    });
+    return compiledPatch.patch;
+  };
 
   const runStageGenerations = async (params: {
     readonly stagePhase: CampaignStagePhase;
@@ -1413,11 +2222,10 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
         status: 'active',
         stagePhase: params.stagePhase,
         activeBucketId: params.bucketId,
-        currentGeneration: gen,
       });
 
       const stagePassingBefore = await store.listIndividuals(campaignId, {
-        status: ['passed'],
+        status: ['passed', 'soft_passed'],
         bucketId: params.bucketId,
       });
 
@@ -1436,16 +2244,33 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
       }
 
       const allPriorStageInds = await store.listIndividuals(campaignId, { bucketId: params.bucketId });
-      const archiveHistorySlices: DecisionMutationNoveltyHistoryEntry[] = [];
-      for (const prior of allPriorStageInds) {
-        if ((prior.status !== 'passed' && prior.status !== 'soft_passed') || prior.codeSliceCasDigest === null) continue;
-        const rawSlice = await store.readCasBlob(prior.codeSliceCasDigest.hex).catch(() => null);
-        if (rawSlice !== null) {
-          archiveHistorySlices.push({
-            id: prior.individualId,
-            sourceSlice: rawSlice.toString('utf8'),
-          });
+      const completedIslandsInGen = new Set<number>(
+        allPriorStageInds
+          .filter(prior => prior.generation === gen && prior.status !== 'preempted')
+          .map(prior => prior.islandId),
+      );
+
+      const historySlicesByIsland = new Map<number, DecisionMutationNoveltyHistoryEntry[]>();
+      for (let isl = 0; isl < population.islands; isl += 1) {
+        const candidates = allPriorStageInds
+          .filter(
+            prior =>
+              prior.islandId === isl
+              && (prior.status === 'passed' || prior.status === 'soft_passed')
+              && prior.codeSliceCasDigest !== null,
+          )
+          .slice(-DECISION_NOVELTY_MAX_HISTORY_SLICES);
+        const slices: DecisionMutationNoveltyHistoryEntry[] = [];
+        for (const prior of candidates) {
+          const rawSlice = await store.readCasBlob(prior.codeSliceCasDigest!.hex).catch(() => null);
+          if (rawSlice !== null) {
+            slices.push({
+              id: prior.individualId.slice(0, 128),
+              sourceSlice: truncateUtf8ByBytes(rawSlice.toString('utf8'), DECISION_NOVELTY_MAX_SLICE_BYTES),
+            });
+          }
         }
+        historySlicesByIsland.set(isl, slices);
       }
 
       const latestScratchpadRec = await store.getLatestScratchpadSnapshot(campaignId);
@@ -1457,11 +2282,10 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
         budgets.maxEvaluations - currentCamp.evaluationsUsed,
         params.maxEvalsCeiling - currentCamp.evaluationsUsed,
       );
-      const activeIslandCount = Math.min(population.islands, remainingEvals);
       const islandsList = await store.listIslands(campaignId);
 
       const preGenNichesByIsland = new Map<number, ReadonlyMap<string, IndividualRecord>>();
-      for (let isl = 0; isl < activeIslandCount; isl += 1) {
+      for (let isl = 0; isl < population.islands; isl += 1) {
         preGenNichesByIsland.set(isl, await store.getIslandNicheElites(campaignId, isl, params.bucketId));
       }
 
@@ -1474,8 +2298,13 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
       }
 
       const slotTasks: Array<() => Promise<IslandSlotOutcome | null>> = [];
+      let scheduledSlotsInGen = 0;
 
-      for (let isl = 0; isl < activeIslandCount; isl += 1) {
+      for (let isl = 0; isl < population.islands; isl += 1) {
+        if (completedIslandsInGen.has(isl)) continue;
+        if (scheduledSlotsInGen >= remainingEvals) break;
+        scheduledSlotsInGen += 1;
+
         const islandRec = islandsList.find(item => item.islandId === isl)!;
         const seqIdx = sequenceCounter;
         sequenceCounter += 1;
@@ -1494,52 +2323,33 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           const localElites = [...localNicheMap.values()];
           const migratedInspirations = inspirationByIsland.get(isl) ?? [];
           const totalParentPool = localElites.length + migratedInspirations.length;
+          const crossoverFeasible = totalParentPool >= 2 && sampling.maxCrossoversPerPrompt > 0;
 
           const rng = createSeededPrng(`${campaignId}:gen-${gen}:isl-${isl}:seq-${seqIdx}`);
-          const mutationKind: IndividualMutationKind = localElites.length === 0
+          const sampledMutationKind: DecisionEvolutionMutationKind = localElites.length === 0
             ? 'full_rewrite'
-            : selectMutationKindDeterministically(rng, sampling.mutationWeights, totalParentPool);
+            : (selectMutationKindDeterministically(
+              rng,
+              crossoverFeasible
+                ? sampling.mutationWeights
+                : { ...sampling.mutationWeights, crossover: 0 },
+              totalParentPool,
+            ) as DecisionEvolutionMutationKind);
 
-          let sampledParents: readonly SampledParentEntry[] = [];
-          let primaryParent: IndividualRecord | null = null;
-          let stagedParentFiles: readonly StagedParentContextFile[] = [];
-
+          let preliminarySelection: ReturnType<typeof sampleParents> | null = null;
           if (localElites.length > 0) {
-            const selection = sampleParents({
+            preliminarySelection = sampleParents({
               islandId: isl,
               localCandidates: localElites,
               inspirationCandidates: migratedInspirations,
-              maxCrossoversPerPrompt: mutationKind === 'crossover' ? sampling.maxCrossoversPerPrompt : 0,
+              maxCrossoversPerPrompt: sampling.maxCrossoversPerPrompt,
               noveltyDecayLambda: sampling.noveltyDecayLambda,
               seed: `${campaignId}:parents:g${gen}:i${isl}`,
             });
-            primaryParent = selection.primary.individual;
-            sampledParents = [selection.primary, ...selection.secondary];
-
-            const parentInputs: ParentContextInput[] = [];
-            for (const sp of sampledParents) {
-              const codeBytes = sp.individual.codeSliceCasDigest !== null
-                ? await store.readCasBlob(sp.individual.codeSliceCasDigest.hex)
-                : Buffer.from('// baseline\n', 'utf8');
-              parentInputs.push({
-                individual: sp.individual,
-                role: sp.role,
-                codeSlice: codeBytes.toString('utf8'),
-              });
-              await store.incrementOffspringCount(lease, sp.individual.individualId, 1);
-            }
-
-            const staged = await stageMultiParentContextFiles({
-              stagingDir: join(childRunDir, 'parent-context'),
-              parents: parentInputs,
-              maxCrossoversPerPrompt: sampling.maxCrossoversPerPrompt,
-              scrubber,
-            });
-            stagedParentFiles = staged.files;
           }
 
-          // System-One advisory DSL track routing (verificationCertified: false)
-          const parentDiag = primaryParent?.hardwareDiagnostics;
+          const preliminaryPrimary = preliminarySelection?.primary.individual ?? null;
+          const parentDiag = preliminaryPrimary?.hardwareDiagnostics;
           const decisionDiag: DecisionHardwareDiagnostics | undefined = parentDiag?.boundPipeline !== undefined
             ? {
               boundPipeline: parentDiag.boundPipeline as DecisionHardwareDiagnostics['boundPipeline'],
@@ -1549,23 +2359,74 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
             }
             : undefined;
 
+          const configuredAllowedKinds: DecisionEvolutionMutationKind[] = [];
+          if (localElites.length === 0) {
+            configuredAllowedKinds.push('full_rewrite');
+          } else if (effectiveDecisionPolicy.enabled) {
+            if (sampling.mutationWeights.diff_tune > 0) configuredAllowedKinds.push('diff_tune');
+            if (sampling.mutationWeights.full_rewrite > 0) configuredAllowedKinds.push('full_rewrite');
+            if (sampling.mutationWeights.crossover > 0 && crossoverFeasible) configuredAllowedKinds.push('crossover');
+            if (configuredAllowedKinds.length === 0) configuredAllowedKinds.push(sampledMutationKind);
+          } else {
+            configuredAllowedKinds.push(sampledMutationKind);
+          }
+
           const strategyDecision = await routeEvolutionStrategy({
-            policy: DEFAULT_DECISION_POLICY,
+            policy: effectiveDecisionPolicy,
             state: {},
             budget: decisionBudget,
+            ...(effectiveDecisionTransport !== undefined ? { transport: effectiveDecisionTransport } : {}),
+            ...(resolvedDecisionApiKey !== undefined ? { apiKey: resolvedDecisionApiKey } : {}),
             scrubber,
             strategy: {
               operatorKind: taskpack.metadata.name,
               tensorRank: 4,
               dtype: 'fp16',
-              declaredTracks: AVAILABLE_EVOLUTION_TRACKS,
-              allowedMutationKinds: ['diff_tune', 'full_rewrite', 'crossover'],
+              declaredTracks,
+              allowedMutationKinds: configuredAllowedKinds,
               stalledGenerations: islandRec.consecutiveNoGainGenerations,
               ...(decisionDiag !== undefined ? { hardwareDiagnostics: decisionDiag } : {}),
             },
           });
           advisoryDecisions.push(strategyDecision);
           const trackId = strategyDecision.trackId;
+          const mutationKind: IndividualMutationKind = localElites.length === 0
+            ? 'full_rewrite'
+            : (strategyDecision.mutationKind === 'crossover' && !crossoverFeasible
+              ? (totalParentPool === 1 ? 'diff_tune' : 'full_rewrite')
+              : strategyDecision.mutationKind);
+
+          let sampledParents: readonly SampledParentEntry[] = [];
+          let primaryParent: IndividualRecord | null = null;
+          let stagedParentFiles: readonly StagedParentContextFile[] = [];
+
+          if (preliminarySelection !== null) {
+            primaryParent = preliminarySelection.primary.individual;
+            sampledParents = mutationKind === 'crossover'
+              ? [preliminarySelection.primary, ...preliminarySelection.secondary]
+              : [preliminarySelection.primary];
+
+            const parentInputs: ParentContextInput[] = [];
+            for (const sp of sampledParents) {
+              const codeBytes = sp.individual.codeSliceCasDigest !== null
+                ? await store.readCasBlob(sp.individual.codeSliceCasDigest.hex)
+                : Buffer.from('// baseline\n', 'utf8');
+              parentInputs.push({
+                individual: sp.individual,
+                role: sp.role as ParentContextInput['role'],
+                codeSlice: codeBytes.toString('utf8'),
+              });
+              await store.incrementOffspringCount(lease, sp.individual.individualId, 1);
+            }
+
+            const staged = await stageMultiParentContextFiles({
+              stagingDir: join(childRunDir, 'parent-context'),
+              parents: parentInputs,
+              maxCrossoversPerPrompt: mutationKind === 'crossover' ? sampling.maxCrossoversPerPrompt : 0,
+              scrubber,
+            });
+            stagedParentFiles = staged.files;
+          }
 
           const arms = await store.listModelBanditArms(campaignId);
           const modelPick = selectModelCandidate({
@@ -1586,12 +2447,8 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
             stagedScratchpadPath = stagedSc.filePath;
           }
 
-          const activeTeamRec = await store.getTeamConfig(islandRec.activeTeamConfigId);
-          let activeTeamPatch: TeamPatchV1 | undefined;
-          if (activeTeamRec?.patchCasDigest !== null && activeTeamRec?.patchCasDigest !== undefined) {
-            const rawPatchBytes = await store.readCasBlob(activeTeamRec.patchCasDigest.hex);
-            activeTeamPatch = parseTeamPatchV1(rawPatchBytes, { scrubber });
-          }
+          const activeTeamPatch = await loadValidatedActiveTeamPatch(islandRec.activeTeamConfigId);
+          const islandHistorySlices = historySlicesByIsland.get(isl) ?? [];
 
           const proposalCtx: CandidateProposalContext = {
             campaignId,
@@ -1613,20 +2470,19 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           let proposedCodeSlice: string | undefined;
           if (opts.proposeCandidateSlice !== undefined) {
             proposedCodeSlice = await opts.proposeCandidateSlice(proposalCtx);
-            const noveltyDecision = await evaluateMutationNovelty({
-              policy: DEFAULT_DECISION_POLICY,
-              state: {},
+            const noveltyOutcome = await screenCandidateNoveltyBeforeDispatch({
+              candidateId: individualId,
+              candidateSlice: proposedCodeSlice,
+              historySlices: islandHistorySlices,
+              policy: effectiveDecisionPolicy,
               budget: decisionBudget,
+              ...(effectiveDecisionTransport !== undefined ? { transport: effectiveDecisionTransport } : {}),
+              ...(resolvedDecisionApiKey !== undefined ? { apiKey: resolvedDecisionApiKey } : {}),
               scrubber,
-              novelty: {
-                candidateId: individualId,
-                candidateSlice: proposedCodeSlice,
-                historySlices: archiveHistorySlices,
-              },
             });
-            advisoryDecisions.push(noveltyDecision);
+            advisoryDecisions.push(noveltyOutcome.decision);
 
-            if (noveltyDecision.action === 'reject_resample') {
+            if (noveltyOutcome.rejected) {
               noveltyRejectionsCount += 1;
               const sliceCas = await store.writeCasBlob(Buffer.from(proposedCodeSlice, 'utf8'));
               const rejectedInd = await store.recordIndividual(lease, {
@@ -1671,11 +2527,35 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
             taskpack,
             ...(activeTeamPatch !== undefined ? { teamPatch: activeTeamPatch } : {}),
             ...(proposedCodeSlice !== undefined ? { proposedCodeSlice } : {}),
+            islandHistorySlices,
+            ...(opts.proposeCandidateSlice === undefined && params.stagePhase !== 'portfolio'
+              ? {
+                noveltyGate: async (candidateSlice: string) => screenCandidateNoveltyBeforeDispatch({
+                  candidateId: individualId,
+                  candidateSlice,
+                  historySlices: islandHistorySlices,
+                  policy: effectiveDecisionPolicy,
+                  budget: decisionBudget,
+                  ...(effectiveDecisionTransport !== undefined ? { transport: effectiveDecisionTransport } : {}),
+                  ...(resolvedDecisionApiKey !== undefined ? { apiKey: resolvedDecisionApiKey } : {}),
+                  scrubber,
+                }),
+              }
+              : {}),
             ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
           });
 
+          if (evalOutcome.noveltyDecision !== undefined) {
+            advisoryDecisions.push(evalOutcome.noveltyDecision);
+          }
+
           let finalStatus = evalOutcome.status;
           let finalFailureReason = evalOutcome.failureReason ?? null;
+          const isNoveltyRejected = finalFailureReason === 'NOVELTY_CLONE_REJECTED';
+          if (isNoveltyRejected) {
+            noveltyRejectionsCount += 1;
+          }
+
           if (finalStatus === 'passed' && evalOutcome.smokeMetrics !== undefined) {
             const primaryMetric = objectives[0]?.metric ?? 'latency_us_p50';
             if (Object.hasOwn(evalOutcome.smokeMetrics, primaryMetric)) {
@@ -1684,9 +2564,11 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
                 Math.min(1, (budgets.maxEvaluations - currentCampaignRow.evaluationsUsed) / budgets.maxEvaluations),
               );
               const cascadeDecision = await evaluateCascadeEscalation({
-                policy: DEFAULT_DECISION_POLICY,
+                policy: effectiveDecisionPolicy,
                 state: {},
                 budget: decisionBudget,
+                ...(effectiveDecisionTransport !== undefined ? { transport: effectiveDecisionTransport } : {}),
+                ...(resolvedDecisionApiKey !== undefined ? { apiKey: resolvedDecisionApiKey } : {}),
                 scrubber,
                 cascade: {
                   candidateId: individualId,
@@ -1732,7 +2614,8 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
             storedArtifacts.push(...evalOutcome.outputArtifacts);
           }
 
-          const nicheKey = finalStatus === 'passed'
+          const retainsInArchive = finalStatus === 'passed' || finalStatus === 'soft_passed';
+          const nicheKey = retainsInArchive
             ? computeNicheKey(population.nicheAxes, evalOutcome.metrics, evalOutcome.hardwareDiagnostics)
             : null;
 
@@ -1758,9 +2641,10 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
             status: finalStatus,
             failureReason: finalFailureReason,
             nicheKey,
-            paretoRank: finalStatus === 'passed' ? 1 : null,
-            crowdingDistance: finalStatus === 'passed' ? 0 : null,
-            scalarFitness: finalStatus === 'passed' ? 0.5 : null,
+            paretoRank: finalStatus === 'passed' ? 1 : (finalStatus === 'soft_passed' ? 2 : null),
+            crowdingDistance: retainsInArchive ? 0 : null,
+            scalarFitness: retainsInArchive ? 0.5 : null,
+            countEvaluation: !isNoveltyRejected,
             codeSliceCasDigest: codeCas.digest,
             evidenceDigest: evalOutcome.evidenceDigest ?? null,
             verdictReceiptCasDigest,
@@ -1903,7 +2787,7 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
 
           if (manifest.spec.teamEvolution?.enabled === true && opts.supervisorRunner !== undefined && !opts.signal?.aborted) {
             const freshCamp = (await store.getCampaign(campaignId))!;
-            const islandInds = await store.listIndividuals(campaignId, { islandId: isl });
+            const islandInds = await store.listIndividuals(campaignId, { islandId: isl, bucketId: params.bucketId });
             const evalsForIsl = islandRunEvals.get(isl);
             await runPlateauSupervisorTurn({
               store,
@@ -1928,6 +2812,22 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
         }
       }
 
+      if (opts.signal?.aborted) {
+        await store.updateCampaignProgress(lease, { campaignId, status: 'paused' });
+        return 'paused';
+      }
+
+      const anyPreemptedOnly = slotOutcomes.length > 0 && slotOutcomes.every(s => s.individual.status === 'preempted');
+      if (!anyPreemptedOnly) {
+        await store.updateCampaignProgress(lease, {
+          campaignId,
+          status: 'active',
+          stagePhase: params.stagePhase,
+          activeBucketId: params.bucketId,
+          currentGeneration: gen,
+        });
+      }
+
       // Periodic campaign scratchpad synthesis
       if (gen > 0 && gen % budgets.scratchpadIntervalGenerations === 0) {
         const allEvaluated = await store.listIndividuals(campaignId);
@@ -1941,11 +2841,6 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           });
         }
       }
-
-      if (opts.signal?.aborted) {
-        await store.updateCampaignProgress(lease, { campaignId, status: 'paused' });
-        return 'paused';
-      }
     }
 
     return 'completed_stage';
@@ -1953,12 +2848,12 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
 
   const currentCampaign = (await store.getCampaign(campaignId))!;
   if (manifest.spec.stages.mode === 'single-target') {
-    const startGen = Math.max(1, currentCampaign.currentGeneration + (currentCampaign.evaluationsUsed > 0 ? 1 : 0));
+    const startGen = Math.max(1, currentCampaign.currentGeneration + 1);
     const outcome = await runStageGenerations({
       stagePhase: 'single-target',
       bucketId: null,
       heldOutWorkloadId: defaultHeldOutWorkloadId,
-      startGen: Math.min(startGen, budgets.maxGenerations),
+      startGen,
       maxGenInclusive: budgets.maxGenerations,
       maxEvalsCeiling: budgets.maxEvaluations,
     });
@@ -1971,7 +2866,7 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
     const gensForSpecialists = Math.max(specBuckets.length, budgets.maxGenerations - 1);
     const gensPerBucket = Math.max(1, Math.floor(gensForSpecialists / specBuckets.length));
 
-    let globalGenCursor = Math.max(1, currentCampaign.currentGeneration);
+    let maxSpecialistGenUsed = currentCampaign.currentGeneration;
 
     if (currentCampaign.stagePhase !== 'portfolio') {
       const startBucketIdx = currentCampaign.activeBucketId !== null
@@ -1981,22 +2876,52 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
       for (let bIdx = startBucketIdx; bIdx < specBuckets.length; bIdx += 1) {
         const bucket = specBuckets[bIdx]!;
         const freshCamp = (await store.getCampaign(campaignId))!;
+
+        if (freshCamp.activeBucketId !== bucket.id) {
+          const allIslands = await store.listIslands(campaignId);
+          for (const islRec of allIslands) {
+            await store.updateIslandProgress(lease, {
+              campaignId,
+              islandId: islRec.islandId,
+              consecutiveNoGainGenerations: 0,
+              consecutivePathologyRuns: 0,
+              lastHypervolume: 0,
+              bestRooflineHeadroom: null,
+            });
+          }
+          islandRunEvals.clear();
+          islandTrajectories.clear();
+          await store.updateCampaignProgress(lease, {
+            campaignId,
+            status: 'active',
+            stagePhase: 'specialist',
+            activeBucketId: bucket.id,
+          });
+        }
+
+        const bucketWindowStart = bIdx * gensPerBucket + 1;
+        const bucketWindowEnd = bIdx === specBuckets.length - 1
+          ? Math.max(bucketWindowStart, budgets.maxGenerations - 1)
+          : bucketWindowStart + gensPerBucket - 1;
+        const startGenForBucket = freshCamp.activeBucketId === bucket.id
+          ? Math.max(bucketWindowStart, freshCamp.currentGeneration + 1)
+          : bucketWindowStart;
+
         const remainingBucketsAfter = specBuckets.length - 1 - bIdx;
         const maxEvalsForThisBucket = Math.max(
           freshCamp.evaluationsUsed + 1,
           budgets.maxEvaluations - remainingBucketsAfter - 1,
         );
-        const endGen = Math.min(budgets.maxGenerations - 1, globalGenCursor + gensPerBucket - 1);
 
         const stageRes = await runStageGenerations({
           stagePhase: 'specialist',
           bucketId: bucket.id,
           heldOutWorkloadId: bucket.heldOutWorkloadId,
-          startGen: globalGenCursor,
-          maxGenInclusive: Math.max(globalGenCursor, endGen),
+          startGen: startGenForBucket,
+          maxGenInclusive: bucketWindowEnd,
           maxEvalsCeiling: maxEvalsForThisBucket,
         });
-        globalGenCursor = Math.max(globalGenCursor + 1, endGen + 1);
+        maxSpecialistGenUsed = Math.max(maxSpecialistGenUsed, bucketWindowEnd);
         if (stageRes === 'paused') {
           break;
         }
@@ -2005,7 +2930,7 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
 
     const afterSpecCamp = (await store.getCampaign(campaignId))!;
     if (afterSpecCamp.status !== 'paused' && !opts.signal?.aborted) {
-      const winningSpecialists: IndividualRecord[] = [];
+      const winningSpecialists: Array<{ readonly bucketId: string; readonly individual: IndividualRecord }> = [];
       let missingBucketWinner = false;
       for (const bucket of specBuckets) {
         const passedInBucket = await store.listIndividuals(campaignId, {
@@ -2022,52 +2947,50 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           if (ra !== rb) return ra - rb;
           return (b.scalarFitness ?? 0) - (a.scalarFitness ?? 0);
         });
-        winningSpecialists.push(sorted[0]!);
+        winningSpecialists.push({ bucketId: bucket.id, individual: sorted[0]! });
       }
 
       if (missingBucketWinner || afterSpecCamp.evaluationsUsed >= budgets.maxEvaluations) {
         await store.updateCampaignProgress(lease, { campaignId, status: 'failed' });
       } else {
-        const portfolioGen = Math.min(budgets.maxGenerations, Math.max(globalGenCursor, afterSpecCamp.currentGeneration + 1));
+        const portfolioGen = Math.max(maxSpecialistGenUsed + 1, afterSpecCamp.currentGeneration + 1);
         await store.updateCampaignProgress(lease, {
           campaignId,
           status: 'active',
           stagePhase: 'portfolio',
           activeBucketId: portfolioWorkloadId,
-          currentGeneration: portfolioGen,
         });
 
         const islandsList = await store.listIslands(campaignId);
         const isl0 = islandsList[0]!;
+        const portfolioTeamPatch = await loadValidatedActiveTeamPatch(isl0.activeTeamConfigId);
         const portfolioId = sanitizeRunId(`ind-portfolio-g${portfolioGen}-${randomBytes(3).toString('hex')}`);
         const childRunDir = join(store.campaignRoot, 'runs', portfolioId);
         await mkdir(childRunDir, { recursive: true, mode: 0o700 });
 
-        const parentInputs: ParentContextInput[] = [];
+        const specialistInputs: PortfolioSpecialistContextInput[] = [];
         const sampledPortfolioMembers: SampledParentEntry[] = [];
-        for (let idx = 0; idx < winningSpecialists.length; idx += 1) {
-          const specWinner = winningSpecialists[idx]!;
+        for (const entry of winningSpecialists) {
+          const specWinner = entry.individual;
           const codeBytes = specWinner.codeSliceCasDigest !== null
             ? await store.readCasBlob(specWinner.codeSliceCasDigest.hex)
             : Buffer.from('// specialist\n', 'utf8');
-          const contextRole = idx === 0 ? ('primary' as const) : ('crossover_donor' as const);
-          parentInputs.push({
+          specialistInputs.push({
+            bucketId: entry.bucketId,
             individual: specWinner,
-            role: contextRole,
             codeSlice: codeBytes.toString('utf8'),
           });
           sampledPortfolioMembers.push({
             individual: specWinner,
-            role: contextRole,
+            role: 'portfolio_member',
             sourceIslandId: specWinner.islandId,
             weight: 1,
           });
         }
 
-        const stagedPortfolioCtx = await stageMultiParentContextFiles({
+        const stagedPortfolioCtx = await stagePortfolioSpecialistContextFiles({
           stagingDir: join(childRunDir, 'portfolio-specialists'),
-          parents: parentInputs,
-          maxCrossoversPerPrompt: Math.max(1, winningSpecialists.length),
+          specialists: specialistInputs,
           scrubber,
         });
 
@@ -2079,7 +3002,7 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           sequenceIndex: sequenceCounter,
         });
 
-        const portfolioTrackId = winningSpecialists[0]?.trackId ?? 'cuda_raw';
+        const portfolioTrackId = winningSpecialists[0]?.individual.trackId ?? declaredTracks[0] ?? 'cuda_raw';
         const portfolioOutcome = await evaluator({
           campaignId,
           individualId: portfolioId,
@@ -2094,12 +3017,13 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           teamConfigId: isl0.activeTeamConfigId,
           parents: sampledPortfolioMembers,
           stagedParentFiles: stagedPortfolioCtx.files,
-          portfolioSpecialists: winningSpecialists,
+          portfolioSpecialists: winningSpecialists.map(w => w.individual),
           campaignRoot: store.campaignRoot,
           childRunDir,
           baseRevision: afterSpecCamp.baseRevision,
           manifest,
           taskpack,
+          ...(portfolioTeamPatch !== undefined ? { teamPatch: portfolioTeamPatch } : {}),
           ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         });
 
@@ -2157,9 +3081,9 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
           lineageEdges: winningSpecialists.map(sw => ({
             campaignId,
             childIndividualId: portfolioId,
-            parentIndividualId: sw.individualId,
+            parentIndividualId: sw.individual.individualId,
             role: 'portfolio_member' as const,
-            sourceIslandId: sw.islandId,
+            sourceIslandId: sw.individual.islandId,
             createdGeneration: portfolioGen,
           })),
         });
@@ -2187,12 +3111,14 @@ async function driveCampaignExecution(opts: InternalDriverOptions): Promise<RunE
     const resolvedOutDir = isAbsolute(rawOutDir)
       ? rawOutDir
       : resolve(opts.repositoryRoot ?? store.campaignRoot, rawOutDir);
+    const effectiveDriverConstraint = opts.driverConstraint ?? finalCampaign.driverConstraint ?? undefined;
     exportedBundle = await exportEvolutionBundle({
       store,
       campaignId,
       outputDir: resolvedOutDir,
       format: manifest.spec.export.format,
       allowSyntheticProbe: opts.allowSyntheticProbe,
+      ...(effectiveDriverConstraint !== undefined ? { driverConstraint: effectiveDriverConstraint } : {}),
       ...(opts.receiptSigningSecret !== undefined ? { receiptSigningSecret: opts.receiptSigningSecret } : {}),
       ...(opts.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: opts.verifyReceiptSignature } : {}),
       ...(opts.dispatchManifest !== undefined ? { dispatchManifest: opts.dispatchManifest } : {}),
@@ -2234,24 +3160,32 @@ export async function runEvolutionCampaign(
   options: RunEvolutionCampaignOptions,
 ): Promise<RunEvolutionCampaignResult> {
   const scrubber = options.scrubber ?? DEFAULT_CAMPAIGN_SCRUBBER;
+  const effectiveRepoRoot = options.repositoryRoot ?? options.controllerEvaluatorOptions?.repositoryRoot;
+  await assertDisjointCampaignAndRepositoryRoots(options.campaignRoot, effectiveRepoRoot);
+
   const checked = await checkEvolutionCampaign({
     ...(options.manifestPath !== undefined ? { manifestPath: options.manifestPath } : {}),
     ...(options.manifest !== undefined ? { manifest: options.manifest } : {}),
     ...(options.format !== undefined ? { format: options.format } : {}),
-    ...(options.repositoryRoot !== undefined ? { repositoryRoot: options.repositoryRoot } : {}),
+    ...(effectiveRepoRoot !== undefined ? { repositoryRoot: effectiveRepoRoot } : {}),
     ...(options.taskpack !== undefined ? { taskpack: options.taskpack } : {}),
     scrubber,
   });
 
+  if (options.manifestPath !== undefined && effectiveRepoRoot === undefined) {
+    await assertDisjointCampaignAndRepositoryRoots(options.campaignRoot, dirname(resolve(options.manifestPath)));
+  }
+
   const evaluator = resolveCampaignEvaluator(options.evaluator, options.controllerEvaluatorOptions);
   const campaignId = options.campaignId ?? `camp-${checked.manifest.metadata.name}-${randomBytes(4).toString('hex')}`;
-  const baseRevision = options.baseRevision ?? resolveGitHeadRevision(options.repositoryRoot);
+  const baseRevision = options.baseRevision ?? resolveGitHeadRevision(effectiveRepoRoot);
   const { lockHash, baseTaskContract } = await computeBaselineCampaignLockHash(
     checked.taskpack,
     campaignId,
     baseRevision,
-    options.repositoryRoot,
+    effectiveRepoRoot,
   );
+  const driverConstraint = resolveTargetDriverConstraint(checked.taskpack, checked.targetCellId);
 
   const store = await EvolutionCampaignStore.open({
     campaignRoot: options.campaignRoot,
@@ -2259,47 +3193,74 @@ export async function runEvolutionCampaign(
     createIfMissing: true,
   });
 
-  const lease = await store.acquireLease(`coordinator-${randomBytes(6).toString('hex')}`);
-  const initialStagePhase: CampaignStagePhase = checked.manifest.spec.stages.mode === 'specialist-then-portfolio'
-    ? 'specialist'
-    : 'single-target';
-  const initialBucketId = checked.manifest.spec.stages.mode === 'specialist-then-portfolio'
-    ? checked.manifest.spec.stages.specialistBuckets[0]!.id
-    : null;
+  try {
+    const lease = await store.acquireLease(`coordinator-${randomBytes(6).toString('hex')}`);
+    const initialStagePhase: CampaignStagePhase = checked.manifest.spec.stages.mode === 'specialist-then-portfolio'
+      ? 'specialist'
+      : 'single-target';
+    const initialBucketId = checked.manifest.spec.stages.mode === 'specialist-then-portfolio'
+      ? checked.manifest.spec.stages.specialistBuckets[0]!.id
+      : null;
 
-  await store.createCampaign(lease, {
-    campaignId,
-    manifest: checked.manifest,
-    manifestDigest: checked.manifestDigest,
-    baseRevision,
-    lockHash,
-    stagePhase: initialStagePhase,
-    activeBucketId: initialBucketId,
-    modelIds: checked.modelIds,
-  });
+    await store.createCampaign(lease, {
+      campaignId,
+      manifest: checked.manifest,
+      manifestDigest: checked.manifestDigest,
+      baseRevision,
+      lockHash,
+      driverConstraint,
+      stagePhase: initialStagePhase,
+      activeBucketId: initialBucketId,
+      modelIds: checked.modelIds,
+    });
 
-  await store.ensureModelBanditArms(lease, campaignId, checked.modelIds);
+    await store.ensureModelBanditArms(lease, campaignId, checked.modelIds);
 
-  return driveCampaignExecution({
-    store,
-    lease,
-    campaignId,
-    manifest: checked.manifest,
-    taskpack: checked.taskpack,
-    baseTaskContract,
-    modelIds: checked.modelIds,
-    ...(options.repositoryRoot !== undefined ? { repositoryRoot: options.repositoryRoot } : {}),
-    evaluator,
-    ...(options.proposeCandidateSlice !== undefined ? { proposeCandidateSlice: options.proposeCandidateSlice } : {}),
-    ...(options.supervisorRunner !== undefined ? { supervisorRunner: options.supervisorRunner } : {}),
-    ...(options.signal !== undefined ? { signal: options.signal } : {}),
-    autoExport: options.autoExport ?? true,
-    allowSyntheticProbe: options.allowSyntheticProbe === true,
-    ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
-    ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
-    ...(options.dispatchManifest !== undefined ? { dispatchManifest: options.dispatchManifest } : {}),
-    scrubber,
-  });
+    return await driveCampaignExecution({
+      store,
+      lease,
+      campaignId,
+      manifest: checked.manifest,
+      taskpack: checked.taskpack,
+      baseTaskContract,
+      modelIds: checked.modelIds,
+      driverConstraint,
+      ...(effectiveRepoRoot !== undefined ? { repositoryRoot: effectiveRepoRoot } : {}),
+      evaluator,
+      ...(options.proposeCandidateSlice !== undefined ? { proposeCandidateSlice: options.proposeCandidateSlice } : {}),
+      ...(options.supervisorRunner !== undefined ? { supervisorRunner: options.supervisorRunner } : {}),
+      ...(options.decisionPolicy !== undefined
+        ? { decisionPolicy: options.decisionPolicy }
+        : (options.controllerEvaluatorOptions?.decisionPolicy !== undefined
+          ? { decisionPolicy: options.controllerEvaluatorOptions.decisionPolicy }
+          : {})),
+      ...(options.decisionTransport !== undefined
+        ? { decisionTransport: options.decisionTransport }
+        : (options.controllerEvaluatorOptions?.decisionTransport !== undefined
+          ? { decisionTransport: options.controllerEvaluatorOptions.decisionTransport }
+          : {})),
+      ...(options.decisionApiKey !== undefined
+        ? { decisionApiKey: options.decisionApiKey }
+        : (options.controllerEvaluatorOptions?.decisionApiKey !== undefined
+          ? { decisionApiKey: options.controllerEvaluatorOptions.decisionApiKey }
+          : {})),
+      ...(options.environment !== undefined
+        ? { environment: options.environment }
+        : (options.controllerEvaluatorOptions?.environment !== undefined
+          ? { environment: options.controllerEvaluatorOptions.environment }
+          : {})),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      autoExport: options.autoExport ?? true,
+      allowSyntheticProbe: options.allowSyntheticProbe === true,
+      ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
+      ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
+      ...(options.dispatchManifest !== undefined ? { dispatchManifest: options.dispatchManifest } : {}),
+      scrubber,
+    });
+  } catch (err: unknown) {
+    await store.close().catch(() => undefined);
+    throw err;
+  }
 }
 
 /**
@@ -2310,6 +3271,9 @@ export async function resumeEvolutionCampaign(
   options: ResumeEvolutionCampaignOptions,
 ): Promise<RunEvolutionCampaignResult> {
   const scrubber = options.scrubber ?? DEFAULT_CAMPAIGN_SCRUBBER;
+  const effectiveRepoRoot = options.repositoryRoot ?? options.controllerEvaluatorOptions?.repositoryRoot;
+  await assertDisjointCampaignAndRepositoryRoots(options.campaignRoot, effectiveRepoRoot);
+
   const evaluator = resolveCampaignEvaluator(options.evaluator, options.controllerEvaluatorOptions);
 
   const store = await EvolutionCampaignStore.open({
@@ -2318,75 +3282,103 @@ export async function resumeEvolutionCampaign(
     createIfMissing: false,
   });
 
-  const lease = await store.acquireLease(`resume-coordinator-${randomBytes(6).toString('hex')}`);
+  try {
+    const lease = await store.acquireLease(`resume-coordinator-${randomBytes(6).toString('hex')}`);
 
-  let existingCampaign: CampaignRecord | null;
-  if (options.campaignId !== undefined) {
-    existingCampaign = await store.getCampaign(options.campaignId);
-  } else {
-    const all = await store.listCampaigns();
-    existingCampaign = all[0] ?? null;
-  }
-  if (existingCampaign === null) {
-    await store.close();
-    throw new EvolutionError('EVOLUTION_NOT_FOUND', 'no campaign found to resume in campaign.sqlite');
-  }
+    let existingCampaign: CampaignRecord | null;
+    if (options.campaignId !== undefined) {
+      existingCampaign = await store.getCampaign(options.campaignId);
+    } else {
+      const all = await store.listCampaigns();
+      existingCampaign = all[0] ?? null;
+    }
+    if (existingCampaign === null) {
+      throw new EvolutionError('EVOLUTION_NOT_FOUND', 'no campaign found to resume in campaign.sqlite');
+    }
 
-  if (existingCampaign.status === 'completed') {
-    const islands = await store.listIslands(existingCampaign.campaignId);
-    const allPassed = await store.listIndividuals(existingCampaign.campaignId, { status: ['passed'] });
-    return Object.freeze({
-      store,
-      campaign: existingCampaign,
-      islands: Object.freeze(islands),
-      paretoFrontier: Object.freeze(allPassed.filter(i => i.paretoRank === 1)),
-      noveltyRejectionsCount: 0,
-      cascadeSoftStopsCount: 0,
-      advisoryDecisions: Object.freeze([]),
-      earlyStoppedByRoofline: false,
+    if (existingCampaign.status === 'completed') {
+      const islands = await store.listIslands(existingCampaign.campaignId);
+      const allPassed = await store.listIndividuals(existingCampaign.campaignId, { status: ['passed'] });
+      return Object.freeze({
+        store,
+        campaign: existingCampaign,
+        islands: Object.freeze(islands),
+        paretoFrontier: Object.freeze(allPassed.filter(i => i.paretoRank === 1)),
+        noveltyRejectionsCount: 0,
+        cascadeSoftStopsCount: 0,
+        advisoryDecisions: Object.freeze([]),
+        earlyStoppedByRoofline: false,
+      });
+    }
+
+    const checked = await checkEvolutionCampaign({
+      manifest: existingCampaign.manifest,
+      ...(effectiveRepoRoot !== undefined ? { repositoryRoot: effectiveRepoRoot } : {}),
+      ...(options.taskpack !== undefined ? { taskpack: options.taskpack } : {}),
+      scrubber,
     });
+
+    const { baseTaskContract } = await computeBaselineCampaignLockHash(
+      checked.taskpack,
+      existingCampaign.campaignId,
+      existingCampaign.baseRevision,
+      effectiveRepoRoot,
+    );
+    const driverConstraint = resolveTargetDriverConstraint(checked.taskpack, checked.targetCellId)
+      ?? existingCampaign.driverConstraint;
+
+    await store.ensureModelBanditArms(lease, existingCampaign.campaignId, checked.modelIds);
+    await store.updateCampaignProgress(lease, {
+      campaignId: existingCampaign.campaignId,
+      status: 'active',
+      ...(driverConstraint !== null ? { driverConstraint } : {}),
+    });
+
+    return await driveCampaignExecution({
+      store,
+      lease,
+      campaignId: existingCampaign.campaignId,
+      manifest: existingCampaign.manifest,
+      taskpack: checked.taskpack,
+      baseTaskContract,
+      modelIds: checked.modelIds,
+      driverConstraint,
+      ...(effectiveRepoRoot !== undefined ? { repositoryRoot: effectiveRepoRoot } : {}),
+      evaluator,
+      ...(options.proposeCandidateSlice !== undefined ? { proposeCandidateSlice: options.proposeCandidateSlice } : {}),
+      ...(options.supervisorRunner !== undefined ? { supervisorRunner: options.supervisorRunner } : {}),
+      ...(options.decisionPolicy !== undefined
+        ? { decisionPolicy: options.decisionPolicy }
+        : (options.controllerEvaluatorOptions?.decisionPolicy !== undefined
+          ? { decisionPolicy: options.controllerEvaluatorOptions.decisionPolicy }
+          : {})),
+      ...(options.decisionTransport !== undefined
+        ? { decisionTransport: options.decisionTransport }
+        : (options.controllerEvaluatorOptions?.decisionTransport !== undefined
+          ? { decisionTransport: options.controllerEvaluatorOptions.decisionTransport }
+          : {})),
+      ...(options.decisionApiKey !== undefined
+        ? { decisionApiKey: options.decisionApiKey }
+        : (options.controllerEvaluatorOptions?.decisionApiKey !== undefined
+          ? { decisionApiKey: options.controllerEvaluatorOptions.decisionApiKey }
+          : {})),
+      ...(options.environment !== undefined
+        ? { environment: options.environment }
+        : (options.controllerEvaluatorOptions?.environment !== undefined
+          ? { environment: options.controllerEvaluatorOptions.environment }
+          : {})),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      autoExport: options.autoExport ?? true,
+      allowSyntheticProbe: options.allowSyntheticProbe === true,
+      ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
+      ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
+      ...(options.dispatchManifest !== undefined ? { dispatchManifest: options.dispatchManifest } : {}),
+      scrubber,
+    });
+  } catch (err: unknown) {
+    await store.close().catch(() => undefined);
+    throw err;
   }
-
-  const checked = await checkEvolutionCampaign({
-    manifest: existingCampaign.manifest,
-    ...(options.repositoryRoot !== undefined ? { repositoryRoot: options.repositoryRoot } : {}),
-    ...(options.taskpack !== undefined ? { taskpack: options.taskpack } : {}),
-    scrubber,
-  });
-
-  const { baseTaskContract } = await computeBaselineCampaignLockHash(
-    checked.taskpack,
-    existingCampaign.campaignId,
-    existingCampaign.baseRevision,
-    options.repositoryRoot,
-  );
-
-  await store.ensureModelBanditArms(lease, existingCampaign.campaignId, checked.modelIds);
-  await store.updateCampaignProgress(lease, {
-    campaignId: existingCampaign.campaignId,
-    status: 'active',
-  });
-
-  return driveCampaignExecution({
-    store,
-    lease,
-    campaignId: existingCampaign.campaignId,
-    manifest: existingCampaign.manifest,
-    taskpack: checked.taskpack,
-    baseTaskContract,
-    modelIds: checked.modelIds,
-    ...(options.repositoryRoot !== undefined ? { repositoryRoot: options.repositoryRoot } : {}),
-    evaluator,
-    ...(options.proposeCandidateSlice !== undefined ? { proposeCandidateSlice: options.proposeCandidateSlice } : {}),
-    ...(options.supervisorRunner !== undefined ? { supervisorRunner: options.supervisorRunner } : {}),
-    ...(options.signal !== undefined ? { signal: options.signal } : {}),
-    autoExport: options.autoExport ?? true,
-    allowSyntheticProbe: options.allowSyntheticProbe === true,
-    ...(options.receiptSigningSecret !== undefined ? { receiptSigningSecret: options.receiptSigningSecret } : {}),
-    ...(options.verifyReceiptSignature !== undefined ? { verifyReceiptSignature: options.verifyReceiptSignature } : {}),
-    ...(options.dispatchManifest !== undefined ? { dispatchManifest: options.dispatchManifest } : {}),
-    scrubber,
-  });
 }
 
 async function withReadStore<T>(

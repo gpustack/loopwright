@@ -190,6 +190,7 @@ export interface ExportEvolutionBundleOptions {
   readonly outputDir: string;
   readonly format?: EvolutionExportFormat;
   readonly allowSyntheticProbe?: boolean;
+  readonly allowUnverifiedSignature?: boolean;
   readonly individualIds?: readonly string[];
   readonly dispatchManifest?: DispatchManifestV1 | string | Uint8Array;
   readonly defaultEntrypoint?: string;
@@ -217,6 +218,7 @@ export interface ExportEvolutionBundleResult {
 export interface VerifyEvolutionBundleOptions {
   readonly bundleDir: string;
   readonly allowSyntheticProbe?: boolean;
+  readonly allowUnverifiedSignature?: boolean;
   readonly receiptSigningSecret?: string;
   readonly verifyReceiptSignature?: ReceiptSignatureVerifier;
   readonly scrubber?: SecretScrubber;
@@ -1219,6 +1221,7 @@ function normalizeAndVerifyDispatchManifest(
 function buildCompatibilityTuple(
   anchorProvenance: HardwareProvenance,
   options: ExportEvolutionBundleOptions,
+  campaignDriverConstraint: string | null | undefined,
   scrubber: SecretScrubber,
 ): BundleCompatibilityTuple {
   const compat = createNullRecord<{
@@ -1239,17 +1242,18 @@ function buildCompatibilityTuple(
   compat.deviceCount = anchorProvenance.deviceCount;
   compat.driverVersion = anchorProvenance.driverVersion;
 
-  if (options.driverConstraint !== undefined) {
+  const effectiveDriverConstraint = options.driverConstraint ?? campaignDriverConstraint ?? undefined;
+  if (effectiveDriverConstraint !== undefined) {
     if (
-      typeof options.driverConstraint !== 'string'
-      || options.driverConstraint.length < 1
-      || options.driverConstraint.length > 128
-      || !PRINTABLE_ASCII_RE.test(options.driverConstraint)
+      typeof effectiveDriverConstraint !== 'string'
+      || effectiveDriverConstraint.length < 1
+      || effectiveDriverConstraint.length > 128
+      || !PRINTABLE_ASCII_RE.test(effectiveDriverConstraint)
     ) {
       throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'invalid driverConstraint', '/driverConstraint');
     }
-    assertCleanSecretText(options.driverConstraint, scrubber, '/driverConstraint');
-    compat.driverConstraint = options.driverConstraint;
+    assertCleanSecretText(effectiveDriverConstraint, scrubber, '/driverConstraint');
+    compat.driverConstraint = effectiveDriverConstraint;
   }
 
   compat.runtimeVersion = anchorProvenance.runtimeVersion;
@@ -1598,6 +1602,16 @@ export async function exportEvolutionBundle(
     throw new EvolutionError('EVOLUTION_NOT_FOUND', `campaign "${options.campaignId}" not found`, '/campaignId');
   }
 
+  const hasReceiptVerifier =
+    (typeof options.receiptSigningSecret === 'string' && options.receiptSigningSecret.length > 0)
+    || typeof options.verifyReceiptSignature === 'function';
+  if (!hasReceiptVerifier && options.allowUnverifiedSignature !== true) {
+    throw new EvolutionError(
+      'EXPORT_UNVERIFIED_FORBIDDEN',
+      'receiptSigningSecret or verifyReceiptSignature is required to verify HMAC verdict receipts',
+    );
+  }
+
   const format: EvolutionExportFormat = options.format ?? campaign.manifest.spec.export?.format ?? 'dir';
   if (format !== 'dir' && format !== 'oci-layout') {
     throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `unsupported export format "${String(format)}"`, '/format');
@@ -1944,7 +1958,12 @@ export async function exportEvolutionBundle(
   members.sort((a, b) => compareUtf16(a.path, b.path));
 
   // Build compatibility, paretoSummary, lineage, and manifest.json
-  const compatibility = buildCompatibilityTuple(resolvedAnchorProvenance, options, scrubber);
+  const compatibility = buildCompatibilityTuple(
+    resolvedAnchorProvenance,
+    options,
+    campaign.driverConstraint,
+    scrubber,
+  );
   const paretoSummary = buildParetoSummary(campaign, selectedIndividuals, receiptCache);
   const exportedIndividualIds = selectedIndividuals.map(ind => ind.individualId).sort(compareUtf16);
 
@@ -2097,6 +2116,16 @@ function parseBundleManifestJson(
     throw new EvolutionError('ARTIFACT_INVALID', 'invalid compatibility.deviceCount', '/manifest.json/compatibility/deviceCount');
   }
   parseDigestValue(compatObj['workloadDigest'], 'ARTIFACT_INVALID', '/manifest.json/compatibility/workloadDigest');
+  if (Object.hasOwn(compatObj, 'driverConstraint') && compatObj['driverConstraint'] !== undefined) {
+    if (
+      typeof compatObj['driverConstraint'] !== 'string'
+      || compatObj['driverConstraint'].length < 1
+      || compatObj['driverConstraint'].length > 128
+      || !PRINTABLE_ASCII_RE.test(compatObj['driverConstraint'])
+    ) {
+      throw new EvolutionError('ARTIFACT_INVALID', 'invalid compatibility.driverConstraint', '/manifest.json/compatibility/driverConstraint');
+    }
+  }
   if (Object.hasOwn(compatObj, 'modelDigest') && compatObj['modelDigest'] !== undefined) {
     parseDigestValue(compatObj['modelDigest'], 'ARTIFACT_INVALID', '/manifest.json/compatibility/modelDigest');
   }
@@ -2178,6 +2207,16 @@ export async function verifyEvolutionBundle(
   const scrubber = options.scrubber ?? DEFAULT_SECRET_SCRUBBER;
   const allowSyntheticProbe = options.allowSyntheticProbe === true;
   const maxBlobBytes = options.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
+
+  const hasReceiptVerifier =
+    (typeof options.receiptSigningSecret === 'string' && options.receiptSigningSecret.length > 0)
+    || typeof options.verifyReceiptSignature === 'function';
+  if (!hasReceiptVerifier && options.allowUnverifiedSignature !== true) {
+    throw new EvolutionError(
+      'EXPORT_UNVERIFIED_FORBIDDEN',
+      'receiptSigningSecret or verifyReceiptSignature is required to verify HMAC verdict receipts',
+    );
+  }
 
   const resolvedBundleDir = validateAbsoluteFilesystemPath(options.bundleDir, 'bundleDir');
   await assertNoSymlinkPath(resolvedBundleDir, { checkLeaf: true, diagPath: resolvedBundleDir });

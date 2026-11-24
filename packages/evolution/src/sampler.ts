@@ -7,6 +7,7 @@ import { computeMedianFitness } from './pareto.js';
 import { canonicalizeJson } from './schema.js';
 import {
   CONTEXT_SLICE_MAX_BYTES,
+  DISPATCH_MANIFEST_MAX_RULES,
   EvolutionError,
   type EvolutionModelBanditStrategy,
   type IndividualRecord,
@@ -78,7 +79,7 @@ export function createSeededPrng(seed: string | Uint8Array): () => number {
 
 export interface SampledParentEntry {
   readonly individual: IndividualRecord;
-  readonly role: 'primary' | 'crossover_donor' | 'inspiration';
+  readonly role: LineageRole;
   readonly sourceIslandId: number;
   readonly weight: number;
 }
@@ -322,7 +323,7 @@ export interface ParentContextInput {
 
 export interface StagedParentContextFile {
   readonly individualId: string;
-  readonly role: Exclude<LineageRole, 'portfolio_member'>;
+  readonly role: LineageRole;
   readonly fileName: string;
   readonly filePath: string;
   readonly byteLength: number;
@@ -338,6 +339,20 @@ export interface StageMultiParentContextOptions {
   readonly stagingDir: string;
   readonly parents: readonly ParentContextInput[];
   readonly maxCrossoversPerPrompt: number;
+  readonly maxCodeSliceBytes?: number;
+  readonly scrubber?: SecretScrubber;
+}
+
+export interface PortfolioSpecialistContextInput {
+  readonly individual: IndividualRecord;
+  readonly bucketId?: string | null;
+  readonly codeSlice: string;
+}
+
+export interface StagePortfolioSpecialistContextOptions {
+  readonly stagingDir: string;
+  readonly specialists: readonly PortfolioSpecialistContextInput[];
+  readonly maxSpecialists?: number;
   readonly maxCodeSliceBytes?: number;
   readonly scrubber?: SecretScrubber;
 }
@@ -501,6 +516,144 @@ export async function stageMultiParentContextFiles(
       Object.freeze({
         individualId: item.individual.individualId,
         role: item.role,
+        fileName,
+        filePath: finalPath,
+        byteLength: bytes.byteLength,
+        digest: Object.freeze({ algorithm: 'sha256' as const, hex }),
+      }),
+    );
+  }
+
+  return Object.freeze({
+    stagingDir: resolvedDir,
+    files: Object.freeze(files),
+  });
+}
+
+/**
+ * Stage bounded, `SecretScrubber`-clean, `O_NOFOLLOW`, `0o400` read-only specialist context files
+ * (`1..64` specialist winners matching `DISPATCH_MANIFEST_MAX_RULES`) for portfolio synthesis.
+ */
+export async function stagePortfolioSpecialistContextFiles(
+  options: StagePortfolioSpecialistContextOptions,
+): Promise<StagedMultiParentContext> {
+  const maxSpecialists = options.maxSpecialists ?? DISPATCH_MANIFEST_MAX_RULES;
+  if (!Number.isSafeInteger(maxSpecialists) || maxSpecialists < 1 || maxSpecialists > DISPATCH_MANIFEST_MAX_RULES) {
+    throw new EvolutionError(
+      'EVOLUTION_SCHEMA_INVALID',
+      `maxSpecialists must be within 1..${DISPATCH_MANIFEST_MAX_RULES}`,
+    );
+  }
+  const maxSliceBytes = options.maxCodeSliceBytes ?? DEFAULT_SLICE_MAX_BYTES;
+  if (!Number.isSafeInteger(maxSliceBytes) || maxSliceBytes < 64 || maxSliceBytes > CONTEXT_SLICE_MAX_BYTES) {
+    throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', `maxCodeSliceBytes must be within 64..${CONTEXT_SLICE_MAX_BYTES}`);
+  }
+  if (options.specialists.length < 1 || options.specialists.length > maxSpecialists) {
+    throw new EvolutionError(
+      'EVOLUTION_SCHEMA_INVALID',
+      `specialists length must be within 1..${maxSpecialists}`,
+    );
+  }
+
+  const seenSpecialistIds = new Set<string>();
+  for (const spec of options.specialists) {
+    if (seenSpecialistIds.has(spec.individual.individualId)) {
+      throw new EvolutionError(
+        'EVOLUTION_SCHEMA_INVALID',
+        `duplicate portfolio specialist individual "${spec.individual.individualId}"`,
+      );
+    }
+    seenSpecialistIds.add(spec.individual.individualId);
+  }
+
+  const scrubber = options.scrubber ?? DEFAULT_SECRET_SCRUBBER;
+  const resolvedDir = resolve(options.stagingDir);
+  await ensureContextStagingDir(resolvedDir);
+
+  const noFollow = 'O_NOFOLLOW' in fsConstants ? fsConstants.O_NOFOLLOW : 0;
+  const files: StagedParentContextFile[] = [];
+
+  for (let i = 0; i < options.specialists.length; i++) {
+    const item = options.specialists[i]!;
+    const boundedSlice = truncateUtf8ByBytes(item.codeSlice, maxSliceBytes);
+    const effectiveBucketId = item.bucketId !== undefined ? item.bucketId : item.individual.bucketId;
+    const payload: Record<string, unknown> = {
+      individualId: item.individual.individualId,
+      role: 'portfolio_member',
+      bucketId: effectiveBucketId,
+      islandId: item.individual.islandId,
+      generation: item.individual.generation,
+      nicheKey: item.individual.nicheKey,
+      paretoRank: item.individual.paretoRank,
+      metrics: item.individual.metrics,
+      codeSlice: boundedSlice,
+      ...(item.individual.bucketMetrics !== undefined ? { bucketMetrics: item.individual.bucketMetrics } : {}),
+      ...(item.individual.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: item.individual.hardwareDiagnostics } : {}),
+    };
+
+    const serialized = `${canonicalizeJson(payload)}\n`;
+    if (scrubber.containsSecret(serialized)) {
+      throw new EvolutionError(
+        'SECRET_LEAK_DETECTED',
+        `secret material detected in portfolio specialist context for "${item.individual.individualId}"`,
+      );
+    }
+
+    const safeBucket = (effectiveBucketId ?? 'bucket').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 32);
+    const safeSlug = item.individual.individualId.replace(/[^A-Za-z0-9._-]/g, '_');
+    const fileName = `specialist-${i}-${safeBucket}-${safeSlug}.json`;
+    const finalPath = join(resolvedDir, fileName);
+
+    const existing = await lstat(finalPath).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      if (err.code === 'ELOOP') {
+        throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `symlink forbidden at ${finalPath}`, finalPath);
+      }
+      throw err;
+    });
+    if (existing !== null) {
+      if (existing.isSymbolicLink()) {
+        throw new EvolutionError('EVOLUTION_SYMLINK_FORBIDDEN', `target context file is a symlink: ${finalPath}`, finalPath);
+      }
+      throw new EvolutionError('EVOLUTION_CONFLICT', `context file already exists: ${finalPath}`, finalPath);
+    }
+
+    const bytes = Buffer.from(serialized, 'utf8');
+    const hex = createHash('sha256').update(bytes).digest('hex');
+    const tempPath = join(resolvedDir, `.tmp-${fileName}-${randomBytes(6).toString('hex')}`);
+
+    const handle = await open(
+      tempPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | noFollow,
+      0o600,
+    );
+    try {
+      let written = 0;
+      while (written < bytes.byteLength) {
+        const res = await handle.write(bytes, written, bytes.byteLength - written, written);
+        written += res.bytesWritten;
+      }
+      await handle.sync();
+    } catch (err) {
+      await handle.close().catch(() => undefined);
+      await unlink(tempPath).catch(() => undefined);
+      throw err;
+    }
+    await handle.close();
+
+    try {
+      await chmod(tempPath, 0o400);
+      await rename(tempPath, finalPath);
+    } catch (err) {
+      await chmod(tempPath, 0o600).catch(() => undefined);
+      await unlink(tempPath).catch(() => undefined);
+      throw err;
+    }
+
+    files.push(
+      Object.freeze({
+        individualId: item.individual.individualId,
+        role: 'portfolio_member' as const,
         fileName,
         filePath: finalPath,
         byteLength: bytes.byteLength,

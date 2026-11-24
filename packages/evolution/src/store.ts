@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   manifest_digest_hex TEXT NOT NULL,
   base_revision TEXT NOT NULL,
   lock_hash_hex TEXT NOT NULL,
+  driver_constraint TEXT,
   current_generation INTEGER NOT NULL CHECK (current_generation >= 0),
   evaluations_used INTEGER NOT NULL CHECK (evaluations_used >= 0),
   preemptions_count INTEGER NOT NULL CHECK (preemptions_count >= 0),
@@ -350,6 +351,7 @@ export interface CreateCampaignInput {
   readonly manifestDigest: Digest;
   readonly baseRevision: string;
   readonly lockHash: Digest;
+  readonly driverConstraint?: string | null;
   readonly stagePhase?: CampaignStagePhase;
   readonly activeBucketId?: string | null;
   readonly modelIds?: readonly string[];
@@ -360,6 +362,7 @@ export interface UpdateCampaignProgressInput {
   readonly status?: CampaignStatus;
   readonly stagePhase?: CampaignStagePhase;
   readonly activeBucketId?: string | null;
+  readonly driverConstraint?: string | null;
   readonly currentGeneration?: number;
 }
 
@@ -586,6 +589,17 @@ export class EvolutionCampaignStore {
         if (monoNow < Number(metaRow['last_monotonic_ms']) || wallNow < Number(metaRow['last_wall_ms'])) {
           throw new EvolutionError('EVOLUTION_CLOCK_DRIFT', 'clock regressed behind persisted campaign_meta timestamp');
         }
+        const campaignCols = db.prepare('PRAGMA table_info(campaigns);').all() as SqlRow[];
+        if (!campaignCols.some(col => String(col['name']) === 'driver_constraint')) {
+          db.exec('BEGIN IMMEDIATE;');
+          try {
+            db.exec('ALTER TABLE campaigns ADD COLUMN driver_constraint TEXT;');
+            db.exec('COMMIT;');
+          } catch (err) {
+            if (db.isTransaction) db.exec('ROLLBACK;');
+            throw err;
+          }
+        }
       }
 
       return new EvolutionCampaignStore(campaignRoot, dbPath, db, clock, monoNow, wallNow, !freshFile);
@@ -810,6 +824,7 @@ export class EvolutionCampaignStore {
       manifestDigest: Digest;
       baseRevision: string;
       lockHash: Digest;
+      driverConstraint: string | null;
       currentGeneration: number;
       evaluationsUsed: number;
       preemptionsCount: number;
@@ -825,6 +840,9 @@ export class EvolutionCampaignStore {
     out.manifestDigest = digestFromHex(String(row['manifest_digest_hex']));
     out.baseRevision = String(row['base_revision']);
     out.lockHash = digestFromHex(String(row['lock_hash_hex']));
+    out.driverConstraint = row['driver_constraint'] === null || row['driver_constraint'] === undefined
+      ? null
+      : String(row['driver_constraint']);
     out.currentGeneration = Number(row['current_generation']);
     out.evaluationsUsed = Number(row['evaluations_used']);
     out.preemptionsCount = Number(row['preemptions_count']);
@@ -985,15 +1003,23 @@ export class EvolutionCampaignStore {
           throw new EvolutionError('EVOLUTION_CONFLICT', `campaign "${input.campaignId}" already exists`);
         }
 
+        const driverConstraint = input.driverConstraint ?? null;
+        if (
+          driverConstraint !== null
+          && (driverConstraint.length < 1 || driverConstraint.length > 128 || !/^[\x20-\x7E]+$/.test(driverConstraint))
+        ) {
+          throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'invalid driverConstraint', '/driverConstraint');
+        }
+
         const manifestJson = canonicalizeJson(validatedManifest);
         this.#db
           .prepare(
             `INSERT INTO campaigns (
               campaign_id, name, status, stage_phase, active_bucket_id,
-              manifest_json, manifest_digest_hex, base_revision, lock_hash_hex,
+              manifest_json, manifest_digest_hex, base_revision, lock_hash_hex, driver_constraint,
               current_generation, evaluations_used, preemptions_count,
               created_at_wall_ms, updated_at_wall_ms
-            ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?);`,
+            ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?);`,
           )
           .run(
             input.campaignId,
@@ -1004,6 +1030,7 @@ export class EvolutionCampaignStore {
             input.manifestDigest.hex,
             input.baseRevision,
             input.lockHash.hex,
+            driverConstraint,
             now.wallMs,
             now.wallMs,
           );
@@ -1084,15 +1111,26 @@ export class EvolutionCampaignStore {
         const nextBucket = input.activeBucketId !== undefined
           ? input.activeBucketId
           : (existing['active_bucket_id'] === null ? null : String(existing['active_bucket_id']));
+        const nextDriverConstraint = input.driverConstraint !== undefined
+          ? input.driverConstraint
+          : (existing['driver_constraint'] === null || existing['driver_constraint'] === undefined
+            ? null
+            : String(existing['driver_constraint']));
+        if (
+          nextDriverConstraint !== null
+          && (nextDriverConstraint.length < 1 || nextDriverConstraint.length > 128 || !/^[\x20-\x7E]+$/.test(nextDriverConstraint))
+        ) {
+          throw new EvolutionError('EVOLUTION_SCHEMA_INVALID', 'invalid driverConstraint', '/driverConstraint');
+        }
         const nextGen = input.currentGeneration ?? Number(existing['current_generation']);
 
         this.#db
           .prepare(
             `UPDATE campaigns
-             SET status = ?, stage_phase = ?, active_bucket_id = ?, current_generation = ?, updated_at_wall_ms = ?
+             SET status = ?, stage_phase = ?, active_bucket_id = ?, driver_constraint = ?, current_generation = ?, updated_at_wall_ms = ?
              WHERE campaign_id = ?;`,
           )
-          .run(nextStatus, nextPhase, nextBucket, nextGen, now.wallMs, input.campaignId);
+          .run(nextStatus, nextPhase, nextBucket, nextDriverConstraint, nextGen, now.wallMs, input.campaignId);
 
         const updated = this.#db
           .prepare('SELECT * FROM campaigns WHERE campaign_id = ?;')
@@ -2036,6 +2074,10 @@ export class EvolutionCampaignStore {
 }
 
 function compareNicheEliteBetter(a: IndividualRecord, b: IndividualRecord): number {
+  if (a.status !== b.status) {
+    if (a.status === 'passed') return -1;
+    if (b.status === 'passed') return 1;
+  }
   const rankA = a.paretoRank ?? Number.MAX_SAFE_INTEGER;
   const rankB = b.paretoRank ?? Number.MAX_SAFE_INTEGER;
   if (rankA !== rankB) return rankA - rankB;

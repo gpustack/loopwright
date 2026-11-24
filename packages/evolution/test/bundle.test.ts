@@ -682,6 +682,7 @@ test('bundle: refuses missing receipt, denied receipt, synthetic_fixture without
           store: seededMissing.store,
           campaignId: seededMissing.campaignId,
           outputDir: join(tempDir, 'out-missing'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EXPORT_UNVERIFIED_FORBIDDEN',
       );
@@ -699,6 +700,7 @@ test('bundle: refuses missing receipt, denied receipt, synthetic_fixture without
           store: seededDenied.store,
           campaignId: seededDenied.campaignId,
           outputDir: join(tempDir, 'out-denied'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EXPORT_UNVERIFIED_FORBIDDEN',
       );
@@ -716,6 +718,7 @@ test('bundle: refuses missing receipt, denied receipt, synthetic_fixture without
           store: seededSynth.store,
           campaignId: seededSynth.campaignId,
           outputDir: join(tempDir, 'out-synth-denied'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EXPORT_UNVERIFIED_FORBIDDEN',
       );
@@ -800,6 +803,7 @@ test('bundle: refuses 1-byte tampered .cubin blob, symlink blob, hardlink (nlink
           store: seededTamper.store,
           campaignId: seededTamper.campaignId,
           outputDir: outTamper,
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'ARTIFACT_INVALID',
       );
@@ -829,6 +833,7 @@ test('bundle: refuses 1-byte tampered .cubin blob, symlink blob, hardlink (nlink
           store: seededSym.store,
           campaignId: seededSym.campaignId,
           outputDir: join(tempDir, 'out-symlink'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'ARTIFACT_INVALID',
       );
@@ -851,6 +856,7 @@ test('bundle: refuses 1-byte tampered .cubin blob, symlink blob, hardlink (nlink
           store: seededHard.store,
           campaignId: seededHard.campaignId,
           outputDir: join(tempDir, 'out-hardlink'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'ARTIFACT_INVALID',
       );
@@ -870,6 +876,7 @@ test('bundle: refuses 1-byte tampered .cubin blob, symlink blob, hardlink (nlink
           store: seededUnref.store,
           campaignId: seededUnref.campaignId,
           outputDir: join(tempDir, 'out-unref'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
           dispatchManifest: {
             version: 1,
             fallback: 'baseline',
@@ -939,6 +946,7 @@ test('bundle: refuses 1-byte tampered .cubin blob, symlink blob, hardlink (nlink
             store: storeBadLen,
             campaignId: 'camp-bad-len',
             outputDir: join(tempDir, 'out-bad-len'),
+            receiptSigningSecret: TEST_HMAC_SECRET,
           }),
           'ARTIFACT_INVALID',
         );
@@ -1080,6 +1088,7 @@ test('bundle (specialist-then-portfolio): refuses export when portfolioHeldOutWo
           store,
           campaignId,
           outputDir: join(tempDir, 'out-port-denied-1'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EXPORT_UNVERIFIED_FORBIDDEN',
       );
@@ -1089,6 +1098,7 @@ test('bundle (specialist-then-portfolio): refuses export when portfolioHeldOutWo
           campaignId,
           outputDir: join(tempDir, 'out-port-denied-2'),
           individualIds: ['ind-spec-1', 'ind-spec-2'],
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EXPORT_UNVERIFIED_FORBIDDEN',
       );
@@ -1221,6 +1231,7 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
           store: seededSecret.store,
           campaignId: seededSecret.campaignId,
           outputDir: join(tempDir, 'out-secret'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'SECRET_LEAK_DETECTED',
       );
@@ -1242,6 +1253,7 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
           store: seededCustomSec.store,
           campaignId: seededCustomSec.campaignId,
           outputDir: join(tempDir, 'out-custom-secret'),
+          receiptSigningSecret: TEST_HMAC_SECRET,
           scrubber,
         }),
         'SECRET_LEAK_DETECTED',
@@ -1265,6 +1277,7 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
           store: seededClean.store,
           campaignId: seededClean.campaignId,
           outputDir: symOut,
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EVOLUTION_SYMLINK_FORBIDDEN',
       );
@@ -1276,6 +1289,7 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
           campaignId: seededClean.campaignId,
           outputDir: realTarget,
           overwrite: false,
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'EVOLUTION_CONFLICT',
       );
@@ -1328,12 +1342,79 @@ test('bundle: refuses secrets via SecretScrubber, symlink outputDir, overwrite: 
           campaignId: seededMismatch.campaignId,
           outputDir: join(tempDir, 'out-mismatch'),
           individualIds: ['ind-win-1', 'ind-win-2-sm89'],
+          receiptSigningSecret: TEST_HMAC_SECRET,
         }),
         'ARTIFACT_INVALID',
       );
     } finally {
       chmodSync(join(mismatchRoot, 'cas', 'sha256'), 0o700);
       await seededMismatch.store.close();
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('bundle (S-C3 + P-W5): requires receiptSigningSecret or verifyReceiptSignature by default, supports explicit allowUnverifiedSignature opt-in, and auto-populates persisted campaign.driverConstraint', async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'evo-bundle-sc3-pw5-'));
+  try {
+    const campRoot = join(tempDir, 'camp');
+    const seeded = await seedSingleTargetCampaign(campRoot);
+    try {
+      const lease = await seeded.store.acquireLease('pw5-driver-owner');
+      await seeded.store.updateCampaignProgress(lease, {
+        campaignId: seeded.campaignId,
+        driverConstraint: '>=560.35,<570.0',
+      });
+
+      // 1. Omitting receiptSigningSecret & verifyReceiptSignature on exportEvolutionBundle fails closed
+      const unverifiedErr = await assertEvolutionErrorAsync(
+        () => exportEvolutionBundle({
+          store: seeded.store,
+          campaignId: seeded.campaignId,
+          outputDir: join(tempDir, 'denied-no-secret'),
+        }),
+        'EXPORT_UNVERIFIED_FORBIDDEN',
+      );
+      assert.match(unverifiedErr.message, /receiptSigningSecret or verifyReceiptSignature is required/);
+
+      // 2. Explicit allowUnverifiedSignature: true succeeds and populates persisted campaign.driverConstraint
+      const offlineOut = join(tempDir, 'offline-bundle');
+      const exported = await exportEvolutionBundle({
+        store: seeded.store,
+        campaignId: seeded.campaignId,
+        outputDir: offlineOut,
+        format: 'dir',
+        allowUnverifiedSignature: true,
+      });
+      assert.equal(exported.format, 'dir');
+
+      const bundleManifest = JSON.parse(
+        readFileSync(join(offlineOut, 'manifest.json'), 'utf8'),
+      ) as EvolutionBundleManifestV1;
+      assert.equal(bundleManifest.compatibility.driverConstraint, '>=560.35,<570.0');
+
+      // 3. verifyEvolutionBundle WITHOUT secret also fails closed unless allowUnverifiedSignature: true
+      await assertEvolutionErrorAsync(
+        () => verifyEvolutionBundle({ bundleDir: offlineOut }),
+        'EXPORT_UNVERIFIED_FORBIDDEN',
+      );
+
+      const verifiedOffline = await verifyEvolutionBundle({
+        bundleDir: offlineOut,
+        allowUnverifiedSignature: true,
+      });
+      assert.equal(verifiedOffline.manifest.compatibility.driverConstraint, '>=560.35,<570.0');
+
+      // 4. And real HMAC verification succeeds with TEST_HMAC_SECRET
+      const verifiedHmac = await verifyEvolutionBundle({
+        bundleDir: offlineOut,
+        receiptSigningSecret: TEST_HMAC_SECRET,
+      });
+      assert.equal(verifiedHmac.receiptCount, 1);
+    } finally {
+      chmodSync(join(campRoot, 'cas', 'sha256'), 0o700);
+      await seeded.store.close();
     }
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

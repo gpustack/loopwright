@@ -315,6 +315,7 @@ export interface CampaignRecord {
   readonly manifestDigest: Digest;
   readonly baseRevision: string;
   readonly lockHash: Digest;
+  readonly driverConstraint: string | null;
   readonly currentGeneration: number;
   readonly evaluationsUsed: number;
   readonly preemptionsCount: number;
