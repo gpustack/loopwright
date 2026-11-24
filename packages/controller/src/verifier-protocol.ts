@@ -197,12 +197,25 @@ export function overlayProtocolBounds(overlay?: OverlayLimitsInput): OverlayProt
   };
 }
 
-export function maxPacketBytes(header: Pick<VerifierHeader, 'payloadKind' | 'overlay'>): number {
+export function maxPacketBytes(
+  header: Pick<VerifierHeader, 'payloadKind' | 'overlay'> & { readonly handler?: ByteHandler },
+): number {
   const bounds = overlayProtocolBounds(header.overlay);
   const inventoriesBytes = 4 + HEADER_BYTES + 2 * bounds.inventoryMaxBytes;
   if (header.payloadKind === 'inventories') return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes);
   if (header.payloadKind === 'json') {
     return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes + 4 + JSON_FILE_BYTES + 262_212);
+  }
+  if (header.handler === 'evolve-block-guard.v1') {
+    // Bounded by ArtifactStore.put / readArtifact's 96 MiB (100_663_296 B) single-artifact cap.
+    return Math.min(
+      MAX_ABSOLUTE_PACKET_BYTES,
+      100_663_296,
+      inventoriesBytes
+        + EVOLVE_BLOCK_LIMITS.maxFiles * 2 * (4 + JSON_FILE_BYTES)
+        + EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes
+        + 68,
+    );
   }
   return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes + 2 * (4 + JSON_FILE_BYTES) + 262_212);
 }
@@ -213,7 +226,12 @@ export function packetAllocationLimit(bytes: Uint8Array): number {
   if (!len || len > HEADER_BYTES) return ALLOCATION_BYTES;
   try {
     const header = checkedHeader(parsePrivateJson(bytes.subarray(4, 4 + len), HEADER_BYTES, 256));
-    return overlayProtocolBounds(header.overlay).allocationMaxBytes;
+    const bounds = overlayProtocolBounds(header.overlay);
+    if (header.handler === 'evolve-block-guard.v1') {
+      const guardMaxPacket = maxPacketBytes(header);
+      return Math.max(bounds.allocationMaxBytes, guardMaxPacket + 2 * bounds.manifestMaxBytes + 4_194_304);
+    }
+    return bounds.allocationMaxBytes;
   } catch {
     return ALLOCATION_BYTES;
   }
@@ -1158,7 +1176,7 @@ interface ParsedEvolveFile {
 const EVOLVE_MARKER_SLASH_RE = /^[ \t]*\/\/[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*$/;
 const EVOLVE_MARKER_HASH_RE = /^[ \t]*#[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*$/;
 const EVOLVE_MARKER_BLOCK_COMMENT_RE = /^[ \t]*\/\*[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*\*\/[ \t]*$/;
-const EVOLVE_MARKER_CANDIDATE_COMMENT_RE = /^[ \t]*(?:\/\/|#|\/\*).*EVOLVE-BLOCK-(?:START|END)\b/;
+const EVOLVE_MARKER_CANDIDATE_COMMENT_RE = /^[ \t]*(?:\/\/|#|\/\*)[ \t]*EVOLVE-BLOCK-(?:START|END)\b/;
 
 function parseEvolveMarkerLine(
   lineText: string,

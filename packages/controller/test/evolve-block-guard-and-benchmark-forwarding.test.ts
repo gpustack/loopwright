@@ -43,6 +43,7 @@ import { stepNext, stepSubmit } from '../src/step.js';
 import { ArtifactStore, stateValue } from '../src/storage.js';
 import { normalizeSubmission } from '../src/submission.js';
 import { authenticatedCheck, preflightVerification, prepareVerification, Verifier, type ByteInventory } from '../src/verification.js';
+import { EVOLVE_BLOCK_LIMITS, JSON_FILE_BYTES, maxPacketBytes } from '../src/verifier-protocol.js';
 import { signPayload } from '../src/gate.js';
 
 const BENCH_SECRET = 'BENCH_SIGNING_SECRET_Aa11Bb22Cc33';
@@ -470,7 +471,44 @@ test('evolve-block-guard.v1 enforces //, #, /* */ blocks, outside-byte SHA-256 i
     assert.equal(invalidUtf8.guardCheck.status, 'failed');
     assert.equal(invalidUtf8.guardCheck.reason, 'invalid_utf8');
 
-    // 14. Guarded file with zero blocks matching allowedBlockIds fails closed with disallowed_block_id
+    // 14. Prose comment mentioning EVOLVE-BLOCK-START does not poison unchanged file, while malformed directive fails closed
+    const proseMentionFile = [
+      '// Note: keep edits inside EVOLVE-BLOCK-START blocks below',
+      'int helper(int a) {',
+      '  /* EVOLVE-BLOCK-START: c_inner */',
+      '  return a * 2;',
+      '  /* EVOLVE-BLOCK-END: c_inner */',
+      '}',
+      '',
+    ].join('\n');
+    const sourceProse = await makeInv([
+      { name: 'packages/kernel.cu', bytes: Buffer.from(baseCu, 'utf8') },
+      { name: 'packages/kernel.py', bytes: Buffer.from(basePy, 'utf8') },
+      { name: 'packages/helper.c', bytes: Buffer.from(proseMentionFile, 'utf8') },
+    ]);
+    const guardSlot = f.plan.verifierSlots.find(s => s.checkId === 'evolve-guard')!;
+    const boundProse = bindSubject(f.lock, sourceProse.manifest);
+    assert.equal(boundProse.ok, true);
+    if (boundProse.ok) {
+      const verifierProse = new Verifier(f.store, f.authority, f.artifacts, f.plan, f.lock, () => boundProse.value);
+      const prepProse = prepareVerification(f.plan, f.lock, guardSlot.id, sourceProse, sourceProse, 16, 'a'.repeat(32));
+      const proseCheck = await verifierProse.run(prepProse, new AbortController().signal);
+      assert.equal(proseCheck.status, 'passed');
+    }
+    const malformedDirective = await runCase(
+      { cu: baseCu.replace('// EVOLVE-BLOCK-START: tile_loop', '// EVOLVE-BLOCK-START') },
+      17,
+    );
+    assert.equal(malformedDirective.guardCheck.status, 'failed');
+    assert.equal(malformedDirective.guardCheck.reason, 'unbalanced_markers');
+
+    // Multi-file evolve-block-guard.v1 packet bound scales beyond single-file guard limit
+    const singleFileGuardLimit = maxPacketBytes({ payloadKind: 'guard', handler: 'line-section-guard.v1' });
+    const evolveGuardLimit = maxPacketBytes({ payloadKind: 'guard', handler: 'evolve-block-guard.v1' });
+    assert.ok(evolveGuardLimit > singleFileGuardLimit);
+    assert.ok(evolveGuardLimit >= EVOLVE_BLOCK_LIMITS.maxFiles * JSON_FILE_BYTES);
+
+    // 14b. Guarded file with zero blocks matching allowedBlockIds fails closed with disallowed_block_id
     const nonMatchingFile = [
       'int helper(int a) {',
       '  /* EVOLVE-BLOCK-START: locked_only */',
@@ -484,7 +522,6 @@ test('evolve-block-guard.v1 enforces //, #, /* */ blocks, outside-byte SHA-256 i
       { name: 'packages/kernel.py', bytes: Buffer.from(basePy, 'utf8') },
       { name: 'packages/helper.c', bytes: Buffer.from(nonMatchingFile, 'utf8') },
     ]);
-    const guardSlot = f.plan.verifierSlots.find(s => s.checkId === 'evolve-guard')!;
     const boundNoMatch = bindSubject(f.lock, sourceNoMatch.manifest);
     assert.equal(boundNoMatch.ok, true);
     if (boundNoMatch.ok) {

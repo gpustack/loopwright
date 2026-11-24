@@ -148,7 +148,11 @@ export function checkedRefusalRecord(input: unknown, plan: CompiledPlan, lock: T
   ) {
     payloadKind = 'guard';
   }
-  const packetAllowed = maxPacketBytes({ payloadKind, ...(overlay ? { overlay } : {}) });
+  const packetAllowed = maxPacketBytes({
+    payloadKind,
+    ...(impl === 'evolve-block-guard.v1' ? { handler: impl } : {}),
+    ...(overlay ? { overlay } : {}),
+  });
 
   const expectedAllowed =
     limits.reason === 'json_file_bytes'
