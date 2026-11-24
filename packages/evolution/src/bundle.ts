@@ -2265,13 +2265,15 @@ export async function verifyEvolutionBundle(
       maxBytes: maxBlobBytes,
       missingCode: 'ARTIFACT_MISSING',
     });
-    verifiedMemberBytes.set(member.path, bytes);
     if (member.path.startsWith('blobs/sha256/')) {
       const hexFromPath = member.path.slice('blobs/sha256/'.length);
       if (hexFromPath !== member.digest.hex) {
         throw new EvolutionError('ARTIFACT_INVALID', `blob path "${member.path}" does not match digest ${member.digest.hex}`);
       }
       verifiedBlobHexes.add(member.digest.hex);
+      // Do not retain large verified Stage A blob buffers in memory after digest verification
+    } else {
+      verifiedMemberBytes.set(member.path, bytes);
     }
   }
 
