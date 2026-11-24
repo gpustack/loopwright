@@ -1,6 +1,6 @@
 # Spec: Evolutionary campaigns, Pareto archive, and bundle export
 
-Status: Built
+Status: Shipped
 Type: Feature
 
 ## Summary
