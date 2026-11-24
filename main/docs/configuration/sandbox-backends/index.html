@@ -261,7 +261,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -426,8 +426,8 @@
 <ul>
 <li><strong>Priority order</strong>: Loopwright probes <code>preferredBackends</code> in order and picks the first backend supporting every listed <code>requiredCapabilities</code> item.</li>
 <li><strong>Declared policy</strong>: Omitting <code>networkMode</code> in an explicit sandbox policy defaults to <code>none</code>.</li>
-<li><strong>Neutral built-in masks</strong>: Locally, sandboxes protect <code>.git</code> and <code>&lt;controlRoot&gt;</code> plus repository-declared <code>scope.protected</code> and <code>deniedReadPaths</code> without hardcoded tool directories. On the GitHub policy profile, <code>.github</code> is also masked read-only unless <code>.github/workflows/**</code> is dual-key unlocked.</li>
-<li><strong>Read-only bind mounts</strong>: Linux <code>bwrap</code> and <code>docker</code> support <code>readOnlyBindMounts</code> for hybrid <code>mountReadOnlyGit</code> (sanitized <code>.git</code> skeleton plus <code>--ro-bind</code> <code>.git/objects</code>), while macOS Seatbelt and Linux Landlock copy <code>.git/objects</code> read-only via single-descriptor <code>1 MiB</code> streaming.</li>
+<li><strong>Neutral built-in masks</strong>: Local sandboxes protect <code>.git</code>, <code>&lt;controlRoot&gt;</code>, <code>scope.protected</code>, and <code>deniedReadPaths</code>. GitHub runs also mask <code>.github</code> unless <code>.github/workflows/**</code> is dual-key unlocked.</li>
+<li><strong>Read-only bind mounts</strong>: Linux <code>bwrap</code> and <code>docker</code> use <code>readOnlyBindMounts</code> for <code>mountReadOnlyGit</code>, while Seatbelt and Landlock copy <code>.git/objects</code> read-only via <code>1 MiB</code> streaming.</li>
 </ul>
 <p>When <code>GITHUB_ACTIONS=true</code>, <code>RUNNER_ENVIRONMENT=github-hosted</code>, and <code>spec.sandbox</code> is omitted, <code>resolveEffectiveTaskpackSandboxPolicy</code> selects <code>direct-dedicated</code>.
 It sets <code>allow-outbound</code>, requires <code>processTreeCleanup</code>, and enables <code>allowDedicatedDirectOverride</code>.

@@ -261,7 +261,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -374,7 +374,7 @@
         
   <h1 id="evolution-campaign">Evolution Campaign</h1>
 <p><code>EvolutionCampaign</code> (<code>&lt;= 64 KiB</code>) defines a bounded multi-generation search over a repository <code>Taskpack</code>, an isolated <code>campaign.sqlite</code> Pareto archive, and signed <code>evolution-bundle.v1</code> exports. Loopwright binds each candidate to an isolated child <code>LocalRunStore</code> and never lets models self-certify hardware results.</p>
-<p>For an end-to-end setup walkthrough, follow <a href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+<p>For an end-to-end setup walkthrough, follow <a href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/">Evolutionary Campaign</a>
 . For <code>TaskContract</code> hardware target cells and threshold rules, see <a href="/loopwright/main/docs/configuration/task-contract/#hardware-target-cells">Task Contract</a>
 .</p>
 <h2 id="contents">Contents</h2>
@@ -383,7 +383,7 @@
 </li>
 <li><a href="#stages-and-population">Stages and population</a>
 </li>
-<li><a href="#sampling-and-objectives">Sampling and objectives</a>
+<li><a href="#sampling-and-budgets">Sampling and budgets</a>
 </li>
 <li><a href="#plateau-team-evolution">Plateau team evolution</a>
 </li>
@@ -400,7 +400,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">targetCellId</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tracks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">triton, cute, cuda_raw]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tracks</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">triton</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">cute</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">cuda_raw</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">stages</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">specialist-then-portfolio</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">specialistBuckets</span><span class="p">:</span><span class="w">
@@ -416,10 +419,20 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">nicheAxes</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bound_pipeline</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">enum</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">hbm, l2, smem_lds_ub, tensor_cube, vector_valu]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">hbm</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">l2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">smem_lds_ub</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">tensor_cube</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">vector_valu</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">occupancy_band</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">numeric_bins</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">edges</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="m">25</span><span class="p">,</span><span class="w"> </span><span class="m">50</span><span class="p">,</span><span class="w"> </span><span class="m">75</span><span class="p">,</span><span class="w"> </span><span class="m">100</span><span class="p">]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">edges</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="m">0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="m">25</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="m">50</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="m">75</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="m">100</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sampling</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noveltyDecayLambda</span><span class="p">:</span><span class="w"> </span><span class="m">1.0</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mutationWeights</span><span class="p">:</span><span class="w">
@@ -431,7 +444,10 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">teamEvolution</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">supervisorRoleId</span><span class="p">:</span><span class="w"> </span><span class="l">supervisor</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowedArchetypeRoles</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">probe-readonly, mutator-sandboxed, reviewer]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowedArchetypeRoles</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">probe-readonly</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">mutator-sandboxed</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">reviewer</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">stallGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minHypervolumeDelta</span><span class="p">:</span><span class="w"> </span><span class="m">0.001</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">triggerOnRunEvalPathology</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
@@ -456,299 +472,73 @@
 <h2 id="stages-and-population">Stages and population</h2>
 <p>Campaigns optimize either one target workload (<code>single-target</code>) or bucket-specialized kernels merged into a verified dispatcher (<code>specialist-then-portfolio</code>):</p>
 <ul>
-<li><strong>Taskpack and cell binding</strong>: <code>spec.taskpack</code> must point to a repository taskpack whose <code>target.matrix</code> declares <code>spec.targetCellId</code>.</li>
-<li><strong>Holdout isolation</strong>: In <code>specialist-then-portfolio</code>, <code>portfolioHeldOutWorkloadId</code> must differ from every specialist bucket <code>heldOutWorkloadId</code> and never enters specialist prompts.</li>
-<li><strong>Ring-topology islands</strong>: Islands maintain independent MAP-Elites archives and migrate rank-1 elites clockwise every <code>migrationIntervalGenerations</code>.</li>
-<li><strong>Niche projection</strong>: Each <code>nicheAxes[]</code> entry maps a metric or hardware diagnostic key into discrete MAP-Elites cells.</li>
+<li><strong>Taskpack &amp; cell binding</strong>: <code>spec.taskpack</code> must point to a repository taskpack whose <code>target.matrix</code> declares <code>spec.targetCellId</code>.</li>
+<li><strong>Holdout isolation</strong>: In <code>specialist-then-portfolio</code>, <code>portfolioHeldOutWorkloadId</code> must differ from every specialist <code>heldOutWorkloadId</code> and never enters specialist prompts.</li>
+<li><strong>Ring-topology islands</strong>: <code>1..16</code> islands maintain independent MAP-Elites archives and migrate rank-1 elites clockwise every <code>migrationIntervalGenerations</code>.</li>
+<li><strong>Niche projection</strong>: <code>1..4</code> <code>nicheAxes[]</code> (<code>enum</code> or <code>numeric_bins</code>) map observed metrics or hardware diagnostics into discrete cells.</li>
 </ul>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Bounds and defaults</th>
-					<th>Behavior</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>spec.taskpack</code></td>
-					<td>Yes</td>
-					<td>Relative repo path</td>
-					<td>Taskpack manifest compiled for every child run</td>
-			</tr>
-			<tr>
-					<td><code>spec.targetCellId</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code>)</td>
-					<td>Hardware cell ID matched against <code>taskpack</code> <code>target.matrix</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.heldOutWorkloadId</code></td>
-					<td>No</td>
-					<td>Identifier (<code>1..64</code>)</td>
-					<td>Optional workload override for <code>single-target</code> mode</td>
-			</tr>
-			<tr>
-					<td><code>spec.tracks</code></td>
-					<td>No</td>
-					<td><code>1..32</code> unique IDs</td>
-					<td>Candidate implementation tracks (<code>triton</code>, <code>cute</code>, <code>cuda_raw</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.stages.mode</code></td>
-					<td>No</td>
-					<td><code>single-target</code> (default) | <code>specialist-then-portfolio</code></td>
-					<td>Selects single workload search or specialist plus portfolio synthesis</td>
-			</tr>
-			<tr>
-					<td><code>stages.specialistBuckets</code></td>
-					<td>No</td>
-					<td><code>1..64</code> <code>{ id, heldOutWorkloadId }</code></td>
-					<td>Required when <code>mode</code> is <code>specialist-then-portfolio</code></td>
-			</tr>
-			<tr>
-					<td><code>stages.portfolioHeldOutWorkloadId</code></td>
-					<td>No</td>
-					<td>Identifier (<code>1..64</code>)</td>
-					<td>Holdout workload certifying final portfolio dispatch</td>
-			</tr>
-			<tr>
-					<td><code>spec.population.islands</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1..16</code>)</td>
-					<td>Number of isolated ring-topology evolution islands</td>
-			</tr>
-			<tr>
-					<td><code>population.migrationIntervalGenerations</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1..1024</code>)</td>
-					<td>Generation cadence between clockwise elite migrations</td>
-			</tr>
-			<tr>
-					<td><code>population.maxMigrationElites</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>0..16</code>)</td>
-					<td>Maximum rank-1 elites migrated per island step</td>
-			</tr>
-			<tr>
-					<td><code>population.nicheAxes[]</code></td>
-					<td>Yes</td>
-					<td><code>1..4</code> axes (<code>enum</code> | <code>numeric_bins</code>)</td>
-					<td><code>enum</code>: <code>1..32</code> values; <code>numeric_bins</code>: <code>2..32</code> sorted edges; optional <code>field</code></td>
-			</tr>
-	</tbody>
-</table>
-<h2 id="sampling-and-objectives">Sampling and objectives</h2>
+<h2 id="sampling-and-budgets">Sampling and budgets</h2>
 <p>Loopwright selects parents with novelty decay, screens clones before hardware dispatch, and ranks passing candidates via NSGA-II:</p>
 <ul>
 <li><strong>Pre-dispatch novelty gate</strong>: Normalized token-shingle clones (<code>Jaccard === 1.0</code>) fail fast with <code>NOVELTY_CLONE_REJECTED</code> and zero hardware calls.</li>
-<li><strong>Advisory System-One nodes</strong>: Optional novelty, strategy, and cascade nodes (<code>@loopwright/decisions</code>) advise sampling and never certify verification.</li>
+<li><strong>Model routing</strong>: <code>sampling.modelBandit</code> selects <code>deterministic-round-robin</code> (default) or <code>ucb1</code> across declared <code>taskpack</code> models.</li>
 <li><strong>Preemption accounting</strong>: Hardware <code>BENCHMARK_PREEMPTED</code> outcomes never consume <code>maxEvaluations</code> and never poison bandit rewards.</li>
-<li><strong>Roofline early stop</strong>: Optional <code>targetRooflineHeadroom</code> stops search once observed hardware headroom reaches the declared bound.</li>
+<li><strong>Roofline early stop</strong>: Optional <code>targetRooflineHeadroom</code> (<code>&gt;= 1.0</code>) stops search once observed hardware headroom reaches the declared bound.</li>
 </ul>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Bounds and defaults</th>
-					<th>Behavior</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>sampling.noveltyDecayLambda</code></td>
-					<td>Yes</td>
-					<td>Finite number in <code>(0, 100]</code></td>
-					<td>Exponential decay weighting parent offspring counts</td>
-			</tr>
-			<tr>
-					<td><code>sampling.mutationWeights</code></td>
-					<td>Yes</td>
-					<td><code>diff_tune</code>, <code>full_rewrite</code>, <code>crossover</code> in <code>[0, 1000]</code></td>
-					<td>Deterministic per-slot operator selection (sum <code>&gt; 0</code>)</td>
-			</tr>
-			<tr>
-					<td><code>sampling.modelBandit</code></td>
-					<td>No</td>
-					<td><code>deterministic-round-robin</code> (default) | <code>ucb1</code></td>
-					<td>Model pool routing across declared <code>taskpack</code> models</td>
-			</tr>
-			<tr>
-					<td><code>sampling.maxCrossoversPerPrompt</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>0..4</code>)</td>
-					<td>Maximum staged parent JSON snapshots per child prompt</td>
-			</tr>
-			<tr>
-					<td><code>spec.objectives[]</code></td>
-					<td>Yes</td>
-					<td><code>1..8</code> unique <code>{ metric, direction }</code></td>
-					<td><code>minimize</code> or <code>maximize</code> metrics for NSGA-II Pareto ranking</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxGenerations</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1..10000</code>)</td>
-					<td>Maximum campaign generations across active stages</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxEvaluations</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1..100000</code>)</td>
-					<td>Hard ceiling on non-preempted child evaluations</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxConcurrentEvaluations</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1..64</code>, <code>&lt;= maxEvaluations</code>)</td>
-					<td>Parallel child evaluation slots per generation</td>
-			</tr>
-			<tr>
-					<td><code>budgets.targetRooflineHeadroom</code></td>
-					<td>No</td>
-					<td>Finite number (<code>&gt;= 1.0</code>)</td>
-					<td>Optional Roofline headroom early-stop target</td>
-			</tr>
-			<tr>
-					<td><code>budgets.scratchpadIntervalGenerations</code></td>
-					<td>No</td>
-					<td>Integer (<code>1..32</code>, default <code>5</code>)</td>
-					<td>Generation interval for read-only scratchpad synthesis</td>
-			</tr>
-	</tbody>
-</table>
 <h2 id="plateau-team-evolution">Plateau team evolution</h2>
-<p>Optional <code>spec.teamEvolution</code> invokes a read-only supervisor role only when an island stalls or hits <code>RunEval</code> loop pathology:</p>
+<p>Optional <code>spec.teamEvolution</code> invokes a read-only supervisor role only when an island stalls (<code>stallGenerations</code>, <code>minHypervolumeDelta</code>) or hits <code>RunEval</code> loop pathology:</p>
 <ul>
-<li><strong>Archetype capability ceiling</strong>: Supervisor <code>TeamPatch</code> outputs may only recompose roles within <code>allowedArchetypeRoles</code> tool and network ceilings.</li>
-<li><strong>Zero-mutation supervisor</strong>: The supervisor runs in an isolated read-only <code>LocalRunStore</code> (<code>no_change</code> verified) with zero repo write tools.</li>
-<li><strong>Trial rollback safety</strong>: Trial teams auto-rollback to the incumbent after <code>trialGenerations</code> without Pareto or niche gain; malformed patches keep the incumbent active.</li>
+<li><strong>Archetype ceiling</strong>: Supervisor <code>TeamPatch</code> outputs may only recompose roles within <code>allowedArchetypeRoles</code> tool and network ceilings (<code>maxTeamSize: 1..4</code>, <code>maxTeamSteps: 1..6</code>).</li>
+<li><strong>Zero-mutation supervisor</strong>: Runs in an isolated read-only <code>LocalRunStore</code> (<code>no_change</code> verified) with zero repo write tools.</li>
+<li><strong>Trial rollback</strong>: Trial teams auto-rollback after <code>trialGenerations</code> without Pareto or niche gain; malformed patches keep the incumbent active.</li>
 </ul>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Bounds and defaults</th>
-					<th>Behavior</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>teamEvolution.enabled</code></td>
-					<td>Yes</td>
-					<td>Boolean</td>
-					<td>Enables plateau and pathology supervisor turns</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.supervisorRoleId</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code>)</td>
-					<td>Read-only supervisor role identifier</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.allowedArchetypeRoles</code></td>
-					<td>Yes</td>
-					<td><code>1..16</code> role IDs</td>
-					<td>Declared archetype roles bounding synthesized teams</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.stallGenerations</code></td>
-					<td>No</td>
-					<td>Integer (<code>1..32</code>, default <code>4</code>)</td>
-					<td>Consecutive low-gain generations before supervisor trigger</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.minHypervolumeDelta</code></td>
-					<td>No</td>
-					<td>Number (<code>&gt;= 0</code>, default <code>0.001</code>)</td>
-					<td>Minimum hypervolume gain required to reset stall counter</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.triggerOnRunEvalPathology</code></td>
-					<td>No</td>
-					<td>Boolean (default <code>true</code>)</td>
-					<td>Triggers supervisor on repeated <code>RunEval</code> tool-loop pathology</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.trialGenerations</code></td>
-					<td>No</td>
-					<td>Integer (<code>1..8</code>, default <code>2</code>)</td>
-					<td>Trial evaluation window before automatic incumbent rollback</td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.maxTeamSize</code></td>
-					<td>No</td>
-					<td>Integer (<code>1..4</code>, default <code>4</code>)</td>
-					<td>Maximum roles permitted in a synthesized <code>TeamPatch</code></td>
-			</tr>
-			<tr>
-					<td><code>teamEvolution.maxTeamSteps</code></td>
-					<td>No</td>
-					<td>Integer (<code>1..6</code>, default <code>6</code>)</td>
-					<td>Maximum DAG steps permitted in a synthesized <code>TeamPatch</code></td>
-			</tr>
-	</tbody>
-</table>
 <h2 id="bundle-export-contract">Bundle export contract</h2>
 <p>Optional <code>spec.export</code> (or <code>loopwright evolve export</code>) writes deterministic, content-addressed <code>evolution-bundle.v1</code> directories or OCI 1.1 layouts:</p>
 <ul>
-<li><strong>Fail-closed receipt verification</strong>: Export refuses missing HMAC secrets, tampered CAS blobs, incompatible hardware provenance, or unopted <code>synthetic_fixture</code> receipts (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>).</li>
-<li><strong>Atomic staging</strong>: Bundles stage into a sibling non-symlink directory and rename atomically; existing destinations fail with <code>EVOLUTION_CONFLICT</code> unless <code>--overwrite</code> is passed.</li>
+<li><strong>Fail-closed verification</strong>: Export refuses missing HMAC secrets, tampered CAS blobs, incompatible hardware provenance, or unopted <code>synthetic_fixture</code> receipts (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>).</li>
+<li><strong>Atomic staging</strong>: Bundles stage into a sibling non-symlink directory and rename atomically (<code>EVOLUTION_CONFLICT</code> on collision without <code>--overwrite</code>).</li>
 </ul>
 <table>
 	<thead>
 			<tr>
-					<th>Field or member</th>
-					<th>Value or format</th>
+					<th>Bundle member</th>
+					<th>Format</th>
 					<th>Role</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
-					<td><code>spec.export.format</code></td>
-					<td><code>dir</code> (default) | <code>oci-layout</code></td>
-					<td>Plain directory or OCI 1.1 image layout (<code>oci-layout</code> + <code>index.json</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.export.outputDir</code></td>
-					<td>Relative path</td>
-					<td>Target directory for auto-export upon completion</td>
-			</tr>
-			<tr>
 					<td><code>manifest.json</code></td>
 					<td><code>kind: EvolutionBundle</code>, <code>version: 1</code></td>
-					<td>Hardware <code>compatibility</code>, <code>paretoSummary</code>, <code>lineage</code>, and member SHA-256 digests</td>
+					<td>Hardware compatibility, Pareto summary, lineage, and member digests</td>
 			</tr>
 			<tr>
 					<td><code>dispatch-manifest.json</code></td>
 					<td><code>version: 1</code>, <code>fallback: baseline</code></td>
-					<td>Bucket routing rules (<code>dimensionBounds</code>, <code>dtypes</code>, <code>alignmentBytes</code>, <code>blobDigest</code>, <code>entrypoint</code>)</td>
+					<td>Bucket routing rules (<code>dimensionBounds</code>, <code>dtypes</code>, <code>blobDigest</code>, <code>entrypoint</code>)</td>
 			</tr>
 			<tr>
 					<td><code>receipts/&lt;id&gt;.verdict.json</code></td>
 					<td>Signed <code>benchmark_verdict</code> JSON</td>
-					<td>Verbatim HMAC-signed hardware verdict receipts per exported individual</td>
+					<td>Verbatim HMAC-signed hardware verdict receipts</td>
 			</tr>
 			<tr>
 					<td><code>blobs/sha256/&lt;hex&gt;</code></td>
 					<td>Verified Stage A CAS blobs</td>
-					<td>Compiled <code>.cubin</code>, <code>.so</code>, <code>.o</code>, or <code>.ptx</code> artifacts referenced by dispatch rules</td>
+					<td>Compiled <code>.cubin</code>, <code>.so</code>, <code>.o</code>, or <code>.ptx</code> artifacts</td>
 			</tr>
 	</tbody>
 </table>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
-      <ul class="related-pages"><li><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+      <ul class="related-pages"><li><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/">Evolutionary Campaign</a>
  (end-to-end setup and <code>loopwright evolve</code> walkthrough)</li><li><a href="/loopwright/main/docs/configuration/task-contract/#hardware-target-cells">Task Contract</a>
  (hardware target cells, thresholds, and provenance)</li><li><a href="/loopwright/main/docs/operations/cli/#evolution-campaigns">CLI</a>
  (<code>runner</code> and <code>evolve</code> subcommands)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
-        <div><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/">Evolutionary Campaigns</a>
+        <div><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/">Evolutionary Campaign</a>
  — mark <code>EVOLVE-BLOCK</code> spans, run a hardware relay, and export signed bundles.</div>
       </section></nav>
 
@@ -762,7 +552,7 @@
     <li><a href="#contents">Contents</a></li>
     <li><a href="#evolutioncampaign">EvolutionCampaign</a></li>
     <li><a href="#stages-and-population">Stages and population</a></li>
-    <li><a href="#sampling-and-objectives">Sampling and objectives</a></li>
+    <li><a href="#sampling-and-budgets">Sampling and budgets</a></li>
     <li><a href="#plateau-team-evolution">Plateau team evolution</a></li>
     <li><a href="#bundle-export-contract">Bundle export contract</a></li>
   </ul>

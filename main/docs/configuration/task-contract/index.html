@@ -261,7 +261,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -373,13 +373,11 @@
       <article>
         
   <h1 id="task-contract">Task Contract</h1>
-<p><code>TaskContract</code> defines <strong>what</strong> bounded work is requested, <strong>where</strong> files may change, <strong>how much</strong> time and model budget a run may spend, and <strong>which</strong> independent checks must pass. In Declarative Taskpack mode, Loopwright compiles <code>TaskContract</code> automatically; in Managed Controller mode, you embed <code>TaskContract</code> inside <code>ControllerConfig</code> (<code>controller.yaml</code>) while keeping credentials and handler digests in <code>TrustedRegistry</code> (see <a href="/loopwright/main/docs/walkthroughs/managed-controller/#configuration-relationships">Configuration relationships</a>
+<p><code>TaskContract</code> defines <strong>what</strong> bounded work is requested, <strong>where</strong> files may change, <strong>how much</strong> time and model budget a run may spend, and <strong>which</strong> independent checks must pass. Declarative Taskpack mode compiles <code>TaskContract</code> automatically; Managed Controller mode embeds it inside <code>ControllerConfig</code> while keeping credentials and handler digests in <code>TrustedRegistry</code> (see <a href="/loopwright/main/docs/walkthroughs/managed-controller/#configuration-relationships">Configuration relationships</a>
 ).</p>
 <h2 id="contents">Contents</h2>
 <ul>
 <li><a href="#taskcontract">TaskContract</a>
-</li>
-<li><a href="#envelope-and-target">Envelope and target</a>
 </li>
 <li><a href="#scope-and-context">Scope and context</a>
 </li>
@@ -388,6 +386,8 @@
 <li><a href="#budgets-and-enforcement">Budgets and enforcement</a>
 </li>
 <li><a href="#acceptance-and-evidence">Acceptance and evidence</a>
+</li>
+<li><a href="#hardware-target-cells">Hardware target cells</a>
 </li>
 </ul>
 <h2 id="taskcontract">TaskContract</h2>
@@ -429,11 +429,11 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">when</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional deterministic activation predicates</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">changedPaths</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&#34;packages/app/**&#34;</span><span class="p">]</span><span class="w"> </span><span class="c"># Optional path globs</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">extensions</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">.json]</span><span class="w"> </span><span class="c"># Optional lowercase .ext suffixes</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">phases</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author, repair]</span><span class="w"> </span><span class="c"># Optional author, review, repair, rework</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">failedChecks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">manifest-json]</span><span class="w"> </span><span class="c"># Optional check IDs</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">failureCodes</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">CHECK_FAILED]</span><span class="w"> </span><span class="c"># Optional verifier codes</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">changedPaths</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="s2">&#34;packages/app/**&#34;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">phases</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">author</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span>- <span class="l">repair</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">wallTimeMs</span><span class="p">:</span><span class="w"> </span><span class="m">300000</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">totalTokens</span><span class="p">:</span><span class="w"> </span><span class="m">64000</span><span class="w">
@@ -461,17 +461,19 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">agent</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">pi-review</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">roleId</span><span class="p">:</span><span class="w"> </span><span class="l">builder</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author-change]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">author-change</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">handoffs</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..16 compact ancestor extracts</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author-summary</span><span class="w"> </span><span class="c"># Optional unique handoff ID</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author-summary</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">fromStep</span><span class="p">:</span><span class="w"> </span><span class="l">author-change</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">source</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">submission</span><span class="w"> </span><span class="c"># Optional artifact, submission, or verdict</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">submission</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">select</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">json_pointer</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">pointers</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">/summary]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional (64..65536, default 8192)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional (defaults to true)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">            </span><span class="nt">pointers</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">              </span>- <span class="l">/summary</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">maxBytes</span><span class="p">:</span><span class="w"> </span><span class="m">8192</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">required</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">verify-manifest</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
@@ -488,535 +490,105 @@
 </div>
 <ul>
 <li><strong>Zero embedded authority</strong>: <code>TaskContract</code> cannot approve handler code, environment variables, network endpoints, or credentials.</li>
-<li><strong>Deterministic canonicalization</strong>: Loopwright hashes <code>TaskContract</code> via RFC 8785 JCS (<code>taskByteDigest</code>) so any field edit produces a distinct run identity.</li>
+<li><strong>Strict schema (<code>&lt;= 1 MiB</code>)</strong>: Every required <code>spec</code> key must appear explicitly (<code>null</code> or <code>[]</code> when empty); unknown keys fail <code>FIELD_UNKNOWN</code>.</li>
+<li><strong>Canonical identity</strong>: Loopwright hashes <code>TaskContract</code> via RFC 8785 JCS (<code>taskByteDigest</code>), so any edit changes run identity.</li>
 </ul>
-<h2 id="envelope-and-target">Envelope and target</h2>
-<p>Strict <code>contractSchema</code> validation requires <code>apiVersion</code>, <code>kind</code>, and <code>spec</code> and requires every declared <code>spec</code> key below to appear explicitly (<code>null</code> or <code>[]</code> where empty; unknown or omitted keys fail with <code>FIELD_REQUIRED</code> or <code>FIELD_UNKNOWN</code>):</p>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and bounds</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>apiVersion</code></td>
-					<td>Yes</td>
-					<td><code>'loopwright.dev/v1alpha1'</code></td>
-					<td>Unified Loopwright document version</td>
-			</tr>
-			<tr>
-					<td><code>kind</code></td>
-					<td>Yes</td>
-					<td><code>'TaskContract'</code></td>
-					<td>Selects strict <code>contractSchema</code> validation (<code>&lt;= 1 MiB</code> input)</td>
-			</tr>
-			<tr>
-					<td><code>spec.goal</code></td>
-					<td>Yes</td>
-					<td>String (<code>1..4096</code> chars)</td>
-					<td>Plain-language objective evaluated by roles and recorded in receipts</td>
-			</tr>
-			<tr>
-					<td><code>spec.taskpack</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Logical taskpack or workflow identifier (<code>Taskpack.metadata.name</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.target.repository</code></td>
-					<td>Yes</td>
-					<td>Repo slug (<code>1..256</code> chars)</td>
-					<td>Target <code>owner/repo</code> path (<code>[A-Za-z0-9._/-]+</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.target.baseRevision</code></td>
-					<td>Yes</td>
-					<td>Revision (<code>1..128</code> chars)</td>
-					<td>Base commit SHA, tag, or branch checked out before agent execution</td>
-			</tr>
-			<tr>
-					<td><code>spec.target.sourceRevision</code></td>
-					<td>Yes</td>
-					<td>Revision (<code>1..128</code> chars)</td>
-					<td>Upstream release, tag, or commit revision that triggered the work</td>
-			</tr>
-			<tr>
-					<td><code>spec.target.matrix</code></td>
-					<td>Yes (<code>null</code> allowed)</td>
-					<td><code>null</code> or cell list (<code>1..64</code>)</td>
-					<td>Target matrix (<code>{ id, platform, variant, hardware? }</code>); <code>hardware</code> required for <code>hardware_execution</code></td>
-			</tr>
-	</tbody>
-</table>
 <h2 id="scope-and-context">Scope and context</h2>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and bounds</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>spec.scope.writable</code></td>
-					<td>Yes</td>
-					<td>Glob list (<code>1..128</code> patterns)</td>
-					<td>Relative path globs where candidate edits are permitted</td>
-			</tr>
-			<tr>
-					<td><code>spec.scope.protected</code></td>
-					<td>Yes</td>
-					<td>Glob list (<code>0..128</code> patterns)</td>
-					<td>Read-only globs overriding <code>writable</code> (pass <code>[]</code> if none)</td>
-			</tr>
-			<tr>
-					<td><code>trustedContext.revision</code></td>
-					<td>Yes</td>
-					<td>Revision (<code>1..128</code> chars)</td>
-					<td>Version label for pinned supplementary context files</td>
-			</tr>
-			<tr>
-					<td><code>trustedContext.discovery</code></td>
-					<td>Yes</td>
-					<td><code>'disabled'</code></td>
-					<td>Disables unpinned workspace prompt discovery so all context is hash-bound</td>
-			</tr>
-			<tr>
-					<td><code>trustedContext.resources</code></td>
-					<td>Yes</td>
-					<td>Object list (<code>0..128</code> items)</td>
-					<td>Read-only context files (<code>&lt;= 1 MiB</code> total; pass <code>[]</code> when unused)</td>
-			</tr>
-			<tr>
-					<td><code>resources[].id</code></td>
-					<td>Conditional</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td><strong>Required</strong> per item; matches <code>TrustedRegistry.spec.resources[].id</code></td>
-			</tr>
-			<tr>
-					<td><code>resources[].kind</code></td>
-					<td>Conditional</td>
-					<td><code>'instruction'</code> | <code>'skill'</code> | <code>'document'</code></td>
-					<td><strong>Required</strong> per item; declares how runtime mounts the context file</td>
-			</tr>
-			<tr>
-					<td><code>resources[].path</code></td>
-					<td>Conditional</td>
-					<td>Relative path (<code>1..1024</code> chars)</td>
-					<td><strong>Required</strong> per item; path resolved under <code>TrustedRegistry</code> directory</td>
-			</tr>
-			<tr>
-					<td><code>resources[].digest</code></td>
-					<td>Conditional</td>
-					<td><code>{ algorithm: 'sha256', hex }</code></td>
-					<td><strong>Required</strong> per item; 64-char lowercase SHA-256 hex digest</td>
-			</tr>
-			<tr>
-					<td><code>resources[].when</code></td>
-					<td>No</td>
-					<td><code>ResourceActivationRule</code></td>
-					<td>Optional predicate object (unconditional when omitted; requires <code>&gt;= 1</code> field)</td>
-			</tr>
-	</tbody>
-</table>
+<ul>
+<li><strong>Writable vs protected</strong>: <code>scope.writable</code> (<code>1..128</code> globs) allows edits; <code>scope.protected</code> (<code>0..128</code> globs) always overrides <code>writable</code>.</li>
+<li><strong>Pinned context</strong>: <code>trustedContext.discovery</code> is fixed to <code>'disabled'</code>; every <code>resources[]</code> entry (<code>0..128</code>, <code>&lt;= 1 MiB</code> total) pins a SHA-256 digest matching <code>TrustedRegistry</code>.</li>
+</ul>
 <h3 id="conditional-activation-rules">Conditional activation rules</h3>
-<p><code>resources[].when</code> filters pre-hashed <code>trustedContext.resources[]</code> per dispatch without runtime discovery (<code>discovery: 'disabled'</code>). Specified fields combine with logical <code>AND</code>, and values inside each list combine with logical <code>OR</code>:</p>
+<p><code>resources[].when</code> filters pre-hashed context per dispatch without runtime discovery. Specified fields combine with <code>AND</code>, and values inside each list combine with <code>OR</code>:</p>
 <table>
 	<thead>
 			<tr>
 					<th>Predicate field</th>
-					<th>Bounds</th>
 					<th>Values and matching</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
 					<td><code>changedPaths</code></td>
-					<td><code>1..128</code> globs</td>
-					<td>Relative path globs matching candidate diffs or initial <code>watchedPaths</code></td>
+					<td><code>1..128</code> globs matching candidate diffs or initial <code>watchedPaths</code></td>
 			</tr>
 			<tr>
 					<td><code>extensions</code></td>
-					<td><code>1..64</code> suffixes</td>
-					<td>Lowercase <code>.ext</code> suffixes (<code>2..33</code> chars) matching changed file extensions</td>
+					<td><code>1..64</code> lowercase <code>.ext</code> suffixes matching changed files</td>
 			</tr>
 			<tr>
 					<td><code>phases</code></td>
-					<td><code>1..4</code> phases</td>
 					<td><code>author</code>, <code>review</code>, <code>repair</code>, <code>rework</code> (<code>format</code> mounts zero conditional rules)</td>
 			</tr>
 			<tr>
-					<td><code>failedChecks</code></td>
-					<td><code>1..64</code> IDs</td>
-					<td>Check identifiers matching failed check receipts</td>
-			</tr>
-			<tr>
-					<td><code>failureCodes</code></td>
-					<td><code>1..64</code> codes</td>
-					<td>Check or verifier reason codes (<code>1..128</code> chars)</td>
+					<td><code>failedChecks</code> / <code>failureCodes</code></td>
+					<td><code>1..64</code> failed check IDs or verifier failure reason codes</td>
 			</tr>
 	</tbody>
 </table>
-<p>Local taskpacks protect <code>.git</code>, <code>&lt;controlRoot&gt;</code> (preserving the exact-file <code>spec.proposal.path</code> carve-out), <code>digests.lock.json</code>, and repository-declared <code>scope.protected</code> by default without hardcoded tool directories. GitHub Action and App entrypoints also protect <code>.github</code>, requiring dual-key <code>allowWorkflowWrites</code> for <code>.github/workflows/**</code>.</p>
 <h2 id="roles-and-steps">Roles and steps</h2>
-<h3 id="role-and-step-fields">Role and step fields</h3>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and bounds</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>spec.roles</code></td>
-					<td>Yes</td>
-					<td>Object list (<code>1..64</code> roles)</td>
-					<td>Named model personas available to <code>agent</code> steps</td>
-			</tr>
-			<tr>
-					<td><code>roles[].id</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Unique role ID bound via <code>ControllerConfig.spec.profiles.roles</code></td>
-			</tr>
-			<tr>
-					<td><code>roles[].adapter</code></td>
-					<td>Yes</td>
-					<td>Label (<code>'pi'</code>)</td>
-					<td>Isolated agent runtime adapter</td>
-			</tr>
-			<tr>
-					<td><code>roles[].provider</code></td>
-					<td>Yes</td>
-					<td>Label (<code>1..128</code> chars)</td>
-					<td>Token-based Pi provider or custom provider ID (matches <code>RoleProfile.selection.provider</code>)</td>
-			</tr>
-			<tr>
-					<td><code>roles[].model</code></td>
-					<td>Yes</td>
-					<td>Label (<code>1..128</code> chars)</td>
-					<td>Coding model ID (for example <code>glm-5.3</code>; see <a href="/loopwright/main/docs/configuration/taskpack/#model-configuration">Model configuration</a>
-)</td>
-			</tr>
-			<tr>
-					<td><code>roles[].thinking</code></td>
-					<td>Yes</td>
-					<td>Label (<code>1..128</code> chars)</td>
-					<td>Pi reasoning level (<code>off</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>, <code>xhigh</code>, <code>max</code>)</td>
-			</tr>
-			<tr>
-					<td><code>roles[].tools</code></td>
-					<td>Yes</td>
-					<td>Tool list (<code>0..128</code> unique)</td>
-					<td>Allowed tools include <code>read</code>, <code>write</code>, <code>edit</code>, <code>bash</code>, <code>delete</code>, <code>mcp</code>, <code>codemode</code>, and <code>mcp__workspace__read_file</code></td>
-			</tr>
-			<tr>
-					<td><code>roles[].resourceIds</code></td>
-					<td>No</td>
-					<td>Identifier list (<code>0..128</code>)</td>
-					<td>Optional subset of <code>trustedContext.resources[].id</code> injected for this role</td>
-			</tr>
-			<tr>
-					<td><code>spec.steps</code></td>
-					<td>Yes</td>
-					<td>Object list (<code>1..256</code> nodes)</td>
-					<td>Acyclic execution graph (<code>&lt;= 2048</code> edges) of authoring and check steps (<code>&lt;= 256</code> checkpoints)</td>
-			</tr>
-			<tr>
-					<td><code>steps[].id</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Unique step node ID bound via <code>ControllerConfig.spec.profiles.steps</code></td>
-			</tr>
-			<tr>
-					<td><code>steps[].kind</code></td>
-					<td>Yes</td>
-					<td><code>'agent'</code> or <code>'check'</code></td>
-					<td>Selects isolated role execution or independent verification</td>
-			</tr>
-			<tr>
-					<td><code>steps[].uses</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Logical operation label mapped to an approved <code>TrustedRegistry</code> handler</td>
-			</tr>
-			<tr>
-					<td><code>steps[].roleId</code></td>
-					<td>Yes (<code>null</code> for check)</td>
-					<td>Identifier or <code>null</code></td>
-					<td>Non-null <code>roles[].id</code> when <code>kind: agent</code>; must be <code>null</code> when <code>kind: check</code></td>
-			</tr>
-			<tr>
-					<td><code>steps[].dependsOn</code></td>
-					<td>Yes</td>
-					<td>Identifier list</td>
-					<td>Upstream <code>steps[].id</code> nodes that must succeed first (pass <code>[]</code> for roots)</td>
-			</tr>
-			<tr>
-					<td><code>steps[].onRework</code></td>
-					<td>No</td>
-					<td><code>{ rejectTo, maxReworks }</code></td>
-					<td>Optional bounded subgraph reset targeting an ancestor step (<code>maxReworks</code>: <code>1..8</code>)</td>
-			</tr>
-			<tr>
-					<td><code>steps[].handoffs</code></td>
-					<td>No</td>
-					<td><code>1..16</code> <code>StepHandoffSelector</code></td>
-					<td>Non-compaction <code>agent</code> steps only (<code>&lt;= 65536</code> bytes aggregate)</td>
-			</tr>
-	</tbody>
-</table>
+<ul>
+<li><strong>Roles (<code>1..64</code>)</strong>: Bind <code>adapter</code> (<code>pi</code> or <code>delegated</code>), <code>provider</code>, <code>model</code>, <code>thinking</code>, <code>tools</code>, and optional <code>resourceIds</code> (see <a href="/loopwright/main/docs/configuration/taskpack/#model-configuration">Model configuration</a>
+).</li>
+<li><strong>Steps (<code>1..256</code> acyclic nodes)</strong>: <code>agent</code> steps bind a <code>roleId</code>; <code>check</code> steps set <code>roleId: null</code>. Optional <code>onRework: { rejectTo, maxReworks }</code> resets an ancestor (<code>1..8</code> times).</li>
+</ul>
 <h3 id="handoff-selectors">Handoff selectors</h3>
-<p><code>steps[].handoffs[]</code> extracts bounded read-only (<code>0o400</code>) context with <code>sourceSha256</code> and <code>extractSha256</code> provenance from a strict DAG ancestor <code>fromStep</code>:</p>
+<p><code>steps[].handoffs[]</code> (<code>1..16</code> entries, <code>&lt;= 65536</code> bytes per step) mounts read-only (<code>0o400</code>) extracts with <code>sourceSha256</code> and <code>extractSha256</code> provenance from a strict DAG ancestor <code>fromStep</code>:</p>
 <table>
 	<thead>
 			<tr>
 					<th>Selector field</th>
-					<th>Required</th>
-					<th>Values and bounds</th>
-					<th>Behavior</th>
+					<th>Values and behavior</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
-					<td><code>id</code></td>
-					<td>No</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Unique selector ID within <code>steps[].handoffs</code></td>
-			</tr>
-			<tr>
 					<td><code>fromStep</code></td>
-					<td>Yes</td>
-					<td>Ancestor <code>steps[].id</code></td>
-					<td>Strict DAG ancestor (<code>GRAPH_CYCLE</code> / <code>REFERENCE_UNKNOWN</code> otherwise)</td>
+					<td>Strict DAG ancestor <code>steps[].id</code> (<code>GRAPH_CYCLE</code> / <code>REFERENCE_UNKNOWN</code> otherwise)</td>
 			</tr>
 			<tr>
 					<td><code>source.kind</code></td>
-					<td>Yes</td>
-					<td><code>'artifact'</code> | <code>'submission'</code> | <code>'verdict'</code></td>
-					<td>Reads <code>&lt;= 1 MiB</code> epoch artifact (<code>source.path</code>), <code>Submission</code>, or <code>StepVerdict</code></td>
+					<td><code>'artifact'</code> (<code>&lt;= 1 MiB</code> epoch file), <code>'submission'</code>, or <code>'verdict'</code></td>
 			</tr>
 			<tr>
 					<td><code>select.kind</code></td>
-					<td>Yes</td>
-					<td><code>'markdown_heading'</code> | <code>'json_pointer'</code> | <code>'full'</code></td>
-					<td>Fence-aware ATX heading (<code>includeSubheadings</code>), <code>1..32</code> RFC 6901 pointers, or slice</td>
+					<td><code>'markdown_heading'</code> (fence-aware), <code>'json_pointer'</code> (<code>1..32</code> RFC 6901 pointers), or <code>'full'</code></td>
 			</tr>
 			<tr>
-					<td><code>maxBytes</code></td>
-					<td>No</td>
-					<td>Integer (<code>64..65536</code>)</td>
-					<td>Per-selector UTF-8 cap (default <code>8192</code>; <code>&lt;= 65536</code> per step)</td>
-			</tr>
-			<tr>
-					<td><code>required</code></td>
-					<td>No</td>
-					<td>Boolean (<code>true</code> default)</td>
-					<td>Fails closed when missing if <code>true</code>; emits omitted provenance if <code>false</code></td>
-			</tr>
-	</tbody>
-</table>
-<p><code>json_pointer</code> decodes <code>~1</code> and <code>~0</code> escapes and rejects <code>__proto__</code>, <code>constructor</code>, and <code>prototype</code> segments.</p>
-<p>The Pi adapter restricts its runtime tool names further.
-For MCP access, it accepts <code>mcp__workspace__read_file</code>, not the generic <code>mcp</code> name.</p>
-<h3 id="step-kinds">Step kinds</h3>
-<table>
-	<thead>
-			<tr>
-					<th>Kind</th>
-					<th><code>roleId</code> rule</th>
-					<th>Runtime behavior</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>agent</code></td>
-					<td>Non-null <code>roles[].id</code></td>
-					<td>Launches an isolated Pi session under sandbox containment to author or repair changes</td>
-			</tr>
-			<tr>
-					<td><code>check</code></td>
-					<td><code>null</code></td>
-					<td>Runs an independent deterministic verifier worker or polls a remote <code>gate.v1</code> service</td>
+					<td><code>maxBytes</code> / <code>required</code></td>
+					<td><code>64..65536</code> bytes (default <code>8192</code>); fails closed when <code>required: true</code> (default)</td>
 			</tr>
 	</tbody>
 </table>
 <h2 id="budgets-and-enforcement">Budgets and enforcement</h2>
-<h3 id="budget-fields">Budget fields</h3>
-<p>Every retry and repair attempt draws from the same parent <code>budgets</code> envelope. Validation fails with <code>BUDGET_INCONSISTENT</code> if any per-call or retry cap exceeds its parent ceiling:</p>
+<p>Every retry and repair draws from one parent <code>budgets</code> envelope (<code>wallTimeMs</code> must exceed <code>controls.drainReserveMs</code>; child caps exceeding parent ceilings fail <code>BUDGET_INCONSISTENT</code>). Optional <code>budgets.overlay</code> raises candidate overlay limits from <code>128</code> files / <code>4 MiB</code> up to <code>16,384</code> files / <code>16 GiB</code>.</p>
 <table>
 	<thead>
 			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and constraint</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>budgets.wallTimeMs</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>&gt;= 1</code> ms)</td>
-					<td>Total wall-clock timeout; must exceed <code>ControllerConfig.spec.controls.drainReserveMs</code></td>
-			</tr>
-			<tr>
-					<td><code>budgets.totalTokens</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>&gt;= 1</code>)</td>
-					<td>Cumulative prompt + completion token ceiling across the entire run</td>
-			</tr>
-			<tr>
-					<td><code>budgets.perCallOutputTokens</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1 .. totalTokens</code>)</td>
-					<td>Maximum completion tokens per model call (<code>&lt;= 262144</code> in Pi profiles)</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxModelCalls</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>&gt;= 1</code>)</td>
-					<td>Maximum total model API invocations across authoring, compaction, and repairs</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxConcurrency</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>1 .. maxModelCalls</code>)</td>
-					<td>Maximum steps dispatched concurrently by the scheduler</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxFormatRepairs</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
-					<td>Allowed repair turns when agent output fails structured submission parsing</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxImplementationRepairs</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
-					<td>Allowed repair turns after an independent check or gate reports failure</td>
-			</tr>
-			<tr>
-					<td><code>budgets.maxTransportRetries</code></td>
-					<td>Yes</td>
-					<td>Integer (<code>0 .. maxModelCalls</code>)</td>
-					<td>Allowed retries on transient network/provider transport failures</td>
-			</tr>
-			<tr>
-					<td><code>budgets.enforcement.*</code></td>
-					<td>Yes</td>
-					<td>All 7 dimension keys</td>
-					<td>Enforcement mode for <code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code></td>
-			</tr>
-			<tr>
-					<td><code>budgets.overlay</code></td>
-					<td>No</td>
-					<td><code>{ maxFiles, maxBytes }</code></td>
-					<td>Optional overlay caps (<code>maxFiles</code>: <code>1..16384</code>, <code>maxBytes</code>: <code>1024..17179869184</code> (<code>16 GiB</code>); default <code>128</code>, <code>4 MiB</code>)</td>
-			</tr>
-	</tbody>
-</table>
-<h3 id="enforcement-modes">Enforcement modes</h3>
-<p>Configure <code>spec.budgets.enforcement.&lt;dimension&gt;</code> for each of the seven dimensions (<code>wallTime</code>, <code>tokens</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code>):</p>
-<table>
-	<thead>
-			<tr>
-					<th>Mode</th>
+					<th>Enforcement mode</th>
 					<th>Admission behavior</th>
-					<th>Controller usage</th>
+					<th>Dimensions</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
 					<td><code>hard_admission</code></td>
-					<td>Pre-reserves quota in SQLite before dispatch; refuses dispatch if remaining allowance is insufficient</td>
-					<td>Required for <code>wallTime</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, and <code>transportRetries</code></td>
+					<td>Pre-reserves quota in SQLite before dispatch; refuses insufficient allowance</td>
+					<td><code>wallTime</code>, <code>modelCalls</code>, <code>concurrency</code>, <code>formatRepairs</code>, <code>implementationRepairs</code>, <code>transportRetries</code></td>
 			</tr>
 			<tr>
 					<td><code>soft_accounting</code></td>
-					<td>Records actual post-call usage and halts subsequent calls once ceiling is reached</td>
-					<td>Used for <code>tokens</code> because exact output token counts are only known after model generation</td>
+					<td>Records actual post-call usage and halts further calls once reached</td>
+					<td><code>tokens</code> (exact output count is known post-generation)</td>
 			</tr>
 	</tbody>
 </table>
 <h2 id="acceptance-and-evidence">Acceptance and evidence</h2>
-<h3 id="artifact-manifests">Artifact manifests</h3>
-<p>An <code>ArtifactManifest</code> uses one of two mutually exclusive <code>spec</code> shapes.
-Classic <code>{ entries }</code> supports up to 256 entries.
-Admission selects it only if the baseline has at most 128 files and 4 MiB total bytes.
-Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
-<p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>16,384</code> files / <code>16 GiB</code> via verified CAS blob pointers).</p>
-<p>Verifier-namespaced descriptors (<code>.loopwright-verifier/&lt;slotId&gt;/*</code>) use a dedicated verifier output budget (<code>64</code> files per slot, <code>256</code> total files, and <code>16 GiB</code> total bytes) separate from candidate <code>budgets.overlay.maxBytes</code>.</p>
-<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence.spec</code> accepts optional <code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>bucketMetrics</code> (<code>1..64</code> buckets, <code>&lt;= 16</code> numeric metrics and <code>&lt;= 8</code> dimensions per bucket), and closed-enum <code>hardwareDiagnostics</code> (<code>boundPipeline</code>: <code>hbm | l2 | smem_lds_ub | tensor_cube | vector_valu | host_launch | comm | unknown</code>, optional counters/percentages/stalls).</p>
-<h3 id="acceptance-fields">Acceptance fields</h3>
+<p><code>spec.acceptance.required</code> lists every check ID that must pass. Admission selects classic <code>{ entries }</code> <code>ArtifactManifest</code> only for small baselines (<code>&lt;= 128</code> files / <code>&lt;= 4 MiB</code>); otherwise it uses <code>tree_overlay</code> (<code>&lt;= 65,536</code> baseline files, CAS blob pointers) with a separate verifier output budget for <code>.loopwright-verifier/&lt;slotId&gt;/*</code>.</p>
 <table>
 	<thead>
 			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and bounds</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>acceptance.required</code></td>
-					<td>Yes</td>
-					<td>Identifier list (<code>1..256</code>)</td>
-					<td>Check IDs that must all report <code>passed</code> before a candidate can complete</td>
-			</tr>
-			<tr>
-					<td><code>acceptance.checks</code></td>
-					<td>Yes</td>
-					<td>Object list (<code>1..256</code> items)</td>
-					<td>Declares every check ID referenced in <code>required</code> (plus any optional checks)</td>
-			</tr>
-			<tr>
-					<td><code>checks[].id</code></td>
-					<td>Yes</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td>Check ID matching the verifier handler&rsquo;s <code>checkId</code> parameter</td>
-			</tr>
-			<tr>
-					<td><code>checks[].allowedEvidenceLevels</code></td>
-					<td>Yes</td>
-					<td>Enum list (<code>1..5</code> unique)</td>
-					<td>Acceptable provenance tiers; <code>hardware_execution</code> must appear alone as <code>['hardware_execution']</code></td>
-			</tr>
-			<tr>
-					<td><code>checks[].targetCellId</code></td>
-					<td>Conditional</td>
-					<td>Identifier (<code>1..64</code> chars)</td>
-					<td><strong>Required</strong> for <code>hardware_execution</code>; references a <code>target.matrix</code> cell with <code>hardware</code></td>
-			</tr>
-			<tr>
-					<td><code>checks[].allowSyntheticHardwareProbe</code></td>
-					<td>No</td>
-					<td>Boolean (default <code>false</code>)</td>
-					<td>Permits <code>probeKind: 'synthetic_fixture'</code> in <code>hardwareProvenance</code> for fixture tests</td>
-			</tr>
-			<tr>
-					<td><code>checks[].metricThresholds</code></td>
-					<td>No</td>
-					<td>Rule list (<code>0..32</code> items)</td>
-					<td>Quantitative <code>bounds</code> and <code>comparative</code> rules verified against <code>evidence.spec.metrics</code></td>
-			</tr>
-	</tbody>
-</table>
-<h3 id="evidence-levels">Evidence levels</h3>
-<table>
-	<thead>
-			<tr>
-					<th>Level</th>
+					<th>Evidence level</th>
 					<th>Observation source</th>
 					<th>Qualification boundary</th>
 			</tr>
@@ -1030,100 +602,38 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
 			<tr>
 					<td><code>synthetic_fixture</code></td>
 					<td>Controlled local test fixture</td>
-					<td>Proves harness logic only; never qualifies live external systems</td>
+					<td>Proves harness logic only; never qualifies live systems</td>
 			</tr>
 			<tr>
 					<td><code>local_execution</code></td>
-					<td>Isolated verifier worker on current host</td>
-					<td>Scoped to current OS/host environment (<code>json-artifact.v1</code>, <code>scope.v1</code>, <code>no-change.v1</code>)</td>
+					<td>Isolated host verifier worker</td>
+					<td>Scoped to current host (<code>json-artifact.v1</code>, <code>scope.v1</code>, <code>command.v1</code>)</td>
 			</tr>
 			<tr>
 					<td><code>external_service</code></td>
-					<td>Signed <code>gate.v1</code> receipt from remote gate</td>
-					<td>Requires trusted <code>gateEndpoints[]</code> URL and HMAC signing credential</td>
+					<td>Signed <code>gate.v1</code> remote receipt</td>
+					<td>Requires trusted <code>gateEndpoints[]</code> URL and HMAC secret</td>
 			</tr>
 			<tr>
 					<td><code>hardware_execution</code></td>
-					<td>Dedicated physical target hardware runner</td>
-					<td>Requires unmixed <code>['hardware_execution']</code>, hardware <code>targetCellId</code>, and <code>benchmark-gate.v1</code></td>
+					<td>Dedicated physical target runner</td>
+					<td>Must appear alone as <code>['hardware_execution']</code> with <code>benchmark-gate.v1</code></td>
 			</tr>
 	</tbody>
 </table>
-<h3 id="hardware-target-cells">Hardware target cells</h3>
-<p>Each <code>spec.target.matrix[]</code> cell accepts an optional <code>hardware</code> block alongside <code>id</code>, <code>platform</code>, and <code>variant</code>. Omitting unset optional fields preserves existing <code>targetMatrixDigest</code> hashes.</p>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Type and bounds</th>
-					<th>Meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>hardware.accelerator</code></td>
-					<td>Yes</td>
-					<td>Printable ASCII (<code>1..64</code>)</td>
-					<td>Target accelerator label (such as <code>sm_89</code>, <code>sm_90a</code>, <code>ascend_910b</code>, <code>gfx1101</code>)</td>
-			</tr>
-			<tr>
-					<td><code>hardware.isolationMode</code></td>
-					<td>Yes</td>
-					<td><code>'whole_device'</code> | <code>'sliced'</code></td>
-					<td>Whole-device exclusivity or sliced accelerator partition mode</td>
-			</tr>
-			<tr>
-					<td><code>hardware.deviceCount</code></td>
-					<td>No</td>
-					<td>Safe integer (<code>1..64</code>)</td>
-					<td>Expected device count verified against observed <code>hardwareProvenance</code></td>
-			</tr>
-			<tr>
-					<td><code>hardware.driverConstraint</code></td>
-					<td>No</td>
-					<td>Printable string (<code>1..128</code>)</td>
-					<td>Exact driver match or <code>&gt;=&lt;dotted-version&gt;</code> minimum version constraint</td>
-			</tr>
-			<tr>
-					<td><code>hardware.topology</code></td>
-					<td>No</td>
-					<td>Printable string (<code>1..128</code>)</td>
-					<td>Optional interconnect or device topology constraint</td>
-			</tr>
-			<tr>
-					<td><code>hardware.forbiddenSymbolPatterns</code></td>
-					<td>No</td>
-					<td><code>0..64</code> ASCII substrings (<code>&lt;= 128</code>)</td>
-					<td>Glob-free Stage A symbol denylist (<code>cublas</code>, <code>rocblas</code>, <code>aclnn</code>)</td>
-			</tr>
-			<tr>
-					<td><code>hardware.maxRegisterCount</code></td>
-					<td>No</td>
-					<td>Safe integer (<code>&gt;= 0</code>)</td>
-					<td>Stage A per-thread register ceiling before Stage B</td>
-			</tr>
-			<tr>
-					<td><code>hardware.maxLocalSpillBytes</code></td>
-					<td>No</td>
-					<td>Safe integer (<code>&gt;= 0</code>)</td>
-					<td>Stage A local memory spill ceiling (<code>STAGE_A_STATIC_AUDIT_FAILED</code>)</td>
-			</tr>
-	</tbody>
-</table>
-<h3 id="thresholds-and-provenance">Thresholds and provenance</h3>
+<h2 id="hardware-target-cells">Hardware target cells</h2>
+<p>Each <code>spec.target.matrix[]</code> cell accepts an optional <code>hardware</code> block (<code>accelerator</code>, <code>isolationMode: 'whole_device' | 'sliced'</code>, optional <code>deviceCount</code>, <code>driverConstraint</code>, <code>topology</code>, and Stage A static audit limits <code>forbiddenSymbolPatterns</code>, <code>maxRegisterCount</code>, <code>maxLocalSpillBytes</code>).</p>
 <ul>
-<li><strong>Bounds and comparative rules</strong>: <code>bounds</code> requires <code>{ metric, min?, max? }</code>; <code>comparative</code> requires <code>{ metric, baselineMetric, operator, threshold }</code> (<code>min_ratio</code>, <code>max_ratio</code>, <code>max_delta</code>). Both accept optional <code>bucketScope</code> (<code>'aggregate' | 'all_buckets' | { bucketId }</code>).</li>
-<li><strong>Hardware provenance</strong>: Passing <code>hardware_execution</code> <code>Evidence</code> requires <code>hardwareProvenance</code> (<code>targetCellId</code>, <code>probeKind: 'physical' | 'synthetic_fixture'</code>, <code>vendor</code>, <code>deviceModel</code>, <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount</code>, <code>driverVersion</code>, <code>runtimeVersion</code>, <code>topology?</code>, <code>workloadDigest</code>, <code>clockLockMode: 'locked' | 'unlocked' | 'unknown'</code>).</li>
-<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> enforces <code>bucketScope</code> across <code>bucketMetrics</code>, requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
+<li><strong>Metric thresholds</strong>: <code>metricThresholds[]</code> (<code>0..32</code>) enforces <code>bounds</code> or <code>comparative</code> (<code>min_ratio</code>/<code>max_ratio</code>/<code>max_delta</code>) rules across optional <code>bucketScope</code>.</li>
+<li><strong>Physical provenance</strong>: <code>hardware_execution</code> requires <code>hardwareProvenance</code> with <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe: true</code>, failing closed on mismatch (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
 </ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
- (end-to-end CLI setup and relationship diagram)</li><li><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
+ (CLI setup and relationship diagram)</li><li><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
  (single-file automated mode)</li><li><a href="/loopwright/main/docs/configuration/evolution-campaign/">Evolution Campaign</a>
- (multi-generation search, islands, and bundle export schema)</li></ul>
+ (multi-generation search and bundle export)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
@@ -1139,7 +649,6 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
   <ul>
     <li><a href="#contents">Contents</a></li>
     <li><a href="#taskcontract">TaskContract</a></li>
-    <li><a href="#envelope-and-target">Envelope and target</a></li>
     <li><a href="#scope-and-context">Scope and context</a>
       <ul>
         <li><a href="#conditional-activation-rules">Conditional activation rules</a></li>
@@ -1147,26 +656,12 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
     </li>
     <li><a href="#roles-and-steps">Roles and steps</a>
       <ul>
-        <li><a href="#role-and-step-fields">Role and step fields</a></li>
         <li><a href="#handoff-selectors">Handoff selectors</a></li>
-        <li><a href="#step-kinds">Step kinds</a></li>
       </ul>
     </li>
-    <li><a href="#budgets-and-enforcement">Budgets and enforcement</a>
-      <ul>
-        <li><a href="#budget-fields">Budget fields</a></li>
-        <li><a href="#enforcement-modes">Enforcement modes</a></li>
-      </ul>
-    </li>
-    <li><a href="#acceptance-and-evidence">Acceptance and evidence</a>
-      <ul>
-        <li><a href="#artifact-manifests">Artifact manifests</a></li>
-        <li><a href="#acceptance-fields">Acceptance fields</a></li>
-        <li><a href="#evidence-levels">Evidence levels</a></li>
-        <li><a href="#hardware-target-cells">Hardware target cells</a></li>
-        <li><a href="#thresholds-and-provenance">Thresholds and provenance</a></li>
-      </ul>
-    </li>
+    <li><a href="#budgets-and-enforcement">Budgets and enforcement</a></li>
+    <li><a href="#acceptance-and-evidence">Acceptance and evidence</a></li>
+    <li><a href="#hardware-target-cells">Hardware target cells</a></li>
   </ul>
 </nav>
         

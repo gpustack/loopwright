@@ -27,7 +27,7 @@ Create a GitHub App in your personal [Developer settings](https://github.com/set
 | App secrets | Repository or organization secrets: `LOOPWRIGHT_APP_ID`, `LOOPWRIGHT_APP_PRIVATE_KEY` |
 | Webhook secret | `LOOPWRIGHT_WEBHOOK_SECRET` when `app-serve` is enabled |
 
-Use `actions/create-github-app-token@v1` with `gpustack/loopwright@main` in the [consumer workflow](/loopwright/main/docs/operations/github-action/index.md). The App's webhook secret and private key must also be available in the trusted daemon environment when enabled.
+Use `actions/create-github-app-token@v1` with `gpustack/loopwright@main` in the [consumer workflow](/loopwright/main/docs/operations/github-action/index.md). Supply the App webhook secret and private key in the trusted daemon environment when `app-serve` is enabled.
 
 ## Admission and permissions
 
@@ -37,13 +37,13 @@ Use `actions/create-github-app-token@v1` with `gpustack/loopwright@main` in the 
   Comment["01 Verify HMAC"] -> Authorize["02 Authorize actor"] -> Enqueue["03 Fence tenant queue"] -> Broker["04 Broker repo token"]
 -->
 
-Subscribe only to the event types used by your taskpack, including release, issue comment and pull request review as needed. Comment commands are restricted to authorized actors. Verify `X-Hub-Signature-256` over raw request bytes with HMAC-SHA256; mismatches and conflicting delivery IDs fail closed. The receiver implements verification before intake.
+Subscribe only to the event types used by your taskpack. Comment commands require authorized actors. The receiver verifies `X-Hub-Signature-256` over raw request bytes with HMAC-SHA256 and fails closed on mismatches or conflicting delivery IDs.
 
-Installation tokens are restricted to one repository. The `read_only` profile grants contents and metadata read; `publish_pull_request` grants contents and pull requests write plus metadata read. Store the App private key and webhook secret in trusted host secret storage.
+Installation tokens are restricted to one repository. The `read_only` profile grants contents and metadata read; `publish_pull_request` grants contents and pull requests write plus metadata read.
 
 ## GitHubAppConfig
 
-Save the daemon configuration as `github-app.yaml`:
+Save the daemon configuration as `github-app.yaml` (`<= 64 KiB`):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -58,36 +58,18 @@ spec:
     host: 127.0.0.1
     port: 8787
     webhookPath: /webhooks/github # Optional (defaults to /webhooks/github)
-  tokenTtlSeconds: 600 # Optional (defaults to 600)
-  maxPayloadBytes: 1048576 # Optional (defaults to 1048576)
+  tokenTtlSeconds: 600 # Optional (60..3600, defaults to 600)
+  maxPayloadBytes: 1048576 # Optional (1024..26214400, defaults to 1048576)
   taskpackPath: .loopwright/taskpack.yaml # Optional repo-relative taskpack path
-  suitePath: .loopwright/suite.yaml # Optional suite path (mutually exclusive with taskpackPath)
-  operatorAllowlist: # Optional GitHub login allowlist for slash commands
+  suitePath: .loopwright/suite.yaml # Optional mutually exclusive with taskpackPath
+  operatorAllowlist: # Optional 1..64 GitHub logins for slash commands
     - release-operator
 ```
 
-- **Secrets**: Provide environment variable names, not secret values.
-- **Listen**: Add authenticated ingress before serving external webhooks.
-- **Path**: `taskpackPath` and `suitePath` must be repo-relative, regular files, and mutually exclusive.
-
-| Field path | Required | Default | Bounds and constraint |
-| --- | --- | --- | --- |
-| `apiVersion` | Yes | — | Must be `'loopwright.dev/v1alpha1'` |
-| `kind` | Yes | — | Must be `'GitHubAppConfig'` (`<= 64 KiB` file) |
-| `spec.appId` | Yes | — | Non-empty GitHub App numeric ID or slug (`1–64` chars) |
-| `spec.webhookSecretEnv` | Yes | — | Uppercase env var name (`[A-Z][A-Z0-9_]*`) holding HMAC secret |
-| `spec.privateKeyEnv` | Yes | — | Uppercase env var name (`[A-Z][A-Z0-9_]*`) holding App PEM |
-| `spec.apiBaseUrl` | No | `https://api.github.com` | HTTPS URL (or loopback HTTP); used for tokens and `issue_comment` PR lookup |
-| `spec.listen` | Conditional | Unset | Optional mapping; **required** with `enabled: true` to run `app-serve` |
-| `spec.listen.enabled` | No | `false` | Set `true` to enable `loopwright app-serve` |
-| `spec.listen.host` | Conditional | `127.0.0.1` | **Required** when `spec.listen` is present; keep tenant routes private |
-| `spec.listen.port` | Conditional | `8787` | **Required** when `spec.listen` is present; integer `0–65535` |
-| `spec.listen.webhookPath` | No | `/webhooks/github` | Leading `/` path; cannot collide with `/healthz` or `/tenants/*` |
-| `spec.tokenTtlSeconds` | No | `600` | Integer `60–3600` cached installation token ceiling |
-| `spec.maxPayloadBytes` | No | `1048576` | Integer `1024–26214400` inbound webhook byte cap |
-| `spec.taskpackPath` | No | Unset | Relative regular-file path validated at startup (mutually exclusive with `suitePath`) |
-| `spec.suitePath` | No | Unset | Relative `TaskpackSuite` path validated at startup (mutually exclusive with `taskpackPath`) |
-| `spec.operatorAllowlist` | No | Unset | GitHub login list (`1–64` entries) authorized for slash commands |
+- **Secrets**: Name uppercase environment variables (`[A-Z][A-Z0-9_]*`), never raw secret values.
+- **Listen**: Set `listen.enabled: true` with `host` and `port`, and place authenticated ingress in front of external webhooks.
+- **Manifest path**: `taskpackPath` and `suitePath` must be repo-relative regular files and are mutually exclusive.
+- **Route isolation**: `webhookPath` must start with `/` and cannot collide with `/healthz` or `/tenants/*`.
 
 ## Control plane
 
@@ -97,11 +79,9 @@ Set `spec.listen.enabled: true`, bind the named secrets in the trusted environme
 loopwright app-serve --config github-app.yaml --repo .
 ```
 
-The command applies the configured listener and token broker settings. It refuses disabled or invalid configuration. The loader resolves the named webhook secret and private key from the environment.
+The daemon binds loopback by default and exposes `listen.webhookPath` (default `/webhooks/github`), `/healthz`, and private tenant lease/settle routes. The broker issues scoped short-lived tokens and scrubs secrets from responses.
 
-The service binds loopback by default. Provide authenticated ingress and a configured broker in the trusted host; do not expose tenant lease endpoints publicly. Endpoints include the configured `listen.webhookPath` (default `/webhooks/github`), `/healthz`, and tenant lease and settle routes. The broker issues scoped short-lived tokens and scrubs secrets from responses.
-
-When `spec.suitePath` is configured, a single verified `X-GitHub-Delivery` fans out across matching domains while deduplicating redeliveries, enforces the suite-wide protected path union, and binds each leased domain to its per-domain manifest SHA-256 digest. For `issue_comment` webhooks lacking PR branch metadata, intake queries `spec.apiBaseUrl` (default `https://api.github.com`) to verify same-repo PR ownership and target branch routing before admission.
+With `spec.suitePath`, one verified `X-GitHub-Delivery` fans out across matching domains while deduplicating redeliveries, enforcing the suite protected union, and binding each domain manifest SHA-256. For `issue_comment` webhooks lacking PR branch metadata, intake queries `spec.apiBaseUrl` to verify same-repo ownership before admission.
 
 ### Webhook events
 

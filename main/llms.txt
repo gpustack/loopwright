@@ -2,47 +2,58 @@
 
 > Loopwright is a TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: a48fc0604262a5b5f92cf68ffd78454f032b8fb8.
+Documentation version: main. Source revision: dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
-## Interactive Bootstrap Protocol
-
-Follow the [Bootstrap Interview Reference](/loopwright/main/references/bootstrap-interview.md) when initializing or migrating Loopwright automation.
-
-1. Inspect first, edit last: scan existing sync scripts, Dockerfiles, dependency manifests (go.mod, package.json, pyproject.toml), Helm charts, version tables, and workflows BEFORE asking questions or editing any files.
-2. Interview one question at a time: ask one focused question per turn with a repository-grounded `(Recommended)` default, covering operating mode (Declarative Taskpack vs Managed Controller), modular domain split (explicit /** scopes) and exclusions, schedule cadence, upstream source kinds (prefer github-release with allowPrerelease: false, http-json versionPath/monotonicSemver, and upstreamGroups lockstep), bounded Host Preflight (split stagedResources) -> networkMode: none -> directory-mounted command.v1 and structural guards, spec.execution trust mode, spec.memory.apply, and workflow panel inputs (mode: auto).
-3. Enforce zero model-specific code coupling: declare model pools and unified apiKeyEnv: LOOPWRIGHT_PROVIDER_TOKEN exclusively in *taskpack.yaml (spec.models); never generate model-specific helper scripts or hardcode vendor names in workflows or scripts.
-4. Fetch schema guides before writing YAML: read the owning Markdown exports linked below right before emitting config (Taskpack + GitHub Action for Mode 1; Managed Controller + Task Contract + Controller and Registry for Mode 2) so spec.execution, spec.preflight, command.v1 parameters, spec.models[] fields, Action inputs, and controller schemas match verbatim.
-5. Gate on Stage 5 approval: present the architecture summary table and wait for explicit user confirmation before generating two-space Pretty YAML (apiVersion: loopwright.dev/v1alpha1), deterministic offline fixture selftests, loopwright digest sync --check, and tiered qualification steps.
-
 ## Getting Started
 
-- [Architecture](/loopwright/main/docs/getting-started/architecture/index.md): Execution stages, trust boundaries, and configuration map
-- [Installation](/loopwright/main/docs/getting-started/installation/index.md): Install the CLI on a laptop or wire the GitHub Action
+- [Architecture](https://docs.gpustack.ai/loopwright/main/docs/getting-started/architecture/index.md): Execution stages, operating modes, trust boundaries, and configuration map
+- [Installation](https://docs.gpustack.ai/loopwright/main/docs/getting-started/installation/index.md): Install the CLI on a laptop or wire the GitHub Action
 
 ## Operations
 
-- [GitHub Action](/loopwright/main/docs/operations/github-action/index.md): Configure and run the reusable GitHub Action
-- [GitHub App](/loopwright/main/docs/operations/github-app/index.md): Deploy and configure the GitHub App control plane
-- [CLI](/loopwright/main/docs/operations/cli/index.md): Generate drafts, inspect runs, reconcile, and audit closure
-- [Coding Agents](/loopwright/main/docs/operations/coding-agents/index.md): Drive zero-secret delegated step loops from host coding agents
+- [GitHub Action](https://docs.gpustack.ai/loopwright/main/docs/operations/github-action/index.md): Configure and run the reusable GitHub Action
+- [GitHub App](https://docs.gpustack.ai/loopwright/main/docs/operations/github-app/index.md): Deploy and configure the GitHub App control plane
+- [CLI](https://docs.gpustack.ai/loopwright/main/docs/operations/cli/index.md): Generate drafts, inspect runs, reconcile, and audit closure
+- [Coding Agents](https://docs.gpustack.ai/loopwright/main/docs/operations/coding-agents/index.md): Drive zero-secret delegated step loops from host coding agents
 
 ## Walkthroughs
 
-- [Declarative Taskpack](/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md): Author or migrate a single-file repository taskpack
-- [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md): Configure out-of-repo registries, contracts, and CLI runs
-- [Evolutionary Campaigns](/loopwright/main/docs/walkthroughs/evolutionary-campaigns/index.md): Run bounded island optimization with hardware gates and bundle export
+- [Declarative Taskpack](https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md): Author or migrate a single-file repository taskpack
+- [Managed Controller](https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/managed-controller/index.md): Configure out-of-repo registries, contracts, and CLI runs
+- [Evolutionary Campaign](https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/evolutionary-campaign/index.md): Run bounded island optimization with hardware gates and bundle export
 
 ## Configuration
 
-- [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md): Configure every field and enum in .loopwright/taskpack.yaml
-- [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md): Configure task goals, scope, roles, budgets, DAGs, and evidence
-- [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md): Configure approved handlers, profiles, credentials, and controls
-- [Sandbox Backends](/loopwright/main/docs/configuration/sandbox-backends/index.md): Select OS or container sandboxes and required capabilities
-- [Decision Routing](/loopwright/main/docs/configuration/decision-routing/index.md): Configure advisory routing policies, providers, and thresholds
-- [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md): Configure stages, islands, objectives, budgets, teamEvolution, and export
+- [Taskpack](https://docs.gpustack.ai/loopwright/main/docs/configuration/taskpack/index.md): Configure .loopwright/taskpack.yaml and multi-domain TaskpackSuite manifests
+- [Task Contract](https://docs.gpustack.ai/loopwright/main/docs/configuration/task-contract/index.md): Configure task goals, scope, roles, budgets, DAGs, and evidence
+- [Controller and Registry](https://docs.gpustack.ai/loopwright/main/docs/configuration/controller-and-registry/index.md): Configure approved handlers, profiles, credentials, and controls
+- [Sandbox Backends](https://docs.gpustack.ai/loopwright/main/docs/configuration/sandbox-backends/index.md): Select OS or container sandboxes and required capabilities
+- [Decision Routing](https://docs.gpustack.ai/loopwright/main/docs/configuration/decision-routing/index.md): Configure advisory routing policies, providers, and thresholds
+- [Evolution Campaign](https://docs.gpustack.ai/loopwright/main/docs/configuration/evolution-campaign/index.md): Configure stages, islands, objectives, budgets, teamEvolution, and export
+
+## Reference
+
+- [Reference Hub](https://docs.gpustack.ai/loopwright/main/references/README.md): Task routing, exact resource aliases, and evidence labels for flat references
+- [Bootstrap Interview Reference](https://docs.gpustack.ai/loopwright/main/references/bootstrap-interview.md): Interactive agent interview protocol for Mode 1, Mode 2, and Mode 3 setup
+- [Taskpack and Contract Reference](https://docs.gpustack.ai/loopwright/main/references/taskpack-and-contract-schema.md): Complete field, bound, and enum dictionary for Taskpack, TaskContract, and EvolutionCampaign
+- [Controller and Registry Reference](https://docs.gpustack.ai/loopwright/main/references/controller-and-registry-schema.md): Complete TrustedRegistry, ControllerConfig, and DecisionPolicy field and hook tables
+- [CLI and Action Reference](https://docs.gpustack.ai/loopwright/main/references/cli-and-action-reference.md): Exhaustive action.yml inputs, CLI subcommand flags, exit codes, and GitHubAppConfig
+- [Coding Agent Protocol Reference](https://docs.gpustack.ai/loopwright/main/references/coding-agent-protocol.md): StepYield JSON schema, lease diagnostics, exit codes, and verified overlay-apply script
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/a48fc0604262a5b5f92cf68ffd78454f032b8fb8/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Development and Verification](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/development.md): Build, test, lint, and verify workspace changes
+- [Workspace Internals and Boundaries](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/internals.md): Navigate package layers, code ownership, and invariants
+- [Canonical Identity and Digests](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/identity.md): Implement RFC 8785 JCS canonicalization and SHA-256 digests
+- [Verification Evidence and Authority](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/evidence.md): Implement independent check hooks and HMAC gate receipts
+- [Persistent Local State Store](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/state.md): Implement SQLite WAL lease fencing and monotonic clock guards
+- [Isolated Pi Runtime Adapter](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/pi-adapter.md): Implement isolated Pi sessions, brokers, and secret scrubbing
+- [Runner Taskpack and Offline Parity](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/runner-taskpack.md): Maintain runner parity and frozen taskpack fixtures
+- [Reviewed Memory and CAS Compaction](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/memory.md): Implement CAS reviewed memory proposals and compaction
+- [GitHub App Control Plane Internals](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/github-app-internals.md): Implement webhook verification, intake gates, and compilation
+- [Capability Closure Matrix and Failure Semantics](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/closure-matrix.md): Maintain capability closure ledger and failure injection suites
+- [ADR 0001: Local State Authority](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/adr/0001-local-state-authority.md): Record the fenced local SQLite authority decision
+- [ADR 0002: Isolated Pi SDK](https://github.com/gpustack/loopwright/blob/dedec1dc8452ea04e5b0ea9ffd76e4944d580ae7/docs/contribute/adr/0002-isolated-pi-sdk.md): Record the isolated Pi runtime boundary decision

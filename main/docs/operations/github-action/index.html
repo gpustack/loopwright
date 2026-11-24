@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -382,7 +382,7 @@
 </li>
 <li><a href="#secrets-and-environment">Secrets and environment</a>
 </li>
-<li><a href="#inputs">Inputs</a>
+<li><a href="#core-inputs">Core inputs</a>
 </li>
 <li><a href="#outputs">Outputs</a>
 </li>
@@ -390,7 +390,7 @@
 </li>
 </ul>
 <h2 id="workflow">Workflow</h2>
-<p>Install a taskpack and configure the provider and App secrets before enabling this workflow. The App installation needs repository contents and pull request write permissions for native publication.</p>
+<p>Install a taskpack and configure provider and App secrets before enabling this workflow. The App installation needs repository contents and pull request write permissions for native publication.</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright</span><span class="w">
@@ -399,7 +399,8 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">cron</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;0 3 * * *&#39;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">workflow_dispatch</span><span class="p">:</span><span class="w"> </span>{}<span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">issue_comment</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">types</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">created]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">types</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">created</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="nt">permissions</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">contents</span><span class="p">:</span><span class="w"> </span><span class="l">read</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="nt">jobs</span><span class="p">:</span><span class="w">
@@ -417,7 +418,6 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">suite-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/suite.yaml</span><span class="w"> </span><span class="c"># Optional multi-domain suite</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">domain</span><span class="p">:</span><span class="w"> </span><span class="l">docs</span><span class="w"> </span><span class="c"># Optional suite domain ID</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">resolve-suite-only</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional matrix resolution only</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">baseline-alignment</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;off&#39;</span><span class="w"> </span><span class="c"># Optional (off, fail-fast, extract-context)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional (auto, candidate, or no-change)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-privileged-execution</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key host unlock</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">allow-workflow-writes</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional dual-key workflow write unlock</span><span class="w">
@@ -425,22 +425,19 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-installation-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_INSTALLATION_ID }}</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="l">json,github-step-summary</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">env</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Mode <code>auto</code></strong>: Runs <code>spec.preflight</code> or upstream discovery, dispatches <code>candidate</code> when updates exist or <code>force</code> is <code>'true'</code>, and compiles a check-only <code>no-change</code> run with zero agent model calls when settled.</li>
-<li><strong>Suite matrix</strong>: Pass <code>suite-path</code> with <code>resolve-suite-only: 'true'</code> to emit <code>outputs.matrix</code> (<code>{ include: [...] }</code>), then run each matrix job with <code>domain: ${{ matrix.domainId }}</code> for per-job revalidation.</li>
-<li><strong>Comment checkout</strong>: Workflows triggered on <code>issue_comment</code> should fetch the PR head commit when running candidate checkout (<code>Suite</code> lookup verifies <code>head.repo.full_name</code>, <code>base.ref</code>, <code>head.ref</code>, and <code>head.sha</code>).</li>
-<li><strong>Dual-key authority</strong>: Even under <code>spec.execution.mode: strict</code>, enabling <code>allowHostEnv</code>, <code>allowHostPath</code>, <code>mountReadOnlyGit</code>, <code>allowCheckNetwork</code>, <code>allowAgentNetwork</code>, or <code>command.v1</code> <code>mountReadOnlyGit: true</code> requires <code>allow-privileged-execution: 'true'</code>. Enabling <code>allowWorkflowWrites: true</code> independently requires <code>allow-workflow-writes: 'true'</code>, and <code>command.v1</code> <code>parameters.mounts[]</code> requires both <code>allow-privileged-execution: 'true'</code> and each <code>source</code> path listed in <code>allow-host-mounts</code> (for example <code>/var/run/docker.sock</code>).</li>
-<li><strong>Provider</strong>: Set the token variable for the selected model, not necessarily <code>ZAI_API_KEY</code>.</li>
-<li><strong>Runtime</strong>: The Action sets up Node.js 26 and builds the workspace if its entrypoint is absent.</li>
+<li><strong>Mode <code>auto</code></strong>: Runs preflight or upstream discovery, dispatches <code>candidate</code> on changes, or settles <code>no-change</code> without model calls.</li>
+<li><strong>Suite matrix</strong>: Pass <code>suite-path</code> with <code>resolve-suite-only: 'true'</code> to emit <code>outputs.matrix</code>, then run each job with <code>domain</code>.</li>
+<li><strong>Dual-key authority</strong>: Privileged capabilities require <code>allow-privileged-execution: 'true'</code>; workflow edits require <code>allow-workflow-writes: 'true'</code>; host mounts require <code>allow-host-mounts</code>.</li>
+<li><strong>Provider</strong>: Set the token environment variable expected by the model selected in <code>spec.models</code>.</li>
+<li><strong>Runtime</strong>: The Action provisions Node.js <code>26</code> and builds the workspace if its entrypoint is absent.</li>
 </ul>
 <h2 id="execution-and-publication">Execution and publication</h2>
-<p>A live Action enforces <code>policyProfile: github</code> (persisted in <code>run.json</code>), validates <code>spec.triggers</code> strictly <strong>before</strong> <code>spec.preflight</code>, resolves repository identity and revisions, authorizes the actor, initializes <code>SecretScrubber</code>, runs <code>spec.preflight</code>, and checks for an existing managed PR.</p>
-<p>When <code>suite-path</code> is set, intake resolves <code>.loopwright/suite.yaml</code> (verifying PR ownership via GitHub API on <code>issue_comment</code> and refusing cross-fork PRs or domain conflicts), enforces the suite-wide protected union, and revalidates domain eligibility per matrix job before compiling outside the checkout.</p>
+<p>Live runs enforce <code>policyProfile: github</code>, validate <code>spec.triggers</code> before <code>spec.preflight</code>, authorize the actor, initialize <code>SecretScrubber</code>, and compile artifacts outside the checkout.</p>
 <table>
 	<thead>
 			<tr>
@@ -451,38 +448,32 @@
 	<tbody>
 			<tr>
 					<td>Preflight</td>
-					<td>Validates <code>spec.triggers</code> (and <code>suite-path</code> domain/stage probes) first, then runs <code>spec.preflight.script</code> after actor auth and scrubber setup</td>
+					<td>Validates <code>spec.triggers</code> (and <code>suite-path</code> probes) first, then runs <code>spec.preflight.script</code> post-auth</td>
 			</tr>
 			<tr>
 					<td>Align</td>
-					<td>When <code>sourceRevision !== baseRevision</code>, runs isolated 3-way <code>git merge-tree</code> (<code>fail-fast</code> blocks conflicts; <code>extract-context</code> stages scrubbed hunks) before model probes</td>
+					<td>Runs isolated 3-way <code>git merge-tree</code> when <code>sourceRevision !== baseRevision</code> (<code>fail-fast</code> or <code>extract-context</code>)</td>
 			</tr>
 			<tr>
 					<td>Discover</td>
-					<td>Resolves upstreams, <code>upstreamGroups</code> lockstep holds (<code>held_back</code>), or <code>upstream-records</code>; <code>mode: auto</code> routes <code>no_change</code> to check-only checks</td>
+					<td>Resolves upstreams, lockstep <code>held_back</code> holds, or <code>upstream-records</code>; routes settled <code>auto</code> runs to <code>no-change</code></td>
 			</tr>
 			<tr>
 					<td>Execute</td>
-					<td>Authors a candidate in sandboxed steps with CAS blob pointers and verifies scope and local or external checks; eligible failures can enter bounded repair or <code>rejectTo</code> rework</td>
+					<td>Authors candidates in sandboxes with CAS pointers and runs local or external checks with bounded repair</td>
 			</tr>
 			<tr>
 					<td>Publish</td>
-					<td>For <code>pull_request</code> mode, consumes shared 3-way merged carry blobs, verifies extracted conflict resolution, and streams verified CAS blobs into a managed PR</td>
+					<td>Streams verified CAS blobs into a head-pinned managed PR with DCO sign-off and <code>--force-with-lease</code></td>
 			</tr>
 	</tbody>
 </table>
-<p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Local checks and publication keep protected and non-writable files at <code>GITHUB_SHA</code>, and squash writable changes onto a commit parented on <code>GITHUB_SHA</code>.</p>
-<p>Native publication opens each verified CAS blob once (<code>O_RDONLY | O_NOFOLLOW</code>, <code>nlink === 1</code>), streams <code>1 MiB</code> chunks into <code>git hash-object -w --stdin</code> while verifying SHA-256 and Git blob OID, and commits via a temporary <code>GIT_INDEX_FILE</code> with DCO sign-off and <code>--force-with-lease</code>. It does not embed credentials in remote URLs. An uncertain external outcome remains <code>unknown</code>; do not silently retry it.</p>
-<p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>inline-with-candidate</code>, <code>local-only</code>, or <code>disabled</code>). <code>separate-pull-request</code> opens dedicated memory PRs, skips non-passing runs by default (<code>publishOnFailure: false</code>), and adds <code>[skip ci]</code> before the DCO trailer (<code>skipCi: true</code>).</p>
-<p><code>inline-with-candidate</code> skips unless a candidate PR was published, then appends a host-signed memory-only commit onto that PR branch with <code>--force-with-lease</code> (<code>skipCi</code> defaults to <code>false</code> so required PR checks still run). Memory errors never block primary task completion.</p>
-<p>Local <code>command.v1</code> checks run through a signed loopback gate against a verified candidate snapshot, mounting the check script&rsquo;s parent directory read-only with whole-tree SHA-256 verification and exposing <code>$LOOPWRIGHT_BASE_DIR</code>, <code>$LOOPWRIGHT_STAGED_DIR</code> (when <code>exposeToChecks: true</code>), and <code>$LOOPWRIGHT_CHECK_OUT</code>. If a check opts into a GitHub token, grant that token only the permissions the check may use.</p>
-<p>On GitHub-hosted Actions runners (<code>GITHUB_ACTIONS=true</code> and <code>RUNNER_ENVIRONMENT=github-hosted</code>), an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>. Self-hosted runners negotiate host OS sandboxes instead. The turnkey host session supports <code>macos-seatbelt</code>, <code>linux-bwrap</code>, <code>linux-landlock</code>, and <code>direct-dedicated</code>, and blocks <code>docker</code>. See <a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
- for isolation tradeoffs.</p>
-<p>Protected paths override writable paths. <code>.github/workflows/**</code> stays write-protected unless both <code>spec.execution.capabilities.allowWorkflowWrites: true</code> and <code>allow-workflow-writes: 'true'</code> are set. See <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
- for full manifest fields.</p>
+<p>Pass <code>source-revision</code> when preflight stages writable files onto a commit separate from <code>GITHUB_SHA</code>. Uncertain external outcomes stay <code>unknown</code> and are never retried silently.</p>
+<p>Memory finalization follows <code>spec.memory.apply</code> (<code>separate-pull-request</code>, <code>inline-with-candidate</code>, <code>local-only</code>, or <code>disabled</code>) without blocking primary task completion. On GitHub-hosted runners (<code>RUNNER_ENVIRONMENT=github-hosted</code>), an omitted <code>spec.sandbox</code> selects <code>direct-dedicated</code>; self-hosted runners negotiate host OS sandboxes instead (see <a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
+).</p>
+<p>Protected paths override writable paths. <code>.github/workflows/**</code> stays write-protected unless both <code>allowWorkflowWrites: true</code> and <code>allow-workflow-writes: 'true'</code> are set.</p>
 <h2 id="secrets-and-environment">Secrets and environment</h2>
-<p>Pass <code>github-token</code> directly, or pass <code>github-app-id</code> and <code>github-app-private-key</code> to mint an installation token. Explicit <code>github-token</code> takes precedence over App credentials, and App credentials take precedence over ambient <code>GITHUB_TOKEN</code>. When <code>github-app-installation-id</code> is omitted, the Action discovers the repository installation automatically. <code>GH_TOKEN</code> is not the Action token fallback.</p>
-<p>The App ID and optional installation ID must be positive integers. The private key is a PEM secret. Restrict installation access to the target repository and required permissions. App tokens can trigger downstream workflows under GitHub&rsquo;s App event rules.</p>
+<p>Pass <code>github-token</code>, or pass <code>github-app-id</code> and <code>github-app-private-key</code> to mint an installation token. Precedence is explicit <code>github-token</code> &gt; App credentials &gt; ambient <code>GITHUB_TOKEN</code> (<code>GH_TOKEN</code> is not the Action fallback).</p>
 <table>
 	<thead>
 			<tr>
@@ -493,29 +484,29 @@
 	<tbody>
 			<tr>
 					<td><code>github-token</code> or <code>GITHUB_TOKEN</code></td>
-					<td>GitHub discovery and native PR publication; permissions depend on the operations used.</td>
+					<td>GitHub discovery, opted-in checks, and native PR publication</td>
 			</tr>
 			<tr>
-					<td><code>github-app-id</code>, <code>github-app-private-key</code>, <code>github-app-installation-id</code></td>
-					<td>Mint a repository installation token; installation ID is auto-discovered when omitted.</td>
+					<td><code>github-app-id</code>, <code>github-app-private-key</code></td>
+					<td>Mint repository installation token (<code>github-app-installation-id</code> auto-discovers)</td>
 			</tr>
 			<tr>
-					<td>Provider token environment</td>
-					<td>Authenticate live model calls; token variables can contain comma-separated token pools.</td>
+					<td>Provider token env var</td>
+					<td>Authenticate live model calls (supports comma-separated token pools)</td>
 			</tr>
 			<tr>
 					<td><code>LOOPWRIGHT_GATE_SIGNING_SECRET</code></td>
-					<td>Sign external gate requests when a gate endpoint is configured.</td>
+					<td>Sign external <code>gate.v1</code> requests when a remote gate endpoint is used</td>
 			</tr>
 			<tr>
 					<td><code>LOOPWRIGHT_PUBLICATION_SIGNING_SECRET</code></td>
-					<td>Sign requests to an external publication endpoint.</td>
+					<td>Sign external publication endpoint requests</td>
 			</tr>
 	</tbody>
 </table>
-<p>Local command gates and native publication use ephemeral loopback credentials. They do not require external endpoint signing secrets. Generated registry and controller files contain secret references, not raw credentials. Never commit secrets to the repository.</p>
-<h2 id="inputs">Inputs</h2>
-<p>All Action inputs are optional. Conditional credentials, endpoint bindings, and event payloads depend on the taskpack and trigger.</p>
+<p>Local <code>command.v1</code> gates and native publication use ephemeral loopback credentials and need no external signing secrets.</p>
+<h2 id="core-inputs">Core inputs</h2>
+<p>All Action inputs are optional. Precedence is <code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> env vars &gt; compiler defaults.</p>
 <table>
 	<thead>
 			<tr>
@@ -526,217 +517,60 @@
 	</thead>
 	<tbody>
 			<tr>
-					<td><code>taskpack-path</code></td>
-					<td><code>.loopwright/taskpack.yaml</code></td>
-					<td>Repository-relative manifest path, including a custom control directory.</td>
+					<td><code>taskpack-path</code> / <code>suite-path</code></td>
+					<td><code>.loopwright/taskpack.yaml</code> / unset</td>
+					<td>Manifest or multi-domain <code>TaskpackSuite</code> path</td>
 			</tr>
 			<tr>
-					<td><code>suite-path</code></td>
-					<td>Unset</td>
-					<td>Optional repository-relative <code>TaskpackSuite</code> manifest path (for example <code>.loopwright/suite.yaml</code>).</td>
+					<td><code>domain</code> / <code>resolve-suite-only</code></td>
+					<td>Unset / <code>false</code></td>
+					<td>Target suite domain or emit <code>outputs.matrix</code> only</td>
 			</tr>
 			<tr>
-					<td><code>domain</code></td>
-					<td>Unset</td>
-					<td>Optional target domain identifier within <code>suite-path</code>.</td>
+					<td><code>mode</code> / <code>baseline-alignment</code></td>
+					<td><code>candidate</code> / <code>off</code></td>
+					<td><code>auto|candidate|no-change</code> and 3-way conflict policy</td>
 			</tr>
 			<tr>
-					<td><code>resolve-suite-only</code></td>
-					<td><code>false</code></td>
-					<td>Set <code>true</code> with <code>suite-path</code> to emit <code>outputs.matrix</code> without executing a domain run.</td>
+					<td><code>dry-run</code> / <code>force</code></td>
+					<td><code>false</code> / <code>false</code></td>
+					<td>Compile statically without execution, or bypass <code>no_change</code>/dedupe</td>
 			</tr>
 			<tr>
-					<td><code>baseline-alignment</code></td>
-					<td>Taskpack <code>off</code></td>
-					<td>Optional 3-way conflict alignment override (<code>off</code>, <code>fail-fast</code>, or <code>extract-context</code>).</td>
+					<td><code>event-name</code> / <code>event-path</code></td>
+					<td><code>workflow_dispatch</code> / unset</td>
+					<td>Pass <code>github.event_name</code> and <code>github.event_path</code> for trigger checks</td>
 			</tr>
 			<tr>
-					<td><code>mode</code></td>
-					<td><code>candidate</code></td>
-					<td><code>auto</code> (preflight-driven candidate or check-only <code>no-change</code>), <code>candidate</code>, or <code>no-change</code>.</td>
+					<td><code>source-revision</code> / <code>upstream-records</code></td>
+					<td><code>GITHUB_SHA</code> / unset</td>
+					<td>Detached candidate base ref or precomputed upstream JSON</td>
 			</tr>
 			<tr>
 					<td><code>allow-privileged-execution</code></td>
 					<td><code>false</code></td>
-					<td>Dual-key host unlock for <code>spec.execution.mode: privileged</code> or privileged capabilities.</td>
+					<td>Dual-key unlock for privileged execution capabilities</td>
 			</tr>
 			<tr>
-					<td><code>allow-workflow-writes</code></td>
-					<td><code>false</code></td>
-					<td>Dual-key host unlock allowing <code>allowWorkflowWrites: true</code> manifests to edit <code>.github/workflows/**</code>.</td>
+					<td><code>allow-workflow-writes</code> / <code>allow-host-mounts</code></td>
+					<td><code>false</code> / unset</td>
+					<td>Dual-key <code>.github/workflows/**</code> write unlock and host mount allowlist</td>
 			</tr>
 			<tr>
-					<td><code>allow-host-mounts</code></td>
-					<td>Unset</td>
-					<td>Dual-key comma/newline allowlist of absolute host paths (files, directories, or sockets such as <code>/var/run/docker.sock</code>) for <code>command.v1</code> <code>parameters.mounts</code>.</td>
-			</tr>
-			<tr>
-					<td><code>event-name</code></td>
-					<td><code>workflow_dispatch</code></td>
-					<td>GitHub event name; pass <code>github.event_name</code> for other triggers.</td>
-			</tr>
-			<tr>
-					<td><code>event-path</code></td>
-					<td>Unset</td>
-					<td>Event payload path; pass <code>github.event_path</code> for comment and review events.</td>
-			</tr>
-			<tr>
-					<td><code>run-root</code></td>
-					<td><code>RUNNER_TEMP</code> or <code>../.loopwright-runs</code></td>
-					<td>Trusted artifact root outside the checkout.</td>
-			</tr>
-			<tr>
-					<td><code>run-id</code></td>
-					<td><code>GITHUB_RUN_ID</code> or <code>local</code></td>
-					<td>Stable run identifier.</td>
-			</tr>
-			<tr>
-					<td><code>storage-profile</code></td>
-					<td><code>actions-basic</code></td>
-					<td>Host storage profile: <code>actions-basic</code> or <code>durable</code>.</td>
-			</tr>
-			<tr>
-					<td><code>provider</code>, <code>model</code>, <code>thinking</code></td>
+					<td><code>provider</code>, <code>model</code>, <code>thinking</code>, <code>api</code>, <code>base-url</code></td>
 					<td>Taskpack model pool</td>
-					<td>Override author model selection; thinking levels range from <code>off</code> to <code>max</code>.</td>
+					<td>Model, reasoning level, wire API, and gateway overrides</td>
 			</tr>
 			<tr>
-					<td><code>api</code>, <code>base-url</code></td>
-					<td>Inferred, unset</td>
-					<td>Wire API and trusted HTTPS endpoint override; <code>base-url</code> requires <code>api</code>.</td>
-			</tr>
-			<tr>
-					<td><code>provider-token-env</code></td>
-					<td>Provider default</td>
-					<td>Environment variable containing a provider token or comma-separated pool.</td>
-			</tr>
-			<tr>
-					<td><code>models-json</code></td>
-					<td>Unset</td>
-					<td>Trusted Pi model configuration path; shell credential resolvers are refused.</td>
-			</tr>
-			<tr>
-					<td><code>allow-custom-base-url</code></td>
-					<td><code>false</code></td>
-					<td>Set <code>true</code> to permit model base URLs declared in the taskpack.</td>
-			</tr>
-			<tr>
-					<td><code>dry-run</code></td>
-					<td><code>false</code></td>
-					<td>Set <code>true</code> to compile without executing the controller.</td>
-			</tr>
-			<tr>
-					<td><code>force</code></td>
-					<td><code>false</code></td>
-					<td>Set <code>true</code> on non-comment triggers to bypass <code>no_change</code> and open-PR deduplication.</td>
-			</tr>
-			<tr>
-					<td><code>gate-endpoint-url</code></td>
-					<td>Unset</td>
-					<td>External gate endpoint, bound as <code>default</code>.</td>
-			</tr>
-			<tr>
-					<td><code>publication-endpoint-url</code></td>
-					<td>Unset</td>
-					<td>External managed publication endpoint; otherwise native PR publication is available.</td>
-			</tr>
-			<tr>
-					<td><code>output</code></td>
-					<td>Taskpack formats or <code>json</code></td>
-					<td>Comma-separated output formats; overrides <code>spec.output.formats</code>.</td>
-			</tr>
-			<tr>
-					<td><code>github-token</code></td>
-					<td><code>GITHUB_TOKEN</code> fallback</td>
-					<td>GitHub token for discovery, opted-in checks, and publication; explicit input overrides App auth.</td>
-			</tr>
-			<tr>
-					<td><code>github-app-id</code></td>
-					<td>Unset</td>
-					<td>App ID for installation token minting (overrides ambient <code>GITHUB_TOKEN</code>).</td>
-			</tr>
-			<tr>
-					<td><code>github-app-private-key</code></td>
-					<td>Unset</td>
-					<td>App PEM private key for installation token minting.</td>
-			</tr>
-			<tr>
-					<td><code>github-app-installation-id</code></td>
-					<td>Auto-discovered</td>
-					<td>Optional installation ID; discovered from <code>owner/repo</code> when omitted.</td>
-			</tr>
-			<tr>
-					<td><code>git-author-name</code></td>
-					<td>Dynamic or <code>github-actions[bot]</code></td>
-					<td>Optional commit author, committer, and DCO <code>Signed-off-by</code> name override.</td>
-			</tr>
-			<tr>
-					<td><code>git-author-email</code></td>
-					<td>Dynamic noreply email</td>
-					<td>Optional commit author, committer, and DCO <code>Signed-off-by</code> email override.</td>
-			</tr>
-			<tr>
-					<td><code>upstream-records</code></td>
-					<td>Unset</td>
-					<td>JSON array of precomputed upstream acquisition records (<code>github-release</code>, <code>git-tag</code>, <code>git-commit</code>, <code>http-json</code>, or <code>custom-table</code>).</td>
-			</tr>
-			<tr>
-					<td><code>source-revision</code></td>
-					<td><code>GITHUB_SHA</code></td>
-					<td>Git commit SHA or ref materialized as the candidate source tree while keeping <code>GITHUB_SHA</code> as base revision.</td>
-			</tr>
-			<tr>
-					<td><code>mcp-servers</code></td>
-					<td>Taskpack <code>spec.mcp.servers</code></td>
-					<td>JSON or YAML MCP server declarations merged by <code>id</code> (<code>LOOPWRIGHT_MCP_SERVERS</code> fallback).</td>
-			</tr>
-			<tr>
-					<td><code>wall-time-seconds</code></td>
-					<td><code>3600</code></td>
-					<td>Run wall-time limit override in seconds (<code>60..21600</code>; <code>LOOPWRIGHT_WALL_TIME_SECONDS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>total-tokens</code></td>
-					<td><code>20000000</code></td>
-					<td>Total token ceiling across model calls (<code>1000..1000000000</code>; <code>LOOPWRIGHT_TOTAL_TOKENS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>context-window</code></td>
-					<td>Model catalog or <code>128000</code></td>
-					<td>Model context window token override (<code>1024..10000000</code>; <code>LOOPWRIGHT_CONTEXT_WINDOW</code>).</td>
-			</tr>
-			<tr>
-					<td><code>max-output-tokens</code></td>
-					<td><code>32768</code></td>
-					<td>Per-call output token ceiling (<code>256..262144</code>; <code>LOOPWRIGHT_MAX_OUTPUT_TOKENS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>max-model-calls</code></td>
-					<td><code>256</code></td>
-					<td>Maximum model call count per run (<code>1..1024</code>; <code>LOOPWRIGHT_MAX_MODEL_CALLS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>max-attempts</code></td>
-					<td><code>5</code></td>
-					<td>Maximum controller attempt count (<code>1..16</code>; <code>LOOPWRIGHT_MAX_ATTEMPTS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>tool-timeout-seconds</code></td>
-					<td><code>300</code></td>
-					<td>Per-tool execution timeout in seconds (<code>1..1800</code>; <code>LOOPWRIGHT_TOOL_TIMEOUT_SECONDS</code>).</td>
-			</tr>
-			<tr>
-					<td><code>command-timeout-seconds</code></td>
-					<td><code>30</code></td>
-					<td>Fallback <code>command.v1</code> check timeout in seconds (<code>1..3600</code>; <code>LOOPWRIGHT_COMMAND_TIMEOUT_SECONDS</code>).</td>
+					<td><code>wall-time-seconds</code>, <code>total-tokens</code>, <code>max-attempts</code></td>
+					<td><code>3600</code>, <code>20000000</code>, <code>5</code></td>
+					<td>Execution limit overrides (see <a href="/loopwright/main/docs/configuration/taskpack/#execution-limits">Taskpack</a>
+)</td>
 			</tr>
 	</tbody>
 </table>
-<p>Explicit configuration takes precedence over environment variables (<code>Action with:</code> inputs &gt; <code>taskpack.yaml</code> <code>spec.limits</code> &gt; <code>LOOPWRIGHT_*</code> environment variables &gt; compiler defaults). Repair sub-budgets and byte or entry ceilings also accept canonical <code>spec.limits</code> keys and <code>LOOPWRIGHT_*</code> fallbacks; see <a href="/loopwright/main/docs/configuration/taskpack/#execution-limits">Taskpack</a>
-. Interactive OAuth and CLI providers or MCP servers are unsupported.</p>
-<p>The <code>force</code> input applies only to candidate discovery on non-comment trigger events (<code>workflow_dispatch</code>, <code>schedule</code>, <code>repository_dispatch</code>, <code>release</code>), while PR comment commands (<code>/auto-sync retry</code>, <code>revise</code>, <code>status</code>) follow comment-command dispatch semantics.</p>
 <h2 id="outputs">Outputs</h2>
-<p>The Action writes a compact, scrubbed <code>result</code> JSON summary (with SHA-256 digests and byte lengths rather than raw binary buffers) to stdout and <code>GITHUB_OUTPUT</code>. Live runs stream <code>[loopwright]</code> progress lines (upstream discovery, connected MCP servers, per-turn token/duration metrics, tool calls, and check outcomes) plus a plain-text run summary to stderr. A <code>compiled</code> result alone does not establish successful publication; inspect <code>delegateOutcome</code> and the run report.</p>
+<p>The Action writes a scrubbed <code>result</code> JSON summary to stdout and <code>GITHUB_OUTPUT</code>, and streams <code>[loopwright]</code> progress lines to stderr. A <code>compiled</code> result alone does not establish publication; inspect <code>delegateOutcome</code>.</p>
 <table>
 	<thead>
 			<tr>
@@ -747,63 +581,33 @@
 	<tbody>
 			<tr>
 					<td><code>result</code></td>
-					<td>Compact structured entrypoint summary and <code>delegateOutcome</code> (<code>ok</code>, <code>detail</code>).</td>
+					<td>Compact structured summary and <code>delegateOutcome</code> (<code>ok</code>, <code>detail</code>)</td>
 			</tr>
 			<tr>
 					<td><code>pr-url</code></td>
-					<td>Published PR URL when available; otherwise empty.</td>
+					<td>Published PR URL when available; otherwise empty</td>
 			</tr>
 			<tr>
 					<td><code>memory-pr-url</code></td>
-					<td>Separate memory PR URL when published or updated; otherwise empty.</td>
+					<td>Separate memory PR URL when published or updated; otherwise empty</td>
 			</tr>
 			<tr>
 					<td><code>total-tokens</code></td>
-					<td>Exact integer token subtotal, or <code>0</code> when usage is unavailable.</td>
+					<td>Exact integer token subtotal, or <code>0</code> when usage is unavailable</td>
 			</tr>
 			<tr>
 					<td><code>cost-usd</code></td>
-					<td>Six-decimal USD known subtotal when cost provenance is <code>reported</code> or <code>estimated</code>; otherwise omitted.</td>
+					<td>Six-decimal USD subtotal when provenance is <code>reported</code> or <code>estimated</code></td>
 			</tr>
 			<tr>
 					<td><code>matrix</code></td>
-					<td>Deterministic JSON matrix (<code>{ include: [...] }</code>) emitted when <code>suite-path</code> resolves.</td>
+					<td>Deterministic JSON matrix (<code>{ include: [...] }</code>) when <code>suite-path</code> resolves</td>
 			</tr>
 	</tbody>
 </table>
-<p>Extended outputs are written for live runs, or for dry runs with an explicit <code>output</code> input. <code>github-step-summary</code>, <code>markdown</code>, <code>text</code>, and <code>json</code> include a sanitized <code>Run Health</code> (<code>RunEval</code>) section with <code>toolRepeats</code>, <code>pingPong</code>, <code>repairConvergence</code>, per-role/per-step breakdowns, and <code>autoApplied: false</code> hints.</p>
-<p>Step summaries and human-readable reports format token counts using <code>K</code>/<code>M</code>/<code>B</code> and elapsed durations using <code>ms</code>/<code>s</code>/<code>m</code>/<code>h</code>, while <code>total-tokens</code> and JSON reports preserve exact integers. Estimated cost uses model pricing, not provider-attested billing; missing cost is unknown, not zero.</p>
-<table>
-	<thead>
-			<tr>
-					<th>Format</th>
-					<th>Destination</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>json</code></td>
-					<td>Structured Action result remains on stdout and <code>GITHUB_OUTPUT</code>.</td>
-			</tr>
-			<tr>
-					<td><code>github-step-summary</code></td>
-					<td>Markdown report appended to <code>GITHUB_STEP_SUMMARY</code> when available.</td>
-			</tr>
-			<tr>
-					<td><code>markdown</code></td>
-					<td>Human-readable report on stderr.</td>
-			</tr>
-			<tr>
-					<td><code>text</code></td>
-					<td>Plain-text report on stderr.</td>
-			</tr>
-	</tbody>
-</table>
-<p><code>totalTokens</code> is the primary usage metric across sinks, with <code>inputTokens</code> and <code>outputTokens</code> breakdowns when available.
-Human-readable summaries show cost only for <code>reported</code> or <code>estimated</code> provenance.
-Reports include usage provenance when available. Output is scrubbed and workflow command text is neutralized. Local and fixture tests do not qualify live GitHub publication or provider billing.</p>
+<p>Extended formats (<code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, <code>text</code>) append a sanitized <code>Run Health</code> (<code>RunEval</code>) section with <code>toolRepeats</code>, <code>pingPong</code>, <code>repairConvergence</code>, and <code>autoApplied: false</code> hints. Missing cost is unknown, not zero.</p>
 <h2 id="triggers">Triggers</h2>
-<p>Intake enforces <code>spec.triggers</code> strictly before <code>spec.preflight</code> or execution. Omitted or disabled triggers reject <code>schedule</code>, <code>workflow_dispatch</code>, <code>release</code>, <code>repository_dispatch</code>, and comment events fail-closed. Pass the event name and payload explicitly as shown above; comment commands also require actor authorization.</p>
+<p>Intake enforces <code>spec.triggers</code> strictly before <code>spec.preflight</code> or execution. Omitted or disabled triggers reject <code>schedule</code>, <code>workflow_dispatch</code>, <code>release</code>, <code>repository_dispatch</code>, and comment events fail-closed.</p>
 <p>Install a workflow in each consumer repository. For centralized webhook intake and token brokering, see <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
 .</p>
 <nav class="reading-footer" aria-label="Further reading">
@@ -811,7 +615,8 @@ Reports include usage provenance when available. Output is scrubbed and workflow
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
  (configure webhook intake)</li><li><a href="/loopwright/main/docs/configuration/sandbox-backends/">Sandbox Backends</a>
- (select execution isolation)</li></ul>
+ (select execution isolation)</li><li><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
+ (manifest schema and limits)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
@@ -829,7 +634,7 @@ Reports include usage provenance when available. Output is scrubbed and workflow
     <li><a href="#workflow">Workflow</a></li>
     <li><a href="#execution-and-publication">Execution and publication</a></li>
     <li><a href="#secrets-and-environment">Secrets and environment</a></li>
-    <li><a href="#inputs">Inputs</a></li>
+    <li><a href="#core-inputs">Core inputs</a></li>
     <li><a href="#outputs">Outputs</a></li>
     <li><a href="#triggers">Triggers</a></li>
   </ul>

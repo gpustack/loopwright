@@ -18,6 +18,7 @@ Loopwright supports two operating modes sharing one verification kernel: **Decla
 
 - [Declarative Taskpack](/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md) walks through simple single-file repository automation and automatic synchronized workflow migration.
 - [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md) walks through fine-grained out-of-repo `TrustedRegistry`, `ControllerConfig`, and CLI execution.
+- [Evolutionary Campaign](/loopwright/main/docs/walkthroughs/evolutionary-campaign/index.md) coordinates multi-island evolutionary search, hardware benchmark relays, and reproducible bundle export.
 
 ## Configuration
 
@@ -26,3 +27,4 @@ Loopwright supports two operating modes sharing one verification kernel: **Decla
 - [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md) documents every handler, profile, credential, endpoint, and control in `TrustedRegistry` and `ControllerConfig`.
 - [Sandbox Backends](/loopwright/main/docs/configuration/sandbox-backends/index.md) covers native OS and container sandbox policies and capabilities.
 - [Decision Routing](/loopwright/main/docs/configuration/decision-routing/index.md) details System-One advisory confidence zones, providers, and disclosure policies.
+- [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) configures islands, specialist-to-portfolio stages, team evolution, and bundle export in `campaign.yaml` (`EvolutionCampaign`).

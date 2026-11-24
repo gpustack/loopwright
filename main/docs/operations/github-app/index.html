@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -434,16 +434,16 @@
 	</tbody>
 </table>
 <p>Use <code>actions/create-github-app-token@v1</code> with <code>gpustack/loopwright@main</code> in the <a href="/loopwright/main/docs/operations/github-action/">consumer workflow</a>
-. The App&rsquo;s webhook secret and private key must also be available in the trusted daemon environment when enabled.</p>
+. Supply the App webhook secret and private key in the trusted daemon environment when <code>app-serve</code> is enabled.</p>
 <h2 id="admission-and-permissions">Admission and permissions</h2>
 <p><span class="diagram-scroll"><img src="/loopwright/main/docs/assets/diagrams/slash-command-flow.svg" alt="Authenticated webhook and slash-command intake" decoding="async"></span></p>
 <!-- flowchart LR
   Comment["01 Verify HMAC"] -> Authorize["02 Authorize actor"] -> Enqueue["03 Fence tenant queue"] -> Broker["04 Broker repo token"]
 -->
-<p>Subscribe only to the event types used by your taskpack, including release, issue comment and pull request review as needed. Comment commands are restricted to authorized actors. Verify <code>X-Hub-Signature-256</code> over raw request bytes with HMAC-SHA256; mismatches and conflicting delivery IDs fail closed. The receiver implements verification before intake.</p>
-<p>Installation tokens are restricted to one repository. The <code>read_only</code> profile grants contents and metadata read; <code>publish_pull_request</code> grants contents and pull requests write plus metadata read. Store the App private key and webhook secret in trusted host secret storage.</p>
+<p>Subscribe only to the event types used by your taskpack. Comment commands require authorized actors. The receiver verifies <code>X-Hub-Signature-256</code> over raw request bytes with HMAC-SHA256 and fails closed on mismatches or conflicting delivery IDs.</p>
+<p>Installation tokens are restricted to one repository. The <code>read_only</code> profile grants contents and metadata read; <code>publish_pull_request</code> grants contents and pull requests write plus metadata read.</p>
 <h2 id="githubappconfig">GitHubAppConfig</h2>
-<p>Save the daemon configuration as <code>github-app.yaml</code>:</p>
+<p>Save the daemon configuration as <code>github-app.yaml</code> (<code>&lt;= 64 KiB</code>):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -458,135 +458,27 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">host</span><span class="p">:</span><span class="w"> </span><span class="m">127.0.0.1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">port</span><span class="p">:</span><span class="w"> </span><span class="m">8787</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">webhookPath</span><span class="p">:</span><span class="w"> </span><span class="l">/webhooks/github</span><span class="w"> </span><span class="c"># Optional (defaults to /webhooks/github)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tokenTtlSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="c"># Optional (defaults to 600)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxPayloadBytes</span><span class="p">:</span><span class="w"> </span><span class="m">1048576</span><span class="w"> </span><span class="c"># Optional (defaults to 1048576)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tokenTtlSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="c"># Optional (60..3600, defaults to 600)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxPayloadBytes</span><span class="p">:</span><span class="w"> </span><span class="m">1048576</span><span class="w"> </span><span class="c"># Optional (1024..26214400, defaults to 1048576)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpackPath</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional repo-relative taskpack path</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">suitePath</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/suite.yaml</span><span class="w"> </span><span class="c"># Optional suite path (mutually exclusive with taskpackPath)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">operatorAllowlist</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional GitHub login allowlist for slash commands</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">suitePath</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/suite.yaml</span><span class="w"> </span><span class="c"># Optional mutually exclusive with taskpackPath</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">operatorAllowlist</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..64 GitHub logins for slash commands</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">release-operator</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Secrets</strong>: Provide environment variable names, not secret values.</li>
-<li><strong>Listen</strong>: Add authenticated ingress before serving external webhooks.</li>
-<li><strong>Path</strong>: <code>taskpackPath</code> and <code>suitePath</code> must be repo-relative, regular files, and mutually exclusive.</li>
+<li><strong>Secrets</strong>: Name uppercase environment variables (<code>[A-Z][A-Z0-9_]*</code>), never raw secret values.</li>
+<li><strong>Listen</strong>: Set <code>listen.enabled: true</code> with <code>host</code> and <code>port</code>, and place authenticated ingress in front of external webhooks.</li>
+<li><strong>Manifest path</strong>: <code>taskpackPath</code> and <code>suitePath</code> must be repo-relative regular files and are mutually exclusive.</li>
+<li><strong>Route isolation</strong>: <code>webhookPath</code> must start with <code>/</code> and cannot collide with <code>/healthz</code> or <code>/tenants/*</code>.</li>
 </ul>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Default</th>
-					<th>Bounds and constraint</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>apiVersion</code></td>
-					<td>Yes</td>
-					<td>—</td>
-					<td>Must be <code>'loopwright.dev/v1alpha1'</code></td>
-			</tr>
-			<tr>
-					<td><code>kind</code></td>
-					<td>Yes</td>
-					<td>—</td>
-					<td>Must be <code>'GitHubAppConfig'</code> (<code>&lt;= 64 KiB</code> file)</td>
-			</tr>
-			<tr>
-					<td><code>spec.appId</code></td>
-					<td>Yes</td>
-					<td>—</td>
-					<td>Non-empty GitHub App numeric ID or slug (<code>1–64</code> chars)</td>
-			</tr>
-			<tr>
-					<td><code>spec.webhookSecretEnv</code></td>
-					<td>Yes</td>
-					<td>—</td>
-					<td>Uppercase env var name (<code>[A-Z][A-Z0-9_]*</code>) holding HMAC secret</td>
-			</tr>
-			<tr>
-					<td><code>spec.privateKeyEnv</code></td>
-					<td>Yes</td>
-					<td>—</td>
-					<td>Uppercase env var name (<code>[A-Z][A-Z0-9_]*</code>) holding App PEM</td>
-			</tr>
-			<tr>
-					<td><code>spec.apiBaseUrl</code></td>
-					<td>No</td>
-					<td><code>https://api.github.com</code></td>
-					<td>HTTPS URL (or loopback HTTP); used for tokens and <code>issue_comment</code> PR lookup</td>
-			</tr>
-			<tr>
-					<td><code>spec.listen</code></td>
-					<td>Conditional</td>
-					<td>Unset</td>
-					<td>Optional mapping; <strong>required</strong> with <code>enabled: true</code> to run <code>app-serve</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.listen.enabled</code></td>
-					<td>No</td>
-					<td><code>false</code></td>
-					<td>Set <code>true</code> to enable <code>loopwright app-serve</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.listen.host</code></td>
-					<td>Conditional</td>
-					<td><code>127.0.0.1</code></td>
-					<td><strong>Required</strong> when <code>spec.listen</code> is present; keep tenant routes private</td>
-			</tr>
-			<tr>
-					<td><code>spec.listen.port</code></td>
-					<td>Conditional</td>
-					<td><code>8787</code></td>
-					<td><strong>Required</strong> when <code>spec.listen</code> is present; integer <code>0–65535</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.listen.webhookPath</code></td>
-					<td>No</td>
-					<td><code>/webhooks/github</code></td>
-					<td>Leading <code>/</code> path; cannot collide with <code>/healthz</code> or <code>/tenants/*</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.tokenTtlSeconds</code></td>
-					<td>No</td>
-					<td><code>600</code></td>
-					<td>Integer <code>60–3600</code> cached installation token ceiling</td>
-			</tr>
-			<tr>
-					<td><code>spec.maxPayloadBytes</code></td>
-					<td>No</td>
-					<td><code>1048576</code></td>
-					<td>Integer <code>1024–26214400</code> inbound webhook byte cap</td>
-			</tr>
-			<tr>
-					<td><code>spec.taskpackPath</code></td>
-					<td>No</td>
-					<td>Unset</td>
-					<td>Relative regular-file path validated at startup (mutually exclusive with <code>suitePath</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.suitePath</code></td>
-					<td>No</td>
-					<td>Unset</td>
-					<td>Relative <code>TaskpackSuite</code> path validated at startup (mutually exclusive with <code>taskpackPath</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.operatorAllowlist</code></td>
-					<td>No</td>
-					<td>Unset</td>
-					<td>GitHub login list (<code>1–64</code> entries) authorized for slash commands</td>
-			</tr>
-	</tbody>
-</table>
 <h2 id="control-plane">Control plane</h2>
 <p>Set <code>spec.listen.enabled: true</code>, bind the named secrets in the trusted environment, then start the daemon:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright app-serve --config github-app.yaml --repo .</span></span></code></pre></div>
 </div>
-<p>The command applies the configured listener and token broker settings. It refuses disabled or invalid configuration. The loader resolves the named webhook secret and private key from the environment.</p>
-<p>The service binds loopback by default. Provide authenticated ingress and a configured broker in the trusted host; do not expose tenant lease endpoints publicly. Endpoints include the configured <code>listen.webhookPath</code> (default <code>/webhooks/github</code>), <code>/healthz</code>, and tenant lease and settle routes. The broker issues scoped short-lived tokens and scrubs secrets from responses.</p>
-<p>When <code>spec.suitePath</code> is configured, a single verified <code>X-GitHub-Delivery</code> fans out across matching domains while deduplicating redeliveries, enforces the suite-wide protected path union, and binds each leased domain to its per-domain manifest SHA-256 digest. For <code>issue_comment</code> webhooks lacking PR branch metadata, intake queries <code>spec.apiBaseUrl</code> (default <code>https://api.github.com</code>) to verify same-repo PR ownership and target branch routing before admission.</p>
+<p>The daemon binds loopback by default and exposes <code>listen.webhookPath</code> (default <code>/webhooks/github</code>), <code>/healthz</code>, and private tenant lease/settle routes. The broker issues scoped short-lived tokens and scrubs secrets from responses.</p>
+<p>With <code>spec.suitePath</code>, one verified <code>X-GitHub-Delivery</code> fans out across matching domains while deduplicating redeliveries, enforcing the suite protected union, and binding each domain manifest SHA-256. For <code>issue_comment</code> webhooks lacking PR branch metadata, intake queries <code>spec.apiBaseUrl</code> to verify same-repo ownership before admission.</p>
 <h3 id="webhook-events">Webhook events</h3>
 <table>
 	<thead>

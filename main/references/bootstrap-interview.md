@@ -1,5 +1,7 @@
 # Bootstrap Interview Reference
 
+Evidence: contract.
+
 Use this protocol when a maintainer asks a coding agent to initialize or migrate Loopwright automation. Inspect the repository first, interview the maintainer one question at a time with repository-grounded defaults, and obtain approval on the summary before editing files.
 
 ## Contents
@@ -286,7 +288,7 @@ When Stage 1 selects Mode 2, keep `registry.yaml` and `controller.yaml` outside 
 
 When Stage 1 selects Mode 3, keep campaign state (`--state`) strictly outside `--repo` and bind every mutable region to `evolve-block-guard.v1`:
 
-1. Fetch the Mode 3 Markdown guides linked from `llms.txt` (`Evolutionary Campaigns`, `Evolution Campaign`, `Taskpack`, and `CLI`) before authoring schemas.
+1. Fetch the Mode 3 Markdown guides linked from `llms.txt` (`Evolutionary Campaign`, `Evolution Campaign`, `Taskpack`, and `CLI`) before authoring schemas.
 2. Confirm guarded `EVOLVE-BLOCK` source files (`allowedBlockIds`, `maxBlockBytes`), hardware `target.matrix` cell (`accelerator`, `isolationMode`, `driverConstraint`, Stage A static audit bounds), and held-out `benchmark-gate.v1` workloads plus `runner relay|worker` topology one question at a time.
 3. Confirm search `stages` (`single-target` or `specialist-then-portfolio`), `population` islands and `nicheAxes`, multi-objective `objectives`, `budgets`, optional read-only `teamEvolution`, `export` format (`dir` or `oci-layout`), and required secrets (`LOOPWRIGHT_PROVIDER_TOKEN`, `LOOPWRIGHT_BENCHMARK_GATE_URL`, `LOOPWRIGHT_GATE_SIGNING_SECRET`).
 4. Confirm the Stage 5 summary table before writing `.loopwright/taskpack.yaml` and `.loopwright/campaign.yaml`.
@@ -295,4 +297,4 @@ When Stage 1 selects Mode 3, keep campaign state (`--state`) strictly outside `-
 
 ---
 
-**See also** — [Declarative Taskpack](../docs/walkthroughs/declarative-taskpack/index.md) (author and run a repository taskpack) · [Taskpack](../docs/configuration/taskpack/index.md) (complete manifest field dictionary) · [Evolutionary Campaigns](../docs/walkthroughs/evolutionary-campaigns/index.md) (end-to-end evolutionary campaign setup) · [Evolution Campaign](../docs/configuration/evolution-campaign/index.md) (`EvolutionCampaign` schema and bundle contract) · [GitHub Action](../docs/operations/github-action/index.md) (Action inputs, preflight `source-revision`, and secrets) · [Managed Controller](../docs/walkthroughs/managed-controller/index.md) (out-of-repo `TrustedRegistry` and CLI governance)
+**See also** — [Reference Hub](README.md) (flat reference task routing and aliases) · [Declarative Taskpack](../docs/walkthroughs/declarative-taskpack/index.md) (author and run a repository taskpack) · [Taskpack](../docs/configuration/taskpack/index.md) (manifest model and core fields) · [Evolutionary Campaign](../docs/walkthroughs/evolutionary-campaign/index.md) (end-to-end evolutionary campaign setup) · [Evolution Campaign](../docs/configuration/evolution-campaign/index.md) (`EvolutionCampaign` schema and bundle contract) · [GitHub Action](../docs/operations/github-action/index.md) (Action inputs, preflight, and secrets) · [Managed Controller](../docs/walkthroughs/managed-controller/index.md) (out-of-repo `TrustedRegistry` and CLI governance)

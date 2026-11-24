@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -392,12 +392,12 @@
 </li>
 <li><a href="#step-4-apply-overlay">Step 4: Apply overlay</a>
 </li>
-<li><a href="#exit-codes">Exit codes</a>
+<li><a href="#recovery-and-exits">Recovery and exits</a>
 </li>
 </ul>
 <h2 id="operating-model">Operating model</h2>
-<p>Delegated stepping turns Loopwright into a pull-based local coroutine (<code>loopwright step next | submit | cancel</code>). Your host coding agent supplies model execution over its existing OAuth or subscription session, while Loopwright enforces SQLite lease fencing, workspace confinement, and independent check verification.</p>
-<p>Zero Loopwright provider credentials, GitHub App keys, or workflow secrets are required on disk or in environment variables. Both operating modes share identical <code>StepYield</code> envelopes and verification gates:</p>
+<p>Delegated stepping turns Loopwright into a pull-based local coroutine (<code>loopwright step next | submit | cancel</code>). Your host coding agent supplies model execution over its OAuth or subscription session, while Loopwright enforces SQLite lease fencing, workspace confinement, and independent verification.</p>
+<p>Zero Loopwright provider credentials, GitHub App keys, or workflow secrets are needed on disk or in environment variables:</p>
 <table>
 	<thead>
 			<tr>
@@ -410,12 +410,12 @@
 			<tr>
 					<td>Declarative Taskpack</td>
 					<td><code>--taskpack .loopwright/taskpack.yaml</code></td>
-					<td>Compiles manifest roles as <code>adapter: delegated</code> with <code>publication.mode: disabled</code></td>
+					<td>Compiles roles as <code>adapter: delegated</code> with <code>publication.mode: disabled</code></td>
 			</tr>
 			<tr>
 					<td>Managed Controller</td>
 					<td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
-					<td>Uses <code>adapter: delegated</code> profiles; set <code>publication.mode: disabled</code> for local-only runs</td>
+					<td>Uses <code>adapter: delegated</code> profiles with local <code>publication.mode: disabled</code></td>
 			</tr>
 	</tbody>
 </table>
@@ -426,7 +426,7 @@
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">npx skills add gpustack/loopwright --skill loopwright-step</span></span></code></pre></div>
 </div>
-<p>Or copy <code>.agents/skills/loopwright-step/SKILL.md</code> from a Loopwright checkout into <code>.agents/skills/loopwright-step/SKILL.md</code> (repository scope) or <code>~/.agents/skills/loopwright-step/SKILL.md</code> (global user scope).</p>
+<p>Or copy <code>.agents/skills/loopwright-step/SKILL.md</code> into <code>.agents/skills/loopwright-step/SKILL.md</code> (repo scope) or <code>~/.agents/skills/loopwright-step/SKILL.md</code> (user scope).</p>
 <h3 id="zero-install-prompt">Zero-install prompt</h3>
 <p>When running without local skills installed, paste this prompt into your coding agent inside the target checkout:</p>
 <div class="code-block">
@@ -434,7 +434,7 @@
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and fetch https://docs.gpustack.ai/loopwright/latest/docs/operations/coding-agents/index.md. Drive this repository through loopwright step next and loopwright step submit using a disjoint --run-root directory outside the checkout, keep all edits confined to candidateDir, and once result.json settles completed, export a fresh inspect bundle to a new child path and apply candidate.files.json onto my current Git branch.</span></span></code></pre></div>
 </div>
 <h2 id="step-1-pull-assignment">Step 1: Pull assignment</h2>
-<p>Choose a canonical <code>--run-root</code> directory strictly disjoint from <code>--repo</code> (neither inside nor containing <code>--repo</code>, with zero symlink components — resolve <code>pwd -P</code> on macOS where <code>/tmp</code> and <code>/var</code> are symlinks). Start a Declarative Taskpack run:</p>
+<p>Choose a canonical <code>--run-root</code> strictly disjoint from <code>--repo</code> with zero symlink components (resolve <code>pwd -P</code> on macOS). Start a Declarative Taskpack run (native <code>spec.preflight</code>, <code>--baseline-alignment</code>, <code>--source-revision</code>, and <code>--allow-privileged</code> are supported):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">RUN_ROOT</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">cd</span> <span class="s2">&#34;</span><span class="k">$(</span>mktemp -d <span class="s2">&#34;</span><span class="si">${</span><span class="nv">TMPDIR</span><span class="k">:-</span><span class="p">/tmp</span><span class="si">}</span><span class="s2">/loopwright-run.XXXXXX&#34;</span><span class="k">)</span><span class="s2">&#34;</span> <span class="o">&amp;&amp;</span> <span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">&#34;</span>
@@ -447,120 +447,17 @@
 </span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
 </span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
-<h3 id="host-preflight">Host preflight</h3>
-<p><code>step next --taskpack</code> runs <code>spec.preflight</code> natively without manual staging scripts or <code>--mode auto</code>, and accepts <code>--baseline-alignment</code> and <code>--source-revision</code>. Pass <code>--allow-privileged</code> when the taskpack declares privileged preflight or execution capabilities:</p>
-<div class="code-block">
-  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REPO</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">&#34;</span>
-</span></span><span class="line"><span class="cl">
-</span></span><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --taskpack .auto-sync/taskpack.yaml <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --repo <span class="s2">&#34;</span><span class="nv">$REPO</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --allow-privileged <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
-</div>
-<p>Or start a Managed Controller run, pinning <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> (<code>--mode candidate|no-change</code> is optional):</p>
-<div class="code-block">
-  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/registry.yaml&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --registry-sha256 &lt;hex&gt; <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --repo . <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> <span class="se">\
-</span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
-</div>
-<p>With <code>--json</code>, stdout emits a versioned NDJSON <code>Envelope</code> (<code>{ version: 1, kind, sequence, runId, data }</code>). When <code>kind</code> is <code>&quot;step&quot;</code>, <code>data</code> is a <code>StepYield</code> assignment:</p>
-<table>
-	<thead>
-			<tr>
-					<th>Yield field</th>
-					<th>Type</th>
-					<th>Contract</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>status</code></td>
-					<td><code>&quot;awaiting_role&quot;</code></td>
-					<td>Run is parked at <code>role_pre</code> awaiting external role execution</td>
-			</tr>
-			<tr>
-					<td><code>attemptId</code>, <code>stepId</code></td>
-					<td><code>string</code></td>
-					<td>Monotonic attempt identifier and compiled DAG step identifier</td>
-			</tr>
-			<tr>
-					<td><code>roleId</code>, <code>purpose</code></td>
-					<td><code>string</code></td>
-					<td>Role identifier and runtime purpose (<code>&quot;task&quot;</code> or <code>&quot;reviewer&quot;</code>)</td>
-			</tr>
-			<tr>
-					<td><code>repair</code></td>
-					<td><code>string</code></td>
-					<td>Repair turn kind (<code>&quot;none&quot;</code>, <code>&quot;format&quot;</code>, or <code>&quot;implementation&quot;</code>)</td>
-			</tr>
-			<tr>
-					<td><code>selection</code></td>
-					<td><code>object</code></td>
-					<td>Resolved <code>{ provider, model, thinking }</code> target for role dispatch</td>
-			</tr>
-			<tr>
-					<td><code>allowedTools</code></td>
-					<td><code>string[]</code></td>
-					<td>Permitted tool names (<code>[]</code> when <code>repair</code> equals <code>&quot;format&quot;</code>)</td>
-			</tr>
-			<tr>
-					<td><code>scope</code></td>
-					<td><code>object</code></td>
-					<td><code>{ writable, protected }</code> path rules enforced during capture</td>
-			</tr>
-			<tr>
-					<td><code>candidateDir</code></td>
-					<td><code>string</code></td>
-					<td>Staged working tree (<code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;/&lt;attemptId&gt;/candidate</code>)</td>
-			</tr>
-			<tr>
-					<td><code>contextFiles</code></td>
-					<td><code>string[]</code></td>
-					<td>Read-only (<code>0o400</code>) context artifacts under <code>.../context</code></td>
-			</tr>
-			<tr>
-					<td><code>prompt</code></td>
-					<td><code>string</code></td>
-					<td>Effective task, review, or format-repair prompt text</td>
-			</tr>
-			<tr>
-					<td><code>submissionMode</code></td>
-					<td><code>&quot;artifact_or_assistant&quot;</code></td>
-					<td>Accepts <code>--submission-file</code> or structured <code>--status</code> metadata</td>
-			</tr>
-			<tr>
-					<td><code>submissionPath</code></td>
-					<td><code>string | null</code></td>
-					<td>Expected relative artifact path inside <code>candidateDir</code> when configured</td>
-			</tr>
-			<tr>
-					<td><code>leaseToken</code></td>
-					<td><code>string</code></td>
-					<td>Single-use 64-character lowercase hex token required on submit</td>
-			</tr>
-	</tbody>
-</table>
+<p>For Managed Controller runs, pin <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> and pass <code>--config</code>, <code>--registry</code>, and <code>--registry-sha256</code>. With <code>--json</code>, stdout emits NDJSON <code>Envelope</code> lines; when <code>kind</code> is <code>&quot;step&quot;</code>, <code>data</code> returns the <code>StepYield</code> assignment (<code>candidateDir</code>, <code>contextFiles</code>, <code>selection</code>, <code>allowedTools</code>, <code>scope</code>, <code>prompt</code>, <code>submissionPath</code>, and single-use <code>leaseToken</code>).</p>
 <h2 id="step-2-execute-role">Step 2: Execute role</h2>
-<p>Execute the yielded prompt inside <code>candidateDir</code> while obeying every confinement invariant:</p>
+<p>Execute the yielded <code>prompt</code> inside <code>candidateDir</code> while obeying four confinement invariants:</p>
 <ul>
-<li><strong>Isolated staging</strong>: Modify files only inside <code>candidateDir</code>; leave <code>--repo</code>, <code>&lt;runRoot&gt;/&lt;runId&gt;</code>, and <code>&lt;runRoot&gt;/.taskpack-&lt;runId&gt;</code> untouched.</li>
-<li><strong>Regular files only</strong>: Create zero symlinks (<code>O_NOFOLLOW</code>), zero hardlinks (<code>nlink === 1</code>), and zero <code>.git</code> entries inside <code>candidateDir</code>.</li>
-<li><strong>Overlay bounds</strong>: Keep changed or added files within default <code>128</code> entries and <code>4 MiB</code> total (configurable via <code>spec.limits.overlay</code> up to <code>16,384</code> files and <code>16 GiB</code> via <code>1 MiB</code> CAS streaming; depth <code>&lt;= 32</code>, <code>&lt;= 131,072</code> scanned entries).</li>
-<li><strong>Protected invariance</strong>: Never modify or chmod <code>0o400</code> / <code>0o500</code> protected files, <code>.git</code>, <code>&lt;controlRoot&gt;</code>, paths matched by <code>scope.protected</code>, or <code>.github/workflows/**</code> on GitHub policy runs unless explicitly unlocked.</li>
-<li><strong>Read-only invariance</strong>: Leave <code>candidateDir</code> byte-identical when <code>repair === &quot;format&quot;</code> or when <code>allowedTools</code> omits <code>write</code>, <code>edit</code>, <code>delete</code>, and <code>bash</code> (such as <code>purpose: &quot;reviewer&quot;</code>).</li>
+<li><strong>Isolated staging</strong>: Modify files only inside <code>candidateDir</code>; leave <code>--repo</code> and <code>&lt;runRoot&gt;/&lt;runId&gt;</code> untouched.</li>
+<li><strong>Regular files only</strong>: Create zero symlinks (<code>O_NOFOLLOW</code>), zero hardlinks (<code>nlink === 1</code>), and zero <code>.git</code> entries.</li>
+<li><strong>Overlay bounds</strong>: Stay within <code>spec.limits.overlay</code> (default <code>128</code> files / <code>4 MiB</code>, up to <code>16,384</code> files / <code>16 GiB</code> via CAS streaming).</li>
+<li><strong>Protected &amp; read-only invariance</strong>: Never edit <code>0o400</code>/<code>0o500</code> protected paths, <code>.git</code>, <code>&lt;controlRoot&gt;</code>, or <code>candidateDir</code> during <code>repair === &quot;format&quot;</code> or read-only review turns.</li>
 </ul>
 <h2 id="step-3-submit-lease">Step 3: Submit lease</h2>
-<p>Submit the completed role turn with its single-use <code>leaseToken</code>:</p>
+<p>Submit the completed turn with its single-use <code>leaseToken</code> (add <code>--submission-file</code>, <code>--status no_change|failed|blocked</code>, or <code>--reason</code> when needed):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step submit <span class="se">\
@@ -570,43 +467,9 @@
 </span></span></span><span class="line"><span class="cl">  --status completed <span class="se">\
 </span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
-<p>Pass <code>--submission-file &lt;path&gt;</code> when supplying an external JSON artifact, or set <code>--status</code> (<code>completed</code>, <code>no_change</code>, <code>failed</code>, or <code>blocked</code>) with <code>--reason &quot;&lt;summary&gt;&quot;</code> on non-completed turns. Loopwright captures the overlay, runs independent checks (<code>scope.v1</code>, <code>json-artifact.v1</code>, <code>no-change.v1</code>, and local <code>command.v1</code> hooks), and emits either the next <code>StepYield</code> (<code>kind: &quot;step&quot;</code>) or a terminal <code>result</code> / <code>incident</code> envelope.</p>
-<p>Pre-commit scan failures (symlinks, hardlinks, size ceilings, or read-only invariance violations) release authority without consuming <code>leaseToken</code> or deleting <code>candidateDir</code>, so the agent can fix the workspace and re-submit.</p>
-<table>
-	<thead>
-			<tr>
-					<th>Condition</th>
-					<th>Diagnostic code</th>
-					<th>Exit code</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td>Duplicate <code>step next</code> while parked</td>
-					<td><code>OWNER_BUSY</code></td>
-					<td><code>7</code></td>
-			</tr>
-			<tr>
-					<td>Replay or stale <code>leaseToken</code> after rotation</td>
-					<td><code>AUTHORITY_REFUSED</code></td>
-					<td><code>7</code></td>
-			</tr>
-			<tr>
-					<td>Unattended <code>run</code> or <code>resume</code> on delegated role</td>
-					<td><code>CAPABILITY_UNSUPPORTED</code></td>
-					<td><code>3</code></td>
-			</tr>
-	</tbody>
-</table>
-<p>Recover a lost lease from a crashed worker by rotating the token explicitly (<code>contextFiles</code> reconstruct from CAS for active handoffs), or abort the run cleanly (exit <code>130</code>):</p>
-<div class="code-block">
-  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --reissue-lease --json
-</span></span><span class="line"><span class="cl">loopwright step cancel --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --json</span></span></code></pre></div>
-</div>
+<p>Loopwright captures the overlay, runs independent checks (<code>scope.v1</code>, <code>json-artifact.v1</code>, <code>no-change.v1</code>, and local <code>command.v1</code>), and emits either the next <code>StepYield</code> or a terminal <code>result</code>/<code>incident</code> envelope. Pre-commit scan failures release authority without consuming <code>leaseToken</code> or deleting <code>candidateDir</code> so you can fix and re-submit.</p>
 <h2 id="multi-role-routing">Multi-role routing</h2>
-<p>Declare <code>1</code> to <code>4</code> ordered roles under <code>spec.roles</code> in <code>.loopwright/taskpack.yaml</code> (see <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
-) to run multi-agent DAGs such as author-then-reviewer pipelines. During <code>step next --taskpack</code>, Loopwright compiles every role into <code>adapter: delegated</code> automatically; Managed Controller files set <code>adapter: delegated</code> directly on <code>TaskContract.spec.roles[]</code> and <code>TrustedRegistry.spec.roleProfiles[]</code>.</p>
+<p>Declare <code>1..4</code> ordered roles under <code>spec.roles</code> in <code>.loopwright/taskpack.yaml</code> to run multi-agent DAGs such as author-then-reviewer pipelines. <code>step next --taskpack</code> compiles every role as <code>adapter: delegated</code> automatically.</p>
 <h3 id="taskpack">Taskpack</h3>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -624,7 +487,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">versions.json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">policy/invariants.md</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional — 1..4 roles compiled as adapter delegated during step next</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional 1..4 roles compiled as delegated during step next</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">task</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">anthropic</span><span class="w">
@@ -665,7 +528,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">pull_request</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">targetBranch</span><span class="p">:</span><span class="w"> </span><span class="l">main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">headBranchPrefix</span><span class="p">:</span><span class="w"> </span><span class="l">auto-sync/</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">titleTemplate</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;chore(sync): update upstream manifests&#34;</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">titleTemplate</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;chore(sync) - update upstream manifests&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">memory</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/memory/multi-role-sync</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">apply</span><span class="p">:</span><span class="w"> </span><span class="l">separate-pull-request</span><span class="w">
@@ -676,7 +539,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">releasePublished</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentCommands</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span></span></span></code></pre></div>
 </div>
-<p>Override role models at admission without editing YAML by passing repeatable <code>--role-model &lt;roleId&gt;=&lt;provider&gt;/&lt;model&gt;[:&lt;thinking&gt;]</code> flags (up to <code>8</code> unique role IDs, persisted in <code>run.json</code>, total CLI <code>argv &lt;= 64</code>). Dispatch each yielded <code>selection</code> to a matching subagent or supervised Orca worker:</p>
+<p>Override role models at admission without editing YAML via repeatable <code>--role-model &lt;roleId&gt;=&lt;provider&gt;/&lt;model&gt;[:&lt;thinking&gt;]</code> flags (up to <code>8</code> roles, persisted in <code>run.json</code>), then dispatch each yielded <code>selection</code> to a matching subagent or worker:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next <span class="se">\
@@ -689,188 +552,54 @@
 </span></span></span><span class="line"><span class="cl">  --json</span></span></code></pre></div>
 </div>
 <h2 id="step-4-apply-overlay">Step 4: Apply overlay</h2>
-<p><code>step next --taskpack</code> sets <code>publication.mode: disabled</code> and pins <code>target.sourceRevision</code> to <code>HEAD</code>&rsquo;s commit OID automatically. For local-only Managed Controller runs, set <code>publication.mode: disabled</code> and pin <code>target.sourceRevision</code> to <code>git rev-parse HEAD</code> in <code>controller.yaml</code>. Terminal <code>step submit</code> deletes <code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;</code> (<code>candidateDir</code>) while retaining verified artifacts under <code>&lt;runRoot&gt;/&lt;runId&gt;</code>.</p>
-<p>Once <code>step submit --json</code> emits <code>kind: &quot;result&quot;</code> with <code>data.result.spec.status === &quot;completed&quot;</code>, export the digest-verified bundle to a <strong>new</strong> <code>--output</code> path (<code>loopwright inspect</code> creates the destination with mode <code>0700</code> and rejects pre-existing directories):</p>
+<p>Terminal <code>step submit</code> deletes <code>&lt;runRoot&gt;/workspaces/&lt;runId&gt;</code> while keeping verified artifacts under <code>&lt;runRoot&gt;/&lt;runId&gt;</code>. Once <code>result.json</code> settles <code>completed</code>, export a fresh bundle to a new <code>--output</code> path (<code>0700</code>):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">INSPECT_DIR</span><span class="o">=</span><span class="s2">&#34;</span><span class="k">$(</span><span class="nb">cd</span> <span class="s2">&#34;</span><span class="k">$(</span>mktemp -d <span class="s2">&#34;</span><span class="si">${</span><span class="nv">TMPDIR</span><span class="k">:-</span><span class="p">/tmp</span><span class="si">}</span><span class="s2">/loopwright-inspect.XXXXXX&#34;</span><span class="k">)</span><span class="s2">&#34;</span> <span class="o">&amp;&amp;</span> <span class="nb">pwd</span> -P<span class="k">)</span><span class="s2">/bundle&#34;</span>
 </span></span><span class="line"><span class="cl">loopwright inspect --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --output <span class="s2">&#34;</span><span class="nv">$INSPECT_DIR</span><span class="s2">&#34;</span> --json</span></span></code></pre></div>
 </div>
-<p>Verify <code>$INSPECT_DIR/result.json</code> settled <code>completed</code>, confirm your local Git working tree is clean and <code>HEAD</code> matches the immutable baseline commit OID, and apply <code>$INSPECT_DIR/candidate.files.json</code> onto your branch. <code>candidate.files.json</code> exports <code>version: 2</code> CAS pointers (<code>{ name, mode, sha256, byteLength, uri, blobPath }</code>, verified via <code>O_NOFOLLOW</code>, <code>nlink === 1</code>, and <code>1 MiB</code> streaming SHA-256 while preserving <code>100644</code>/<code>100755</code> modes), with passive fallback for legacy <code>version: 1</code> base64 <code>body</code> bundles:</p>
+<p>Before applying <code>$INSPECT_DIR/candidate.files.json</code> onto your branch (either via the <code>loopwright-step</code> skill or an atomic script), verify five invariants:</p>
+<ol>
+<li><strong>Completed lock</strong>: <code>$INSPECT_DIR/result.json</code> settled <code>completed</code> and matches <code>task.lock.json</code> <code>lockHash</code>.</li>
+<li><strong>Clean baseline</strong>: Local <code>git status --porcelain</code> is empty and <code>HEAD</code> equals pinned <code>sourceRevision</code> (and <code>baseTree.commitOid</code> for overlays).</li>
+<li><strong>Safe targets</strong>: Every path is repo-relative with zero symlinks, zero hardlinks (<code>nlink === 1</code>), and zero <code>.git</code> segments.</li>
+<li><strong>Verified CAS blobs</strong>: Every <code>version: 2</code> entry (<code>cas://sha256/&lt;hex&gt;</code>) matches its <code>1 MiB</code> streamed SHA-256 and <code>100644</code>/<code>100755</code> mode.</li>
+<li><strong>Review diff</strong>: Inspect <code>git status</code> and <code>git diff</code>, run project tests, and commit on your branch.</li>
+</ol>
+<h2 id="recovery-and-exits">Recovery and exits</h2>
+<p>Rotate a lost lease after a worker crash, or cancel cleanly (exit <code>130</code>):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">node -e <span class="s1">&#39;
-</span></span></span><span class="line"><span class="cl"><span class="s1">const fs = require(&#34;node:fs&#34;), path = require(&#34;node:path&#34;), cp = require(&#34;node:child_process&#34;), crypto = require(&#34;node:crypto&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const [inspectDir, repoArg] = process.argv.slice(1);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const repoRoot = fs.realpathSync(repoArg), CHUNK = 1048576;
-</span></span></span><span class="line"><span class="cl"><span class="s1">const readJson = (n) =&gt; JSON.parse(fs.readFileSync(path.join(inspectDir, n), &#34;utf8&#34;));
-</span></span></span><span class="line"><span class="cl"><span class="s1">const res = readJson(&#34;result.json&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (res.spec?.status !== &#34;completed&#34;) throw new Error(`Refusing apply: status=${res.spec?.status}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const lock = readJson(&#34;task.lock.json&#34;), bundle = readJson(&#34;candidate.files.json&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (!lock.spec?.lockHash?.hex || res.spec?.subject?.lockHash?.hex !== lock.spec.lockHash.hex) throw new Error(&#34;Refusing apply: lockHash mismatch&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const git = (...a) =&gt; cp.execFileSync(&#34;git&#34;, [&#34;-C&#34;, repoRoot, ...a], { encoding: &#34;utf8&#34; });
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (git(&#34;status&#34;, &#34;--porcelain&#34;, &#34;-z&#34;, &#34;--untracked-files=all&#34;).length &gt; 0) throw new Error(&#34;Refusing apply: working tree is dirty&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const sourceRev = lock.spec?.contract?.spec?.target?.sourceRevision;
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (typeof sourceRev !== &#34;string&#34; || !sourceRev || sourceRev.startsWith(&#34;-&#34;)) throw new Error(&#34;Invalid sourceRevision&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const head = git(&#34;rev-parse&#34;, &#34;--verify&#34;, &#34;HEAD^{commit}&#34;).trim();
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (head !== git(&#34;rev-parse&#34;, &#34;--verify&#34;, &#34;--end-of-options&#34;, `${sourceRev}^{commit}`).trim()) throw new Error(&#34;Refusing apply: HEAD != sourceRevision&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const safePath = (rel) =&gt; {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (typeof rel !== &#34;string&#34; || !rel || path.isAbsolute(rel) || rel.includes(&#34;\\&#34;)) throw new Error(`Invalid path: ${rel}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const parts = rel.split(&#34;/&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (parts.some((p) =&gt; !p || p === &#34;.&#34; || p === &#34;..&#34; || p === &#34;.git&#34;)) throw new Error(`Unsafe segment: ${rel}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  let cur = repoRoot;
-</span></span></span><span class="line"><span class="cl"><span class="s1">  for (let i = 0; i &lt; parts.length; i++) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    cur = path.join(cur, parts[i]);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    try {
-</span></span></span><span class="line"><span class="cl"><span class="s1">      const st = fs.lstatSync(cur);
-</span></span></span><span class="line"><span class="cl"><span class="s1">      const bad = st.isSymbolicLink() || (i &lt; parts.length - 1 ? !st.isDirectory() : (!st.isFile() || st.nlink !== 1));
-</span></span></span><span class="line"><span class="cl"><span class="s1">      if (bad) throw new Error(`Unsafe target: ${rel}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    } catch (e) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">      if (e.code !== &#34;ENOENT&#34;) throw e;
-</span></span></span><span class="line"><span class="cl"><span class="s1">    }
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">  return cur;
-</span></span></span><span class="line"><span class="cl"><span class="s1">};
-</span></span></span><span class="line"><span class="cl"><span class="s1">const streamHash = (filePath, expectedLen, outFd) =&gt; {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  try {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    const st = fs.fstatSync(fd);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (!st.isFile() || st.nlink !== 1) throw new Error(`Unsafe source: ${filePath}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (expectedLen !== null &amp;&amp; st.size !== expectedLen) throw new Error(`Size mismatch: ${filePath}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    const hash = crypto.createHash(&#34;sha256&#34;), buf = Buffer.allocUnsafe(CHUNK);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    let total = 0, n = 0;
-</span></span></span><span class="line"><span class="cl"><span class="s1">    while ((n = fs.readSync(fd, buf, 0, CHUNK, null)) &gt; 0) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">      hash.update(buf.subarray(0, n));
-</span></span></span><span class="line"><span class="cl"><span class="s1">      if (outFd !== null) for (let off = 0; off &lt; n;) off += fs.writeSync(outFd, buf, off, n - off);
-</span></span></span><span class="line"><span class="cl"><span class="s1">      total += n;
-</span></span></span><span class="line"><span class="cl"><span class="s1">    }
-</span></span></span><span class="line"><span class="cl"><span class="s1">    const after = fs.fstatSync(fd);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (after.ino !== st.ino || after.dev !== st.dev || after.size !== st.size || after.mtimeMs !== st.mtimeMs) throw new Error(`Source mutated: ${filePath}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (expectedLen !== null &amp;&amp; total !== expectedLen) throw new Error(`Short read: ${filePath}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    return hash.digest(&#34;hex&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  } finally {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    fs.closeSync(fd);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">};
-</span></span></span><span class="line"><span class="cl"><span class="s1">const isV2 = bundle.version === 2;
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (!isV2 &amp;&amp; bundle.version !== 1) throw new Error(`Unsupported bundle version: ${bundle.version}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">const files = bundle.files ?? [], present = new Set(files.map((f) =&gt; f.name));
-</span></span></span><span class="line"><span class="cl"><span class="s1">let deleted;
-</span></span></span><span class="line"><span class="cl"><span class="s1">if (bundle.manifest?.spec?.baseTree != null) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const commitOid = bundle.manifest.spec.baseTree.commitOid;
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (typeof commitOid !== &#34;string&#34; || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commitOid) || head !== commitOid) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    throw new Error(&#34;Refusing apply: HEAD != baseTree.commitOid&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">  deleted = bundle.manifest.spec.deleted ?? [];
-</span></span></span><span class="line"><span class="cl"><span class="s1">} else {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sourceRev) || head !== sourceRev) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    throw new Error(&#34;Refusing apply: classic snapshot requires pinned commit OID sourceRevision&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const baseRows = git(&#34;ls-tree&#34;, &#34;-r&#34;, &#34;-z&#34;, &#34;--full-tree&#34;, head).split(&#34;\0&#34;).filter(Boolean)
-</span></span></span><span class="line"><span class="cl"><span class="s1">    .map((r) =&gt; /^(?:100644|100755) blob ([0-9a-f]{40,64})\t(.+)$/s.exec(r)).filter(Boolean)
-</span></span></span><span class="line"><span class="cl"><span class="s1">    .map((m) =&gt; m[2]);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  deleted = baseRows.filter((n) =&gt; !present.has(n));
-</span></span></span><span class="line"><span class="cl"><span class="s1">}
-</span></span></span><span class="line"><span class="cl"><span class="s1">for (const del of deleted) safePath(del);
-</span></span></span><span class="line"><span class="cl"><span class="s1">for (const file of files) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  safePath(file.name);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (isV2) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (!/^[0-9a-f]{64}$/.test(file.sha256) || file.uri !== `cas://sha256/${file.sha256}`) throw new Error(`Invalid CAS ref: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (!Number.isSafeInteger(file.byteLength) || file.byteLength &lt; 0 || typeof file.blobPath !== &#34;string&#34; || !path.isAbsolute(file.blobPath)) throw new Error(`Invalid blobPath: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (file.mode !== &#34;100644&#34; &amp;&amp; file.mode !== &#34;100755&#34;) throw new Error(`Invalid mode: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (streamHash(file.blobPath, file.byteLength, null) !== file.sha256) throw new Error(`Digest mismatch: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  } else if (file.encoding !== &#34;base64&#34; || typeof file.body !== &#34;string&#34;) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    throw new Error(`Invalid v1 bundle entry: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">}
-</span></span></span><span class="line"><span class="cl"><span class="s1">for (const del of deleted) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const target = safePath(del);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  fs.rmSync(target, { force: true });
-</span></span></span><span class="line"><span class="cl"><span class="s1">  for (let d = path.dirname(target); d !== repoRoot &amp;&amp; d.startsWith(repoRoot + path.sep); d = path.dirname(d)) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    try { fs.rmdirSync(d); } catch { break; }
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">}
-</span></span></span><span class="line"><span class="cl"><span class="s1">for (const file of files) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const target = safePath(file.name);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const v1Bytes = isV2 ? null : Buffer.from(file.body, &#34;base64&#34;);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  let mode = file.mode === &#34;100755&#34; ? 0o755 : 0o644, unchanged = false;
-</span></span></span><span class="line"><span class="cl"><span class="s1">  try {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    const st = fs.lstatSync(target);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (file.mode == null &amp;&amp; (st.mode &amp; 0o111)) mode = 0o755;
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (isV2) unchanged = st.size === file.byteLength &amp;&amp; streamHash(target, file.byteLength, null) === file.sha256 &amp;&amp; ((st.mode &amp; 0o111) !== 0) === (mode === 0o755);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    else unchanged = st.size === v1Bytes.length &amp;&amp; fs.readFileSync(target).equals(v1Bytes);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  } catch {}
-</span></span></span><span class="line"><span class="cl"><span class="s1">  if (unchanged) continue;
-</span></span></span><span class="line"><span class="cl"><span class="s1">  fs.mkdirSync(path.dirname(target), { recursive: true });
-</span></span></span><span class="line"><span class="cl"><span class="s1">  safePath(file.name);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const tmp = path.join(path.dirname(target), `.lw-apply-${process.pid}-${Math.random().toString(16).slice(2)}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  const fd = fs.openSync(tmp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW, mode);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  try {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    if (isV2) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">      if (streamHash(file.blobPath, file.byteLength, fd) !== file.sha256) throw new Error(`Digest mismatch: ${file.name}`);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    } else {
-</span></span></span><span class="line"><span class="cl"><span class="s1">      fs.writeFileSync(fd, v1Bytes);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    }
-</span></span></span><span class="line"><span class="cl"><span class="s1">    fs.fchmodSync(fd, mode);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    fs.closeSync(fd);
-</span></span></span><span class="line"><span class="cl"><span class="s1">    fs.renameSync(tmp, target);
-</span></span></span><span class="line"><span class="cl"><span class="s1">  } catch (e) {
-</span></span></span><span class="line"><span class="cl"><span class="s1">    try { fs.closeSync(fd); } catch {}
-</span></span></span><span class="line"><span class="cl"><span class="s1">    fs.rmSync(tmp, { force: true });
-</span></span></span><span class="line"><span class="cl"><span class="s1">    throw e;
-</span></span></span><span class="line"><span class="cl"><span class="s1">  }
-</span></span></span><span class="line"><span class="cl"><span class="s1">}
-</span></span></span><span class="line"><span class="cl"><span class="s1">&#39;</span> <span class="s2">&#34;</span><span class="nv">$INSPECT_DIR</span><span class="s2">&#34;</span> .</span></span></code></pre></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --reissue-lease --json
+</span></span><span class="line"><span class="cl">loopwright step cancel --run-root <span class="s2">&#34;</span><span class="nv">$RUN_ROOT</span><span class="s2">&#34;</span> --run-id <span class="s2">&#34;</span><span class="nv">$RUN_ID</span><span class="s2">&#34;</span> --json</span></span></code></pre></div>
 </div>
-<p>Review <code>git status</code> and <code>git diff</code>, run project tests if desired, and commit on your branch.</p>
-<h2 id="exit-codes">Exit codes</h2>
 <table>
 	<thead>
 			<tr>
 					<th>Exit code</th>
-					<th>Outcome</th>
+					<th>Diagnostic or outcome</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
 					<td><code>0</code></td>
-					<td><code>step next</code> or <code>step submit</code> yielded <code>awaiting_role</code>, or run settled <code>completed</code> / <code>no_change</code></td>
+					<td>Yielded <code>awaiting_role</code>, or settled <code>completed</code> / <code>no_change</code></td>
 			</tr>
 			<tr>
-					<td><code>2</code></td>
-					<td>CLI flag, configuration schema, <code>--run-root</code> overlap, or <code>Taskpack</code> manifest error</td>
+					<td><code>2</code> / <code>3</code></td>
+					<td>Schema or <code>--run-root</code> overlap (<code>2</code>); <code>blocked</code> or <code>CAPABILITY_UNSUPPORTED</code> (<code>3</code>)</td>
 			</tr>
 			<tr>
-					<td><code>3</code></td>
-					<td>Run settled <code>blocked</code>, or unsupported capability (<code>CAPABILITY_UNSUPPORTED</code>)</td>
-			</tr>
-			<tr>
-					<td><code>4</code></td>
-					<td>Verification check or role execution settled <code>failed</code></td>
-			</tr>
-			<tr>
-					<td><code>5</code></td>
-					<td>Allowance settled <code>exhausted</code> (<code>BUDGET_EXHAUSTED</code>, <code>ATTEMPT_LIMIT</code>, <code>REPEAT_FAILURE</code>)</td>
-			</tr>
-			<tr>
-					<td><code>6</code></td>
-					<td>Wall-clock deadline settled <code>expired</code> (<code>DEADLINE</code>)</td>
+					<td><code>4</code> / <code>5</code> / <code>6</code></td>
+					<td>Verification <code>failed</code> (<code>4</code>), budget <code>exhausted</code> (<code>5</code>), or <code>DEADLINE</code> (<code>6</code>)</td>
 			</tr>
 			<tr>
 					<td><code>7</code></td>
-					<td>Lease or recovery conflict (<code>OWNER_BUSY</code>, <code>AUTHORITY_REFUSED</code>, <code>RECOVERY_REQUIRED</code>)</td>
+					<td><code>OWNER_BUSY</code>, <code>AUTHORITY_REFUSED</code>, or <code>RECOVERY_REQUIRED</code></td>
 			</tr>
 			<tr>
-					<td><code>8</code></td>
-					<td>State, artifact (<code>ARTIFACT_INVALID</code>), limit (<code>OUTPUT_LIMIT</code>), or cleanup incident</td>
-			</tr>
-			<tr>
-					<td><code>130</code></td>
-					<td>Run settled <code>cancelled</code> (<code>step cancel</code> or accounted <code>SIGINT</code>)</td>
-			</tr>
-			<tr>
-					<td><code>143</code></td>
-					<td>Accounted <code>SIGTERM</code> termination</td>
+					<td><code>8</code> / <code>130</code> / <code>143</code></td>
+					<td>Artifact/store incident (<code>8</code>), <code>step cancel</code>/<code>SIGINT</code> (<code>130</code>), or <code>SIGTERM</code> (<code>143</code>)</td>
 			</tr>
 	</tbody>
 </table>
@@ -880,7 +609,7 @@
       <ul class="related-pages"><li><a href="/loopwright/main/docs/operations/cli/">CLI</a>
  (local operator subcommands and flags)</li><li><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
  (manifest roles, scope, and checks)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
- (delegated role profiles and trusted bindings)</li></ul>
+ (delegated role profiles)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
@@ -902,11 +631,7 @@
         <li><a href="#zero-install-prompt">Zero-install prompt</a></li>
       </ul>
     </li>
-    <li><a href="#step-1-pull-assignment">Step 1: Pull assignment</a>
-      <ul>
-        <li><a href="#host-preflight">Host preflight</a></li>
-      </ul>
-    </li>
+    <li><a href="#step-1-pull-assignment">Step 1: Pull assignment</a></li>
     <li><a href="#step-2-execute-role">Step 2: Execute role</a></li>
     <li><a href="#step-3-submit-lease">Step 3: Submit lease</a></li>
     <li><a href="#multi-role-routing">Multi-role routing</a>
@@ -915,7 +640,7 @@
       </ul>
     </li>
     <li><a href="#step-4-apply-overlay">Step 4: Apply overlay</a></li>
-    <li><a href="#exit-codes">Exit codes</a></li>
+    <li><a href="#recovery-and-exits">Recovery and exits</a></li>
   </ul>
 </nav>
         

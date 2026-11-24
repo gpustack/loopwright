@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -373,108 +373,56 @@
       <article>
         
   <h1 id="cli">CLI</h1>
-<p>The CLI validates trusted configuration, syncs taskpack digest lockfiles, and manages bounded local runs. Install the <code>loopwright</code> command on your laptop first via <a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
-, then use it to prepare, inspect, resume, or reconcile work and audit capability closure.</p>
+<p>The CLI validates trusted configuration, syncs taskpack digest lockfiles, and manages bounded local runs. Install <code>loopwright</code> first via <a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
+, then use it to prepare, run, inspect, reconcile, or audit capability closure.</p>
 <h2 id="contents">Contents</h2>
 <ul>
-<li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a>
+<li><a href="#step-1-prepare-and-check">Step 1: Prepare and check</a>
 </li>
-<li><a href="#step-2-approve-bindings">Step 2: Approve bindings</a>
+<li><a href="#step-2-execute-runs">Step 2: Execute runs</a>
 </li>
-<li><a href="#step-3-check-configuration">Step 3: Check configuration</a>
+<li><a href="#step-3-inspect-and-recover">Step 3: Inspect and recover</a>
 </li>
-<li><a href="#step-4-run-work">Step 4: Run work</a>
-</li>
-<li><a href="#step-5-inspect-recovery">Step 5: Inspect recovery</a>
-</li>
-<li><a href="#step-6-audit-closure">Step 6: Audit closure</a>
-</li>
-<li><a href="#digest-lockfile">Digest lockfile</a>
+<li><a href="#step-4-audit-closure">Step 4: Audit closure</a>
 </li>
 <li><a href="#delegated-stepping">Delegated stepping</a>
 </li>
-<li><a href="#command-reference">Command reference</a>
+<li><a href="#suites-and-app">Suites and App</a>
+</li>
+<li><a href="#runner-and-evolution">Runner and evolution</a>
 </li>
 <li><a href="#exit-codes">Exit codes</a>
 </li>
 </ul>
-<h2 id="step-1-generate-drafts">Step 1: Generate drafts</h2>
+<h2 id="step-1-prepare-and-check">Step 1: Prepare and check</h2>
+<p>Scaffold Managed Controller drafts outside the checkout (<code>controller.draft.yaml</code>, <code>registry.draft.yaml</code>, <code>README.draft.md</code>), pin <code>digests.lock.json</code> for <code>Taskpack</code>s, and compile statically:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright init --directory ./loopwright-config</span></span></code></pre></div>
-</div>
-<p>The command creates <code>controller.draft.yaml</code>, <code>registry.draft.yaml</code>, and <code>README.draft.md</code> for <strong>Managed Controller</strong> workflows (for a complete populated setup, follow <a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
-). Note that <code>loopwright init</code> does not generate <code>.loopwright/taskpack.yaml</code>; to bootstrap or migrate a repository <code>Taskpack</code> interactively, use the <a href="/loopwright/main/docs/getting-started/installation/#prompt-bootstrap"><code>llms.txt</code> bootstrap prompt</a>
-.</p>
-<div class="code-block">
-  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">TrustedRegistry</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">operator-draft</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resourceVersion</span><span class="p">:</span><span class="w"> </span><span class="l">context-draft</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">handlers</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roleProfiles</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">runtimeProfiles</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">resources</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">credentialBindings</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">environmentBindings</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span></span></span></code></pre></div>
-</div>
-<ul>
-<li><strong>Draft</strong>: The excerpt shows the generated registry; <code>controller.draft.yaml</code> contains <code>REVIEW_REQUIRED</code> placeholders that must be replaced before execution.</li>
-<li><strong>Authority</strong>: Keep approved registry bytes and run state outside the checkout.</li>
-<li><strong>Context</strong>: <code>proven_bound</code> is the strict default; estimated guards require explicit immutable opt-in.</li>
-</ul>
-<table>
-	<thead>
-			<tr>
-					<th>File</th>
-					<th>Purpose</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>controller.draft.yaml</code></td>
-					<td>Task, registry <code>name</code> + digest, profile references, and controls</td>
-			</tr>
-			<tr>
-					<td><code>registry.draft.yaml</code></td>
-					<td>Trusted handlers, profiles, resources, and bindings</td>
-			</tr>
-			<tr>
-					<td><code>README.draft.md</code></td>
-					<td>Draft readiness and review instructions</td>
-			</tr>
-	</tbody>
-</table>
-<h2 id="step-2-approve-bindings">Step 2: Approve bindings</h2>
-<p>Review the task scope, exact installed profiles, handlers, credentials, and registry bytes. Replace every placeholder and calculate the SHA-256 of the final approved registry. The generated digest matches only the initial draft bytes.</p>
-<h2 id="step-3-check-configuration">Step 3: Check configuration</h2>
-<div class="code-block">
-  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
-</span></span><span class="line"><span class="cl">loopwright run --dry-run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright init --directory ./loopwright-config
+</span></span><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json
+</span></span><span class="line"><span class="cl">loopwright check --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --json
 </span></span><span class="line"><span class="cl">loopwright run --dry-run --taskpack .loopwright/taskpack.yaml --repo . --json</span></span></code></pre></div>
 </div>
-<p>These commands validate and compile statically without running preflight, memory, or publication. Neither proves execution readiness, provider availability, or host qualification. Managed <code>run --dry-run</code> (<code>--config</code>) refuses <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, and <code>--allow-host-mounts</code>, whereas <code>run --dry-run --taskpack</code> accepts them for static validation.</p>
-<h2 id="step-4-run-work">Step 4: Run work</h2>
+<ul>
+<li><strong>Drafts</strong>: Replace <code>REVIEW_REQUIRED</code> placeholders and compute the approved <code>registry.yaml</code> SHA-256 before running <code>check</code>. For repository <code>Taskpack</code>s, use the <a href="/loopwright/main/docs/getting-started/installation/#prompt-bootstrap">bootstrap prompt</a>
+.</li>
+<li><strong>Digest lockfile</strong>: <code>digest sync</code> hashes <code>preflight.script</code>, <code>command.v1</code> directories, instructions, and skills (<code>DIGEST_LOCKFILE_DRIFT</code>, exit <code>4</code> on drift).</li>
+<li><strong>Static check</strong>: <code>check</code> and <code>run --dry-run</code> perform zero preflight, model, or publication calls; managed <code>run --dry-run</code> refuses privilege flags.</li>
+</ul>
+<h2 id="step-2-execute-runs">Step 2: Execute runs</h2>
+<p>Run a local <code>Taskpack</code>, launch a Managed Controller cycle, or resume an existing run under identical trusted bindings:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo REPO --run-root TRUSTED_ROOT --run-id demo
 </span></span><span class="line"><span class="cl">loopwright run --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo
 </span></span><span class="line"><span class="cl">loopwright resume --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo</span></span></code></pre></div>
 </div>
-<p><code>run --taskpack</code> runs a local declarative taskpack via <code>@loopwright/taskpack</code> without GitHub variables (<code>--taskpack</code> is mutually exclusive with <code>--config</code>/<code>--registry</code>/<code>--registry-sha256</code>). It accepts <code>--mode candidate|no-change|auto</code>, <code>--baseline-alignment off|fail-fast|extract-context</code>, <code>--source-revision &lt;REV&gt;</code>, <code>--role-model</code>, <code>--dry-run</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--allow-host-mounts</code>, <code>--json</code>, <code>--output-format</code>, and <code>--step-summary-file</code>.</p>
-<p>When <code>--source-revision</code> differs from <code>HEAD</code>, <code>--baseline-alignment</code> probes 3-way merge conflicts in an isolated Git object directory before model calls (<code>fail-fast</code> halts as <code>baseline_merge_conflict</code>, exit <code>3</code>; <code>extract-context</code> stages scrubbed conflict hunks).</p>
-<p>Under local CLI runs without a PR publisher, <code>mode: auto</code> defaults to <code>candidate</code> when neither <code>preflight</code> nor <code>upstreams</code> is declared. Declaring <code>publication.mode: pull_request</code>, <code>memory.apply: separate-pull-request</code>, or <code>memory.apply: inline-with-candidate</code> fails closed with <code>TASKPACK_HOST_BINDING_INVALID</code>.</p>
-<p>Use <code>resume</code> for an existing run with the same trusted identity and bindings. Do not replay an uncertain external effect.</p>
-<p><code>run</code>, <code>resume</code>, <code>step next</code>, and <code>step submit</code> accept opt-in <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>. <code>run</code>, <code>step next</code>, and <code>step submit</code> also accept <code>--allow-host-mounts &lt;csv&gt;</code> to authorize <code>command.v1</code> <code>parameters.mounts</code> sources. <code>reconcile</code> accepts <code>--allow-workflow-writes</code> only; other commands (including <code>runner</code>) refuse all privilege flags.</p>
-<p><code>run</code> and <code>step</code> runs wire live <code>@loopwright/decisions</code> adapters into <code>ControllerPorts.decisions</code> whenever <code>spec.decisions.enabled</code> is <code>true</code> (falling back deterministically when credentials or endpoints are unavailable).</p>
-<p><code>run</code>, <code>resume</code>, and <code>reconcile</code> accept <code>--output-format &lt;csv&gt;</code> with <code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, and <code>text</code> (each emitting a sanitized <code>Run Health</code> (<code>RunEval</code>) section covering tool repeats, ping-pong loops, repair convergence, per-step/role breakdowns, and <code>autoApplied: false</code> suggestions).
-Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown summary. With <code>--json</code>, stdout stays pure NDJSON and omits selected Markdown or text reports. Without <code>--json</code>, selected reports go to stdout.</p>
-<h2 id="step-5-inspect-recovery">Step 5: Inspect recovery</h2>
+<ul>
+<li><strong>Local taskpack mode</strong>: <code>--taskpack</code> accepts <code>--mode</code>, <code>--baseline-alignment</code>, <code>--source-revision</code>, and <code>--role-model</code>. PR publication or PR memory fails closed locally (<code>TASKPACK_HOST_BINDING_INVALID</code>).</li>
+<li><strong>Dual-key privileges</strong>: <code>run</code>, <code>resume</code>, <code>step next</code>, and <code>step submit</code> accept <code>--allow-privileged</code> and <code>--allow-workflow-writes</code>; <code>run</code> and <code>step</code> also accept <code>--allow-host-mounts &lt;csv&gt;</code>.</li>
+<li><strong>Diagnostics &amp; decisions</strong>: <code>--output-format</code> (<code>json</code>, <code>github-step-summary</code>, <code>markdown</code>, <code>text</code>) and <code>--step-summary-file</code> emit <code>RunEval</code>. Enabled <code>spec.decisions</code> wires live adapters with fallback.</li>
+</ul>
+<h2 id="step-3-inspect-and-recover">Step 3: Inspect and recover</h2>
 <p><span class="diagram-scroll"><img src="/loopwright/main/docs/assets/diagrams/reconcile-closure-flow.svg" alt="Recovery, receipt reconciliation, and closure audit" decoding="async"></span></p>
 <!-- flowchart LR
   Inspect["01 Inspect state"] -> Reconcile["02 Reconcile receipt"] -> Closed["03 Verify closed_local"] -> External["04 Report external gaps"]
@@ -485,13 +433,13 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 </span></span><span class="line"><span class="cl">loopwright inspect --run-root TRUSTED_ROOT --run-id demo --output INSPECTION_DIR --json
 </span></span><span class="line"><span class="cl">loopwright reconcile --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --receipt RECEIPT --json</span></span></code></pre></div>
 </div>
-<p>Inspect state and evidence before recovery. <code>loopwright inspect</code> exports <code>run-eval.json</code> inside <code>--output</code> and attaches <code>runEval</code> to JSON output without calling a model or network service. Reconcile an unknown external outcome with its matching authenticated receipt; absent evidence stays unknown.</p>
-<h2 id="step-6-audit-closure">Step 6: Audit closure</h2>
+<p>Inspect state and <code>run-eval.json</code> offline before recovery. Settle any <code>unknown</code> external outcome with its matching authenticated receipt via <code>reconcile</code>; never silently retry uncertain remote effects.</p>
+<h2 id="step-4-audit-closure">Step 4: Audit closure</h2>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright closure --verify-failures --json</span></span></code></pre></div>
 </div>
-<p>Closure exits <code>0</code> for a valid report, <code>3</code> for falsification or unsupported capability, <code>4</code> for failure-matrix failure, and <code>8</code> for integrity failure. JSON output uses versioned envelopes with kind, sequence, run identity, and data.</p>
+<p>Closure audits the 23-capability matrix and 14-case failure suite, exiting <code>0</code> when valid, <code>3</code> on unsupported/falsified capability, <code>4</code> on failure-matrix failure, and <code>8</code> on integrity failure.</p>
 <table>
 	<thead>
 			<tr>
@@ -503,202 +451,51 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 	<tbody>
 			<tr>
 					<td><code>closed_local</code></td>
-					<td>Recorded local evidence level</td>
+					<td>Recorded local evidence</td>
 					<td>Local criterion and failure matrix passed</td>
 			</tr>
 			<tr>
 					<td><code>blocked_external</code></td>
-					<td>Unprovisioned external dependency</td>
-					<td>Live service, host, or hardware remains external</td>
+					<td>Unprovisioned external service</td>
+					<td>Live provider, host, or hardware remains external</td>
 			</tr>
 			<tr>
 					<td><code>deferred_owned</code></td>
 					<td>Deferred owned capability</td>
-					<td>Recorded prerequisite remains unimplemented or deferred</td>
+					<td>Recorded prerequisite remains unimplemented</td>
 			</tr>
 	</tbody>
 </table>
-<h2 id="digest-lockfile">Digest lockfile</h2>
-<div class="code-block">
-  <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
-</span></span><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo . --check --json</span></span></code></pre></div>
-</div>
-<p><code>digest sync</code> computes deterministic SHA-256 digests for <code>spec.preflight.script</code>, mounted <code>command.v1</code> check directories, instructions, and skills, writing <code>&lt;controlRoot&gt;/digests.lock.json</code> (or <code>spec.execution.digests.lockfile</code>). Pass <code>--check</code> in CI to fail closed (<code>DIGEST_LOCKFILE_DRIFT</code>, exit <code>4</code>) when any tracked file or check helper drifts.</p>
 <h2 id="delegated-stepping">Delegated stepping</h2>
-<p>Use <code>step</code> to hand each delegated role to a host agent (see <a href="/loopwright/main/docs/operations/coding-agents/">Coding Agents</a>
- for the end-to-end coroutine workflow and overlay application). Start with either trusted configuration or a taskpack:</p>
+<p>Hand delegated roles to host coding agents (see <a href="/loopwright/main/docs/operations/coding-agents/">Coding Agents</a>
+ for the full coroutine loop and overlay application):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --config CONFIG --registry REGISTRY --registry-sha256 DIGEST --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
-</span></span><span class="line"><span class="cl">loopwright step next --taskpack TASKPACK --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --taskpack .loopwright/taskpack.yaml --repo REPO --run-root TRUSTED_ROOT --run-id demo --json
 </span></span><span class="line"><span class="cl">loopwright step submit --run-root TRUSTED_ROOT --run-id demo --lease TOKEN --status completed --json
 </span></span><span class="line"><span class="cl">loopwright step cancel --run-root TRUSTED_ROOT --run-id demo --json</span></span></code></pre></div>
 </div>
-<p>Use <code>--action next</code>, <code>--action submit</code>, or <code>--action cancel</code> instead of a positional action. <code>step next</code> accepts <code>--mode candidate|no-change</code>, <code>--baseline-alignment off|fail-fast|extract-context</code>, <code>--source-revision &lt;REV&gt;</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, and <code>--allow-host-mounts &lt;csv&gt;</code>. Pass the same privilege flags to <code>step submit</code> when running <code>command.v1</code> checks that require privileged host capabilities or host mounts.</p>
-<p>A parked run rejects another pull unless <code>--reissue-lease</code> replaces a lost lease. Submit each single-use <code>--lease</code> token once. <code>--submission-file</code> supplies an artifact; <code>--status</code> accepts <code>completed</code>, <code>no_change</code>, <code>failed</code>, or <code>blocked</code>. Use <code>--reason</code> for a failure or block.</p>
-<p>JSON output is NDJSON. An envelope with <code>kind: 'step'</code> contains <code>data.status: 'awaiting_role'</code>, selection, prompt, allowed tools, scope, workspace paths, and lease token. Follow those bounds before submitting. Cancellation exits <code>130</code>; SIGINT and SIGTERM exit <code>130</code> and <code>143</code>, subject to uncertainty precedence.</p>
-<p><code>check</code>, <code>run</code>, <code>resume</code>, and <code>step next</code> accept repeatable <code>--role-model ROLE=PROVIDER/MODEL[:THINKING]</code>. Supply at most eight entries. The CLI limits the argument vector to 64 entries. See <a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
- for precedence and persistence.</p>
-<h2 id="command-reference">Command reference</h2>
-<table>
-	<thead>
-			<tr>
-					<th>Subcommand</th>
-					<th>Required flags</th>
-					<th>Optional flags</th>
-					<th>Purpose</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>init</code></td>
-					<td><code>--directory</code></td>
-					<td><code>--force</code>, <code>--json</code></td>
-					<td>Emit <code>controller.draft.yaml</code> and <code>registry.draft.yaml</code></td>
-			</tr>
-			<tr>
-					<td><code>check</code></td>
-					<td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code></td>
-					<td><code>--output</code>, <code>--json</code></td>
-					<td>Compile and verify configuration and registry digest statically</td>
-			</tr>
-			<tr>
-					<td><code>digest sync</code></td>
-					<td><code>--taskpack</code></td>
-					<td><code>--repo</code>, <code>--check</code>, <code>--json</code></td>
-					<td>Write or verify <code>digests.lock.json</code> SHA-256 digests</td>
-			</tr>
-			<tr>
-					<td><code>suite check</code></td>
-					<td><code>--suite</code></td>
-					<td><code>--repo</code>, <code>--verify-digests</code>, <code>--json</code></td>
-					<td>Validate <code>TaskpackSuite</code>, protected union, and prefix disjointness</td>
-			</tr>
-			<tr>
-					<td><code>suite resolve</code></td>
-					<td><code>--suite</code></td>
-					<td><code>--repo</code>, <code>--event</code>, <code>--schedule</code>, <code>--comment-body</code>, <code>--pr-head-ref</code>, <code>--pr-base-ref</code>, <code>--domain</code>, <code>--json</code></td>
-					<td>Resolve domain matrix, PR comments, and stage readiness</td>
-			</tr>
-			<tr>
-					<td><code>run</code></td>
-					<td><code>--taskpack</code> or <code>--config</code>+<code>--registry</code>+<code>--registry-sha256</code>, plus <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
-					<td><code>--mode</code>, <code>--baseline-alignment</code>, <code>--source-revision</code>, <code>--role-model</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
-					<td>Execute a local taskpack or managed controller run</td>
-			</tr>
-			<tr>
-					<td><code>run --dry-run</code></td>
-					<td><code>--dry-run</code> with <code>--taskpack</code>+<code>--repo</code> or <code>--config</code>+<code>--registry</code>+<code>--registry-sha256</code></td>
-					<td><code>--mode</code>, <code>--baseline-alignment</code>, <code>--source-revision</code>, <code>--role-model</code>, <code>--output</code>, <code>--json</code></td>
-					<td>Compile plan statically without preflight, memory, or publication</td>
-			</tr>
-			<tr>
-					<td><code>resume</code></td>
-					<td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code></td>
-					<td><code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
-					<td>Resume an existing run under identical trusted bindings</td>
-			</tr>
-			<tr>
-					<td><code>step</code></td>
-					<td><code>--run-root</code>, <code>--run-id</code>, action</td>
-					<td><code>--action</code>, <code>--baseline-alignment</code>, <code>--source-revision</code>, <code>--allow-privileged</code>, <code>--allow-workflow-writes</code>, <code>--json</code></td>
-					<td>Pull, submit, or cancel delegated work</td>
-			</tr>
-			<tr>
-					<td><code>status</code></td>
-					<td><code>--run-root</code>, <code>--run-id</code></td>
-					<td><code>--json</code></td>
-					<td>Read current run stage, lease state, and checkpoint summary</td>
-			</tr>
-			<tr>
-					<td><code>inspect</code></td>
-					<td><code>--run-root</code>, <code>--run-id</code></td>
-					<td><code>--output</code>, <code>--json</code></td>
-					<td>Export redacted receipts, <code>run-eval.json</code>, and diagnostics</td>
-			</tr>
-			<tr>
-					<td><code>reconcile</code></td>
-					<td><code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, <code>--repo</code>, <code>--run-root</code>, <code>--run-id</code>, <code>--receipt</code></td>
-					<td><code>--output</code>, <code>--json</code>, <code>--output-format</code>, <code>--step-summary-file</code></td>
-					<td>Settle an unknown external outcome with an authenticated receipt</td>
-			</tr>
-			<tr>
-					<td><code>closure</code></td>
-					<td>None</td>
-					<td><code>--repo</code>, <code>--output</code>, <code>--verify-failures</code>, <code>--json</code></td>
-					<td>Audit the 23-capability closure matrix and 14-case failure suite</td>
-			</tr>
-			<tr>
-					<td><code>app-serve</code></td>
-					<td><code>--config</code></td>
-					<td><code>--repo</code>, <code>--json</code></td>
-					<td>Start the opt-in GitHub App HTTP webhook and token listener</td>
-			</tr>
-			<tr>
-					<td><code>runner relay</code></td>
-					<td><code>--config</code></td>
-					<td><code>--json</code></td>
-					<td>Start the outbound-pull benchmark relay and CAS server</td>
-			</tr>
-			<tr>
-					<td><code>runner worker</code></td>
-					<td><code>--config</code></td>
-					<td><code>--once</code>, <code>--json</code></td>
-					<td>Poll relay leases and execute two-stage hardware benchmarks</td>
-			</tr>
-			<tr>
-					<td><code>evolve check</code></td>
-					<td><code>--campaign</code></td>
-					<td><code>--repo</code>, <code>--json</code></td>
-					<td>Validate an <code>EvolutionCampaign</code>, taskpack, and target cell</td>
-			</tr>
-			<tr>
-					<td><code>evolve run</code></td>
-					<td><code>--campaign</code>, <code>--state</code></td>
-					<td><code>--repo</code>, <code>--out</code>, <code>--format</code>, <code>--allow-synthetic-probe</code>, <code>--json</code></td>
-					<td>Run an evolutionary campaign over isolated child runs</td>
-			</tr>
-			<tr>
-					<td><code>evolve resume</code></td>
-					<td><code>--campaign</code> (or <code>--root</code>)</td>
-					<td><code>--repo</code>, <code>--out</code>, <code>--format</code>, <code>--allow-synthetic-probe</code>, <code>--json</code></td>
-					<td>Resume a paused or preempted campaign from <code>campaign.sqlite</code></td>
-			</tr>
-			<tr>
-					<td><code>evolve status</code></td>
-					<td><code>--campaign</code> (or <code>--root</code>)</td>
-					<td><code>--json</code></td>
-					<td>Read campaign stage, generation, evaluations, and island state</td>
-			</tr>
-			<tr>
-					<td><code>evolve inspect</code></td>
-					<td><code>--campaign</code> (or <code>--root</code>)</td>
-					<td><code>--island</code>, <code>--individual</code>, <code>--json</code></td>
-					<td>Inspect Pareto frontier, niches, teams, and lineage edges</td>
-			</tr>
-			<tr>
-					<td><code>evolve export</code></td>
-					<td><code>--campaign</code> (or <code>--root</code>), <code>--out</code></td>
-					<td><code>--format</code>, <code>--allow-synthetic-probe</code>, <code>--overwrite</code>, <code>--json</code></td>
-					<td>Export a verified <code>evolution-bundle.v1</code> package</td>
-			</tr>
-	</tbody>
-</table>
+<ul>
+<li><strong>Leases &amp; recovery</strong>: Submit each single-use <code>--lease</code> token once (<code>--status completed|no_change|failed|blocked</code>, optional <code>--submission-file</code> or <code>--reason</code>). Pass <code>--reissue-lease</code> to rotate a lost lease on a parked run.</li>
+<li><strong>Model overrides</strong>: <code>check</code>, <code>run</code>, <code>resume</code>, and <code>step next</code> accept up to <code>8</code> repeatable <code>--role-model ROLE=PROVIDER/MODEL[:THINKING]</code> entries (<code>argv &lt;= 64</code>).</li>
+</ul>
+<h2 id="suites-and-app">Suites and App</h2>
 <h3 id="suite-commands">Suite commands</h3>
+<p>Validate multi-domain <code>TaskpackSuite</code> manifests and resolve GitHub Actions matrices or comment commands offline:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright suite check --suite .loopwright/suite.yaml --repo . --verify-digests --json
-</span></span><span class="line"><span class="cl">loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event schedule --schedule nightly --json
-</span></span><span class="line"><span class="cl">loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event issue_comment --comment-body <span class="s2">&#34;/loopwright docs retry&#34;</span> --pr-head-ref loopwright-docs-1 --pr-base-ref main --json</span></span></code></pre></div>
+</span></span><span class="line"><span class="cl">loopwright suite resolve --suite .loopwright/suite.yaml --repo . --event schedule --schedule nightly --json</span></span></code></pre></div>
 </div>
-<p><code>suite resolve</code> emits <code>{ include: [...] }</code> matrix cells in <code>--json</code> mode and exits <code>0</code> for <code>eligible</code>, <code>deferred</code>, and <code>ignored</code> dispositions, <code>2</code> for usage, unknown <code>--domain</code>, or manifest/scope validation errors, and <code>3</code> for runtime <code>blocked</code> outcomes (such as probe failures or branch-ownership mismatches).</p>
+<p><code>suite resolve</code> emits <code>{ include: [...] }</code> in <code>--json</code> mode, exiting <code>0</code> for <code>eligible</code>/<code>deferred</code>/<code>ignored</code>, <code>2</code> for schema or unknown <code>--domain</code> errors, and <code>3</code> for blocked probes or branch mismatches.</p>
+<h3 id="app-daemon">App daemon</h3>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright app-serve --config github-app.yaml --repo . --json</span></span></code></pre></div>
 </div>
-<p>Set <code>spec.listen.enabled: true</code> first. The command exits <code>2</code> for disabled or invalid configuration, <code>130</code> on SIGINT, and <code>143</code> on SIGTERM. See <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
- for configuration and host requirements.</p>
+<p>Requires <code>spec.listen.enabled: true</code> (exit <code>2</code> when disabled or invalid; <code>130</code>/<code>143</code> on <code>SIGINT</code>/<code>SIGTERM</code>). See <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
+.</p>
+<h2 id="runner-and-evolution">Runner and evolution</h2>
 <h3 id="hardware-runner">Hardware runner</h3>
 <p><span class="diagram-scroll"><img src="/loopwright/main/docs/assets/diagrams/hardware-relay-flow.svg" alt="Hardware relay and outbound worker topology" decoding="async"></span></p>
 <!-- flowchart LR
@@ -706,30 +503,21 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 -->
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright runner --help
-</span></span><span class="line"><span class="cl">loopwright runner relay --config relay.yaml --json
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright runner relay --config relay.yaml --json
 </span></span><span class="line"><span class="cl">loopwright runner worker --config worker.yaml --once --json</span></span></code></pre></div>
 </div>
-<p><code>runner relay</code> decouples controllers from GPU clusters so worker hosts open zero inbound ports. Controllers submit signed jobs to <code>/v1/benchmark/jobs/*</code>, while workers poll <code>/v1/runner/leases*</code> outbound across heterogeneous pools (<code>sm_89</code>, <code>gfx1101</code>, <code>ascend_910b</code>).</p>
-<p>The relay isolates credentials (<code>controllerSigningSecret</code> vs <code>workerToken</code>), enforces monotonic <code>leaseEpoch</code> preemption fencing, and streams <code>1 MiB</code> CAS artifacts. Workers compile Stage A without <code>held_out_workloads</code>, run Stage B read-only under <code>networkMode: none</code>, and return signed verdicts.</p>
-<ul>
-<li><strong>Graceful shutdown (<code>SIGINT</code>)</strong>: Exits <code>130</code> (<code>runner worker</code> returns <code>8</code> if an <code>unknown</code> settlement takes precedence).</li>
-<li><strong>Preemption (<code>SIGTERM</code>)</strong>: Reports lease preemption to the relay and exits <code>143</code>, unless superseded by <code>unknown</code> (<code>8</code>) or a <code>fenced</code> preemption acknowledgment (<code>7</code>).</li>
-<li><strong>Fenced lease (<code>7</code>)</strong>: Exits <code>7</code> when the relay rejects a stale <code>leaseEpoch</code> or <code>relayBootId</code> (<code>QUEUE_LEASE_FENCED</code>).</li>
-<li><strong>Unknown or teardown (<code>8</code>)</strong>: Exits <code>8</code> on <code>unknown</code> acknowledgment, <code>RUNNER_TEARDOWN_FAILED</code>, or <code>RUNNER_TRANSPORT_ERROR</code>.</li>
-</ul>
+<p><code>runner relay</code> isolates controller HMAC secrets from worker tokens, enforces <code>leaseEpoch</code> fencing, and streams <code>1 MiB</code> CAS artifacts so private GPU workers open zero inbound ports. Workers compile Stage A without <code>held_out_workloads</code> and execute Stage B read-only with <code>networkMode: none</code>.</p>
 <h3 id="evolution-campaigns">Evolution campaigns</h3>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright evolve check --campaign campaign.yaml --repo . --json
-</span></span><span class="line"><span class="cl">loopwright evolve run --campaign campaign.yaml --state ../campaign-state --repo . --allow-synthetic-probe --json
-</span></span><span class="line"><span class="cl">loopwright evolve resume --campaign ../campaign-state --repo . --json
+</span></span><span class="line"><span class="cl">loopwright evolve run --campaign campaign.yaml --state ../campaign-state --repo . --json
 </span></span><span class="line"><span class="cl">loopwright evolve status --campaign ../campaign-state --json
 </span></span><span class="line"><span class="cl">loopwright evolve inspect --campaign ../campaign-state --island <span class="m">0</span> --json
+</span></span><span class="line"><span class="cl">loopwright evolve resume --campaign ../campaign-state --repo . --json
 </span></span><span class="line"><span class="cl">loopwright evolve <span class="nb">export</span> --campaign ../campaign-state --out ../bundle --format oci-layout --json</span></span></code></pre></div>
 </div>
-<p><code>evolve</code> lazily loads <code>@loopwright/evolution</code>, persists archive state in <code>&lt;state&gt;/campaign.sqlite</code>, and dispatches each candidate into an isolated child <code>LocalRunStore</code>. Keep <code>--state</code> (<code>--campaign-dir</code> / <code>--root</code>) outside <code>--repo</code> or runs fail closed with <code>EVOLUTION_SCHEMA_INVALID</code> (<code>2</code>).</p>
-<p><code>evolve export</code> verifies every HMAC verdict receipt fail-closed (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>, exit <code>3</code> when no signing secret is set) and rejects <code>synthetic_fixture</code> receipts unless <code>--allow-synthetic-probe</code> is passed. GitHub Actions workflows can run <code>loopwright evolve</code> against an HTTPS <code>runner relay</code> (or self-hosted loopback relay) using <code>permissions: { contents: read }</code> and state under <code>${RUNNER_TEMP}</code>.</p>
+<p>Keep <code>--state</code> strictly outside <code>--repo</code> (<code>EVOLUTION_SCHEMA_INVALID</code>, exit <code>2</code> otherwise). <code>evolve export</code> verifies every HMAC verdict receipt fail-closed (<code>EXPORT_UNVERIFIED_FORBIDDEN</code>, exit <code>3</code>) and refuses <code>synthetic_fixture</code> receipts without <code>--allow-synthetic-probe</code>.</p>
 <table>
 	<thead>
 			<tr>
@@ -740,19 +528,19 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 	<tbody>
 			<tr>
 					<td><code>LOOPWRIGHT_BENCHMARK_GATE_URL</code></td>
-					<td>Fallback HTTPS or loopback <code>benchmark-gate.v1</code> submission URL for <code>runner relay</code></td>
+					<td>Fallback HTTPS or loopback <code>benchmark-gate.v1</code> URL for <code>runner relay</code></td>
 			</tr>
 			<tr>
 					<td><code>LOOPWRIGHT_GATE_SIGNING_SECRET</code></td>
-					<td>Required HMAC secret for benchmark submission and fail-closed <code>evolve export</code> (<code>BENCH_SIGNING_SECRET</code> fallback)</td>
+					<td>Required HMAC secret for benchmark submission and fail-closed <code>evolve export</code></td>
 			</tr>
 			<tr>
 					<td><code>LOOPWRIGHT_GATE_AUTH_TOKEN</code></td>
-					<td>Optional bearer token bound to <code>authCredentialRef</code> on remote <code>runner relay</code> endpoints</td>
+					<td>Optional bearer token bound to <code>authCredentialRef</code> on remote relays</td>
 			</tr>
 			<tr>
 					<td><code>LOOPWRIGHT_MODELS_JSON</code></td>
-					<td>Optional Pi <code>models.json</code> path for custom providers and local model endpoints</td>
+					<td>Optional Pi <code>models.json</code> path for custom providers and endpoints</td>
 			</tr>
 	</tbody>
 </table>
@@ -766,44 +554,40 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
 	</thead>
 	<tbody>
 			<tr>
-					<td>0</td>
+					<td><code>0</code></td>
 					<td>Completed, no change, successful static command, or <code>suite</code> <code>eligible</code>/<code>deferred</code>/<code>ignored</code></td>
 			</tr>
 			<tr>
-					<td>2</td>
-					<td>Usage, configuration, unknown <code>--domain</code>, or <code>TaskpackSuite</code>/<code>EvolutionCampaign</code> manifest rejected</td>
+					<td><code>2</code></td>
+					<td>Usage, configuration, unknown <code>--domain</code>, or manifest rejected</td>
 			</tr>
 			<tr>
-					<td>3</td>
-					<td>Unsupported capability, blocked work, <code>TEAM_ENVELOPE_VIOLATION</code>, <code>EXPORT_UNVERIFIED_FORBIDDEN</code>, or <code>WORKER_DEVICE_QUARANTINED</code></td>
+					<td><code>3</code></td>
+					<td>Unsupported capability, blocked work, <code>TEAM_ENVELOPE_VIOLATION</code>, or <code>EXPORT_UNVERIFIED_FORBIDDEN</code></td>
 			</tr>
 			<tr>
-					<td>4</td>
-					<td>Execution, acceptance, or artifact validation failed</td>
+					<td><code>4</code></td>
+					<td>Execution, acceptance, <code>DIGEST_LOCKFILE_DRIFT</code>, or artifact validation failed</td>
 			</tr>
 			<tr>
-					<td>5</td>
+					<td><code>5</code></td>
 					<td>Allowance or campaign budget exhausted</td>
 			</tr>
 			<tr>
-					<td>6</td>
+					<td><code>6</code></td>
 					<td>Deadline expired</td>
 			</tr>
 			<tr>
-					<td>7</td>
-					<td>Reconciliation, <code>EVOLUTION_CONFLICT</code>, <code>EVOLUTION_LEASE_FENCED</code>, <code>EVOLUTION_CLOCK_DRIFT</code>, or fenced runner lease</td>
+					<td><code>7</code></td>
+					<td>Reconciliation, <code>EVOLUTION_CONFLICT</code>, lease fenced (<code>QUEUE_LEASE_FENCED</code>), or clock drift</td>
 			</tr>
 			<tr>
-					<td>8</td>
+					<td><code>8</code></td>
 					<td>Authoritative result unavailable, incident, store corruption, or runner teardown failure</td>
 			</tr>
 			<tr>
-					<td>130</td>
-					<td>Step cancellation, paused evolution campaign, or accounted SIGINT, subject to uncertainty precedence</td>
-			</tr>
-			<tr>
-					<td>143</td>
-					<td>Accounted SIGTERM, subject to uncertainty precedence</td>
+					<td><code>130</code> / <code>143</code></td>
+					<td>Cancellation, pause, or accounted <code>SIGINT</code> / <code>SIGTERM</code> (subject to uncertainty precedence)</td>
 			</tr>
 	</tbody>
 </table>
@@ -811,9 +595,9 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/operations/coding-agents/">Coding Agents</a>
- (drive zero-secret <code>loopwright step</code> loops from OAuth coding agents)</li><li><a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
- (install <code>@gpustack/loopwright</code> and copy bootstrap prompts)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
- (approve trusted execution bindings)</li></ul>
+ (zero-secret <code>loopwright step</code> loops)</li><li><a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
+ (CLI install and bootstrap prompts)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ (trusted execution bindings)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
@@ -828,17 +612,19 @@ Use <code>--step-summary-file &lt;path&gt;</code> to write a separate Markdown s
           <nav id="TableOfContents">
   <ul>
     <li><a href="#contents">Contents</a></li>
-    <li><a href="#step-1-generate-drafts">Step 1: Generate drafts</a></li>
-    <li><a href="#step-2-approve-bindings">Step 2: Approve bindings</a></li>
-    <li><a href="#step-3-check-configuration">Step 3: Check configuration</a></li>
-    <li><a href="#step-4-run-work">Step 4: Run work</a></li>
-    <li><a href="#step-5-inspect-recovery">Step 5: Inspect recovery</a></li>
-    <li><a href="#step-6-audit-closure">Step 6: Audit closure</a></li>
-    <li><a href="#digest-lockfile">Digest lockfile</a></li>
+    <li><a href="#step-1-prepare-and-check">Step 1: Prepare and check</a></li>
+    <li><a href="#step-2-execute-runs">Step 2: Execute runs</a></li>
+    <li><a href="#step-3-inspect-and-recover">Step 3: Inspect and recover</a></li>
+    <li><a href="#step-4-audit-closure">Step 4: Audit closure</a></li>
     <li><a href="#delegated-stepping">Delegated stepping</a></li>
-    <li><a href="#command-reference">Command reference</a>
+    <li><a href="#suites-and-app">Suites and App</a>
       <ul>
         <li><a href="#suite-commands">Suite commands</a></li>
+        <li><a href="#app-daemon">App daemon</a></li>
+      </ul>
+    </li>
+    <li><a href="#runner-and-evolution">Runner and evolution</a>
+      <ul>
         <li><a href="#hardware-runner">Hardware runner</a></li>
         <li><a href="#evolution-campaigns">Evolution campaigns</a></li>
       </ul>

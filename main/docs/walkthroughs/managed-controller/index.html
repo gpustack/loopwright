@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -373,7 +373,7 @@
       <article>
         
   <h1 id="managed-controller">Managed Controller</h1>
-<p>Managed controller mode is Loopwright&rsquo;s fine-grained governance workflow for platform engineers and local CLI operators. You author an out-of-repo <code>TrustedRegistry</code>, pin its SHA-256 digest inside <code>ControllerConfig</code> alongside a <code>TaskContract</code> DAG, and drive admission, execution, inspection, and crash reconciliation via the <code>loopwright</code> CLI.</p>
+<p>Managed controller mode is Loopwright&rsquo;s fine-grained governance workflow for platform engineers and local CLI operators. Author an out-of-repo <code>TrustedRegistry</code>, pin its SHA-256 digest inside <code>ControllerConfig</code> alongside a <code>TaskContract</code> DAG, and drive runs via the <code>loopwright</code> CLI.</p>
 <p>For single-file repository automation where Loopwright compiles contracts and digests automatically, follow <a href="/loopwright/main/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
  instead.</p>
 <h2 id="contents">Contents</h2>
@@ -417,38 +417,38 @@
 			<tr>
 					<td>Containment</td>
 					<td><code>ControllerConfig.spec.task</code></td>
-					<td>Embedded <code>TaskContract</code> (<code>apiVersion</code>, <code>kind</code>, <code>spec</code>)</td>
-					<td>JCS-hashed into run lock; carries zero credentials or handler digests</td>
+					<td>Embedded <code>TaskContract</code></td>
+					<td>JCS-hashed into run lock; zero credentials or handler digests</td>
 			</tr>
 			<tr>
 					<td>Registry hash lock</td>
-					<td><code>ControllerConfig.spec.registry.{name,digest}</code></td>
-					<td><code>TrustedRegistry.metadata.name</code> + file SHA-256</td>
-					<td>Must match <code>--registry-sha256</code> and live outside repo/config roots</td>
+					<td><code>spec.registry.{name,digest}</code></td>
+					<td><code>TrustedRegistry.metadata.name</code> + SHA-256</td>
+					<td>Matches <code>--registry-sha256</code>; lives outside repo/config roots</td>
 			</tr>
 			<tr>
 					<td>Role binding</td>
-					<td><code>spec.profiles.roles[].{roleId,profileRef}</code></td>
-					<td>Bridges <code>TaskContract.roles[].id</code> to <code>roleProfiles[].id</code></td>
-					<td>Enforces provider, context ceiling, tool subset, and <code>runtimeRef</code></td>
+					<td><code>spec.profiles.roles[]</code></td>
+					<td>Bridges <code>TaskContract.roles[]</code> to <code>roleProfiles[]</code></td>
+					<td>Enforces provider, context ceiling, tools, and <code>runtimeRef</code></td>
 			</tr>
 			<tr>
-					<td>Step &amp; check binding</td>
-					<td><code>spec.profiles.steps[].{stepId,handlerRef}</code></td>
-					<td>Bridges <code>TaskContract.steps[].id</code> to <code>handlers[].id</code></td>
-					<td>Verifies installed handler SHA-256 and <code>acceptance.checks[].id</code></td>
+					<td>Step binding</td>
+					<td><code>spec.profiles.steps[]</code></td>
+					<td>Bridges <code>TaskContract.steps[]</code> to <code>handlers[]</code></td>
+					<td>Verifies installed handler SHA-256 and <code>acceptance.checks[]</code></td>
 			</tr>
 			<tr>
 					<td>Context pinning</td>
-					<td><code>TaskContract.trustedContext.{revision,resources}</code></td>
+					<td><code>trustedContext.{revision,resources}</code></td>
 					<td><code>TrustedRegistry.{resourceVersion,resources[]}</code></td>
-					<td>Matches context revision and read-only instruction SHA-256 digests</td>
+					<td>Matches context revision and read-only instruction SHA-256</td>
 			</tr>
 			<tr>
 					<td>Secret &amp; PR wiring</td>
-					<td><code>spec.credentials[]</code> &amp; <code>publication.endpointRef</code></td>
-					<td><code>credentialBindings[]</code>, <code>environmentBindings[]</code>, <code>publicationEndpoints[]</code></td>
-					<td>Resolves <code>${ENV}</code> in memory only; signs HMAC PR/gate requests</td>
+					<td><code>spec.credentials[]</code> &amp; <code>publication</code></td>
+					<td><code>credentialBindings[]</code>, <code>environmentBindings[]</code></td>
+					<td>Resolves <code>${ENV}</code> in memory only; signs HMAC requests</td>
 			</tr>
 	</tbody>
 </table>
@@ -458,14 +458,14 @@
   Init["01 Init drafts"] -> Registry["02 Pin TrustedRegistry"] -> Config["03 Bind ControllerConfig"] -> Run["04 Check & run"] -> Reconcile["05 Inspect & settle"]
 -->
 <h2 id="prompt-bootstrap">Prompt bootstrap</h2>
-<p><code>loopwright init</code> writes generic <code>REVIEW_REQUIRED</code> placeholders. To assemble tailored <code>registry.yaml</code> and <code>controller.yaml</code> files through an interview-first workflow without looking up digests by hand, paste this prompt into your local coding agent:</p>
+<p><code>loopwright init</code> writes generic <code>REVIEW_REQUIRED</code> placeholders. To assemble tailored <code>registry.yaml</code> and <code>controller.yaml</code> files interactively without looking up digests by hand, paste this prompt into your coding agent:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.</span></span></code></pre></div>
 </div>
 <h2 id="step-1-generate-drafts">Step 1: Generate drafts</h2>
 <p>Install <code>@gpustack/loopwright</code> (see <a href="/loopwright/main/docs/getting-started/installation/">Installation</a>
-) and initialize starter YAML files in a real non-symlink directory <strong>outside</strong> the target repository:</p>
+) and initialize starter YAML files in real non-symlink directories <strong>outside</strong> the target repository:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">mkdir -p <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust&#34;</span>
@@ -473,9 +473,9 @@
 </span></span><span class="line"><span class="cl">cp <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/registry.draft.yaml&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span>
 </span></span><span class="line"><span class="cl">cp <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.draft.yaml&#34;</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span></span></span></code></pre></div>
 </div>
-<p><code>loopwright init</code> writes <code>0600</code> drafts. Keep <code>registry.yaml</code> in <code>$HOME/loopwright-trust</code> outside <code>cwd</code>, outside <code>$HOME/loopwright-ops</code>, and outside any target repository (<code>REGISTRY_UNTRUSTED</code>).</p>
+<p>Keep <code>registry.yaml</code> (<code>0600</code>) in <code>$HOME/loopwright-trust</code> outside <code>cwd</code>, outside <code>$HOME/loopwright-ops</code>, and outside any target repository (<code>REGISTRY_UNTRUSTED</code>).</p>
 <h2 id="step-2-pin-registry">Step 2: Pin registry</h2>
-<p>Compute the installed handler and runtime digests from your Loopwright installation so <code>registry.yaml</code> pins verified code bytes:</p>
+<p>Compute installed handler and runtime digests from your Loopwright installation so <code>registry.yaml</code> pins verified code bytes:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">node --input-type<span class="o">=</span>module -e <span class="s2">&#34;
@@ -490,7 +490,8 @@
 </span></span></span><span class="line"><span class="cl"><span class="s2">console.log({ handlers, pi, graphSha256: createHash(&#39;sha256&#39;).update(lock).digest(&#39;hex&#39;) });
 </span></span></span><span class="line"><span class="cl"><span class="s2">&#34;</span></span></span></code></pre></div>
 </div>
-<p>Populate <code>$HOME/loopwright-trust/registry.yaml</code> (<code>metadata.name</code> is referenced by <code>controller.yaml</code>):</p>
+<p>Populate <code>$HOME/loopwright-trust/registry.yaml</code> (see <a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ for every field in <code>roleProfiles</code>, <code>runtimeProfiles</code>, <code>mcp</code>, and endpoints):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -509,7 +510,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l">Update packages/app/manifest.json and satisfy required schema keys.</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">prompt</span><span class="p">:</span><span class="w"> </span><span class="l">Update packages/app/manifest.json.</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">task</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">pi</span><span class="w">
@@ -525,21 +526,8 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">packages/app/manifest.json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">required</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">schema_version</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span>- <span class="l">release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">equals</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">schema_version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">inert_bytes</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read_only</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">scope</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">check</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">scope.v1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">digest</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">algorithm</span><span class="p">:</span><span class="w"> </span><span class="l">sha256</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">hex</span><span class="p">:</span><span class="w"> </span><span class="l">&lt;hash&gt;</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">checkId</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">capabilities</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">inert_bytes</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">read_only</span><span class="w">
@@ -597,21 +585,21 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">destinationRef</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">environmentNames</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">ZAI_API_KEY</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="l">${ZAI_API_KEY}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;${ZAI_API_KEY}&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">environmentBindings</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">classification</span><span class="p">:</span><span class="w"> </span><span class="l">credential</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">paths</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">/spec/credentials/0/template</span></span></span></code></pre></div>
 </div>
-<p>Compute and export the SHA-256 digest of the finalized <code>registry.yaml</code>:</p>
+<p>Compute the SHA-256 digest of the finalized <code>registry.yaml</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REGISTRY_SHA</span><span class="o">=</span><span class="k">$(</span>shasum -a <span class="m">256</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> <span class="p">|</span> awk <span class="s1">&#39;{print $1}&#39;</span><span class="k">)</span>
-</span></span><span class="line"><span class="cl"><span class="nb">echo</span> <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span></span></span></code></pre></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nv">REGISTRY_SHA</span><span class="o">=</span><span class="k">$(</span>shasum -a <span class="m">256</span> <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> <span class="p">|</span> awk <span class="s1">&#39;{print $1}&#39;</span><span class="k">)</span></span></span></code></pre></div>
 </div>
 <h2 id="step-3-author-controller">Step 3: Author controller</h2>
-<p>Edit <code>$HOME/loopwright-ops/controller.yaml</code> to embed your <code>TaskContract</code>, bind <code>registry.name</code> + <code>$REGISTRY_SHA</code>, and map roles and steps:</p>
+<p>Edit <code>$HOME/loopwright-ops/controller.yaml</code> to embed your <code>TaskContract</code>, bind <code>registry.name</code> + <code>$REGISTRY_SHA</code>, and map roles and steps (see <a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>
+ for all contract fields):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -699,7 +687,7 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">handlerRef</span><span class="p">:</span><span class="w"> </span><span class="l">check-manifest-json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">credentials</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">ref</span><span class="p">:</span><span class="w"> </span><span class="l">zai-token</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="l">${ZAI_API_KEY}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">template</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;${ZAI_API_KEY}&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">controls</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">drainReserveMs</span><span class="p">:</span><span class="w"> </span><span class="m">120000</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
@@ -710,14 +698,8 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">disabled</span></span></span></code></pre></div>
 </div>
-<ul>
-<li><strong>Contract fields</strong>: See <a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>
- for every <code>TaskContract</code> field and budget invariant.</li>
-<li><strong>Registry and controller fields</strong>: See <a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
- for every <code>TrustedRegistry</code> and <code>ControllerConfig</code> field.</li>
-</ul>
 <h2 id="step-4-execute-run">Step 4: Execute run</h2>
-<p>Run static compilation first (<code>check</code> performs zero network calls and zero state admission), then launch the fenced run outside <code>$HOME/loopwright-trust</code>:</p>
+<p>Compile statically first (<code>check</code> makes zero network or state calls), then launch the fenced run outside <code>$HOME/loopwright-trust</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl"><span class="nb">export</span> <span class="nv">ZAI_API_KEY</span><span class="o">=</span><span class="s2">&#34;zai_example_token&#34;</span>
@@ -725,33 +707,32 @@
 </span></span><span class="line"><span class="cl">loopwright run --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> --registry-sha256 <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span> --repo /path/to/example-app --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --json</span></span></code></pre></div>
 </div>
 <h3 id="delegated-execution">Delegated execution</h3>
-<p>For delegated execution, approve a role profile with <code>adapter: delegated</code>. Set <code>runtimeRef</code>, <code>providerCredentialRef</code>, and <code>mcp</code> to <code>null</code>. Bind the task role to that profile and set its task adapter to <code>delegated</code>. See <a href="/loopwright/main/docs/configuration/controller-and-registry/#role-and-runtime-profiles">Controller and Registry</a>
- for selection and context rules.</p>
+<p>For zero-secret delegated stepping, set <code>adapter: delegated</code> on the role profile (<code>runtimeRef: null</code>, <code>providerCredentialRef: null</code>, <code>mcp: null</code>) and task role (see <a href="/loopwright/main/docs/configuration/controller-and-registry/#role-and-runtime-profiles">Controller and Registry</a>
+ and <a href="/loopwright/main/docs/operations/cli/#delegated-stepping">CLI</a>
+):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --config <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-ops/controller.yaml&#34;</span> --registry <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-trust/registry.yaml&#34;</span> --registry-sha256 <span class="s2">&#34;</span><span class="nv">$REGISTRY_SHA</span><span class="s2">&#34;</span> --repo /path/to/example-app --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id delegated-1 --role-model <span class="nv">builder</span><span class="o">=</span>example/author-model:medium --json
 </span></span><span class="line"><span class="cl">loopwright step submit --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id delegated-1 --lease TOKEN --status completed --json</span></span></code></pre></div>
 </div>
-<p>Use the yielded workspace and allowed tools, then submit its single-use lease. Repeat until the run settles. See <a href="/loopwright/main/docs/operations/cli/#delegated-stepping">CLI</a>
- for recovery and cancellation.</p>
 <h2 id="step-5-reconcile-receipts">Step 5: Reconcile receipts</h2>
-<p>Query run state, export evidence bundles, or resume/reconcile interrupted executions:</p>
+<p>Inspect run state and export evidence bundles offline:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright status --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --json
 </span></span><span class="line"><span class="cl">loopwright inspect --run-root <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs&#34;</span> --run-id run-20261112-01 --output <span class="s2">&#34;</span><span class="nv">$HOME</span><span class="s2">/loopwright-runs/bundle-01&#34;</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Resume after host restart</strong>: Run <code>loopwright resume</code> with the same <code>--run-root</code>, <code>--run-id</code>, <code>--config</code>, <code>--registry</code>, <code>--registry-sha256</code>, and <code>--repo</code>.</li>
-<li><strong>Reconcile uncertain publication (exit <code>7</code>)</strong>: Never retry uncertain remote mutations blindly; verify remote state and settle with <code>loopwright reconcile ... --receipt receipt.json</code> (see <a href="/loopwright/main/docs/operations/cli/">CLI</a>
+<li><strong>Resume after restart</strong>: Run <code>loopwright resume</code> with the exact same config, registry, digest, repo, and run identity.</li>
+<li><strong>Reconcile unknown outcomes (exit <code>7</code>)</strong>: Verify remote state and settle with <code>loopwright reconcile ... --receipt receipt.json</code> (see <a href="/loopwright/main/docs/operations/cli/">CLI</a>
 ).</li>
 </ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>
- (every <code>TaskContract</code> field and budget rule)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
- (every <code>TrustedRegistry</code> and <code>ControllerConfig</code> field)</li></ul>
+ (contract fields and budget rules)</li><li><a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
+ (registry and controller schemas)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>

@@ -6,7 +6,7 @@ System-One decision routing uses fast, calibrated models to classify bounded tri
 
 - [DecisionPolicy](#decisionpolicy)
 - [Confidence zones](#confidence-zones)
-- [Policy reference](#policy-reference)
+- [Providers and disclosure](#providers-and-disclosure)
 - [Live wiring and fallback](#live-wiring-and-fallback)
 
 ## DecisionPolicy
@@ -17,8 +17,8 @@ System-One decision routing uses fast, calibrated models to classify bounded tri
   OptIn["01 Explicit opt-in"] -> Redact["02 Scrub payload"] -> Zone["03 Calibrate zone"] -> Fallback["04 Deterministic fallback"]
 -->
 
-- **Standalone host policy (`decisions.yaml`)**: Load a `DecisionPolicy` document via `loadDecisionPolicyFile('decisions.yaml')` in custom controller or App integrations.
-- **Declarative Taskpack (`spec.decisions`)**: Embed the policy under `spec.decisions` in `.loopwright/taskpack.yaml`. Taskpack 2.0 wires `spec.decisions` live through `ControllerPorts.decisions` in both GitHub Action and CLI runs.
+- **Standalone host policy (`decisions.yaml`)**: Load a `DecisionPolicy` document via `loadDecisionPolicyFile('decisions.yaml')` (`disclosurePolicy` defaults to `disabled`).
+- **Declarative Taskpack (`spec.decisions`)**: Embed policy fields under `spec.decisions` in `.loopwright/taskpack.yaml` (`enabled` required; `disclosurePolicy` defaults to `public-metadata-only`).
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -27,14 +27,14 @@ spec:
   enabled: true # Optional in standalone decisions.yaml (defaults to false)
   disclosurePolicy: public-metadata-only # Optional (defaults to disabled)
   provider: typesafe-jev # Optional (defaults to typesafe-jev)
-  minConfidence: 0.8 # Optional (defaults to 0.8)
-  confirmThreshold: 0.6 # Optional (defaults to 0.6)
-  hardDeadlineMs: 5000 # Optional (defaults to 5000)
-  maxAttempts: 1 # Optional (defaults to 1)
+  minConfidence: 0.8 # Optional (0.5..1.0, defaults to 0.8)
+  confirmThreshold: 0.6 # Optional (0.0..minConfidence, defaults to 0.6)
+  hardDeadlineMs: 5000 # Optional (100..30000 ms, defaults to 5000)
+  maxAttempts: 1 # Optional (1 or 2, defaults to 1)
   allowImages: false # Optional (defaults to false)
 ```
 
-For declarative `Taskpack` triage, declare `spec.decisions` with optional `triageRules`:
+For declarative `Taskpack` triage, declare `spec.decisions` with optional `triageRules` (`0..100` rules):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -57,41 +57,20 @@ spec:
         threshold: 0.7 # Optional finite score in 0.0..1.0
 ```
 
-- **Taskpack nesting**: Inside `.loopwright/taskpack.yaml` (`kind: Taskpack`), place the `spec.*` fields under `spec.decisions` rather than repeating a nested `DecisionPolicy` header.
-- **Threshold order**: Validation rejects policies where `confirmThreshold > minConfidence` (`DECISION_POLICY_INVALID`).
+- **Threshold order**: Policies with `confirmThreshold > minConfidence` fail closed (`DECISION_POLICY_INVALID`).
+- **Question primitives**: Programmatic callers compose `choice` (`<= 255` options), `score` (`2..10` criteria), `noul` (`0.0..1.0`), and `box` (`allowImages: true`).
 
 ## Confidence zones
 
-Every calibrated response is routed into one of three deterministic zones based on `minConfidence` and `confirmThreshold`:
+Every calibrated response routes into one of three deterministic zones:
 
 | Zone | Confidence range | Router action |
 | --- | --- | --- |
 | `act` | `confidence >= minConfidence` | Accepts the advisory choice within bounded non-authority scope |
 | `confirm` | `confirmThreshold <= confidence < minConfidence` | Requests secondary confirmation or conservative check |
-| `escalate` | `confidence < confirmThreshold` (or timeout/error) | Rejects model advice and executes deterministic fallback |
+| `escalate` | `confidence < confirmThreshold` (or timeout/error) | Rejects model advice and runs deterministic fallback |
 
-## Policy reference
-
-### Policy fields
-
-In a standalone `DecisionPolicy` document (`decisions.yaml`), `apiVersion`, `kind`, and `spec` are required while all `spec.*` keys default cleanly; when nested under `Taskpack` `spec.decisions`, `decisions.enabled` is **required** and the shared fields plus `triageRules` are optional:
-
-| Field path | Required | Default | Bounds and meaning |
-| --- | --- | --- | --- |
-| `apiVersion` / `kind` | Conditional | — | **Required** in standalone envelope (`loopwright.dev/v1alpha1`, `DecisionPolicy`); omit in `taskpack.yaml` |
-| `spec.enabled` | Conditional | `false` | **Required** inside `Taskpack` `spec.decisions`; optional in standalone `decisions.yaml` |
-| `spec.disclosurePolicy` | No | `'disabled'` (standalone) / `'public-metadata-only'` (`Taskpack`) | Outbound payload redaction tier (`disabled`, `public-metadata-only`, `repo-approved-redacted-evidence`) |
-| `spec.provider` | No | `'typesafe-jev'` | Target provider adapter and wire dialect |
-| `spec.minConfidence` | No | `0.8` | Float in `0.5 .. 1.0`; minimum calibrated score required for `act` |
-| `spec.confirmThreshold` | No | `0.6` | Float in `0.0 .. 1.0` (`<= minConfidence`); floor for `confirm` before `escalate` |
-| `spec.hardDeadlineMs` | No | `5000` | Integer `100 .. 30000` ms shared across all attempts |
-| `spec.maxAttempts` | No | `1` | `1` (single call) or `2` (one retry if time remains in `hardDeadlineMs`) |
-| `spec.allowImages` | No | `false` | Permits image inputs and `box` bounding-box questions when `true` |
-| `spec.triageRules` | No | Unset | `Taskpack` `spec.decisions`: `0..100` rules (`{ id, description, severity, kind, threshold? }`) |
-| `spec.endpoint` / `spec.model` | No | Provider default | Standalone `DecisionPolicy` only: custom `http(s)://` URL and model ID override |
-| `spec.fallbackRole` | No | `null` | Standalone `DecisionPolicy` only: fallback role ID or `null` |
-| `spec.onFallbackUnavailable` | No | `'blocked'` | Standalone `DecisionPolicy` only: `'blocked'` or `'deterministic_default'` |
-| `spec.startluxOptions` | No | `null` | Standalone `DecisionPolicy` only: `thinkMode`, `thinkBudget`, `gate`, `allowNone` tuning |
+## Providers and disclosure
 
 ### Providers
 
@@ -113,34 +92,13 @@ In a standalone `DecisionPolicy` document (`decisions.yaml`), `apiVersion`, `kin
 | `public-metadata-only` | Redacted metadata (`<= 512` chars) | Strips raw file contents, diffs, and secrets |
 | `repo-approved-redacted-evidence` | Secret-scrubbed evidence (`<= 64 KiB`) | Requires explicit operator approval for repository snippets |
 
-### Question primitives
-
-Programmatic `@loopwright/decisions` callers compose structured requests from four primitives:
-
-| Primitive | Output shape | Constraint |
-| --- | --- | --- |
-| `choice` | Single option key (`<= 255` options) | Supported across all seven providers |
-| `score` | Weighted score across `2..10` criteria | Supported across all seven providers |
-| `noul` | Calibrated binary probability (`0.0..1.0`) | Supported across all seven providers |
-| `box` | Normalized bounding box coordinates | Requires `allowImages: true` and vision-capable provider |
-
 ## Live wiring and fallback
 
-`ControllerPorts.decisions` exposes the zero-dependency `AdvisoryDecisionPort` interface so `@loopwright/github-app` and `@loopwright/cli` inject live `@loopwright/decisions` adapters without creating package cycles. Standalone `kind: DecisionPolicy` defaults `disclosurePolicy` to `disabled`, whereas omitting `spec.decisions.disclosurePolicy` when `spec.decisions.enabled: true` in `kind: Taskpack` defaults to `public-metadata-only`.
+Both the GitHub Action and CLI inject live `@loopwright/decisions` adapters through `ControllerPorts.decisions` (`AdvisoryDecisionPort`) covering capability routing, cycle alignment, soft compaction, candidate diff triage, and evolutionary novelty/strategy/cascade hooks.
 
-| Port hook | Lifecycle point | Safety guarantee |
-| --- | --- | --- |
-| `routeCapabilityTier` | Role preparation | Preserves pinned role models (`userOverridePreserved: true`) |
-| `evaluateCycleAlignment` | Before repair or `rejectTo` rework | Advisory route (`continue`, `revise`, `needs_review`, `blocked`) |
-| `adviseSoftCompaction` | Prior to `pi.compact.v1` steps | Cannot veto active hard-compaction triggers |
-| `triageCandidateDiff` | Post-capture pre-publication | Skips cleanly when `triageRules` is empty; sets `verificationCertified: false` |
-| `advise_mutation_novelty` | Pre-compile evolution mutation | Rejects `Jaccard === 1.0` clones offline (`0` network calls); queries Jev `noul` in soft band |
-| `route_evolution_strategy` | Pre-mutation evolution track choice | Routes `(trackId, mutationKind)` from declared tracks with deterministic Roofline fallback |
-| `advise_cascade_escalation` | Post-smoke benchmark triage | Returns `prune`, `confirm`, or `escalate`; never bypasses full multi-bucket verification |
-
-- **Advisory stamps**: Every decision result stamps `advisoryOnly: true` and `verificationCertified: false`.
-- **Deterministic fallback**: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (`source: 'deterministic_fallback'` or `'deterministic_heuristic'`) without blocking or certifying runs.
-- **Non-delegable authority**: All six `DECISION_FORBIDDEN_AUTHORITY_INTENTS` (`grant_execution_authority`, `certify_verification_evidence`, `skip_adversarial_review`, `approve_external_gate`, `override_pinned_model`, `veto_hard_compaction`) throw `DecisionError('DECISION_AUTHORITY_VIOLATION')` with `authorityViolation: true`. Recorded entries appear in run observations (`advisoryDecisions`) with `verificationCertified: false`.
+- **Advisory stamps**: Every decision stamps `advisoryOnly: true` and `verificationCertified: false`.
+- **Deterministic fallback**: Missing credentials, timeouts, or unreachable endpoints fall back deterministically (`deterministic_fallback` / `deterministic_heuristic`) without blocking runs.
+- **Non-delegable authority**: Forbidden intents (granting authority, certifying evidence, skipping review, approving gates, overriding pinned models, or vetoing hard compaction) throw `DECISION_AUTHORITY_VIOLATION`.
 
 ---
 

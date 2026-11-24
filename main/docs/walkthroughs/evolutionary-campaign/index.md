@@ -1,4 +1,4 @@
-# Evolutionary Campaigns
+# Evolutionary Campaign
 
 Evolutionary campaign mode coordinates bounded multi-generation optimization over mutable `EVOLVE-BLOCK` source regions, isolated child `LocalRunStore` runs, and hardware-verified `benchmark-gate.v1` receipts. Loopwright maintains a fenced `campaign.sqlite` Pareto archive and exports signed `evolution-bundle.v1` packages without delegating verification authority to models.
 
@@ -22,14 +22,14 @@ For single-run repository automation, follow [Declarative Taskpack](/loopwright/
   Control["Zone 1: Control Plane (CLI or GitHub Actions, Outbound HTTPS)"] -> DMZ["Zone 2: Relay DMZ (HTTPS Gate, HMAC Auth, Lease Fence, CAS)"] -> Firewall["Cluster Firewall (Zero Inbound Ports)"] -> Worker["Zone 3: Private GPU Cluster (Outbound Pull)"] -> Sandbox["Offline Zero-Network Docker (Stage A Build + Stage B Bench)"] -> Receipt["Signed Verdict Receipt"]
 -->
 
-Evolutionary campaigns separate candidate authoring from blind hardware evaluation across three zones:
+Evolutionary campaign mode separates candidate authoring from blind hardware evaluation across three zones:
 
 | Responsibility | Authored files | Runtime invariant |
 | --- | --- | --- |
 | Mutable span guard | `EVOLVE-BLOCK` markers and `evolve-block-guard.v1` | Outside bytes must match baseline SHA-256 exactly |
-| Hardware contract | `target.matrix[].hardware` and `benchmark-gate.v1` | Stage A static audit blocks forbidden symbols and excess spills before Stage B |
-| Blind evaluation | Outbound `runner relay` and `runner worker` | Zero inbound GPU cluster ports; Stage B executes offline with read-only holdout data |
-| Archive and export | `.loopwright/campaign.yaml` and `loopwright evolve` | Fenced `campaign.sqlite` outside `--repo`; `evolve export` verifies every HMAC receipt |
+| Hardware contract | `target.matrix[].hardware` and `benchmark-gate.v1` | Stage A static audit blocks forbidden symbols and excess spills |
+| Blind evaluation | Outbound `runner relay` and `runner worker` | Zero inbound GPU cluster ports; offline Stage B holdout data |
+| Archive and export | `.loopwright/campaign.yaml` and `loopwright evolve` | Fenced `campaign.sqlite` outside `--repo`; signed HMAC export |
 
 ## Prompt bootstrap
 
@@ -41,7 +41,7 @@ Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Re
 
 ## Step 1: Mark evolve blocks
 
-Wrap only the editable spans in guarded source files with matching `EVOLVE-BLOCK-START: <id>` and `EVOLVE-BLOCK-END: <id>` comments (`//`, `#`, or `/* */`):
+Wrap only editable spans in guarded source files with matching `EVOLVE-BLOCK-START: <id>` and `EVOLVE-BLOCK-END: <id>` comments (`//`, `#`, or `/* */`):
 
 ```cpp
 __global__ void flash_decode(float* out, const float* q, int n) {
@@ -53,11 +53,11 @@ __global__ void flash_decode(float* out, const float* q, int n) {
 }
 ```
 
-Keep block IDs unique per file and bounded to printable ASCII. Any byte change outside marked spans fails `evolve-block-guard.v1` before Loopwright dispatches a hardware benchmark job.
+Keep block IDs unique per file and bounded to printable ASCII. Any byte change outside marked spans fails `evolve-block-guard.v1` before hardware dispatch.
 
 ## Step 2: Author taskpack
 
-Create `.loopwright/taskpack.yaml` declaring the guarded files, hardware target cell, Stage A static audit ceilings, and `benchmark-gate.v1` slot. See [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md) and [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md#hardware-target-cells) for full field constraints.
+Create `.loopwright/taskpack.yaml` declaring guarded files, the hardware target cell, Stage A static audit ceilings, and `benchmark-gate.v1` (see [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md) and [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md#hardware-target-cells)):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -132,7 +132,7 @@ spec:
 
 ## Step 3: Author campaign
 
-Create `.loopwright/campaign.yaml` referencing the taskpack and target hardware cell. See [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) for all `stages`, `population`, `sampling`, `teamEvolution`, and `export` fields.
+Create `.loopwright/campaign.yaml` referencing the taskpack and target cell (see [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md)):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -142,7 +142,10 @@ metadata:
 spec:
   taskpack: .loopwright/taskpack.yaml
   targetCellId: cuda-h100-whole
-  tracks: [triton, cute, cuda_raw] # Optional
+  tracks: # Optional
+    - triton
+    - cute
+    - cuda_raw
   stages: # Optional
     mode: single-target # Optional
   population:
@@ -152,7 +155,12 @@ spec:
     nicheAxes:
       - id: bound_pipeline
         kind: enum
-        values: [hbm, l2, smem_lds_ub, tensor_cube, vector_valu]
+        values:
+          - hbm
+          - l2
+          - smem_lds_ub
+          - tensor_cube
+          - vector_valu
   sampling:
     noveltyDecayLambda: 1.0
     mutationWeights:
@@ -184,18 +192,18 @@ loopwright evolve check --campaign .loopwright/campaign.yaml --repo . --json
 
 ## Step 4: Start runner
 
-Start the relay in a reachable DMZ or loopback host, then start one or more outbound workers on private GPU hosts. Workers poll the relay outbound and execute Stage A and Stage B inside offline sandboxes with zero inbound ports:
+Start the relay in a reachable DMZ or loopback host, then start outbound workers on private GPU hosts:
 
 ```sh
 loopwright runner relay --config "$HOME/loopwright-ops/relay.yaml" --json
 loopwright runner worker --config "$HOME/loopwright-ops/worker.yaml" --json
 ```
 
-For local offline smoke tests without physical GPUs, configure `probeMode: synthetic_fixture` on the worker and pass `--allow-synthetic-probe` to `loopwright evolve run`. Omit `--allow-synthetic-probe` on real hardware runs so synthetic receipts fail closed (`HARDWARE_PROVENANCE_MISMATCH`).
+For offline smoke tests without GPUs, set `probeMode: synthetic_fixture` on the worker and pass `--allow-synthetic-probe` to `evolve run`. Omit `--allow-synthetic-probe` on real hardware so synthetic receipts fail closed (`HARDWARE_PROVENANCE_MISMATCH`).
 
 ## Step 5: Run and export
 
-Export the required secrets and point `--state` at a directory strictly outside `--repo`:
+Export required secrets and point `--state` strictly outside `--repo`:
 
 ```sh
 export LOOPWRIGHT_PROVIDER_TOKEN="<provider-token>"
@@ -205,7 +213,7 @@ export LOOPWRIGHT_GATE_SIGNING_SECRET="<hmac-secret>"
 loopwright evolve run --campaign .loopwright/campaign.yaml --state "$HOME/evo-state/flash-decode" --repo . --json
 ```
 
-Monitor progress, pause cleanly on `SIGINT` (exit `130`), resume later, and export signed `evolution-bundle.v1` artifacts:
+Monitor progress, pause cleanly on `SIGINT` (exit `130`), resume later, and export signed `evolution-bundle.v1` packages (`EXPORT_UNVERIFIED_FORBIDDEN`, exit `3` when receipts or secrets are unverified):
 
 ```sh
 loopwright evolve status --campaign "$HOME/evo-state/flash-decode" --json
@@ -214,10 +222,8 @@ loopwright evolve resume --campaign "$HOME/evo-state/flash-decode" --repo . --js
 loopwright evolve export --campaign "$HOME/evo-state/flash-decode" --out "$HOME/evo-out/bundle" --format oci-layout --json
 ```
 
-`evolve export` verifies every HMAC verdict receipt and CAS blob digest before publishing and fails closed (`EXPORT_UNVERIFIED_FORBIDDEN`, exit `3`) when signing secrets are absent or receipts are unverified.
-
 ---
 
-**See also** — [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) (complete `EvolutionCampaign` YAML schema and bundle contract) · [CLI](/loopwright/main/docs/operations/cli/index.md#evolution-campaigns) (`runner` and `evolve` flags, env vars, and exit codes) · [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md) (`evolve-block-guard.v1` and `benchmark-gate.v1` declarations)
+**See also** — [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) (`EvolutionCampaign` schema and bundle contract) · [CLI](/loopwright/main/docs/operations/cli/index.md#evolution-campaigns) (`runner` and `evolve` subcommands) · [Taskpack](/loopwright/main/docs/configuration/taskpack/index.md) (`evolve-block-guard.v1` and `benchmark-gate.v1` declarations)
 
-**Next** → [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) — review every `EvolutionCampaign` field, enum, and bundle export bound.
+**Next** → [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md) — review `EvolutionCampaign` fields, stages, and bundle export rules.

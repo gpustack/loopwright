@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -374,7 +374,7 @@
         
   <h1 id="declarative-taskpack">Declarative Taskpack</h1>
 <p>Declarative taskpack mode is Loopwright&rsquo;s automated workflow for repository maintainers and local CLI operators. Author one <code>.loopwright/taskpack.yaml</code> file in your repository, and <code>loopwright run --taskpack</code>, <code>loopwright step</code>, or the GitHub Action compiles contracts, handler digests, preflight stages, and credential bindings automatically.</p>
-<p>For strict separation between task authors and out-of-repo <code>TrustedRegistry</code> files, or local CLI controller configs, follow <a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
+<p>For out-of-repo <code>TrustedRegistry</code> governance or manual CLI controller configs, follow <a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
  instead.</p>
 <h2 id="contents">Contents</h2>
 <ul>
@@ -396,7 +396,7 @@
 <!-- flowchart LR
   Watch["01 Watch upstream"] -> Compile["02 Auto-compile taskpack"] -> Verify["03 Verify checks"] -> Publish["04 Publish PR"]
 -->
-<p>Declarative taskpack mode eliminates manual boilerplate while preserving every Loopwright safety boundary:</p>
+<p>Declarative taskpack mode eliminates boilerplate while preserving every Loopwright safety boundary:</p>
 <table>
 	<thead>
 			<tr>
@@ -408,23 +408,23 @@
 	<tbody>
 			<tr>
 					<td>Work scope</td>
-					<td>Explicit <code>dir/**</code>, exact files, or <code>*</code>/<code>?</code> <code>writable</code> and <code>protected</code> paths</td>
-					<td>Adds control paths, scripts, and built-in masks; protected paths win</td>
+					<td>Explicit <code>dir/**</code>, exact files, or <code>*</code>/<code>?</code> globs</td>
+					<td>Adds control paths, scripts, and built-in masks; protected wins</td>
 			</tr>
 			<tr>
 					<td>Execution</td>
-					<td>Declare <code>spec.execution</code>, <code>spec.preflight</code>, <code>upstreams</code>, and optional <code>proposal</code></td>
-					<td>Runs preflight post-auth and compiles <code>TaskContract</code>, <code>ControllerConfig</code>, and <code>TrustedRegistry</code> (<code>0600</code>)</td>
+					<td><code>spec.execution</code>, <code>spec.preflight</code>, <code>upstreams</code>, <code>proposal</code></td>
+					<td>Runs preflight post-auth and compiles <code>0600</code> runtime configs</td>
 			</tr>
 			<tr>
 					<td>Digests</td>
 					<td>Optional <code>digests.pinDigests</code> (<code>digests.lock.json</code>)</td>
-					<td>Computes runtime SHA-256 digests for handlers, check directories, instructions, and skills</td>
+					<td>Computes SHA-256 digests for handlers, check dirs, and instructions</td>
 			</tr>
 			<tr>
 					<td>Secrets</td>
 					<td>Pass GitHub Secrets to Action or App env</td>
-					<td>Generates scoped <code>${ENV}</code> credential bindings and scrubs preflight and run logs</td>
+					<td>Generates scoped <code>${ENV}</code> bindings and scrubs logs</td>
 			</tr>
 			<tr>
 					<td>Settlement</td>
@@ -434,14 +434,14 @@
 	</tbody>
 </table>
 <h2 id="prompt-bootstrap">Prompt bootstrap</h2>
-<p><code>loopwright init</code> only scaffolds low-level controller drafts; it does not inspect your repository. To run an interview-first setup or migrate an existing automatic synchronized workflow, paste this prompt into your coding agent inside the target repository:</p>
+<p><code>loopwright init</code> scaffolds low-level controller drafts and does not inspect your repository. To run an interview-first setup or migrate an existing sync workflow, paste this prompt into your coding agent inside the target repository:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>text</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-text" data-lang="text"><span class="line"><span class="cl">Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to agree on which modules to automate or exclude, domain boundaries, update cadence, version/promotion holds, bounded host preflight -&gt; offline sandbox -&gt; independent verifier design, model pool (LOOPWRIGHT_PROVIDER_TOKEN), and workflow panel. Wait for my approval on the design summary before generating Loopwright config (apiVersion: loopwright.dev/v1alpha1) and running dry-run verification.</span></span></code></pre></div>
 </div>
-<p>The agent scans your repository first, interviews you one question at a time with repository-grounded defaults, waits for summary approval, and then writes taskpacks (plus a <code>TaskpackSuite</code> manifest for multi-domain repos), bounded preflight/verifier hooks, and workflows.</p>
+<p>The agent scans your repository, interviews you one question at a time, waits for summary approval, and writes taskpacks, <code>TaskpackSuite</code> manifests (for multi-domain repos), bounded verifiers, and workflows.</p>
 <h2 id="step-1-author-taskpack">Step 1: Author taskpack</h2>
-<p>Create <code>.auto-sync/taskpack.yaml</code> in the target repository. Loopwright derives <code>.auto-sync</code> as the control root.</p>
+<p>Create <code>.loopwright/taskpack.yaml</code> in the target repository (Loopwright derives <code>.loopwright</code> as the control root; pass <code>--taskpack &lt;dir&gt;/taskpack.yaml</code> for a custom root):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -465,15 +465,12 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">protected</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">docs/protected-notes.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">scripts/**</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">instructions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="l">.auto-sync/prompts/instructions.md</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">upstreams</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">engine</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">github-release</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">source</span><span class="p">:</span><span class="w"> </span><span class="l">octocat/engine</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">watchedPaths</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span>- <span class="l">docs</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">allowPrerelease</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">proposal</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional structured proposal ledger</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">path</span><span class="p">:</span><span class="w"> </span><span class="l">docs/proposal.json</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">requiredFields</span><span class="p">:</span><span class="w">
@@ -487,16 +484,16 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">verify-docs</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">implementation</span><span class="p">:</span><span class="w"> </span><span class="l">command.v1</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">parameters</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/checks/verify.sh</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">script</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/checks/verify.sh</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="m">30</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="c"># Optional remote gate checks</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">externalGates</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">publication</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">pull_request</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">targetBranch</span><span class="p">:</span><span class="w"> </span><span class="l">main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">headBranchPrefix</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright-docs-</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">titleTemplate</span><span class="p">:</span><span class="w"> </span><span class="s2">&#34;docs - sync upstream documentation&#34;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">memory</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/memory/docs-sync</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">directory</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/memory/docs-sync</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">apply</span><span class="p">:</span><span class="w"> </span><span class="l">separate-pull-request</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">onNoModelBudget</span><span class="p">:</span><span class="w"> </span><span class="l">deterministic-observations-only</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">triggers</span><span class="p">:</span><span class="w">
@@ -507,71 +504,31 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">retry</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">revise</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">status</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">commentPrefixes</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to [&#39;/loopwright&#39;])</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">/loopwright</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">models</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional ordered model pool</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">zai-coding-cn</span><span class="w"> </span><span class="c"># Optional fallback candidate</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">glm-5.3</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">thinking</span><span class="p">:</span><span class="w"> </span><span class="l">high</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_CODING_CN_API_KEY</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">output</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">formats</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">json</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">github-step-summary</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">decisions</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional live System-One triage policy</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">disclosurePolicy</span><span class="p">:</span><span class="w"> </span><span class="l">public-metadata-only</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">confirmThreshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">hardDeadlineMs</span><span class="p">:</span><span class="w"> </span><span class="m">5000</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowImages</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">apiKeyEnv</span><span class="p">:</span><span class="w"> </span><span class="l">ZAI_API_KEY</span><span class="w"> </span><span class="c"># Optional</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Field dictionary</strong>: Inspect every field, bound, and enum in <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
-.</li>
-<li><strong>Concise local manifests</strong>: Local CLI runs (<code>loopwright run --taskpack</code> and <code>loopwright step</code>) can omit <code>triggers</code>, <code>publication</code> (defaults to <code>disabled</code>), and <code>memory</code> (defaults to <code>disabled</code>).</li>
-<li><strong>Explicit scopes</strong>: Write <code>docs/**</code> for recursive directories and exact paths (or single-segment <code>*</code>/<code>?</code> globs) for files. Local runs protect <code>.git</code> and <code>&lt;controlRoot&gt;</code> by default without hardcoded tool directories; declare extra protected paths in <code>scope.protected</code>.</li>
-<li><strong>Inputs</strong>: Create instruction files, <code>preflight.script</code>, and <code>command.v1</code> scripts under protected paths before running. When configuring <code>spec.proposal.path</code>, place it inside a writable path with a <code>.yaml</code>, <code>.yml</code>, or <code>.json</code> extension.</li>
-<li><strong>Secrets</strong>: Never place tokens or ambient <code>${ENV}</code> templates inside <code>taskpack.yaml</code>; use <code>spec.vars</code> only for non-secret static values.</li>
+<li><strong>Field reference</strong>: See <a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
+ for <code>roles</code>, <code>steps</code>, <code>decisions</code>, <code>sandbox</code>, and <code>TaskpackSuite</code>.</li>
+<li><strong>Local manifests</strong>: Local CLI runs (<code>run --taskpack</code> and <code>step</code>) can omit <code>triggers</code>, <code>publication</code>, and <code>memory</code>.</li>
+<li><strong>Protected inputs</strong>: Place instructions, <code>preflight.script</code>, and <code>command.v1</code> scripts under protected paths.</li>
+<li><strong>Zero embedded secrets</strong>: Never put tokens or <code>${ENV}</code> templates in <code>taskpack.yaml</code>; use <code>spec.vars</code> for static non-secret values.</li>
 </ul>
 <h3 id="delegated-role-dag">Delegated role DAG</h3>
-<p>Add roles and optional <code>spec.steps</code> to the taskpack from Step 1. This example runs a read-only review after the author:</p>
-<div class="code-block">
-  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
-  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">Taskpack</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">roles</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">author</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">author-model</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">purpose</span><span class="p">:</span><span class="w"> </span><span class="l">review</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">example</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l">review-model</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">tools</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">read]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">dependsOn</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">author]</span></span></span></code></pre></div>
-</div>
-<p>Merge these roles into the complete taskpack above; this excerpt omits its other required fields. Run the local delegated loop without Loopwright provider secrets:</p>
+<p>Add <code>spec.roles</code> (<code>author</code> + read-only <code>review</code>) and optional <code>spec.steps</code> to run zero-secret local step loops (see <a href="/loopwright/main/docs/configuration/taskpack/#roles-and-steps">Taskpack</a>
+ and <a href="/loopwright/main/docs/operations/coding-agents/">Coding Agents</a>
+):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright step next --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json
 </span></span><span class="line"><span class="cl">loopwright step submit --run-root ../runs --run-id demo-1 --lease TOKEN --status completed --json</span></span></code></pre></div>
 </div>
-<p>Work in the yielded candidate directory and obey its allowed tools. Repeat until the run settles. See <a href="/loopwright/main/docs/operations/cli/">CLI</a>
- for leases and <a href="/loopwright/main/docs/configuration/taskpack/#roles-and-steps">Taskpack</a>
- for role and step bounds.</p>
 <h2 id="step-2-validate-taskpack">Step 2: Validate taskpack</h2>
-<p>Verify your host meets the <a href="/loopwright/main/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
-, sync <code>digests.lock.json</code> when <code>pinDigests: true</code>, and validate or execute locally via <code>@loopwright/taskpack</code> before enabling GitHub Actions:</p>
+<p>Confirm the <a href="/loopwright/main/docs/getting-started/architecture/#runtime-baseline">runtime baseline</a>
+, sync <code>digests.lock.json</code> when <code>pinDigests: true</code>, and dry-run locally before enabling Actions:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>sh</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-sh" data-lang="sh"><span class="line"><span class="cl">loopwright digest sync --taskpack .loopwright/taskpack.yaml --repo .
@@ -579,9 +536,9 @@
 </span></span><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo . --dry-run --json
 </span></span><span class="line"><span class="cl">loopwright run --taskpack .loopwright/taskpack.yaml --repo . --run-root ../runs --run-id demo-1 --json</span></span></code></pre></div>
 </div>
-<p>Run <code>loopwright run --taskpack ... --dry-run</code> locally or run the GitHub Action with <code>dry-run: 'true'</code> in a pull request workflow to validate the manifest, verify <code>digests.lock.json</code>, negotiate sandbox capabilities, and compile artifacts without invoking preflight, model providers, or branch pushes.</p>
+<p><code>--dry-run</code> validates the manifest, verifies <code>digests.lock.json</code>, negotiates sandboxes, and compiles artifacts without running preflight, models, or pushes.</p>
 <h2 id="step-3-configure-workflow">Step 3: Configure workflow</h2>
-<p>Add <code>.github/workflows/loopwright.yml</code> to your repository to run on <code>schedule</code>, <code>workflow_dispatch</code>, or <code>/loopwright</code> issue comments with <code>mode: auto</code>:</p>
+<p>Add <code>.github/workflows/loopwright.yml</code> to run on <code>schedule</code>, <code>workflow_dispatch</code>, or <code>/loopwright</code> comments with <code>mode: auto</code>:</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">Loopwright Sync</span><span class="w">
@@ -590,59 +547,48 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">cron</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;0 4 * * *&#39;</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">workflow_dispatch</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">issue_comment</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">types</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">created]</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">types</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="l">created</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="nt">permissions</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">contents</span><span class="p">:</span><span class="w"> </span><span class="l">read</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="nt">jobs</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sync</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">runs-on</span><span class="p">:</span><span class="w"> </span><span class="l">ubuntu-latest</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">steps</span><span class="p">:</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">actions/checkout@v4</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">actions/create-github-app-token@v1</span><span class="w"> </span><span class="c"># Optional when minting App PR tokens</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">app-token</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">fetch-depth</span><span class="p">:</span><span class="w"> </span><span class="m">0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">persist-credentials</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">uses</span><span class="p">:</span><span class="w"> </span><span class="l">gpustack/loopwright@main</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">with</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.auto-sync/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional custom control root</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional (candidate or check-only no-change via preflight)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-token</span><span class="p">:</span><span class="w"> </span><span class="l">${{ steps.app-token.outputs.token }}</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w"> </span><span class="c"># Optional (defaults to GITHUB_EVENT_NAME)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w"> </span><span class="c"># Optional for schedule/manual; needed on comments</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dry-run</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional (defaults to &#39;false&#39;)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">taskpack-path</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">auto</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-id</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_ID }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">github-app-private-key</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-name</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_name }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">event-path</span><span class="p">:</span><span class="w"> </span><span class="l">${{ github.event_path }}</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">dry-run</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;false&#39;</span><span class="w"> </span><span class="c"># Optional</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">env</span><span class="p">:</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span><span class="w"> </span><span class="c"># Optional in dry-run mode</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">LOOPWRIGHT_GATE_SIGNING_SECRET</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.LOOPWRIGHT_GATE_SIGNING_SECRET }}</span><span class="w"> </span><span class="c"># Optional when externalGates is empty</span></span></span></code></pre></div>
+</span></span></span><span class="line"><span class="cl"><span class="w">          </span><span class="nt">ZAI_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l">${{ secrets.ZAI_API_KEY }}</span></span></span></code></pre></div>
 </div>
-<ul>
-<li><strong>Action inputs and secrets</strong>: Review every input, output, and secret variable in <a href="/loopwright/main/docs/operations/github-action/">GitHub Action</a>
-.</li>
-<li><strong>Centralized webhook server</strong>: Deploy a multi-repository intake server via <a href="/loopwright/main/docs/operations/github-app/">GitHub App</a>
-.</li>
-</ul>
 <h3 id="bootstrap-provenance">Bootstrap provenance</h3>
-<p>Enforce two provenance rules in comment-driven and self-upgrading workflows:</p>
 <ul>
-<li><strong>Trusted checkout</strong>: Check out <code>ref: refs/heads/main</code> with <code>persist-credentials: false</code>, pass explicit <code>event-name</code> and <code>event-path</code>, and gate <code>issue_comment</code> jobs to <code>/loopwright</code> pull-request comments from <code>OWNER</code>, <code>MEMBER</code>, or <code>COLLABORATOR</code> actors. Fetch <code>+refs/pull/&lt;number&gt;/head</code> into <code>.git/objects</code> without checking out unreviewed pull-request heads.</li>
-<li><strong>Commit SHA pinning</strong>: Pin every third-party Action and the bootstrap <code>gpustack/loopwright</code> revision to full 40-character commit SHAs instead of <code>uses: ./</code> when Loopwright upgrades itself, so candidate branches cannot replace control-plane code or <code>command.v1</code> verification scripts.</li>
+<li><strong>Trusted checkout</strong>: Check out <code>refs/heads/main</code> with <code>persist-credentials: false</code>, gate <code>issue_comment</code> to authorized collaborators, and fetch <code>+refs/pull/&lt;number&gt;/head</code> without checking out untrusted PR heads.</li>
+<li><strong>Commit SHA pinning</strong>: Pin third-party Actions and <code>gpustack/loopwright</code> to 40-character commit SHAs instead of <code>uses: ./</code> during self-upgrades so candidate branches cannot replace control-plane code.</li>
 </ul>
 <h2 id="step-4-review-outcomes">Step 4: Review outcomes</h2>
-<p>Reports include total tokens, with input and output breakdowns. Cost appears in human-readable summaries only when reported or estimated.</p>
 <ol>
-<li><strong>Candidate pull request</strong>: When upstream changes require edits and every check passes, Loopwright opens or updates a head-pinned pull request matching <code>headBranchPrefix</code>.</li>
-<li><strong>Verified no-change</strong>: When preflight or upstream discovery reports <code>no_change</code> under <code>mode: auto</code>, Loopwright runs check-only <code>no-change.v1</code> verification without invoking agent models.</li>
-<li><strong>Slash-command iteration</strong>: Collaborators with write access comment <code>/loopwright status</code>, <code>/loopwright retry</code>, or <code>/loopwright revise</code> on managed issues or pull requests.</li>
-<li><strong>Reviewed memory</strong>: Active entries live under <code>.loopwright/memory/&lt;name&gt;</code>. Separate PRs skip non-passing runs (<code>publishOnFailure: false</code>) and add <code>[skip ci]</code> (<code>skipCi: true</code>). Use <code>local-only</code> or <code>disabled</code> without blocking task completion.</li>
+<li><strong>Candidate pull request</strong>: Opens or updates a head-pinned PR matching <code>headBranchPrefix</code> after all checks pass.</li>
+<li><strong>Verified no-change</strong>: Runs check-only <code>no-change.v1</code> verification without model calls when <code>mode: auto</code> finds no change.</li>
+<li><strong>Slash-command iteration</strong>: Authorized collaborators comment <code>/loopwright status</code>, <code>retry</code>, or <code>revise</code>.</li>
+<li><strong>Reviewed memory</strong>: Persists active entries under <code>&lt;controlRoot&gt;/memory/&lt;name&gt;</code> per <code>spec.memory.apply</code> without blocking task completion.</li>
 </ol>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
- (every <code>Taskpack</code> field and enum)</li><li><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
- (fine-grained out-of-repo contract and registry workflow)</li></ul>
+ (manifest schema, limits, and <code>TaskpackSuite</code>)</li><li><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
+ (out-of-repo contract and registry workflow)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/operations/github-action/">GitHub Action</a>

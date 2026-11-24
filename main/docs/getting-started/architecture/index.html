@@ -263,7 +263,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -373,7 +373,7 @@
       <article>
         
   <h1 id="architecture">Architecture</h1>
-<p>Loopwright runs bounded repository work inside isolated sandboxes and verifies every candidate against independent evidence. Choose between simple repository taskpack automation or fine-grained controller and registry governance.</p>
+<p>Loopwright runs bounded repository work inside isolated sandboxes and verifies every candidate against independent evidence. Choose declarative taskpacks, out-of-repo managed controllers, or multi-generation evolutionary campaigns on one verification kernel.</p>
 <h2 id="contents">Contents</h2>
 <ul>
 <li><a href="#execution-chain">Execution chain</a>
@@ -394,50 +394,51 @@
 -->
 <ol>
 <li><strong>Admit</strong>: Validate task boundaries and acquire a monotonic SQLite lease fence.</li>
-<li><strong>Execute</strong>: Run an isolated Pi role with trusted host bindings and optional decision routing.</li>
+<li><strong>Execute</strong>: Run an isolated Pi or delegated role with trusted bindings and optional decision routing.</li>
 <li><strong>Verify</strong>: Evaluate the candidate against independent checks and authenticated gate receipts.</li>
 <li><strong>Publish &amp; Remember</strong>: Settle pull request publication and propose reviewed memory separately.</li>
 </ol>
 <h2 id="operating-modes">Operating modes</h2>
-<p>Loopwright supports two single-run modes sharing one verification kernel, plus bounded multi-generation evolution (<code>@loopwright/evolution</code>) over isolated child <code>LocalRunStore</code> runs:</p>
+<p>Loopwright supports three operating modes sharing one fenced verification kernel:</p>
 <table>
 	<thead>
 			<tr>
 					<th>Dimension</th>
 					<th>Declarative taskpack</th>
 					<th>Managed controller</th>
+					<th>Evolutionary campaign</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
 					<td>Target user</td>
-					<td>Repository maintainers and local CLI users</td>
+					<td>Repo maintainers and CLI users</td>
 					<td>Platform and security operators</td>
+					<td>Kernel and benchmark engineers</td>
 			</tr>
 			<tr>
 					<td>Files authored</td>
-					<td>One <code>.loopwright/taskpack.yaml</code> in repo</td>
-					<td>Out-of-repo <code>registry.yaml</code> and <code>controller.yaml</code></td>
+					<td><code>.loopwright/taskpack.yaml</code></td>
+					<td>Out-of-repo <code>registry.yaml</code> + <code>controller.yaml</code></td>
+					<td><code>.loopwright/taskpack.yaml</code> + <code>campaign.yaml</code></td>
 			</tr>
 			<tr>
 					<td>Digest pinning</td>
 					<td>Compiled automatically by host</td>
-					<td>Pinned manually via SHA-256 (<code>--registry-sha256</code>)</td>
+					<td>Pinned manually (<code>--registry-sha256</code>)</td>
+					<td>Compiled per isolated child run</td>
 			</tr>
 			<tr>
-					<td>Execution graph</td>
-					<td>Single compiled author + check pipeline</td>
+					<td>Execution model</td>
+					<td>Compiled author + check pipeline</td>
 					<td>Custom multi-step <code>agent</code> and <code>check</code> DAG</td>
+					<td>Island Pareto search over <code>EVOLVE-BLOCK</code> spans</td>
 			</tr>
 			<tr>
 					<td>Credential wiring</td>
-					<td>Mapped from local CLI, Action, or App environment</td>
-					<td>Explicit <code>credentialBindings</code> and path templates</td>
-			</tr>
-			<tr>
-					<td>Key advantage</td>
-					<td>Zero boilerplate; local CLI or GitHub automation</td>
-					<td>Duty separation, custom gates/MCP, local CLI control</td>
+					<td>Mapped from CLI, Action, or App env</td>
+					<td>Explicit <code>credentialBindings</code> templates</td>
+					<td>Relay HMAC and provider env secrets</td>
 			</tr>
 			<tr>
 					<td>Walkthrough</td>
@@ -445,24 +446,26 @@
 </td>
 					<td><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
 </td>
+					<td><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/">Evolutionary Campaign</a>
+</td>
 			</tr>
 	</tbody>
 </table>
 <h2 id="configuration-surfaces">Configuration surfaces</h2>
-<p>Every Loopwright document uses <code>apiVersion: loopwright.dev/v1alpha1</code> across declarative and managed configuration surfaces:</p>
+<p>Every Loopwright document uses <code>apiVersion: loopwright.dev/v1alpha1</code> across all configuration surfaces:</p>
 <table>
 	<thead>
 			<tr>
 					<th>Mode or scope</th>
 					<th>Document <code>kind</code></th>
 					<th>Top-level keys</th>
-					<th>Reference guide</th>
+					<th>Owning page</th>
 			</tr>
 	</thead>
 	<tbody>
 			<tr>
 					<td>Declarative mode</td>
-					<td><code>Taskpack</code></td>
+					<td><code>Taskpack</code> / <code>TaskpackSuite</code></td>
 					<td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
 					<td><a href="/loopwright/main/docs/configuration/taskpack/">Taskpack</a>
 </td>
@@ -533,7 +536,7 @@
 			<tr>
 					<td>Node runtime</td>
 					<td>Node.js <code>26.x</code> (built-in <code>node:sqlite</code>)</td>
-					<td>Required across Action, App, CLI, and workspace builds (<code>gpustack/loopwright</code> provisions it automatically)</td>
+					<td>Required across Action, App, CLI, and workspace builds</td>
 			</tr>
 			<tr>
 					<td>Package manager</td>
@@ -547,7 +550,7 @@
 			</tr>
 			<tr>
 					<td>Storage and clock</td>
-					<td>Local POSIX filesystem; <code>&lt;= 1000 ms</code> clock drift</td>
+					<td>Local POSIX filesystem; <code>&lt;= 1000 ms</code> drift</td>
 					<td>Network mounts (<code>nfs</code>, <code>smb</code>, <code>fuse</code>, <code>sshfs</code>) and clock jumps fail closed</td>
 			</tr>
 			<tr>
@@ -557,20 +560,21 @@
 			</tr>
 			<tr>
 					<td>Optional tools</td>
-					<td>Python <code>3.11+</code> (runner bridge); Hugo extended <code>0.170.1+</code> (docs site)</td>
-					<td>Needed only when exercising runner helpers or building <code>site/</code></td>
+					<td>Python <code>3.11+</code> (runner); Hugo <code>0.170.1+</code></td>
+					<td>Needed only for runner helpers or site builds</td>
 			</tr>
 	</tbody>
 </table>
 <h2 id="trust-boundaries">Trust boundaries</h2>
-<p>Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local runs enforce neutral <code>.git</code> and <code>&lt;controlRoot&gt;</code> protection while GitHub entrypoints enforce triggers, PR publication, and <code>.github/workflows/**</code> dual-key locks.</p>
+<p>Trusted hosts bind credentials, runtimes, handlers, and external services. <code>Taskpack</code>s and model output cannot grant authority. Local runs protect <code>.git</code> and <code>&lt;controlRoot&gt;</code> while GitHub entrypoints enforce triggers, PR publication, and <code>.github/workflows/**</code> dual-key locks.</p>
 <p>Large overlays stream through SHA-256 verified CAS blob pointers (<code>1 MiB</code> chunks, up to <code>16,384</code> files and <code>16 GiB</code>) instead of inline base64 buffers. Local fixture proof never establishes live provider qualification, and unknown external effects stay unknown until reconciled.</p>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
       <ul class="related-pages"><li><a href="/loopwright/main/docs/walkthroughs/declarative-taskpack/">Declarative Taskpack</a>
- (simple single-file automation)</li><li><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
- (fine-grained registry and contract control)</li></ul>
+ (single-file automation)</li><li><a href="/loopwright/main/docs/walkthroughs/managed-controller/">Managed Controller</a>
+ (out-of-repo governance)</li><li><a href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/">Evolutionary Campaign</a>
+ (multi-generation optimization)</li></ul>
     </section><section class="next-page">
         <h2>Next</h2>
         <div><a href="/loopwright/main/docs/getting-started/installation/">Installation</a>

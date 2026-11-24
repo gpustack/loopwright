@@ -1,6 +1,6 @@
 # Managed Controller
 
-Managed controller mode is Loopwright's fine-grained governance workflow for platform engineers and local CLI operators. You author an out-of-repo `TrustedRegistry`, pin its SHA-256 digest inside `ControllerConfig` alongside a `TaskContract` DAG, and drive admission, execution, inspection, and crash reconciliation via the `loopwright` CLI.
+Managed controller mode is Loopwright's fine-grained governance workflow for platform engineers and local CLI operators. Author an out-of-repo `TrustedRegistry`, pin its SHA-256 digest inside `ControllerConfig` alongside a `TaskContract` DAG, and drive runs via the `loopwright` CLI.
 
 For single-file repository automation where Loopwright compiles contracts and digests automatically, follow [Declarative Taskpack](/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md) instead.
 
@@ -30,12 +30,12 @@ Managed controller mode coordinates an operator-owned authority store (`TrustedR
 
 | Relationship | Source field | Target declaration | Runtime invariant |
 | --- | --- | --- | --- |
-| Containment | `ControllerConfig.spec.task` | Embedded `TaskContract` (`apiVersion`, `kind`, `spec`) | JCS-hashed into run lock; carries zero credentials or handler digests |
-| Registry hash lock | `ControllerConfig.spec.registry.{name,digest}` | `TrustedRegistry.metadata.name` + file SHA-256 | Must match `--registry-sha256` and live outside repo/config roots |
-| Role binding | `spec.profiles.roles[].{roleId,profileRef}` | Bridges `TaskContract.roles[].id` to `roleProfiles[].id` | Enforces provider, context ceiling, tool subset, and `runtimeRef` |
-| Step & check binding | `spec.profiles.steps[].{stepId,handlerRef}` | Bridges `TaskContract.steps[].id` to `handlers[].id` | Verifies installed handler SHA-256 and `acceptance.checks[].id` |
-| Context pinning | `TaskContract.trustedContext.{revision,resources}` | `TrustedRegistry.{resourceVersion,resources[]}` | Matches context revision and read-only instruction SHA-256 digests |
-| Secret & PR wiring | `spec.credentials[]` & `publication.endpointRef` | `credentialBindings[]`, `environmentBindings[]`, `publicationEndpoints[]` | Resolves `${ENV}` in memory only; signs HMAC PR/gate requests |
+| Containment | `ControllerConfig.spec.task` | Embedded `TaskContract` | JCS-hashed into run lock; zero credentials or handler digests |
+| Registry hash lock | `spec.registry.{name,digest}` | `TrustedRegistry.metadata.name` + SHA-256 | Matches `--registry-sha256`; lives outside repo/config roots |
+| Role binding | `spec.profiles.roles[]` | Bridges `TaskContract.roles[]` to `roleProfiles[]` | Enforces provider, context ceiling, tools, and `runtimeRef` |
+| Step binding | `spec.profiles.steps[]` | Bridges `TaskContract.steps[]` to `handlers[]` | Verifies installed handler SHA-256 and `acceptance.checks[]` |
+| Context pinning | `trustedContext.{revision,resources}` | `TrustedRegistry.{resourceVersion,resources[]}` | Matches context revision and read-only instruction SHA-256 |
+| Secret & PR wiring | `spec.credentials[]` & `publication` | `credentialBindings[]`, `environmentBindings[]` | Resolves `${ENV}` in memory only; signs HMAC requests |
 
 ## Overview
 
@@ -47,7 +47,7 @@ Managed controller mode coordinates an operator-owned authority store (`TrustedR
 
 ## Prompt bootstrap
 
-`loopwright init` writes generic `REVIEW_REQUIRED` placeholders. To assemble tailored `registry.yaml` and `controller.yaml` files through an interview-first workflow without looking up digests by hand, paste this prompt into your local coding agent:
+`loopwright init` writes generic `REVIEW_REQUIRED` placeholders. To assemble tailored `registry.yaml` and `controller.yaml` files interactively without looking up digests by hand, paste this prompt into your coding agent:
 
 ```text
 Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.
@@ -55,7 +55,7 @@ Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Re
 
 ## Step 1: Generate drafts
 
-Install `@gpustack/loopwright` (see [Installation](/loopwright/main/docs/getting-started/installation/index.md)) and initialize starter YAML files in a real non-symlink directory **outside** the target repository:
+Install `@gpustack/loopwright` (see [Installation](/loopwright/main/docs/getting-started/installation/index.md)) and initialize starter YAML files in real non-symlink directories **outside** the target repository:
 
 ```sh
 mkdir -p "$HOME/loopwright-ops" "$HOME/loopwright-runs" "$HOME/loopwright-trust"
@@ -64,11 +64,11 @@ cp "$HOME/loopwright-ops/registry.draft.yaml" "$HOME/loopwright-trust/registry.y
 cp "$HOME/loopwright-ops/controller.draft.yaml" "$HOME/loopwright-ops/controller.yaml"
 ```
 
-`loopwright init` writes `0600` drafts. Keep `registry.yaml` in `$HOME/loopwright-trust` outside `cwd`, outside `$HOME/loopwright-ops`, and outside any target repository (`REGISTRY_UNTRUSTED`).
+Keep `registry.yaml` (`0600`) in `$HOME/loopwright-trust` outside `cwd`, outside `$HOME/loopwright-ops`, and outside any target repository (`REGISTRY_UNTRUSTED`).
 
 ## Step 2: Pin registry
 
-Compute the installed handler and runtime digests from your Loopwright installation so `registry.yaml` pins verified code bytes:
+Compute installed handler and runtime digests from your Loopwright installation so `registry.yaml` pins verified code bytes:
 
 ```sh
 node --input-type=module -e "
@@ -84,7 +84,7 @@ console.log({ handlers, pi, graphSha256: createHash('sha256').update(lock).diges
 "
 ```
 
-Populate `$HOME/loopwright-trust/registry.yaml` (`metadata.name` is referenced by `controller.yaml`):
+Populate `$HOME/loopwright-trust/registry.yaml` (see [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md) for every field in `roleProfiles`, `runtimeProfiles`, `mcp`, and endpoints):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -103,7 +103,7 @@ spec:
         algorithm: sha256
         hex: <hash>
       parameters:
-        prompt: Update packages/app/manifest.json and satisfy required schema keys.
+        prompt: Update packages/app/manifest.json.
         purpose: task
       capabilities:
         - pi
@@ -119,21 +119,8 @@ spec:
         path: packages/app/manifest.json
         required:
           - schema_version
-          - release
         equals:
           schema_version: 1
-      capabilities:
-        - inert_bytes
-        - read_only
-    - id: scope
-      version: 1
-      kind: check
-      implementation: scope.v1
-      digest:
-        algorithm: sha256
-        hex: <hash>
-      parameters:
-        checkId: null
       capabilities:
         - inert_bytes
         - read_only
@@ -191,7 +178,7 @@ spec:
       destinationRef: zai
       environmentNames:
         - ZAI_API_KEY
-      template: ${ZAI_API_KEY}
+      template: "${ZAI_API_KEY}"
   environmentBindings:
     - name: ZAI_API_KEY
       classification: credential
@@ -199,16 +186,15 @@ spec:
         - /spec/credentials/0/template
 ```
 
-Compute and export the SHA-256 digest of the finalized `registry.yaml`:
+Compute the SHA-256 digest of the finalized `registry.yaml`:
 
 ```sh
 REGISTRY_SHA=$(shasum -a 256 "$HOME/loopwright-trust/registry.yaml" | awk '{print $1}')
-echo "$REGISTRY_SHA"
 ```
 
 ## Step 3: Author controller
 
-Edit `$HOME/loopwright-ops/controller.yaml` to embed your `TaskContract`, bind `registry.name` + `$REGISTRY_SHA`, and map roles and steps:
+Edit `$HOME/loopwright-ops/controller.yaml` to embed your `TaskContract`, bind `registry.name` + `$REGISTRY_SHA`, and map roles and steps (see [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) for all contract fields):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -296,7 +282,7 @@ spec:
         handlerRef: check-manifest-json
   credentials:
     - ref: zai-token
-      template: ${ZAI_API_KEY}
+      template: "${ZAI_API_KEY}"
   controls:
     drainReserveMs: 120000
     maxAttempts: 4
@@ -308,12 +294,9 @@ spec:
     mode: disabled
 ```
 
-- **Contract fields**: See [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) for every `TaskContract` field and budget invariant.
-- **Registry and controller fields**: See [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md) for every `TrustedRegistry` and `ControllerConfig` field.
-
 ## Step 4: Execute run
 
-Run static compilation first (`check` performs zero network calls and zero state admission), then launch the fenced run outside `$HOME/loopwright-trust`:
+Compile statically first (`check` makes zero network or state calls), then launch the fenced run outside `$HOME/loopwright-trust`:
 
 ```sh
 export ZAI_API_KEY="zai_example_token"
@@ -323,29 +306,27 @@ loopwright run --config "$HOME/loopwright-ops/controller.yaml" --registry "$HOME
 
 ### Delegated execution
 
-For delegated execution, approve a role profile with `adapter: delegated`. Set `runtimeRef`, `providerCredentialRef`, and `mcp` to `null`. Bind the task role to that profile and set its task adapter to `delegated`. See [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md#role-and-runtime-profiles) for selection and context rules.
+For zero-secret delegated stepping, set `adapter: delegated` on the role profile (`runtimeRef: null`, `providerCredentialRef: null`, `mcp: null`) and task role (see [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md#role-and-runtime-profiles) and [CLI](/loopwright/main/docs/operations/cli/index.md#delegated-stepping)):
 
 ```sh
 loopwright step next --config "$HOME/loopwright-ops/controller.yaml" --registry "$HOME/loopwright-trust/registry.yaml" --registry-sha256 "$REGISTRY_SHA" --repo /path/to/example-app --run-root "$HOME/loopwright-runs" --run-id delegated-1 --role-model builder=example/author-model:medium --json
 loopwright step submit --run-root "$HOME/loopwright-runs" --run-id delegated-1 --lease TOKEN --status completed --json
 ```
 
-Use the yielded workspace and allowed tools, then submit its single-use lease. Repeat until the run settles. See [CLI](/loopwright/main/docs/operations/cli/index.md#delegated-stepping) for recovery and cancellation.
-
 ## Step 5: Reconcile receipts
 
-Query run state, export evidence bundles, or resume/reconcile interrupted executions:
+Inspect run state and export evidence bundles offline:
 
 ```sh
 loopwright status --run-root "$HOME/loopwright-runs" --run-id run-20261112-01 --json
 loopwright inspect --run-root "$HOME/loopwright-runs" --run-id run-20261112-01 --output "$HOME/loopwright-runs/bundle-01"
 ```
 
-- **Resume after host restart**: Run `loopwright resume` with the same `--run-root`, `--run-id`, `--config`, `--registry`, `--registry-sha256`, and `--repo`.
-- **Reconcile uncertain publication (exit `7`)**: Never retry uncertain remote mutations blindly; verify remote state and settle with `loopwright reconcile ... --receipt receipt.json` (see [CLI](/loopwright/main/docs/operations/cli/index.md)).
+- **Resume after restart**: Run `loopwright resume` with the exact same config, registry, digest, repo, and run identity.
+- **Reconcile unknown outcomes (exit `7`)**: Verify remote state and settle with `loopwright reconcile ... --receipt receipt.json` (see [CLI](/loopwright/main/docs/operations/cli/index.md)).
 
 ---
 
-**See also** — [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) (every `TaskContract` field and budget rule) · [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md) (every `TrustedRegistry` and `ControllerConfig` field)
+**See also** — [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) (contract fields and budget rules) · [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md) (registry and controller schemas)
 
 **Next** → [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) — review complete contract schemas, budgets, and evidence levels.

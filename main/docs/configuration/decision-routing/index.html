@@ -261,7 +261,7 @@
         
         
           
-          <a title="Evolutionary Campaigns" href="/loopwright/main/docs/walkthroughs/evolutionary-campaigns/" >Evolutionary Campaigns</a>
+          <a title="Evolutionary Campaign" href="/loopwright/main/docs/walkthroughs/evolutionary-campaign/" >Evolutionary Campaign</a>
         
       
     
@@ -380,7 +380,7 @@
 </li>
 <li><a href="#confidence-zones">Confidence zones</a>
 </li>
-<li><a href="#policy-reference">Policy reference</a>
+<li><a href="#providers-and-disclosure">Providers and disclosure</a>
 </li>
 <li><a href="#live-wiring-and-fallback">Live wiring and fallback</a>
 </li>
@@ -391,8 +391,8 @@
   OptIn["01 Explicit opt-in"] -> Redact["02 Scrub payload"] -> Zone["03 Calibrate zone"] -> Fallback["04 Deterministic fallback"]
 -->
 <ul>
-<li><strong>Standalone host policy (<code>decisions.yaml</code>)</strong>: Load a <code>DecisionPolicy</code> document via <code>loadDecisionPolicyFile('decisions.yaml')</code> in custom controller or App integrations.</li>
-<li><strong>Declarative Taskpack (<code>spec.decisions</code>)</strong>: Embed the policy under <code>spec.decisions</code> in <code>.loopwright/taskpack.yaml</code>. Taskpack 2.0 wires <code>spec.decisions</code> live through <code>ControllerPorts.decisions</code> in both GitHub Action and CLI runs.</li>
+<li><strong>Standalone host policy (<code>decisions.yaml</code>)</strong>: Load a <code>DecisionPolicy</code> document via <code>loadDecisionPolicyFile('decisions.yaml')</code> (<code>disclosurePolicy</code> defaults to <code>disabled</code>).</li>
+<li><strong>Declarative Taskpack (<code>spec.decisions</code>)</strong>: Embed policy fields under <code>spec.decisions</code> in <code>.loopwright/taskpack.yaml</code> (<code>enabled</code> required; <code>disclosurePolicy</code> defaults to <code>public-metadata-only</code>).</li>
 </ul>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
@@ -402,13 +402,13 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional in standalone decisions.yaml (defaults to false)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">disclosurePolicy</span><span class="p">:</span><span class="w"> </span><span class="l">public-metadata-only</span><span class="w"> </span><span class="c"># Optional (defaults to disabled)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l">typesafe-jev</span><span class="w"> </span><span class="c"># Optional (defaults to typesafe-jev)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional (defaults to 0.8)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">confirmThreshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w"> </span><span class="c"># Optional (defaults to 0.6)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">hardDeadlineMs</span><span class="p">:</span><span class="w"> </span><span class="m">5000</span><span class="w"> </span><span class="c"># Optional (defaults to 5000)</span><span class="w">
-</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional (defaults to 1)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">minConfidence</span><span class="p">:</span><span class="w"> </span><span class="m">0.8</span><span class="w"> </span><span class="c"># Optional (0.5..1.0, defaults to 0.8)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">confirmThreshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.6</span><span class="w"> </span><span class="c"># Optional (0.0..minConfidence, defaults to 0.6)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">hardDeadlineMs</span><span class="p">:</span><span class="w"> </span><span class="m">5000</span><span class="w"> </span><span class="c"># Optional (100..30000 ms, defaults to 5000)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">maxAttempts</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="c"># Optional (1 or 2, defaults to 1)</span><span class="w">
 </span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">allowImages</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="w"> </span><span class="c"># Optional (defaults to false)</span></span></span></code></pre></div>
 </div>
-<p>For declarative <code>Taskpack</code> triage, declare <code>spec.decisions</code> with optional <code>triageRules</code>:</p>
+<p>For declarative <code>Taskpack</code> triage, declare <code>spec.decisions</code> with optional <code>triageRules</code> (<code>0..100</code> rules):</p>
 <div class="code-block">
   <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
   <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
@@ -431,11 +431,11 @@
 </span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">threshold</span><span class="p">:</span><span class="w"> </span><span class="m">0.7</span><span class="w"> </span><span class="c"># Optional finite score in 0.0..1.0</span></span></span></code></pre></div>
 </div>
 <ul>
-<li><strong>Taskpack nesting</strong>: Inside <code>.loopwright/taskpack.yaml</code> (<code>kind: Taskpack</code>), place the <code>spec.*</code> fields under <code>spec.decisions</code> rather than repeating a nested <code>DecisionPolicy</code> header.</li>
-<li><strong>Threshold order</strong>: Validation rejects policies where <code>confirmThreshold &gt; minConfidence</code> (<code>DECISION_POLICY_INVALID</code>).</li>
+<li><strong>Threshold order</strong>: Policies with <code>confirmThreshold &gt; minConfidence</code> fail closed (<code>DECISION_POLICY_INVALID</code>).</li>
+<li><strong>Question primitives</strong>: Programmatic callers compose <code>choice</code> (<code>&lt;= 255</code> options), <code>score</code> (<code>2..10</code> criteria), <code>noul</code> (<code>0.0..1.0</code>), and <code>box</code> (<code>allowImages: true</code>).</li>
 </ul>
 <h2 id="confidence-zones">Confidence zones</h2>
-<p>Every calibrated response is routed into one of three deterministic zones based on <code>minConfidence</code> and <code>confirmThreshold</code>:</p>
+<p>Every calibrated response routes into one of three deterministic zones:</p>
 <table>
 	<thead>
 			<tr>
@@ -458,109 +458,11 @@
 			<tr>
 					<td><code>escalate</code></td>
 					<td><code>confidence &lt; confirmThreshold</code> (or timeout/error)</td>
-					<td>Rejects model advice and executes deterministic fallback</td>
+					<td>Rejects model advice and runs deterministic fallback</td>
 			</tr>
 	</tbody>
 </table>
-<h2 id="policy-reference">Policy reference</h2>
-<h3 id="policy-fields">Policy fields</h3>
-<p>In a standalone <code>DecisionPolicy</code> document (<code>decisions.yaml</code>), <code>apiVersion</code>, <code>kind</code>, and <code>spec</code> are required while all <code>spec.*</code> keys default cleanly; when nested under <code>Taskpack</code> <code>spec.decisions</code>, <code>decisions.enabled</code> is <strong>required</strong> and the shared fields plus <code>triageRules</code> are optional:</p>
-<table>
-	<thead>
-			<tr>
-					<th>Field path</th>
-					<th>Required</th>
-					<th>Default</th>
-					<th>Bounds and meaning</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>apiVersion</code> / <code>kind</code></td>
-					<td>Conditional</td>
-					<td>—</td>
-					<td><strong>Required</strong> in standalone envelope (<code>loopwright.dev/v1alpha1</code>, <code>DecisionPolicy</code>); omit in <code>taskpack.yaml</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.enabled</code></td>
-					<td>Conditional</td>
-					<td><code>false</code></td>
-					<td><strong>Required</strong> inside <code>Taskpack</code> <code>spec.decisions</code>; optional in standalone <code>decisions.yaml</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.disclosurePolicy</code></td>
-					<td>No</td>
-					<td><code>'disabled'</code> (standalone) / <code>'public-metadata-only'</code> (<code>Taskpack</code>)</td>
-					<td>Outbound payload redaction tier (<code>disabled</code>, <code>public-metadata-only</code>, <code>repo-approved-redacted-evidence</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.provider</code></td>
-					<td>No</td>
-					<td><code>'typesafe-jev'</code></td>
-					<td>Target provider adapter and wire dialect</td>
-			</tr>
-			<tr>
-					<td><code>spec.minConfidence</code></td>
-					<td>No</td>
-					<td><code>0.8</code></td>
-					<td>Float in <code>0.5 .. 1.0</code>; minimum calibrated score required for <code>act</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.confirmThreshold</code></td>
-					<td>No</td>
-					<td><code>0.6</code></td>
-					<td>Float in <code>0.0 .. 1.0</code> (<code>&lt;= minConfidence</code>); floor for <code>confirm</code> before <code>escalate</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.hardDeadlineMs</code></td>
-					<td>No</td>
-					<td><code>5000</code></td>
-					<td>Integer <code>100 .. 30000</code> ms shared across all attempts</td>
-			</tr>
-			<tr>
-					<td><code>spec.maxAttempts</code></td>
-					<td>No</td>
-					<td><code>1</code></td>
-					<td><code>1</code> (single call) or <code>2</code> (one retry if time remains in <code>hardDeadlineMs</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.allowImages</code></td>
-					<td>No</td>
-					<td><code>false</code></td>
-					<td>Permits image inputs and <code>box</code> bounding-box questions when <code>true</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.triageRules</code></td>
-					<td>No</td>
-					<td>Unset</td>
-					<td><code>Taskpack</code> <code>spec.decisions</code>: <code>0..100</code> rules (<code>{ id, description, severity, kind, threshold? }</code>)</td>
-			</tr>
-			<tr>
-					<td><code>spec.endpoint</code> / <code>spec.model</code></td>
-					<td>No</td>
-					<td>Provider default</td>
-					<td>Standalone <code>DecisionPolicy</code> only: custom <code>http(s)://</code> URL and model ID override</td>
-			</tr>
-			<tr>
-					<td><code>spec.fallbackRole</code></td>
-					<td>No</td>
-					<td><code>null</code></td>
-					<td>Standalone <code>DecisionPolicy</code> only: fallback role ID or <code>null</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.onFallbackUnavailable</code></td>
-					<td>No</td>
-					<td><code>'blocked'</code></td>
-					<td>Standalone <code>DecisionPolicy</code> only: <code>'blocked'</code> or <code>'deterministic_default'</code></td>
-			</tr>
-			<tr>
-					<td><code>spec.startluxOptions</code></td>
-					<td>No</td>
-					<td><code>null</code></td>
-					<td>Standalone <code>DecisionPolicy</code> only: <code>thinkMode</code>, <code>thinkBudget</code>, <code>gate</code>, <code>allowNone</code> tuning</td>
-			</tr>
-	</tbody>
-</table>
+<h2 id="providers-and-disclosure">Providers and disclosure</h2>
 <h3 id="providers">Providers</h3>
 <table>
 	<thead>
@@ -643,91 +545,12 @@
 			</tr>
 	</tbody>
 </table>
-<h3 id="question-primitives">Question primitives</h3>
-<p>Programmatic <code>@loopwright/decisions</code> callers compose structured requests from four primitives:</p>
-<table>
-	<thead>
-			<tr>
-					<th>Primitive</th>
-					<th>Output shape</th>
-					<th>Constraint</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>choice</code></td>
-					<td>Single option key (<code>&lt;= 255</code> options)</td>
-					<td>Supported across all seven providers</td>
-			</tr>
-			<tr>
-					<td><code>score</code></td>
-					<td>Weighted score across <code>2..10</code> criteria</td>
-					<td>Supported across all seven providers</td>
-			</tr>
-			<tr>
-					<td><code>noul</code></td>
-					<td>Calibrated binary probability (<code>0.0..1.0</code>)</td>
-					<td>Supported across all seven providers</td>
-			</tr>
-			<tr>
-					<td><code>box</code></td>
-					<td>Normalized bounding box coordinates</td>
-					<td>Requires <code>allowImages: true</code> and vision-capable provider</td>
-			</tr>
-	</tbody>
-</table>
 <h2 id="live-wiring-and-fallback">Live wiring and fallback</h2>
-<p><code>ControllerPorts.decisions</code> exposes the zero-dependency <code>AdvisoryDecisionPort</code> interface so <code>@loopwright/github-app</code> and <code>@loopwright/cli</code> inject live <code>@loopwright/decisions</code> adapters without creating package cycles. Standalone <code>kind: DecisionPolicy</code> defaults <code>disclosurePolicy</code> to <code>disabled</code>, whereas omitting <code>spec.decisions.disclosurePolicy</code> when <code>spec.decisions.enabled: true</code> in <code>kind: Taskpack</code> defaults to <code>public-metadata-only</code>.</p>
-<table>
-	<thead>
-			<tr>
-					<th>Port hook</th>
-					<th>Lifecycle point</th>
-					<th>Safety guarantee</th>
-			</tr>
-	</thead>
-	<tbody>
-			<tr>
-					<td><code>routeCapabilityTier</code></td>
-					<td>Role preparation</td>
-					<td>Preserves pinned role models (<code>userOverridePreserved: true</code>)</td>
-			</tr>
-			<tr>
-					<td><code>evaluateCycleAlignment</code></td>
-					<td>Before repair or <code>rejectTo</code> rework</td>
-					<td>Advisory route (<code>continue</code>, <code>revise</code>, <code>needs_review</code>, <code>blocked</code>)</td>
-			</tr>
-			<tr>
-					<td><code>adviseSoftCompaction</code></td>
-					<td>Prior to <code>pi.compact.v1</code> steps</td>
-					<td>Cannot veto active hard-compaction triggers</td>
-			</tr>
-			<tr>
-					<td><code>triageCandidateDiff</code></td>
-					<td>Post-capture pre-publication</td>
-					<td>Skips cleanly when <code>triageRules</code> is empty; sets <code>verificationCertified: false</code></td>
-			</tr>
-			<tr>
-					<td><code>advise_mutation_novelty</code></td>
-					<td>Pre-compile evolution mutation</td>
-					<td>Rejects <code>Jaccard === 1.0</code> clones offline (<code>0</code> network calls); queries Jev <code>noul</code> in soft band</td>
-			</tr>
-			<tr>
-					<td><code>route_evolution_strategy</code></td>
-					<td>Pre-mutation evolution track choice</td>
-					<td>Routes <code>(trackId, mutationKind)</code> from declared tracks with deterministic Roofline fallback</td>
-			</tr>
-			<tr>
-					<td><code>advise_cascade_escalation</code></td>
-					<td>Post-smoke benchmark triage</td>
-					<td>Returns <code>prune</code>, <code>confirm</code>, or <code>escalate</code>; never bypasses full multi-bucket verification</td>
-			</tr>
-	</tbody>
-</table>
+<p>Both the GitHub Action and CLI inject live <code>@loopwright/decisions</code> adapters through <code>ControllerPorts.decisions</code> (<code>AdvisoryDecisionPort</code>) covering capability routing, cycle alignment, soft compaction, candidate diff triage, and evolutionary novelty/strategy/cascade hooks.</p>
 <ul>
-<li><strong>Advisory stamps</strong>: Every decision result stamps <code>advisoryOnly: true</code> and <code>verificationCertified: false</code>.</li>
-<li><strong>Deterministic fallback</strong>: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (<code>source: 'deterministic_fallback'</code> or <code>'deterministic_heuristic'</code>) without blocking or certifying runs.</li>
-<li><strong>Non-delegable authority</strong>: All six <code>DECISION_FORBIDDEN_AUTHORITY_INTENTS</code> (<code>grant_execution_authority</code>, <code>certify_verification_evidence</code>, <code>skip_adversarial_review</code>, <code>approve_external_gate</code>, <code>override_pinned_model</code>, <code>veto_hard_compaction</code>) throw <code>DecisionError('DECISION_AUTHORITY_VIOLATION')</code> with <code>authorityViolation: true</code>. Recorded entries appear in run observations (<code>advisoryDecisions</code>) with <code>verificationCertified: false</code>.</li>
+<li><strong>Advisory stamps</strong>: Every decision stamps <code>advisoryOnly: true</code> and <code>verificationCertified: false</code>.</li>
+<li><strong>Deterministic fallback</strong>: Missing credentials, timeouts, or unreachable endpoints fall back deterministically (<code>deterministic_fallback</code> / <code>deterministic_heuristic</code>) without blocking runs.</li>
+<li><strong>Non-delegable authority</strong>: Forbidden intents (granting authority, certifying evidence, skipping review, approving gates, overriding pinned models, or vetoing hard compaction) throw <code>DECISION_AUTHORITY_VIOLATION</code>.</li>
 </ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
@@ -751,12 +574,10 @@
     <li><a href="#contents">Contents</a></li>
     <li><a href="#decisionpolicy">DecisionPolicy</a></li>
     <li><a href="#confidence-zones">Confidence zones</a></li>
-    <li><a href="#policy-reference">Policy reference</a>
+    <li><a href="#providers-and-disclosure">Providers and disclosure</a>
       <ul>
-        <li><a href="#policy-fields">Policy fields</a></li>
         <li><a href="#providers">Providers</a></li>
         <li><a href="#disclosure-policies">Disclosure policies</a></li>
-        <li><a href="#question-primitives">Question primitives</a></li>
       </ul>
     </li>
     <li><a href="#live-wiring-and-fallback">Live wiring and fallback</a></li>
