@@ -14,7 +14,6 @@ import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Writable } from 'node:stream';
 import { types } from 'node:util';
 import {
-  evaluateMetricThresholds,
   isVerifierNamespacePath,
   LIMITS,
   SecretScrubber,
@@ -3324,10 +3323,28 @@ async function parseElfFromHandle(
       continue;
     }
 
-    // Embedded PTX sections inside host fatbin ELF
-    if ((secName.includes('ptx') || secName === '.nv_fatbin') && sec.shSize > 0 && sec.shSize <= maxScanBytes - scannedBytes) {
+    // Embedded PTX sections inside host fatbin ELF — fail closed when scan budget is exceeded
+    if ((secName.includes('ptx') || secName === '.nv_fatbin') && sec.shSize > 0) {
+      if (sec.shSize > maxScanBytes - scannedBytes) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF embedded PTX section "${secName}" (${sec.shSize} bytes) exceeds remaining ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
       const embBuf = await readSectionBounded(idx);
-      if (embBuf !== null && embBuf.byteLength > 0) {
+      if (embBuf === null) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF embedded PTX section "${secName}" exceeded ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      if (embBuf.byteLength > 0) {
         embeddedTexts.push(embBuf.toString('latin1'));
       }
     }
@@ -3788,9 +3805,39 @@ export async function auditSealedStageAOutputs(
         if (embParsed.maxSpillBytes !== null) maxSpillBytes = Math.max(maxSpillBytes ?? 0, embParsed.maxSpillBytes);
       }
 
+      const verifySealedInodeUnchanged = async (toolLabel: string): Promise<boolean> => {
+        try {
+          const recheck = await lstat(item.sealedFilePath);
+          if (
+            !recheck.isFile()
+            || recheck.isSymbolicLink()
+            || recheck.nlink !== 1
+            || recheck.dev !== preStat.dev
+            || recheck.ino !== preStat.ino
+            || recheck.size !== item.artifact.byteLength
+          ) {
+            pushAuditFinding(
+              `Stage A file mutated before ${toolLabel} static audit`,
+              relName,
+              `File "${relName}" inode or size changed between sealed read and ${toolLabel} invocation`,
+            );
+            return false;
+          }
+          return true;
+        } catch (statErr: unknown) {
+          pushAuditFinding(
+            `Stage A file unavailable before ${toolLabel} static audit`,
+            relName,
+            `File "${relName}" lstat failed before ${toolLabel}: ${statErr instanceof Error ? statErr.message : String(statErr)}`,
+          );
+          return false;
+        }
+      };
+
       // Optional root-owned Linux/CUDA host toolchain inspection (`nm` / `cuobjdump`, 1 MiB stdout cap)
       if (isElf && resolvedNm !== null) {
         for (const nmFlags of [['-a', item.sealedFilePath], ['-D', item.sealedFilePath]]) {
+          if (!(await verifySealedInodeUnchanged('nm'))) break;
           try {
             const nmRes = await toolRunner('nm', resolvedNm, nmFlags, {
               timeoutMs: 10_000,
@@ -3805,43 +3852,39 @@ export async function auditSealedStageAOutputs(
             }
           } catch (toolErr: unknown) {
             const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
-            if (msg.includes('exceeded')) {
-              pushAuditFinding(
-                'Stage A nm output exceeded 1 MiB static audit cap',
-                relName,
-                `File "${relName}": ${msg}`,
-              );
-            }
+            const title = msg.includes('exceeded')
+              ? 'Stage A nm output exceeded 1 MiB static audit cap'
+              : 'Stage A nm static audit invocation failed';
+            pushAuditFinding(title, relName, `File "${relName}": ${msg}`);
           }
         }
       }
 
       if (isElf && resolvedCuobjdump !== null && /\.(?:cubin|fatbin|so|o)$/i.test(relName)) {
-        try {
-          const cuRes = await toolRunner(
-            'cuobjdump',
-            resolvedCuobjdump,
-            ['--dump-resource-usage', '--dump-elf-symbols', item.sealedFilePath],
-            {
-              timeoutMs: 10_000,
-              maxOutputBytes: maxScanBytes,
-              ...(options.signal !== undefined ? { signal: options.signal } : {}),
-            },
-          );
-          if (cuRes.exitCode === 0 && cuRes.stdout.length > 0) {
-            const cuParsed = parseTextAndPtxStaticInfo(cuRes.stdout, `${relName}.sass`);
-            for (const tok of cuParsed.tokensAndLines) candidateSymbols.add(tok);
-            if (cuParsed.maxRegisters !== null) maxRegisters = Math.max(maxRegisters ?? 0, cuParsed.maxRegisters);
-            if (cuParsed.maxSpillBytes !== null) maxSpillBytes = Math.max(maxSpillBytes ?? 0, cuParsed.maxSpillBytes);
-          }
-        } catch (toolErr: unknown) {
-          const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
-          if (msg.includes('exceeded')) {
-            pushAuditFinding(
-              'Stage A cuobjdump output exceeded 1 MiB static audit cap',
-              relName,
-              `File "${relName}": ${msg}`,
+        if (await verifySealedInodeUnchanged('cuobjdump')) {
+          try {
+            const cuRes = await toolRunner(
+              'cuobjdump',
+              resolvedCuobjdump,
+              ['--dump-resource-usage', '--dump-elf-symbols', item.sealedFilePath],
+              {
+                timeoutMs: 10_000,
+                maxOutputBytes: maxScanBytes,
+                ...(options.signal !== undefined ? { signal: options.signal } : {}),
+              },
             );
+            if (cuRes.exitCode === 0 && cuRes.stdout.length > 0) {
+              const cuParsed = parseTextAndPtxStaticInfo(cuRes.stdout, `${relName}.sass`);
+              for (const tok of cuParsed.tokensAndLines) candidateSymbols.add(tok);
+              if (cuParsed.maxRegisters !== null) maxRegisters = Math.max(maxRegisters ?? 0, cuParsed.maxRegisters);
+              if (cuParsed.maxSpillBytes !== null) maxSpillBytes = Math.max(maxSpillBytes ?? 0, cuParsed.maxSpillBytes);
+            }
+          } catch (toolErr: unknown) {
+            const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+            const title = msg.includes('exceeded')
+              ? 'Stage A cuobjdump output exceeded 1 MiB static audit cap'
+              : 'Stage A cuobjdump static audit invocation failed';
+            pushAuditFinding(title, relName, `File "${relName}": ${msg}`);
           }
         }
       }
@@ -4248,9 +4291,6 @@ function checkMetricThresholds(
     }
     const err = checkSingleScopeMetricRule(rule, targetBucket.metrics, `bucket "${targetBucket.bucketId}": `);
     if (err !== null) return err;
-  }
-  if (!evaluateMetricThresholds(rules, metrics, bucketMetrics)) {
-    return 'quantitative metric threshold check failed';
   }
   return null;
 }

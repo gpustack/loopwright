@@ -1615,7 +1615,7 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
               quarantineRequired: true,
               probeKind: config.probeMode,
               vendor: 'synthetic',
-              checkedDeviceIndices: Object.freeze([0]),
+              checkedDeviceIndices: Object.freeze([]),
               faultKind: 'probe_failed',
               summary: safeProbeErr,
               findings: Object.freeze([
@@ -1819,6 +1819,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
           });
           if (options.onJobSettled !== undefined) {
             await options.onJobSettled(lastSettlement);
+          }
+          if (quarantineError !== null) {
+            throw quarantineError;
           }
           return { polls, jobsProcessed, lastSettlement, exitReason: 'aborted' };
         }

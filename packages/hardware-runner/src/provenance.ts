@@ -2013,7 +2013,10 @@ function classifyFailedProbeOutput(
   if (/gpu requires reset|reset required|gpu reset|gpu hang|gpu recovery|wedged/i.test(cleaned)) {
     return { faultKind: 'gpu_reset_required', externalHostLoss: false };
   }
-  if (/uncorrectable|double\s+bit\s+ecc|remapping\s+failure/i.test(cleaned)) {
+  if (/remapping\s+failure/i.test(cleaned)) {
+    return { faultKind: 'row_remap_failure', externalHostLoss: false };
+  }
+  if (/uncorrectable|double\s+bit\s+ecc/i.test(cleaned)) {
     return { faultKind: 'ecc_uncorrectable', externalHostLoss: false };
   }
   void vendor;
@@ -2090,11 +2093,21 @@ export function parseNvidiaHealthOutput(
   }
 
   const rowsByIndex = new Map<number, readonly string[]>();
-  lines.forEach((line, positionalIdx) => {
+  for (const line of lines) {
     const cols = line.split(',').map(c => c.trim());
-    const parsedIdx = /^\d+$/.test(cols[0] ?? '') ? Number.parseInt(cols[0]!, 10) : positionalIdx;
-    rowsByIndex.set(parsedIdx, cols);
-  });
+    if (!/^\d+$/.test(cols[0] ?? '')) {
+      return buildUnhealthyProbeResult({
+        probeKind: 'physical',
+        vendor: 'nvidia',
+        checkedDeviceIndices,
+        faultKind: 'probe_failed',
+        title: 'Malformed nvidia-smi GPU index column',
+        detail: `Expected integer GPU index in nvidia-smi health output row: ${line}`,
+        scrubber,
+      });
+    }
+    rowsByIndex.set(Number.parseInt(cols[0]!, 10), cols);
+  }
 
   for (const idx of checkedDeviceIndices) {
     const row = rowsByIndex.get(idx);
