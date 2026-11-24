@@ -50,7 +50,7 @@ interface PageSpec {
   readonly title: string;
 }
 
-const CANONICAL_PAGES: readonly PageSpec[] = [
+const PUBLIC_PAGES: readonly PageSpec[] = [
   { relPath: 'getting-started/architecture.md', title: 'Architecture' },
   { relPath: 'getting-started/installation.md', title: 'Installation' },
   { relPath: 'operations/github-action.md', title: 'GitHub Action' },
@@ -59,13 +59,25 @@ const CANONICAL_PAGES: readonly PageSpec[] = [
   { relPath: 'operations/coding-agents.md', title: 'Coding Agents' },
   { relPath: 'walkthroughs/declarative-taskpack.md', title: 'Declarative Taskpack' },
   { relPath: 'walkthroughs/managed-controller.md', title: 'Managed Controller' },
-  { relPath: 'walkthroughs/evolutionary-campaigns.md', title: 'Evolutionary Campaigns' },
+  { relPath: 'walkthroughs/evolutionary-campaign.md', title: 'Evolutionary Campaign' },
   { relPath: 'configuration/taskpack.md', title: 'Taskpack' },
   { relPath: 'configuration/task-contract.md', title: 'Task Contract' },
   { relPath: 'configuration/controller-and-registry.md', title: 'Controller and Registry' },
   { relPath: 'configuration/sandbox-backends.md', title: 'Sandbox Backends' },
   { relPath: 'configuration/decision-routing.md', title: 'Decision Routing' },
   { relPath: 'configuration/evolution-campaign.md', title: 'Evolution Campaign' },
+];
+
+const REFERENCE_PAGES: readonly PageSpec[] = [
+  { relPath: 'references/README.md', title: 'Reference Hub' },
+  { relPath: 'references/bootstrap-interview.md', title: 'Bootstrap Interview Reference' },
+  { relPath: 'references/taskpack-and-contract-schema.md', title: 'Taskpack and Contract Reference' },
+  { relPath: 'references/controller-and-registry-schema.md', title: 'Controller and Registry Reference' },
+  { relPath: 'references/cli-and-action-reference.md', title: 'CLI and Action Reference' },
+  { relPath: 'references/coding-agent-protocol.md', title: 'Coding Agent Protocol Reference' },
+];
+
+const CONTRIBUTE_PAGES: readonly PageSpec[] = [
   { relPath: 'development.md', title: 'Development and Verification' },
   { relPath: 'contribute/internals.md', title: 'Workspace Internals and Boundaries' },
   { relPath: 'contribute/identity.md', title: 'Canonical Identity and Digests' },
@@ -78,6 +90,12 @@ const CANONICAL_PAGES: readonly PageSpec[] = [
   { relPath: 'contribute/closure-matrix.md', title: 'Capability Closure Matrix and Failure Semantics' },
   { relPath: 'contribute/adr/0001-local-state-authority.md', title: 'ADR 0001: Local State Authority' },
   { relPath: 'contribute/adr/0002-isolated-pi-sdk.md', title: 'ADR 0002: Isolated Pi SDK' },
+];
+
+const CANONICAL_PAGES: readonly PageSpec[] = [
+  ...PUBLIC_PAGES,
+  ...REFERENCE_PAGES,
+  ...CONTRIBUTE_PAGES,
 ];
 
 function writeFileEnsuringDir(filePath: string, content: string): void {
@@ -128,12 +146,65 @@ function buildCleanPageContent(page: PageSpec): string {
     ].join('\n');
   }
 
+  if (page.relPath === 'references/README.md') {
+    const siblingLinks = REFERENCE_PAGES
+      .filter(p => p.relPath !== 'references/README.md')
+      .map(p => {
+        const base = p.relPath.slice('references/'.length);
+        return `| [${p.title}](${base}) | \`contract\` |`;
+      });
+    return [
+      `# ${page.title}`,
+      '',
+      'Evidence: contract.',
+      '',
+      'Flat machine-readable reference hub for schemas, flags, and protocols.',
+      '',
+      '## Task routing',
+      '',
+      '| Reference | Evidence |',
+      '| --- | --- |',
+      ...siblingLinks,
+      '',
+      '---',
+      '',
+      '**See also** — [Architecture](../getting-started/architecture.md) (execution chain and trust boundaries)',
+      '',
+    ].join('\n');
+  }
+
+  if (page.relPath.startsWith('references/')) {
+    return [
+      `# ${page.title}`,
+      '',
+      'Evidence: contract.',
+      '',
+      'Machine-readable contract dictionary for Loopwright configuration and CLI surfaces.',
+      '',
+      '## Contents',
+      '',
+      '- [Overview](#overview)',
+      '',
+      '## Overview',
+      '',
+      '| Field | Type | Default |',
+      '| --- | --- | --- |',
+      '| `name` | `string` | `sample` |',
+      '',
+      '---',
+      '',
+      '**See also** — [Reference Hub](README.md) (flat reference routing) · [Architecture](../getting-started/architecture.md) (execution chain)',
+      '',
+    ].join('\n');
+  }
+
   const depth = page.relPath.split('/').length - 1;
   const upPrefix = '../'.repeat(depth);
   const archLink = `${upPrefix}getting-started/architecture.md`;
   const contractsLink = `${upPrefix}configuration/task-contract.md`;
+  const isPublic = PUBLIC_PAGES.some(p => p.relPath === page.relPath);
 
-  return [
+  const lines = [
     `# ${page.title}`,
     '',
     'Loopwright enforces explicit schemas and deterministic runtime boundaries.',
@@ -164,10 +235,16 @@ function buildCleanPageContent(page: PageSpec): string {
     '---',
     '',
     `**See also** — [Architecture](${archLink}) (four-stage execution chain and vocabulary)`,
-    '',
-    `**Next** → [Task Contract](${contractsLink}) — inspect task contract fields and verification bounds.`,
-    '',
-  ].join('\n');
+  ];
+
+  if (isPublic) {
+    lines.push(
+      '',
+      `**Next** → [Task Contract](${contractsLink}) — inspect task contract fields and verification bounds.`
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 function buildMinimalRepoFixture(): string {
@@ -183,6 +260,8 @@ function buildMinimalRepoFixture(): string {
     'taskpack',
     'github-app',
     'decisions',
+    'hardware-runner',
+    'evolution',
     'cli',
   ];
   for (const pkg of packages) {
@@ -240,7 +319,7 @@ function buildMinimalRepoFixture(): string {
       '    items:',
       '      - /docs/walkthroughs/declarative-taskpack/',
       '      - /docs/walkthroughs/managed-controller/',
-      '      - /docs/walkthroughs/evolutionary-campaigns/',
+      '      - /docs/walkthroughs/evolutionary-campaign/',
       '  - name: Configuration',
       '    items:',
       '      - /docs/configuration/taskpack/',
@@ -258,7 +337,7 @@ function buildMinimalRepoFixture(): string {
       '  /docs/operations/coding-agents/: Coding Agents',
       '  /docs/walkthroughs/declarative-taskpack/: Declarative Taskpack',
       '  /docs/walkthroughs/managed-controller/: Managed Controller',
-      '  /docs/walkthroughs/evolutionary-campaigns/: Evolutionary Campaigns',
+      '  /docs/walkthroughs/evolutionary-campaign/: Evolutionary Campaign',
       '  /docs/configuration/taskpack/: Taskpack',
       '  /docs/configuration/task-contract/: Task Contract',
       '  /docs/configuration/controller-and-registry/: Controller and Registry',
@@ -269,9 +348,35 @@ function buildMinimalRepoFixture(): string {
     ].join('\n')
   );
 
-  const allPagesRows = CANONICAL_PAGES.map(
-    p => `| [${p.title}](${p.relPath}) | ${p.title} reference |`
-  ).join('\n');
+  writeFileEnsuringDir(
+    join(root, 'site', 'content', 'docs', '_index.md'),
+    [
+      '---',
+      'title: Documentation',
+      '---',
+      '',
+      '# Documentation',
+      '',
+      ...PUBLIC_PAGES.map(p => `- [${p.title}](${p.relPath.replace(/\.md$/, '/')})`),
+      '',
+    ].join('\n')
+  );
+
+  writeFileEnsuringDir(
+    join(root, 'site', 'layouts', 'index.html'),
+    [
+      '{{ define "main" }}',
+      ...PUBLIC_PAGES.map(
+        p => `  <a href="{{ "docs/${p.relPath.replace(/\.md$/, '/')}" | relLangURL }}">${p.title}</a>`
+      ),
+      '{{ end }}',
+      '',
+    ].join('\n')
+  );
+
+  const publicRows = PUBLIC_PAGES.map(p => `| [${p.title}](${p.relPath}) | ${p.title} guide |`).join('\n');
+  const referenceRows = REFERENCE_PAGES.map(p => `| [${p.title}](${p.relPath}) | ${p.title} lookup |`).join('\n');
+  const contributeRows = CONTRIBUTE_PAGES.map(p => `| [${p.title}](${p.relPath}) | ${p.title} internals |`).join('\n');
 
   const docsIndex = [
     '# Loopwright Documentation',
@@ -279,6 +384,7 @@ function buildMinimalRepoFixture(): string {
     '## Reading paths',
     '',
     '- [Architecture](getting-started/architecture.md)',
+    '- [Reference Hub](references/README.md)',
     '',
     '## Module map',
     '',
@@ -317,7 +423,7 @@ function buildMinimalRepoFixture(): string {
     '- ID: controller',
     '- Use for: controller',
     '- Aliases: controller',
-    '- Guides: [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)',
+    '- Guides: [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [walkthroughs/evolutionary-campaign.md](walkthroughs/evolutionary-campaign.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)',
     `- Specs: [Specification](../${specFile})`,
     '- Code: [controller](../packages/controller/)',
     '- Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md)',
@@ -382,7 +488,19 @@ function buildMinimalRepoFixture(): string {
     '',
     '| Page | Description |',
     '| --- | --- |',
-    allPagesRows,
+    publicRows,
+    '',
+    '## Reference',
+    '',
+    '| Page | Description |',
+    '| --- | --- |',
+    referenceRows,
+    '',
+    '## Contribute',
+    '',
+    '| Page | Description |',
+    '| --- | --- |',
+    contributeRows,
     '',
   ].join('\n');
 
@@ -390,12 +508,15 @@ function buildMinimalRepoFixture(): string {
   return root;
 }
 
-test('expanded loopwright-* skills and openai.yaml exist and satisfy AC-2 contracts', () => {
+test('expanded loopwright-* skills and openai.yaml exist and satisfy three-zone governance contracts', () => {
   const docsSkill = readFileSync(join(REPO_ROOT, '.agents/skills/loopwright-docs/SKILL.md'), 'utf8');
   assert.match(docsSkill, /references\/page-map\.md/);
   assert.match(docsSkill, /references\/conventions\.md/);
   assert.match(docsSkill, /npm run lint:docs/);
   assert.match(docsSkill, /npm run site/);
+  assert.match(docsSkill, /Strict Pretty Block-Style YAML/);
+  assert.ok(!docsSkill.includes('evolutionary-campaigns.md'), 'SKILL.md must use singular evolutionary-campaign.md');
+  assert.ok(!docsSkill.includes('metadata: { name'), 'SKILL.md must not model inline flow mapping metadata');
 
   const conventions = readFileSync(
     join(REPO_ROOT, '.agents/skills/loopwright-docs/references/conventions.md'),
@@ -407,6 +528,10 @@ test('expanded loopwright-* skills and openai.yaml exist and satisfy AC-2 contra
   assert.match(conventions, /#D89B48/);
   assert.match(conventions, /\*\*See also\*\* — /);
   assert.match(conventions, /\*\*Next\*\* → /);
+  assert.match(conventions, /Strict Multi-Line 2-Space Block Style/);
+  assert.match(conventions, /Checked Kind-Plural Rules/);
+  assert.ok(!conventions.includes('All 25 `docs/**/*.md`'), 'conventions.md must not retain stale 25-page count');
+  assert.ok(!conventions.includes('All 13 site-published'), 'conventions.md must not retain stale 13-page count');
 
   const pageMap = readFileSync(
     join(REPO_ROOT, '.agents/skills/loopwright-docs/references/page-map.md'),
@@ -452,9 +577,13 @@ test('expanded loopwright-* skills and openai.yaml exist and satisfy AC-2 contra
   assert.match(overviewSkill, /registry\.draft\.yaml/);
   assert.match(overviewSkill, /github-app\.yaml/);
   assert.match(overviewSkill, /decisions\.yaml/);
+  assert.match(overviewSkill, /walkthroughs\/evolutionary-campaign\.md/);
+
+  const stepSkill = readFileSync(join(REPO_ROOT, '.agents/skills/loopwright-step/SKILL.md'), 'utf8');
+  assert.match(stepSkill, /https:\/\/docs\.gpustack\.ai\/loopwright\/latest\/references\/coding-agent-protocol\.md/);
 });
 
-test('checkDocs: passes with 0 errors on a clean synthetic repository fixture', async () => {
+test('checkDocs: passes with 0 errors on a clean three-zone synthetic repository fixture', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
@@ -466,7 +595,7 @@ test('checkDocs: passes with 0 errors on a clean synthetic repository fixture', 
   }
 });
 
-test('checkDocs rule 1: enforces heading word/char caps, Step N: <Action> caps, and interrogative bans', async () => {
+test('checkDocs rule 1: enforces H1-H3 ceiling (rejects H4+), layout-container heading nouns, word/char caps, and interrogative bans', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
@@ -482,16 +611,33 @@ test('checkDocs rule 1: enforces heading word/char caps, Step N: <Action> caps, 
         '- [Five words in this heading](#five-words-in-this-heading)',
         '- [Step 1: Execute five words after colon](#step-1-execute-five-words-after-colon)',
         '- [Why contracts matter](#why-contracts-matter)',
+        '- [Table rows](#table-rows)',
         '',
         '## Five words in this heading',
         '',
         'Body text.',
+        '',
+        '#### Forbidden H4 subheading',
+        '',
+        '> ##### Blockquoted H5 subheading',
+        '',
+        '```markdown',
+        '#### Allowed inside fenced code block',
+        '```',
+        '',
+        '<!-- #### Allowed inside HTML comment -->',
         '',
         '## Step 1: Execute five words after colon',
         '',
         'Body text.',
         '',
         '## Why contracts matter',
+        '',
+        'Body text.',
+        '',
+        '## Table rows',
+        '',
+        '### Manifest entries',
         '',
         'Body text.',
         '',
@@ -506,6 +652,30 @@ test('checkDocs rule 1: enforces heading word/char caps, Step N: <Action> caps, 
 
     const result = checkDocs({ repoRoot: root, mode: 'strict' });
     assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(
+        e => e.includes('docs/configuration/task-contract.md:16:') && e.includes('heading depth H4 exceeds hard H1-H3 ceiling')
+      ),
+      `Expected H4 ceiling error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(
+        e => e.includes('docs/configuration/task-contract.md:18:') && e.includes('heading depth H5 exceeds hard H1-H3 ceiling')
+      ),
+      `Expected blockquoted H5 ceiling error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      !result.errors.some(e => e.includes('docs/configuration/task-contract.md:21:') || e.includes('docs/configuration/task-contract.md:24:')),
+      `Fenced and commented H4 headings must be exempt, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/configuration/task-contract.md') && e.includes('layout-container noun "Table"')),
+      `Expected layout-container noun error for Table rows, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/configuration/task-contract.md') && e.includes('layout-container noun "entries"')),
+      `Expected layout-container noun error for Manifest entries, got: ${result.errors.join('\n')}`
+    );
     assert.ok(
       result.errors.some(e => e.includes('docs/configuration/task-contract.md') && e.includes('heading exceeds cap')),
       `Expected standard heading cap error, got: ${result.errors.join('\n')}`
@@ -523,13 +693,12 @@ test('checkDocs rule 1: enforces heading word/char caps, Step N: <Action> caps, 
   }
 });
 
-test('checkDocs rule 2: enforces <= 10 H2 sections and page line caps (200 architecture, 220 ADR, 400 standard)', async () => {
+test('checkDocs rule 2: enforces <= 8 H2s on public pages, <= 10 H2s on contribute pages, exempts references from H2 cap, and enforces line caps (200/220/400/800)', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
-    const h2Names = Array.from({ length: 11 }, (_, idx) => `Section ${idx + 1}`);
-    const tocLines = h2Names.map(name => `- [${name}](#${name.toLowerCase().replace(/\s+/g, '-')})`);
-    const bodySections = h2Names.flatMap(name => [`## ${name}`, '', 'Short body.', '']);
+    // 9 content H2s on a public page must fail (> 8)
+    const nineH2s = Array.from({ length: 9 }, (_, idx) => `Topic ${idx + 1}`);
     writeFileEnsuringDir(
       join(root, 'docs', 'configuration', 'task-contract.md'),
       [
@@ -539,14 +708,81 @@ test('checkDocs rule 2: enforces <= 10 H2 sections and page line caps (200 archi
         '',
         '## Contents',
         '',
-        ...tocLines,
+        ...nineH2s.map(name => `- [${name}](#${name.toLowerCase().replace(/\s+/g, '-')})`),
         '',
-        ...bodySections,
+        ...nineH2s.flatMap(name => [`## ${name}`, '', 'Short body.', '']),
         '---',
         '',
         '**See also** — [Architecture](../getting-started/architecture.md) (execution flow)',
         '',
         '**Next** → [Controller and Registry](controller-and-registry.md) — configure controller drafts.',
+        '',
+      ].join('\n')
+    );
+
+    // 10 content H2s on a contribute page must pass, 11 must fail (> 10)
+    const tenH2s = Array.from({ length: 10 }, (_, idx) => `Layer ${idx + 1}`);
+    writeFileEnsuringDir(
+      join(root, 'docs', 'contribute', 'pi-adapter.md'),
+      [
+        '# Isolated Pi Runtime Adapter',
+        '',
+        'Intro text.',
+        '',
+        '## Contents',
+        '',
+        ...tenH2s.map(name => `- [${name}](#${name.toLowerCase().replace(/\s+/g, '-')})`),
+        '',
+        ...tenH2s.flatMap(name => [`## ${name}`, '', 'Short body.', '']),
+        '---',
+        '',
+        '**See also** — [Architecture](../getting-started/architecture.md) (execution flow)',
+        '',
+      ].join('\n')
+    );
+
+    const elevenH2s = Array.from({ length: 11 }, (_, idx) => `Gate ${idx + 1}`);
+    writeFileEnsuringDir(
+      join(root, 'docs', 'contribute', 'evidence.md'),
+      [
+        '# Verification Evidence and Authority',
+        '',
+        'Intro text.',
+        '',
+        '## Contents',
+        '',
+        ...elevenH2s.map(name => `- [${name}](#${name.toLowerCase().replace(/\s+/g, '-')})`),
+        '',
+        ...elevenH2s.flatMap(name => [`## ${name}`, '', 'Short body.', '']),
+        '---',
+        '',
+        '**See also** — [Architecture](../getting-started/architecture.md) (execution flow)',
+        '',
+      ].join('\n')
+    );
+
+    // 12 content H2s and 450 lines on a reference page must pass (exempt from <= 8 H2 cap and 400-line cap)
+    const twelveRefH2s = Array.from({ length: 12 }, (_, idx) => `Stage ${idx + 1}`);
+    const refPadding = Array.from({ length: 410 }, (_, idx) => `- Item ${idx + 1}`);
+    writeFileEnsuringDir(
+      join(root, 'docs', 'references', 'bootstrap-interview.md'),
+      [
+        '# Bootstrap Interview Reference',
+        '',
+        'Evidence: contract.',
+        '',
+        'Reference intro.',
+        '',
+        '## Contents',
+        '',
+        ...twelveRefH2s.map(name => `- [${name}](#${name.toLowerCase().replace(/\s+/g, '-')})`),
+        '',
+        ...twelveRefH2s.flatMap(name => [`## ${name}`, '', 'Short body.', '']),
+        ...refPadding,
+        '',
+        '---',
+        '',
+        '**See also** — [Reference Hub](README.md) (flat reference hub)',
         '',
       ].join('\n')
     );
@@ -577,8 +813,20 @@ test('checkDocs rule 2: enforces <= 10 H2 sections and page line caps (200 archi
     const result = checkDocs({ repoRoot: root, mode: 'strict' });
     assert.equal(result.ok, false);
     assert.ok(
-      result.errors.some(e => e.includes('docs/configuration/task-contract.md') && e.includes('H2 section count exceeds 10')),
-      `Expected H2 section cap error, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('docs/configuration/task-contract.md') && e.includes('H2 section count exceeds 8')),
+      `Expected public <= 8 H2 section cap error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      !result.errors.some(e => e.includes('docs/contribute/pi-adapter.md') && e.includes('H2 section count')),
+      `Contribute page with 10 H2s must pass, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/contribute/evidence.md') && e.includes('H2 section count exceeds 10')),
+      `Expected contribute <= 10 H2 section cap error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      !result.errors.some(e => e.includes('docs/references/bootstrap-interview.md')),
+      `Reference page with 12 H2s and ~470 lines must pass, got: ${result.errors.join('\n')}`
     );
     assert.ok(
       result.errors.some(
@@ -689,7 +937,7 @@ test('checkDocs rule 4: enforces table header word/char caps, banned articles/de
   }
 });
 
-test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, examples/controller.md JSON ban, reading footer format, and public link boundary (contribute/* and adr/*)', async () => {
+test('checkDocs rules 5, 6, 7: enforces AI filler bans, Pretty YAML tab/JSON bans, reading footers, and one-way public link isolation across contribute and references', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
@@ -707,6 +955,11 @@ test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, exam
         '## Overview',
         '',
         'See [Development](../development.md), [Internals](../contribute/internals.md), and [ADR 0001](../contribute/adr/0001-local-state-authority.md).',
+        'Also leaks to [Ref Rel](../references/bootstrap-interview.md), [Ref Root](/references/bootstrap-interview.md), [Docs Ref Root](/docs/references/bootstrap-interview.md), and [Same Origin](https://gpustack.github.io/loopwright/references/bootstrap-interview.md).',
+        '',
+        '```text',
+        'Read https://gpustack.github.io/loopwright/references/bootstrap-interview.md inside a copy-paste prompt fence.',
+        '```',
         '',
         '```yaml',
         'apiVersion: loopwright.dev/v1alpha1',
@@ -723,6 +976,23 @@ test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, exam
     );
 
     writeFileEnsuringDir(
+      join(root, 'site', 'content', 'docs', '_index.md'),
+      [
+        '---',
+        'title: Documentation',
+        '---',
+        '',
+        '# Documentation',
+        '',
+        ...PUBLIC_PAGES
+          .filter(p => p.relPath !== 'walkthroughs/evolutionary-campaign.md')
+          .map(p => `- [${p.title}](${p.relPath.replace(/\.md$/, '/')})`),
+        '- [Leaked Ref](/references/bootstrap-interview.md)',
+        '',
+      ].join('\n')
+    );
+
+    writeFileEnsuringDir(
       join(root, 'examples', 'controller.md'),
       '# Controller Example\n\n```json\n{"kind": "ControllerConfig"}\n```\n'
     );
@@ -732,10 +1002,6 @@ test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, exam
     assert.ok(
       result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('banned AI filler phrase "this page describes"')),
       `Expected AI filler error for "this page describes", got: ${result.errors.join('\n')}`
-    );
-    assert.ok(
-      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('banned AI filler phrase "seamlessly"')),
-      `Expected AI filler error for "seamlessly", got: ${result.errors.join('\n')}`
     );
     assert.ok(
       result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('Pretty YAML block must not contain tab characters')),
@@ -750,8 +1016,28 @@ test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, exam
       `Expected public-to-contribute link boundary error, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('public site page must not link to repository-only contributor page') && e.includes('docs/contribute/adr/0001-local-state-authority.md')),
-      `Expected public-to-adr link boundary error, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('excluded reference zone "../references/bootstrap-interview.md"')),
+      `Expected relative public-to-references leak error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('excluded reference zone "/references/bootstrap-interview.md"')),
+      `Expected root-relative /references/ leak error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('excluded reference zone "/docs/references/bootstrap-interview.md"')),
+      `Expected root-relative /docs/references/ leak error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('excluded reference zone "https://gpustack.github.io/loopwright/references/bootstrap-interview.md"')),
+      `Expected same-origin gpustack.github.io leak error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('site/content/docs/_index.md') && e.includes('excluded reference zone "/references/bootstrap-interview.md"')),
+      `Expected site/content/** reference leak error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('site/content/docs/_index.md') && e.includes('missing link to public navigation route "/docs/walkthroughs/evolutionary-campaign/"')),
+      `Expected site/content/docs/_index.md 15-page parity error, got: ${result.errors.join('\n')}`
     );
     assert.ok(
       result.errors.some(e => e.includes('docs/configuration/decision-routing.md') && e.includes('"**See also**" item must match "[Title](target) (description)"')),
@@ -770,7 +1056,128 @@ test('checkDocs rules 5, 6, 7: enforces banned AI filler, Pretty YAML bans, exam
   }
 });
 
-test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-kind metadata and rejects bare fragments', async () => {
+test('checkDocs flat docs/references/ contract & three-table docs/README.md: rejects nested subdirs, **Next** on references, missing Evidence:, and unlinked siblings', async () => {
+  const checkDocs = await loadCheckDocs();
+  const root = buildMinimalRepoFixture();
+  try {
+    // 1. Nested subdirectory under docs/references/
+    writeFileEnsuringDir(join(root, 'docs', 'references', 'nested', 'extra.md'), '# Extra\n');
+
+    // 2. Unlinked sibling reference file that also lacks Evidence: and illegally includes **Next**
+    writeFileEnsuringDir(
+      join(root, 'docs', 'references', 'orphan-schema.md'),
+      [
+        '# Orphan Schema Reference',
+        '',
+        'Missing Evidence header line.',
+        '',
+        '## Contents',
+        '',
+        '- [Overview](#overview)',
+        '',
+        '## Overview',
+        '',
+        'Body text.',
+        '',
+        '---',
+        '',
+        '**See also** — [Reference Hub](README.md) (flat reference hub)',
+        '',
+        '**Next** → [Architecture](../getting-started/architecture.md) — forbidden Next on reference page.',
+        '',
+      ].join('\n')
+    );
+
+    // 3. Nested ### Contribute inside ## All pages in docs/README.md
+    const readmePath = join(root, 'docs', 'README.md');
+    writeFileSync(
+      readmePath,
+      readFileSync(readmePath, 'utf8').replace('## All pages\n', '## All pages\n\n### Contribute\n'),
+      'utf8'
+    );
+
+    const result = checkDocs({ repoRoot: root, mode: 'strict' });
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some(e => e.includes('docs/references/nested: nested subdirectory forbidden')),
+      `Expected nested subdirectory error under docs/references/, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/references/README.md: must link sibling reference file "orphan-schema.md"')),
+      `Expected unlinked sibling error in docs/references/README.md, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/README.md Reference table missing flat reference file: references/orphan-schema.md')),
+      `Expected missing Reference table entry error in docs/README.md, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/references/orphan-schema.md') && e.includes('Evidence:')),
+      `Expected missing Evidence: label error on reference page, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('docs/references/orphan-schema.md') && e.includes('reference page must not include "**Next**"')),
+      `Expected **Next** ban error on reference page, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('"## All pages" must not nest "### Contribute"')),
+      `Expected nested ### Contribute error inside ## All pages, got: ${result.errors.join('\n')}`
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('checkDocs checked kind-plurals: rejects pluralized kinds in backticks while allowing singular + outside s, flags, paths, and fenced blocks', async () => {
+  const checkDocs = await loadCheckDocs();
+  const root = buildMinimalRepoFixture();
+  try {
+    writeFileEnsuringDir(
+      join(root, 'docs', 'configuration', 'taskpack.md'),
+      [
+        '# Taskpack',
+        '',
+        'Author `Taskpack`s, `TaskpackSuite`s, `TrustedRegistry` objects, and `DecisionPolicy` objects cleanly.',
+        'Flags like `--taskpacks`, paths like `packages/taskpacks/index.ts`, and keys like `taskpacks: []` are exempt.',
+        '',
+        '## Contents',
+        '',
+        '- [Overview](#overview)',
+        '',
+        '## Overview',
+        '',
+        'Malformed spans: `Taskpacks`, `TaskpackSuites`, `TrustedRegistries`, `DecisionPolicies`, `TrustedRegistry`s, and `DecisionPolicy`s.',
+        '',
+        '```sh',
+        'echo "Taskpacks inside fenced code blocks are exempt"',
+        '```',
+        '',
+        '<!-- `Taskpacks` inside HTML comments are exempt -->',
+        '',
+        '---',
+        '',
+        '**See also** — [Architecture](../getting-started/architecture.md) (execution chain)',
+        '',
+        '**Next** → [Task Contract](task-contract.md) — inspect task contract fields.',
+        '',
+      ].join('\n')
+    );
+
+    const result = checkDocs({ repoRoot: root, mode: 'strict' });
+    assert.equal(result.ok, false);
+    const taskpackErrors = result.errors.filter(e => e.startsWith('docs/configuration/taskpack.md:'));
+    assert.equal(taskpackErrors.length, 6, `Expected exactly 6 kind-plural errors on line 12, got:\n${taskpackErrors.join('\n')}`);
+    assert.ok(taskpackErrors.some(e => e.includes('"`Taskpacks`"') && e.includes('use `Taskpack`s')));
+    assert.ok(taskpackErrors.some(e => e.includes('"`TaskpackSuites`"') && e.includes('use `TaskpackSuite`s')));
+    assert.ok(taskpackErrors.some(e => e.includes('"`TrustedRegistries`"') && e.includes('use `TrustedRegistry` objects')));
+    assert.ok(taskpackErrors.some(e => e.includes('"`DecisionPolicies`"') && e.includes('use `DecisionPolicy` objects')));
+    assert.ok(taskpackErrors.some(e => e.includes('"`TrustedRegistry`s"') && e.includes('use `TrustedRegistry` objects')));
+    assert.ok(taskpackErrors.some(e => e.includes('"`DecisionPolicy`s"') && e.includes('use `DecisionPolicy` objects')));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('checkDocs Strict Pretty Block-Style YAML: rejects non-empty flow mappings/sequences, anchors/aliases/merge keys, and enforces TaskpackSuite + EvolutionCampaign metadata', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
@@ -799,35 +1206,51 @@ test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-ki
         '',
         '## Contents',
         '',
-        '- [Models](#models)',
-        '- [Legacy metadata](#legacy-metadata)',
-        '- [One-off metadata](#one-off-metadata)',
-        '- [Workflow](#workflow)',
+        '- [Valid block](#valid-block)',
+        '- [Flow violations](#flow-violations)',
+        '- [Metadata rules](#metadata-rules)',
+        '- [Anchors](#anchors)',
         '',
-        '## Models',
+        '## Valid block',
         '',
         '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: TaskpackSuite',
+        'metadata:',
+        '  name: repo-suite',
         'spec:',
-        '  models:',
-        '    - provider: zai',
-        '      id: glm-5.3',
+        '  domains: []',
+        '  defaults: {}',
         '```',
         '',
-        '## Legacy metadata',
+        '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: EvolutionCampaign',
+        'metadata:',
+        '  name: flash-decode',
+        'spec: {}',
+        '```',
+        '',
+        '## Flow violations',
         '',
         '```yaml',
         'apiVersion: loopwright.dev/v1alpha1',
         'kind: Taskpack',
         'metadata:',
-        '  id: legacy-id',
         '  name: sample',
-        '  version: 1.0.0',
         'spec:',
-        '  digest:',
-        '    hex: 1111111111111111111111111111111111111111111111111111111111111111 # Required: bad comment',
+        '  digest: { algorithm: sha256, hex: <hash> }',
+        '  tools: [read, write]',
+        '  steps: [{ id: a, kind: agent }]',
         '```',
         '',
-        '## One-off metadata',
+        '## Metadata rules',
+        '',
+        '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: TaskpackSuite',
+        'spec: {}',
+        '```',
         '',
         '```yaml',
         'apiVersion: loopwright.dev/v1alpha1',
@@ -837,17 +1260,15 @@ test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-ki
         'spec: {}',
         '```',
         '',
-        '## Workflow',
+        '## Anchors',
         '',
         '```yaml',
-        'name: loopwright',
-        'on:',
-        '  workflow_dispatch: {}',
-        'jobs:',
-        '  taskpack:',
-        '    runs-on: ubuntu-latest',
-        '    steps:',
-        '      - uses: gpustack/loopwright@main',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: ControllerConfig',
+        'spec:',
+        '  base: &defaults',
+        '    retries: 1',
+        '  copy: *defaults',
         '```',
         '',
         '---',
@@ -857,11 +1278,6 @@ test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-ki
         '**Next** → [Task Contract](task-contract.md) — inspect task contract fields.',
         '',
       ].join('\n')
-    );
-
-    writeFileEnsuringDir(
-      join(root, 'examples', 'controller.md'),
-      '# Controller Example\n\n```yaml\nrequired:\n  - tests\n```\n'
     );
 
     writeFileEnsuringDir(
@@ -876,36 +1292,34 @@ test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-ki
       `Expected bare spec error in README.md, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/taskpack.md:14:') && e.includes('complete top-level header envelope')),
-      `Expected bare spec error in docs/configuration/taskpack.md:14, got: ${result.errors.join('\n')}`
+      !result.errors.some(
+        e => e.startsWith('docs/configuration/taskpack.md:14:') || e.startsWith('docs/configuration/taskpack.md:24:')
+      ),
+      `Valid block-style TaskpackSuite and EvolutionCampaign with empty []/{} must pass, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/taskpack.md:23:') && e.includes('metadata must use name only')),
-      `Expected metadata.id/version rejection in Taskpack, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('docs/configuration/taskpack.md:') && e.includes('non-empty flow mapping')),
+      `Expected non-empty flow mapping rejection, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.includes('Use "hex: <hash>"') && e.includes('docs/configuration/taskpack.md')),
-      `Expected dummy 64-hex hash rejection, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('docs/configuration/taskpack.md:') && e.includes('non-empty flow sequence')),
+      `Expected non-empty flow sequence rejection, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.includes('YAML comments must only annotate Optional items')),
-      `Expected # Required YAML comment rejection, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('kind "TaskpackSuite" must include top-level metadata.name')),
+      `Expected missing metadata.name error on TaskpackSuite, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.includes('Inline YAML comment must not contain ": "')),
-      `Expected inline ": " YAML comment rejection, got: ${result.errors.join('\n')}`
-    );
-    assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/taskpack.md:37:') && e.includes('must omit top-level metadata')),
+      result.errors.some(e => e.includes('one-off kind "DecisionPolicy" must omit top-level metadata')),
       `Expected top-level metadata rejection on one-off DecisionPolicy, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      !result.errors.some(e => e.startsWith('docs/configuration/taskpack.md:47:')),
-      `Valid GitHub Actions workflow YAML at docs/configuration/taskpack.md:47 must pass, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('must not use YAML anchors ("&defaults")')),
+      `Expected YAML anchor rejection, got: ${result.errors.join('\n')}`
     );
     assert.ok(
-      result.errors.some(e => e.startsWith('examples/controller.md:3:') && e.includes('complete top-level header envelope')),
-      `Expected bare fragment error in examples/controller.md, got: ${result.errors.join('\n')}`
+      result.errors.some(e => e.includes('must not use YAML aliases ("*defaults")')),
+      `Expected YAML alias rejection, got: ${result.errors.join('\n')}`
     );
     assert.ok(
       result.errors.some(e => e.includes('docs/assets/diagrams/architecture-flow.svg') && e.includes('must not contain array/object brackets')),
@@ -916,13 +1330,24 @@ test('checkDocs Pretty YAML envelope & Kubernetes metadata rule: enforces per-ki
   }
 });
 
-test('checkDocs 1:1:1 alignment rule: enforces matching filename slug, navigation.yaml label, and # H1 title', async () => {
+test('checkDocs 1:1:1 alignment & site/layouts/index.html parity rule: enforces matching slug, label, H1, and home layout routes', async () => {
   const checkDocs = await loadCheckDocs();
   const root = buildMinimalRepoFixture();
   try {
     writeFileEnsuringDir(
       join(root, 'docs', 'configuration', 'taskpack.md'),
       buildCleanPageContent({ relPath: 'configuration/taskpack.md', title: 'Taskpack Manifest Reference' })
+    );
+    writeFileEnsuringDir(
+      join(root, 'site', 'layouts', 'index.html'),
+      [
+        '{{ define "main" }}',
+        ...PUBLIC_PAGES
+          .filter(p => p.relPath !== 'configuration/evolution-campaign.md')
+          .map(p => `  <a href="{{ "docs/${p.relPath.replace(/\.md$/, '/')}" | relLangURL }}">${p.title}</a>`),
+        '{{ end }}',
+        '',
+      ].join('\n')
     );
 
     const result = checkDocs({ repoRoot: root, mode: 'strict' });
@@ -934,6 +1359,10 @@ test('checkDocs 1:1:1 alignment rule: enforces matching filename slug, navigatio
     assert.ok(
       result.errors.some(e => e.includes('site/data/navigation.yaml') && e.includes('label "Taskpack" for "/docs/configuration/taskpack/" must match')),
       `Expected navigation.yaml-to-H1 mismatch error, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.includes('site/layouts/index.html: missing link to public navigation route "/docs/configuration/evolution-campaign/"')),
+      `Expected site/layouts/index.html missing route error, got: ${result.errors.join('\n')}`
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -986,77 +1415,6 @@ test('check-docs.mjs CLI: --report exits 0, strict mode exits 1 on violations, a
     });
     assert.equal(badFlagRun.status, 2, `unknown CLI flag must exit 2, got ${badFlagRun.status}`);
     assert.match(badFlagRun.stderr, /Unknown CLI flag: --reprot/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('checkDocs Pretty YAML metadata rule: EvolutionCampaign requires metadata.name and rejects metadata.id', async () => {
-  const checkDocs = await loadCheckDocs();
-  const root = buildMinimalRepoFixture();
-  try {
-    writeFileEnsuringDir(
-      join(root, 'docs', 'configuration', 'task-contract.md'),
-      [
-        '# Task Contract',
-        '',
-        'Task contracts and campaigns enforce strict schemas.',
-        '',
-        '## Contents',
-        '',
-        '- [EvolutionCampaign](#evolutioncampaign)',
-        '',
-        '## EvolutionCampaign',
-        '',
-        '```yaml',
-        'apiVersion: loopwright.dev/v1alpha1',
-        'kind: EvolutionCampaign',
-        'metadata:',
-        '  name: flash-decode',
-        'spec: {}',
-        '```',
-        '',
-        '```yaml',
-        'apiVersion: loopwright.dev/v1alpha1',
-        'kind: EvolutionCampaign',
-        'metadata:',
-        '  id: legacy-id',
-        'spec: {}',
-        '```',
-        '',
-        '```yaml',
-        'apiVersion: loopwright.dev/v1alpha1',
-        'kind: EvolutionCampaign',
-        'spec: {}',
-        '```',
-        '',
-        '---',
-        '',
-        '**See also** — [Architecture](../getting-started/architecture.md) (execution chain)',
-        '',
-        '**Next** → [Controller and Registry](controller-and-registry.md) — configure controller drafts.',
-        '',
-      ].join('\n')
-    );
-
-    const result = checkDocs({ repoRoot: root, mode: 'strict' });
-    assert.equal(result.ok, false);
-    assert.ok(
-      !result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:11:')),
-      `Valid EvolutionCampaign YAML with metadata.name must pass, got: ${result.errors.join('\n')}`
-    );
-    assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:19:') && e.includes('must declare metadata.name')),
-      `Expected missing metadata.name error for EvolutionCampaign, got: ${result.errors.join('\n')}`
-    );
-    assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:19:') && e.includes('metadata must use name only')),
-      `Expected metadata.id rejection for EvolutionCampaign, got: ${result.errors.join('\n')}`
-    );
-    assert.ok(
-      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:27:') && e.includes('must include top-level metadata.name')),
-      `Expected missing metadata block error for EvolutionCampaign, got: ${result.errors.join('\n')}`
-    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

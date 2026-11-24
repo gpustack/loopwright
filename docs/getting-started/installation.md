@@ -127,6 +127,6 @@ Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Re
 
 ---
 
-**See also** — [Coding Agents](../operations/coding-agents.md) (drive zero-secret `loopwright step` loops from OAuth agents) · [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (simple automated repository mode) · [Managed Controller](../walkthroughs/managed-controller.md) (fine-grained registry and contract mode) · [Evolutionary Campaigns](../walkthroughs/evolutionary-campaigns.md) (multi-generation evolutionary optimization)
+**See also** — [Coding Agents](../operations/coding-agents.md) (drive zero-secret `loopwright step` loops from OAuth agents) · [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (simple automated repository mode) · [Managed Controller](../walkthroughs/managed-controller.md) (fine-grained registry and contract mode) · [Evolutionary Campaign](../walkthroughs/evolutionary-campaign.md) (multi-generation evolutionary optimization)
 
 **Next** → [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) — author or migrate a `.loopwright/taskpack.yaml` workflow.

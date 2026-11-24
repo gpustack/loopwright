@@ -13,7 +13,7 @@ groups:
     items:
       - /docs/walkthroughs/declarative-taskpack/
       - /docs/walkthroughs/managed-controller/
-      - /docs/walkthroughs/evolutionary-campaigns/
+      - /docs/walkthroughs/evolutionary-campaign/
   - name: Configuration
     items:
       - /docs/configuration/taskpack/
@@ -32,7 +32,7 @@ labels:
   /docs/operations/coding-agents/: Coding Agents
   /docs/walkthroughs/declarative-taskpack/: Declarative Taskpack
   /docs/walkthroughs/managed-controller/: Managed Controller
-  /docs/walkthroughs/evolutionary-campaigns/: Evolutionary Campaigns
+  /docs/walkthroughs/evolutionary-campaign/: Evolutionary Campaign
   /docs/configuration/taskpack/: Taskpack
   /docs/configuration/task-contract/: Task Contract
   /docs/configuration/controller-and-registry/: Controller and Registry

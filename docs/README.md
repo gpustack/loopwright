@@ -5,10 +5,10 @@
 - [Installation](getting-started/installation.md) and [Architecture](getting-started/architecture.md)
 - [Declarative Taskpack](walkthroughs/declarative-taskpack.md), [Taskpack](configuration/taskpack.md), and [GitHub Action](operations/github-action.md)
 - [Managed Controller](walkthroughs/managed-controller.md), [Task Contract](configuration/task-contract.md), and [Controller and Registry](configuration/controller-and-registry.md)
-- [Evolutionary Campaigns](walkthroughs/evolutionary-campaigns.md) and [Evolution Campaign](configuration/evolution-campaign.md)
+- [Evolutionary Campaign](walkthroughs/evolutionary-campaign.md) and [Evolution Campaign](configuration/evolution-campaign.md)
 - [GitHub App](operations/github-app.md), [CLI](operations/cli.md), and [Coding Agents](operations/coding-agents.md)
 - [Sandbox Backends](configuration/sandbox-backends.md) and [Decision Routing](configuration/decision-routing.md)
-- [Bootstrap Interview Reference](references/bootstrap-interview.md) for interactive agent onboarding
+- [Reference Hub](references/README.md) and [Bootstrap Interview Reference](references/bootstrap-interview.md) for machine-readable lookup and agent onboarding
 - [Development](development.md) and [Internals](contribute/internals.md)
 
 ## Module map
@@ -51,7 +51,7 @@
 - ID: controller
 - Use for: compile trusted configuration and coordinate bounded runs
 - Aliases: controller
-- Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [walkthroughs/evolutionary-campaigns.md](walkthroughs/evolutionary-campaigns.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [configuration/evolution-campaign.md](configuration/evolution-campaign.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
+- Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [walkthroughs/evolutionary-campaign.md](walkthroughs/evolutionary-campaign.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [configuration/evolution-campaign.md](configuration/evolution-campaign.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
 - Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md), [Hardware Execution and Remote Runner](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md), [Evolutionary Campaigns, Pareto Archive, and Bundle Export](../specs/2026-11-23-evolutionary-campaigns-pareto-archive-and-bundle-export.md)
 - Code: [controller](../packages/controller/), [hardware-runner](../packages/hardware-runner/), [evolution](../packages/evolution/), [cli](../packages/cli/)
 - Related: [contracts](#contracts-and-evidence), [state](#persistent-state-store)
@@ -146,7 +146,7 @@
 
 | Page | Description |
 | --- | --- |
-| [Architecture](getting-started/architecture.md) | Execution stages, trust boundaries, and configuration map |
+| [Architecture](getting-started/architecture.md) | Execution stages, operating modes, trust boundaries, and configuration map |
 | [Installation](getting-started/installation.md) | Install the CLI on a laptop or wire the GitHub Action |
 
 ### Operations
@@ -164,20 +164,31 @@
 | --- | --- |
 | [Declarative Taskpack](walkthroughs/declarative-taskpack.md) | Author or migrate a single-file repository taskpack |
 | [Managed Controller](walkthroughs/managed-controller.md) | Configure out-of-repo registries, contracts, and CLI runs |
-| [Evolutionary Campaigns](walkthroughs/evolutionary-campaigns.md) | Run bounded island optimization with hardware gates and bundle export |
+| [Evolutionary Campaign](walkthroughs/evolutionary-campaign.md) | Run bounded island optimization with hardware gates and bundle export |
 
 ### Configuration
 
 | Page | Description |
 | --- | --- |
-| [Taskpack](configuration/taskpack.md) | Configure every field and enum in .loopwright/taskpack.yaml |
+| [Taskpack](configuration/taskpack.md) | Configure .loopwright/taskpack.yaml and multi-domain TaskpackSuite manifests |
 | [Task Contract](configuration/task-contract.md) | Configure task goals, scope, roles, budgets, DAGs, and evidence |
 | [Controller and Registry](configuration/controller-and-registry.md) | Configure approved handlers, profiles, credentials, and controls |
 | [Sandbox Backends](configuration/sandbox-backends.md) | Select OS or container sandboxes and required capabilities |
 | [Decision Routing](configuration/decision-routing.md) | Configure advisory routing policies, providers, and thresholds |
 | [Evolution Campaign](configuration/evolution-campaign.md) | Configure stages, islands, objectives, budgets, teamEvolution, and export |
 
-### Contribute
+## Reference
+
+| Page | Description |
+| --- | --- |
+| [Reference Hub](references/README.md) | Task routing, exact resource aliases, and evidence labels for flat references |
+| [Bootstrap Interview Reference](references/bootstrap-interview.md) | Interactive agent interview protocol for Mode 1, Mode 2, and Mode 3 setup |
+| [Taskpack and Contract Reference](references/taskpack-and-contract-schema.md) | Complete field, bound, and enum dictionary for Taskpack, TaskContract, and EvolutionCampaign |
+| [Controller and Registry Reference](references/controller-and-registry-schema.md) | Complete TrustedRegistry, ControllerConfig, and DecisionPolicy field and hook tables |
+| [CLI and Action Reference](references/cli-and-action-reference.md) | Exhaustive action.yml inputs, CLI subcommand flags, exit codes, and GitHubAppConfig |
+| [Coding Agent Protocol Reference](references/coding-agent-protocol.md) | StepYield JSON schema, lease diagnostics, exit codes, and verified overlay-apply script |
+
+## Contribute
 
 | Page | Description |
 | --- | --- |

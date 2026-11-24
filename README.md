@@ -31,7 +31,7 @@ Read the [architecture overview](./docs/getting-started/architecture.md) and [do
 - **Declarative taskpacks & suites**: Define repository scope, triggers, compact step handoffs, conditional rules, baseline alignment (`baselineAlignment`), and multi-domain `TaskpackSuite` manifests (`.loopwright/suite.yaml`) in YAML. See [Declarative Taskpack](./docs/walkthroughs/declarative-taskpack.md) and [Taskpack](./docs/configuration/taskpack.md).
 - **Run diagnostics (`RunEval`)**: Export deterministic tool-repeat, ping-pong, repair-convergence, and per-role/per-step breakdowns via `loopwright inspect` and `Run Health` step summaries. See [CLI](./docs/operations/cli.md).
 - **Hardware benchmark gates**: Bind hardware `target.matrix` cells to host-owned `benchmark-gate.v1` slots and run outbound-only `@loopwright/hardware-runner` workers (`loopwright runner relay|worker`). See [Task Contract](./docs/configuration/task-contract.md) and [CLI](./docs/operations/cli.md).
-- **Evolutionary campaigns**: Run bounded island and MAP-Elites optimization (`@loopwright/evolution`, `loopwright evolve`) with `evolve-block-guard.v1`, plateau `teamEvolution`, and signed `evolution-bundle.v1` exports. See [Evolutionary Campaigns](./docs/walkthroughs/evolutionary-campaigns.md), [Evolution Campaign](./docs/configuration/evolution-campaign.md), and [CLI](./docs/operations/cli.md#evolution-campaigns).
+- **Evolutionary campaigns**: Run bounded island and MAP-Elites optimization (`@loopwright/evolution`, `loopwright evolve`) with `evolve-block-guard.v1`, plateau `teamEvolution`, and signed `evolution-bundle.v1` exports. See [Evolutionary Campaign](./docs/walkthroughs/evolutionary-campaign.md), [Evolution Campaign](./docs/configuration/evolution-campaign.md), and [CLI](./docs/operations/cli.md#evolution-campaigns).
 - **Reviewed memory**: Content-addressed proposals apply separately after review. See [memory](./docs/contribute/memory.md).
 - **Capability closure**: Inspect local evidence and external prerequisites with the [closure matrix](./docs/contribute/closure-matrix.md).
 
@@ -177,7 +177,8 @@ on:
     - cron: '0 3 * * *'
   workflow_dispatch: {}
   issue_comment:
-    types: [created]
+    types:
+      - created
 permissions:
   contents: read
 jobs:

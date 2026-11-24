@@ -1,6 +1,6 @@
 # Architecture
 
-Loopwright runs bounded repository work inside isolated sandboxes and verifies every candidate against independent evidence. Choose between simple repository taskpack automation or fine-grained controller and registry governance.
+Loopwright runs bounded repository work inside isolated sandboxes and verifies every candidate against independent evidence. Choose declarative taskpacks, out-of-repo managed controllers, or multi-generation evolutionary campaigns on one verification kernel.
 
 ## Contents
 
@@ -19,31 +19,30 @@ Loopwright runs bounded repository work inside isolated sandboxes and verifies e
 -->
 
 1. **Admit**: Validate task boundaries and acquire a monotonic SQLite lease fence.
-2. **Execute**: Run an isolated Pi role with trusted host bindings and optional decision routing.
+2. **Execute**: Run an isolated Pi or delegated role with trusted bindings and optional decision routing.
 3. **Verify**: Evaluate the candidate against independent checks and authenticated gate receipts.
 4. **Publish & Remember**: Settle pull request publication and propose reviewed memory separately.
 
 ## Operating modes
 
-Loopwright supports two single-run modes sharing one verification kernel, plus bounded multi-generation evolution (`@loopwright/evolution`) over isolated child `LocalRunStore` runs:
+Loopwright supports three operating modes sharing one fenced verification kernel:
 
-| Dimension | Declarative taskpack | Managed controller |
-| --- | --- | --- |
-| Target user | Repository maintainers and local CLI users | Platform and security operators |
-| Files authored | One `.loopwright/taskpack.yaml` in repo | Out-of-repo `registry.yaml` and `controller.yaml` |
-| Digest pinning | Compiled automatically by host | Pinned manually via SHA-256 (`--registry-sha256`) |
-| Execution graph | Single compiled author + check pipeline | Custom multi-step `agent` and `check` DAG |
-| Credential wiring | Mapped from local CLI, Action, or App environment | Explicit `credentialBindings` and path templates |
-| Key advantage | Zero boilerplate; local CLI or GitHub automation | Duty separation, custom gates/MCP, local CLI control |
-| Walkthrough | [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) | [Managed Controller](../walkthroughs/managed-controller.md) |
+| Dimension | Declarative taskpack | Managed controller | Evolutionary campaign |
+| --- | --- | --- | --- |
+| Target user | Repo maintainers and CLI users | Platform and security operators | Kernel and benchmark engineers |
+| Files authored | `.loopwright/taskpack.yaml` | Out-of-repo `registry.yaml` + `controller.yaml` | `.loopwright/taskpack.yaml` + `campaign.yaml` |
+| Digest pinning | Compiled automatically by host | Pinned manually (`--registry-sha256`) | Compiled per isolated child run |
+| Execution model | Compiled author + check pipeline | Custom multi-step `agent` and `check` DAG | Island Pareto search over `EVOLVE-BLOCK` spans |
+| Credential wiring | Mapped from CLI, Action, or App env | Explicit `credentialBindings` templates | Relay HMAC and provider env secrets |
+| Walkthrough | [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) | [Managed Controller](../walkthroughs/managed-controller.md) | [Evolutionary Campaign](../walkthroughs/evolutionary-campaign.md) |
 
 ## Configuration surfaces
 
-Every Loopwright document uses `apiVersion: loopwright.dev/v1alpha1` across declarative and managed configuration surfaces:
+Every Loopwright document uses `apiVersion: loopwright.dev/v1alpha1` across all configuration surfaces:
 
-| Mode or scope | Document `kind` | Top-level keys | Reference guide |
+| Mode or scope | Document `kind` | Top-level keys | Owning page |
 | --- | --- | --- | --- |
-| Declarative mode | `Taskpack` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Taskpack](../configuration/taskpack.md) |
+| Declarative mode | `Taskpack` / `TaskpackSuite` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Taskpack](../configuration/taskpack.md) |
 | Managed mode | `TrustedRegistry` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Controller and Registry](../configuration/controller-and-registry.md) |
 | Managed mode | `ControllerConfig` | `apiVersion`, `kind`, `spec` | [Controller and Registry](../configuration/controller-and-registry.md) |
 | Managed mode | `TaskContract` | `apiVersion`, `kind`, `spec` | [Task Contract](../configuration/task-contract.md) |
@@ -58,21 +57,21 @@ Deployment host qualification (`qualifyDeploymentHostProfile`) enforces these ba
 
 | Component | Baseline requirement | Enforcement scope |
 | --- | --- | --- |
-| Node runtime | Node.js `26.x` (built-in `node:sqlite`) | Required across Action, App, CLI, and workspace builds (`gpustack/loopwright` provisions it automatically) |
+| Node runtime | Node.js `26.x` (built-in `node:sqlite`) | Required across Action, App, CLI, and workspace builds |
 | Package manager | `npm 11.x` | Workspace dependency installation and builds |
 | Host platform | `darwin/arm64`, `linux/arm64`, `linux/x64` | Unlisted OS or architecture targets fail closed |
-| Storage and clock | Local POSIX filesystem; `<= 1000 ms` clock drift | Network mounts (`nfs`, `smb`, `fuse`, `sshfs`) and clock jumps fail closed |
+| Storage and clock | Local POSIX filesystem; `<= 1000 ms` drift | Network mounts (`nfs`, `smb`, `fuse`, `sshfs`) and clock jumps fail closed |
 | Sandbox backend | Seatbelt, bubblewrap, Landlock, or Docker | Negotiated against taskpack `spec.sandbox` policy |
-| Optional tools | Python `3.11+` (runner bridge); Hugo extended `0.170.1+` (docs site) | Needed only when exercising runner helpers or building `site/` |
+| Optional tools | Python `3.11+` (runner); Hugo `0.170.1+` | Needed only for runner helpers or site builds |
 
 ## Trust boundaries
 
-Trusted hosts bind credentials, runtimes, handlers, and external services. Taskpacks and model output cannot grant authority. Local runs enforce neutral `.git` and `<controlRoot>` protection while GitHub entrypoints enforce triggers, PR publication, and `.github/workflows/**` dual-key locks.
+Trusted hosts bind credentials, runtimes, handlers, and external services. `Taskpack`s and model output cannot grant authority. Local runs protect `.git` and `<controlRoot>` while GitHub entrypoints enforce triggers, PR publication, and `.github/workflows/**` dual-key locks.
 
 Large overlays stream through SHA-256 verified CAS blob pointers (`1 MiB` chunks, up to `16,384` files and `16 GiB`) instead of inline base64 buffers. Local fixture proof never establishes live provider qualification, and unknown external effects stay unknown until reconciled.
 
 ---
 
-**See also** — [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (simple single-file automation) · [Managed Controller](../walkthroughs/managed-controller.md) (fine-grained registry and contract control)
+**See also** — [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (single-file automation) · [Managed Controller](../walkthroughs/managed-controller.md) (out-of-repo governance) · [Evolutionary Campaign](../walkthroughs/evolutionary-campaign.md) (multi-generation optimization)
 
 **Next** → [Installation](installation.md) — install the CLI on a laptop or wire the GitHub Action.

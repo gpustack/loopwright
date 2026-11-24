@@ -8,6 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -17,7 +18,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import { installedHandlerDigests } from '@loopwright/controller';
 import { parseEvolutionCampaignDocument } from '@loopwright/evolution';
@@ -44,6 +45,28 @@ function findRepositoryRoot(startDir = dirname(fileURLToPath(import.meta.url))):
 }
 
 const REPO_ROOT = findRepositoryRoot();
+const SITE_SCRIPT_PATH = join(REPO_ROOT, 'scripts', 'site.mjs');
+
+interface SiteModule {
+  rewriteReferenceMarkdown: (
+    content: string,
+    options?: { docsPrefix?: string; repoBlobBase?: string; sourceRef?: string }
+  ) => string;
+  stageReferenceDocs: (options?: {
+    rootDir?: string;
+    docsDir?: string;
+    sourceDir?: string;
+    stagingDir?: string;
+    docsPrefix?: string;
+    repoBlobBase?: string;
+    sourceRef?: string;
+    rebaseFrom?: string | null;
+  }) => string[];
+}
+
+async function loadSiteModule(): Promise<SiteModule> {
+  return (await import(pathToFileURL(SITE_SCRIPT_PATH).href)) as SiteModule;
+}
 
 function assertRgbaPng(filePath: string, expectedWidth = 512, expectedHeight = 512): void {
   assert.ok(existsSync(filePath), `${filePath} must exist`);
@@ -249,24 +272,24 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.equal(validatedEvoConfig.spec.stages.mode, 'specialist-then-portfolio');
   assert.equal(validatedEvoConfig.spec.teamEvolution?.enabled, true);
 
-  // Verify embedded Taskpack and EvolutionCampaign YAML examples in docs/walkthroughs/evolutionary-campaigns.md validate against schema
-  const evoWalkthroughDoc = readFileSync(join(REPO_ROOT, 'docs', 'walkthroughs', 'evolutionary-campaigns.md'), 'utf8');
+  // Verify embedded Taskpack and EvolutionCampaign YAML examples in docs/walkthroughs/evolutionary-campaign.md validate against schema
+  const evoWalkthroughDoc = readFileSync(join(REPO_ROOT, 'docs', 'walkthroughs', 'evolutionary-campaign.md'), 'utf8');
   const evoWalkthroughYamlBlocks = [...evoWalkthroughDoc.matchAll(/```yaml\n([\s\S]*?)\n```/g)]
     .map(m => m[1]!)
     .map(raw => {
       const parsed = parseDocument(raw, { version: '1.2', schema: 'core', uniqueKeys: true });
-      assert.equal(parsed.errors.length, 0, 'evolutionary-campaigns.md YAML must parse cleanly');
+      assert.equal(parsed.errors.length, 0, 'evolutionary-campaign.md YAML must parse cleanly');
       return parsed.toJS() as Record<string, Json>;
     });
   const evoWalkthroughTaskpack = evoWalkthroughYamlBlocks.find(doc => doc['kind'] === 'Taskpack');
-  assert.ok(evoWalkthroughTaskpack, 'docs/walkthroughs/evolutionary-campaigns.md must include a YAML Taskpack example');
+  assert.ok(evoWalkthroughTaskpack, 'docs/walkthroughs/evolutionary-campaign.md must include a YAML Taskpack example');
   const validatedEvoWalkthroughTaskpack = validateTaskpackManifestObject(evoWalkthroughTaskpack, {
     controlRoot: '.loopwright',
     manifestPath: '.loopwright/taskpack.yaml',
   });
   assert.equal(validatedEvoWalkthroughTaskpack.metadata.name, 'kernel-evolve-tp');
   const evoWalkthroughCampaign = evoWalkthroughYamlBlocks.find(doc => doc['kind'] === 'EvolutionCampaign');
-  assert.ok(evoWalkthroughCampaign, 'docs/walkthroughs/evolutionary-campaigns.md must include a YAML EvolutionCampaign example');
+  assert.ok(evoWalkthroughCampaign, 'docs/walkthroughs/evolutionary-campaign.md must include a YAML EvolutionCampaign example');
   const validatedEvoWalkthroughCampaign = parseEvolutionCampaignDocument(evoWalkthroughCampaign);
   assert.equal(validatedEvoWalkthroughCampaign.metadata.name, 'flash-decode-sm90a');
 
@@ -277,6 +300,117 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.ok(stat.isSymbolicLink(), '.claude/skills must be a symbolic link');
   const target = readlinkSync(claudeSkillsPath);
   assert.ok(target.endsWith('.agents/skills'), `.claude/skills must point to .agents/skills, got: ${target}`);
+});
+
+test('site.mjs unit: rewriteReferenceMarkdown rewrites all 6 target classes while preserving exempt code/comment/escaped regions, and stageReferenceDocs prunes stale files and rejects subdirs', async () => {
+  const { rewriteReferenceMarkdown, stageReferenceDocs } = await loadSiteModule();
+
+  const sourceMarkdown = [
+    '# Sample Reference',
+    '',
+    '1. Sibling ref: [CLI Ref](cli-and-action-reference.md#cli-subcommands)',
+    '2. Public regular: [Taskpack](../configuration/taskpack.md#taskpack-bounds)',
+    '3. Public section index: [Config Index](../configuration/_index.md#top) and [Docs Index](../_index.md)',
+    '4. Shared asset: ![Flow](../assets/diagrams/architecture-flow.svg)',
+    '5. Contribute & README: [Docs Map](../README.md#module-map), [Dev](../development.md), [State](../contribute/state.md#fencing)',
+    '6. Repo paths: [Core](../../packages/core/src/index.ts) and [Spec](../../specs/2026-11-05-task-contracts-and-evidence.md)',
+    '7. Multiline inline: [Evolution',
+    '   Campaign](../walkthroughs/evolutionary-campaign.md#step-1)',
+    '8. Escaped & inline code: \\[Escaped](../configuration/taskpack.md) and `[Code](../configuration/taskpack.md)`',
+    '',
+    '<!-- [Commented](../configuration/taskpack.md) -->',
+    '',
+    '```yaml',
+    '# [Fenced](../configuration/taskpack.md)',
+    'spec: {}',
+    '```',
+    '',
+    '    [Indented](../configuration/taskpack.md)',
+    '',
+    '[ref-public]: ../operations/cli.md#exit-codes',
+    '[ref-contrib]: ../contribute/memory.md',
+    '',
+  ].join('\n');
+
+  const rewritten = rewriteReferenceMarkdown(sourceMarkdown, {
+    docsPrefix: '../docs',
+    repoBlobBase: 'https://github.com/gpustack/loopwright/blob',
+    sourceRef: 'v1.2.0',
+  });
+
+  assert.ok(rewritten.includes('[CLI Ref](cli-and-action-reference.md#cli-subcommands)'));
+  assert.ok(rewritten.includes('[Taskpack](../docs/configuration/taskpack/index.md#taskpack-bounds)'));
+  assert.ok(rewritten.includes('[Config Index](../docs/configuration/index.md#top)'));
+  assert.ok(rewritten.includes('[Docs Index](../docs/index.md)'));
+  assert.ok(rewritten.includes('![Flow](../docs/assets/diagrams/architecture-flow.svg)'));
+  assert.ok(rewritten.includes('[Docs Map](https://github.com/gpustack/loopwright/blob/v1.2.0/docs/README.md#module-map)'));
+  assert.ok(rewritten.includes('[Dev](https://github.com/gpustack/loopwright/blob/v1.2.0/docs/development.md)'));
+  assert.ok(rewritten.includes('[State](https://github.com/gpustack/loopwright/blob/v1.2.0/docs/contribute/state.md#fencing)'));
+  assert.ok(rewritten.includes('[Core](https://github.com/gpustack/loopwright/blob/v1.2.0/packages/core/src/index.ts)'));
+  assert.ok(rewritten.includes('[Spec](https://github.com/gpustack/loopwright/blob/v1.2.0/specs/2026-11-05-task-contracts-and-evidence.md)'));
+  assert.ok(rewritten.includes('Campaign](../docs/walkthroughs/evolutionary-campaign/index.md#step-1)'));
+  assert.ok(rewritten.includes('\\[Escaped](../configuration/taskpack.md)'));
+  assert.ok(rewritten.includes('`[Code](../configuration/taskpack.md)`'));
+  assert.ok(rewritten.includes('<!-- [Commented](../configuration/taskpack.md) -->'));
+  assert.ok(rewritten.includes('# [Fenced](../configuration/taskpack.md)'));
+  assert.ok(rewritten.includes('    [Indented](../configuration/taskpack.md)'));
+  assert.ok(rewritten.includes('[ref-public]: ../docs/operations/cli/index.md#exit-codes'));
+  assert.ok(rewritten.includes('[ref-contrib]: https://github.com/gpustack/loopwright/blob/v1.2.0/docs/contribute/memory.md'));
+
+  assert.throws(
+    () => rewriteReferenceMarkdown('[Escape](../../../outside.md)'),
+    /link escapes repository root/
+  );
+
+  // stageReferenceDocs: fresh mirror, stale file/dir pruning, rebaseFrom, and subdir/overlap rejection
+  const tmpDir = mkdtempSync(join(tmpdir(), 'lw-stage-ref-test-'));
+  try {
+    const srcRefs = join(tmpDir, 'docs', 'references');
+    const stageRefs = join(tmpDir, 'site', 'resources', 'references');
+    const rootRefs = join(tmpDir, 'gh-pages', 'references');
+    mkdirSync(srcRefs, { recursive: true });
+    mkdirSync(join(stageRefs, 'obsolete-dir'), { recursive: true });
+    writeFileSync(join(stageRefs, 'stale.md'), '# Stale\n');
+    writeFileSync(join(stageRefs, 'obsolete-dir', 'old.md'), '# Old\n');
+    writeFileSync(join(srcRefs, 'README.md'), '# Hub\n\nSee [Guide](../getting-started/architecture.md).\n');
+    writeFileSync(join(srcRefs, 'topic.md'), '# Topic\n\nSee [Hub](README.md) and [Dev](../development.md).\n');
+
+    const stagedNames = stageReferenceDocs({
+      sourceDir: srcRefs,
+      stagingDir: stageRefs,
+      docsPrefix: '../docs',
+      sourceRef: 'main',
+    });
+    assert.deepEqual(stagedNames, ['README.md', 'topic.md']);
+    assert.deepEqual(readdirSync(stageRefs).sort(), ['README.md', 'topic.md']);
+    assert.ok(
+      readFileSync(join(stageRefs, 'README.md'), 'utf8').includes('../docs/getting-started/architecture/index.md')
+    );
+
+    const rebasedNames = stageReferenceDocs({
+      sourceDir: stageRefs,
+      stagingDir: rootRefs,
+      rebaseFrom: '../docs',
+      docsPrefix: '../latest/docs',
+    });
+    assert.deepEqual(rebasedNames, ['README.md', 'topic.md']);
+    assert.ok(
+      readFileSync(join(rootRefs, 'README.md'), 'utf8').includes('../latest/docs/getting-started/architecture/index.md')
+    );
+
+    assert.throws(
+      () => stageReferenceDocs({ sourceDir: srcRefs, stagingDir: srcRefs }),
+      /must not overlap/
+    );
+
+    mkdirSync(join(srcRefs, 'nested-subdir'));
+    assert.throws(
+      () => stageReferenceDocs({ sourceDir: srcRefs, stagingDir: stageRefs }),
+      /docs\/references must be flat; found nested subdirectory: nested-subdir/
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('documentation verification: check-docs.mjs passes with zero errors', () => {
@@ -293,7 +427,7 @@ test('documentation verification: check-docs.mjs passes with zero errors', () =>
   assert.match(run.stdout, /0 error\(s\)/, 'check-docs.mjs must report 0 error(s)');
 });
 
-test('hugo site: site.mjs build builds 15-page site, exports markdown, renders reading footers, and verifies zero broken links', () => {
+test('hugo site: site.mjs build builds 15-page site, exports three-zone llms.txt + 6 flat references, and verifies zero excluded-zone leaks in sitemap.xml and index.json', () => {
   const siteScript = join(REPO_ROOT, 'scripts', 'site.mjs');
   assert.ok(existsSync(siteScript), 'scripts/site.mjs must exist');
 
@@ -328,17 +462,49 @@ test('hugo site: site.mjs build builds 15-page site, exports markdown, renders r
   assert.ok(existsSync(join(publicDir, 'llms.txt')), 'llms.txt must exist');
   assert.ok(existsSync(join(publicDir, 'site-version.json')), 'site-version.json must exist');
   assert.ok(existsSync(join(publicDir, 'index.json')), 'index.json must exist');
+  assert.ok(existsSync(join(publicDir, 'sitemap.xml')), 'sitemap.xml must exist');
 
-  // Verify llms.txt content
+  // Verify llms.txt content across all 3 zones (Public 15 + Reference 6 + Optional 13 [README + 12 Contribute])
   const llms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
-  const llmsMatches = llms.match(/^-\s+\[[^\]]+\]\(\/docs\/[^)]+\):/gm);
-  assert.equal(llmsMatches?.length, 15, 'llms.txt must list exactly 15 docs pages');
-  assert.match(llms, /\[Bootstrap Interview Reference\]\(\/references\/bootstrap-interview\.md\)/, 'llms.txt must link to Bootstrap Interview Reference');
-  assert.ok(!llms.includes('/docs/development/'), 'llms.txt must not contain /docs/development/');
-  assert.ok(!llms.includes('/docs/contribute/'), 'llms.txt must not contain /docs/contribute/');
-  assert.ok(!llms.includes('/docs/adr/'), 'llms.txt must not contain /docs/adr/');
-  assert.ok(!llms.includes('/docs/references/'), 'llms.txt must not contain /docs/references/');
-  assert.ok(existsSync(join(publicDir, 'references', 'bootstrap-interview.md')), 'references/bootstrap-interview.md must exist');
+  const llmsPublicMatches = llms.match(/^-\s+\[[^\]]+\]\((?:https?:\/\/[^/]+)?\/docs\/[^)]+\):/gm);
+  assert.equal(llmsPublicMatches?.length, 15, 'llms.txt must list exactly 15 public docs pages');
+  assert.match(llms, /\/docs\/walkthroughs\/evolutionary-campaign\/index\.md\)/, 'llms.txt must link to singular evolutionary-campaign');
+
+  const expectedRefFiles = [
+    'README.md',
+    'bootstrap-interview.md',
+    'taskpack-and-contract-schema.md',
+    'controller-and-registry-schema.md',
+    'cli-and-action-reference.md',
+    'coding-agent-protocol.md',
+  ];
+  assert.match(llms, /^## Reference$/m, 'llms.txt must contain ## Reference section');
+  for (const refName of expectedRefFiles) {
+    assert.ok(
+      llms.includes(`/references/${refName}):`),
+      `llms.txt ## Reference must include /references/${refName}`
+    );
+    assert.ok(
+      existsSync(join(publicDir, 'references', refName)),
+      `site/public/references/${refName} must exist`
+    );
+  }
+
+  assert.match(llms, /^## Optional$/m, 'llms.txt must contain ## Optional section');
+  const optionalGithubMatches = llms.match(/^-\s+\[[^\]]+\]\(https:\/\/github\.com\/gpustack\/loopwright\/blob\/[^/]+\/docs\/[^)]+\):/gm);
+  assert.equal(
+    optionalGithubMatches?.length,
+    13,
+    'llms.txt ## Optional must list Repository navigation (docs/README.md) plus all 12 Contribute pages'
+  );
+
+  for (const nonGithubLine of llms.split('\n').filter(l => l.startsWith('- ') && !l.includes('https://github.com/'))) {
+    assert.ok(!nonGithubLine.includes('/docs/development'), `llms.txt must not leak /docs/development: ${nonGithubLine}`);
+    assert.ok(!nonGithubLine.includes('/docs/contribute/'), `llms.txt must not leak /docs/contribute/: ${nonGithubLine}`);
+    assert.ok(!nonGithubLine.includes('/docs/adr/'), `llms.txt must not leak /docs/adr/: ${nonGithubLine}`);
+    assert.ok(!nonGithubLine.includes('/docs/references/'), `llms.txt must not leak /docs/references/: ${nonGithubLine}`);
+  }
+
   const exportedBootstrapRef = readFileSync(join(publicDir, 'references', 'bootstrap-interview.md'), 'utf8');
   assert.match(exportedBootstrapRef, /\(\.\.\/docs\/walkthroughs\/declarative-taskpack\/index\.md\)/, 'exported bootstrap-interview.md must rewrite doc links');
   assert.ok(!exportedBootstrapRef.includes('](../walkthroughs/'), 'exported bootstrap-interview.md must not retain unrewritten ../<group>/ links');
@@ -347,9 +513,26 @@ test('hugo site: site.mjs build builds 15-page site, exports markdown, renders r
   const version = JSON.parse(readFileSync(join(publicDir, 'site-version.json'), 'utf8')) as { version?: string };
   assert.ok(version.version, 'site-version.json must contain version');
 
-  // Verify index.json content
-  const index = JSON.parse(readFileSync(join(publicDir, 'index.json'), 'utf8')) as unknown[];
+  // Verify index.json content and 0 excluded-zone leaks
+  const index = JSON.parse(readFileSync(join(publicDir, 'index.json'), 'utf8')) as Array<{ url?: string }>;
   assert.ok(Array.isArray(index) && index.length >= 15, 'index.json must contain at least 15 pages');
+  for (const entry of index) {
+    const u = String(entry.url ?? '');
+    assert.ok(
+      !/\/(?:references|docs\/references|contribute|docs\/contribute|docs\/adr|development|docs\/development)(?:\/|\.|$)/.test(u),
+      `index.json must not leak excluded zone URL: ${u}`
+    );
+  }
+
+  // Verify sitemap.xml has 0 excluded-zone leaks
+  const sitemapXml = readFileSync(join(publicDir, 'sitemap.xml'), 'utf8');
+  for (const locMatch of sitemapXml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+    const loc = locMatch[1] ?? '';
+    assert.ok(
+      !/\/(?:references|docs\/references|contribute|docs\/contribute|docs\/adr|development|docs\/development)(?:\/|\.|$)/.test(loc),
+      `sitemap.xml must not leak excluded zone URL: ${loc}`
+    );
+  }
 
   // Verify 15 markdown and html exports exist under docs/<group>/<slug>/
   const canonicalPages = [
@@ -361,7 +544,7 @@ test('hugo site: site.mjs build builds 15-page site, exports markdown, renders r
     'operations/coding-agents',
     'walkthroughs/declarative-taskpack',
     'walkthroughs/managed-controller',
-    'walkthroughs/evolutionary-campaigns',
+    'walkthroughs/evolutionary-campaign',
     'configuration/taskpack',
     'configuration/task-contract',
     'configuration/controller-and-registry',
@@ -399,7 +582,11 @@ test('hugo site: site.mjs build builds 15-page site, exports markdown, renders r
   assert.equal(subpathBuild.status, 0, `subpath site.mjs build failed:\nstdout: ${subpathBuild.stdout}\nstderr: ${subpathBuild.stderr}`);
   assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 15 Markdown exports; 0 broken link\(s\)/);
   const subpathLlms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
-  assert.match(subpathLlms, /\[Bootstrap Interview Reference\]\(\/loopwright\/latest\/references\/bootstrap-interview\.md\)/, 'subpath llms.txt must prefix relURL cleanly');
+  assert.match(
+    subpathLlms,
+    /\[Bootstrap Interview Reference\]\(https:\/\/docs\.gpustack\.ai\/loopwright\/latest\/references\/bootstrap-interview\.md\)/,
+    'subpath llms.txt must emit full absURL for flat reference entries'
+  );
 
   // Restore default "/" build
   const restoreBuild = spawnSync(process.execPath, [siteScript, 'build'], {
@@ -411,14 +598,14 @@ test('hugo site: site.mjs build builds 15-page site, exports markdown, renders r
 });
 
 test('coding-agents apply snippet: matches loopwright-step skill, handles inspect bundle, classic/overlay deletes, 0755 preservation, and blocks hardlinks/symlinks', () => {
-  const docText = readFileSync(join(REPO_ROOT, 'docs', 'operations', 'coding-agents.md'), 'utf8');
+  const docText = readFileSync(join(REPO_ROOT, 'docs', 'references', 'coding-agent-protocol.md'), 'utf8');
   const skillText = readFileSync(join(REPO_ROOT, '.agents', 'skills', 'loopwright-step', 'SKILL.md'), 'utf8');
 
   const docMatch = docText.match(/node -e '\n([\s\S]*?)\n' "\$INSPECT_DIR" \./);
   const skillMatch = skillText.match(/node -e '\n([\s\S]*?)\n' "\$INSPECT_DIR" <repo-dir>/);
-  assert.ok(docMatch?.[1], 'coding-agents.md must include node -e apply snippet');
+  assert.ok(docMatch?.[1], 'docs/references/coding-agent-protocol.md must include node -e apply snippet');
   assert.ok(skillMatch?.[1], 'loopwright-step/SKILL.md must include node -e apply snippet');
-  assert.equal(docMatch[1], skillMatch[1], 'coding-agents.md and loopwright-step/SKILL.md apply scripts must stay identical');
+  assert.equal(docMatch[1], skillMatch[1], 'coding-agent-protocol.md and loopwright-step/SKILL.md apply scripts must stay identical');
   const applyScript = docMatch[1];
 
   const mainJs = fileURLToPath(new URL('../src/main.js', import.meta.url));
@@ -609,8 +796,8 @@ test('coding-agents apply snippet: matches loopwright-step skill, handles inspec
 
 test('coding-agents apply snippet: Managed Controller refuses symbolic classic sourceRevision and rejects empty or mode-only HEAD drift', async () => {
   const repoRoot = findRepositoryRoot();
-  const codingAgentsDoc = readFileSync(join(repoRoot, 'docs', 'operations', 'coding-agents.md'), 'utf8');
-  const applyScript = /node -e '([\s\S]*?)' "\$INSPECT_DIR" \./.exec(codingAgentsDoc)?.[1] ?? '';
+  const codingAgentsProtocolDoc = readFileSync(join(repoRoot, 'docs', 'references', 'coding-agent-protocol.md'), 'utf8');
+  const applyScript = /node -e '([\s\S]*?)' "\$INSPECT_DIR" \./.exec(codingAgentsProtocolDoc)?.[1] ?? '';
   assert.ok(applyScript.length > 0);
   const mainJs = fileURLToPath(new URL('../src/main.js', import.meta.url));
 

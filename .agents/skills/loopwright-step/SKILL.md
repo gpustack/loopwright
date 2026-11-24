@@ -8,7 +8,7 @@ description: >-
 
 # Loopwright Step Driver
 
-Drive bounded Loopwright pipelines from an OAuth-backed host coding agent with zero Loopwright provider API tokens, or bind distinct models per role via `--role-model`. Read [Coding Agents](https://docs.gpustack.ai/loopwright/latest/docs/operations/coding-agents/) and [CLI](https://docs.gpustack.ai/loopwright/latest/docs/operations/cli/) for complete coroutine and flag contracts.
+Drive bounded Loopwright pipelines from an OAuth-backed host coding agent with zero Loopwright provider API tokens, or bind distinct models per role via `--role-model`. Read [Coding Agents](https://docs.gpustack.ai/loopwright/latest/docs/operations/coding-agents/), [Coding Agent Protocol Reference](https://docs.gpustack.ai/loopwright/latest/references/coding-agent-protocol.md), and [CLI](https://docs.gpustack.ai/loopwright/latest/docs/operations/cli/) for complete coroutine, `StepYield`, and flag contracts.
 
 ## When to Use
 
