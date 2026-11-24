@@ -6,6 +6,8 @@
   </url><url>
     <loc>https://docs.gpustack.ai/loopwright/main/docs/configuration/decision-routing/</loc>
   </url><url>
+    <loc>https://docs.gpustack.ai/loopwright/main/docs/configuration/evolution-campaign/</loc>
+  </url><url>
     <loc>https://docs.gpustack.ai/loopwright/main/docs/configuration/sandbox-backends/</loc>
   </url><url>
     <loc>https://docs.gpustack.ai/loopwright/main/docs/configuration/task-contract/</loc>
@@ -25,6 +27,8 @@
     <loc>https://docs.gpustack.ai/loopwright/main/docs/operations/github-app/</loc>
   </url><url>
     <loc>https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/declarative-taskpack/</loc>
+  </url><url>
+    <loc>https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/evolutionary-campaigns/</loc>
   </url><url>
     <loc>https://docs.gpustack.ai/loopwright/main/docs/walkthroughs/managed-controller/</loc>
   </url><url>

@@ -2,7 +2,7 @@
 
 > Loopwright is a TypeScript harness and GitHub Action/App control plane for bounded, verified work.
 
-Documentation version: main. Source revision: 28d29da53b64384514a68ac516ce3e5413e8ef24.
+Documentation version: main. Source revision: a48fc0604262a5b5f92cf68ffd78454f032b8fb8.
 These pages come from the repository's docs/ sources. For version-specific behavior, use the
 documentation and code for your release. This index routes questions; follow its links for evidence.
 
@@ -32,6 +32,7 @@ Follow the [Bootstrap Interview Reference](/loopwright/main/references/bootstrap
 
 - [Declarative Taskpack](/loopwright/main/docs/walkthroughs/declarative-taskpack/index.md): Author or migrate a single-file repository taskpack
 - [Managed Controller](/loopwright/main/docs/walkthroughs/managed-controller/index.md): Configure out-of-repo registries, contracts, and CLI runs
+- [Evolutionary Campaigns](/loopwright/main/docs/walkthroughs/evolutionary-campaigns/index.md): Run bounded island optimization with hardware gates and bundle export
 
 ## Configuration
 
@@ -40,7 +41,8 @@ Follow the [Bootstrap Interview Reference](/loopwright/main/references/bootstrap
 - [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md): Configure approved handlers, profiles, credentials, and controls
 - [Sandbox Backends](/loopwright/main/docs/configuration/sandbox-backends/index.md): Select OS or container sandboxes and required capabilities
 - [Decision Routing](/loopwright/main/docs/configuration/decision-routing/index.md): Configure advisory routing policies, providers, and thresholds
+- [Evolution Campaign](/loopwright/main/docs/configuration/evolution-campaign/index.md): Configure stages, islands, objectives, budgets, teamEvolution, and export
 
 ## Optional
 
-- [Repository navigation](https://github.com/gpustack/loopwright/blob/28d29da53b64384514a68ac516ce3e5413e8ef24/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
+- [Repository navigation](https://github.com/gpustack/loopwright/blob/a48fc0604262a5b5f92cf68ffd78454f032b8fb8/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors.
