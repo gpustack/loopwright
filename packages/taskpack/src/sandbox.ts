@@ -1800,7 +1800,7 @@ function probeLinuxLandlockExecutable(executable: string): { readonly abi: numbe
   const probe = spawnSync(
     executable,
     ['-I', '-S', '-B', '-c', LANDLOCK_HOST_PROBE_SCRIPT],
-    { cwd: '/', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3_000 },
+    { cwd: '/', encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 },
   );
   if (probe.status === 0 && probe.error === undefined) {
     const parts = (probe.stdout ?? '').trim().split(':');
@@ -1812,7 +1812,9 @@ function probeLinuxLandlockExecutable(executable: string): { readonly abi: numbe
       return info;
     }
   }
-  cachedLandlockProbesByExecutable.set(executable, null);
+  if ((probe.error as NodeJS.ErrnoException | undefined)?.code !== 'ETIMEDOUT') {
+    cachedLandlockProbesByExecutable.set(executable, null);
+  }
   return null;
 }
 
@@ -1914,7 +1916,7 @@ export function negotiateSandboxBackend(
       }
       if (env.probeExecutables && process.platform === 'linux') {
         const probe = spawnSync(executable, ['--unshare-all', '--ro-bind', '/', '/', '/bin/true'], {
-          timeout: 2000,
+          timeout: 5_000,
           stdio: 'ignore',
         });
         if (probe.status !== 0) {

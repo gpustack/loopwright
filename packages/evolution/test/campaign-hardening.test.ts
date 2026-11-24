@@ -590,6 +590,7 @@ test('concurrent child evaluator never mutates process.env, preserves evo-parent
   });
 
   let workerLeases = 0;
+  let workerFatalError: unknown = null;
   const workerAbort = new AbortController();
   const workerPromise = runHardwareWorker({
     config: {
@@ -620,7 +621,11 @@ test('concurrent child evaluator never mutates process.env, preserves evo-parent
     onLeaseAcquired: () => {
       workerLeases += 1;
     },
-  }).catch(() => undefined);
+  }).catch((err: unknown) => {
+    if (!workerAbort.signal.aborted) {
+      workerFatalError = err;
+    }
+  });
 
   const secretEnvVarName = 'LW_ISOLATED_TEST_SIGNING_KEY_SC2';
   assert.equal(process.env[secretEnvVarName], undefined);
@@ -724,9 +729,23 @@ test('concurrent child evaluator never mutates process.env, preserves evo-parent
     assert.equal(sawScratchpadInAgent, true, 'evo-scratchpad must be exposed in contextFiles when role.instructions is set');
 
     // Gen 1 ran 2 worker leases (Island 0 + Island 1); Gen 2 Island 0 clone was rejected pre-gate (0 leases), Gen 2 Island 1 ran 1 lease -> total 3 leases
-    assert.equal(res.noveltyRejectionsCount, 1);
-    assert.equal(workerLeases, 3, 'cosmetic clone must be rejected BEFORE benchmark-gate.v1 acquires any worker lease');
-    assert.equal(res.campaign.evaluationsUsed, 3);
+    const recordedSummary = JSON.stringify(
+      (await res.store.listIndividuals('camp-sc2-sh3-pm2')).map(ind => ({
+        id: ind.individualId,
+        gen: ind.generation,
+        isl: ind.islandId,
+        status: ind.status,
+        reason: ind.failureReason,
+      })),
+    );
+    assert.equal(workerFatalError, null, `hardware worker threw unexpectedly: ${String(workerFatalError)}`);
+    assert.equal(
+      res.noveltyRejectionsCount,
+      1,
+      `expected 1 novelty rejection (workerLeases=${workerLeases}, individuals=${recordedSummary})`,
+    );
+    assert.equal(workerLeases, 3, `cosmetic clone must be rejected BEFORE benchmark-gate.v1 acquires any worker lease (individuals=${recordedSummary})`);
+    assert.equal(res.campaign.evaluationsUsed, 3, `individuals=${recordedSummary}`);
 
     // Auto-exported bundle carries hardware.driverConstraint (">=550.54") in compatibility
     assert.ok(res.exportedBundle !== undefined);

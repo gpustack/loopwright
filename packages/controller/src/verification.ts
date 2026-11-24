@@ -1491,7 +1491,7 @@ export class Verifier {
       const maxOldGenerationSizeMb = isWideOverlay
         ? Math.min(192, Math.max(64, Math.ceil(workerBounds.allocationMaxBytes / (1024 * 1024)) + 32))
         : 64;
-      const timeoutMs = isWideOverlay ? 15_000 : 2_000;
+      const timeoutMs = isWideOverlay ? 15_000 : 10_000;
       const running = boundedWorker(verifierModule, packet, signal, { maxOldGenerationSizeMb, timeoutMs });
       closed = false;
       const observed = await running;

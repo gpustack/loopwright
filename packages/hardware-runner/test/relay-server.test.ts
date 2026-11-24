@@ -3424,3 +3424,51 @@ test('bounded terminal retention + evicted replay/GET lazy disk recovery, CAS lo
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('RelayServer: concurrent identical-blob PUT staging across distinct operations never exposes transient nlink > 1', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lw-relay-concurrent-put-'));
+  const casDir = join(dir, 'cas');
+  const relay = await startRelayServer({
+    port: 0,
+    casDir,
+    controllerSigningSecret: CONTROLLER_SECRET,
+    controllerAuthToken: CONTROLLER_BEARER,
+    workerTokens: [WORKER_TOKEN],
+  });
+  try {
+    const sharedPayload = Buffer.from('shared-base-tree-bundle-payload-'.repeat(256), 'utf8');
+    const sharedSha = sha256Hex(sharedPayload);
+    const opCount = 8;
+    const responses = await Promise.all(
+      Array.from({ length: opCount }, (_, idx) => {
+        const opId = `verify.0.check.concurrent-put-${idx}`;
+        const sig = signRelayPayload(CONTROLLER_SECRET, `PUT\n${opId}\n${sharedSha}\n${sharedPayload.byteLength}`);
+        return fetch(`${relay.url}/v1/benchmark/jobs/${opId}/blobs/${sharedSha}`, {
+          method: 'PUT',
+          headers: {
+            authorization: `Bearer ${CONTROLLER_BEARER}`,
+            'content-type': 'application/octet-stream',
+            'content-length': String(sharedPayload.byteLength),
+            'x-loopwright-blob-sha256': sharedSha,
+            'x-loopwright-blob-length': String(sharedPayload.byteLength),
+            'x-loopwright-signature': sig,
+          },
+          body: sharedPayload,
+        });
+      }),
+    );
+
+    const statuses = responses.map(r => r.status);
+    for (const r of responses) {
+      assert.ok(r.status === 200 || r.status === 201, `expected 200/201 for concurrent identical PUT, got ${r.status} (all=${JSON.stringify(statuses)})`);
+    }
+    assert.equal(statuses.filter(s => s === 201).length, 1, `exactly one writer should create the CAS blob (statuses=${JSON.stringify(statuses)})`);
+    const blobStat = await lstat(join(casDir, 'blobs', 'sha256', sharedSha));
+    assert.equal(blobStat.isFile(), true);
+    assert.equal(blobStat.nlink, 1);
+    assert.equal(blobStat.mode & 0o777, 0o400);
+  } finally {
+    await relay.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { constants, linkSync, lstatSync, realpathSync, statSync, unlinkSync, type Stats } from 'node:fs';
-import { chmod, link, lstat, mkdir, open, opendir, unlink } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, opendir, unlink } from 'node:fs/promises';
 import {
   createServer as createHttpServer,
   type IncomingMessage,
@@ -2457,34 +2457,45 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
       if (!tmpStat.isFile() || tmpStat.isSymbolicLink() || tmpStat.nlink !== 1 || (tmpStat.mode & 0o777) !== 0o400) {
         throw new HardwareRunnerError('ARTIFACT_INVALID', 'sealed temp blob failed stat verification');
       }
+      await tmpHandle.close();
+      tmpClosed = true;
 
       const finalPath = join(sha256Dir, sha256);
       let linked = false;
       try {
-        await link(tmpPath, finalPath);
+        linkSync(tmpPath, finalPath);
         linked = true;
       } catch (err: unknown) {
         if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
       }
 
-      if (linked) {
-        await unlink(tmpPath);
+      // Drop the temp directory entry synchronously right after linkSync so concurrent Relay
+      // requests staging or reading the same content-addressed blob never observe transient nlink === 2.
+      try {
+        unlinkSync(tmpPath);
         tmpUnlinked = true;
-        await tmpHandle.close();
-        tmpClosed = true;
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+          tmpUnlinked = true;
+        } else if (!linked) {
+          throw err;
+        }
+      }
+
+      if (linked) {
+        if (!tmpUnlinked) {
+          await unlink(tmpPath);
+          tmpUnlinked = true;
+        }
         await syncDir(sha256Dir);
         await verifyExistingCasBlob(sha256, expectedLength);
         return { created: true };
       }
 
-      await tmpHandle.close();
-      tmpClosed = true;
-      await unlink(tmpPath);
-      tmpUnlinked = true;
-      for (let attempt = 0; attempt < 20; attempt += 1) {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
         const st = await lstat(finalPath).catch(() => null);
         if (!st || st.isSymbolicLink() || !st.isFile() || st.nlink <= 1) break;
-        await new Promise(r => setTimeout(r, 5));
+        await new Promise(r => setTimeout(r, 10));
       }
       await verifyExistingCasBlob(sha256, expectedLength, { scrubSecrets: optionsIngest.scrubSecrets });
       await syncDir(sha256Dir);
