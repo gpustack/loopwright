@@ -2575,12 +2575,16 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
         continue;
       }
       if (declared.implementation === 'evolve-block-guard.v1') {
+        const files = declared.parameters?.['files'];
+        if (!Array.isArray(files) || files.length === 0) {
+          manifestInvalid('evolve-block-guard.v1 requires a non-empty parameters.files array', `/spec/verification/localChecks/${declared.id}/parameters/files`);
+        }
         activeChecks.push({
           id: declared.id,
           implementation: 'evolve-block-guard.v1',
           parameters: {
             checkId: declared.id,
-            files: declared.parameters?.['files'],
+            files,
             ...(declared.parameters?.['allowedBlockIds'] !== undefined
               ? { allowedBlockIds: declared.parameters['allowedBlockIds'] }
               : {}),
