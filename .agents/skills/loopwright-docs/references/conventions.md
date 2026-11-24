@@ -1,19 +1,27 @@
-# Documentation Conventions — Human-First Decomposition, Page Shape, and Writing Rules
+# Documentation Conventions — Three-Zone Governance, Human-First Decomposition, Strict Pretty YAML, and Writing Rules
 
-Every page under `docs/`, `README.md`, and `examples/*.md` is written for human engineers and repository operators first, and checked deterministically by `scripts/check-docs.mjs` and `scripts/site.mjs`.
+Every file under `docs/`, `README.md`, and `examples/*.md` is written for human engineers and repository operators first, routed cleanly across Loopwright's three documentation zones, and checked deterministically by `scripts/check-docs.mjs` and `scripts/site.mjs`.
 
-## 1. Human-First Decomposition Pattern
+## 1. Three-Zone Architecture & Human-First Decomposition
 
-Never dump dense implementation prose, raw TypeScript interfaces, or unannotated JSON schemas onto a reader. Decompose every concept, subsystem, or operational workflow into four progressive layers:
+Loopwright splits `docs/` (`34` Markdown files: `docs/README.md` shared index + `33` zone pages) into three strict zones:
+
+| Zone | Source Paths | Human Site (HTML / Sidebar / `index.json` / `sitemap.xml`) | `/llms.txt` Surface | Outbound Link Policy |
+| --- | --- | --- | --- | --- |
+| **Public Human Site** (`15` pages) | `docs/{getting-started,operations,walkthroughs,configuration}/*.md` | **Included** (`site/data/navigation.yaml`, `site/content/docs/_index.md`, `site/layouts/index.html`) | Topic `##` sections → `/docs/<group>/<slug>/index.md` | Public pages, `docs/assets/`, non-`docs/` repo files. **Never** `development.md`, `contribute/**`, or `references/**`. |
+| **Flat LLM Reference** (`6` flat files) | `docs/references/*.md` (0 subdirectories) | **Excluded** (0 HTML, sidebar, `index.json`, or `sitemap.xml` entries) | `## Reference` → static `/references/<file>.md` (links rewritten before Hugo runs) | Sibling `references/*.md`, public pages, `docs/assets/`, repo & `Contribute` paths (rewritten to GitHub `blob/<sourceRef>`). |
+| **Repo-Only `Contribute`** (`12` pages) | `docs/development.md`, `docs/contribute/**/*.md` | **Excluded** (0 HTML, sidebar, `index.json`, or `sitemap.xml` entries) | `## Optional` → GitHub `blob/<sourceRef>/docs/...` | Any repository path. |
+
+Never dump dense implementation prose, raw TypeScript interfaces, or unannotated JSON schemas onto a human reader. Decompose every public concept, subsystem, or operational workflow into four progressive layers, and route exhaustive machine lookup tables to `docs/references/*.md`:
 
 1. **Mental model (1–3 short sentences)**: State what the component or workflow does, what boundary it enforces, and when an operator uses it.
 2. **Visual flow or lifecycle table**:
    - For 3 or more interacting stages or components, embed a committed SVG diagram (`docs/assets/diagrams/*.svg`) paired with a hidden `<!-- flowchart ... -->` comment immediately below.
    - For two-dimensional comparisons (modes, sandbox backends, error codes, failure outcomes), present a uniform 2D Markdown table.
-3. **Macro view (Complete Annotated Pretty YAML)**: Show a complete, copy-pasteable two-space Pretty YAML configuration or manifest (`apiVersion`, `kind`, `metadata`, `spec`) listing **every** schema field (required and optional) with inline `#` comments marking required fields, defaults, bounds, and security constraints.
-4. **Micro view (Constraint bullets + Domain-grouped reference tables)**: Immediately beneath the Macro YAML block, list key field rules as short bullets (`- **<Field>**: <Constraint in <= 20 words>.`) and document **every schema field, numeric bound, and valid enum choice** (`kind`, `mode`, `provider`, `disclosurePolicy`, `preferredBackends`, `networkMode`, `requiredCapabilities`, `implementation`, `enforcement`) in **domain-grouped** 2D Markdown tables (`### <Domain>`). Never merge values from unrelated YAML fields or domains (for example, mixing provider names with numeric retry counts `1` / `2`) into a single generic `Value | Meaning | Constraints` table.
+3. **Macro view (Annotated Block-Style Pretty YAML)**: Show a copy-pasteable two-space block-style Pretty YAML configuration or manifest (`apiVersion`, `kind`, `metadata.name` when applicable, `spec`) with inline `#` comments marking `Optional` fields, defaults, and security constraints.
+4. **Micro view (Constraint bullets + Focused domain tables)**: Beneath the Macro YAML block, list essential field rules as short bullets (`- **<Field>**: <Constraint in <= 20 words>.`) and group core enum choices in 2D Markdown tables (`### <Domain>`). Offload exhaustive field-by-field bound matrices, 44-input / 23-subcommand flag encyclopedias, and verbatim protocol scripts to `docs/references/*.md`. Never merge values from unrelated YAML fields or domains into a single generic `Value | Meaning | Constraints` table.
 
-## 2. Sentence & Voice Discipline (80% ASD-STE100)
+## 2. Sentence Discipline (80% ASD-STE100), Shared Glossary, and Plurality Rules
 
 Apply controlled-English discipline across `README.md`, `docs/**/*.md`, and `examples/*.md`:
 
@@ -25,7 +33,10 @@ Apply controlled-English discipline across `README.md`, `docs/**/*.md`, and `exa
   - Do not write: `Stale lease tokens are rejected by the controller prior to verification being executed.`
 - **Imperative procedures**: Address operator actions with direct imperative verbs (`Create`, `Validate`, `Inspect`, `Run`). Number dependent steps as `Step N: <Action>`.
 - **Zero self-referential page narration**: Never write `This page describes`, `This document describes`, `This section covers`, or `In this guide we will`. State the technical fact or operator instruction directly.
-- **Consistent Loopwright terminology**: Use one canonical name for each domain concept:
+
+### Shared Glossary
+
+Use one canonical name for each domain concept and avoid mechanical slang (`wiring`, `plumbing`, `knob`, `arm/leg`):
 
 | Concept | Canonical Term | Avoid |
 | --- | --- | --- |
@@ -33,33 +44,46 @@ Apply controlled-English discipline across `README.md`, `docs/**/*.md`, and `exa
 | Monotonic SQLite admission lock | `lease fence` | lock token, session lock, DB mutex |
 | Monotonic wall/monotonic time guard | `monotonic clock guard` | clock check, time skew guard |
 | Cryptographic verification receipt token | `gate token` (`gate.v1`) | check signature, verification hash |
-| Repository automation manifest | `taskpack` (`.loopwright/taskpack.yaml`) | repo workflow, automation config |
-| Calibrated System-One triage node | `decision router` (`@loopwright/decisions`) | AI classifier, fast model router |
+| Repository automation manifest | `taskpack` (`.loopwright/taskpack.yaml`, `Taskpack`) | repo workflow, automation config |
+| Multi-domain suite manifest | `taskpack suite` (`.loopwright/suite.yaml`, `TaskpackSuite`) | multi-pack config, domain bundle |
+| Out-of-repo approved handler catalog | `trusted registry` (`TrustedRegistry`) | plugin list, handler config |
+| Bounded island optimization manifest | `evolution campaign` (`campaign.yaml`, `EvolutionCampaign`) | search job, genetic config |
+| Calibrated System-One triage node | `decision router` (`@loopwright/decisions`, `DecisionPolicy`) | AI classifier, fast model router |
 | Reviewed content-addressed memory | `reviewed memory` (`@loopwright/memory`) | agent memory, vector store |
 | Qualification and failure ledger | `closure matrix` (`loopwright closure`) | readiness table, feature matrix |
 | Uncertain external side effect | `unknown outcome` (`unknown`) | ambiguous failure, partial error |
 
-- **Banned AI filler words and phrases**: `scripts/check-docs.mjs` rejects the following case-insensitively in `docs/**/*.md` prose:
-  - `seamlessly`
-  - `delve`
-  - `tapestry`
-  - `leverage`
-  - `utilize`
-  - `cutting-edge`
-  - `empower`
-  - `it is worth noting`
-  - `in order to`
-  - `this page describes`
-  - `this document describes`
-  - `comprehensive guide`
-  - Also avoid figurative puffery such as `robust`, `streamline`, `unlock`, `pivotal`, or `crucial` unless naming a literal identifier.
+### Menu, Sidebar, and Heading Plurality Rules
 
-## 3. Page Shape & `gpustack`-Style Reading Footer Contract
+1. **Collections use plural nouns**: `Walkthroughs`, `Operations`, `Sandbox Backends` (collection of OS/container backends), `Coding Agents` (collection of external host agents).
+2. **One capability, workflow, or resource kind uses a singular noun**: `Architecture`, `Installation`, `GitHub Action`, `GitHub App`, `CLI`, `Declarative Taskpack`, `Managed Controller`, `Evolutionary Campaign`, `Taskpack`, `Task Contract`, `Controller and Registry`, `Decision Routing`, `Evolution Campaign`.
+3. **Siblings of one type share the same grammatical number**: Every workflow walkthrough under `Walkthroughs` is singular (`Declarative Taskpack`, `Managed Controller`, `Evolutionary Campaign` — never mixing singular siblings with plural `Evolutionary Campaigns`).
 
-Every page under `docs/**/*.md` (except the index `docs/README.md`) must follow this exact structure:
+### Checked Kind-Plural Rules in Authored Prose
+
+In authored prose across `docs/**/*.md` (including paragraphs, list items, headings, and table cells), keep the **singular PascalCase resource `kind` inside backticks** and place the plural `s` or an explicit plural noun outside. `scripts/check-docs.mjs` (`checkKindPlurals`) enforces this deterministically:
+
+| Pattern | Kinds | Correct | Never Write (CI Fail) |
+| --- | --- | --- | --- |
+| **Regular kinds** | `Taskpack`, `TaskpackSuite`, `TaskContract`, `ControllerConfig`, `GitHubAppConfig`, `EvolutionCampaign`, `AttemptReceipt`, `VerificationProfile` | `` `Taskpack`s ``, `` `TaskpackSuite`s ``, `` `TaskContract`s ``, `` `ControllerConfig`s ``, `` `GitHubAppConfig`s ``, `` `EvolutionCampaign`s ``, `` `AttemptReceipt`s ``, `` `VerificationProfile`s `` | `` `Taskpacks` ``, `` `TaskpackSuites` ``, `` `TaskContracts` ``, `` `ControllerConfigs` ``, `` `GitHubAppConfigs` ``, `` `EvolutionCampaigns` ``, `` `AttemptReceipts` ``, `` `VerificationProfiles` `` |
+| **Irregular `-y` kinds** | `TrustedRegistry`, `DecisionPolicy` | `` `TrustedRegistry` objects ``, `` `DecisionPolicy` objects `` (or `manifests` / `files`) | `` `TrustedRegistries` ``, `` `TrustedRegistry`s ``, `` `DecisionPolicies` ``, `` `DecisionPolicy`s `` |
+
+- **Explicit Kind-Plural Exemptions**: Fenced code blocks, 4-space/tab indented code blocks, HTML comments, CLI commands/flags (`--taskpacks`, `loopwright ...`), file/API paths (`packages/taskpack/...`), and YAML/property expressions (`spec.domains`) retain literal spelling.
+- **Count nouns & units**: Match noun and verb to number (`1 island`, `2 islands`), keep units singular (`4 MiB`, `5000 ms`), and form abbreviation plurals with plain `s` (`GPUs`, `NPUs`, `PRs`, never `GPU's`).
+
+### Banned AI Filler Phrases
+
+`scripts/check-docs.mjs` rejects the following case-insensitively in `docs/**/*.md` prose:
+`seamlessly`, `delve`, `tapestry`, `leverage`, `utilize`, `cutting-edge`, `empower`, `it is worth noting`, `in order to`, `this page describes`, `this document describes`, `comprehensive guide`. Also avoid figurative puffery (`robust`, `streamline`, `unlock`, `pivotal`, `crucial`) unless naming a literal identifier.
+
+## 3. Page Shape, Flat Reference Contract, and Reading Footers
+
+### Public (`15` Pages) & Contribute (`12` Pages) Shape
+
+Every public and contributor page under `docs/**/*.md` follows this structure:
 
 ```markdown
-# <Exact Page Title Matching docs/README.md All pages>
+# <Exact Page Title Matching docs/README.md Zone Table>
 
 Short introductory paragraph (1 to 3 paragraphs, each <= 5 lines and <= 500 characters)
 stating the component role, safety boundary, and operator entry point.
@@ -67,29 +91,11 @@ stating the component role, safety boundary, and operator entry point.
 ## Contents
 
 - [Overview](#overview)
-- [Configuration](#configuration)
+- [Taskpack](#taskpack)
 - [Step 1: Generate draft files](#step-1-generate-draft-files)
 - [Verification](#verification)
-- [Troubleshooting](#troubleshooting)
 
 ## Overview
-
-...
-
-## Configuration
-
-...
-
-## Step 1: Generate draft files
-
-...
-
-## Verification
-
-...
-
-## Troubleshooting
-
 ...
 
 ---
@@ -99,131 +105,148 @@ stating the component role, safety boundary, and operator entry point.
 **Next** → [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) — author and verify a repository taskpack end to end.
 ```
 
+### Flat `docs/references/*.md` Contract (`6` Flat Files)
+
+Every file in `docs/references/` must be flat (zero nested subdirectories, zero symlinks) and obey:
+
+1. **Opening `Evidence:` label line**: Declare `Evidence: contract.`, `Evidence: recorded capture.`, or `Evidence: synthetic simulation.` before the first `## ` heading.
+2. **Hub vs. topic `## Contents`**: Topic files (`bootstrap-interview.md`, `taskpack-and-contract-schema.md`, `controller-and-registry-schema.md`, `cli-and-action-reference.md`, `coding-agent-protocol.md`) include synchronized `## Contents`; `docs/references/README.md` (`# Reference Hub`) is exempt from `## Contents` and must link every sibling `docs/references/*.md`.
+3. **Reference reading footer (`**See also**` only, zero `**Next**`)**: Every `docs/references/*.md` file must end with `\n---\n\n**See also** — [Title](target.md) (description) · ...` and is **strictly forbidden** from including `**Next**`.
+
 ### 1:1:1 Group Directory, Filename Slug, Sidebar Label, and `# H1` Title Rule
 
-Every public documentation page (all 15 pages published to `site/`) must obey strict **1:1:1 alignment**:
+Every public documentation page (all `15` pages published to `site/`) must obey strict **1:1:1 alignment**:
 
-1. **Group directory matches navigation group**: Public pages reside inside one of the 4 group-matching directories under `docs/`:
+1. **Group directory matches navigation group**:
    - `Getting Started` → `docs/getting-started/`
    - `Operations` → `docs/operations/`
    - `Walkthroughs` → `docs/walkthroughs/`
    - `Configuration` → `docs/configuration/`
-2. **Filename matches `# H1` slug**: `path.basename(file, '.md') === slugify(h1Title)` (for example, `# Controller and Registry` → `docs/configuration/controller-and-registry.md`, `# Task Contract` → `docs/configuration/task-contract.md`, `# CLI` → `docs/operations/cli.md`).
-3. **Exact label equality across all surfaces**: `site/data/navigation.yaml` `labels["/docs/<group>/<slug>/"]` === page `# H1` title === `docs/README.md` `## All pages` link label. Never mix `Taskpack Manifest` in the sidebar with `# Taskpack Manifest Reference` in the article or `Task Contracts` with `# Task Contracts and Schemas`.
-
-### Reading Footer Format (`\n---\n`)
-
-`site/layouts/partials/article-content.html` splits page content on `\n---\n` and renders the trailing `**See also**` / `**Next**` block into `<nav class="reading-footer">`:
-
-1. **Trailing `\n---\n` separator**: Every non-index `docs/**/*.md` page must end with a `\n---\n` horizontal rule followed by `**See also** — `.
-2. **Descriptive `See also` items**: Separate multiple items with ` · ` (middle dot). Every item must include a Markdown link `[Title](target.md)` followed by a parenthetical description `(short phrase explaining why to read it)`.
-3. **Descriptive `Next` pointer**: Every public `site/` page (all 15 pages) must include a `**Next** → [Title](target.md) — <short description>` line after `**See also**`. Whenever `**Next**` appears on any repository-only page, it must follow the same `**Next** → [Title](target.md) — <description>` format.
+2. **Filename matches `# H1` slug**: `path.basename(file, '.md') === slugify(h1Title)` (e.g., `# Evolutionary Campaign` → `docs/walkthroughs/evolutionary-campaign.md`, `# Evolution Campaign` → `docs/configuration/evolution-campaign.md`).
+3. **Exact label & index parity across all surfaces**: `site/data/navigation.yaml` `labels["/docs/<group>/<slug>/"]` === page `# H1` title === `docs/README.md` `## All pages` link label, and all `15` routes must be linked in both `site/content/docs/_index.md` and `site/layouts/index.html`.
 
 ### Enforced Page Shape Caps
 
 | Rule | Limit | Scope |
 | --- | --- | --- |
-| H1 title & 1:1:1 parity | Exact match with `docs/README.md` `## All pages` label; on public pages, also matches `navigation.yaml` label and `docs/<group>/<slug>.md` | All 25 `docs/**/*.md` pages |
-| Intro before `## Contents` | 1–3 paragraphs (`<= 5` lines, `<= 500` chars each) | All non-index `docs/**/*.md` pages |
-| `## Contents` | Exact match and order for all subsequent `## ` headings | All non-index `docs/**/*.md` pages |
-| `##` section count | `<= 10` `##` headings (excluding `## Contents`) | All non-index `docs/**/*.md` pages |
+| Zone registration & `# H1` parity | Exact `# H1` match in `docs/README.md` (`## All pages` `15`, `## Reference` `6`, `## Contribute` `12`) | All `33` non-index `docs/**/*.md` pages |
+| Heading depth ceiling | Hard **`H1`–`H3` max** (`####`, `#####`, `######` forbidden) | All `34` `docs/**/*.md` files |
+| `##` section count | **`<= 8`** on public pages; **`<= 10`** on `Contribute` pages (excluding `## Contents`) | `15` Public + `12` `Contribute` pages (`docs/README.md` & `docs/references/*` exempt) |
+| Intro & `## Contents` | 1–3 intro paragraphs + exact `## Contents` sync | All non-index `docs/**/*.md` except `docs/references/README.md` |
 | Prose paragraph size | `<= 5` lines and `<= 500` characters | All `docs/**/*.md` pages (excluding trailing `\n---\n` footer) |
 | Architecture line budget | `<= 200` lines | `docs/getting-started/architecture.md` |
 | ADR line budget | `<= 220` lines | `docs/contribute/adr/*.md` |
-| Standard page line budget | `<= 400` lines | All other non-index `docs/**/*.md` pages |
-| Reading footer | `\n---\n\n**See also** — [Title](path) (desc)` required; `**Next** → [Title](path) — desc` required on public pages | All non-index `docs/**/*.md` pages |
-| Public-to-Contribute link ban | `0` links to `development.md` or `contribute/**` | All 13 site-published `docs/` pages |
+| Reference line backstop | `<= 800` lines | `docs/references/*.md` |
+| Standard page line budget | `<= 400` lines | All other non-index `docs/**/*.md` pages (`14` Public + `10` `Contribute`) |
+| Reading footer | `\n---\n\n**See also** — [Title](path) (desc)` required; `**Next** →` required on `15` public pages and **forbidden** on `docs/references/*.md` | All `33` non-index `docs/**/*.md` pages |
+| One-way public link isolation | `0` links to `development.md`, `contribute/**`, or `references/**` | All `15` public `docs/` pages + `site/content/**` |
 
 ### Prose Paragraph Measurement Rules
 
-`scripts/check-docs.mjs` strips the trailing `\n---\n` reading footer block first, then measures contiguous prose paragraphs outside:
-- Fenced code blocks (```` ``` ```` or `~~~`)
-- HTML comments (`<!-- ... -->`)
-- Markdown tables (lines starting with `|`)
-- Blockquotes (lines starting with `>`)
-- Bullet or numbered list items (lines starting with `- `, `* `, `+ `, or `1. `)
-- Headings (`#` through `######`)
-- Standalone image lines (`![...](...)`)
-- Footer lines starting with `**See also**` or `**Next**`
+`scripts/check-docs.mjs` strips the trailing `\n---\n` reading footer block first, then measures contiguous prose paragraphs outside fenced code blocks, HTML comments, Markdown tables (`|`), blockquotes (`>`), list items (`- `, `* `, `+ `, `1. `), headings (`#`–`###`), standalone images (`![...](...)`), and footer lines (`**See also**`, `**Next**`). Split any paragraph over `5` lines or `500` characters into focused paragraphs, `<= 20`-word bullets, or a uniform 2D table.
 
-If a prose paragraph exceeds `5` lines or `500` characters, split it into focused paragraphs or convert enumerable facts into `<= 20`-word bullets or a uniform 2D table.
+## 4. Heading Rules (`H1`–`H3` Ceiling & Zero Container Nouns)
 
-## 4. Heading Rules
+Every heading across `docs/**/*.md` must obey:
 
-Every `##`, `###`, and `####` heading on `docs/**/*.md` (excluding `docs/README.md`) must obey:
-
-1. **Standard headings**: At most **4 words** and at most **32 characters** (`<= 4` words, `<= 32` chars).
-2. **Procedural step headings (`Step N: <Action>`)**: Match `^Step [0-9]+: <Action>$` with at most **4 words after the colon** and at most **38 total characters** (`<= 38` chars total). Capitalize the first word after the colon and use sentence case for the rest (for example, `## Step 1: Generate draft configs`).
-3. **Zero articles and zero interrogatives**: Never use articles (`a`, `an`, `the`) in `##` / `###` / `####` section headings across `docs/**/*.md` (excluding `docs/README.md`), and never use interrogative words (`what`, `where`, `when`, `how`, `which`, `why`, `who`, `whose`, or `whom`, case-insensitive) in any heading across `README.md` or `docs/**/*.md`. Keep headings abstract, concise, and immediately scannable.
-4. **Canonical section names and `## <Kind>` resource headings**: Prefer consistent, short section headings (`Overview`, `Prerequisites`, `Verification`, `Troubleshooting`, `Limitations`, `Decision`, `Context`, `Consequences`), and name complete configuration YAML sections directly after their resource `kind` (`## Taskpack`, `## TaskContract`, `## TrustedRegistry`, `## ControllerConfig`, `## DecisionPolicy`, `## GitHubAppConfig`).
+1. **Hard `H1`–`H3` depth ceiling**: `H4`, `H5`, and `H6` (`####`, `#####`, `######`, including blockquoted `> ####`) are forbidden across all `docs/**/*.md` files. Express sub-items under `###` using bold lead-in bullets (`- **<Item>**: ...`) or 2D tables.
+2. **Standard `##` and `###` headings**: At most **4 words** and at most **32 characters** (`<= 4` words, `<= 32` chars) on non-index pages.
+3. **Procedural step headings (`Step N: <Action>`)**: Match `^Step [0-9]+: <Action>$` with at most **4 words after the colon** and at most **38 total characters** (`<= 38` chars total). Capitalize the first word after the colon and use sentence case for the rest (`## Step 1: Generate draft configs`).
+4. **Zero articles, zero interrogatives, and zero layout-container nouns**:
+   - Omit articles (`a`, `an`, `the`) in `##` and `###` headings across non-index `docs/**/*.md`.
+   - Never use interrogative words (`what`, `where`, `when`, `how`, `which`, `why`, `who`, `whose`, `whom`) in any heading across `README.md` or `docs/**/*.md`.
+   - Never use layout-container nouns (`row`, `rows`, `table`, `tables`, `column`, `columns`, `guide`, `guides`, `entries`, `section`, `sections`) in headings across non-index `docs/**/*.md`. Name the domain concept directly (`## Memory records` instead of `## Entries`; `## Installation surfaces` instead of `## Guide table`).
+5. **Canonical section names and `## <Kind>` resource headings**: Prefer short section names (`Overview`, `Prerequisites`, `Verification`, `Troubleshooting`, `Limitations`, `Decision`, `Context`, `Consequences`), and name complete configuration YAML sections directly after their resource `kind` (`## Taskpack`, `## TaskpackSuite`, `## TaskContract`, `## TrustedRegistry`, `## ControllerConfig`, `## DecisionPolicy`, `## GitHubAppConfig`, `## EvolutionCampaign`).
 
 ## 5. Table Header & Cell Rules
 
-Markdown tables present two-dimensional comparisons, field references, and failure matrices. Every table in `docs/**/*.md` must obey:
+Every Markdown table in `docs/**/*.md` must obey:
 
-1. **Header word and character cap**: Every column header cell must contain **1 to 3 words** and at most **24 characters** (`1–3` words, `<= 24` chars) after stripping inline code backticks or links.
-2. **Banned header words**: Column headers must never contain:
-   - Articles: `a`, `an`, `the`
-   - Demonstratives: `this`, `that`, `these`, `those`
-   - Interrogatives: `what`, `where`, `when`, `how`, `which`, `why`, `who`, `whose`, `whom`
-3. **Uniform column counts**: The separator row (`| --- | --- |`) and every body row in a table must have the exact same number of columns as the header row.
-4. **Cell length cap**: Every table cell must be at most **180 characters** (`<= 180` chars). Keep cells scannable; move multi-sentence explanations out of table cells.
-5. **Compatibility with `docs/README.md`**: In `docs/README.md`, keep `| Specification | Scope |` under `## Specs` and `| Page | Description |` under `## All pages`.
+1. **Header word and character cap**: Every column header cell must contain **1 to 3 words** and at most **24 characters** (`1–3` words, `<= 24` chars) after stripping inline formatting.
+2. **Banned header words**: Column headers must never contain articles (`a`, `an`, `the`), demonstratives (`this`, `that`, `these`, `those`), or interrogatives (`what`, `where`, `when`, `how`, `which`, `why`, `who`, `whose`, `whom`).
+3. **Uniform column counts**: Separator (`| --- | --- |`) and body rows must match the header column count.
+4. **Cell length cap**: Every table cell must be at most **180 characters** (`<= 180` chars).
+5. **Three-zone tables in `docs/README.md`**: Keep `| Specification | Scope |` under `## Specs` and `| Page | Description |` under top-level `## All pages`, `## Reference`, and `## Contribute` (never nest `### Contribute` or `### Reference` inside `## All pages`).
 
-## 6. Pretty YAML & Kubernetes-Aligned Envelope Rules
+## 6. Strict Pretty Block-Style YAML & Kubernetes-Aligned Envelope Rules
 
-YAML is Loopwright's primary human configuration format across all operator and contributor surfaces:
+YAML is Loopwright's human configuration format across all operator and contributor surfaces:
 
-- `controller.draft.yaml` (`kind: ControllerConfig` — `apiVersion`, `kind`, `spec` only)
+- `.loopwright/taskpack.yaml` (`kind: Taskpack` — requires `metadata.name`)
+- `.loopwright/suite.yaml` (`kind: TaskpackSuite` — requires `metadata.name`)
 - `registry.draft.yaml` (`kind: TrustedRegistry` — referenced by `ControllerConfig.spec.registry.name`, requires `metadata.name`)
-- `.loopwright/taskpack.yaml` (`kind: Taskpack` — multi-instance repository manifest, requires `metadata.name`)
+- `campaign.yaml` (`kind: EvolutionCampaign` — requires `metadata.name`)
+- `controller.draft.yaml` (`kind: ControllerConfig` — `apiVersion`, `kind`, `spec` only)
+- `examples/task.yaml` (`kind: TaskContract` — `apiVersion`, `kind`, `spec` only)
 - `github-app.yaml` (`kind: GitHubAppConfig` — `apiVersion`, `kind`, `spec` only)
 - `decisions.yaml` (`kind: DecisionPolicy` — `apiVersion`, `kind`, `spec` only)
-- `examples/task.yaml` (`kind: TaskContract` — standalone or embedded at `ControllerConfig.spec.task`, `apiVersion`, `kind`, `spec` only)
-- Consumer GitHub Action workflow files (`.github/workflows/*.yml` in consumer repositories)
+- `VerificationProfile` & `AttemptReceipt` (`apiVersion`, `kind`, `spec` only)
+- Consumer GitHub Actions workflow files (`.github/workflows/*.yml` — `name`, `on`, `jobs`)
 
-Every ```` ```yaml ```` or ```` ```yml ```` fenced block in `README.md`, `docs/**/*.md`, and `examples/*.md` must obey:
+Every ```` ```yaml ```` or ```` ```yml ```` fenced block in `README.md`, `docs/**/*.md`, and `examples/*.md` is parsed via `parseDocument(..., { version: "1.2", schema: "core", uniqueKeys: true })` in `scripts/check-docs.mjs` (`checkPrettyYamlBlocks`) and must obey:
 
-1. **Kubernetes-aligned top-level header envelope (zero bare `spec:` fragments, strict per-`kind` `metadata` rule)**: Every YAML block must declare its complete document header so readers always know which `kind` or workflow owns the fields:
-   - **Multi-instance / cross-referenced Loopwright objects (`Taskpack`, `TrustedRegistry`)**: Always include top-level `apiVersion`, `kind`, `metadata: { name: <slug> }`, and `spec`. Following Kubernetes conventions, `metadata` contains `name` **only** (`[a-z0-9]` slug) — never `metadata.id` and never `metadata.version`.
-   - **One-off Loopwright configurations (`ControllerConfig`, `TaskContract`, `GitHubAppConfig`, `DecisionPolicy`)**: Always include top-level `apiVersion`, `kind`, and `spec` only. Even when illustrating a focused subsection (such as `spec.sandbox` or `spec.decisions`), include the owning `apiVersion` and `kind` (plus `metadata.name` when the owning kind is `Taskpack` or `TrustedRegistry`) and note omitted sibling sections with an inline `#` comment inside `spec:`. Never write awkward `"no metadata"` / `"without metadata"` phrasing in prose, YAML comments, or diagrams.
-   - **GitHub Actions workflows**: Always include top-level `name`, `on`, and `jobs` (never a bare `- uses:` step list without its enclosing workflow header).
-2. **Two-space indentation**: Use 2 spaces per indentation level. Never use tab characters (`\t`) inside YAML blocks.
-3. **No embedded multi-line JSON blobs**: Never embed multi-line JSON objects inside YAML block scalars (`config: |\n  { ... }`). Express structured configuration natively in YAML mappings and sequences (`examples/controller.md` must also contain zero ```` ```json ```` configuration blocks).
-4. **`Optional`-only inline `#` comments, Hugo Chroma comment safety, and `<hash>` placeholders**: Show every top-level and nested schema key in the Macro YAML block. Annotate **only `Optional` fields** in `#` comments (never add noisy `# Required` or `# Conditional` comments — unmarked keys are required), never put `: ` (colon + space) inside an inline `#` comment (and use double quotes `"..."` for string scalars containing `: `) so Hugo's Chroma YAML lexer renders all comments in uniform gray, and write `hex: <hash>` (`imageDigest: sha256:<hash>`) instead of 64-character dummy hashes. Follow with domain-grouped 2D tables of every valid enum choice.
-5. **Secret safety**: Reference credentials exclusively via environment variable names or `${ENV_VAR}` placeholders (`webhookSecretEnv: LOOPWRIGHT_WEBHOOK_SECRET`, `template: ${PROVIDER_TOKEN}`). Never include live tokens, private keys, or unredacted secrets.
-6. **Strict YAML 1.2 core schema compatibility**: Do not use YAML anchors (`&`), aliases (`*`), merge keys (`<<:`), custom tags (`!`), or duplicate keys, because Loopwright's configuration loaders reject them fail-closed.
+1. **Strict Multi-Line 2-Space Block Style (Zero Non-Empty Flow Syntax)**:
+   - **Forbidden**: Any non-empty flow mapping (`{ key: value }`, `- { id: a, kind: agent }`) or non-empty flow sequence (`[read, write]`, `[{ id: a }]`).
+   - **Allowed**: Only explicit empty mappings (`{}`) and explicit empty sequences (`[]`), such as `spec: {}`, `parameters: {}`, or `externalGates: []`.
+   - **Never game line caps with flow YAML**: Never compress block mappings or sequences onto single flow lines to squeeze under the `400`-line page cap. Instead, trim non-essential duplicate subfields from walkthroughs/overviews and route exhaustive schema dictionaries to `docs/references/*.md`, keeping every YAML example strictly 2-space block-style Pretty YAML.
+
+   **Bad (rejected by `check-docs.mjs`)**:
+
+   ```text
+   apiVersion: loopwright.dev/v1alpha1
+   kind: Taskpack
+   metadata: { name: docs-sync }
+   spec:
+     digest: { algorithm: sha256, hex: <hash> }
+     tools: [read, write]
+     steps: [{ id: author, kind: agent }]
+   ```
+
+   **Good (strict 2-space block-style Pretty YAML)**:
+
+   ```yaml
+   apiVersion: loopwright.dev/v1alpha1
+   kind: Taskpack
+   metadata:
+     name: docs-sync
+   spec:
+     digest:
+       algorithm: sha256
+       hex: <hash>
+     tools:
+       - read
+       - write
+     steps:
+       - id: author
+         kind: agent
+     externalGates: []
+   ```
+
+2. **Kubernetes-aligned top-level header envelope (zero bare `spec:` fragments, strict per-`kind` `metadata` rule)**:
+   - **Named multi-instance / cross-referenced objects (`Taskpack`, `TaskpackSuite`, `TrustedRegistry`, `EvolutionCampaign`)**: Always include top-level `apiVersion`, `kind`, 2-space block `metadata` with `name: <slug>` **only** (never `metadata.id` or `metadata.version`), and `spec`.
+   - **One-off / standalone objects (`ControllerConfig`, `TaskContract`, `GitHubAppConfig`, `DecisionPolicy`, `VerificationProfile`, `AttemptReceipt`)**: Always include top-level `apiVersion`, `kind`, and `spec` only. Never write awkward `"no metadata"` / `"without metadata"` phrasing in prose, YAML comments, or diagrams.
+   - **GitHub Actions workflows**: Always include top-level `name`, `on`, and `jobs`.
+3. **Two-space indentation & no embedded JSON blobs**: Use 2 spaces per indentation level (zero `\t` tabs), and never embed multi-line JSON objects inside YAML block scalars (`config: |\n  { ... }`). `examples/controller.md` must also contain zero ```` ```json ```` configuration blocks.
+4. **`Optional`-only inline `#` comments, Hugo Chroma comment safety, and `<hash>` placeholders**: Annotate **only `Optional` fields** in `#` comments (omit `# Required` and `# Conditional`), never put `: ` (colon + space) inside an inline `#` comment (and double-quote string scalars containing `: `), and write `hex: <hash>` (`imageDigest: sha256:<hash>`) instead of 64-character dummy hashes.
+5. **Secret safety & YAML 1.2 core schema**: Reference credentials only via environment variable names or `${ENV_VAR}` placeholders. Never use YAML anchors (`&`), aliases (`*`), merge keys (`<<`), custom/non-core tags (`!`), or duplicate keys.
 
 ## 7. `gpustack`-Style Blueprint SVG Diagrams & Hidden Mermaid Parity
 
 Visual diagrams clarify multi-stage execution, configuration containment/cross-reference relationships, admission fences, sandbox isolation, and GitHub App/Action control flows:
 
-1. **Location, generator & embedding**: Maintain diagram definitions in `scripts/generate-diagrams.mjs`, emit SVG files to `docs/assets/diagrams/*.svg` (copying `architecture-flow.svg` to `site/assets/images/architecture-flow.svg`), and embed them with standard Markdown image syntax (`![Diagram description](../../assets/diagrams/architecture-flow.svg)`).
+1. **Location, generator & embedding**: Maintain diagram definitions in `scripts/generate-diagrams.mjs`, emit SVG files to `docs/assets/diagrams/*.svg` (copying `architecture-flow.svg` to `site/assets/images/architecture-flow.svg`), and embed them with standard Markdown image syntax (`![Diagram description](../assets/diagrams/architecture-flow.svg)`).
 2. **`gpustack` Blueprint engineering-grid aesthetic & Loopwright brand palette**:
-   - **Canvas & Grid**: Use a `1200`-px wide `viewBox` (`0 0 1200 <height>`) with a `rx="20"` outer frame (`class="canvas"`) and a `40x40` `<pattern id="grid">` engineering grid overlay.
-   - **Adaptive Light / Dark CSS Variables**: Declare `color-scheme: light dark;` with `@media (prefers-color-scheme: dark)` overrides and preserve Loopwright's three signature hues across strokes, left-accent bars, and badges:
+   - **Canvas & Grid**: `1200`-px wide `viewBox` (`0 0 1200 <height>`) with `rx="20"` outer frame and `40x40` `<pattern id="grid">` engineering grid overlay.
+   - **Adaptive Light / Dark CSS Variables**: Declare `color-scheme: light dark;` with `@media (prefers-color-scheme: dark)` overrides and preserve Loopwright's three signature hues:
      - **Indigo-Violet**: `#5B4B9E` (primary control plane, admission, contracts)
      - **Teal-Cyan**: `#3B8EA5` (isolated runtime, sandboxes, decision routing)
      - **Warm Amber-Gold**: `#D89B48` (verification gates, receipts, publication, memory)
-   - **Header & Brand Logo Badge**: Include an uppercase `.kicker` (`LOOPWRIGHT / ...`), bold `29px` `.title`, `.sub` subtitle, and embed the original Loopwright logo (`docs/assets/logo.png` via `<symbol id="lw-logo">`) in both the top-right header badge and any middle control-plane hub badge (never a placeholder `L` circle).
-   - **Hierarchical Containers, Concise `<= 10`-Word Cards, Animated Wires & Takeaway Pills**: Group trust or lifecycle zones in `.box` / `.tint` containers, style individual nodes as cards with `4px` rounded left-accent bars and vector icons, connect stages or cross-references with dashed `.wire` paths and `<circle class="dot"><animateMotion .../></circle>` (`@media (prefers-reduced-motion: reduce) { .dot { display: none; } }`), and finish with 3 bottom emerald bullseye takeaway pills.
-   - **Strict SVG Card Text Hygiene (`<= 10` words, zero code punctuation)**: Every SVG card must contain **at most 10 words** in crisp, plain-English concepts — **zero `[]` or `{}`** array/object syntax, **zero `camelCase` or `snake_case`** field identifiers (`handlers[]`, `roleProfiles`, `envBindings`, `wallTimeMs`), and zero CLI `--flags`.
-3. **Readability bounds**: Include an explicit `viewBox`, keep stages scannable with generous padding, and keep body/mono label font sizes readable (`>= 11px` mono metadata, `>= 12px` labels).
-4. **Hidden Mermaid comment parity**: Immediately below every SVG image embed, include a hidden HTML comment containing the matching `flowchart LR` or `flowchart TD` graph using `->` and `..>` instead of `-->` and `-.->` (since `-->` closes an HTML comment early):
+   - **Header & Brand Logo Badge**: Embed the original Loopwright logo (`docs/assets/logo.png` via `<symbol id="lw-logo">`) in header and middle control-plane hub badges.
+   - **Strict SVG Card Text Hygiene (`<= 10` words, zero code punctuation)**: Every SVG card must contain **at most 10 words** in plain English — **zero `[]` or `{}`** array/object syntax, **zero `camelCase` or `snake_case`** field identifiers, and zero CLI `--flags`.
+3. **Hidden Mermaid comment parity**: Immediately below every SVG image embed, include a hidden HTML comment containing the matching `flowchart LR` or `flowchart TD` graph using `->` and `..>` instead of `-->` and `-.->` (since `-->` closes an HTML comment early).
 
-```markdown
-![Loopwright four-stage execution flow](../../assets/diagrams/architecture-flow.svg)
-
-<!--
-flowchart LR
-  Admit[1. Admit & Fence] -> Execute[2. Isolated Pi & Router]
-  Execute -> Verify[3. Independent Gate Verify]
-  Verify -> Publish[4. Publish & CAS Memory]
--->
-```
-
-## 8. Raw HTML & Link Discipline
+## 8. Raw HTML & One-Way Public Link Isolation
 
 - **Raw HTML ban in prose**: Outside fenced code blocks and HTML comments, the only permitted raw HTML tag in `docs/**/*.md` is an attribute-free `<br>` or `<br/>`.
-- **Relative links**: Use relative repository paths (`../operations/cli.md`, `./task-contract.md#schema-bounds`) for internal links so both repository readers and `scripts/site.mjs` resolve them deterministically.
-- **Public vs. Contributor link boundary**: The 15 public pages published to `site/` must never link to `docs/development.md` or `docs/contribute/**`.
+- **Relative links**: Use relative repository paths (`../operations/cli.md`, `./task-contract.md#schema-bounds`) for internal links so repository readers, `scripts/check-docs.mjs`, and `scripts/site.mjs` (`stageReferenceDocs()` and Hugo render hooks) resolve them deterministically.
+- **One-way public link isolation**: Links may point **into** the 15 public pages from `docs/references/*.md` and `docs/contribute/**`, **never** outward from the 15 public `docs/` pages or `site/content/**` into `development.md`, `contribute/**`, or `references/**` — across relative paths, root-relative paths (`/references/...`, `/docs/references/...`, `/docs/contribute/...`, `/docs/development/...`), and same-origin (`gpustack.github.io/loopwright/...`, `docs.gpustack.ai/loopwright/...`) or GitHub blob URLs. Literal URLs inside fenced code blocks (such as copy-paste `llms.txt` bootstrap prompts) are permitted.

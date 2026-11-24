@@ -1,0 +1,41 @@
+{{- $normalized := replace .content "\r\n" "\n" -}}
+{{- $headingPrefix := printf "## %s\n" .heading -}}
+{{- $section := "" -}}
+{{- if hasPrefix $normalized $headingPrefix -}}
+  {{- $section = index (split (strings.TrimPrefix $headingPrefix $normalized) "\n## ") 0 -}}
+{{- else -}}
+  {{- $parts := split $normalized (printf "\n%s" $headingPrefix) -}}
+  {{- if lt (len $parts) 2 -}}{{ errorf "docs/README.md is missing '## %s'" .heading }}{{- end -}}
+  {{- $section = index (split (index $parts 1) "\n## ") 0 -}}
+{{- end -}}
+{{- $items := slice -}}
+{{- $inTableBody := false -}}
+{{- $pipePlaceholder := "__LOOPWRIGHT_ESCAPED_PIPE__" -}}
+{{- range split $section "\n" -}}
+  {{- $trimmed := strings.TrimSpace . -}}
+  {{- if hasPrefix $trimmed "### " -}}
+    {{- $inTableBody = false -}}
+    {{- $items = $items | append (dict "kind" "heading" "title" (strings.TrimSpace (strings.TrimPrefix "### " $trimmed))) -}}
+  {{- else if hasPrefix $trimmed "|" -}}
+    {{- if findRE `^\|(\s*:?-+:?\s*\|)+$` $trimmed 1 -}}
+      {{- $inTableBody = true -}}
+    {{- else if $inTableBody -}}
+      {{- $masked := replace $trimmed `\|` $pipePlaceholder -}}
+      {{- $fields := split $masked "|" -}}
+      {{- if lt (len $fields) 4 -}}
+        {{- errorf "docs/README.md ## %s table row has fewer than 2 cells: %s" $.heading $trimmed -}}
+      {{- end -}}
+      {{- $link := replace (strings.TrimSpace (index $fields 1)) $pipePlaceholder "|" -}}
+      {{- if not (findRE `^\[[^\]]+\]\([^\)]+\)$` $link 1) -}}
+        {{- errorf "docs/README.md ## %s table row has invalid markdown link cell: %s" $.heading $link -}}
+      {{- end -}}
+      {{- $label := replaceRE `^\[([^\]]*)\]\([^\)]+\)$` "$1" $link -}}
+      {{- $target := strings.TrimSpace (replaceRE `^\[[^\]]*\]\(([^\)]+)\)$` "$1" $link) -}}
+      {{- $description := replace (strings.TrimSpace (index $fields 2)) $pipePlaceholder "|" -}}
+      {{- $items = $items | append (dict "kind" "row" "label" $label "target" $target "description" $description) -}}
+    {{- end -}}
+  {{- else -}}
+    {{- $inTableBody = false -}}
+  {{- end -}}
+{{- end -}}
+{{- return $items -}}

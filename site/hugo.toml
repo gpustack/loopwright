@@ -15,6 +15,10 @@ defaultContentLanguageInSubdir = false
   sourceRef = "main"
   siteRoot = ""
   releaseKind = "development"
+  siteHost = "docs.gpustack.ai"
+  repoSlug = "gpustack/loopwright"
+  repoNavLabel = "Repository navigation"
+  repoNavDescription = "Module relationships, design records, code entry points and applicable skills for contributors."
 
 [outputs]
   home = ["HTML", "JSON", "LLMS", "Markdown", "Version", "Versions"]
@@ -70,8 +74,9 @@ defaultContentLanguageInSubdir = false
     source = "../docs/assets"
     target = "static/docs/assets"
   [[module.mounts]]
-    source = "../docs/references"
+    source = "resources/references"
     target = "static/references"
+    files = ["*.md"]
   [[module.mounts]]
     source = "layouts"
     target = "layouts"

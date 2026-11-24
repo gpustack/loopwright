@@ -8,7 +8,7 @@ The package never mutates a primary `RunResult`, never spends exhausted model bu
 ## Contents
 
 - [Three-tier separation](#three-tier-separation)
-- [Entries](#entries)
+- [Memory records](#memory-records)
 - [Settled-outcome finalization](#settled-outcome-finalization)
 - [Six-gate verification](#six-gate-verification)
 - [Compare-and-swap application](#compare-and-swap-application)
@@ -41,7 +41,7 @@ are refused anywhere inside `.loopwright/memory/`. The taskpack store accepts on
 `entries/`, and `.cas.lock`, and `repository` fields always carry an `org/repo` slug, never a host path.
 `readRegularFile` checks `fstat.size` before reading, capping each `entries/<id>.md` at `64 KiB` and `index.json` at `2 MiB`.
 
-## Entries
+## Memory records
 
 A `MemoryEntry` (`version: 1`) binds a bounded claim (`1..2048` bytes) to a `claimKey`, a `kind` (`fact`, `failure_observation`, or `invariant`), the taskpack/repository/path scope, provenance (`runId`, `lockHash`, `candidateDigest`, `sourceDigest`), validity (`baseRevision`, `sourceRevision`, `codeFingerprint`, `upstreamVersions`), an expiry, prior ids it supersedes, and `1..16` evidence references that resolve against the run's authenticated `VerificationResult` and artifact inventory.
 

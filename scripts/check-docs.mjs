@@ -2,11 +2,12 @@
 /* global process, console */
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { parseDocument } from "yaml";
+import { pathToFileURL, URL } from "node:url";
+import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from "yaml";
 
 const INTERROGATIVES = /\b(what|where|when|how|which|why|who|whose|whom)\b/i;
 const HEADING_ARTICLES = /\b(a|an|the)\b/i;
+const HEADING_CONTAINER_NOUNS = /\b(rows?|tables?|columns?|guides?|entries|sections?)\b/i;
 const TABLE_HEADER_BANNED_WORDS = /\b(a|an|the|this|that|these|those|what|where|when|how|which|why|who|whose|whom)\b/i;
 const AI_FILLER_PHRASES = [
   "seamlessly",
@@ -27,8 +28,59 @@ const AI_FILLER_REGEXES = AI_FILLER_PHRASES.map(phrase => ({
   re: new RegExp(`\\b${phrase.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}\\b`, "i")
 }));
 
+const STANDARD_YAML_CORE_TAGS = new Set([
+  "tag:yaml.org,2002:map",
+  "tag:yaml.org,2002:seq",
+  "tag:yaml.org,2002:str",
+  "tag:yaml.org,2002:null",
+  "tag:yaml.org,2002:bool",
+  "tag:yaml.org,2002:int",
+  "tag:yaml.org,2002:float"
+]);
+
+export const NAMED_METADATA_KINDS = new Set([
+  "Taskpack",
+  "TaskpackSuite",
+  "TrustedRegistry",
+  "EvolutionCampaign"
+]);
+
+export const METADATA_FREE_KINDS = new Set([
+  "ControllerConfig",
+  "TaskContract",
+  "GitHubAppConfig",
+  "DecisionPolicy",
+  "VerificationProfile",
+  "AttemptReceipt"
+]);
+
+const KIND_PLURAL_REPLACEMENTS = new Map([
+  ["Taskpacks", "`Taskpack`s"],
+  ["TaskpackSuites", "`TaskpackSuite`s"],
+  ["TaskContracts", "`TaskContract`s"],
+  ["TrustedRegistries", "`TrustedRegistry` objects"],
+  ["ControllerConfigs", "`ControllerConfig`s"],
+  ["GitHubAppConfigs", "`GitHubAppConfig`s"],
+  ["DecisionPolicies", "`DecisionPolicy` objects"],
+  ["EvolutionCampaigns", "`EvolutionCampaign`s"],
+  ["AttemptReceipts", "`AttemptReceipt`s"],
+  ["VerificationProfiles", "`VerificationProfile`s"]
+]);
+
+const IRREGULAR_KIND_SINGULARS = new Map([
+  ["TrustedRegistry", "`TrustedRegistry` objects"],
+  ["DecisionPolicy", "`DecisionPolicy` objects"]
+]);
+
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const LINK = /!?\[([^\]\n]*)\]\(([^)\n]+)\)/g;
+const BQ_FENCE = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})(.*)$/;
+const BQ_HEADING_RE = /^(?: {0,3}> ?)* {0,3}#{1,6}\s+(.+)$/;
+const EXCLUDED_SITE_ROUTE_RE =
+  /^(?:loopwright\/(?:[^/]+\/)?)?(references|docs\/references|contribute|docs\/contribute|docs\/adr|development(?:\.md)?|docs\/development(?:\.md)?)(?:\/|$)/i;
+const GITHUB_EXCLUDED_BLOB_RE =
+  /^gpustack\/loopwright\/(?:blob|tree)\/[^/]+\/docs\/(references|contribute|adr|development(?:\.md)?)(?:\/|$)/i;
+const EVIDENCE_LINE_RE = /^Evidence:\s*(?:contract|recorded capture|synthetic simulation)\.$/;
+
 export const PUBLIC_SITE_DOC_REL_PATHS = new Set([
   "docs/getting-started/architecture.md",
   "docs/getting-started/installation.md",
@@ -38,7 +90,7 @@ export const PUBLIC_SITE_DOC_REL_PATHS = new Set([
   "docs/operations/coding-agents.md",
   "docs/walkthroughs/declarative-taskpack.md",
   "docs/walkthroughs/managed-controller.md",
-  "docs/walkthroughs/evolutionary-campaigns.md",
+  "docs/walkthroughs/evolutionary-campaign.md",
   "docs/configuration/taskpack.md",
   "docs/configuration/task-contract.md",
   "docs/configuration/controller-and-registry.md",
@@ -61,20 +113,22 @@ export const REPO_ONLY_DOC_REL_PATHS = new Set([
   "docs/contribute/adr/0002-isolated-pi-sdk.md"
 ]);
 
+const MAX_HEADING_DEPTH = 3;
 const HEADING_MAX_WORDS = 4;
 const HEADING_MAX_CHARS = 32;
 const STEP_HEADING_MAX_CHARS = 38;
-const MAX_H2_SECTIONS = 10;
+const MAX_PUBLIC_H2_SECTIONS = 8;
+const MAX_CONTRIBUTE_H2_SECTIONS = 10;
 const LINE_CAP_ARCHITECTURE = 200;
 const LINE_CAP_ADR = 220;
 const LINE_CAP_DEFAULT = 400;
+const LINE_CAP_REFERENCE = 800;
 const PARAGRAPH_MAX_LINES = 5;
 const PARAGRAPH_MAX_CHARS = 500;
 const TABLE_HEADER_MIN_WORDS = 1;
 const TABLE_HEADER_MAX_WORDS = 3;
 const TABLE_HEADER_MAX_CHARS = 24;
 const TABLE_CELL_MAX_CHARS = 180;
-const EXPECTED_ALL_PAGES_COUNT = PUBLIC_SITE_DOC_REL_PATHS.size + REPO_ONLY_DOC_REL_PATHS.size;
 
 export function slugify(text) {
   return text
@@ -103,8 +157,32 @@ export function getAnchors(filePath) {
   const content = fs.readFileSync(filePath, "utf8");
   const anchors = new Set();
   const counts = new Map();
+  let fence = "";
+  let comment = false;
   for (const line of content.split("\n")) {
-    const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+    const marker = line.match(BQ_FENCE);
+    if (marker && !fence) {
+      if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        continue;
+      }
+    } else if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = "";
+      }
+      continue;
+    }
+    const stripped = line.trim();
+    if (comment) {
+      if (stripped.includes("-->")) comment = false;
+      continue;
+    }
+    if (stripped.startsWith("<!--")) {
+      if (!stripped.includes("-->")) comment = true;
+      continue;
+    }
+
+    const headingMatch = line.match(BQ_HEADING_RE);
     if (headingMatch) {
       const rawText = headingMatch[1]
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
@@ -128,48 +206,95 @@ export function getAnchors(filePath) {
   return anchors;
 }
 
-export function proseLinks(text) {
-  const links = [];
+function maskExemptMarkdownRegions(text) {
+  const lines = text.split("\n");
+  const out = [];
   let fence = "";
   let comment = false;
-  for (const line of text.split("\n")) {
-    const marker = line.match(FENCE);
-    if (marker) {
-      const m = marker[1];
-      if (!fence) {
-        if (m[0] === "`" && marker[2].includes("`")) {
-          // inline code on line
-        } else {
-          fence = m;
-          continue;
-        }
-      } else if (m[0] === fence[0] && m.length >= fence.length && !marker[2].trim()) {
+  let prevBlank = true;
+  let inList = false;
+
+  for (const line of lines) {
+    const marker = line.match(BQ_FENCE);
+    if (marker && !fence) {
+      if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        prevBlank = false;
+        out.push("");
+        continue;
+      }
+    } else if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
         fence = "";
-        continue;
       }
+      out.push("");
+      continue;
     }
-    if (!fence) {
-      const stripped = line.trimStart();
-      if (comment) {
-        if (line.includes("-->")) {
-          comment = false;
-        }
-        continue;
-      }
-      if (stripped.startsWith("<!--")) {
-        if (!line.includes("-->")) {
-          comment = true;
-        }
-        continue;
-      }
-      let proseLine = line.replace(/`[^`]+`/g, " ");
-      let match;
-      const re = new RegExp(LINK.source, "g");
-      while ((match = re.exec(proseLine)) !== null) {
-        links.push({ label: match[1], target: match[2] });
-      }
+
+    const stripped = line.trim();
+    if (comment) {
+      if (stripped.includes("-->")) comment = false;
+      out.push("");
+      continue;
     }
+    if (stripped.startsWith("<!--")) {
+      if (!stripped.includes("-->")) comment = true;
+      out.push("");
+      continue;
+    }
+
+    if (stripped === "") {
+      prevBlank = true;
+      out.push("");
+      continue;
+    }
+
+    const isIndented = line.startsWith("    ") || line.startsWith("\t");
+    if (prevBlank && !inList && isIndented) {
+      out.push("");
+      continue;
+    }
+    if (/^(?: {0,3}> ?)* {0,3}(?:[-*+]|\d+[.)])[ \t]/.test(line)) {
+      inList = true;
+    } else if (!isIndented) {
+      inList = false;
+    }
+    prevBlank = false;
+
+    let masked = line.replace(/<!--[\s\S]*?-->/g, " ");
+    masked = masked.replace(/(`+)[^`]*?\1/g, " ");
+    out.push(masked);
   }
+
+  return out.join("\n");
+}
+
+export function proseLinks(text) {
+  const links = [];
+  const masked = maskExemptMarkdownRegions(text);
+
+  const inlineRe = /!?\[([^\]\n]*(?:\n(?!\s*\n)[^\]\n]*)*)\]\(\s*(<[^>\r\n]+>|[^)\s]+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g;
+  let match;
+  while ((match = inlineRe.exec(masked)) !== null) {
+    const rawTarget = match[2].startsWith("<") && match[2].endsWith(">")
+      ? match[2].slice(1, -1)
+      : match[2];
+    links.push({ label: match[1].replace(/\s+/g, " ").trim(), target: rawTarget.trim() });
+  }
+
+  const refDefRe = /^(?: {0,3}> ?)* {0,3}\[(?!\^)([^\]\r\n]+)\]:[ \t]*(?:\r?\n[ \t]*)?(<[^>\r\n]+>|[^\s]+)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/gm;
+  while ((match = refDefRe.exec(masked)) !== null) {
+    const rawTarget = match[2].startsWith("<") && match[2].endsWith(">")
+      ? match[2].slice(1, -1)
+      : match[2];
+    links.push({ label: match[1].trim(), target: rawTarget.trim() });
+  }
+
+  const autoLinkRe = /<((?:https?:\/\/|\/\/)[^\s>]+)>/gi;
+  while ((match = autoLinkRe.exec(masked)) !== null) {
+    links.push({ label: match[1], target: match[1].trim() });
+  }
+
   return links;
 }
 
@@ -180,7 +305,7 @@ export function checkProseHtml(text, source, errors) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const lineno = i + 1;
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (marker[1][0] === "`" && marker[2].includes("`")) {
         // inline prose
@@ -220,8 +345,8 @@ export function checkProseHtml(text, source, errors) {
       continue;
     }
 
-    let proseLine = line.replace(/`[^`]+`/g, "");
-    proseLine = proseLine.replace(/<(https?:\/\/[^\s>]+|[^\s>@]+@[^\s>@]+)>/g, "");
+    let proseLine = line.replace(/(`+)[^`]*?\1/g, "");
+    proseLine = proseLine.replace(/<((?:https?:\/\/|\/\/)[^\s>]+|[^\s>@]+@[^\s>@]+)>/g, "");
     const tagMatches = proseLine.matchAll(/<\/?[a-zA-Z][a-zA-Z0-9]*(?:\s+[^>]*)?\/?>/g);
     for (const match of tagMatches) {
       const tag = match[0];
@@ -238,7 +363,7 @@ export function checkInterrogatives(filePath, content, errors) {
   let comment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         fence = marker[1];
@@ -261,7 +386,7 @@ export function checkInterrogatives(filePath, content, errors) {
       continue;
     }
 
-    const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+    const headingMatch = line.match(BQ_HEADING_RE);
     if (headingMatch) {
       const text = headingMatch[1];
       if (INTERROGATIVES.test(text)) {
@@ -292,13 +417,13 @@ function splitTableCells(rowLine) {
     .map(c => c.replaceAll(placeholder, "|").trim());
 }
 
-export function checkHeadingCaps(relDoc, content, errors) {
+export function checkHeadingDepthCeiling(relDoc, content, errors) {
   const lines = content.split("\n");
   let fence = "";
   let comment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         fence = marker[1];
@@ -321,10 +446,61 @@ export function checkHeadingCaps(relDoc, content, errors) {
       continue;
     }
 
-    const headingMatch = line.match(/^(#{2,4})\s+(.+)$/);
-    if (!headingMatch) continue;
-    const rawHeading = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
+    const deepHeadingMatch = line.match(/^(?: {0,3}> ?)* {0,3}(#{4,6})\s+(.+)$/);
+    if (deepHeadingMatch) {
+      errors.push(
+        `${relDoc}:${i + 1}: heading depth H${deepHeadingMatch[1].length} exceeds hard H1-H${MAX_HEADING_DEPTH} ceiling: "${deepHeadingMatch[1]} ${deepHeadingMatch[2].trim()}"`
+      );
+    }
+  }
+}
+
+export function checkHeadingCaps(relDoc, content, errors) {
+  const lines = content.split("\n");
+  let fence = "";
+  let comment = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const marker = line.match(BQ_FENCE);
+    if (marker && !fence) {
+      if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        continue;
+      }
+    } else if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = "";
+      }
+      continue;
+    }
+
+    const stripped = line.trim();
+    if (comment) {
+      if (stripped.includes("-->")) comment = false;
+      continue;
+    }
+    if (stripped.startsWith("<!--")) {
+      if (!stripped.includes("-->")) comment = true;
+      continue;
+    }
+
+    const anyHeadingMatch = line.match(/^(?: {0,3}> ?)* {0,3}(#{1,6})\s+(.+)$/);
+    if (!anyHeadingMatch) continue;
+    const hashes = anyHeadingMatch[1];
+    const rawHeading = anyHeadingMatch[2].replace(/\s+#+\s*$/, "").trim();
     const visible = stripInlineFormatting(rawHeading);
+    const codeStrippedHeading = stripInlineFormatting(rawHeading.replace(/(`+)[^`]*?\1/g, " "));
+
+    const containerMatch = codeStrippedHeading.match(HEADING_CONTAINER_NOUNS);
+    if (containerMatch) {
+      errors.push(
+        `${relDoc}:${i + 1}: heading must not use layout-container noun "${containerMatch[1]}": "${visible}"`
+      );
+    }
+
+    if (hashes.length < 2 || hashes.length > MAX_HEADING_DEPTH) {
+      continue;
+    }
 
     const stepMatch = visible.match(/^Step\s+[0-9]+:\s+(.+)$/);
     if (stepMatch) {
@@ -358,23 +534,30 @@ export function checkSectionAndLineCaps(relDoc, content, errors) {
   const normalizedRel = relDoc.split(path.sep).join("/");
   const rawLines = content.split("\n");
   const lineCount = rawLines.length > 0 && rawLines[rawLines.length - 1] === "" ? rawLines.length - 1 : rawLines.length;
+  const isReferenceDoc = /^docs\/references\/[^/]+\.md$/.test(normalizedRel);
 
   let lineCap = LINE_CAP_DEFAULT;
   if (normalizedRel === "docs/getting-started/architecture.md") {
     lineCap = LINE_CAP_ARCHITECTURE;
   } else if (/^docs\/contribute\/adr\/[^/]+\.md$/.test(normalizedRel)) {
     lineCap = LINE_CAP_ADR;
+  } else if (isReferenceDoc) {
+    lineCap = LINE_CAP_REFERENCE;
   }
 
   if (lineCount > lineCap) {
     errors.push(`${relDoc}: line count exceeds ${lineCap} lines (${lineCount})`);
   }
 
+  if (normalizedRel === "docs/README.md" || isReferenceDoc) {
+    return;
+  }
+
   let fence = "";
   let comment = false;
   let h2Count = 0;
   for (const line of rawLines) {
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         fence = marker[1];
@@ -402,8 +585,12 @@ export function checkSectionAndLineCaps(relDoc, content, errors) {
     }
   }
 
-  if (h2Count > MAX_H2_SECTIONS) {
-    errors.push(`${relDoc}: H2 section count exceeds ${MAX_H2_SECTIONS} (${h2Count} ## sections excluding ## Contents)`);
+  const maxH2 = PUBLIC_SITE_DOC_REL_PATHS.has(normalizedRel)
+    ? MAX_PUBLIC_H2_SECTIONS
+    : MAX_CONTRIBUTE_H2_SECTIONS;
+
+  if (h2Count > maxH2) {
+    errors.push(`${relDoc}: H2 section count exceeds ${maxH2} (${h2Count} ## sections excluding ## Contents)`);
   }
 }
 
@@ -442,7 +629,7 @@ export function checkProseParagraphCaps(relDoc, content, errors) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         flushParagraph();
@@ -499,7 +686,7 @@ export function checkTables(relDoc, content, errors) {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         fence = marker[1];
@@ -600,7 +787,7 @@ export function checkBannedAiFiller(relDoc, content, errors) {
   let comment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const marker = line.match(FENCE);
+    const marker = line.match(BQ_FENCE);
     if (marker && !fence) {
       if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
         fence = marker[1];
@@ -623,7 +810,7 @@ export function checkBannedAiFiller(relDoc, content, errors) {
       continue;
     }
 
-    const proseLine = line.replace(/`[^`]+`/g, " ");
+    const proseLine = line.replace(/(`+)[^`]*?\1/g, " ");
     for (const { phrase, re } of AI_FILLER_REGEXES) {
       if (re.test(proseLine)) {
         errors.push(`${relDoc}:${i + 1}: prose must not use banned AI filler phrase "${phrase}"`);
@@ -631,6 +818,98 @@ export function checkBannedAiFiller(relDoc, content, errors) {
     }
     if (/\b(?:no\s+`?metadata`?|without\s+`?metadata`?|`?metadata`?\s+is\s+(?:forbidden|not\s+used)|omits\s+`?metadata`?)\b/i.test(line)) {
       errors.push(`${relDoc}:${i + 1}: omit awkward "no metadata" / "without metadata" phrasing in docs`);
+    }
+  }
+}
+
+function isCodeSpanKindExempt(spanText) {
+  if (!spanText) return true;
+  if (
+    spanText.startsWith("-") ||
+    spanText.includes("/") ||
+    spanText.includes("\\") ||
+    spanText.includes(":") ||
+    spanText.includes("=") ||
+    spanText.includes(".")
+  ) {
+    return true;
+  }
+  if (/^(?:loopwright|npm|npx|pnpm|node|git|gh|curl|docker)\s/.test(spanText)) {
+    return true;
+  }
+  return false;
+}
+
+export function checkKindPlurals(relDoc, content, errors) {
+  const lines = content.split("\n");
+  let fence = "";
+  let comment = false;
+  let prevBlank = true;
+  let inList = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineno = i + 1;
+    const marker = line.match(BQ_FENCE);
+    if (marker && !fence) {
+      if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        prevBlank = false;
+        continue;
+      }
+    } else if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = "";
+      }
+      continue;
+    }
+
+    const stripped = line.trim();
+    if (comment) {
+      if (stripped.includes("-->")) comment = false;
+      continue;
+    }
+    if (stripped.startsWith("<!--")) {
+      if (!stripped.includes("-->")) comment = true;
+      continue;
+    }
+    if (stripped === "") {
+      prevBlank = true;
+      continue;
+    }
+
+    const isIndented = line.startsWith("    ") || line.startsWith("\t");
+    if (prevBlank && !inList && isIndented) {
+      continue;
+    }
+    if (/^(?: {0,3}> ?)* {0,3}(?:[-*+]|\d+[.)])[ \t]/.test(line)) {
+      inList = true;
+    } else if (!isIndented) {
+      inList = false;
+    }
+    prevBlank = false;
+
+    const uncommented = line.replace(/<!--[\s\S]*?-->/g, " ");
+    for (const codeMatch of uncommented.matchAll(/(`+)([^`]+)\1([A-Za-z]*)/g)) {
+      const span = codeMatch[2].trim();
+      const suffix = codeMatch[3];
+      if (IRREGULAR_KIND_SINGULARS.has(span) && suffix === "s") {
+        errors.push(
+          `${relDoc}:${lineno}: invalid irregular kind plural "\`${span}\`s"; use ${IRREGULAR_KIND_SINGULARS.get(span)}`
+        );
+        continue;
+      }
+      if (isCodeSpanKindExempt(span)) {
+        continue;
+      }
+      for (const rawToken of span.split(/\s+/)) {
+        const token = rawToken.replace(/^[([{,;|]+|[)\]},;|]+$/g, "");
+        if (KIND_PLURAL_REPLACEMENTS.has(token)) {
+          errors.push(
+            `${relDoc}:${lineno}: pluralized resource kind "\`${token}\`" inside backticks; use ${KIND_PLURAL_REPLACEMENTS.get(token)}`
+          );
+        }
+      }
     }
   }
 }
@@ -646,6 +925,27 @@ export function checkPrettyYamlBlocks(relDoc, content, errors) {
     if (!isYamlFence || yamlLines.length === 0) return;
     const blockText = yamlLines.map(item => item.text).join("\n");
 
+    const lineStartOffsets = [];
+    let runningOffset = 0;
+    for (const item of yamlLines) {
+      lineStartOffsets.push({ offset: runningOffset, lineNo: item.lineNo });
+      runningOffset += item.text.length + 1;
+    }
+    function lineForOffset(offset) {
+      if (typeof offset !== "number" || Number.isNaN(offset) || offset < 0) {
+        return yamlBlockStartLine;
+      }
+      let resolvedLine = yamlLines[0]?.lineNo ?? yamlBlockStartLine;
+      for (const entry of lineStartOffsets) {
+        if (entry.offset <= offset) {
+          resolvedLine = entry.lineNo;
+        } else {
+          break;
+        }
+      }
+      return resolvedLine;
+    }
+
     for (const item of yamlLines) {
       if (item.text.includes("\t")) {
         errors.push(`${relDoc}:${item.lineNo}: Pretty YAML block must not contain tab characters`);
@@ -657,6 +957,60 @@ export function checkPrettyYamlBlocks(relDoc, content, errors) {
         `${relDoc}:${yamlBlockStartLine}: Pretty YAML block must not embed multi-line JSON block scalars`
       );
     }
+
+    const parsedDoc = parseDocument(blockText, {
+      version: "1.2",
+      schema: "core",
+      uniqueKeys: true
+    });
+    if (parsedDoc.errors.length > 0) {
+      for (const parseErr of parsedDoc.errors) {
+        const errLine = lineForOffset(parseErr.pos?.[0]);
+        errors.push(
+          `${relDoc}:${errLine}: Pretty YAML block failed strict YAML 1.2 parse (${parseErr.message.split("\n")[0]})`
+        );
+      }
+    }
+
+    visit(parsedDoc, {
+      Node(_key, node) {
+        if (!node || typeof node !== "object") return;
+        const nodeLine = lineForOffset(node.range?.[0]);
+        if (node.anchor) {
+          errors.push(
+            `${relDoc}:${nodeLine}: Pretty YAML block must not use YAML anchors ("&${node.anchor}")`
+          );
+        }
+        if (isAlias(node)) {
+          errors.push(
+            `${relDoc}:${nodeLine}: Pretty YAML block must not use YAML aliases ("*${node.source}")`
+          );
+        }
+        if (node.tag && !STANDARD_YAML_CORE_TAGS.has(node.tag)) {
+          errors.push(
+            `${relDoc}:${nodeLine}: Pretty YAML block must not use custom or non-core YAML tags ("${node.tag}")`
+          );
+        }
+        if (isMap(node) && node.flow === true && node.items.length > 0) {
+          errors.push(
+            `${relDoc}:${nodeLine}: Pretty YAML block must use 2-space block style instead of non-empty flow mapping ({ ... }); only empty {} is allowed`
+          );
+        }
+        if (isSeq(node) && node.flow === true && node.items.length > 0) {
+          errors.push(
+            `${relDoc}:${nodeLine}: Pretty YAML block must use 2-space block style instead of non-empty flow sequence ([ ... ]); only empty [] is allowed`
+          );
+        }
+      },
+      Pair(_key, pair) {
+        if (pair && isScalar(pair.key) && (pair.key.value === "<<" || pair.key.source === "<<")) {
+          const mergeLine = lineForOffset(pair.key.range?.[0]);
+          errors.push(
+            `${relDoc}:${mergeLine}: Pretty YAML block must not use YAML merge keys ("<<")`
+          );
+        }
+      }
+    });
 
     const topKeys = new Set();
     let topKind = "";
@@ -670,16 +1024,6 @@ export function checkPrettyYamlBlocks(relDoc, content, errors) {
         }
       }
     }
-
-    const NAMED_METADATA_KINDS = new Set(["Taskpack", "TrustedRegistry", "EvolutionCampaign"]);
-    const METADATA_FREE_KINDS = new Set([
-      "ControllerConfig",
-      "TaskContract",
-      "GitHubAppConfig",
-      "DecisionPolicy",
-      "VerificationProfile",
-      "AttemptReceipt"
-    ]);
 
     for (const item of yamlLines) {
       const codeOnly = item.text.replace(/#.*$/, "");
@@ -806,7 +1150,56 @@ export function checkPrettyYamlBlocks(relDoc, content, errors) {
   }
 }
 
+export function checkReferenceEvidenceHeader(relDoc, content, errors) {
+  const introPart = content.split("\n---\n")[0];
+  const lines = introPart.split("\n");
+  let fence = "";
+  let comment = false;
+  let foundEvidence = false;
+
+  for (const line of lines) {
+    const marker = line.match(BQ_FENCE);
+    if (marker && !fence) {
+      if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
+        fence = marker[1];
+        continue;
+      }
+    } else if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) {
+        fence = "";
+      }
+      continue;
+    }
+
+    const stripped = line.trim();
+    if (comment) {
+      if (stripped.includes("-->")) comment = false;
+      continue;
+    }
+    if (stripped.startsWith("<!--")) {
+      if (!stripped.includes("-->")) comment = true;
+      continue;
+    }
+
+    if (line.startsWith("## ")) {
+      break;
+    }
+    if (EVIDENCE_LINE_RE.test(stripped)) {
+      foundEvidence = true;
+      break;
+    }
+  }
+
+  if (!foundEvidence) {
+    errors.push(
+      `${relDoc}: reference page must declare an opening "Evidence: contract | recorded capture | synthetic simulation." label line`
+    );
+  }
+}
+
 export function checkReadingFooter(relDoc, content, errors) {
+  const normalizedRel = relDoc.split(path.sep).join("/");
+  const isReference = normalizedRel.startsWith("docs/references/");
   const parts = content.split("\n---\n");
   if (parts.length < 2) {
     errors.push(`${relDoc}: missing trailing "\\n---\\n" reading footer separator before "**See also**"`);
@@ -837,7 +1230,14 @@ export function checkReadingFooter(relDoc, content, errors) {
     }
   }
 
-  const isPublic = PUBLIC_SITE_DOC_REL_PATHS.has(relDoc);
+  if (isReference) {
+    if (nextParts.length > 1 || /^\*\*Next\*\*/m.test(maskExemptMarkdownRegions(content))) {
+      errors.push(`${relDoc}: reference page must not include "**Next**" in reading footer`);
+    }
+    return;
+  }
+
+  const isPublic = PUBLIC_SITE_DOC_REL_PATHS.has(normalizedRel);
   if (isPublic && nextParts.length < 2) {
     errors.push(`${relDoc}: public site page must include "**Next** → [Title](target) — <description>" in reading footer`);
     return;
@@ -876,6 +1276,121 @@ export function checkExamplesControllerNoJson(relDoc, content, errors) {
   }
 }
 
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function classifyExcludedPublicLink(rawTarget, absSource, root) {
+  const trimmed = rawTarget.trim().replace(/^<|>$/g, "").trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+  if (/^(?:mailto:|javascript:|tel:|data:)/i.test(trimmed)) {
+    return null;
+  }
+
+  if (/^(?:https?:\/\/|\/\/)/i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed.startsWith("//") ? `https:${trimmed}` : trimmed);
+      const hostname = parsed.hostname.toLowerCase();
+      const cleanPath = path.posix
+        .normalize("/" + safeDecodeURIComponent(parsed.pathname))
+        .replace(/^\/+/, "");
+      if (hostname === "gpustack.github.io" || hostname === "docs.gpustack.ai") {
+        const m = EXCLUDED_SITE_ROUTE_RE.exec(cleanPath);
+        if (m) {
+          const isRef = m[1].toLowerCase().includes("references");
+          return { zone: isRef ? "references" : "contribute", detail: cleanPath };
+        }
+      } else if (hostname === "github.com") {
+        const m = GITHUB_EXCLUDED_BLOB_RE.exec(cleanPath);
+        if (m) {
+          const isRef = m[1].toLowerCase().includes("references");
+          return { zone: isRef ? "references" : "contribute", detail: cleanPath };
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+    return null;
+  }
+
+  const [beforeHash] = trimmed.split("#");
+  const [rawPathOnly] = beforeHash.split("?");
+  const decodedPath = safeDecodeURIComponent(rawPathOnly);
+  if (!decodedPath) {
+    return null;
+  }
+
+  if (decodedPath.startsWith("/")) {
+    const cleanRootRel = path.posix.normalize(decodedPath).replace(/^\/+/, "");
+    const m = EXCLUDED_SITE_ROUTE_RE.exec(cleanRootRel);
+    if (m) {
+      const isRef = m[1].toLowerCase().includes("references");
+      return { zone: isRef ? "references" : "contribute", detail: `/${cleanRootRel}` };
+    }
+    return null;
+  }
+
+  const resolvedFs = path.resolve(path.dirname(absSource), decodedPath);
+  const relFs = path.relative(root, resolvedFs).split(path.sep).join("/");
+  if (
+    relFs === "docs/development.md" ||
+    relFs === "docs/development" ||
+    relFs.startsWith("docs/development/") ||
+    relFs === "docs/contribute" ||
+    relFs.startsWith("docs/contribute/") ||
+    relFs === "docs/adr" ||
+    relFs.startsWith("docs/adr/")
+  ) {
+    return { zone: "contribute", detail: relFs };
+  }
+  if (relFs === "docs/references" || relFs.startsWith("docs/references/")) {
+    return { zone: "references", detail: relFs };
+  }
+
+  const siteContentDir = path.join(root, "site", "content");
+  const relFromSiteContent = path.relative(siteContentDir, absSource);
+  if (relFromSiteContent && !relFromSiteContent.startsWith("..") && !path.isAbsolute(relFromSiteContent)) {
+    const virtualDir = path.posix.dirname(relFromSiteContent.split(path.sep).join("/"));
+    const virtualNorm = path.posix
+      .normalize("/" + path.posix.join(virtualDir === "." ? "" : virtualDir, decodedPath))
+      .replace(/^\/+/, "");
+    const m = EXCLUDED_SITE_ROUTE_RE.exec(virtualNorm);
+    if (m) {
+      const isRef = m[1].toLowerCase().includes("references");
+      return { zone: isRef ? "references" : "contribute", detail: virtualNorm };
+    }
+  }
+
+  return null;
+}
+
+export function checkPublicZoneLinkIsolation(relSource, absSource, content, root, errors) {
+  for (const link of proseLinks(content)) {
+    const raw = link.target.trim();
+    const leak = classifyExcludedPublicLink(raw, absSource, root);
+    if (!leak) continue;
+    if (leak.zone === "references") {
+      errors.push(
+        `${relSource}: public site page must not link to excluded reference zone "${raw}" (${leak.detail})`
+      );
+    } else {
+      errors.push(
+        `${relSource}: public site page must not link to repository-only contributor page "${raw}" (${leak.detail})`
+      );
+    }
+  }
+}
+
 function getSection(text, title) {
   const marker = `\n## ${title}\n`;
   const startIdx = text.startsWith(`## ${title}\n`) ? 0 : text.indexOf(marker);
@@ -888,6 +1403,40 @@ function getSection(text, title) {
     return text.slice(bodyStart);
   }
   return text.slice(bodyStart, nextHeadingIdx);
+}
+
+function parseZoneTableEntries(sectionText) {
+  const entries = [];
+  const rowRegex = /^\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*([^|]+)\s*\|$/gm;
+  let rowMatch;
+  while ((rowMatch = rowRegex.exec(sectionText)) !== null) {
+    entries.push({
+      label: rowMatch[1].trim(),
+      target: rowMatch[2].trim(),
+      description: rowMatch[3].trim()
+    });
+  }
+  return entries;
+}
+
+function verifyExactH1(docsDir, entry, zoneHeading, errors) {
+  const targetPath = path.resolve(docsDir, entry.target);
+  if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isFile()) {
+    errors.push(`${zoneHeading} target does not exist: ${entry.target}`);
+    return;
+  }
+  const pageContent = fs.readFileSync(targetPath, "utf8");
+  const h1Match = pageContent.match(/^#\s+(.+)$/m);
+  if (!h1Match) {
+    errors.push(`${entry.target}: missing # H1 heading`);
+  } else {
+    const h1Title = h1Match[1].trim();
+    if (h1Title !== entry.label) {
+      errors.push(
+        `${entry.target}: H1 title "${h1Title}" does not match ${zoneHeading} label "${entry.label}" character for character`
+      );
+    }
+  }
 }
 
 function resolveCheckOptions(arg) {
@@ -916,11 +1465,13 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
 
   const indexContent = fs.readFileSync(indexFile, "utf8");
 
-  // 1. docs/README.md sections
+  // 1. docs/README.md sections (three-zone governance)
   let readingPaths;
   let moduleMap = "";
   let specsSection;
   let allPagesSection = "";
+  let referenceSection = "";
+  let contributeSection = "";
 
   try {
     readingPaths = getSection(indexContent, "Reading paths");
@@ -945,6 +1496,16 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
   }
   try {
     allPagesSection = getSection(indexContent, "All pages");
+  } catch (err) {
+    errors.push(err.message);
+  }
+  try {
+    referenceSection = getSection(indexContent, "Reference");
+  } catch (err) {
+    errors.push(err.message);
+  }
+  try {
+    contributeSection = getSection(indexContent, "Contribute");
   } catch (err) {
     errors.push(err.message);
   }
@@ -1077,38 +1638,131 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
     }
   }
 
-  // 3. All pages table validation
-  const allPagesEntries = [];
-  if (allPagesSection) {
-    const rowRegex = /^\|\s*\[([^\]]+)\]\(([^)]+)\)\s*\|\s*([^|]+)\s*\|$/gm;
-    let rowMatch;
-    while ((rowMatch = rowRegex.exec(allPagesSection)) !== null) {
-      allPagesEntries.push({
-        label: rowMatch[1].trim(),
-        target: rowMatch[2].trim(),
-        description: rowMatch[3].trim()
-      });
-    }
-
-    if (allPagesEntries.length !== EXPECTED_ALL_PAGES_COUNT) {
-      errors.push(`All pages expected ${EXPECTED_ALL_PAGES_COUNT} entries, found ${allPagesEntries.length}`);
-    }
-
-    for (const entry of allPagesEntries) {
-      const targetPath = path.resolve(docsDir, entry.target);
-      if (!fs.existsSync(targetPath)) {
-        errors.push(`All pages target does not exist: ${entry.target}`);
+  // 3a. Discover flat docs/references/*.md on disk & enforce flat directory contract
+  const referencesDir = path.join(docsDir, "references");
+  const flatReferenceNames = [];
+  const flatReferenceRelPaths = new Set();
+  if (!fs.existsSync(referencesDir) || !fs.statSync(referencesDir).isDirectory()) {
+    errors.push("docs/references: directory does not exist");
+  } else {
+    const refEntries = fs
+      .readdirSync(referencesDir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const entry of refEntries) {
+      if (entry.isDirectory()) {
+        errors.push(`docs/references/${entry.name}: nested subdirectory forbidden under flat docs/references/`);
         continue;
       }
-      const pageContent = fs.readFileSync(targetPath, "utf8");
-      const h1Match = pageContent.match(/^#\s+(.+)$/m);
-      if (!h1Match) {
-        errors.push(`${entry.target}: missing # H1 heading`);
-      } else {
-        const h1Title = h1Match[1].trim();
-        if (h1Title !== entry.label) {
-          errors.push(`${entry.target}: H1 title "${h1Title}" does not match All pages label "${entry.label}" character for character`);
+      if (entry.isSymbolicLink()) {
+        errors.push(`docs/references/${entry.name}: symlink forbidden under docs/references/`);
+        continue;
+      }
+      if (entry.isFile() && entry.name.endsWith(".md")) {
+        flatReferenceNames.push(entry.name);
+        flatReferenceRelPaths.add(`docs/references/${entry.name}`);
+      }
+    }
+
+    const refHubPath = path.join(referencesDir, "README.md");
+    if (!fs.existsSync(refHubPath)) {
+      errors.push("docs/references/README.md: missing flat reference hub");
+    } else {
+      const hubContent = fs.readFileSync(refHubPath, "utf8");
+      const linkedRefFiles = new Set();
+      for (const link of proseLinks(hubContent)) {
+        const [rawPath] = link.target.trim().split("#");
+        if (!rawPath || /^(?:https?:\/\/|\/\/|mailto:|javascript:)/i.test(rawPath)) continue;
+        const resolved = path.resolve(referencesDir, rawPath);
+        if (path.dirname(resolved) === referencesDir && resolved.endsWith(".md")) {
+          linkedRefFiles.add(path.basename(resolved));
         }
+      }
+      for (const refName of flatReferenceNames) {
+        if (refName === "README.md") continue;
+        if (!linkedRefFiles.has(refName)) {
+          errors.push(`docs/references/README.md: must link sibling reference file "${refName}"`);
+        }
+      }
+    }
+  }
+
+  // 3b. Three-zone docs/README.md table validation (All pages, Reference, Contribute)
+  if (allPagesSection) {
+    if (/^###\s+(?:Contribute|Reference)\b/im.test(allPagesSection)) {
+      errors.push(
+        'docs/README.md: "## All pages" must not nest "### Contribute" or "### Reference"; use top-level zone sections'
+      );
+    }
+    const allPagesEntries = parseZoneTableEntries(allPagesSection);
+    if (allPagesEntries.length !== PUBLIC_SITE_DOC_REL_PATHS.size) {
+      errors.push(
+        `All pages expected ${PUBLIC_SITE_DOC_REL_PATHS.size} public entries, found ${allPagesEntries.length}`
+      );
+    }
+    const seenPublic = new Set();
+    for (const entry of allPagesEntries) {
+      const relDoc = `docs/${entry.target.replace(/^\.\//, "")}`;
+      if (seenPublic.has(relDoc)) {
+        errors.push(`All pages duplicate entry: ${entry.target}`);
+      }
+      seenPublic.add(relDoc);
+      if (!PUBLIC_SITE_DOC_REL_PATHS.has(relDoc)) {
+        errors.push(`All pages must only list public site pages (unexpected "${entry.target}")`);
+      }
+      verifyExactH1(docsDir, entry, "All pages", errors);
+    }
+    for (const expectedPub of PUBLIC_SITE_DOC_REL_PATHS) {
+      if (!seenPublic.has(expectedPub)) {
+        errors.push(`All pages missing public site page: ${expectedPub.slice("docs/".length)}`);
+      }
+    }
+  }
+
+  if (referenceSection) {
+    const referenceEntries = parseZoneTableEntries(referenceSection);
+    const seenReferences = new Set();
+    for (const entry of referenceEntries) {
+      const normalizedTarget = entry.target.replace(/^\.\//, "");
+      if (path.posix.dirname(normalizedTarget) !== "references" || !normalizedTarget.endsWith(".md")) {
+        errors.push(`Reference entry must be a flat references/*.md path: ${entry.target}`);
+        continue;
+      }
+      const relDoc = `docs/${normalizedTarget}`;
+      if (seenReferences.has(relDoc)) {
+        errors.push(`Reference duplicate entry: ${entry.target}`);
+      }
+      seenReferences.add(relDoc);
+      verifyExactH1(docsDir, entry, "Reference", errors);
+    }
+    for (const refRel of flatReferenceRelPaths) {
+      if (!seenReferences.has(refRel)) {
+        errors.push(`docs/README.md Reference table missing flat reference file: ${refRel.slice("docs/".length)}`);
+      }
+    }
+  }
+
+  if (contributeSection) {
+    const contributeEntries = parseZoneTableEntries(contributeSection);
+    if (contributeEntries.length !== REPO_ONLY_DOC_REL_PATHS.size) {
+      errors.push(
+        `Contribute expected ${REPO_ONLY_DOC_REL_PATHS.size} repository-only entries, found ${contributeEntries.length}`
+      );
+    }
+    const seenContribute = new Set();
+    for (const entry of contributeEntries) {
+      const relDoc = `docs/${entry.target.replace(/^\.\//, "")}`;
+      if (seenContribute.has(relDoc)) {
+        errors.push(`Contribute duplicate entry: ${entry.target}`);
+      }
+      seenContribute.add(relDoc);
+      if (!REPO_ONLY_DOC_REL_PATHS.has(relDoc)) {
+        errors.push(`Contribute must only list repository-only pages (unexpected "${entry.target}")`);
+      }
+      verifyExactH1(docsDir, entry, "Contribute", errors);
+    }
+    for (const expectedContribute of REPO_ONLY_DOC_REL_PATHS) {
+      if (!seenContribute.has(expectedContribute)) {
+        errors.push(`Contribute missing repository-only page: ${expectedContribute.slice("docs/".length)}`);
       }
     }
   }
@@ -1119,7 +1773,9 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name !== "assets") scanDocs(full);
+        if (entry.name === "assets") continue;
+        if (dir === referencesDir) continue;
+        scanDocs(full);
       } else if (entry.name.endsWith(".md")) {
         docFiles.push(full);
       }
@@ -1131,14 +1787,25 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
     const relDoc = path.relative(root, docFile).split(path.sep).join("/");
     const content = fs.readFileSync(docFile, "utf8");
     const lines = content.split("\n");
+    const isReferenceDoc = flatReferenceRelPaths.has(relDoc);
 
+    checkHeadingDepthCeiling(relDoc, content, errors);
     checkProseHtml(content, relDoc, errors);
     checkProseParagraphCaps(relDoc, content, errors);
     checkBannedAiFiller(relDoc, content, errors);
+    checkKindPlurals(relDoc, content, errors);
     checkPrettyYamlBlocks(relDoc, content, errors);
 
     if (docFile === indexFile) {
       continue;
+    }
+
+    if (
+      !PUBLIC_SITE_DOC_REL_PATHS.has(relDoc) &&
+      !REPO_ONLY_DOC_REL_PATHS.has(relDoc) &&
+      !isReferenceDoc
+    ) {
+      errors.push(`${relDoc}: unregistered docs page outside Public, Reference, and Contribute zones`);
     }
 
     checkHeadingCaps(relDoc, content, errors);
@@ -1151,10 +1818,16 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       errors.push(`${relDoc}: missing H1 title at top of page`);
     }
 
-    // Page shape: intro before ## Contents
+    if (isReferenceDoc) {
+      checkReferenceEvidenceHeader(relDoc, content, errors);
+    }
+
+    // Page shape: intro before ## Contents (exempt docs/references/README.md)
     const contentsIdx = lines.findIndex(l => l.trim() === "## Contents");
     if (contentsIdx === -1) {
-      errors.push(`${relDoc}: missing "## Contents" table of contents`);
+      if (relDoc !== "docs/references/README.md") {
+        errors.push(`${relDoc}: missing "## Contents" table of contents`);
+      }
     } else {
       const intro = lines.slice(1, contentsIdx).filter(l => l.trim().length > 0 && !l.startsWith("#"));
       if (intro.length === 0) {
@@ -1166,7 +1839,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       let inFence = "";
       for (let i = contentsIdx + 1; i < lines.length; i++) {
         const l = lines[i];
-        const marker = l.match(FENCE);
+        const marker = l.match(BQ_FENCE);
         if (marker && !inFence) {
           if (!(marker[1][0] === "`" && marker[2].includes("`"))) {
             inFence = marker[1];
@@ -1230,7 +1903,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       }
     }
 
-    // Site publication link boundary & 1:1 filename-to-H1 slug rule on the 15 public docs pages
+    // One-way public link isolation & 1:1 filename-to-H1 slug rule on the 15 public docs pages
     if (PUBLIC_SITE_DOC_REL_PATHS.has(relDoc)) {
       if (firstNonEmpty && firstNonEmpty.startsWith("# ")) {
         const h1Title = firstNonEmpty.slice(2).trim();
@@ -1243,29 +1916,28 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
         }
       }
 
-      const pageLinks = proseLinks(content);
-      for (const link of pageLinks) {
-        const raw = link.target.trim();
-        if (/^(?:https?:\/\/|mailto:|javascript:)/i.test(raw)) {
-          continue;
-        }
-        const [targetPath] = raw.split("#");
-        if (!targetPath) continue;
-        const resolved = path.resolve(path.dirname(docFile), targetPath);
-        const relTarget = path.relative(root, resolved).split(path.sep).join("/");
-        if (
-          relTarget === "docs/development.md" ||
-          relTarget.startsWith("docs/contribute/")
-        ) {
-          errors.push(
-            `${relDoc}: public site page must not link to repository-only contributor page "${raw}" (${relTarget})`
-          );
-        }
-      }
+      checkPublicZoneLinkIsolation(relDoc, docFile, content, root, errors);
     }
   }
 
-  // 4a. Validate 1:1:1 alignment with site/data/navigation.yaml when present
+  // 4a-site-content. Enforce one-way public link isolation across site/content/**
+  const siteContentRoot = path.join(root, "site", "content");
+  if (fs.existsSync(siteContentRoot) && fs.statSync(siteContentRoot).isDirectory()) {
+    const scanSiteContent = d => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, e.name);
+        if (e.isDirectory()) {
+          scanSiteContent(full);
+        } else if (e.isFile() && e.name.endsWith(".md")) {
+          const relSiteFile = path.relative(root, full).split(path.sep).join("/");
+          checkPublicZoneLinkIsolation(relSiteFile, full, fs.readFileSync(full, "utf8"), root, errors);
+        }
+      }
+    };
+    scanSiteContent(siteContentRoot);
+  }
+
+  // 4a. Validate 1:1:1 alignment with site/data/navigation.yaml and site index parity when present
   const navYamlPath = path.join(root, "site", "data", "navigation.yaml");
   if (fs.existsSync(navYamlPath)) {
     const navDoc = parseDocument(fs.readFileSync(navYamlPath, "utf8"), {
@@ -1282,6 +1954,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       const groups = Array.isArray(navData.groups) ? navData.groups : [];
       const labels = navData.labels && typeof navData.labels === "object" ? navData.labels : {};
       const seenPublicPaths = new Set();
+      const expectedNavItems = [];
 
       for (const group of groups) {
         const groupName = String(group?.name || "").trim();
@@ -1304,6 +1977,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
           }
           const relDoc = `docs/${routeGroupSlug}/${routePageSlug}.md`;
           seenPublicPaths.add(relDoc);
+          expectedNavItems.push({ routeStr, routeKey: `${routeGroupSlug}/${routePageSlug}` });
           const absDoc = path.join(root, relDoc);
           if (!fs.existsSync(absDoc)) {
             errors.push(`site/data/navigation.yaml: route "${routeStr}" missing file ${relDoc}`);
@@ -1333,6 +2007,48 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
       for (const pubRel of PUBLIC_SITE_DOC_REL_PATHS) {
         if (!seenPublicPaths.has(pubRel)) {
           errors.push(`site/data/navigation.yaml: missing public doc page ${pubRel}`);
+        }
+      }
+
+      const docsIndexMdPath = path.join(root, "site", "content", "docs", "_index.md");
+      if (fs.existsSync(docsIndexMdPath)) {
+        const docsIndexContent = fs.readFileSync(docsIndexMdPath, "utf8");
+        const linkedRouteKeys = new Set();
+        for (const link of proseLinks(docsIndexContent)) {
+          const cleaned = link.target
+            .split("#")[0]
+            .split("?")[0]
+            .trim()
+            .replace(/^\.\//, "")
+            .replace(/^\/docs\//, "")
+            .replace(/\.md$/, "")
+            .replace(/\/+$/, "");
+          if (/^[a-z0-9-]+\/[a-z0-9-]+$/.test(cleaned)) {
+            linkedRouteKeys.add(cleaned);
+          }
+        }
+        for (const item of expectedNavItems) {
+          if (!linkedRouteKeys.has(item.routeKey)) {
+            errors.push(
+              `site/content/docs/_index.md: missing link to public navigation route "${item.routeStr}"`
+            );
+          }
+        }
+      }
+
+      const homeLayoutPath = path.join(root, "site", "layouts", "index.html");
+      if (fs.existsSync(homeLayoutPath)) {
+        const homeLayoutContent = fs.readFileSync(homeLayoutPath, "utf8");
+        const layoutRouteKeys = new Set();
+        for (const m of homeLayoutContent.matchAll(/(?:\/|["'])docs\/([a-z0-9-]+\/[a-z0-9-]+)\//g)) {
+          layoutRouteKeys.add(m[1]);
+        }
+        for (const item of expectedNavItems) {
+          if (!layoutRouteKeys.has(item.routeKey)) {
+            errors.push(
+              `site/layouts/index.html: missing link to public navigation route "${item.routeStr}"`
+            );
+          }
         }
       }
     }
@@ -1423,7 +2139,7 @@ export function checkDocs(rootDirOrOptions = process.cwd()) {
     const links = proseLinks(content);
     for (const link of links) {
       const raw = link.target.trim();
-      if (/^(?:https?:\/\/|mailto:|javascript:)/i.test(raw)) {
+      if (/^(?:https?:\/\/|\/\/|mailto:|javascript:)/i.test(raw)) {
         continue;
       }
       const [targetPath, anchor] = raw.split("#");

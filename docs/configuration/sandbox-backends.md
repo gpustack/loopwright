@@ -49,8 +49,8 @@ spec:
 
 - **Priority order**: Loopwright probes `preferredBackends` in order and picks the first backend supporting every listed `requiredCapabilities` item.
 - **Declared policy**: Omitting `networkMode` in an explicit sandbox policy defaults to `none`.
-- **Neutral built-in masks**: Locally, sandboxes protect `.git` and `<controlRoot>` plus repository-declared `scope.protected` and `deniedReadPaths` without hardcoded tool directories. On the GitHub policy profile, `.github` is also masked read-only unless `.github/workflows/**` is dual-key unlocked.
-- **Read-only bind mounts**: Linux `bwrap` and `docker` support `readOnlyBindMounts` for hybrid `mountReadOnlyGit` (sanitized `.git` skeleton plus `--ro-bind` `.git/objects`), while macOS Seatbelt and Linux Landlock copy `.git/objects` read-only via single-descriptor `1 MiB` streaming.
+- **Neutral built-in masks**: Local sandboxes protect `.git`, `<controlRoot>`, `scope.protected`, and `deniedReadPaths`. GitHub runs also mask `.github` unless `.github/workflows/**` is dual-key unlocked.
+- **Read-only bind mounts**: Linux `bwrap` and `docker` use `readOnlyBindMounts` for `mountReadOnlyGit`, while Seatbelt and Landlock copy `.git/objects` read-only via `1 MiB` streaming.
 
 When `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted`, and `spec.sandbox` is omitted, `resolveEffectiveTaskpackSandboxPolicy` selects `direct-dedicated`.
 It sets `allow-outbound`, requires `processTreeCleanup`, and enables `allowDedicatedDirectOverride`.
