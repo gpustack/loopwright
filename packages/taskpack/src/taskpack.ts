@@ -2576,20 +2576,34 @@ export async function compileDeclarativeTaskpack(manifest: TaskpackManifest, bin
       }
       if (declared.implementation === 'evolve-block-guard.v1') {
         const files = declared.parameters?.['files'];
-        if (!Array.isArray(files) || files.length === 0) {
-          manifestInvalid('evolve-block-guard.v1 requires a non-empty parameters.files array', `/spec/verification/localChecks/${declared.id}/parameters/files`);
+        if (!Array.isArray(files) || files.length === 0 || !files.every(f => typeof f === 'string' && f.length > 0)) {
+          manifestInvalid('evolve-block-guard.v1 requires a non-empty parameters.files string array', `/spec/verification/localChecks/${declared.id}/parameters/files`);
+        }
+        const allowedBlockIds = declared.parameters?.['allowedBlockIds'];
+        if (
+          allowedBlockIds !== undefined
+          && (!Array.isArray(allowedBlockIds) || allowedBlockIds.length === 0 || !allowedBlockIds.every(id => typeof id === 'string' && id.length > 0))
+        ) {
+          manifestInvalid('evolve-block-guard.v1 parameters.allowedBlockIds must be a non-empty string array', `/spec/verification/localChecks/${declared.id}/parameters/allowedBlockIds`);
+        }
+        const maxBlockBytes = declared.parameters?.['maxBlockBytes'];
+        if (
+          maxBlockBytes !== undefined
+          && (typeof maxBlockBytes !== 'number' || !Number.isSafeInteger(maxBlockBytes) || maxBlockBytes < 1)
+        ) {
+          manifestInvalid('evolve-block-guard.v1 parameters.maxBlockBytes must be a positive safe integer', `/spec/verification/localChecks/${declared.id}/parameters/maxBlockBytes`);
         }
         activeChecks.push({
           id: declared.id,
           implementation: 'evolve-block-guard.v1',
           parameters: {
             checkId: declared.id,
-            files,
-            ...(declared.parameters?.['allowedBlockIds'] !== undefined
-              ? { allowedBlockIds: declared.parameters['allowedBlockIds'] }
+            files: [...files],
+            ...(allowedBlockIds !== undefined
+              ? { allowedBlockIds: [...allowedBlockIds] }
               : {}),
-            ...(declared.parameters?.['maxBlockBytes'] !== undefined
-              ? { maxBlockBytes: declared.parameters['maxBlockBytes'] }
+            ...(maxBlockBytes !== undefined
+              ? { maxBlockBytes }
               : {}),
           },
           allowedEvidenceLevels: ['local_execution'],
