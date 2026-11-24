@@ -377,7 +377,7 @@
 <li><strong>Publish &amp; Remember</strong>: Settle pull request publication and propose reviewed memory separately.</li>
 </ol>
 <h2 id="operating-modes">Operating modes</h2>
-<p>Loopwright supports two distinct configuration and execution modes sharing one verification kernel:</p>
+<p>Loopwright supports two single-run modes sharing one verification kernel, plus bounded multi-generation evolution (<code>@loopwright/evolution</code>) over isolated child <code>LocalRunStore</code> runs:</p>
 <table>
 	<thead>
 			<tr>
@@ -478,6 +478,13 @@
 					<td><code>DecisionPolicy</code></td>
 					<td><code>apiVersion</code>, <code>kind</code>, <code>spec</code></td>
 					<td><a href="/loopwright/main/docs/configuration/decision-routing/">Decision Routing</a>
+</td>
+			</tr>
+			<tr>
+					<td>Evolution mode</td>
+					<td><code>EvolutionCampaign</code></td>
+					<td><code>apiVersion</code>, <code>kind</code>, <code>metadata.name</code>, <code>spec</code></td>
+					<td><a href="/loopwright/main/docs/configuration/task-contract/#evolutioncampaign">Task Contract</a>
 </td>
 			</tr>
 			<tr>

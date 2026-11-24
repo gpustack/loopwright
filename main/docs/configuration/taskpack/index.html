@@ -351,8 +351,7 @@
       <article>
         
   <h1 id="taskpack">Taskpack</h1>
-<p><code>Taskpack</code> powers Loopwright&rsquo;s automated mode. Declare repository intent in a bounded YAML document (<code>&lt;= 64 KiB</code>), such as <code>.loopwright/taskpack.yaml</code> or <code>.auto-sync/taskpack.yaml</code>. The host compiles runtime contracts, handler SHA-256 digests, and credential bindings.</p>
-<p>For out-of-repo <code>TrustedRegistry</code> governance or CLI controller files, see <a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>
+<p><code>Taskpack</code> powers Loopwright&rsquo;s automated mode in a bounded YAML document (<code>&lt;= 64 KiB</code>, <code>.loopwright/taskpack.yaml</code>). For out-of-repo <code>TrustedRegistry</code> governance or CLI controller files, see <a href="/loopwright/main/docs/configuration/task-contract/">Task Contract</a>
  and <a href="/loopwright/main/docs/configuration/controller-and-registry/">Controller and Registry</a>
 .</p>
 <h2 id="contents">Contents</h2>
@@ -715,7 +714,7 @@
 					<td><code>spec.target.matrix</code></td>
 					<td>No</td>
 					<td><code>null</code> or <code>1..64</code> cells</td>
-					<td><code>{ id, platform, variant, hardware? }</code>; <code>hardware</code> adds <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount?</code>, <code>driverConstraint?</code>, <code>topology?</code></td>
+					<td><code>{ id, platform, variant, hardware? }</code>; <code>hardware</code> adds <code>accelerator</code>, <code>isolationMode</code>, <code>forbiddenSymbolPatterns?</code>, <code>maxRegisterCount?</code>, <code>maxLocalSpillBytes?</code></td>
 			</tr>
 			<tr>
 					<td><code>spec.proposal</code></td>
@@ -850,6 +849,11 @@
 					<td>Fails if any line outside delimited marker sections changed vs baseline</td>
 			</tr>
 			<tr>
+					<td><code>evolve-block-guard.v1</code></td>
+					<td><code>files</code>, <code>allowedBlockIds?</code>, <code>maxBlockBytes?</code></td>
+					<td>Verifies bytes outside <code>EVOLVE-BLOCK-START/END</code> markers match baseline SHA-256</td>
+			</tr>
+			<tr>
 					<td><code>scope.v1</code> / <code>no-change.v1</code></td>
 					<td><code>checkId</code> (plus implicit guards)</td>
 					<td>Verifies writable/protected scope or untouched tree parity</td>
@@ -867,7 +871,7 @@
 <li><strong>Explicit host mounts (<code>parameters.mounts[]</code>)</strong>: Declare <code>0..16</code> Docker-style bind entries <code>{ source, target?, mode?: 'ro' | 'rw' }</code> (<code>target</code> defaults to <code>source</code>; <code>mode</code> defaults to <code>'ro'</code>) for host files, directories, or Unix domain sockets (for example <code>{ source: /var/run/docker.sock, mode: rw }</code>). Every <code>source</code> requires dual-key <code>allow-privileged-execution: 'true'</code> (<code>--allow-privileged</code>) plus an explicit entry in <code>allow-host-mounts</code> (<code>--allow-host-mounts</code>). Broad roots, <code>/etc</code>, <code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/var/lib</code>, control-plane directories, and <code>$HOME</code> secrets are always refused; under <code>/run</code> and <code>/var/run</code>, only Unix domain sockets are permitted. Missing sources, or socket, <code>rw</code>, and remapped mounts without Linux <code>bwrap</code>, fail closed (<code>SANDBOX_CAPABILITY_INSUFFICIENT</code>).</li>
 <li><strong>Structured check output</strong>: Writing bounded JSON (<code>{ metrics?, findings?, detail? }</code>, <code>&lt;= 64 KiB</code>; unknown keys such as <code>passed</code> or <code>summary</code> fail closed) to <code>$LOOPWRIGHT_CHECK_OUT</code> propagates through HMAC-signed <code>gate.v1</code> verdicts (<code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>retryablePreemption</code>) even on exit <code>0</code>.</li>
 <li><strong>Inner sandboxes and repair early-stop</strong>: Checks running inner OS sandboxes should set <code>allowCheckNetwork: true</code> under <code>--allow-privileged</code>. Repair prompts instruct agents to submit <code>status: 'blocked'</code> immediately when failures originate in protected check scripts or missing host tools instead of looping until <code>repairNoProgress</code>. <code>gate.v1</code> entries in <code>externalGates[]</code> support per-gate <code>signingCredentialRef</code>, <code>authCredentialRef</code>, and <code>url</code>.</li>
-<li><strong>External benchmark gates (<code>benchmark-gate.v1</code>)</strong>: Requires <code>targetCellId</code> (matching a <code>spec.target.matrix</code> cell with <code>hardware</code>), <code>heldOutWorkloadId</code>, and optional <code>maxPreemptions</code> (<code>0..16</code>), <code>allowSyntheticHardwareProbe</code>, and <code>metricThresholds</code> (<code>bounds</code>/<code>comparative</code>). Manifest-level <code>url</code>, <code>signingCredentialRef</code>, and <code>authCredentialRef</code> overrides are forbidden; host <code>gateEndpoints</code> bindings enforce strict credential isolation across endpoints, local command gates, <code>GH_TOKEN</code>/<code>GITHUB_TOKEN</code>, and publication.</li>
+<li><strong>External benchmark gates (<code>benchmark-gate.v1</code>)</strong>: Requires <code>targetCellId</code> (matching a <code>spec.target.matrix</code> cell with <code>hardware</code>), <code>heldOutWorkloadId</code>, and optional <code>maxPreemptions</code> (<code>0..16</code>), <code>allowSyntheticHardwareProbe</code>, and <code>metricThresholds</code> (<code>bounds</code>/<code>comparative</code> with optional <code>bucketScope</code>: <code>aggregate | all_buckets | { bucketId }</code>). Manifest-level <code>url</code>, <code>signingCredentialRef</code>, and <code>authCredentialRef</code> overrides are forbidden; host <code>gateEndpoints</code> bindings isolate credentials across endpoints, local gates, <code>GH_TOKEN</code>, and publication.</li>
 </ul>
 <h2 id="publication-and-triggers">Publication and triggers</h2>
 <p><code>spec.publication</code>, <code>spec.memory</code>, and <code>spec.triggers</code> are optional in <code>'local'</code> mode (<code>publication</code> defaults to <code>{ mode: 'disabled' }</code>; <code>memory</code> defaults to <code>{ directory: '&lt;controlRoot&gt;/memory/default', apply: 'disabled', onNoModelBudget: 'skip' }</code>). GitHub entrypoints enforce <code>spec.triggers</code> before preflight and require PR fields when <code>publication.mode</code> is <code>'pull_request'</code>. Memory finalization projects <code>targetMatrix</code> cells to <code>{ id, platform, variant }</code> while <code>TaskContract</code> keeps <code>hardware</code>.</p>

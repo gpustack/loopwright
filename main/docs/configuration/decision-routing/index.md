@@ -134,9 +134,13 @@ Programmatic `@loopwright/decisions` callers compose structured requests from fo
 | `evaluateCycleAlignment` | Before repair or `rejectTo` rework | Advisory route (`continue`, `revise`, `needs_review`, `blocked`) |
 | `adviseSoftCompaction` | Prior to `pi.compact.v1` steps | Cannot veto active hard-compaction triggers |
 | `triageCandidateDiff` | Post-capture pre-publication | Skips cleanly when `triageRules` is empty; sets `verificationCertified: false` |
+| `advise_mutation_novelty` | Pre-compile evolution mutation | Rejects `Jaccard === 1.0` clones offline (`0` network calls); queries Jev `noul` in soft band |
+| `route_evolution_strategy` | Pre-mutation evolution track choice | Routes `(trackId, mutationKind)` from declared tracks with deterministic Roofline fallback |
+| `advise_cascade_escalation` | Post-smoke benchmark triage | Returns `prune`, `confirm`, or `escalate`; never bypasses full multi-bucket verification |
 
-- **Deterministic fallback**: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (`source: 'deterministic_fallback'`) without blocking or certifying runs.
-- **Non-delegable authority**: All six `DECISION_FORBIDDEN_AUTHORITY_INTENTS` (such as certifying verification receipts, bypassing required gates, overriding pinned models, expanding `writable` scope, or granting execution authority) are permanently refused and never sent to a decision model. Recorded entries appear in run observations (`advisoryDecisions`) with `verificationCertified: false`.
+- **Advisory stamps**: Every decision result stamps `advisoryOnly: true` and `verificationCertified: false`.
+- **Deterministic fallback**: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (`source: 'deterministic_fallback'` or `'deterministic_heuristic'`) without blocking or certifying runs.
+- **Non-delegable authority**: All six `DECISION_FORBIDDEN_AUTHORITY_INTENTS` (`grant_execution_authority`, `certify_verification_evidence`, `skip_adversarial_review`, `approve_external_gate`, `override_pinned_model`, `veto_hard_compaction`) throw `DecisionError('DECISION_AUTHORITY_VIOLATION')` with `authorityViolation: true`. Recorded entries appear in run observations (`advisoryDecisions`) with `verificationCertified: false`.
 
 ---
 

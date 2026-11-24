@@ -1,8 +1,6 @@
 # Taskpack
 
-`Taskpack` powers Loopwright's automated mode. Declare repository intent in a bounded YAML document (`<= 64 KiB`), such as `.loopwright/taskpack.yaml` or `.auto-sync/taskpack.yaml`. The host compiles runtime contracts, handler SHA-256 digests, and credential bindings.
-
-For out-of-repo `TrustedRegistry` governance or CLI controller files, see [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) and [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md).
+`Taskpack` powers Loopwright's automated mode in a bounded YAML document (`<= 64 KiB`, `.loopwright/taskpack.yaml`). For out-of-repo `TrustedRegistry` governance or CLI controller files, see [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) and [Controller and Registry](/loopwright/main/docs/configuration/controller-and-registry/index.md).
 
 ## Contents
 
@@ -264,7 +262,7 @@ spec:
 | `spec.goal.candidate` / `noChange` | Yes | Strings (`1..1024` chars) | Role objectives for candidate and `no_change` runs |
 | `spec.scope.writable` / `protected` | No | String lists (`1..128` / `0..128`) | Explicit `/**` directories, exact files, or single-segment `*`/`?` globs |
 | `spec.instructions` / `skills` | No | Entry or list (`1..16` entries) | Protected UTF-8 files as paths or `{ path, when }` rules (`<= 256 KiB` total) |
-| `spec.target.matrix` | No | `null` or `1..64` cells | `{ id, platform, variant, hardware? }`; `hardware` adds `accelerator`, `isolationMode`, `deviceCount?`, `driverConstraint?`, `topology?` |
+| `spec.target.matrix` | No | `null` or `1..64` cells | `{ id, platform, variant, hardware? }`; `hardware` adds `accelerator`, `isolationMode`, `forbiddenSymbolPatterns?`, `maxRegisterCount?`, `maxLocalSpillBytes?` |
 | `spec.proposal` | No | `{ path, requiredFields, schemaVersion }` | Optional writable `.yaml`/`.yml`/`.json` proposal ledger |
 | `spec.submission` | No | `{ path, required? }` | Optional writable `.json` agent deliverable path |
 
@@ -331,6 +329,7 @@ spec:
 | `json-artifact.v1` | Scalar expectations (binds `spec.proposal`) | Validates JSON/YAML keys and scalar equality |
 | `json-keys-guard.v1` | `path`, `allowedPointers` (`/json/pointer`) | Fails if any JSON key outside `allowedPointers` changed vs baseline |
 | `line-section-guard.v1` | `path`, `startMarker`, `endMarker` | Fails if any line outside delimited marker sections changed vs baseline |
+| `evolve-block-guard.v1` | `files`, `allowedBlockIds?`, `maxBlockBytes?` | Verifies bytes outside `EVOLVE-BLOCK-START/END` markers match baseline SHA-256 |
 | `scope.v1` / `no-change.v1` | `checkId` (plus implicit guards) | Verifies writable/protected scope or untouched tree parity |
 | `command.v1` | `script`, `args`, `env`, `toolchainPaths`, `mountReadOnlyGit`, `preserveRepoDirName`, `mounts` | Mounts the script's parent directory read-only (whole-tree SHA-256 digest so `./lib.sh` works) |
 
@@ -340,7 +339,7 @@ spec:
 - **Explicit host mounts (`parameters.mounts[]`)**: Declare `0..16` Docker-style bind entries `{ source, target?, mode?: 'ro' | 'rw' }` (`target` defaults to `source`; `mode` defaults to `'ro'`) for host files, directories, or Unix domain sockets (for example `{ source: /var/run/docker.sock, mode: rw }`). Every `source` requires dual-key `allow-privileged-execution: 'true'` (`--allow-privileged`) plus an explicit entry in `allow-host-mounts` (`--allow-host-mounts`). Broad roots, `/etc`, `/proc`, `/sys`, `/dev`, `/var/lib`, control-plane directories, and `$HOME` secrets are always refused; under `/run` and `/var/run`, only Unix domain sockets are permitted. Missing sources, or socket, `rw`, and remapped mounts without Linux `bwrap`, fail closed (`SANDBOX_CAPABILITY_INSUFFICIENT`).
 - **Structured check output**: Writing bounded JSON (`{ metrics?, findings?, detail? }`, `<= 64 KiB`; unknown keys such as `passed` or `summary` fail closed) to `$LOOPWRIGHT_CHECK_OUT` propagates through HMAC-signed `gate.v1` verdicts (`metrics`, `findings`, `detail`, `retryablePreemption`) even on exit `0`.
 - **Inner sandboxes and repair early-stop**: Checks running inner OS sandboxes should set `allowCheckNetwork: true` under `--allow-privileged`. Repair prompts instruct agents to submit `status: 'blocked'` immediately when failures originate in protected check scripts or missing host tools instead of looping until `repairNoProgress`. `gate.v1` entries in `externalGates[]` support per-gate `signingCredentialRef`, `authCredentialRef`, and `url`.
-- **External benchmark gates (`benchmark-gate.v1`)**: Requires `targetCellId` (matching a `spec.target.matrix` cell with `hardware`), `heldOutWorkloadId`, and optional `maxPreemptions` (`0..16`), `allowSyntheticHardwareProbe`, and `metricThresholds` (`bounds`/`comparative`). Manifest-level `url`, `signingCredentialRef`, and `authCredentialRef` overrides are forbidden; host `gateEndpoints` bindings enforce strict credential isolation across endpoints, local command gates, `GH_TOKEN`/`GITHUB_TOKEN`, and publication.
+- **External benchmark gates (`benchmark-gate.v1`)**: Requires `targetCellId` (matching a `spec.target.matrix` cell with `hardware`), `heldOutWorkloadId`, and optional `maxPreemptions` (`0..16`), `allowSyntheticHardwareProbe`, and `metricThresholds` (`bounds`/`comparative` with optional `bucketScope`: `aggregate | all_buckets | { bucketId }`). Manifest-level `url`, `signingCredentialRef`, and `authCredentialRef` overrides are forbidden; host `gateEndpoints` bindings isolate credentials across endpoints, local gates, `GH_TOKEN`, and publication.
 
 ## Publication and triggers
 

@@ -685,11 +685,27 @@
 					<td>Post-capture pre-publication</td>
 					<td>Skips cleanly when <code>triageRules</code> is empty; sets <code>verificationCertified: false</code></td>
 			</tr>
+			<tr>
+					<td><code>advise_mutation_novelty</code></td>
+					<td>Pre-compile evolution mutation</td>
+					<td>Rejects <code>Jaccard === 1.0</code> clones offline (<code>0</code> network calls); queries Jev <code>noul</code> in soft band</td>
+			</tr>
+			<tr>
+					<td><code>route_evolution_strategy</code></td>
+					<td>Pre-mutation evolution track choice</td>
+					<td>Routes <code>(trackId, mutationKind)</code> from declared tracks with deterministic Roofline fallback</td>
+			</tr>
+			<tr>
+					<td><code>advise_cascade_escalation</code></td>
+					<td>Post-smoke benchmark triage</td>
+					<td>Returns <code>prune</code>, <code>confirm</code>, or <code>escalate</code>; never bypasses full multi-bucket verification</td>
+			</tr>
 	</tbody>
 </table>
 <ul>
-<li><strong>Deterministic fallback</strong>: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (<code>source: 'deterministic_fallback'</code>) without blocking or certifying runs.</li>
-<li><strong>Non-delegable authority</strong>: All six <code>DECISION_FORBIDDEN_AUTHORITY_INTENTS</code> (such as certifying verification receipts, bypassing required gates, overriding pinned models, expanding <code>writable</code> scope, or granting execution authority) are permanently refused and never sent to a decision model. Recorded entries appear in run observations (<code>advisoryDecisions</code>) with <code>verificationCertified: false</code>.</li>
+<li><strong>Advisory stamps</strong>: Every decision result stamps <code>advisoryOnly: true</code> and <code>verificationCertified: false</code>.</li>
+<li><strong>Deterministic fallback</strong>: Missing provider credentials, timeouts, or unreachable endpoints fall back deterministically (<code>source: 'deterministic_fallback'</code> or <code>'deterministic_heuristic'</code>) without blocking or certifying runs.</li>
+<li><strong>Non-delegable authority</strong>: All six <code>DECISION_FORBIDDEN_AUTHORITY_INTENTS</code> (<code>grant_execution_authority</code>, <code>certify_verification_evidence</code>, <code>skip_adversarial_review</code>, <code>approve_external_gate</code>, <code>override_pinned_model</code>, <code>veto_hard_compaction</code>) throw <code>DecisionError('DECISION_AUTHORITY_VIOLATION')</code> with <code>authorityViolation: true</code>. Recorded entries appear in run observations (<code>advisoryDecisions</code>) with <code>verificationCertified: false</code>.</li>
 </ul>
 <nav class="reading-footer" aria-label="Further reading">
     <section>

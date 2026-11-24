@@ -164,6 +164,12 @@ JSON output is NDJSON. An envelope with `kind: 'step'` contains `data.status: 'a
 | `app-serve` | `--config` | `--repo`, `--json` | Start the opt-in GitHub App HTTP webhook and token listener |
 | `runner relay` | `--config` | `--json` | Start the outbound-pull benchmark relay and CAS server |
 | `runner worker` | `--config` | `--once`, `--json` | Poll relay leases and execute two-stage hardware benchmarks |
+| `evolve check` | `--campaign` | `--repo`, `--json` | Validate an `EvolutionCampaign`, taskpack, and target cell |
+| `evolve run` | `--campaign`, `--state` | `--repo`, `--out`, `--format`, `--allow-synthetic-probe`, `--json` | Run an evolutionary campaign over isolated child runs |
+| `evolve resume` | `--campaign` (or `--root`) | `--repo`, `--out`, `--format`, `--allow-synthetic-probe`, `--json` | Resume a paused or preempted campaign from `campaign.sqlite` |
+| `evolve status` | `--campaign` (or `--root`) | `--json` | Read campaign stage, generation, evaluations, and island state |
+| `evolve inspect` | `--campaign` (or `--root`) | `--island`, `--individual`, `--json` | Inspect Pareto frontier, niches, teams, and lineage edges |
+| `evolve export` | `--campaign` (or `--root`), `--out` | `--format`, `--allow-synthetic-probe`, `--overwrite`, `--json` | Export a verified `evolution-bundle.v1` package |
 
 ### Suite commands
 
@@ -183,34 +189,62 @@ Set `spec.listen.enabled: true` first. The command exits `2` for disabled or inv
 
 ### Hardware runner
 
+![Hardware relay and outbound worker topology](/loopwright/main/docs/assets/diagrams/hardware-relay-flow.svg)
+
+<!-- flowchart LR
+  Control["Zone 1: Control Plane (CLI or GitHub Actions, Outbound HTTPS)"] -> DMZ["Zone 2: Relay DMZ (HTTPS Gate, HMAC Auth, Lease Fence, CAS)"] -> Firewall["Cluster Firewall (Zero Inbound Ports)"] -> Worker["Zone 3: Private GPU Cluster (Outbound Pull)"] -> Sandbox["Offline Zero-Network Docker (Stage A Build + Stage B Bench)"] -> Receipt["Signed Verdict Receipt"]
+-->
+
 ```sh
 loopwright runner --help
 loopwright runner relay --config relay.yaml --json
 loopwright runner worker --config worker.yaml --once --json
 ```
 
-`runner relay` listens for controller submissions (`/v1/benchmark/jobs/*`) and worker pull-lease polls (`/v1/runner/leases*`) with monotonic `leaseEpoch` fencing and `1 MiB` CAS streaming.
+`runner relay` decouples controllers from GPU clusters so worker hosts open zero inbound ports. Controllers submit signed jobs to `/v1/benchmark/jobs/*`, while workers poll `/v1/runner/leases*` outbound across heterogeneous pools (`sm_89`, `gfx1101`, `ascend_910b`).
 
-`runner worker` opens zero inbound ports, pulls leases outbound over HTTPS or loopback HTTP, compiles Stage A artifacts without `held_out_workloads`, executes Stage B benchmarks read-only under `networkMode: none`, and returns signed verdicts.
+The relay isolates credentials (`controllerSigningSecret` vs `workerToken`), enforces monotonic `leaseEpoch` preemption fencing, and streams `1 MiB` CAS artifacts. Workers compile Stage A without `held_out_workloads`, run Stage B read-only under `networkMode: none`, and return signed verdicts.
 
 - **Graceful shutdown (`SIGINT`)**: Exits `130` (`runner worker` returns `8` if an `unknown` settlement takes precedence).
 - **Preemption (`SIGTERM`)**: Reports lease preemption to the relay and exits `143`, unless superseded by `unknown` (`8`) or a `fenced` preemption acknowledgment (`7`).
 - **Fenced lease (`7`)**: Exits `7` when the relay rejects a stale `leaseEpoch` or `relayBootId` (`QUEUE_LEASE_FENCED`).
 - **Unknown or teardown (`8`)**: Exits `8` on `unknown` acknowledgment, `RUNNER_TEARDOWN_FAILED`, or `RUNNER_TRANSPORT_ERROR`.
 
+### Evolution campaigns
+
+```sh
+loopwright evolve check --campaign campaign.yaml --repo . --json
+loopwright evolve run --campaign campaign.yaml --state ../campaign-state --repo . --allow-synthetic-probe --json
+loopwright evolve resume --campaign ../campaign-state --repo . --json
+loopwright evolve status --campaign ../campaign-state --json
+loopwright evolve inspect --campaign ../campaign-state --island 0 --json
+loopwright evolve export --campaign ../campaign-state --out ../bundle --format oci-layout --json
+```
+
+`evolve` lazily loads `@loopwright/evolution`, persists archive state in `<state>/campaign.sqlite`, and dispatches each candidate into an isolated child `LocalRunStore`. Keep `--state` (`--campaign-dir` / `--root`) outside `--repo` or runs fail closed with `EVOLUTION_SCHEMA_INVALID` (`2`).
+
+`evolve export` verifies every HMAC verdict receipt fail-closed (`EXPORT_UNVERIFIED_FORBIDDEN`, exit `3` when no signing secret is set) and rejects `synthetic_fixture` receipts unless `--allow-synthetic-probe` is passed. GitHub Actions workflows can run `loopwright evolve` against an HTTPS `runner relay` (or self-hosted loopback relay) using `permissions: { contents: read }` and state under `${RUNNER_TEMP}`.
+
+| Environment variable | Purpose |
+| --- | --- |
+| `LOOPWRIGHT_BENCHMARK_GATE_URL` | Fallback HTTPS or loopback `benchmark-gate.v1` submission URL for `runner relay` |
+| `LOOPWRIGHT_GATE_SIGNING_SECRET` | Required HMAC secret for benchmark submission and fail-closed `evolve export` (`BENCH_SIGNING_SECRET` fallback) |
+| `LOOPWRIGHT_GATE_AUTH_TOKEN` | Optional bearer token bound to `authCredentialRef` on remote `runner relay` endpoints |
+| `LOOPWRIGHT_MODELS_JSON` | Optional Pi `models.json` path for custom providers and local model endpoints |
+
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Completed, no change, successful static command, or `suite` `eligible`/`deferred`/`ignored` |
-| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite` manifest rejected |
-| 3 | Unsupported capability or runtime `blocked` (`baseline_merge_conflict`, stage probe, branch mismatch) |
-| 4 | Execution or acceptance failed |
-| 5 | Allowance exhausted |
+| 2 | Usage, configuration, unknown `--domain`, or `TaskpackSuite`/`EvolutionCampaign` manifest rejected |
+| 3 | Unsupported capability, blocked work, `TEAM_ENVELOPE_VIOLATION`, `EXPORT_UNVERIFIED_FORBIDDEN`, or `WORKER_DEVICE_QUARANTINED` |
+| 4 | Execution, acceptance, or artifact validation failed |
+| 5 | Allowance or campaign budget exhausted |
 | 6 | Deadline expired |
-| 7 | Reconciliation, ownership needed, or fenced runner lease |
-| 8 | Authoritative result unavailable, incident, or runner teardown failure |
-| 130 | Step cancellation or accounted SIGINT, subject to uncertainty precedence |
+| 7 | Reconciliation, `EVOLUTION_CONFLICT`, `EVOLUTION_LEASE_FENCED`, `EVOLUTION_CLOCK_DRIFT`, or fenced runner lease |
+| 8 | Authoritative result unavailable, incident, store corruption, or runner teardown failure |
+| 130 | Step cancellation, paused evolution campaign, or accounted SIGINT, subject to uncertainty precedence |
 | 143 | Accounted SIGTERM, subject to uncertainty precedence |
 
 ---

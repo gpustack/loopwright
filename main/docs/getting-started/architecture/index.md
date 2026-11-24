@@ -25,7 +25,7 @@ Loopwright runs bounded repository work inside isolated sandboxes and verifies e
 
 ## Operating modes
 
-Loopwright supports two distinct configuration and execution modes sharing one verification kernel:
+Loopwright supports two single-run modes sharing one verification kernel, plus bounded multi-generation evolution (`@loopwright/evolution`) over isolated child `LocalRunStore` runs:
 
 | Dimension | Declarative taskpack | Managed controller |
 | --- | --- | --- |
@@ -49,6 +49,7 @@ Every Loopwright document uses `apiVersion: loopwright.dev/v1alpha1` across decl
 | Managed mode | `TaskContract` | `apiVersion`, `kind`, `spec` | [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md) |
 | Shared policy | `spec.sandbox` | Nested under `Taskpack.spec` | [Sandbox Backends](/loopwright/main/docs/configuration/sandbox-backends/index.md) |
 | Shared policy | `DecisionPolicy` | `apiVersion`, `kind`, `spec` | [Decision Routing](/loopwright/main/docs/configuration/decision-routing/index.md) |
+| Evolution mode | `EvolutionCampaign` | `apiVersion`, `kind`, `metadata.name`, `spec` | [Task Contract](/loopwright/main/docs/configuration/task-contract/index.md#evolutioncampaign) |
 | Entry points | Action or `GitHubAppConfig` | Workflow or `apiVersion`, `kind`, `spec` | [GitHub Action](/loopwright/main/docs/operations/github-action/index.md) · [GitHub App](/loopwright/main/docs/operations/github-app/index.md) |
 
 ## Runtime baseline

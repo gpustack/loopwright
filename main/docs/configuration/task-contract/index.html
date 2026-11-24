@@ -367,6 +367,8 @@
 </li>
 <li><a href="#acceptance-and-evidence">Acceptance and evidence</a>
 </li>
+<li><a href="#evolutioncampaign">EvolutionCampaign</a>
+</li>
 </ul>
 <h2 id="taskcontract">TaskContract</h2>
 <div class="code-block">
@@ -934,7 +936,7 @@ Admission selects it only if the baseline has at most 128 files and 4 MiB total 
 Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 KiB.</p>
 <p>Otherwise, admission selects <code>tree_overlay</code> with <code>{ baseTree, entries, deleted }</code> (<code>&lt;= 256</code> state checkpoints). The baseline supports up to 65,536 regular files, and the overlay honors <code>budgets.overlay</code> (default <code>128</code> entries / <code>4 MiB</code>, configurable up to <code>16,384</code> files / <code>16 GiB</code> via verified CAS blob pointers).</p>
 <p>Verifier-namespaced descriptors (<code>.loopwright-verifier/&lt;slotId&gt;/*</code>) use a dedicated verifier output budget (<code>64</code> files per slot, <code>256</code> total files, and <code>16 GiB</code> total bytes) separate from candidate <code>budgets.overlay.maxBytes</code>.</p>
-<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence</code> and <code>EvaluatedCheck</code> accept optional <code>metrics</code> (finite numbers, strings, or booleans), <code>findings</code>, and <code>detail</code> even on <code>passed</code> (<code>Evidence.spec.reason</code> stays <code>null</code>).</p>
+<p><code>ArtifactRef</code> accepts optional <code>uri</code> (<code>&lt;= 2048</code> chars) and <code>mediaType</code> (<code>&lt;= 128</code> chars), omitted from canonical serialization when unset. <code>Evidence.spec</code> accepts optional <code>metrics</code>, <code>findings</code>, <code>detail</code>, <code>bucketMetrics</code> (<code>1..64</code> buckets, <code>&lt;= 16</code> numeric metrics and <code>&lt;= 8</code> dimensions per bucket), and closed-enum <code>hardwareDiagnostics</code> (<code>boundPipeline</code>: <code>hbm | l2 | smem_lds_ub | tensor_cube | vector_valu | host_launch | comm | unknown</code>, optional counters/percentages/stalls).</p>
 <h3 id="acceptance-fields">Acceptance fields</h3>
 <table>
 	<thead>
@@ -1069,15 +1071,180 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
 					<td>Printable string (<code>1..128</code>)</td>
 					<td>Optional interconnect or device topology constraint</td>
 			</tr>
+			<tr>
+					<td><code>hardware.forbiddenSymbolPatterns</code></td>
+					<td>No</td>
+					<td><code>0..64</code> ASCII substrings (<code>&lt;= 128</code>)</td>
+					<td>Glob-free Stage A symbol denylist (<code>cublas</code>, <code>rocblas</code>, <code>aclnn</code>)</td>
+			</tr>
+			<tr>
+					<td><code>hardware.maxRegisterCount</code></td>
+					<td>No</td>
+					<td>Safe integer (<code>&gt;= 0</code>)</td>
+					<td>Stage A per-thread register ceiling before Stage B</td>
+			</tr>
+			<tr>
+					<td><code>hardware.maxLocalSpillBytes</code></td>
+					<td>No</td>
+					<td>Safe integer (<code>&gt;= 0</code>)</td>
+					<td>Stage A local memory spill ceiling (<code>STAGE_A_STATIC_AUDIT_FAILED</code>)</td>
+			</tr>
 	</tbody>
 </table>
 <h3 id="thresholds-and-provenance">Thresholds and provenance</h3>
 <ul>
-<li><strong>Bounds rules</strong>: <code>{ kind: 'bounds', metric, min?, max? }</code> requires at least one finite endpoint (<code>min &lt;= max</code>; <code>-0</code> normalizes to <code>0</code>).</li>
-<li><strong>Comparative rules</strong>: <code>{ kind: 'comparative', metric, baselineMetric, operator, threshold }</code> supports <code>min_ratio</code>, <code>max_ratio</code>, and <code>max_delta</code> (<code>baseline &gt; 0</code> for ratios).</li>
+<li><strong>Bounds and comparative rules</strong>: <code>bounds</code> requires <code>{ metric, min?, max? }</code>; <code>comparative</code> requires <code>{ metric, baselineMetric, operator, threshold }</code> (<code>min_ratio</code>, <code>max_ratio</code>, <code>max_delta</code>). Both accept optional <code>bucketScope</code> (<code>'aggregate' | 'all_buckets' | { bucketId }</code>).</li>
 <li><strong>Hardware provenance</strong>: Passing <code>hardware_execution</code> <code>Evidence</code> requires <code>hardwareProvenance</code> (<code>targetCellId</code>, <code>probeKind: 'physical' | 'synthetic_fixture'</code>, <code>vendor</code>, <code>deviceModel</code>, <code>accelerator</code>, <code>isolationMode</code>, <code>deviceCount</code>, <code>driverVersion</code>, <code>runtimeVersion</code>, <code>topology?</code>, <code>workloadDigest</code>, <code>clockLockMode: 'locked' | 'unlocked' | 'unknown'</code>).</li>
-<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
+<li><strong>Independent core check</strong>: <code>evaluateAcceptance</code> enforces <code>bucketScope</code> across <code>bucketMetrics</code>, requires <code>probeKind: 'physical'</code> unless <code>allowSyntheticHardwareProbe</code> is <code>true</code>, and blocks mismatches (<code>hardware_provenance_mismatch</code>, <code>metric_threshold_failed</code>).</li>
 </ul>
+<h2 id="evolutioncampaign">EvolutionCampaign</h2>
+<p><code>EvolutionCampaign</code> (<code>&lt;= 64 KiB</code>) coordinates bounded multi-generation search over an isolated <code>campaign.sqlite</code> archive and child <code>LocalRunStore</code> runs.</p>
+<div class="code-block">
+  <div class="code-toolbar"><span>yaml</span><button class="copy-code" type="button" aria-label="Copy code">Copy</button></div>
+  <div class="highlight"><pre tabindex="0" class="chroma"><code class="language-yaml" data-lang="yaml"><span class="line"><span class="cl"><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l">loopwright.dev/v1alpha1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">EvolutionCampaign</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">metadata</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l">flash-decode-sm90a</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="nt">spec</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">taskpack</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright/taskpack.yaml</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">targetCellId</span><span class="p">:</span><span class="w"> </span><span class="l">cuda-h100-whole</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">tracks</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">triton, cute, cuda_raw]</span><span class="w"> </span><span class="c"># Optional 1..32 track IDs</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">stages</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional (defaults to single-target)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l">specialist-then-portfolio</span><span class="w"> </span><span class="c"># Optional single-target or specialist-then-portfolio</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">specialistBuckets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bs1-isl4k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">heldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-bs1-4k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bs16-isl8k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">heldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-bs16-8k</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">portfolioHeldOutWorkloadId</span><span class="p">:</span><span class="w"> </span><span class="l">decode-portfolio-holdout</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">population</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">islands</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">migrationIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">8</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxMigrationElites</span><span class="p">:</span><span class="w"> </span><span class="m">1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">nicheAxes</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">bound_pipeline</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">enum</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">hbm, l2, smem_lds_ub, tensor_cube, vector_valu]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span>- <span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l">occupancy_band</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l">numeric_bins</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">        </span><span class="nt">edges</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="m">0</span><span class="p">,</span><span class="w"> </span><span class="m">25</span><span class="p">,</span><span class="w"> </span><span class="m">50</span><span class="p">,</span><span class="w"> </span><span class="m">75</span><span class="p">,</span><span class="w"> </span><span class="m">100</span><span class="p">]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">sampling</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">noveltyDecayLambda</span><span class="p">:</span><span class="w"> </span><span class="m">1.0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">mutationWeights</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">diff_tune</span><span class="p">:</span><span class="w"> </span><span class="m">0.5</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">full_rewrite</span><span class="p">:</span><span class="w"> </span><span class="m">0.3</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">crossover</span><span class="p">:</span><span class="w"> </span><span class="m">0.2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">modelBandit</span><span class="p">:</span><span class="w"> </span><span class="l">ucb1</span><span class="w"> </span><span class="c"># Optional deterministic-round-robin or ucb1</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxCrossoversPerPrompt</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">teamEvolution</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional plateau-triggered bounded role synthesis</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">supervisorRoleId</span><span class="p">:</span><span class="w"> </span><span class="l">supervisor</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">allowedArchetypeRoles</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="l">probe-readonly, mutator-sandboxed, reviewer]</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">stallGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="c"># Optional (1..32)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">minHypervolumeDelta</span><span class="p">:</span><span class="w"> </span><span class="m">0.001</span><span class="w"> </span><span class="c"># Optional (&gt;= 0)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">triggerOnRunEvalPathology</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="c"># Optional (defaults to true)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">trialGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">2</span><span class="w"> </span><span class="c"># Optional (1..8)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTeamSize</span><span class="p">:</span><span class="w"> </span><span class="m">3</span><span class="w"> </span><span class="c"># Optional (1..4)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxTeamSteps</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w"> </span><span class="c"># Optional (1..6)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">objectives</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">latency_us_p50</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">minimize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span>- <span class="nt">metric</span><span class="p">:</span><span class="w"> </span><span class="l">goodput_rps</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">      </span><span class="nt">direction</span><span class="p">:</span><span class="w"> </span><span class="l">maximize</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">budgets</span><span class="p">:</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">40</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">160</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">maxConcurrentEvaluations</span><span class="p">:</span><span class="w"> </span><span class="m">4</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">targetRooflineHeadroom</span><span class="p">:</span><span class="w"> </span><span class="m">1.08</span><span class="w"> </span><span class="c"># Optional early-stop ratio &gt;= 1.0</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">scratchpadIntervalGenerations</span><span class="p">:</span><span class="w"> </span><span class="m">5</span><span class="w"> </span><span class="c"># Optional (1..32)</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">  </span><span class="nt">export</span><span class="p">:</span><span class="w"> </span><span class="c"># Optional auto-export on completion</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">format</span><span class="p">:</span><span class="w"> </span><span class="l">oci-layout</span><span class="w"> </span><span class="c"># Optional dir or oci-layout</span><span class="w">
+</span></span></span><span class="line"><span class="cl"><span class="w">    </span><span class="nt">outputDir</span><span class="p">:</span><span class="w"> </span><span class="l">.loopwright-out/bundles/flash-decode-sm90a</span></span></span></code></pre></div>
+</div>
+<table>
+	<thead>
+			<tr>
+					<th>Field path</th>
+					<th>Required</th>
+					<th>Bounds and defaults</th>
+					<th>Behavior</th>
+			</tr>
+	</thead>
+	<tbody>
+			<tr>
+					<td><code>spec.heldOutWorkloadId</code></td>
+					<td>No</td>
+					<td>Identifier (<code>1..64</code> chars)</td>
+					<td>Single-target holdout workload ID override</td>
+			</tr>
+			<tr>
+					<td><code>spec.tracks</code></td>
+					<td>No</td>
+					<td><code>1..32</code> unique IDs</td>
+					<td>Candidate implementation tracks (<code>cuda_raw</code>, <code>cute</code>, <code>triton</code>)</td>
+			</tr>
+			<tr>
+					<td><code>spec.stages</code></td>
+					<td>No</td>
+					<td><code>single-target</code> (default) or <code>specialist-then-portfolio</code></td>
+					<td><code>specialistBuckets</code> (<code>1..64</code>) + <code>portfolioHeldOutWorkloadId</code></td>
+			</tr>
+			<tr>
+					<td><code>spec.population</code></td>
+					<td>Yes</td>
+					<td><code>islands</code> <code>1..16</code>, <code>migrationIntervalGenerations</code> <code>1..1024</code>, <code>maxMigrationElites</code> <code>0..16</code></td>
+					<td>Ring-topology island archive and migration cadence</td>
+			</tr>
+			<tr>
+					<td><code>population.nicheAxes[]</code></td>
+					<td>Yes</td>
+					<td><code>1..4</code> axes (<code>enum</code> <code>1..32</code> values or <code>numeric_bins</code> <code>2..32</code> edges)</td>
+					<td>Optional <code>field</code> maps metric/diagnostic key into MAP-Elites cell</td>
+			</tr>
+			<tr>
+					<td><code>spec.sampling</code></td>
+					<td>Yes</td>
+					<td><code>noveltyDecayLambda</code> <code>(0, 100]</code>, <code>modelBandit</code> <code>deterministic-round-robin</code> (default) | <code>ucb1</code>, <code>maxCrossoversPerPrompt</code> <code>0..4</code></td>
+					<td>Parent selection, novelty decay, and model bandit routing</td>
+			</tr>
+			<tr>
+					<td><code>sampling.mutationWeights</code></td>
+					<td>Yes</td>
+					<td><code>diff_tune</code>, <code>full_rewrite</code>, <code>crossover</code> in <code>[0, 1000]</code> (sum <code>&gt; 0</code>)</td>
+					<td>Deterministic per-slot mutation operator weights</td>
+			</tr>
+			<tr>
+					<td><code>spec.teamEvolution</code></td>
+					<td>No</td>
+					<td><code>enabled</code>, <code>supervisorRoleId</code>, <code>allowedArchetypeRoles</code> (<code>1..16</code>), <code>maxTeamSize</code> <code>1..4</code> (<code>4</code>), <code>maxTeamSteps</code> <code>1..6</code> (<code>6</code>)</td>
+					<td>Read-only plateau supervisor bounded by archetype envelopes</td>
+			</tr>
+			<tr>
+					<td><code>teamEvolution</code> triggers</td>
+					<td>No</td>
+					<td><code>stallGenerations</code> <code>1..32</code> (<code>4</code>), <code>minHypervolumeDelta</code> <code>&gt;= 0</code> (<code>0.001</code>), <code>triggerOnRunEvalPathology</code> (<code>true</code>), <code>trialGenerations</code> <code>1..8</code> (<code>2</code>)</td>
+					<td>Plateau/pathology trigger thresholds and trial rollback window</td>
+			</tr>
+			<tr>
+					<td><code>spec.objectives[]</code></td>
+					<td>Yes</td>
+					<td><code>1..8</code> unique metrics (<code>minimize</code> | <code>maximize</code>)</td>
+					<td>Multi-objective NSGA-II Pareto frontier and scalar fitness</td>
+			</tr>
+			<tr>
+					<td><code>spec.budgets</code></td>
+					<td>Yes</td>
+					<td><code>maxGenerations</code> <code>1..10000</code>, <code>maxEvaluations</code> <code>1..100000</code>, <code>maxConcurrentEvaluations</code> <code>1..64</code>, <code>scratchpadIntervalGenerations</code> <code>1..32</code> (<code>5</code>)</td>
+					<td>Hard caps (<code>maxConcurrent &lt;= maxEvaluations</code>) and <code>targetRooflineHeadroom</code> <code>&gt;= 1.0</code></td>
+			</tr>
+			<tr>
+					<td><code>spec.export</code></td>
+					<td>No</td>
+					<td><code>format</code> <code>dir</code> (default) | <code>oci-layout</code>, relative <code>outputDir</code></td>
+					<td>Auto-exports signed <code>evolution-bundle.v1</code> upon completion</td>
+			</tr>
+	</tbody>
+</table>
 <nav class="reading-footer" aria-label="Further reading">
     <section>
       <h2>See also</h2>
@@ -1127,6 +1294,7 @@ Its canonical manifest JSON must fit 32 KiB and its inventory JSON must fit 256 
         <li><a href="#thresholds-and-provenance">Thresholds and provenance</a></li>
       </ul>
     </li>
+    <li><a href="#evolutioncampaign">EvolutionCampaign</a></li>
   </ul>
 </nav>
         
