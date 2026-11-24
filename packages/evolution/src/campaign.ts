@@ -18,8 +18,6 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
 import {
   admitTask,
   LIMITS,
@@ -145,6 +143,7 @@ import {
   type TeamPatchV1,
 } from './types.js';
 
+const execFileAsync = promisify(execFile);
 const DEFAULT_CAMPAIGN_SCRUBBER = new SecretScrubber();
 const AVAILABLE_EVOLUTION_TRACKS: readonly string[] = Object.freeze([
   'cuda_raw',
@@ -1874,6 +1873,21 @@ export function createControllerChildRunEvaluator(
           ?? (!collected.hasBenchmarkProof ? 'LOCAL_VERIFICATION_FAILED' : `RUN_${terminalStatusLabel.toUpperCase()}`);
       }
 
+      const evidenceDigest = collected.rawVerdictReceiptBytes !== undefined
+        ? sha256Digest(collected.rawVerdictReceiptBytes)
+        : (
+            runSucceeded
+              ? sha256Digest(
+                  JSON.stringify({
+                    metrics: collected.metrics,
+                    bucketMetrics: collected.bucketMetrics ?? null,
+                    outputArtifacts: collected.outputArtifacts,
+                    codeSlice: extractedCodeSlice,
+                  }),
+                )
+              : null
+          );
+
       const evalResult: CandidateEvaluationResult = Object.freeze({
         status: finalStatus,
         failureReason,
@@ -1886,7 +1900,7 @@ export function createControllerChildRunEvaluator(
         outputArtifacts: collected.outputArtifacts,
         ...(collected.stageABlobs.length > 0 ? { stageABlobs: collected.stageABlobs } : {}),
         ...(collected.rawVerdictReceiptBytes !== undefined ? { rawVerdictReceiptBytes: collected.rawVerdictReceiptBytes } : {}),
-        evidenceDigest: runSucceeded ? sha256Digest(`${proposal.individualId}:${runId}:passed`) : null,
+        evidenceDigest,
         childRunRelPath,
         ...(runEvalReport !== undefined ? { runEvalReport } : {}),
         ...(noveltyDecisionOut !== undefined ? { noveltyDecision: noveltyDecisionOut } : {}),
@@ -1996,16 +2010,30 @@ async function runWithConcurrencyLimit<T>(
 ): Promise<readonly T[]> {
   const results = new Array<T>(tasks.length);
   let nextIdx = 0;
+  let hasError = false;
+  let firstError: unknown;
   const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
   const workers = Array.from({ length: workerCount }, async () => {
     for (;;) {
+      if (hasError) return;
       const idx = nextIdx;
       nextIdx += 1;
       if (idx >= tasks.length) return;
-      results[idx] = await tasks[idx]!();
+      try {
+        results[idx] = await tasks[idx]!();
+      } catch (err: unknown) {
+        if (!hasError) {
+          hasError = true;
+          firstError = err;
+        }
+        return;
+      }
     }
   });
   await Promise.all(workers);
+  if (hasError) {
+    throw firstError;
+  }
   return results;
 }
 

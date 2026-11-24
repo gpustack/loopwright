@@ -1,9 +1,10 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import {
   LIMITS,
   SecretScrubber,
@@ -1485,22 +1486,21 @@ export function createLocalRunStoreSupervisorRunner(
       GIT_COMMITTER_NAME: 'Loopwright Supervisor',
       GIT_COMMITTER_EMAIL: 'supervisor@loopwright.dev',
     };
+    const execFileAsync = promisify(execFile);
     if (!(await lstat(join(workspaceDir, '.git')).catch(() => null))) {
-      execFileSync('git', ['init', '-b', 'main'], { cwd: workspaceDir, env: gitEnv, stdio: 'ignore' });
-      execFileSync(
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: workspaceDir, env: gitEnv });
+      await execFileAsync(
         'git',
         ['commit', '--allow-empty', '-m', 'Read-only plateau supervisor workspace'],
-        { cwd: workspaceDir, env: gitEnv, stdio: 'ignore' },
+        { cwd: workspaceDir, env: gitEnv },
       );
     }
-    const workspaceHeadRev = execFileSync('git', ['rev-parse', 'HEAD'], {
+    const { stdout: headStdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
       cwd: workspaceDir,
       env: gitEnv,
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .trim()
-      .toLowerCase();
+    });
+    const workspaceHeadRev = headStdout.trim().toLowerCase();
 
     const rawContract = context.supervisorContract;
     const contract: TaskContract = {
