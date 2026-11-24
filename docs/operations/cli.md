@@ -244,7 +244,7 @@ loopwright evolve export --campaign ../campaign-state --out ../bundle --format o
 | 6 | Deadline expired |
 | 7 | Reconciliation, `EVOLUTION_CONFLICT`, `EVOLUTION_LEASE_FENCED`, `EVOLUTION_CLOCK_DRIFT`, or fenced runner lease |
 | 8 | Authoritative result unavailable, incident, store corruption, or runner teardown failure |
-| 130 | Step cancellation or accounted SIGINT, subject to uncertainty precedence |
+| 130 | Step cancellation, paused evolution campaign, or accounted SIGINT, subject to uncertainty precedence |
 | 143 | Accounted SIGTERM, subject to uncertainty precedence |
 
 ---
