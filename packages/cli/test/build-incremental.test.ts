@@ -20,13 +20,14 @@ const PACKAGES = [
   'taskpack',
   'github-app',
   'hardware-runner',
+  'evolution',
   'cli',
 ] as const;
 
 test('build.mjs: restores deleted dist outputs and invalidates tsbuildinfo when dependency declarations change', async () => {
   const work = await mkdtemp(join(tmpdir(), 'lw-build-inc-'));
   try {
-    // Create a minimal 11-package composite workspace using the real scripts/build.mjs and real tsconfig.json layout
+    // Create a minimal 12-package composite workspace using the real scripts/build.mjs and real tsconfig.json layout
     await mkdir(join(work, 'scripts'), { recursive: true });
     await cp(join(REPO_ROOT, 'scripts', 'build.mjs'), join(work, 'scripts', 'build.mjs'));
     await cp(join(REPO_ROOT, 'tsconfig.json'), join(work, 'tsconfig.json'));

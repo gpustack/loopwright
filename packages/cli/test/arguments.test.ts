@@ -551,3 +551,82 @@ test('cli: parseArguments validates runner relay|worker grammar and rejects inva
     assert.throws(() => parseArguments(bad), UsageError, `expected UsageError for ${JSON.stringify(bad)}`);
   }
 });
+
+test('cli: parseArguments validates evolve check|run|resume|status|inspect|export grammar and rejects invalid shapes', () => {
+  const checkMin = parseArguments(['evolve', 'check', '--campaign', '.loopwright/campaign.yaml']);
+  assert.equal(checkMin.command, 'evolve');
+  assert.equal(checkMin.evolveAction, 'check');
+  assert.equal(checkMin.values.get('campaign'), '.loopwright/campaign.yaml');
+
+  const checkFull = parseArguments(['evolve', 'check', '--campaign', 'c.yaml', '--repo', '/repo', '--json']);
+  assert.equal(checkFull.evolveAction, 'check');
+  assert.equal(checkFull.values.get('repo'), '/repo');
+  assert.equal(checkFull.flags.has('json'), true);
+
+  for (const stateFlag of ['state', 'campaign-dir', 'root'] as const) {
+    const runParsed = parseArguments([
+      'evolve', 'run', '--campaign', 'c.yaml', `--${stateFlag}`, '/state',
+      '--repo', '/repo', '--out', '/bundle', '--format', 'oci-layout',
+      '--allow-synthetic-probe', '--json',
+    ]);
+    assert.equal(runParsed.evolveAction, 'run');
+    assert.equal(runParsed.values.get(stateFlag), '/state');
+    assert.equal(runParsed.values.get('format'), 'oci-layout');
+    assert.equal(runParsed.flags.has('allow-synthetic-probe'), true);
+    assert.equal(runParsed.flags.has('json'), true);
+  }
+
+  for (const dirFlag of ['campaign', 'campaign-dir', 'root'] as const) {
+    const resumeParsed = parseArguments([
+      'evolve', 'resume', `--${dirFlag}`, '/state', '--repo', '/repo', '--out', '/out', '--format', 'dir', '--allow-synthetic-probe', '--json',
+    ]);
+    assert.equal(resumeParsed.evolveAction, 'resume');
+    assert.equal(resumeParsed.values.get(dirFlag), '/state');
+
+    const statusParsed = parseArguments(['evolve', 'status', `--${dirFlag}`, '/state', '--json']);
+    assert.equal(statusParsed.evolveAction, 'status');
+
+    const inspectParsed = parseArguments([
+      'evolve', 'inspect', `--${dirFlag}`, '/state', '--island', '0', '--individual', 'ind-g1-i0', '--json',
+    ]);
+    assert.equal(inspectParsed.evolveAction, 'inspect');
+    assert.equal(inspectParsed.values.get('island'), '0');
+    assert.equal(inspectParsed.values.get('individual'), 'ind-g1-i0');
+
+    const exportParsed = parseArguments([
+      'evolve', 'export', `--${dirFlag}`, '/state', '--out', '/bundle', '--format', 'oci-layout', '--allow-synthetic-probe', '--overwrite', '--json',
+    ]);
+    assert.equal(exportParsed.evolveAction, 'export');
+    assert.equal(exportParsed.flags.has('overwrite'), true);
+  }
+
+  for (const bad of [
+    ['evolve'],
+    ['evolve', 'bogus'],
+    ['evolve', '--campaign', 'c.yaml'],
+    ['evolve', 'check'],
+    ['evolve', 'check', '--campaign', '   '],
+    ['evolve', 'check', '--campaign', 'c.yaml', '--state', '/s'],
+    ['evolve', 'check', '--campaign', 'c.yaml', '--role-model', 'author=openai/gpt-5.4'],
+    ['evolve', 'run', '--campaign', 'c.yaml'],
+    ['evolve', 'run', '--campaign', 'c.yaml', '--state', '/s', '--campaign-dir', '/s2'],
+    ['evolve', 'run', '--campaign', 'c.yaml', '--state', '/s', '--root', '/s2'],
+    ['evolve', 'run', '--campaign', 'c.yaml', '--state', '/s', '--format', 'tar'],
+    ['evolve', 'run', '--campaign', 'c.yaml', '--state', '/s', '--overwrite'],
+    ['evolve', 'resume'],
+    ['evolve', 'resume', '--campaign', '/s', '--root', '/s2'],
+    ['evolve', 'status'],
+    ['evolve', 'status', '--campaign', '/s', '--out', '/o'],
+    ['evolve', 'inspect'],
+    ['evolve', 'inspect', '--campaign', '/s', '--island', '-1'],
+    ['evolve', 'inspect', '--campaign', '/s', '--island', 'abc'],
+    ['evolve', 'inspect', '--campaign', '/s', '--individual', 'bad id'],
+    ['evolve', 'export', '--campaign', '/s'],
+    ['evolve', 'export', '--out', '/bundle'],
+    ['evolve', 'export', '--campaign', '/s', '--out', '/bundle', '--format', 'zip'],
+    ['evolve', 'export', '--campaign', '/s', '--out', '/bundle', '--repo', '/r'],
+    ['evolve', 'export', '--campaign', '/s', '--out', '/bundle', 'extra'],
+  ]) {
+    assert.throws(() => parseArguments(bad), UsageError, `expected UsageError for ${JSON.stringify(bad)}`);
+  }
+});

@@ -272,6 +272,7 @@ UNMANAGED_WORKSPACES = [
     "packages/memory",
     "packages/taskpack-runner",
     "packages/hardware-runner",
+    "packages/evolution",
 ]
 ALL_WORKSPACES = sorted(["packages/agent-pi", *YAML_WORKSPACES, *UNMANAGED_WORKSPACES])
 ALLOWED_WORKSPACE_LINKS = {
@@ -307,6 +308,7 @@ PROTECTED_TREE_PREFIXES = [
     "packages/memory",
     "packages/taskpack-runner",
     "packages/hardware-runner",
+    "packages/evolution",
     "packages/agent-pi/qualification",
     "packages/controller/qualification",
     "docs/contribute",

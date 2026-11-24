@@ -8,9 +8,11 @@ import {
 } from '@loopwright/controller';
 import {
   MAX_MEMORY_INDEX_BLOB_BYTES,
+  type HardwareMemoryScope,
   type MemoryDiagnostic,
   type MemoryErrorCode,
   type MemoryEntry,
+  type MemoryEntryScope,
   type MemoryEvidenceRef,
   type MemoryOperation,
   type MemoryProposal,
@@ -63,14 +65,50 @@ export function hasControlCharacter(value: string): boolean {
   return false;
 }
 const revisionPattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+const PRINTABLE_ASCII_RE = /^[\x20-\x7E]+$/;
+const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const HARDWARE_SCOPE_KEYS = ['accelerator', 'driverConstraint', 'operatorFamily', 'boundPipeline'] as const;
+
+export const MEMORY_CREDENTIAL_PATTERNS: readonly { readonly source: RegExp; readonly label: string }[] = [
+  { source: /ghp_[A-Za-z0-9]{20,}/, label: 'GitHub user token' },
+  { source: /ghs_[A-Za-z0-9]{20,}/, label: 'GitHub server token' },
+  { source: /github_pat_[A-Za-z0-9_]{20,}/, label: 'GitHub fine-grained token' },
+  { source: /sk-[A-Za-z0-9_-]{20,}/, label: 'API key' },
+  { source: /Bearer [A-Za-z0-9._~+/=-]{16,}/, label: 'bearer token' },
+  { source: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, label: 'private key' },
+  { source: /AKIA[0-9A-Z]{16}/, label: 'AWS access key' },
+];
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : 0;
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function objectShape(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('MEMORY_SCHEMA_INVALID', path, 'expected object');
   return value as Record<string, unknown>;
 }
-function field(input: Record<string, unknown>, keys: readonly string[], path: string): void {
+function field(
+  input: Record<string, unknown>,
+  keys: readonly string[],
+  path: string,
+  optionalKeys: readonly string[] = [],
+): void {
   for (const key of keys) if (!Object.hasOwn(input, key)) fail('MEMORY_SCHEMA_INVALID', `${path}/${key}`, 'field required');
-  for (const key of Object.keys(input)) if (!keys.includes(key)) fail('MEMORY_SCHEMA_INVALID', `${path}/${key}`, 'unknown field');
+  for (const key of Object.getOwnPropertyNames(input)) {
+    if (FORBIDDEN_PROTOTYPE_KEYS.has(key) || (!keys.includes(key) && !optionalKeys.includes(key))) {
+      fail('MEMORY_SCHEMA_INVALID', `${path}/${key}`, 'unknown field');
+    }
+  }
 }
 function text(value: unknown, path: string, min: number, max: number): string {
   if (typeof value !== 'string') fail('MEMORY_SCHEMA_INVALID', path, 'expected string');
@@ -216,6 +254,49 @@ function targetMatrix(value: unknown, path: string): MemoryEntry['scope']['targe
   field(input, ['id', 'platform', 'variant'], path);
   return { id: identifier(input['id'], `${path}/id`, 128), platform: text(input['platform'], `${path}/platform`, 1, 128), variant: text(input['variant'], `${path}/variant`, 1, 128) };
 }
+function hardwareScopeField(value: unknown, path: string, max: number): string {
+  const raw = text(value, path, 1, max);
+  if (hasLoneSurrogate(raw)) fail('MEMORY_SCHEMA_INVALID', path, 'lone UTF-16 surrogate in hardwareScope field');
+  if (!PRINTABLE_ASCII_RE.test(raw) || raw.trim().length === 0) {
+    fail('MEMORY_SCHEMA_INVALID', path, 'expected non-empty printable ASCII string');
+  }
+  for (const pattern of MEMORY_CREDENTIAL_PATTERNS) {
+    if (pattern.source.test(raw)) fail('MEMORY_SECRET_LEAK', path, `credential pattern detected: ${pattern.label}`);
+  }
+  return raw;
+}
+export function hardwareMemoryScopeSchema(value: unknown, path = '/hardwareScope'): HardwareMemoryScope {
+  const input = objectShape(value, path);
+  field(input, ['accelerator'], path, HARDWARE_SCOPE_KEYS.slice(1));
+  const out: Record<string, string> = Object.create(null);
+  out['accelerator'] = hardwareScopeField(input['accelerator'], `${path}/accelerator`, 64);
+  if (Object.hasOwn(input, 'driverConstraint') && input['driverConstraint'] !== undefined) {
+    out['driverConstraint'] = hardwareScopeField(input['driverConstraint'], `${path}/driverConstraint`, 128);
+  }
+  if (Object.hasOwn(input, 'operatorFamily') && input['operatorFamily'] !== undefined) {
+    out['operatorFamily'] = hardwareScopeField(input['operatorFamily'], `${path}/operatorFamily`, 64);
+  }
+  if (Object.hasOwn(input, 'boundPipeline') && input['boundPipeline'] !== undefined) {
+    out['boundPipeline'] = hardwareScopeField(input['boundPipeline'], `${path}/boundPipeline`, 64);
+  }
+  return Object.freeze(out) as unknown as HardwareMemoryScope;
+}
+/**
+ * Symmetric overlap check for two optional hardware scopes (used by conflict and supersession gates).
+ * An omitted scope or optional sub-field is treated as wildcard-compatible for overlap purposes;
+ * directional query selection uses `hardwareScopeMatches` in `selector.ts`.
+ */
+export function hardwareScopesOverlap(
+  a: HardwareMemoryScope | undefined,
+  b: HardwareMemoryScope | undefined,
+): boolean {
+  if (a === undefined || b === undefined) return true;
+  if (a.accelerator !== b.accelerator) return false;
+  if (a.driverConstraint !== undefined && b.driverConstraint !== undefined && a.driverConstraint !== b.driverConstraint) return false;
+  if (a.operatorFamily !== undefined && b.operatorFamily !== undefined && a.operatorFamily !== b.operatorFamily) return false;
+  if (a.boundPipeline !== undefined && b.boundPipeline !== undefined && a.boundPipeline !== b.boundPipeline) return false;
+  return true;
+}
 const ENTRY_KINDS = ['fact', 'failure_observation', 'invariant'] as const;
 export function memoryEntrySchema(value: unknown, path = ''): MemoryEntry {
   const input = objectShape(value, path);
@@ -224,7 +305,10 @@ export function memoryEntrySchema(value: unknown, path = ''): MemoryEntry {
   const kind = text(input['kind'], `${path}/kind`, 1, 32);
   if (!ENTRY_KINDS.includes(kind as (typeof ENTRY_KINDS)[number])) fail('MEMORY_SCHEMA_INVALID', `${path}/kind`, 'unknown entry kind');
   const scope = objectShape(input['scope'], `${path}/scope`);
-  field(scope, ['taskpack', 'repository', 'paths', 'targetMatrix'], `${path}/scope`);
+  field(scope, ['taskpack', 'repository', 'paths', 'targetMatrix'], `${path}/scope`, ['hardwareScope']);
+  const parsedHardwareScope = Object.hasOwn(scope, 'hardwareScope') && scope['hardwareScope'] !== undefined
+    ? hardwareMemoryScopeSchema(scope['hardwareScope'], `${path}/scope/hardwareScope`)
+    : undefined;
   const sourceRef = objectShape(input['sourceRef'], `${path}/sourceRef`);
   field(sourceRef, ['runId', 'lockHash', 'candidateDigest'], `${path}/sourceRef`);
   const validFor = objectShape(input['validFor'], `${path}/validFor`);
@@ -233,11 +317,23 @@ export function memoryEntrySchema(value: unknown, path = ''): MemoryEntry {
   const expiresAtMs = integer(input['expiresAtMs'], `${path}/expiresAtMs`, 1);
   if (expiresAtMs <= verifiedAtMs) fail('MEMORY_SCHEMA_INVALID', `${path}/expiresAtMs`, 'expiresAtMs must exceed verifiedAtMs');
   const paths = sortedUnique(scope['paths'], `${path}/scope/paths`, 1, 128, 1024);
+  const normalizedScope: MemoryEntryScope = parsedHardwareScope === undefined
+    ? {
+        taskpack: identifier(scope['taskpack'], `${path}/scope/taskpack`, 128),
+        repository: repositorySlug(scope['repository'], `${path}/scope/repository`),
+        paths: paths.map((item, index) => scopePattern(item, `${path}/scope/paths/${index}`)),
+        targetMatrix: targetMatrix(scope['targetMatrix'], `${path}/scope/targetMatrix`),
+      }
+    : {
+        taskpack: identifier(scope['taskpack'], `${path}/scope/taskpack`, 128),
+        repository: repositorySlug(scope['repository'], `${path}/scope/repository`),
+        paths: paths.map((item, index) => scopePattern(item, `${path}/scope/paths/${index}`)),
+        targetMatrix: targetMatrix(scope['targetMatrix'], `${path}/scope/targetMatrix`),
+        hardwareScope: parsedHardwareScope,
+      };
   const entry: MemoryEntry = { version: 1, id: identifier(input['id'], `${path}/id`, 128), claimKey: identifier(input['claimKey'], `${path}/claimKey`, 128),
     claim: memoryClaim(input['claim'], `${path}/claim`), kind: kind as (typeof ENTRY_KINDS)[number],
-    scope: { taskpack: identifier(scope['taskpack'], `${path}/scope/taskpack`, 128), repository: repositorySlug(scope['repository'], `${path}/scope/repository`),
-      paths: paths.map((item, index) => scopePattern(item, `${path}/scope/paths/${index}`)),
-      targetMatrix: targetMatrix(scope['targetMatrix'], `${path}/scope/targetMatrix`) },
+    scope: normalizedScope,
     sourceRef: { runId: identifier(sourceRef['runId'], `${path}/sourceRef/runId`, 128), lockHash: digestShape(sourceRef['lockHash'], `${path}/sourceRef/lockHash`),
       candidateDigest: digestShape(sourceRef['candidateDigest'], `${path}/sourceRef/candidateDigest`) },
     sourceDigest: digestShape(input['sourceDigest'], `${path}/sourceDigest`), verifiedAtMs,

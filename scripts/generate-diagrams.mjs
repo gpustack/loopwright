@@ -939,6 +939,246 @@ ${pillsHtml}
 `;
 }
 
+function renderHardwareRelayFlowSvg() {
+  const diagramName = "hardware-relay-flow.svg";
+  const width = 1200;
+  const height = 1036;
+
+  const headerTexts = [
+    "LOOPWRIGHT  /  HARDWARE RUNNER",
+    "Hardware Relay and Network Boundaries",
+    "Three isolated network zones separate control plane credentials, relay DMZ routing, and private GPU clusters",
+    "ZONE 1  ·  CONTROL PLANE ZONE  ·  OUTBOUND HTTPS ONLY",
+    "SIGNED BENCHMARK SUBMISSION  ·  LOCAL CLI OR GITHUB ACTIONS",
+    "OUTBOUND HTTPS ONLY  ·  HMAC JOB SUBMIT  ·  NO WORKER TOKENS",
+    "ZONE 2  ·  RELAY DMZ BOUNDARY  ·  HTTPS & CREDENTIAL ISOLATION",
+    "HARDWARE RELAY & CAS HUB  ·  RELAY DMZ",
+    "HTTPS Endpoint  ·  HMAC Auth  ·  Monotonic Lease Fence  ·  1 MB CAS Store",
+    "Separates controller signing secrets from worker bearer tokens across distinct endpoints",
+    "CLUSTER FIREWALL  ·  ZERO INBOUND PORTS  ·  WORKER PULLS OVER HTTPS",
+    "ZONE 3  ·  PRIVATE GPU CLUSTER ZONE  ·  OUTBOUND PULL & OFFLINE SANDBOX",
+    "OFFLINE DOCKER SANDBOX  ·  ZERO NETWORK",
+    "GPU hosts open zero inbound ports and hold no signing secrets; controllers never read held-out suites."
+  ];
+  for (const t of headerTexts) {
+    assertCleanSvgText(diagramName, "header/boundary", t);
+  }
+
+  const domains = [
+    {
+      title: "CAMPAIGN CLIENTS  ·  Job Producers",
+      items: [
+        { kicker: "LOCAL CLI", head: "Evolution campaigns", note: "Dispatches candidate jobs" },
+        { kicker: "CI WORKFLOW", head: "GitHub Actions", note: "Runs with read scope" }
+      ]
+    },
+    {
+      title: "SIGNED PAYLOAD  ·  Controller Secret",
+      items: [
+        { kicker: "BENCHMARK JOB", head: "Target pool routing", note: "Matches GPU capabilities" },
+        { kicker: "HMAC SECRET", head: "Controller signing key", note: "Authenticates verdict receipts" }
+      ]
+    }
+  ];
+
+  const topDomainsHtml = domains
+    .map((dom, dIdx) => {
+      assertCleanSvgText(diagramName, `domain-${dIdx}`, dom.title);
+      const dx = dIdx === 0 ? 50 : 602;
+      const cardsHtml = dom.items
+        .map((it, iIdx) => {
+          assertCardWordLimit(diagramName, `domain-${dIdx}-card-${iIdx}`, [
+            it.kicker,
+            it.head,
+            it.note
+          ]);
+          const ix = dx + 16 + iIdx * 266;
+          return [
+            `<rect class="box" x="${ix}" y="214" width="250" height="86" rx="8"/>`,
+            `<text class="detail" x="${ix + 14}" y="236">${esc(it.kicker)}</text>`,
+            `<text class="cardhead" x="${ix + 14}" y="261">${esc(it.head)}</text>`,
+            `<text class="small" x="${ix + 14}" y="285">${esc(it.note)}</text>`
+          ].join("");
+        })
+        .join("");
+      return [
+        `<rect class="tint" x="${dx}" y="178" width="548" height="138" rx="10"/>`,
+        `<text class="ct" x="${dx + 16}" y="201">${esc(dom.title)}</text>`,
+        cardsHtml
+      ].join("");
+    })
+    .join("");
+
+  const wireXs = [179, 453, 727, 1001];
+  const topWiresHtml = wireXs
+    .map((wx, idx) => {
+      const b1 = (-idx * 0.37).toFixed(2);
+      return [
+        `<path class="wire" d="M ${wx} 330 L ${wx} 442"/>`,
+        `<circle class="dot" r="3.5"><animateMotion path="M ${wx} 330 L ${wx} 442" dur="2.6s" begin="${b1}s" repeatCount="indefinite"/></circle>`
+      ].join("");
+    })
+    .join("");
+
+  const bottomWiresHtml = wireXs
+    .map((wx, idx) => {
+      const b2 = (-(idx * 0.37 + 0.74)).toFixed(2);
+      return [
+        `<path class="wire" d="M ${wx} 560 L ${wx} 676"/>`,
+        `<circle class="dot" r="3.5"><animateMotion path="M ${wx} 560 L ${wx} 676" dur="2.6s" begin="${b2}s" repeatCount="indefinite"/></circle>`
+      ].join("");
+    })
+    .join("");
+
+  const stageCards = [
+    {
+      accent: "--indigo",
+      icon: "radar",
+      title: "01 · Worker Pull",
+      line1: "Zero inbound GPU ports",
+      line2: "Polls leases outbound"
+    },
+    {
+      accent: "--teal",
+      icon: "layers",
+      title: "02 · Build Audit",
+      line1: "Offline zero-network compile",
+      line2: "Checks forbidden symbols"
+    },
+    {
+      accent: "--amber",
+      icon: "chip",
+      title: "03 · GPU Bench",
+      line1: "Zero-network Docker sandbox",
+      line2: "Mounts holdout read-only"
+    },
+    {
+      accent: "--emerald",
+      icon: "shield",
+      title: "04 · Verdict Receipt",
+      line1: "Returns signed HMAC",
+      line2: "Backs archive export"
+    }
+  ];
+
+  const stageCardsHtml = stageCards
+    .map((card, idx) => {
+      assertCardWordLimit(diagramName, `stage-card-${idx}`, [
+        card.title,
+        card.line1,
+        card.line2
+      ]);
+      const cx = 50 + idx * 274;
+      return [
+        `<rect class="box" x="${cx}" y="732" width="258" height="148" rx="12"/>`,
+        `<rect x="${cx}" y="744" width="4" height="124" rx="2" fill="var(${card.accent})"/>`,
+        renderIcon(card.icon, cx + 16, 750, card.accent),
+        `<text class="ct" x="${cx + 48}" y="766">${esc(card.title)}</text>`,
+        `<text class="detail" x="${cx + 18}" y="804">${esc(card.line1)}</text>`,
+        `<text class="detail" x="${cx + 18}" y="828">${esc(card.line2)}</text>`
+      ].join("");
+    })
+    .join("");
+
+  const pills = [
+    "Zone 1 to DMZ: outbound HTTPS job submit",
+    "Cluster firewall: zero inbound GPU ports",
+    "Stage A and B: offline zero-network Docker"
+  ];
+  for (const pill of pills) {
+    assertCleanSvgText(diagramName, "pill", pill);
+  }
+
+  const pillsHtml = pills
+    .map((pill, idx) => {
+      const px = 32 + idx * 384;
+      return [
+        `<rect class="box" x="${px}" y="968" width="368" height="42" rx="10"/>`,
+        `<circle cx="${px + 20}" cy="989" r="5.5" fill="none" stroke="var(--emerald)" stroke-width="1.6"/>`,
+        `<circle cx="${px + 20}" cy="989" r="2.5" fill="var(--emerald)"/>`,
+        `<text class="pill" x="${px + 36}" y="993.5">${esc(pill)}</text>`
+      ].join("");
+    })
+    .join("");
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" role="img" aria-labelledby="title desc">
+<title id="title">Hardware Relay and Network Boundaries</title>
+<desc id="desc">Three isolated network zones: Control Plane outbound HTTPS submit, Relay DMZ hub, and Private GPU Cluster behind a zero-inbound-ports firewall with offline zero-network Docker sandboxes.</desc>
+<style>
+:root{color-scheme:light dark;--bg:#f8fbff;--card:#fff;--ink:#12233d;--muted:#52677f;--line:#c9d9e7;--indigo:#5B4B9E;--blue:#2563eb;--purple:#7c3aed;--teal:#3B8EA5;--amber:#D89B48;--emerald:#059669;--soft:#edf5fc;--grid:#dfeaf3}
+@media(prefers-color-scheme:dark){:root{--bg:#101d30;--card:#1a2c43;--ink:#f1f6ff;--muted:#bdcde0;--line:#526b83;--indigo:#b5a6f5;--blue:#80adff;--purple:#c4a4ff;--teal:#6cd0e8;--amber:#ffc273;--emerald:#5ce2af;--soft:#213b55;--grid:#29425b}}
+text{font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;fill:var(--ink)}
+.title{font-size:29px;font-weight:750;letter-spacing:-.4px}
+.sub{font-size:14px;fill:var(--muted)}
+.label{font-size:12px;font-weight:700;letter-spacing:1.2px;fill:var(--muted)}
+.ct{font-size:15px;font-weight:700}
+.cardhead{font-size:13.5px;font-weight:650}
+.detail{font-size:12.5px;fill:var(--muted)}
+.small{font-size:11.5px;fill:var(--muted)}
+.box{fill:var(--card);stroke:var(--line);stroke-width:1.2}
+.tint{fill:var(--soft);stroke:var(--line);stroke-width:1.1}
+.wire{fill:none;stroke:var(--teal);stroke-width:2;stroke-dasharray:5 5;opacity:.85}
+.barrier{fill:none;stroke:var(--blue);stroke-width:1.8;stroke-dasharray:7 5;opacity:.85}
+.firewall{fill:none;stroke:var(--amber);stroke-width:2.2;stroke-dasharray:8 5;opacity:.95}
+.sandbox{fill:var(--soft);stroke:var(--amber);stroke-width:1.5;stroke-dasharray:6 4}
+.badge{font-size:11.5px;font-weight:700;letter-spacing:.7px;fill:var(--ink)}
+.dot{fill:var(--teal)}
+.headline{font-size:16px;font-weight:750;letter-spacing:.35px}
+.pill{font-size:12px;font-weight:650}
+@media(prefers-reduced-motion:reduce){.dot{display:none}}
+</style>
+<defs>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M40 0H0V40" fill="none" stroke="var(--grid)" stroke-width="1"/>
+  </pattern>
+  <symbol id="lw-logo" viewBox="0 0 88 88">
+    <image width="88" height="88" href="${LOGO_DATA_URI}"/>
+  </symbol>
+</defs>
+<rect width="${width}" height="${height}" rx="16" fill="var(--bg)"/>
+<rect width="${width}" height="${height}" rx="16" fill="url(#grid)" opacity=".65"/>
+<text class="label" x="32" y="34">LOOPWRIGHT  /  HARDWARE RUNNER</text>
+<text class="title" x="32" y="70">Hardware Relay and Network Boundaries</text>
+<text class="sub" x="32" y="94">Three isolated network zones separate control plane credentials, relay DMZ routing, and private GPU clusters</text>
+${renderLogoBadge(1126, 30, 42, 10)}
+
+<rect x="28" y="114" width="465" height="20" rx="3" fill="var(--bg)"/>
+<text class="label" x="34" y="128">ZONE 1  ·  CONTROL PLANE ZONE  ·  OUTBOUND HTTPS ONLY</text>
+<rect class="box" x="32" y="142" width="1136" height="188" rx="15" style="stroke:var(--indigo);stroke-width:1.6"/>
+<text class="ct" x="50" y="166">SIGNED BENCHMARK SUBMISSION  ·  LOCAL CLI OR GITHUB ACTIONS</text>
+${topDomainsHtml}
+
+${topWiresHtml}
+<line class="barrier" x1="32" y1="376" x2="1168" y2="376"/>
+<rect class="box" x="330" y="362" width="540" height="28" rx="8" style="stroke:var(--blue);stroke-width:1.5"/>
+<text class="badge" x="600" y="380" text-anchor="middle">OUTBOUND HTTPS ONLY  ·  HMAC JOB SUBMIT  ·  NO WORKER TOKENS</text>
+
+<rect x="28" y="414" width="525" height="20" rx="3" fill="var(--bg)"/>
+<text class="label" x="34" y="428">ZONE 2  ·  RELAY DMZ BOUNDARY  ·  HTTPS &amp; CREDENTIAL ISOLATION</text>
+<rect class="box" x="32" y="442" width="1136" height="118" rx="16" style="stroke:var(--teal);stroke-width:1.8"/>
+${renderLogoBadge(52, 460, 48, 11)}
+<text class="headline" x="118" y="478">HARDWARE RELAY &amp; CAS HUB  ·  RELAY DMZ</text>
+<text class="sub" x="118" y="504">HTTPS Endpoint  ·  HMAC Auth  ·  Monotonic Lease Fence  ·  1 MB CAS Store</text>
+<text class="detail" x="118" y="530">Separates controller signing secrets from worker bearer tokens across distinct endpoints</text>
+
+${bottomWiresHtml}
+<line class="firewall" x1="32" y1="616" x2="1168" y2="616"/>
+<rect class="box" x="295" y="601" width="610" height="30" rx="8" style="stroke:var(--amber);stroke-width:1.8"/>
+<text class="badge" x="600" y="620" text-anchor="middle">CLUSTER FIREWALL  ·  ZERO INBOUND PORTS  ·  WORKER PULLS OVER HTTPS</text>
+
+<rect x="28" y="648" width="615" height="20" rx="3" fill="var(--bg)"/>
+<text class="label" x="34" y="662">ZONE 3  ·  PRIVATE GPU CLUSTER ZONE  ·  OUTBOUND PULL &amp; OFFLINE SANDBOX</text>
+<rect class="box" x="32" y="676" width="1136" height="238" rx="16" style="stroke:var(--emerald);stroke-width:1.7"/>
+<rect class="sandbox" x="312" y="694" width="556" height="202" rx="12"/>
+<text class="badge" x="590" y="716" text-anchor="middle">OFFLINE DOCKER SANDBOX  ·  ZERO NETWORK</text>
+${stageCardsHtml}
+
+<text class="small" x="33" y="944">GPU hosts open zero inbound ports and hold no signing secrets; controllers never read held-out suites.</text>
+${pillsHtml}
+</svg>
+`;
+}
+
 for (const spec of DIAGRAMS) {
   const svg = renderBlueprintSvg(spec);
   const outPath = path.join(diagramsDir, spec.filename);
@@ -954,4 +1194,10 @@ fs.writeFileSync(
   "utf8"
 );
 
-console.log(`Generated ${DIAGRAMS.length + 1} gpustack-style blueprint SVG diagrams.`);
+fs.writeFileSync(
+  path.join(diagramsDir, "hardware-relay-flow.svg"),
+  renderHardwareRelayFlowSvg(),
+  "utf8"
+);
+
+console.log(`Generated ${DIAGRAMS.length + 2} gpustack-style blueprint SVG diagrams.`);

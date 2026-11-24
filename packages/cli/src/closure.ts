@@ -18,7 +18,7 @@ export type ClosureDisposition = 'closed_local' | 'deferred_owned' | 'blocked_ex
 export type ClosureEvidenceLevel = 'unit_and_integration' | 'controlled_local_qualification' | 'frozen_offline_parity' | 'unprovisioned_external';
 export type ClosureOwnerPackage = '@loopwright/core' | '@loopwright/state' | '@loopwright/agent-pi' | '@loopwright/controller' | '@loopwright/cli'
   | '@loopwright/taskpack-runner' | '@loopwright/memory' | '@loopwright/taskpack' | '@loopwright/github-app' | '@loopwright/decisions'
-  | '@loopwright/hardware-runner';
+  | '@loopwright/hardware-runner' | '@loopwright/evolution';
 export type ClosureSubsystem = string;
 export interface ClosureCapabilityEntry {
   readonly id: ClosureCapabilityId;
@@ -86,7 +86,7 @@ export interface ClosureMatrixReport {
 const DISPOSITIONS: readonly ClosureDisposition[] = ['closed_local', 'deferred_owned', 'blocked_external'];
 const EVIDENCE_LEVELS: readonly ClosureEvidenceLevel[] = ['unit_and_integration', 'controlled_local_qualification', 'frozen_offline_parity', 'unprovisioned_external'];
 const STATUSES: readonly ClosureCapabilityEntry['verificationStatus'][] = ['passed', 'failed', 'blocked', 'not_run'];
-const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/taskpack', '@loopwright/github-app', '@loopwright/decisions', '@loopwright/hardware-runner'];
+const OWNER_PACKAGES: readonly ClosureOwnerPackage[] = ['@loopwright/core', '@loopwright/state', '@loopwright/agent-pi', '@loopwright/controller', '@loopwright/cli', '@loopwright/taskpack-runner', '@loopwright/memory', '@loopwright/taskpack', '@loopwright/github-app', '@loopwright/decisions', '@loopwright/hardware-runner', '@loopwright/evolution'];
 function text(value: unknown): string { return typeof value === 'string' ? value : ''; }
 function entryShapeErrors(entry: ClosureCapabilityEntry, path: string): ClosureDiagnostic[] {
   const errors: ClosureDiagnostic[] = [];

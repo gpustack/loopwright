@@ -3,6 +3,7 @@ import { attempt, fail, type Result } from './diagnostics.js';
 import { LIMITS, OVERLAY_LIMITS, type OverlayLimits } from './limits.js';
 import { graphBounds, unique, validateGraph } from './graph.js';
 import { isVerifierNamespacePath, matches, relativeName, scopePattern } from './scope.js';
+import { SecretScrubber } from './scrubber.js';
 
 export type Schema<T> = (value: Json, path: string) => T;
 export type Infer<S> = S extends Schema<infer T> ? T : never;
@@ -149,11 +150,14 @@ export const mediaType: Schema<string> = (value, path) => {
   return mime;
 };
 
-const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+export const FORBIDDEN_PROTOTYPE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const FORBIDDEN_METRIC_KEYS = FORBIDDEN_PROTOTYPE_KEYS;
 const METRIC_KEY_RE = /^[A-Za-z_][A-Za-z0-9._-]*$/;
+const BUCKET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const FORBIDDEN_SYMBOL_GLOB_RE = /[*?[\]]/;
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const DOTTED_VERSION_RE = /^\d+(?:\.\d+)*$/;
+const DEFAULT_SECRET_SCRUBBER = new SecretScrubber();
 
 export function printableAscii(min = 1, max: number = LIMITS.string): Schema<string> {
   return (value, path) => {
@@ -170,6 +174,15 @@ export function printableText(min = 1, max: number = LIMITS.string): Schema<stri
       fail('VALUE_RANGE', path);
     }
     return parsed;
+  };
+}
+
+function uniqueArrayOf<T extends string>(schema: Schema<T>, min: number, max: number): Schema<readonly T[]> {
+  const base = arrayOf(schema, min, max);
+  return (value, path) => {
+    const items = base(value, path);
+    unique(items, path);
+    return items;
   };
 }
 
@@ -213,6 +226,12 @@ const driverConstraintSchema: Schema<string> = (value, path) => {
   return constraint;
 };
 
+const forbiddenSymbolPatternSchema: Schema<string> = (value, path) => {
+  const parsed = printableAscii(1, LIMITS.forbiddenSymbolPattern)(value, path);
+  if (FORBIDDEN_SYMBOL_GLOB_RE.test(parsed)) fail('PATTERN_UNSUPPORTED', path);
+  return parsed;
+};
+
 export const hardwareIsolationMode = enumeration('whole_device', 'sliced');
 export interface HardwareTargetSpec {
   readonly accelerator: string;
@@ -220,6 +239,9 @@ export interface HardwareTargetSpec {
   readonly deviceCount?: number;
   readonly driverConstraint?: string;
   readonly topology?: string;
+  readonly forbiddenSymbolPatterns?: readonly string[];
+  readonly maxRegisterCount?: number;
+  readonly maxLocalSpillBytes?: number;
 }
 export const hardwareTargetSchema: Schema<HardwareTargetSpec> = record({
   accelerator: printableAscii(1, 64),
@@ -227,9 +249,12 @@ export const hardwareTargetSchema: Schema<HardwareTargetSpec> = record({
   deviceCount: optional(integer(1, 64)),
   driverConstraint: optional(driverConstraintSchema),
   topology: optional(printableText(1, 128)),
+  forbiddenSymbolPatterns: optional(uniqueArrayOf(forbiddenSymbolPatternSchema, 0, LIMITS.forbiddenSymbolPatterns)),
+  maxRegisterCount: optional(integer(0)),
+  maxLocalSpillBytes: optional(integer(0)),
 });
 
-function isValidMetricKey(key: string): boolean {
+export function isValidMetricKey(key: string): boolean {
   return key.length >= 1 && key.length <= LIMITS.metricKey
     && !FORBIDDEN_METRIC_KEYS.has(key)
     && METRIC_KEY_RE.test(key);
@@ -239,6 +264,38 @@ const metricKeySchema: Schema<string> = (value, path) => {
   if (typeof value !== 'string') fail('VALUE_TYPE', path);
   if (!isValidMetricKey(value)) fail('IDENTIFIER_INVALID', path);
   return value;
+};
+
+export function validateBucketId(
+  value: Json,
+  path: string,
+  scrubber: SecretScrubber = DEFAULT_SECRET_SCRUBBER,
+): string {
+  const parsed = text(1, LIMITS.bucketId)(value, path);
+  if (FORBIDDEN_PROTOTYPE_KEYS.has(parsed) || !BUCKET_ID_RE.test(parsed)) fail('IDENTIFIER_INVALID', path);
+  if (scrubber.containsSecret(parsed)) fail('VALUE_RANGE', path);
+  return parsed;
+}
+
+export const bucketIdSchema: Schema<string> = (value, path) => validateBucketId(value, path);
+
+export type MetricBucketScope =
+  | 'aggregate'
+  | 'all_buckets'
+  | { readonly bucketId: string };
+
+const bucketScopeTargetShape = record({
+  bucketId: bucketIdSchema,
+});
+
+export const metricBucketScopeSchema: Schema<MetricBucketScope> = (value, path) => {
+  if (typeof value === 'string') {
+    return enumeration('aggregate', 'all_buckets')(value, path);
+  }
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return bucketScopeTargetShape(value, path);
+  }
+  fail('VALUE_TYPE', path);
 };
 
 const finiteNumber: Schema<number> = (value, path) => {
@@ -252,6 +309,7 @@ export interface MetricBoundsRule {
   readonly metric: string;
   readonly min?: number;
   readonly max?: number;
+  readonly bucketScope?: MetricBucketScope;
 }
 export interface MetricComparativeRule {
   readonly kind: 'comparative';
@@ -259,6 +317,7 @@ export interface MetricComparativeRule {
   readonly baselineMetric: string;
   readonly operator: 'min_ratio' | 'max_ratio' | 'max_delta';
   readonly threshold: number;
+  readonly bucketScope?: MetricBucketScope;
 }
 export type MetricThresholdRule = MetricBoundsRule | MetricComparativeRule;
 
@@ -267,6 +326,7 @@ const metricBoundsShape = record({
   metric: metricKeySchema,
   min: optional(finiteNumber),
   max: optional(finiteNumber),
+  bucketScope: optional(metricBucketScopeSchema),
 });
 const metricComparativeShape = record({
   kind: enumeration('comparative'),
@@ -274,6 +334,7 @@ const metricComparativeShape = record({
   baselineMetric: metricKeySchema,
   operator: enumeration('min_ratio', 'max_ratio', 'max_delta'),
   threshold: finiteNumber,
+  bucketScope: optional(metricBucketScopeSchema),
 });
 
 export const metricThresholdRuleSchema: Schema<MetricThresholdRule> = (value, path) => {
@@ -349,15 +410,6 @@ export const reworkPolicySchema = record({
   maxReworks: integer(1, LIMITS.maxReworks),
 });
 export type ReworkPolicy = Infer<typeof reworkPolicySchema>;
-
-function uniqueArrayOf<T extends string>(schema: Schema<T>, min: number, max: number): Schema<readonly T[]> {
-  const base = arrayOf(schema, min, max);
-  return (value, path) => {
-    const items = base(value, path);
-    unique(items, path);
-    return items;
-  };
-}
 
 const handoffHeadingSchema: Schema<string> = (value, path) => {
   const raw = text(1, LIMITS.handoffHeading)(value, path);

@@ -4,6 +4,7 @@ import {
   LIMITS,
   OVERLAY_LIMITS,
   admitTask,
+  digestArtifact,
   identifyManifest,
   isWritablePath,
   resolveOverlayLimits,
@@ -36,12 +37,43 @@ const NAME_LEN_MASK = 0x3fff;
 export const RFC6901_POINTER_PATTERN = /^(?:\/(?:[^~/]|~[01])*)+$/;
 const LONE_SURROGATE_PATTERN = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
+export const EVOLVE_BLOCK_LIMITS = Object.freeze({
+  maxFiles: 64,
+  maxBlocksPerFile: 32,
+  maxAllowedBlockIds: 64,
+  maxBlockIdLength: 128,
+  maxMerkleTreeProofBytes: 262_144,
+});
+
+export function isValidEvolveGuardPath(filePath: string): boolean {
+  if (typeof filePath !== 'string' || filePath.length < 1 || filePath.length > 1024) return false;
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
+  if (!validateRelativePath(filePath).ok) return false;
+  if (!digestArtifact(filePath, new Uint8Array()).ok) return false;
+  const segments = filePath.split('/');
+  if (segments.some(seg => seg.toLowerCase() === '.git')) return false;
+  if (segments[0]?.toLowerCase() === '.github' && segments[1]?.toLowerCase() === 'workflows') return false;
+  return true;
+}
+
+export function isValidEvolveBlockId(blockId: string): boolean {
+  return (
+    typeof blockId === 'string' &&
+    blockId.length >= 1 &&
+    blockId.length <= EVOLVE_BLOCK_LIMITS.maxBlockIdLength &&
+    /^[\x21-\x7E]+$/.test(blockId) &&
+    !blockId.includes('/*') &&
+    !blockId.includes('*/')
+  );
+}
+
 export type ByteHandler =
   | 'scope.v1'
   | 'no-change.v1'
   | 'json-artifact.v1'
   | 'json-keys-guard.v1'
-  | 'line-section-guard.v1';
+  | 'line-section-guard.v1'
+  | 'evolve-block-guard.v1';
 
 export type VerifierReason =
   | 'outside_scope'
@@ -54,14 +86,20 @@ export type VerifierReason =
   | 'invalid_utf8'
   | 'missing_markers'
   | 'unbalanced_markers'
-  | 'outside_section_modified';
+  | 'outside_section_modified'
+  | 'duplicate_block_id'
+  | 'block_limit_exceeded'
+  | 'outside_block_modified'
+  | 'disallowed_block_id'
+  | 'block_bytes_exceeded';
 
 export type VerifierMethod =
   | 'verify_scope'
   | 'verify_no_change'
   | 'verify_json'
   | 'verify_json_keys_guard'
-  | 'verify_line_section_guard';
+  | 'verify_line_section_guard'
+  | 'verify_evolve_block_guard';
 
 export interface ManifestDescriptor {
   readonly metadataId: string;
@@ -159,12 +197,25 @@ export function overlayProtocolBounds(overlay?: OverlayLimitsInput): OverlayProt
   };
 }
 
-export function maxPacketBytes(header: Pick<VerifierHeader, 'payloadKind' | 'overlay'>): number {
+export function maxPacketBytes(
+  header: Pick<VerifierHeader, 'payloadKind' | 'overlay'> & { readonly handler?: ByteHandler },
+): number {
   const bounds = overlayProtocolBounds(header.overlay);
   const inventoriesBytes = 4 + HEADER_BYTES + 2 * bounds.inventoryMaxBytes;
   if (header.payloadKind === 'inventories') return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes);
   if (header.payloadKind === 'json') {
     return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes + 4 + JSON_FILE_BYTES + 262_212);
+  }
+  if (header.handler === 'evolve-block-guard.v1') {
+    // Bounded by ArtifactStore.put / readArtifact's 96 MiB (100_663_296 B) single-artifact cap.
+    return Math.min(
+      MAX_ABSOLUTE_PACKET_BYTES,
+      100_663_296,
+      inventoriesBytes
+        + EVOLVE_BLOCK_LIMITS.maxFiles * 2 * (4 + JSON_FILE_BYTES)
+        + EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes
+        + 68,
+    );
   }
   return Math.min(MAX_ABSOLUTE_PACKET_BYTES, inventoriesBytes + 2 * (4 + JSON_FILE_BYTES) + 262_212);
 }
@@ -175,7 +226,12 @@ export function packetAllocationLimit(bytes: Uint8Array): number {
   if (!len || len > HEADER_BYTES) return ALLOCATION_BYTES;
   try {
     const header = checkedHeader(parsePrivateJson(bytes.subarray(4, 4 + len), HEADER_BYTES, 256));
-    return overlayProtocolBounds(header.overlay).allocationMaxBytes;
+    const bounds = overlayProtocolBounds(header.overlay);
+    if (header.handler === 'evolve-block-guard.v1') {
+      const guardMaxPacket = maxPacketBytes(header);
+      return Math.max(bounds.allocationMaxBytes, guardMaxPacket + 2 * bounds.manifestMaxBytes + 4_194_304);
+    }
+    return bounds.allocationMaxBytes;
   } catch {
     return ALLOCATION_BYTES;
   }
@@ -505,7 +561,7 @@ function checkedOverlayField(raw: unknown): OverlayLimits {
 
 function expectedPayloadKind(handler: ByteHandler): VerifierHeader['payloadKind'] {
   if (handler === 'json-artifact.v1') return 'json';
-  if (handler === 'json-keys-guard.v1' || handler === 'line-section-guard.v1') return 'guard';
+  if (handler === 'json-keys-guard.v1' || handler === 'line-section-guard.v1' || handler === 'evolve-block-guard.v1') return 'guard';
   return 'inventories';
 }
 
@@ -521,7 +577,7 @@ export function checkedHeader(raw: unknown): VerifierHeader {
   if (
     value.version !== 1 ||
     value.handlerVersion !== 1 ||
-    !['scope.v1', 'no-change.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(handlerStr) ||
+    !['scope.v1', 'no-change.v1', 'json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'evolve-block-guard.v1'].includes(handlerStr) ||
     !/^[a-f0-9]{32}$/.test(text(value.producerNonce)) ||
     value.payloadKind !== expectedPayloadKind(handlerStr as ByteHandler)
   ) {
@@ -623,7 +679,7 @@ function verifyMerkleBlobSlice(
   baseTree: BaseTreeAnchor,
   expectedRaw: unknown,
   quota: AllocationQuota,
-): { readonly blobSlice: Uint8Array; readonly nextPos: number } {
+): { readonly blobSlice: Uint8Array; readonly nextPos: number; readonly treeProofBytes: number } {
   const expected = record(expectedRaw, ['mode', 'oid', 'byteLength', ...(isRecord(expectedRaw) && Object.hasOwn(expectedRaw, 'baseline') ? ['baseline' as const] : []), ...(isRecord(expectedRaw) && Object.hasOwn(expectedRaw, 'kind') ? ['kind' as const] : [])]);
   const expectedMode = expected.mode;
   const expectedOid = text(expected.oid);
@@ -670,7 +726,7 @@ function verifyMerkleBlobSlice(
       if (gitObjectOid(baseTree.objectFormat, 'blob', blobSlice) !== match.oid) refuse('ARTIFACT_INVALID', '', 'verification');
     }
   }
-  return { blobSlice, nextPos: pos };
+  return { blobSlice, nextPos: pos, treeProofBytes: totalTreeBytes };
 }
 
 type GuardJson = null | boolean | number | string | readonly GuardJson[] | { readonly [key: string]: GuardJson };
@@ -1094,6 +1150,381 @@ function evaluateLineSectionGuard(
   return { reason: null };
 }
 
+type EvolveCommentStyle = '//' | '#' | '/*';
+
+interface ParsedEvolveMarker {
+  readonly kind: 'START' | 'END';
+  readonly blockId: string;
+  readonly style: EvolveCommentStyle;
+}
+
+interface ParsedEvolveBlock {
+  readonly blockId: string;
+  readonly style: EvolveCommentStyle;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly interiorBytes: Uint8Array;
+}
+
+interface ParsedEvolveFile {
+  readonly blocks: readonly ParsedEvolveBlock[];
+  readonly outsideSegments: readonly Uint8Array[];
+  readonly outsideSegmentStartLines: readonly number[];
+  readonly outsideDigest: string;
+}
+
+const EVOLVE_MARKER_SLASH_RE = /^[ \t]*\/\/[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*$/;
+const EVOLVE_MARKER_HASH_RE = /^[ \t]*#[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*$/;
+const EVOLVE_MARKER_BLOCK_COMMENT_RE = /^[ \t]*\/\*[ \t]*EVOLVE-BLOCK-(START|END):[ \t]*([\x21-\x7E]+)[ \t]*\*\/[ \t]*$/;
+const EVOLVE_MARKER_CANDIDATE_COMMENT_RE = /^[ \t]*(?:\/\/|#|\/\*)[ \t]*EVOLVE-BLOCK-(?:START|END)\b/;
+
+function parseEvolveMarkerLine(
+  lineText: string,
+): { readonly kind: 'none' } | { readonly kind: 'valid'; readonly marker: ParsedEvolveMarker } | { readonly kind: 'malformed' } {
+  let match = EVOLVE_MARKER_SLASH_RE.exec(lineText);
+  let style: EvolveCommentStyle = '//';
+  if (!match) {
+    match = EVOLVE_MARKER_HASH_RE.exec(lineText);
+    style = '#';
+  }
+  if (!match) {
+    match = EVOLVE_MARKER_BLOCK_COMMENT_RE.exec(lineText);
+    style = '/*';
+  }
+  if (match) {
+    const markerKind = match[1] as 'START' | 'END';
+    const blockId = match[2]!;
+    if (!isValidEvolveBlockId(blockId)) return { kind: 'malformed' };
+    return { kind: 'valid', marker: { kind: markerKind, blockId, style } };
+  }
+  if (EVOLVE_MARKER_CANDIDATE_COMMENT_RE.test(lineText)) {
+    return { kind: 'malformed' };
+  }
+  return { kind: 'none' };
+}
+
+function computeOutsideDigest(
+  blocks: readonly ParsedEvolveBlock[],
+  outsideSegments: readonly Uint8Array[],
+): string {
+  const hasher = createHash('sha256');
+  hasher.update('loopwright.dev/controller/evolve-block-outside/v1\0');
+  const countBuf = Buffer.alloc(4);
+  countBuf.writeUInt32BE(blocks.length, 0);
+  hasher.update(countBuf);
+  const lenBuf = Buffer.alloc(4);
+  for (let i = 0; i < outsideSegments.length; i++) {
+    const seg = outsideSegments[i]!;
+    lenBuf.writeUInt32BE(seg.byteLength, 0);
+    hasher.update(lenBuf);
+    hasher.update(seg);
+    if (i < blocks.length) {
+      const idBytes = Buffer.from(blocks[i]!.blockId, 'utf8');
+      lenBuf.writeUInt32BE(idBytes.byteLength, 0);
+      hasher.update(lenBuf);
+      hasher.update(idBytes);
+    }
+  }
+  return hasher.digest('hex');
+}
+
+function parseEvolveBlocks(
+  fileBytes: Uint8Array,
+  label: 'baseline' | 'candidate',
+  path: string,
+): { readonly ok: true; readonly parsed: ParsedEvolveFile } | { readonly ok: false; readonly reason: VerifierReason; readonly detail: string; readonly finding: StructuredFinding } {
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+  try {
+    decoder.decode(fileBytes);
+  } catch {
+    const msg = `${label === 'baseline' ? 'Baseline' : 'Candidate'} file "${path}" is not valid UTF-8`;
+    return {
+      ok: false,
+      reason: 'invalid_utf8',
+      detail: clipText(msg, 1024),
+      finding: makeGuardFinding(`Invalid UTF-8 in ${label} file`, path, msg, 1),
+    };
+  }
+
+  const blocks: ParsedEvolveBlock[] = [];
+  const outsideSegments: Uint8Array[] = [];
+  const outsideSegmentStartLines: number[] = [];
+  const seenBlockIds = new Set<string>();
+
+  let openBlock: {
+    readonly blockId: string;
+    readonly style: EvolveCommentStyle;
+    readonly startLine: number;
+    readonly interiorStartByte: number;
+  } | null = null;
+  let outsideStartByte = 0;
+  let outsideStartLine = 1;
+
+  let pos = 0;
+  let lineNo = 0;
+  while (pos < fileBytes.byteLength) {
+    lineNo++;
+    const nl = fileBytes.indexOf(0x0a, pos);
+    const lineEnd = nl === -1 ? fileBytes.byteLength : nl + 1;
+    let textEnd = nl === -1 ? fileBytes.byteLength : nl;
+    if (textEnd > pos && fileBytes[textEnd - 1] === 0x0d) textEnd--;
+    const lineText = decoder.decode(fileBytes.subarray(pos, textEnd));
+    const parsedMarker = parseEvolveMarkerLine(lineText);
+
+    if (parsedMarker.kind === 'malformed') {
+      const msg = `Malformed EVOLVE-BLOCK marker in ${label} "${path}" at line ${lineNo}`;
+      return {
+        ok: false,
+        reason: 'unbalanced_markers',
+        detail: clipText(msg, 1024),
+        finding: makeGuardFinding('Malformed EVOLVE-BLOCK marker', path, msg, lineNo),
+      };
+    }
+
+    if (parsedMarker.kind === 'valid') {
+      const { kind, blockId, style } = parsedMarker.marker;
+      if (kind === 'START') {
+        if (openBlock !== null) {
+          const msg = `Nested EVOLVE-BLOCK-START "${blockId}" inside "${openBlock.blockId}" (opened at line ${openBlock.startLine}) in ${label} "${path}" at line ${lineNo}`;
+          return {
+            ok: false,
+            reason: 'unbalanced_markers',
+            detail: clipText(msg, 1024),
+            finding: makeGuardFinding('Nested EVOLVE-BLOCK marker', path, msg, lineNo),
+          };
+        }
+        if (seenBlockIds.has(blockId)) {
+          const msg = `Duplicate EVOLVE-BLOCK id "${blockId}" in ${label} "${path}" at line ${lineNo}`;
+          return {
+            ok: false,
+            reason: 'duplicate_block_id',
+            detail: clipText(msg, 1024),
+            finding: makeGuardFinding('Duplicate EVOLVE-BLOCK id', path, msg, lineNo),
+          };
+        }
+        if (blocks.length >= EVOLVE_BLOCK_LIMITS.maxBlocksPerFile) {
+          const msg = `EVOLVE-BLOCK count exceeds maximum of ${EVOLVE_BLOCK_LIMITS.maxBlocksPerFile} in ${label} "${path}" at line ${lineNo}`;
+          return {
+            ok: false,
+            reason: 'block_limit_exceeded',
+            detail: clipText(msg, 1024),
+            finding: makeGuardFinding('EVOLVE-BLOCK count limit exceeded', path, msg, lineNo),
+          };
+        }
+        seenBlockIds.add(blockId);
+        outsideSegments.push(fileBytes.subarray(outsideStartByte, lineEnd));
+        outsideSegmentStartLines.push(outsideStartLine);
+        openBlock = { blockId, style, startLine: lineNo, interiorStartByte: lineEnd };
+      } else {
+        if (openBlock === null) {
+          const msg = `Unmatched EVOLVE-BLOCK-END "${blockId}" without START in ${label} "${path}" at line ${lineNo}`;
+          return {
+            ok: false,
+            reason: 'unbalanced_markers',
+            detail: clipText(msg, 1024),
+            finding: makeGuardFinding('Unmatched EVOLVE-BLOCK-END marker', path, msg, lineNo),
+          };
+        }
+        if (openBlock.blockId !== blockId || openBlock.style !== style) {
+          const msg = `Mismatched EVOLVE-BLOCK-END "${blockId}" for START "${openBlock.blockId}" (opened at line ${openBlock.startLine}) in ${label} "${path}" at line ${lineNo}`;
+          return {
+            ok: false,
+            reason: 'unbalanced_markers',
+            detail: clipText(msg, 1024),
+            finding: makeGuardFinding('Mismatched EVOLVE-BLOCK marker', path, msg, lineNo),
+          };
+        }
+        blocks.push({
+          blockId: openBlock.blockId,
+          style: openBlock.style,
+          startLine: openBlock.startLine,
+          endLine: lineNo,
+          interiorBytes: fileBytes.subarray(openBlock.interiorStartByte, pos),
+        });
+        openBlock = null;
+        outsideStartByte = pos;
+        outsideStartLine = lineNo;
+      }
+    }
+    pos = lineEnd;
+  }
+
+  if (openBlock !== null) {
+    const msg = `Unclosed EVOLVE-BLOCK-START "${openBlock.blockId}" opened at line ${openBlock.startLine} in ${label} "${path}"`;
+    return {
+      ok: false,
+      reason: 'unbalanced_markers',
+      detail: clipText(msg, 1024),
+      finding: makeGuardFinding('Unclosed EVOLVE-BLOCK-START marker', path, msg, openBlock.startLine),
+    };
+  }
+  if (blocks.length === 0) {
+    const msg = `Guarded file "${path}" contains zero EVOLVE-BLOCK mutable regions in ${label}`;
+    return {
+      ok: false,
+      reason: 'missing_markers',
+      detail: clipText(msg, 1024),
+      finding: makeGuardFinding('Missing EVOLVE-BLOCK markers', path, msg, 1),
+    };
+  }
+  outsideSegments.push(fileBytes.subarray(outsideStartByte, fileBytes.byteLength));
+  outsideSegmentStartLines.push(outsideStartLine);
+
+  const outsideDigest = computeOutsideDigest(blocks, outsideSegments);
+  return { ok: true, parsed: { blocks, outsideSegments, outsideSegmentStartLines, outsideDigest } };
+}
+
+function firstDifferingLineInSegment(baseSeg: Uint8Array, candSeg: Uint8Array, candStartLine: number): number {
+  const minLen = Math.min(baseSeg.byteLength, candSeg.byteLength);
+  let line = candStartLine;
+  for (let idx = 0; idx < minLen; idx++) {
+    if (baseSeg[idx] !== candSeg[idx]) return line;
+    if (candSeg[idx] === 0x0a) line++;
+  }
+  return line;
+}
+
+function evaluateSingleEvolveFile(
+  path: string,
+  baselineBytes: Uint8Array | null,
+  candidateBytes: Uint8Array | null,
+  allowedBlockSet: ReadonlySet<string> | null,
+  maxBlockBytes: number | undefined,
+): { readonly reason: VerifierReason | null; readonly detail?: string; readonly finding?: StructuredFinding } {
+  if (baselineBytes === null || candidateBytes === null) {
+    const which = baselineBytes === null ? 'baseline' : 'candidate';
+    const msg = `Guarded file "${path}" is missing in ${which}`;
+    return {
+      reason: 'missing_file',
+      detail: msg,
+      finding: makeGuardFinding(`Missing guarded file (${which})`, path, msg, 1),
+    };
+  }
+
+  const baseRes = parseEvolveBlocks(baselineBytes, 'baseline', path);
+  if (!baseRes.ok) return { reason: baseRes.reason, detail: baseRes.detail, finding: baseRes.finding };
+  const candRes = parseEvolveBlocks(candidateBytes, 'candidate', path);
+  if (!candRes.ok) return { reason: candRes.reason, detail: candRes.detail, finding: candRes.finding };
+
+  const base = baseRes.parsed;
+  const cand = candRes.parsed;
+
+  if (base.outsideDigest !== cand.outsideDigest) {
+    if (base.blocks.length !== cand.blocks.length) {
+      const lineNo = cand.blocks[Math.min(base.blocks.length, cand.blocks.length) - 1]?.startLine ?? 1;
+      const msg = `EVOLVE-BLOCK count changed in "${path}" (baseline: ${base.blocks.length}, candidate: ${cand.blocks.length}; outside sha256 expected ${base.outsideDigest.slice(0, 16)}, got ${cand.outsideDigest.slice(0, 16)})`;
+      return {
+        reason: 'outside_block_modified',
+        detail: clipText(msg, 1024),
+        finding: makeGuardFinding('EVOLVE-BLOCK structure modified', path, msg, lineNo),
+      };
+    }
+    for (let i = 0; i < base.blocks.length; i++) {
+      if (base.blocks[i]!.blockId !== cand.blocks[i]!.blockId || base.blocks[i]!.style !== cand.blocks[i]!.style) {
+        const lineNo = cand.blocks[i]!.startLine;
+        const msg = `EVOLVE-BLOCK ordering, style, or id changed in "${path}" at line ${lineNo}: expected "${base.blocks[i]!.blockId}" (${base.blocks[i]!.style}), got "${cand.blocks[i]!.blockId}" (${cand.blocks[i]!.style})`;
+        return {
+          reason: 'outside_block_modified',
+          detail: clipText(msg, 1024),
+          finding: makeGuardFinding('EVOLVE-BLOCK ordering modified', path, msg, lineNo),
+        };
+      }
+    }
+    let diffLine = 1;
+    for (let s = 0; s < base.outsideSegments.length; s++) {
+      const bSeg = base.outsideSegments[s]!;
+      const cSeg = cand.outsideSegments[s]!;
+      if (bSeg.byteLength !== cSeg.byteLength || !Buffer.from(bSeg).equals(cSeg)) {
+        diffLine = firstDifferingLineInSegment(bSeg, cSeg, cand.outsideSegmentStartLines[s] ?? 1);
+        break;
+      }
+    }
+    const msg = `Immutable bytes outside EVOLVE-BLOCK modified in "${path}" at line ${diffLine} (outside sha256 expected ${base.outsideDigest}, got ${cand.outsideDigest})`;
+    return {
+      reason: 'outside_block_modified',
+      detail: clipText(msg, 1024),
+      finding: makeGuardFinding('Mutation outside EVOLVE-BLOCK', path, msg, diffLine),
+    };
+  }
+
+  let mutableBlockCount = 0;
+  for (let i = 0; i < cand.blocks.length; i++) {
+    const baseBlock = base.blocks[i]!;
+    const candBlock = cand.blocks[i]!;
+    const isMutable = allowedBlockSet === null || allowedBlockSet.has(candBlock.blockId);
+    if (!isMutable) {
+      if (
+        baseBlock.interiorBytes.byteLength !== candBlock.interiorBytes.byteLength ||
+        !same(fileHash(baseBlock.interiorBytes), fileHash(candBlock.interiorBytes))
+      ) {
+        const msg = `EVOLVE-BLOCK "${candBlock.blockId}" in "${path}" at line ${candBlock.startLine} is not listed in allowedBlockIds and cannot be modified`;
+        return {
+          reason: 'disallowed_block_id',
+          detail: clipText(msg, 1024),
+          finding: makeGuardFinding('Disallowed EVOLVE-BLOCK modified', path, msg, candBlock.startLine),
+        };
+      }
+      continue;
+    }
+    mutableBlockCount++;
+    if (maxBlockBytes !== undefined && candBlock.interiorBytes.byteLength > maxBlockBytes) {
+      const msg = `EVOLVE-BLOCK "${candBlock.blockId}" in "${path}" at line ${candBlock.startLine} exceeds maxBlockBytes (${candBlock.interiorBytes.byteLength} > ${maxBlockBytes} UTF-8 bytes)`;
+      return {
+        reason: 'block_bytes_exceeded',
+        detail: clipText(msg, 1024),
+        finding: makeGuardFinding('EVOLVE-BLOCK byte limit exceeded', path, msg, candBlock.startLine),
+      };
+    }
+  }
+
+  if (allowedBlockSet !== null && mutableBlockCount === 0) {
+    const firstLine = cand.blocks[0]?.startLine ?? 1;
+    const msg = `Guarded file "${path}" has zero mutable EVOLVE-BLOCK regions matching allowedBlockIds`;
+    return {
+      reason: 'disallowed_block_id',
+      detail: clipText(msg, 1024),
+      finding: makeGuardFinding('No allowed EVOLVE-BLOCK in guarded file', path, msg, firstLine),
+    };
+  }
+
+  return { reason: null };
+}
+
+function evaluateEvolveBlockGuard(
+  fileEntries: readonly {
+    readonly path: string;
+    readonly baselineBytes: Uint8Array | null;
+    readonly candidateBytes: Uint8Array | null;
+  }[],
+  allowedBlockIds: readonly string[] | undefined,
+  maxBlockBytes: number | undefined,
+): { readonly reason: VerifierReason | null; readonly detail?: string; readonly findings?: readonly StructuredFinding[] } {
+  const allowedSet = allowedBlockIds !== undefined ? new Set(allowedBlockIds) : null;
+  let firstReason: VerifierReason | null = null;
+  let firstDetail: string | undefined;
+  const findings: StructuredFinding[] = [];
+
+  for (const item of fileEntries) {
+    const res = evaluateSingleEvolveFile(item.path, item.baselineBytes, item.candidateBytes, allowedSet, maxBlockBytes);
+    if (res.reason !== null) {
+      if (firstReason === null) {
+        firstReason = res.reason;
+        firstDetail = res.detail;
+      }
+      if (res.finding !== undefined && findings.length < LIMITS.findings) {
+        findings.push(res.finding);
+      }
+    }
+  }
+
+  if (firstReason === null) return { reason: null };
+  return {
+    reason: firstReason,
+    ...(firstDetail !== undefined ? { detail: firstDetail } : {}),
+    findings: boundGuardFindings(findings),
+  };
+}
+
 export function evaluatePacket(bytes: Uint8Array): VerifierReply {
   if (
     !(bytes instanceof Uint8Array) ||
@@ -1218,6 +1649,165 @@ export function evaluatePacket(bytes: Uint8Array): VerifierReply {
       if (verified.nextPos !== bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
       reason = verifyJsonPayload(verified.blobSlice, required, equals as Readonly<Record<string, Json>>);
     }
+  } else if (header.handler === 'evolve-block-guard.v1') {
+    if (!isRecord(header.parameters)) refuse('ARTIFACT_INVALID', '', 'verification');
+    const hasAllowedBlockIds = Object.hasOwn(header.parameters, 'allowedBlockIds');
+    const hasMaxBlockBytes = Object.hasOwn(header.parameters, 'maxBlockBytes');
+    const parameters = record(header.parameters, [
+      'files',
+      'fileSpecs',
+      ...(hasAllowedBlockIds ? ['allowedBlockIds' as const] : []),
+      ...(hasMaxBlockBytes ? ['maxBlockBytes' as const] : []),
+    ]);
+    const files = list(parameters.files, '', EVOLVE_BLOCK_LIMITS.maxFiles).map(item => text(item, '', 1024));
+    if (files.length < 1) refuse('ARTIFACT_INVALID', '', 'verification');
+    const seenFiles = new Set<string>();
+    for (const file of files) {
+      const folded = file.normalize('NFC').toLowerCase();
+      if (!isValidEvolveGuardPath(file) || seenFiles.has(folded)) refuse('ARTIFACT_INVALID', '', 'verification');
+      seenFiles.add(folded);
+    }
+    let allowedBlockIds: readonly string[] | undefined;
+    if (hasAllowedBlockIds) {
+      const ids = list(parameters.allowedBlockIds, '', EVOLVE_BLOCK_LIMITS.maxAllowedBlockIds).map(item =>
+        text(item, '', EVOLVE_BLOCK_LIMITS.maxBlockIdLength),
+      );
+      if (ids.length < 1) refuse('ARTIFACT_INVALID', '', 'verification');
+      const seenIds = new Set<string>();
+      for (const blockId of ids) {
+        if (!isValidEvolveBlockId(blockId) || seenIds.has(blockId)) refuse('ARTIFACT_INVALID', '', 'verification');
+        seenIds.add(blockId);
+      }
+      allowedBlockIds = ids;
+    }
+    const maxBlockBytes = hasMaxBlockBytes
+      ? integer(parameters.maxBlockBytes, 1, Number.MAX_SAFE_INTEGER)
+      : undefined;
+
+    const fileSpecs = list(parameters.fileSpecs, '', EVOLVE_BLOCK_LIMITS.maxFiles);
+    if (fileSpecs.length !== files.length) refuse('ARTIFACT_INVALID', '', 'verification');
+
+    const baseTree = candidate.spec.baseTree;
+    let pos = second.offset;
+    let totalMerkleTreeBytes = 0;
+    const resolvedEntries: {
+      readonly path: string;
+      readonly baselineBytes: Uint8Array | null;
+      readonly candidateBytes: Uint8Array | null;
+    }[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const path = files[i]!;
+      const spec = record(fileSpecs[i], ['baseline', 'candidate']);
+      const sourceSelected = source.spec.entries.find(entry => entry.name === path) ?? null;
+      const sourceDeleted = (source.spec.deleted ?? []).includes(path);
+      const candSelected = candidate.spec.entries.find(entry => entry.name === path) ?? null;
+      const candDeleted = (candidate.spec.deleted ?? []).includes(path);
+
+      let baselineBytes: Uint8Array | null = null;
+      if (!isRecord(spec.baseline)) refuse('ARTIFACT_INVALID', '', 'verification');
+      const baseKind = text(spec.baseline.kind, '', 32);
+      if (!baseTree) {
+        if (baseKind === 'missing') {
+          record(spec.baseline, ['kind']);
+          if (sourceSelected !== null) refuse('ARTIFACT_INVALID', '', 'verification');
+        } else if (baseKind === 'overlay') {
+          record(spec.baseline, ['kind']);
+          if (sourceSelected === null || pos + 4 > bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+          const len = view.getUint32(pos);
+          pos += 4;
+          if (len > JSON_FILE_BYTES || len !== sourceSelected.byteLength || pos + len > bytes.byteLength) {
+            refuse('ARTIFACT_INVALID', '', 'verification');
+          }
+          const slice = bytes.subarray(pos, pos + len);
+          pos += len;
+          if (!same(fileHash(slice), sourceSelected.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+          baselineBytes = slice;
+        } else {
+          refuse('ARTIFACT_INVALID', '', 'verification');
+        }
+      } else if (sourceSelected !== null) {
+        record(spec.baseline, ['kind']);
+        if (baseKind !== 'overlay' || pos + 4 > bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+        const len = view.getUint32(pos);
+        pos += 4;
+        if (len > JSON_FILE_BYTES || len !== sourceSelected.byteLength || pos + len > bytes.byteLength) {
+          refuse('ARTIFACT_INVALID', '', 'verification');
+        }
+        const slice = bytes.subarray(pos, pos + len);
+        pos += len;
+        if (!same(fileHash(slice), sourceSelected.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+        baselineBytes = slice;
+      } else if (sourceDeleted) {
+        record(spec.baseline, ['kind']);
+        if (baseKind !== 'missing') refuse('ARTIFACT_INVALID', '', 'verification');
+      } else if (baseKind === 'missing') {
+        record(spec.baseline, ['kind']);
+      } else if (baseKind === 'merkle_blob') {
+        const verified = verifyMerkleBlobSlice(bytes, view, pos, path, source.spec.baseTree!, spec.baseline, quota);
+        if ((totalMerkleTreeBytes += verified.treeProofBytes) > EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes) {
+          refuse('ARTIFACT_INVALID', '', 'verification');
+        }
+        baselineBytes = verified.blobSlice;
+        pos = verified.nextPos;
+      } else {
+        refuse('ARTIFACT_INVALID', '', 'verification');
+      }
+
+      let candidateBytes: Uint8Array | null = null;
+      if (!isRecord(spec.candidate)) refuse('ARTIFACT_INVALID', '', 'verification');
+      const candKind = text(spec.candidate.kind, '', 32);
+      if (!baseTree) {
+        if (candKind === 'missing') {
+          record(spec.candidate, ['kind']);
+          if (candSelected !== null) refuse('ARTIFACT_INVALID', '', 'verification');
+        } else if (candKind === 'overlay') {
+          record(spec.candidate, ['kind']);
+          if (candSelected === null || pos + 4 > bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+          const len = view.getUint32(pos);
+          pos += 4;
+          if (len > JSON_FILE_BYTES || len !== candSelected.byteLength || pos + len > bytes.byteLength) {
+            refuse('ARTIFACT_INVALID', '', 'verification');
+          }
+          const slice = bytes.subarray(pos, pos + len);
+          pos += len;
+          if (!same(fileHash(slice), candSelected.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+          candidateBytes = slice;
+        } else {
+          refuse('ARTIFACT_INVALID', '', 'verification');
+        }
+      } else if (candSelected !== null) {
+        record(spec.candidate, ['kind']);
+        if (candKind !== 'overlay' || pos + 4 > bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+        const len = view.getUint32(pos);
+        pos += 4;
+        if (len > JSON_FILE_BYTES || len !== candSelected.byteLength || pos + len > bytes.byteLength) {
+          refuse('ARTIFACT_INVALID', '', 'verification');
+        }
+        const slice = bytes.subarray(pos, pos + len);
+        pos += len;
+        if (!same(fileHash(slice), candSelected.digest)) refuse('ARTIFACT_INVALID', '', 'verification');
+        candidateBytes = slice;
+      } else if (candDeleted) {
+        record(spec.candidate, ['kind']);
+        if (candKind !== 'deleted') refuse('ARTIFACT_INVALID', '', 'verification');
+        candidateBytes = null;
+      } else {
+        record(spec.candidate, ['kind']);
+        if (candKind !== 'unchanged_baseline') refuse('ARTIFACT_INVALID', '', 'verification');
+        candidateBytes = baselineBytes;
+      }
+
+      resolvedEntries.push({ path, baselineBytes, candidateBytes });
+    }
+
+    if (pos !== bytes.byteLength) refuse('ARTIFACT_INVALID', '', 'verification');
+
+    method = 'verify_evolve_block_guard';
+    const guardRes = evaluateEvolveBlockGuard(resolvedEntries, allowedBlockIds, maxBlockBytes);
+    reason = guardRes.reason;
+    detail = guardRes.detail;
+    findings = guardRes.findings;
   } else {
     const isJsonKeys = header.handler === 'json-keys-guard.v1';
     const parameters = record(

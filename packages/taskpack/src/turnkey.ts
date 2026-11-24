@@ -6241,29 +6241,6 @@ export function makeAttemptRunId(baseRunId: string, attemptSeq: number): string 
   return `${prefix.length > 0 ? prefix : 'run'}${suffix}`;
 }
 
-async function withTemporaryProcessEnv<T>(
-  overrides: Readonly<Record<string, string | undefined>>,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const previous = new Map<string, string | undefined>();
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) continue;
-    previous.set(key, process.env[key]);
-    process.env[key] = value;
-  }
-  try {
-    return await fn();
-  } finally {
-    for (const [key, prior] of previous.entries()) {
-      if (prior === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = prior;
-      }
-    }
-  }
-}
-
 function formatPiErrorDetail(
   error: { readonly code: string; readonly phase: string; readonly path?: string | undefined },
   prefix = '',
@@ -6272,7 +6249,7 @@ function formatPiErrorDetail(
   return `${prefix}${error.code} (${error.phase}${pathSuffix})`;
 }
 
-function parsePositiveIntEnv(env: NodeJS.ProcessEnv, name: string): number | undefined {
+function parsePositiveIntEnv(env: Readonly<Record<string, string | undefined>>, name: string): number | undefined {
   const raw = env[name]?.trim();
   if (!raw || !/^\d+$/.test(raw)) return undefined;
   const parsed = Number(raw);
@@ -6502,39 +6479,45 @@ export async function executeTurnkeyCycle(
   const startedMs = performance.now();
   const scrubber = options.scrubber ?? new SecretScrubber();
   const attemptRunId = makeAttemptRunId(options.runId, options.attemptSeq);
-  const envOverrides: Record<string, string | undefined> = {};
+  const effectiveEnv: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
+  // Intentional isolation: when a caller supplies runtimeEnv it is authoritative over ambient
+  // process.env (preventing ambient secret leakage and concurrent process.env races), with an
+  // explicit read-only fallback for LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV below.
+  const baseEnv = options.runtimeEnv ?? process.env;
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value !== undefined) {
+      effectiveEnv[key] = value;
+    }
+  }
 
   let publisherHandle: Awaited<ReturnType<NonNullable<ExecuteTurnkeyCycleOptions['publisherFactory']>>> | undefined;
   try {
     if (options.publisherFactory !== undefined) {
       publisherHandle = await options.publisherFactory();
       const signEnv = publisherHandle.signingEnvName ?? 'LOOPWRIGHT_PUBLICATION_SIGNING_SECRET';
-      envOverrides[signEnv] = publisherHandle.signingSecret;
+      effectiveEnv[signEnv] = publisherHandle.signingSecret;
       scrubber.register(publisherHandle.signingSecret);
       if (publisherHandle.authToken !== undefined) {
         const authEnv = publisherHandle.authEnvName ?? 'LOOPWRIGHT_PUBLICATION_AUTH_TOKEN';
-        envOverrides[authEnv] = publisherHandle.authToken;
+        effectiveEnv[authEnv] = publisherHandle.authToken;
         scrubber.register(publisherHandle.authToken);
       }
     }
 
-    if (options.runtimeEnv !== undefined) {
-      for (const [key, value] of Object.entries(options.runtimeEnv)) {
-        if (value !== undefined && process.env[key] === undefined) {
-          envOverrides[key] = value;
-        }
-      }
-    }
     if (options.ephemeralEnv !== undefined) {
       for (const [key, value] of Object.entries(options.ephemeralEnv)) {
-        envOverrides[key] = value;
+        effectiveEnv[key] = value;
         scrubber.register(value);
       }
     }
-    const activeToken = process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV]
-      ?? options.runtimeEnv?.[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+    if (effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] === undefined) {
+      const inheritedActiveToken = process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+      if (typeof inheritedActiveToken === 'string' && inheritedActiveToken.length > 0) {
+        effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = inheritedActiveToken;
+      }
+    }
+    const activeToken = effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
     if (typeof activeToken === 'string' && activeToken.length > 0) {
-      envOverrides[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV] = activeToken;
       scrubber.register(activeToken);
     }
 
@@ -6545,14 +6528,13 @@ export async function executeTurnkeyCycle(
     let implRepairDispatches = 0;
     const totalTokenBudget = options.taskpack.config.spec.task.spec.budgets.totalTokens;
     let cumulativeTokens = 0;
-    const envSource = options.runtimeEnv ?? process.env;
-    const maxTurnsRaw = envSource['LOOPWRIGHT_MAX_TURNS']?.trim();
-    const maxTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_TURNS');
+    const maxTurnsRaw = effectiveEnv['LOOPWRIGHT_MAX_TURNS']?.trim();
+    const maxTurnsOverride = parsePositiveIntEnv(effectiveEnv, 'LOOPWRIGHT_MAX_TURNS');
     if (maxTurnsRaw && maxTurnsOverride === undefined) {
       options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_TURNS=${maxTurnsRaw}; expected positive integer`));
     }
-    const maxRepairTurnsRaw = envSource['LOOPWRIGHT_MAX_REPAIR_TURNS']?.trim();
-    const maxRepairTurnsOverride = parsePositiveIntEnv(envSource, 'LOOPWRIGHT_MAX_REPAIR_TURNS');
+    const maxRepairTurnsRaw = effectiveEnv['LOOPWRIGHT_MAX_REPAIR_TURNS']?.trim();
+    const maxRepairTurnsOverride = parsePositiveIntEnv(effectiveEnv, 'LOOPWRIGHT_MAX_REPAIR_TURNS');
     if (maxRepairTurnsRaw && maxRepairTurnsOverride === undefined) {
       options.onLog?.(scrubber.scrub(`warning: ignoring invalid LOOPWRIGHT_MAX_REPAIR_TURNS=${maxRepairTurnsRaw}; expected positive integer`));
     }
@@ -6617,7 +6599,7 @@ export async function executeTurnkeyCycle(
               && (entry.id === 'taskpack-provider-token' || entry.environmentNames.includes(LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV)),
             );
             if ((hasExplicitMeta && matchesExplicitMeta) || (!hasExplicitMeta && matchesRegistryProviderBinding)) {
-              const active = process.env[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
+              const active = effectiveEnv[LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV];
               if (typeof active === 'string' && active.length > 0) {
                 return { bearerToken: active };
               }
@@ -6732,12 +6714,13 @@ export async function executeTurnkeyCycle(
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await chmod(runRoot, 0o700).catch(() => undefined);
 
-    const cycleOutcome = await withTemporaryProcessEnv(envOverrides, async () => {
+    const cycleOutcome = await (async () => {
       const loaded = await loadTrustedConfiguration({
         configPath: options.taskpack.configPath,
         registryPath: options.taskpack.registryPath,
         registrySha256: options.taskpack.registrySha256,
         untrustedRoots: [options.repositoryRoot],
+        environment: name => (Object.hasOwn(effectiveEnv, name) ? effectiveEnv[name] : undefined),
       });
       if (!loaded.ok) {
         return {
@@ -6859,7 +6842,7 @@ export async function executeTurnkeyCycle(
         maxImplRepairs: options.taskpack.config.spec.task.spec.budgets.maxImplementationRepairs,
         maxModelCalls: options.taskpack.config.spec.task.spec.budgets.maxModelCalls,
       };
-    });
+    })();
 
     const rawSummaryHolder = await mkdtemp(join(tmpdir(), 'loopwright-summary-'));
     await chmod(rawSummaryHolder, 0o700);

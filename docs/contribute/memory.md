@@ -10,7 +10,7 @@ The package never mutates a primary `RunResult`, never spends exhausted model bu
 - [Three-tier separation](#three-tier-separation)
 - [Entries](#entries)
 - [Settled-outcome finalization](#settled-outcome-finalization)
-- [Five-gate verification](#five-gate-verification)
+- [Six-gate verification](#six-gate-verification)
 - [Compare-and-swap application](#compare-and-swap-application)
 - [Two-layer compaction](#two-layer-compaction)
 - [Commands](#commands)
@@ -53,7 +53,9 @@ Each `entries/<id>.md` carries the canonical JSON entry between `---` fences plu
 
 `checkCodeFingerprint` and `checkUpstreamVersions` default to `false`; when `currentCodeFingerprint` or `currentUpstreamVersions` is `null` or `undefined`, `selectActiveMemory` skips those exclusions. When non-null values are supplied, `selectActiveMemory` enforces `fingerprint_mismatch` and `upstream_version_changed`.
 
-`selectActiveMemory` filters `ownExclusion` (including `targetMatrix`), `expired`, and `superseded` before applying `maxPromptEntries` (default `32`) and internal byte caps (`16_384` resource / `4_096` inline prompt). It keeps entries in priority order (`invariant` -> `failure_observation` -> `fact`, newest `verifiedAtMs` first) and sanitizes single-line claims.
+`selectActiveMemory` filters `ownExclusion` (including `targetMatrix` and optional `hardwareScope`), `expired`, and `superseded` before applying `maxPromptEntries` (default `32`) and internal byte caps (`16_384` resource / `4_096` inline prompt). It keeps entries in priority order (`invariant` -> `failure_observation` -> `fact`, newest `verifiedAtMs` first) and sanitizes single-line claims.
+
+`MemoryEntry.scope.hardwareScope` optionally binds `{ accelerator, driverConstraint?, operatorFamily?, boundPipeline? }` (omitted when unset so v1 `storeDigest` and `proposalDigest` stay byte-identical). When present, `selectActiveMemory` excludes entries whose `accelerator` or `driverConstraint` mismatches the active `target.matrix` cell.
 
 Supersession requires a *valid* successor: an expired or drifted successor does not retire its predecessor. The snapshot digest covers store content only, not evaluation time, so drift detection compares meaningfully across calls.
 
@@ -65,7 +67,7 @@ Supersession requires a *valid* successor: an expired or drifted successor does 
 
 Passing checks on `completed` runs become `fact` entries bound to authenticated evidence. Deterministic `no_change` runs skip routine `fact` synthesis so healthy scheduled sweeps emit `operations: []` with zero PR churn. Failing, blocked, or absent checks become `failure_observation` entries, normalizing `/tmp/loopwright-gate-...` paths to `<gate-workdir>`.
 
-Default retention uses a `15`-day TTL (`DEFAULT_MEMORY_TTL_DAYS = 15`) and `128` active entries (`DEFAULT_MEMORY_MAX_ENTRIES = 128`). `targetMatrix` passes through from config into `MemoryEntry.scope.targetMatrix`.
+Default retention uses a `15`-day TTL (`DEFAULT_MEMORY_TTL_DAYS = 15`) and `128` active entries (`DEFAULT_MEMORY_MAX_ENTRIES = 128`). `targetMatrix` and optional `hardwareScope` pass through from matched hardware config cells into `MemoryEntry.scope`.
 
 Before capacity eviction, `finalizeRunMemory` eagerly emits `retire` operations for expired entries, drifted `upstreamVersions` (when `checkUpstreamVersions` is `true`), and healed `failure_observation` entries. Excess entries past `maxEntries` evict deterministically (`failure_observation` -> `fact` -> `invariant`, oldest `verifiedAtMs` first).
 
@@ -76,7 +78,7 @@ The curator port runs only when budget remains and the port is configured. With
 With `onNoModelBudget: 'skip'`, finalization returns `pending` (`no_model_budget_skipped`) and emits no proposal.
 Emitted proposals carry the base store digest, revision, `memory.json`, and a unified `memory.patch` over `<memoryRoot>/<taskpack>/`.
 
-## Five-gate verification
+## Six-gate verification
 
 `verifyMemoryProposal` re-checks every proposal before any store update:
 
@@ -90,6 +92,7 @@ Emitted proposals carry the base store digest, revision, `memory.json`, and a un
    characters never reach proposal text.
 5. `memory-review` — superseded ids exist and are active, supersession cycles and duplicate targets are
    rejected, and an unresolved claim-key overlap is a `MEMORY_CONFLICT_UNRESOLVED`.
+6. `hardware-evidence` — any `upsert` of `kind: 'fact'` or `'invariant'` carrying `hardwareScope` must cite at least one `evidenceRef` with `level: 'hardware_execution'` and `observedStatus: 'passed'` (`MEMORY_HARDWARE_EVIDENCE_REQUIRED`); `failure_observation` entries admit without a passing hardware receipt.
 
 ## Compare-and-swap application
 
@@ -97,13 +100,13 @@ Emitted proposals carry the base store digest, revision, `memory.json`, and a un
 
 Both `cas.ts` and `finalizer.ts` read bounded on-disk `index.json` preimage bytes, and `unifiedFileDiff` tracks EOF-newline state to emit `\ No newline at end of file` when migrating no-LF files. Rollback restores unlinked `.md` files (`0o600`) after backing up prior bytes.
 
-Retiring or superseding an entry removes it from `index.entries`, leaves `index.retired: []`, and compacts any legacy `retired` rows. A matching `baseStoreDigest` and revision applies directly; a drifted store rebases only when disjoint and all five gates pass, otherwise failing with `MEMORY_CAS_CONFLICT`.
+Retiring or superseding an entry removes it from `index.entries`, leaves `index.retired: []`, and compacts any legacy `retired` rows. A matching `baseStoreDigest` and revision applies directly; a drifted store rebases only when disjoint and all six gates pass, otherwise failing with `MEMORY_CAS_CONFLICT`.
 
 The result carries a `SeparateMemoryPullRequestSpec` with unified deletion diffs (`+++ /dev/null`) and `excludesCodeCandidatePaths: true`. `apply: separate-pull-request` opens cleanup PRs even when `no_change` runs only retire stale entries, while `local-only` and `disabled` skip remote memory PRs.
 
 In `@loopwright/github-app`, `separate-pull-request` skips non-passing (`failed`, `blocked`, `exhausted`, `expired`, `cancelled`) or incident runs by default (`publishOnFailure: false`) while `@loopwright/memory` and `local-only` still record `failure_observation` entries. Separate memory commits insert `[skip ci]` before the `Signed-off-by:` trailer (`skipCi: true`) while keeping subjects and PR titles clean.
 
-`inline-with-candidate` skips runs without a published candidate PR. When a candidate PR is published, the host runs the same five-gate CAS check and appends a memory-only commit onto that PR branch with `--force-with-lease` and `skipCi: false` by default.
+`inline-with-candidate` skips runs without a published candidate PR. When a candidate PR is published, the host runs the same six-gate CAS check and appends a memory-only commit onto that PR branch with `--force-with-lease` and `skipCi: false` by default.
 
 ## Two-layer compaction
 

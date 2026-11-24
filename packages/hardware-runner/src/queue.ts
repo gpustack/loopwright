@@ -172,6 +172,7 @@ function buildWorkerJobPayload(request: BenchmarkRequest, preemptionCount: numbe
     subject: request.subject,
     targetCellId: request.targetCellId,
     targetHardware: request.targetHardware,
+    ...(request.stageAAudit !== undefined ? { stageAAudit: request.stageAAudit } : {}),
     heldOutWorkloadId: request.heldOutWorkloadId,
     metricThresholds: request.metricThresholds,
     maxPreemptions: request.maxPreemptions,
@@ -1101,6 +1102,8 @@ export class RelayPullQueue {
       ...(input.metrics !== undefined ? { metrics: input.metrics } : {}),
       ...(input.findings !== undefined ? { findings: input.findings } : {}),
       ...(input.hardwareProvenance !== undefined ? { hardwareProvenance: input.hardwareProvenance } : {}),
+      ...(input.bucketMetrics !== undefined ? { bucketMetrics: input.bucketMetrics } : {}),
+      ...(input.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: input.hardwareDiagnostics } : {}),
       ...(outputArtifacts !== undefined ? { outputArtifacts: Object.freeze(outputArtifacts) } : {}),
     });
 

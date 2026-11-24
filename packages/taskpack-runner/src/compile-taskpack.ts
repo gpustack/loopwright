@@ -118,6 +118,15 @@ export type RunnerLocalCheckPlan =
         readonly startMarker: string;
         readonly endMarker: string;
       };
+    }
+  | {
+      readonly id: string;
+      readonly implementation: 'evolve-block-guard.v1';
+      readonly parameters: {
+        readonly files: readonly string[];
+        readonly allowedBlockIds?: readonly string[];
+        readonly maxBlockBytes?: number;
+      };
     };
 
 export interface CompileRunnerTaskpackOptions {
@@ -406,7 +415,7 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
   type CandidateCheckDef = {
     readonly id: string;
     readonly kind: 'check';
-    readonly implementation: 'json-artifact.v1' | 'json-keys-guard.v1' | 'line-section-guard.v1' | 'gate.v1' | 'no-change.v1';
+    readonly implementation: 'json-artifact.v1' | 'json-keys-guard.v1' | 'line-section-guard.v1' | 'evolve-block-guard.v1' | 'gate.v1' | 'no-change.v1';
     readonly digest: { readonly algorithm: 'sha256'; readonly hex: string };
     readonly parameters: Handler['parameters'];
     readonly allowedEvidenceLevels: readonly string[];
@@ -456,6 +465,24 @@ export async function compileRunnerTaskpack(options: CompileRunnerTaskpackOption
           checkId: localCheck.id,
           path: localCheck.parameters.path,
           allowedPointers: [...localCheck.parameters.allowedPointers],
+        },
+        allowedEvidenceLevels: ['local_execution'],
+      });
+    } else if (localCheck.implementation === 'evolve-block-guard.v1') {
+      candidateLocalChecks.push({
+        id: localCheck.id,
+        kind: 'check',
+        implementation: 'evolve-block-guard.v1',
+        digest: installed['evolve-block-guard.v1'],
+        parameters: {
+          checkId: localCheck.id,
+          files: [...localCheck.parameters.files],
+          ...(localCheck.parameters.allowedBlockIds !== undefined
+            ? { allowedBlockIds: [...localCheck.parameters.allowedBlockIds] }
+            : {}),
+          ...(localCheck.parameters.maxBlockBytes !== undefined
+            ? { maxBlockBytes: localCheck.parameters.maxBlockBytes }
+            : {}),
         },
         allowedEvidenceLevels: ['local_execution'],
       });

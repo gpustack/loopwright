@@ -1,5 +1,6 @@
 import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { realpath } from 'node:fs/promises';
+import { types } from 'node:util';
 import { digestArtifact, validateDocument } from '@loopwright/core';
 import { readBoundedFile, inside } from './files.js';
 import { parseDocumentBytes, DOCUMENT_BYTES } from './parser.js';
@@ -10,7 +11,9 @@ import { result, refuse } from './errors.js';
 import { digestValue, freeze, hash, id, integer, list, record, same, text } from './schema.js';
 import { CONTROLLER_API_VERSION, type ControllerConfiguration, type LoadedConfiguration, type LoadConfigurationInput, type RegistryResource, type PublicationConfig, type RoleModelOverride, type RoleSelectionOverride } from './types.js';
 export interface ApprovedState {
-  readonly input: LoadConfigurationInput; readonly vault: CredentialVault;
+  readonly input: LoadConfigurationInput;
+  readonly environment: (name: string) => string | undefined;
+  readonly vault: CredentialVault;
   readonly resources: readonly { readonly id: string; readonly kind: RegistryResource['kind']; readonly ref: import('@loopwright/core').ArtifactRef; readonly bytes: Uint8Array }[];
 }
 const approved = new WeakMap<object, ApprovedState>();
@@ -209,8 +212,57 @@ export function loadConfiguration(unowned: LoadConfigurationInput, ports: Config
     }
     const loaded: LoadedConfiguration = freeze({ version: 1, configuration, registry, sourceDigest: hash(source), registryDigest });
     vault.assertClean(loaded);
-    approved.set(loaded, { input: freeze({ configPath, registryPath, registrySha256, untrustedRoots: roots, ...(roleModelOverrides !== undefined ? { roleModelOverrides } : {}) }), vault, resources });
+    approved.set(loaded, {
+      input: freeze({ configPath, registryPath, registrySha256, untrustedRoots: roots, ...(roleModelOverrides !== undefined ? { roleModelOverrides } : {}) }),
+      environment: ports.environment,
+      vault,
+      resources,
+    });
     return loaded;
   });
 }
-export function loadTrustedConfiguration(input: LoadConfigurationInput) { return loadConfiguration(input, { environment: name => process.env[name] }); }
+export function loadTrustedConfiguration(
+  input: LoadConfigurationInput & { readonly environment?: ((name: string) => string | undefined) | undefined },
+) {
+  if (
+    input === null
+    || typeof input !== 'object'
+    || Array.isArray(input)
+    || types.isProxy(input)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(input))
+  ) {
+    return loadConfiguration(input as unknown as LoadConfigurationInput, { environment: name => process.env[name] });
+  }
+  const envDescriptor = Object.getOwnPropertyDescriptor(input, 'environment');
+  if (envDescriptor === undefined) {
+    return loadConfiguration(input, { environment: name => process.env[name] });
+  }
+  if (!('value' in envDescriptor) || (envDescriptor.value !== undefined && typeof envDescriptor.value !== 'function')) {
+    return result(async (): Promise<LoadedConfiguration> => {
+      refuse('CONFIG_SCHEMA');
+    });
+  }
+  const rawEnvironment = envDescriptor.value as ((name: string) => string | undefined) | undefined;
+  /**
+   * Trusted host-caller boundary: `loadTrustedConfiguration` accepts an optional environment
+   * lookup callback strictly from trusted in-process hosts (CLI / taskpack / evolution) to avoid
+   * mutating global `process.env`. Bound key/value types and length defensively here.
+   */
+  const environment: (name: string) => string | undefined = rawEnvironment === undefined
+    ? (name => process.env[name])
+    : (name => {
+        if (typeof name !== 'string' || name.length === 0 || name.length > 256) return undefined;
+        let value: unknown;
+        try {
+          value = rawEnvironment(name);
+        } catch {
+          return undefined;
+        }
+        if (typeof value !== 'string' || value.length > 65_536) return undefined;
+        return value;
+      });
+  const descriptors = Object.getOwnPropertyDescriptors(input);
+  Reflect.deleteProperty(descriptors, 'environment');
+  const sanitized = Object.defineProperties(Object.create(null) as object, descriptors) as LoadConfigurationInput;
+  return loadConfiguration(sanitized, { environment });
+}

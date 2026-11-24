@@ -19,7 +19,8 @@
     "packages/github-app",
     "packages/memory",
     "packages/decisions",
-    "packages/hardware-runner"
+    "packages/hardware-runner",
+    "packages/evolution"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",

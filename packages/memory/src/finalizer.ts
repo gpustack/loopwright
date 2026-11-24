@@ -3,9 +3,10 @@ import { lstat, open, readdir, readFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { digestArtifact, identifyManifest, validateDocument, type ArtifactRef, type Digest, type Evidence, type RunResult, type TaskLock } from '@loopwright/core';
 import type { ControllerIncident } from '@loopwright/controller';
-import { canonical, controllerIncidentSchema, digestEqual, fail, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
+import { canonical, controllerIncidentSchema, digestEqual, fail, hardwareMemoryScopeSchema, hardwareScopesOverlap, hashDomain, incidentReferenceDigest, MemoryDiagnosticError, memoryProposalSchema, serializeMemoryStoreIndex, syntheticIncidentArtifact, unifiedFileDiff } from './schema.js';
 import { clampMemoryMaxEntries, compareEntriesForEviction, computeCodeFingerprint, loadMemoryStore, memoryDirectoryFor, normalizeMemoryRoot, projectMemoryStore } from './store.js';
 import type {
+  HardwareMemoryScope,
   MemoryBudgetLedger,
   MemoryCuratorRequest,
   MemoryEntry,
@@ -270,6 +271,7 @@ function applyLifecycleSweepAndEviction(options: {
   const sortedBaseEntries = [...baseEntries].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const runSucceeded = settledStatus === 'completed' || settledStatus === 'no_change';
   const currentTargetMatrix = config.targetMatrix ?? null;
+  const currentHardwareScope = config.hardwareScope;
   for (const entry of sortedBaseEntries) {
     if (targetedOrSuperseded.has(entry.id)) continue;
     let retireReason: string | null = null;
@@ -283,6 +285,7 @@ function applyLifecycleSweepAndEviction(options: {
     } else if (
       entry.kind === 'failure_observation'
       && targetMatrixOverlaps(entry.scope.targetMatrix, currentTargetMatrix)
+      && hardwareScopesOverlap(entry.scope.hardwareScope, currentHardwareScope)
       && (runSucceeded || passedCheckClaimKeys.has(entry.claimKey))
     ) {
       retireReason = 'Prior failure observation healed.';
@@ -422,16 +425,61 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       fail('MEMORY_SCHEMA_INVALID', '/contract/spec/scope/writable', 'writable scope length outside 1..128');
     }
     const targetMatrix = config.targetMatrix ?? null;
-    const priorSameClaim = (claimKey: string): readonly string[] =>
+    const hardwareScope = config.hardwareScope === undefined
+      ? undefined
+      : hardwareMemoryScopeSchema(config.hardwareScope, '/config/hardwareScope');
+    const priorSameClaim = (claimKey: string, entryHardwareScope: MemoryEntry['scope']['hardwareScope']): readonly string[] =>
       [...new Set(
         loaded.index.entries
-          .filter(candidate => candidate.claimKey === claimKey && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix))
+          .filter(candidate =>
+            candidate.claimKey === claimKey
+            && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
+            && hardwareScopesOverlap(candidate.scope.hardwareScope, entryHardwareScope))
           .map(candidate => candidate.id),
       )].sort().slice(0, 32);
-    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry =>
-      ({ version: 1, id, claimKey, claim: boundedClaim(claim), kind, scope: { taskpack: config.taskpack, repository: contract.spec.target.repository,
-        paths: normalizedWritablePaths, targetMatrix }, sourceRef, sourceDigest, verifiedAtMs: config.nowMs,
-        validFor: validity, expiresAtMs: config.nowMs + config.ttlMs, supersedes: priorSameClaim(claimKey), evidenceRefs: refs });
+    let skippedForHardwareEvidenceCount = 0;
+    const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry | null => {
+      let entryHardwareScope: HardwareMemoryScope | undefined;
+      if (hardwareScope !== undefined) {
+        const requiresHardwareEvidence = kind === 'fact' || kind === 'invariant';
+        const hasPassingHardwareEvidence = refs.some(ref => ref.level === 'hardware_execution' && ref.observedStatus === 'passed');
+        if (!requiresHardwareEvidence || hasPassingHardwareEvidence) {
+          entryHardwareScope = hardwareScope;
+        } else {
+          // Do not silently widen a fact/invariant to hardware-universal if an active entry for a
+          // different hardware accelerator already exists on this claimKey.
+          const wouldClobberOtherHardware = loaded.index.entries.some(
+            candidate =>
+              candidate.claimKey === claimKey
+              && targetMatrixOverlaps(candidate.scope.targetMatrix, targetMatrix)
+              && candidate.scope.hardwareScope !== undefined
+              && !hardwareScopesOverlap(candidate.scope.hardwareScope, hardwareScope),
+          );
+          if (wouldClobberOtherHardware) {
+            skippedForHardwareEvidenceCount += 1;
+            return null;
+          }
+          entryHardwareScope = undefined;
+        }
+      }
+      return {
+        version: 1,
+        id,
+        claimKey,
+        claim: boundedClaim(claim),
+        kind,
+        scope: entryHardwareScope === undefined
+          ? { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix }
+          : { taskpack: config.taskpack, repository: contract.spec.target.repository, paths: normalizedWritablePaths, targetMatrix, hardwareScope: entryHardwareScope },
+        sourceRef,
+        sourceDigest,
+        verifiedAtMs: config.nowMs,
+        validFor: validity,
+        expiresAtMs: config.nowMs + config.ttlMs,
+        supersedes: priorSameClaim(claimKey, entryHardwareScope),
+        evidenceRefs: refs,
+      };
+    };
     const deterministicEntries: MemoryEntry[] = [];
     const rows = settled.result === null ? [] : [...settled.result.spec.verification.spec.required, ...settled.result.spec.verification.spec.optional];
     const passedCheckClaimKeys = new Set<string>(
@@ -441,8 +489,9 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       for (const row of rows.filter(row => row.status === 'passed')) {
         const reference = evidenceRefFor(row, settled.evidence);
         if (reference === null) continue;
-        deterministicEntries.push(buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
-          `Check ${row.checkId} passed on run ${runId} with ${reference.level} evidence.`, 'fact', [reference]));
+        const built = buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
+          `Check ${row.checkId} passed on run ${runId} with ${reference.level} evidence.`, 'fact', [reference]);
+        if (built !== null) deterministicEntries.push(built);
       }
     } else if (settled.result !== null && OBSERVATION_STATUSES.includes(settled.result.spec.status as (typeof OBSERVATION_STATUSES)[number])) {
       for (const row of rows.filter(row => row.status !== 'passed')) {
@@ -455,16 +504,18 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
           ? `gate_denied: ${gateReason}`
           : baseDetail;
         const rawClaim = `Check ${row.checkId} ended ${row.status} on run ${runId} (${row.reason}${detailText === null ? '' : `: ${detailText}`}).`;
-        deterministicEntries.push(buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
+        const built = buildEntry(`entry.${runToken}.check.${boundedToken(row.checkId)}`, `claim.check.${row.checkId}`,
           normalizeGateWorkdirPaths(rawClaim),
-          'failure_observation', [reference]));
+          'failure_observation', [reference]);
+        if (built !== null) deterministicEntries.push(built);
       }
     }
     if (settled.result === null && settled.incident !== null) {
       const incident = settled.incident, artifact = incident.knownReferences[0] ?? syntheticIncidentArtifact(incident);
-      deterministicEntries.push(buildEntry(`entry.${runToken}.incident`, `claim.incident.${runToken}`,
+      const built = buildEntry(`entry.${runToken}.incident`, `claim.incident.${runToken}`,
         normalizeGateWorkdirPaths(`Run ${runId} settled as incident ${incident.code} at stage ${incident.stage}; cleanup ${incident.cleanup}.`),
-        'failure_observation', [{ evidenceId: INCIDENT_EVIDENCE_ID, checkId: INCIDENT_CHECK_ID, level: 'local_execution', observedStatus: 'not_run', artifact }]));
+        'failure_observation', [{ evidenceId: INCIDENT_EVIDENCE_ID, checkId: INCIDENT_CHECK_ID, level: 'local_execution', observedStatus: 'not_run', artifact }]);
+      if (built !== null) deterministicEntries.push(built);
     }
     let operations: readonly MemoryOperation[] = deterministicEntries
       .slice(0, MAX_PROPOSAL_OPERATIONS)
@@ -509,6 +560,10 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       passedCheckClaimKeys,
     });
     operations = swept.operations;
+    if (skippedForHardwareEvidenceCount > 0) {
+      const skipNote = `hardware_evidence_required_skipped:${skippedForHardwareEvidenceCount}`;
+      reason = reason === null ? skipNote : `${reason}; ${skipNote}`;
+    }
     if (deterministicTruncated || swept.truncated) {
       reason = reason === null
         ? 'proposal_operations_truncated_at_limit'

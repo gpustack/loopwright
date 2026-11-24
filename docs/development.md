@@ -15,7 +15,7 @@ uses pinned Pi 1.6.0 packages. The root minimatch override applies to the resolv
 After installation, checks need no credentials, model, deployed service, Docker, or accelerator.
 The package is private and is not published.
 
-Build emits `dist` across all 11 workspace packages (`core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, `hardware-runner`, and `cli`); test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
+Build emits `dist` across all 12 workspace packages (`core`, `state`, `agent-pi`, `controller`, `taskpack-runner`, `memory`, `decisions`, `taskpack`, `github-app`, `hardware-runner`, `evolution`, and `cli`); test compilation emits `.test-build`. Both are ignored, as are dependencies and root `.claude` scratch. Git permits `.claude/skills` and `.claude/settings.json`; reports, handoffs, and worktrees remain ignored. Tests use Node's test runner and public package boundaries.
 
 Private constructor seams isolate clock/transaction faults over actual SQLite; they are absent from the public state factories. Test files run serially to bound owned children. The integration fixture runs authoring, admission, candidate identity, evidence evaluation, and honest run construction. Example outputs are checked against this flow.
 
@@ -108,6 +108,10 @@ LOOPWRIGHT_CUDA_SSH_HOST=user@gpu-host.example \
 LOOPWRIGHT_ROCM_SSH_HOST=user@gpu-host.example \
   node --test .test-build/packages/hardware-runner/test/live-ssh-smoke.test.js
 ```
+
+### Evolution campaigns
+
+Run `node scripts/run-tests.mjs --pkg evolution --concurrency 1` to run `campaign.sqlite` store, Pareto, sampler, `team-patch.v1` supervisor, `evolution-bundle.v1`, and e2e tests offline (`allowSyntheticHardwareProbe: true`) under single-concurrency SQLite serialization.
 
 ## Self-upgrade validation
 

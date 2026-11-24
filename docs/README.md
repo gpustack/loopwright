@@ -51,8 +51,8 @@
 - Use for: compile trusted configuration and coordinate bounded runs
 - Aliases: controller
 - Guides: [getting-started/installation.md](getting-started/installation.md), [walkthroughs/managed-controller.md](walkthroughs/managed-controller.md), [configuration/controller-and-registry.md](configuration/controller-and-registry.md), [operations/cli.md](operations/cli.md), [operations/coding-agents.md](operations/coding-agents.md), [contribute/closure-matrix.md](contribute/closure-matrix.md)
-- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md), [Hardware Execution and Remote Runner](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md)
-- Code: [controller](../packages/controller/), [hardware-runner](../packages/hardware-runner/), [cli](../packages/cli/)
+- Specs: [Specification](../specs/2026-11-06-bounded-controller-and-trusted-config.md), [Delegated Stepping](../specs/2026-11-14-delegated-role-stepping-and-multi-model-routing.md), [Multi-Domain Suites, Handoffs, and RunEval](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md), [Hardware Execution and Remote Runner](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md), [Evolutionary Campaigns, Pareto Archive, and Bundle Export](../specs/2026-11-23-evolutionary-campaigns-pareto-archive-and-bundle-export.md)
+- Code: [controller](../packages/controller/), [hardware-runner](../packages/hardware-runner/), [evolution](../packages/evolution/), [cli](../packages/cli/)
 - Related: [contracts](#contracts-and-evidence), [state](#persistent-state-store)
 - Skills: [overview](../.agents/skills/loopwright-overview/SKILL.md), [step](../.agents/skills/loopwright-step/SKILL.md)
 
@@ -137,6 +137,7 @@
 | [2026-11-20-decouple-taskpack-and-cas-blob-pointers.md](../specs/2026-11-20-decouple-taskpack-and-cas-blob-pointers.md) | Decoupled `@loopwright/taskpack` package, policy profiles, and CAS blob pointers |
 | [2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md](../specs/2026-11-21-hardware-execution-benchmark-gate-and-remote-runner.md) | Hardware execution, benchmark-gate.v1, and outbound remote runner |
 | [2026-11-21-multi-domain-suite-handoff-and-run-eval.md](../specs/2026-11-21-multi-domain-suite-handoff-and-run-eval.md) | Multi-domain `TaskpackSuite`, compact handoffs, conditional rules, `RunEval`, and baseline alignment |
+| [2026-11-23-evolutionary-campaigns-pareto-archive-and-bundle-export.md](../specs/2026-11-23-evolutionary-campaigns-pareto-archive-and-bundle-export.md) | Evolutionary campaigns (`@loopwright/evolution`), `evolve-block-guard.v1`, plateau `teamEvolution`, `hardwareScope`, and `evolution-bundle.v1` |
 
 ## All pages
 

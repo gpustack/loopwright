@@ -29,3 +29,69 @@ test('public plans retain command digests while withholding private role prompt 
     assert.match(String(plan.value.orderedDAG[0]!.handler.parameters.prompt), /^\[private command sha256:[a-f0-9]{64}\]$/);
   } finally { if (previous === undefined) delete process.env.PROVIDER_TOKEN; else process.env.PROVIDER_TOKEN = previous; await f.cleanup(); }
 });
+
+test('loadTrustedConfiguration with explicit environment resolves strictly from environment without reading or mutating process.env', async () => {
+  const f = await configurationFixture();
+  const previous = process.env.PROVIDER_TOKEN;
+  const hostSentinel = 'S04_HOST_PROCESS_ENV_SENTINEL_Xx11Yy22';
+  const isolatedToken = 'S04_ISOLATED_ENV_CANARY_Zz33Ww44';
+  try {
+    process.env.PROVIDER_TOKEN = hostSentinel;
+    const lookedUp: string[] = [];
+    const loaded = await loadTrustedConfiguration({
+      ...f.input,
+      environment: name => {
+        lookedUp.push(name);
+        return name === 'PROVIDER_TOKEN' ? isolatedToken : undefined;
+      },
+    });
+    assert.equal(loaded.ok, true, loaded.ok ? '' : JSON.stringify(loaded.error));
+    if (!loaded.ok) return;
+    assert.deepEqual(lookedUp, ['PROVIDER_TOKEN']);
+    assert.equal(process.env.PROVIDER_TOKEN, hostSentinel);
+    const compiled = await compilePlan(loaded.value);
+    assert.equal(compiled.ok, true);
+    assert.ok(!JSON.stringify({ loaded, compiled }).includes(isolatedToken));
+    assert.ok(!JSON.stringify({ loaded, compiled }).includes(hostSentinel));
+
+    // When custom environment returns undefined, loadTrustedConfiguration MUST NOT fall back to process.env.
+    const missing = await loadTrustedConfiguration({
+      ...f.input,
+      environment: () => undefined,
+    });
+    assert.equal(missing.ok, false);
+    if (!missing.ok) assert.equal(missing.error.code, 'CONFIG_ENV_MISSING');
+    assert.equal(process.env.PROVIDER_TOKEN, hostSentinel);
+
+    // Null-prototype input with custom environment is accepted; invalid or accessor environment is refused.
+    const nullProtoInput = Object.assign(Object.create(null) as Record<string, unknown>, {
+      ...f.input,
+      environment: (name: string) => (name === 'PROVIDER_TOKEN' ? isolatedToken : undefined),
+    }) as Parameters<typeof loadTrustedConfiguration>[0];
+    const nullProtoLoaded = await loadTrustedConfiguration(nullProtoInput);
+    assert.equal(nullProtoLoaded.ok, true, nullProtoLoaded.ok ? '' : JSON.stringify(nullProtoLoaded.error));
+
+    const badEnv = await loadTrustedConfiguration({
+      ...f.input,
+      environment: 'not-a-function' as unknown as (name: string) => string | undefined,
+    });
+    assert.equal(badEnv.ok, false);
+    if (!badEnv.ok) {
+      assert.equal(badEnv.error.code, 'CONFIG_SCHEMA');
+    }
+
+    const getterInput = { ...f.input };
+    Object.defineProperty(getterInput, 'environment', {
+      enumerable: true,
+      get: () => () => isolatedToken,
+    });
+    const getterRes = await loadTrustedConfiguration(getterInput as Parameters<typeof loadTrustedConfiguration>[0]);
+    assert.equal(getterRes.ok, false);
+    if (!getterRes.ok) {
+      assert.equal(getterRes.error.code, 'CONFIG_SCHEMA');
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PROVIDER_TOKEN; else process.env.PROVIDER_TOKEN = previous;
+    await f.cleanup();
+  }
+});

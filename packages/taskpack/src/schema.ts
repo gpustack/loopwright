@@ -1,5 +1,6 @@
 import { posix } from 'node:path';
 import {
+  digestArtifact,
   HANDOFF_LIMITS,
   isWritablePath,
   LIMITS,
@@ -9,6 +10,7 @@ import {
   validateRelativePath,
   validateScopePattern,
   type HardwareTargetSpec,
+  type MetricBucketScope,
   type MetricThresholdRule,
   type OverlayLimits,
   type ResourceActivationPhase,
@@ -18,6 +20,7 @@ import {
   type StepHandoffSelector,
   type StepHandoffSource,
 } from '@loopwright/core';
+import { SecretScrubber } from './scrubber.js';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { DECISION_PROVIDER_API_KEY_ENV } from '@loopwright/decisions';
 import {
@@ -1703,9 +1706,37 @@ function isValidDottedVersion(value: string): boolean {
   return true;
 }
 
+const FORBIDDEN_SYMBOL_GLOB_RE = /[*?[\]]/;
+const EVOLVE_BLOCK_MAX_FILES = 64;
+const EVOLVE_BLOCK_MAX_ALLOWED_IDS = 64;
+const EVOLVE_BLOCK_MAX_ID_LENGTH = 128;
+
+function isValidEvolveGuardPath(filePath: string): boolean {
+  if (typeof filePath !== 'string' || filePath.length < 1 || filePath.length > 1024) return false;
+  if (filePath.startsWith('/') || filePath.startsWith('\\')) return false;
+  if (!validateRelativePath(filePath).ok) return false;
+  if (!digestArtifact(filePath, new Uint8Array()).ok) return false;
+  const segments = filePath.split('/');
+  if (segments.some(seg => seg.toLowerCase() === '.git')) return false;
+  if (segments[0]?.toLowerCase() === '.github' && segments[1]?.toLowerCase() === 'workflows') return false;
+  return true;
+}
+
+function isValidEvolveBlockId(blockId: string): boolean {
+  return (
+    typeof blockId === 'string'
+    && blockId.length >= 1
+    && blockId.length <= EVOLVE_BLOCK_MAX_ID_LENGTH
+    && /^[\x21-\x7E]+$/.test(blockId)
+    && !blockId.includes('/*')
+    && !blockId.includes('*/')
+  );
+}
+
 function validateHardwareTargetSpec(value: unknown, path: string): HardwareTargetSpec {
   const raw = requireNullProtoObject(value, path, [
     'accelerator', 'isolationMode', 'deviceCount', 'driverConstraint', 'topology',
+    'forbiddenSymbolPatterns', 'maxRegisterCount', 'maxLocalSpillBytes',
   ]);
   const accelerator = requirePrintableAscii(raw['accelerator'], `${path}/accelerator`, 1, 64);
   const rawIsolation = raw['isolationMode'];
@@ -1725,13 +1756,71 @@ function validateHardwareTargetSpec(value: unknown, path: string): HardwareTarge
   const topology = raw['topology'] === undefined
     ? undefined
     : requirePrintableText(raw['topology'], `${path}/topology`, 1, 128);
+  let forbiddenSymbolPatterns: readonly string[] | undefined;
+  if (raw['forbiddenSymbolPatterns'] !== undefined) {
+    const rawPatterns = raw['forbiddenSymbolPatterns'];
+    if (!Array.isArray(rawPatterns) || rawPatterns.length > LIMITS.forbiddenSymbolPatterns) {
+      manifestInvalid(
+        `hardware.forbiddenSymbolPatterns must contain 0..${LIMITS.forbiddenSymbolPatterns} entries`,
+        `${path}/forbiddenSymbolPatterns`,
+      );
+    }
+    const seen = new Set<string>();
+    forbiddenSymbolPatterns = Object.freeze(rawPatterns.map((entry, idx) => {
+      const entryPath = `${path}/forbiddenSymbolPatterns/${idx}`;
+      const pattern = requirePrintableAscii(entry, entryPath, 1, LIMITS.forbiddenSymbolPattern);
+      if (FORBIDDEN_SYMBOL_GLOB_RE.test(pattern)) {
+        manifestInvalid('hardware.forbiddenSymbolPatterns entries must be glob-free literal substrings', entryPath);
+      }
+      if (seen.has(pattern)) {
+        manifestInvalid(`duplicate hardware.forbiddenSymbolPatterns entry "${pattern}"`, entryPath);
+      }
+      seen.add(pattern);
+      return pattern;
+    }));
+  }
+  const maxRegisterCount = raw['maxRegisterCount'] === undefined
+    ? undefined
+    : requireSafeIntInRange(raw['maxRegisterCount'], `${path}/maxRegisterCount`, 0, Number.MAX_SAFE_INTEGER);
+  const maxLocalSpillBytes = raw['maxLocalSpillBytes'] === undefined
+    ? undefined
+    : requireSafeIntInRange(raw['maxLocalSpillBytes'], `${path}/maxLocalSpillBytes`, 0, Number.MAX_SAFE_INTEGER);
   return Object.freeze({
     accelerator,
     isolationMode: rawIsolation,
     ...(deviceCount === undefined ? {} : { deviceCount }),
     ...(driverConstraint === undefined ? {} : { driverConstraint }),
     ...(topology === undefined ? {} : { topology }),
+    ...(forbiddenSymbolPatterns === undefined ? {} : { forbiddenSymbolPatterns }),
+    ...(maxRegisterCount === undefined ? {} : { maxRegisterCount }),
+    ...(maxLocalSpillBytes === undefined ? {} : { maxLocalSpillBytes }),
   });
+}
+
+const BUCKET_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const DEFAULT_BUCKET_SCRUBBER = new SecretScrubber();
+
+function validateMetricBucketScope(value: unknown, path: string): MetricBucketScope {
+  if (typeof value === 'string') {
+    if (value === 'aggregate' || value === 'all_buckets') return value;
+    manifestInvalid('metricThreshold.bucketScope must be "aggregate", "all_buckets", or { bucketId }', path);
+  }
+  const raw = requireNullProtoObject(value, path, ['bucketId']);
+  if (!Object.hasOwn(raw, 'bucketId')) {
+    manifestInvalid('metricThreshold.bucketScope object requires "bucketId"', `${path}/bucketId`);
+  }
+  const bucketId = raw['bucketId'];
+  if (
+    typeof bucketId !== 'string'
+    || bucketId.length < 1
+    || bucketId.length > LIMITS.bucketId
+    || FORBIDDEN_KEYS.has(bucketId)
+    || !BUCKET_ID_RE.test(bucketId)
+    || DEFAULT_BUCKET_SCRUBBER.containsSecret(bucketId)
+  ) {
+    manifestInvalid('metricThreshold.bucketScope.bucketId is invalid', `${path}/bucketId`);
+  }
+  return Object.freeze({ bucketId });
 }
 
 function requireMetricKey(value: unknown, path: string): string {
@@ -1758,7 +1847,7 @@ function validateMetricThresholdRule(value: unknown, path: string): MetricThresh
   }
   const kind = rawRecord['kind'];
   if (kind === 'bounds') {
-    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'min', 'max']);
+    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'min', 'max', 'bucketScope']);
     const metric = requireMetricKey(raw['metric'], `${path}/metric`);
     const min = raw['min'] === undefined ? undefined : requireFiniteNumber(raw['min'], `${path}/min`);
     const max = raw['max'] === undefined ? undefined : requireFiniteNumber(raw['max'], `${path}/max`);
@@ -1768,15 +1857,19 @@ function validateMetricThresholdRule(value: unknown, path: string): MetricThresh
     if (min !== undefined && max !== undefined && min > max) {
       manifestInvalid('bounds metric threshold requires min <= max', path);
     }
+    const bucketScope = raw['bucketScope'] === undefined
+      ? undefined
+      : validateMetricBucketScope(raw['bucketScope'], `${path}/bucketScope`);
     return Object.freeze({
       kind: 'bounds' as const,
       metric,
       ...(min === undefined ? {} : { min }),
       ...(max === undefined ? {} : { max }),
+      ...(bucketScope === undefined ? {} : { bucketScope }),
     });
   }
   if (kind === 'comparative') {
-    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'baselineMetric', 'operator', 'threshold']);
+    const raw = requireNullProtoObject(value, path, ['kind', 'metric', 'baselineMetric', 'operator', 'threshold', 'bucketScope']);
     const metric = requireMetricKey(raw['metric'], `${path}/metric`);
     const baselineMetric = requireMetricKey(raw['baselineMetric'], `${path}/baselineMetric`);
     const operator = raw['operator'];
@@ -1786,12 +1879,16 @@ function validateMetricThresholdRule(value: unknown, path: string): MetricThresh
     // Reject -0/NaN/Infinity on untrusted manifest input (stricter than @loopwright/core's -0 -> 0 normalization)
     // while matching @loopwright/core's allowance of finite negative comparative thresholds (e.g. -0.25).
     const threshold = requireFiniteNumber(raw['threshold'], `${path}/threshold`);
+    const bucketScope = raw['bucketScope'] === undefined
+      ? undefined
+      : validateMetricBucketScope(raw['bucketScope'], `${path}/bucketScope`);
     return Object.freeze({
       kind: 'comparative' as const,
       metric,
       baselineMetric,
       operator,
       threshold,
+      ...(bucketScope === undefined ? {} : { bucketScope }),
     });
   }
   manifestInvalid('metric threshold rule kind must be "bounds" or "comparative"', `${path}/kind`);
@@ -3494,7 +3591,7 @@ function validateTaskpackManifestInternal(
   const checkIds = new Set<string>();
   const reservedIds = new Set(['scope', 'no-change', 'taskpack-author', 'taskpack-no-change']);
   const allowedLocalCheckImpls = schemaMode === 'v2'
-    ? ['json-artifact.v1', 'scope.v1', 'no-change.v1', 'command.v1', 'json-keys-guard.v1', 'line-section-guard.v1']
+    ? ['json-artifact.v1', 'scope.v1', 'no-change.v1', 'command.v1', 'json-keys-guard.v1', 'line-section-guard.v1', 'evolve-block-guard.v1']
     : ['json-artifact.v1', 'scope.v1', 'no-change.v1', 'command.v1'];
 
   const relativeToolchainPaths: string[] = [];
@@ -3716,6 +3813,61 @@ function validateTaskpackManifestInternal(
           path: targetPath,
           startMarker,
           endMarker,
+        }),
+      });
+    }
+    if (implementation === 'evolve-block-guard.v1') {
+      const paramPath = `/spec/verification/localChecks/${index}/parameters`;
+      const params = requireNullProtoObject(check['parameters'], paramPath, ['files', 'allowedBlockIds', 'maxBlockBytes']);
+      const rawFiles = params['files'];
+      if (!Array.isArray(rawFiles) || rawFiles.length < 1 || rawFiles.length > EVOLVE_BLOCK_MAX_FILES) {
+        manifestInvalid(`evolve-block-guard.v1 files must contain 1..${EVOLVE_BLOCK_MAX_FILES} repo-relative paths`, `${paramPath}/files`);
+      }
+      const seenFiles = new Set<string>();
+      const files = Object.freeze(rawFiles.map((entry, fIdx) => {
+        const fPath = `${paramPath}/files/${fIdx}`;
+        const file = requireString(entry, fPath, 1, 1024);
+        const folded = file.normalize('NFC').toLowerCase();
+        if (!isValidEvolveGuardPath(file)) {
+          manifestInvalid(`evolve-block-guard.v1 file "${file}" must be a safe repo-relative path outside .git and .github/workflows`, fPath);
+        }
+        if (seenFiles.has(folded)) {
+          manifestInvalid(`duplicate evolve-block-guard.v1 file "${file}"`, fPath);
+        }
+        seenFiles.add(folded);
+        return file;
+      }));
+      let allowedBlockIds: readonly string[] | undefined;
+      if (params['allowedBlockIds'] !== undefined) {
+        const rawBlockIds = params['allowedBlockIds'];
+        if (!Array.isArray(rawBlockIds) || rawBlockIds.length < 1 || rawBlockIds.length > EVOLVE_BLOCK_MAX_ALLOWED_IDS) {
+          manifestInvalid(`evolve-block-guard.v1 allowedBlockIds must contain 1..${EVOLVE_BLOCK_MAX_ALLOWED_IDS} block IDs`, `${paramPath}/allowedBlockIds`);
+        }
+        const seenBlockIds = new Set<string>();
+        allowedBlockIds = Object.freeze(rawBlockIds.map((entry, bIdx) => {
+          const bPath = `${paramPath}/allowedBlockIds/${bIdx}`;
+          const blockId = requireString(entry, bPath, 1, EVOLVE_BLOCK_MAX_ID_LENGTH);
+          if (!isValidEvolveBlockId(blockId)) {
+            manifestInvalid(`evolve-block-guard.v1 block ID "${blockId}" is invalid`, bPath);
+          }
+          if (seenBlockIds.has(blockId)) {
+            manifestInvalid(`duplicate evolve-block-guard.v1 block ID "${blockId}"`, bPath);
+          }
+          seenBlockIds.add(blockId);
+          return blockId;
+        }));
+      }
+      let maxBlockBytes: number | undefined;
+      if (params['maxBlockBytes'] !== undefined) {
+        maxBlockBytes = requireSafeIntInRange(params['maxBlockBytes'], `${paramPath}/maxBlockBytes`, 1, Number.MAX_SAFE_INTEGER);
+      }
+      return Object.freeze({
+        id: checkId,
+        implementation: 'evolve-block-guard.v1' as const,
+        parameters: Object.freeze({
+          files,
+          ...(allowedBlockIds !== undefined ? { allowedBlockIds } : {}),
+          ...(maxBlockBytes !== undefined ? { maxBlockBytes } : {}),
         }),
       });
     }

@@ -45,6 +45,7 @@ export type Implementation =
   | 'json-artifact.v1'
   | 'json-keys-guard.v1'
   | 'line-section-guard.v1'
+  | 'evolve-block-guard.v1'
   | 'no-change.v1'
   | 'gate.v1'
   | 'benchmark-gate.v1';

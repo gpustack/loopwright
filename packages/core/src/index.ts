@@ -3,7 +3,10 @@ export {
   LIMITS, OVERLAY_LIMITS, HANDOFF_LIMITS, VERIFIER_ARTIFACT_LIMITS,
   type OverlayLimits, type OverlayLimitsInput, type OverlayLimitOptions,
 } from './limits.js';
-export { DIAGNOSTIC_CODES, type DiagnosticCode, type Diagnostic, type Result } from './diagnostics.js';
+export {
+  DIAGNOSTIC_CODES, STAGE_A_STATIC_AUDIT_FAILED, TEAM_ENVELOPE_VIOLATION, EXPORT_UNVERIFIED_FORBIDDEN,
+  type DiagnosticCode, type Diagnostic, type Result,
+} from './diagnostics.js';
 export {
   matchesScopePattern, validateScopePattern, validateRelativePath,
   isVerifierNamespacePath, parseVerifierArtifactPath, type VerifierArtifactPath,
@@ -14,7 +17,8 @@ export {
   type MetricValue, type MetricsMap, type FindingSeverity, type StructuredFinding,
   type StepHandoffSource, type StepHandoffSelect, type StepHandoffSelector,
   type ResourceActivationPhase, type ResourceActivationRule,
-  type HardwareTargetSpec, type MetricBoundsRule, type MetricComparativeRule, type MetricThresholdRule,
+  type HardwareTargetSpec, type MetricBucketScope, type MetricBoundsRule, type MetricComparativeRule,
+  type MetricThresholdRule,
 } from './contracts.js';
 export { admitTask, identifyManifest, bindSubject, type TaskLock, type Subject } from './identity.js';
 export {
@@ -23,10 +27,15 @@ export {
   type BaseTreeAnchor, type ResolvedArtifact, type ResolvedArtifactInput, type VerifiedArtifactDescriptor,
 } from './artifacts.js';
 export {
-  evaluateAcceptance, matchesHardwareTarget,
+  evaluateAcceptance, evaluateMetricThresholds, matchesHardwareTarget,
   type VerificationResult, type EvaluatedCheck,
 } from './acceptance.js';
-export type { Evidence, HardwareProvenance, SubmittedCheck } from './evidence.js';
+export {
+  HARDWARE_BOUND_PIPELINES, validateBucketMetrics, validateHardwareDiagnostics,
+  type Evidence, type HardwareProvenance, type SubmittedCheck,
+  type BucketDimensionValue, type BucketDimensionsMap, type BucketMetricEntry,
+  type HardwareBoundPipeline, type HardwareStallReason, type HardwareDiagnostics,
+} from './evidence.js';
 export { aggregateUsage, type RequestUsage, type Quantity, type Aggregate, type UsageSummary } from './usage.js';
 export { SecretScrubber } from './scrubber.js';
 export { constructRunResult, type RunResult, type RunStatus, type MemoryObservation, type NoChangeVerification } from './results.js';

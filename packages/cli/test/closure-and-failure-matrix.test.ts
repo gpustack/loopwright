@@ -100,6 +100,27 @@ test('closure: refuses unprovisioned external upgrades without a hash-bound rece
   });
   assert.equal(hwForged.falsificationDetected, true);
   assert.ok(hwForged.diagnostics.some(diagnostic => diagnostic.code === CLOSURE_FALSIFICATION_FORBIDDEN));
+
+  const evoRow: ClosureCapabilityEntry = {
+    ...CLOSURE_CAPABILITY_LEDGER[0]!,
+    ownerPackage: '@loopwright/evolution',
+  };
+  const evoAccepted = await evaluateClosureMatrix({ entries: [evoRow] });
+  assert.equal(evoAccepted.falsificationDetected, false);
+  assert.deepEqual(evoAccepted.diagnostics, []);
+
+  const evoExternal: ClosureCapabilityEntry = {
+    ...external,
+    ownerPackage: '@loopwright/evolution',
+  };
+  const evoBlocked = await evaluateClosureMatrix({ entries: [evoExternal] });
+  assert.equal(evoBlocked.falsificationDetected, false);
+  assert.deepEqual(evoBlocked.diagnostics, []);
+  const evoForged = await evaluateClosureMatrix({
+    entries: [{ ...evoExternal, disposition: 'closed_local', verificationStatus: 'passed', unlockPrerequisite: null }],
+  });
+  assert.equal(evoForged.falsificationDetected, true);
+  assert.ok(evoForged.diagnostics.some(diagnostic => diagnostic.code === CLOSURE_FALSIFICATION_FORBIDDEN));
 });
 test('closure: verifies evidence containment and refuses missing or symlinked files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'lw-closure-integrity-'));

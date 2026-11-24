@@ -1,17 +1,9 @@
 import type { Evidence, VerificationResult } from '@loopwright/core';
-import { diagnostic, digestEqual, hasControlCharacter, incidentReferenceDigest, memoryProposalSchema, renderEntryMarkdown } from './schema.js';
+import { diagnostic, digestEqual, hardwareScopesOverlap, hasControlCharacter, incidentReferenceDigest, MEMORY_CREDENTIAL_PATTERNS, memoryProposalSchema, renderEntryMarkdown } from './schema.js';
 import { compileScopePattern, isMemoryManagedPath, matchScopePattern, memoryDirectoryFor, normalizeMemoryRoot } from './store.js';
 import type { MemoryDiagnostic, MemoryGateResult, MemoryGateName, MemoryOperation, MemoryProposal, MemoryVerificationInput, MemoryVerificationReport } from './types.js';
 
-const CREDENTIAL_PATTERNS: readonly { readonly source: RegExp; readonly label: string }[] = [
-  { source: /ghp_[A-Za-z0-9]{20,}/, label: 'GitHub user token' },
-  { source: /ghs_[A-Za-z0-9]{20,}/, label: 'GitHub server token' },
-  { source: /github_pat_[A-Za-z0-9_]{20,}/, label: 'GitHub fine-grained token' },
-  { source: /sk-[A-Za-z0-9_-]{20,}/, label: 'API key' },
-  { source: /Bearer [A-Za-z0-9._~+/=-]{16,}/, label: 'bearer token' },
-  { source: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, label: 'private key' },
-  { source: /AKIA[0-9A-Z]{16}/, label: 'AWS access key' },
-];
+const CREDENTIAL_PATTERNS = MEMORY_CREDENTIAL_PATTERNS;
 const INJECTION_PATTERNS: readonly { readonly source: RegExp; readonly label: string }[] = [
   { source: /=== .*? ===/, label: 'sentinel header' },
   { source: /^REQUIRED:/m, label: 'REQUIRED directive' },
@@ -192,6 +184,26 @@ function redactionGate(input: MemoryVerificationInput, proposal: MemoryProposal)
   }
   return gate('redaction', diagnostics);
 }
+function hardwareEvidenceGate(proposal: MemoryProposal): MemoryGateResult {
+  const diagnostics: MemoryDiagnostic[] = [];
+  for (const [index, operation] of proposal.operations.entries()) {
+    if (operation.kind !== 'upsert') continue;
+    const entry = operation.entry;
+    if (entry.scope.hardwareScope === undefined) continue;
+    if (entry.kind !== 'fact' && entry.kind !== 'invariant') continue;
+    const hasPassingHardwareEvidence = entry.evidenceRefs.some(
+      reference => reference.level === 'hardware_execution' && reference.observedStatus === 'passed',
+    );
+    if (!hasPassingHardwareEvidence) {
+      diagnostics.push({
+        code: 'MEMORY_HARDWARE_EVIDENCE_REQUIRED',
+        path: `/proposal/operations/${index}/entry/evidenceRefs`,
+        detail: `${entry.kind} carrying hardwareScope (${entry.scope.hardwareScope.accelerator}) requires at least one passed hardware_execution evidence reference`,
+      });
+    }
+  }
+  return gate('hardware-evidence', diagnostics);
+}
 function conflictGate(input: MemoryVerificationInput, proposal: MemoryProposal): MemoryGateResult {
   const diagnostics: MemoryDiagnostic[] = [];
   const push = (path: string, detail: string) => diagnostics.push({ code: 'MEMORY_CONFLICT_UNRESOLVED', path, detail });
@@ -240,7 +252,8 @@ function conflictGate(input: MemoryVerificationInput, proposal: MemoryProposal):
         && base.scope.taskpack === upsert.entry.scope.taskpack && base.scope.repository === upsert.entry.scope.repository
         && (base.scope.targetMatrix === null || upsert.entry.scope.targetMatrix === null
           || (base.scope.targetMatrix.id === upsert.entry.scope.targetMatrix.id && base.scope.targetMatrix.platform === upsert.entry.scope.targetMatrix.platform
-            && base.scope.targetMatrix.variant === upsert.entry.scope.targetMatrix.variant));
+            && base.scope.targetMatrix.variant === upsert.entry.scope.targetMatrix.variant))
+        && hardwareScopesOverlap(base.scope.hardwareScope, upsert.entry.scope.hardwareScope);
       if (!overlapping) continue;
       const sharedKeys = Object.keys(base.validFor.upstreamVersions).filter(key => Object.hasOwn(upsert.entry.validFor.upstreamVersions, key));
       const diverged = sharedKeys.length > 0 && sharedKeys.every(key => upsert.entry.validFor.upstreamVersions[key] !== base.validFor.upstreamVersions[key]);
@@ -250,16 +263,28 @@ function conflictGate(input: MemoryVerificationInput, proposal: MemoryProposal):
   }
   return gate('memory-review', diagnostics);
 }
-/** Deterministic five-gate verifier; never writes, never mutates its inputs. */
+/** Deterministic six-gate verifier; never writes, never mutates its inputs. */
 export function verifyMemoryProposal(input: MemoryVerificationInput): MemoryVerificationReport {
   const schema = schemaGate(input);
   const gates: MemoryGateResult[] = [schema.result];
   const proposal = schema.proposal;
   if (proposal === null) {
-    gates.push(skippedGate('provenance'), skippedGate('scope'), skippedGate('redaction'), skippedGate('memory-review'));
+    gates.push(
+      skippedGate('provenance'),
+      skippedGate('scope'),
+      skippedGate('redaction'),
+      skippedGate('memory-review'),
+      skippedGate('hardware-evidence'),
+    );
     return { gates, satisfied: false };
   }
-  gates.push(provenanceGate(input, proposal), scopeGate(input, proposal), redactionGate(input, proposal), conflictGate(input, proposal));
+  gates.push(
+    provenanceGate(input, proposal),
+    scopeGate(input, proposal),
+    redactionGate(input, proposal),
+    conflictGate(input, proposal),
+    hardwareEvidenceGate(proposal),
+  );
   return { gates, satisfied: gates.every(gate => gate.status === 'passed') };
 }
 /** Re-checks a proposal after a rebase, verifying the regenerated patch text as well. */

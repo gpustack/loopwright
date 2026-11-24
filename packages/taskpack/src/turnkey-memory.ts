@@ -11,6 +11,7 @@ import {
   loadMemoryStore,
   MemoryDiagnosticError,
   resolveSettledCycleContext,
+  type HardwareMemoryScope,
   type MemoryCASResult,
   type MemoryFinalizerConfig,
   type MemoryProposal,
@@ -85,6 +86,18 @@ export function projectMemoryTargetMatrixCell(
     id: cell.id,
     platform: cell.platform,
     variant: cell.variant,
+  });
+}
+
+/** Derive optional `HardwareMemoryScope` (`{ accelerator, driverConstraint? }`) when a matched matrix cell declares `hardware`. */
+export function projectMemoryHardwareScope(
+  cell: TargetMatrixCell | null | undefined,
+): HardwareMemoryScope | undefined {
+  const hardware = cell?.hardware;
+  if (hardware === undefined) return undefined;
+  return Object.freeze({
+    accelerator: hardware.accelerator,
+    ...(hardware.driverConstraint !== undefined ? { driverConstraint: hardware.driverConstraint } : {}),
   });
 }
 
@@ -580,6 +593,7 @@ export async function finalizeLocalTurnkeyMemory(
       ? options.targetMatrix
       : (manifestMatrix !== undefined && manifestMatrix !== null && manifestMatrix.length === 1 ? manifestMatrix[0]! : null);
     const targetMatrix = projectMemoryTargetMatrixCell(rawTargetMatrix);
+    const hardwareScope = projectMemoryHardwareScope(rawTargetMatrix);
 
     const expectedBindings: ExpectedSettledRunBindings = {
       runId: options.runId,
@@ -600,6 +614,7 @@ export async function finalizeLocalTurnkeyMemory(
       checkCodeFingerprint,
       checkUpstreamVersions,
       targetMatrix,
+      ...(hardwareScope !== undefined ? { hardwareScope } : {}),
       upstreamVersions: buildUpstreamMemoryVersions(options.upstreamRecords as readonly UpstreamAcquisitionRecord[] | undefined),
     };
 

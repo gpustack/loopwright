@@ -5,12 +5,13 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from '
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { SecretScrubber as CoreSecretScrubber } from '@loopwright/core';
 import { STANDARD_PI_PROVIDER_ENV } from '@loopwright/agent-pi/catalog';
 import { HostMcpRegistry } from '@loopwright/agent-pi/mcp';
 import { compilePlan, formatRunReport, inspectRun, loadTrustedConfiguration, parseReportOutputFormats, readStatus, reconcileCycle, resumeCycle, resumeCycleWithPorts, runCycle, runCycleWithPorts, stepCancel, stepNext, stepSubmit, type ControllerDiagnostic, type ControllerPorts, type CycleExecution, type InspectRunValue, type LoadedConfiguration, type ReportCheckItem, type ReportModelInfo, type ReportOutputFormat, type RoleModelOverride, type RunReportInput, type StepTickResult } from '@loopwright/controller';
 import { alignBaselineRevisions, assertCleanArtifact, BASELINE_CONFLICT_REASON, buildDefaultAuthorPrompt, checkTaskpackSuite, collectManifestSecretEnvNames, collectMcpReferencedEnvNames, compileDeclarativeTaskpack, computeTaskpackDigests, createTaskpackDecisionPort, DEFAULT_HOST_BUDGETS, DEFAULT_LOCAL_COMMAND_GATE_ENV, discoverTaskpackUpstreamsV2, evaluateUpstreamIntakeDisposition, executeTurnkeyCycle, finalizeLocalTurnkeyMemory, formatWorkspaceResourcesManifest, insideRoot, loadDeclarativeTaskpack, loadPiModelsJson, LOOPWRIGHT_ACTIVE_PROVIDER_TOKEN_ENV, normalizeRelativePath, openStagedTaskpackStepGate, parseActionInputLimits, parseAllowedHostMounts, parseBaselineAlignmentPolicy, parseLoopwrightEnvLimits, parseYamlDocument, readBoundedRegularFile, REPOSITORY_FULL_NAME_PATTERN, resolveDefaultProviderTokenEnv, resolveDigestLockfilePath, resolveExternalMcpConfigs, resolveRepositoryAndRevisions, resolveTaskpackModelCandidates, resolveTaskpackModelSelection, resolveTaskpackSuite, runTaskpackPreflight, SecretScrubber, selectHealthyModelCandidate, serializePrettyYaml, stageCompiledInstructionResources, stageTaskpackForStep, startLocalCommandGateServer, TaskpackError, validateGateToolchainPath, verifyDigestLockfile, writeDigestLockfile, type BaselineAlignmentOverride, type BaselineAlignmentResult, type CompiledTaskpack, type ExecutionHostPolicy, type HostGateEndpointPlan, type HostRoleSelection, type HostTaskpackBindings, type LoadedTaskpackSuite, type LocalCommandGateServer, type ParsedPiModelsJson, type PiThinkingLevel, type ResolvedModelCandidate, type RunTaskpackPreflightResult, type StagedTaskpackStepGateHandle, type SuiteResolutionResult, type TaskpackErrorCode, type TaskpackManifest, type TaskpackUpstreamRecord, type TurnkeyCycleAttemptSummary, type WrittenCompiledTaskpack } from '@loopwright/taskpack';
 import type { HardwareRunnerErrorCode, RunHardwareWorkerResult, WorkerJobSettlementSummary } from '@loopwright/hardware-runner';
-import { parseArguments, UsageError, type Arguments } from './arguments.js';
+import { EVOLVE_ACTIONS, parseArguments, UsageError, type Arguments } from './arguments.js';
 import { appendStepSummary, initDraft, writeOutput } from './draft.js';
 import { evaluateClosureMatrix, CLOSURE_FALSIFICATION_FORBIDDEN, type ClosureMatrixReport } from './closure.js';
 function resolveCliVersion(): string {
@@ -21,8 +22,9 @@ function resolveCliVersion(): string {
   return '0.0.0';
 }
 const CLI_VERSION = resolveCliVersion();
-const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nsuite check --suite FILE [--repo DIR] [--verify-digests] [--json]\nsuite resolve --suite FILE [--repo DIR] [--event NAME] [--schedule KEY] [--comment-body TEXT] [--pr-head-ref REF] [--pr-base-ref REF] [--domain ID] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nrunner relay --config FILE [--json]\nrunner worker --config FILE [--once] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
+const HELP = `loopwright ${CLI_VERSION}\ninit --directory DIR [--force] [--json]\ncheck --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --dry-run --config FILE --registry FILE --registry-sha256 HEX [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--json] [--output FILE]\nrun --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nrun --dry-run --taskpack FILE --repo DIR [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output FILE]\nrun --taskpack FILE --repo DIR --run-root DIR --run-id ID [--mode candidate|no-change|auto] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nresume --run-root DIR --run-id ID --config FILE --registry FILE --registry-sha256 HEX --repo DIR [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--allow-privileged] [--allow-workflow-writes] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep next --run-root DIR --run-id ID (--taskpack FILE --repo DIR | --config FILE --registry FILE --registry-sha256 HEX --repo DIR | [--repo DIR]) [--role-model ROLE=PROVIDER/MODEL[:THINKING]] [--mode candidate|no-change] [--baseline-alignment off|fail-fast|extract-context] [--source-revision REV] [--reissue-lease] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep submit --run-root DIR --run-id ID --lease TOKEN [--submission-file FILE] [--status completed|no_change|failed|blocked] [--reason TEXT] [--allow-privileged] [--allow-workflow-writes] [--allow-host-mounts PATHS] [--json] [--output-format FORMATS] [--step-summary-file FILE]\nstep cancel --run-root DIR --run-id ID [--json] [--output-format FORMATS] [--step-summary-file FILE]\ndigest sync --taskpack FILE [--repo DIR] [--check] [--json]\nsuite check --suite FILE [--repo DIR] [--verify-digests] [--json]\nsuite resolve --suite FILE [--repo DIR] [--event NAME] [--schedule KEY] [--comment-body TEXT] [--pr-head-ref REF] [--pr-base-ref REF] [--domain ID] [--json]\nreconcile --config FILE --registry FILE --registry-sha256 HEX --repo DIR --run-root DIR --run-id ID --receipt FILE [--allow-workflow-writes] [--json] [--output FILE] [--output-format FORMATS] [--step-summary-file FILE]\nstatus --run-root DIR --run-id ID [--json]\ninspect --run-root DIR --run-id ID [--json] [--output DIR]\nclosure [--repo DIR] [--output FILE] [--json] [--verify-failures]\napp-serve --config FILE [--repo DIR] [--json]\nrunner relay --config FILE [--json]\nrunner worker --config FILE [--once] [--json]\nevolve check --campaign FILE [--repo DIR] [--json]\nevolve run --campaign FILE --state DIR [--repo DIR] [--out DIR] [--format dir|oci-layout] [--allow-synthetic-probe] [--json]\nevolve resume --campaign DIR [--repo DIR] [--out DIR] [--format dir|oci-layout] [--allow-synthetic-probe] [--json]\nevolve status --campaign DIR [--json]\nevolve inspect --campaign DIR [--island ID] [--individual ID] [--json]\nevolve export --campaign DIR --out DIR [--format dir|oci-layout] [--allow-synthetic-probe] [--overwrite] [--json]\nConfig and registry files accept YAML (.yaml, .yml) or JSON (.json); init writes controller.draft.yaml and registry.draft.yaml.\nStatic plans do not establish execution readiness. Strict proven_bound is the default.\nJSON verification requires both complete manifests and framing to fit the 16384-byte header; selected file <=1032184 bytes.\n`;
 const RUNNER_HELP = `loopwright ${CLI_VERSION} runner\nrunner relay --config FILE [--json]\nrunner worker --config FILE [--once] [--json]\n`;
+const EVOLVE_HELP = `loopwright ${CLI_VERSION} evolve\nevolve check --campaign FILE [--repo DIR] [--json]\nevolve run --campaign FILE --state DIR [--repo DIR] [--out DIR] [--format dir|oci-layout] [--allow-synthetic-probe] [--json]\nevolve resume --campaign DIR [--repo DIR] [--out DIR] [--format dir|oci-layout] [--allow-synthetic-probe] [--json]\nevolve status --campaign DIR [--json]\nevolve inspect --campaign DIR [--island ID] [--individual ID] [--json]\nevolve export --campaign DIR --out DIR [--format dir|oci-layout] [--allow-synthetic-probe] [--overwrite] [--json]\n`;
 export interface Envelope { readonly version: 1; readonly kind: 'plan' | 'event' | 'status' | 'inspection' | 'result' | 'diagnostic' | 'incident' | 'closure' | 'step' | 'digest' | 'suite'; readonly sequence: number; readonly runId: string | null; readonly data: unknown }
 export function encoded(value: unknown): string {
   return JSON.stringify(value).replace(/[\u007f-\u009f\u2028\u2029<>&]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0')).replace(/::/g, '\\u003a\\u003a');
@@ -217,6 +219,7 @@ export function hardwareRunnerExitCode(code: HardwareRunnerErrorCode): number {
     case 'AUTH_UNAUTHORIZED':
     case 'AUTH_FORBIDDEN':
     case 'RUNNER_SANDBOX_FAILED':
+    case 'WORKER_DEVICE_QUARANTINED':
       return 3;
     case 'ARTIFACT_INVALID':
     case 'ARTIFACT_MISSING':
@@ -235,9 +238,48 @@ export function hardwareRunnerExitCode(code: HardwareRunnerErrorCode): number {
     }
   }
 }
+type EvolutionErrorCode = import('@loopwright/evolution').EvolutionErrorCode;
+/** Map every EvolutionErrorCode exhaustively to its documented CLI exit code. */
+export function evolutionExitCode(code: EvolutionErrorCode): number {
+  switch (code) {
+    case 'EVOLUTION_SCHEMA_INVALID':
+      return 2;
+    case 'TEAM_ENVELOPE_VIOLATION':
+    case 'EXPORT_UNVERIFIED_FORBIDDEN':
+    case 'EVOLUTION_SYMLINK_FORBIDDEN':
+      return 3;
+    case 'EVOLUTION_NOT_FOUND':
+    case 'ARTIFACT_INVALID':
+    case 'ARTIFACT_MISSING':
+      return 4;
+    case 'EVOLUTION_BUDGET_EXCEEDED':
+      return 5;
+    case 'EVOLUTION_CLOCK_DRIFT':
+    case 'EVOLUTION_LEASE_FENCED':
+    case 'EVOLUTION_CONFLICT':
+    case 'EVOLUTION_STORE_BUSY':
+      return 7;
+    case 'EVOLUTION_STORE_ERROR':
+    case 'EVOLUTION_STORE_CLOSED':
+    case 'EVOLUTION_STORE_CORRUPT':
+    case 'SECRET_LEAK_DETECTED':
+      return 8;
+    default: {
+      const _exhaustive: never = code;
+      return _exhaustive;
+    }
+  }
+}
+const BASE_CLI_SECRET_ENV_KEYS = [
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'INPUT_GITHUB-TOKEN',
+  'INPUT_GITHUB-APP-PRIVATE-KEY',
+] as const;
+
 function createCliScrubber(extraKeys: readonly string[] = []): SecretScrubber {
   const scrubber = new SecretScrubber();
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'INPUT_GITHUB-TOKEN', 'INPUT_GITHUB-APP-PRIVATE-KEY', ...extraKeys]) {
+  for (const key of [...BASE_CLI_SECRET_ENV_KEYS, ...extraKeys]) {
     const value = process.env[key];
     if (typeof value === 'string' && value.length > 0) scrubber.register(value);
   }
@@ -1805,10 +1847,322 @@ async function runRunnerCommand(args: Arguments, emit: EmitFn): Promise<number> 
   }
 }
 
+function scrubJsonPayload(value: unknown, scrubber: SecretScrubber, depth = 0): unknown {
+  if (depth > 32) return '[REDACTED:DEPTH]';
+  if (typeof value === 'string') return scrubber.scrub(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map(item => scrubJsonPayload(item, scrubber, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = scrubJsonPayload(v, scrubber, depth + 1);
+  }
+  return out;
+}
+
+async function runEvolveCommand(args: Arguments, emit: EmitFn): Promise<number> {
+  const get = (key: string) => args.values.get(key)!;
+  const extraSecretKeys = [
+    'LOOPWRIGHT_GATE_SIGNING_SECRET',
+    'BENCH_SIGNING_SECRET',
+    'LOOPWRIGHT_GATE_AUTH_TOKEN',
+    'LOCAL_OAI_KEY',
+    ...Object.values(STANDARD_PI_PROVIDER_ENV),
+  ];
+  const scrubber = createCliScrubber(extraSecretKeys);
+  const coreScrubber = new CoreSecretScrubber();
+  for (const key of [...BASE_CLI_SECRET_ENV_KEYS, ...extraSecretKeys]) {
+    const value = process.env[key];
+    if (typeof value === 'string' && value.length > 0) coreScrubber.register(value);
+  }
+  const evolution = await import('@loopwright/evolution');
+  const resolveCampaignDir = (): string => resolve(args.values.get('campaign') ?? args.values.get('campaign-dir') ?? args.values.get('root')!);
+  const resolveStateDir = (): string => resolve(args.values.get('state') ?? args.values.get('campaign-dir') ?? args.values.get('root')!);
+  const resolveSigningSecret = (): string | undefined => {
+    const raw = process.env['LOOPWRIGHT_GATE_SIGNING_SECRET']?.trim()
+      || process.env['BENCH_SIGNING_SECRET']?.trim()
+      || undefined;
+    if (raw !== undefined && raw.length > 0) {
+      scrubber.register(raw);
+      coreScrubber.register(raw);
+      return raw;
+    }
+    return undefined;
+  };
+
+  try {
+    const action = args.evolveAction!;
+    if (action === 'check') {
+      const checked = await evolution.checkEvolutionCampaign({
+        manifestPath: resolve(get('campaign')),
+        ...(args.values.has('repo') ? { repositoryRoot: resolve(get('repo')) } : {}),
+        allowLoopbackHttp: true,
+        scrubber: coreScrubber,
+      });
+      const payload = {
+        version: 1,
+        action: 'check',
+        valid: checked.valid,
+        campaignName: scrubber.scrub(checked.manifest.metadata.name),
+        manifestDigest: checked.manifestDigest,
+        taskpackName: scrubber.scrub(checked.taskpack.metadata.name),
+        targetCellId: checked.targetCellId,
+        modelIds: checked.modelIds,
+        stageMode: checked.stageMode,
+        specialistBucketIds: checked.specialistBucketIds,
+        portfolioHeldOutWorkloadId: checked.portfolioHeldOutWorkloadId,
+      };
+      await emit(
+        'plan',
+        payload,
+        scrubber.scrub(`evolve check: ok (${checked.manifest.metadata.name}, target=${checked.targetCellId}, mode=${checked.stageMode})`),
+      );
+      return 0;
+    }
+
+    if (action === 'status') {
+      const status = await evolution.getEvolutionCampaignStatus({
+        campaignRoot: resolveCampaignDir(),
+      });
+      await emit(
+        'status',
+        scrubJsonPayload(status, scrubber),
+        scrubber.scrub(
+          `evolve status: ${status.campaign.campaignId} status=${status.campaign.status} gen=${status.campaign.currentGeneration} evals=${status.campaign.evaluationsUsed}`,
+        ),
+      );
+      return 0;
+    }
+
+    if (action === 'inspect') {
+      const inspection = await evolution.inspectEvolutionCampaign({
+        campaignRoot: resolveCampaignDir(),
+      });
+      const islandFilter = args.values.has('island') ? Number.parseInt(get('island'), 10) : undefined;
+      const individualFilter = args.values.get('individual');
+
+      if (islandFilter !== undefined && !inspection.islands.some(i => i.islandId === islandFilter)) {
+        throw new evolution.EvolutionError(
+          'EVOLUTION_NOT_FOUND',
+          `island ${islandFilter} not found in campaign "${inspection.campaign.campaignId}"`,
+          '/island',
+        );
+      }
+
+      const islands = islandFilter !== undefined
+        ? inspection.islands.filter(i => i.islandId === islandFilter)
+        : inspection.islands;
+      const nicheArchives = islandFilter !== undefined
+        ? inspection.nicheArchives.filter(a => a.islandId === islandFilter)
+        : inspection.nicheArchives;
+      const teamConfigs = islandFilter !== undefined
+        ? inspection.teamConfigs.filter(tc => tc.islandId === islandFilter)
+        : inspection.teamConfigs;
+      let individuals = islandFilter !== undefined
+        ? inspection.individuals.filter(ind => ind.islandId === islandFilter)
+        : inspection.individuals;
+      let paretoFrontier = islandFilter !== undefined
+        ? inspection.paretoFrontier.filter(ind => ind.islandId === islandFilter)
+        : inspection.paretoFrontier;
+      let lineageEdges = inspection.lineageEdges;
+
+      if (individualFilter !== undefined) {
+        const matched = individuals.find(ind => ind.individualId === individualFilter);
+        if (matched === undefined) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_NOT_FOUND',
+            `individual "${individualFilter}" not found in campaign "${inspection.campaign.campaignId}"`,
+            '/individual',
+          );
+        }
+        individuals = [matched];
+        paretoFrontier = paretoFrontier.filter(ind => ind.individualId === individualFilter);
+        lineageEdges = lineageEdges.filter(
+          edge => edge.childIndividualId === individualFilter || edge.parentIndividualId === individualFilter,
+        );
+      }
+
+      const payload = {
+        ...inspection,
+        islands,
+        paretoFrontier,
+        nicheArchives,
+        teamConfigs,
+        individuals,
+        lineageEdges,
+      };
+      await emit(
+        'inspection',
+        scrubJsonPayload(payload, scrubber),
+        scrubber.scrub(
+          `evolve inspect: ${inspection.campaign.campaignId} individuals=${individuals.length} pareto=${paretoFrontier.length}`,
+        ),
+      );
+      return 0;
+    }
+
+    if (action === 'export') {
+      const campaignRoot = resolveCampaignDir();
+      const outputDir = resolve(get('out'));
+      const format = args.values.get('format') as 'dir' | 'oci-layout' | undefined;
+      const allowSyntheticProbe = args.flags.has('allow-synthetic-probe');
+      const overwrite = args.flags.has('overwrite');
+      const receiptSigningSecret = resolveSigningSecret();
+
+      const store = await evolution.EvolutionCampaignStore.open({
+        campaignRoot,
+        createIfMissing: false,
+      });
+      try {
+        const campaigns = await store.listCampaigns();
+        if (campaigns.length > 1) {
+          throw new evolution.EvolutionError(
+            'EVOLUTION_CONFLICT',
+            `campaign store holds ${campaigns.length} campaigns; export requires a single campaign`,
+          );
+        }
+        const target = campaigns[0];
+        if (target === undefined) {
+          throw new evolution.EvolutionError('EVOLUTION_NOT_FOUND', 'no campaigns found in campaign.sqlite');
+        }
+        const exported = await evolution.exportEvolutionBundle({
+          store,
+          campaignId: target.campaignId,
+          outputDir,
+          ...(format !== undefined ? { format } : {}),
+          allowSyntheticProbe,
+          overwrite,
+          ...(receiptSigningSecret !== undefined ? { receiptSigningSecret } : {}),
+          scrubber: coreScrubber,
+        });
+        await emit(
+          'result',
+          scrubJsonPayload(exported, scrubber),
+          scrubber.scrub(`evolve export: ok (${exported.format}, individuals=${exported.exportedIndividualIds.length}, blobs=${exported.blobCount})`),
+        );
+        return 0;
+      } finally {
+        await store.close().catch(() => undefined);
+      }
+    }
+
+    const { createCliEvolutionEvaluator, createCliEvolutionSupervisorRunner } = await import('./evolve.js');
+    const repositoryRoot = resolve(args.values.has('repo') ? get('repo') : process.cwd());
+    const allowSyntheticProbe = args.flags.has('allow-synthetic-probe');
+    const receiptSigningSecret = resolveSigningSecret();
+    const outDir = args.values.has('out') ? resolve(get('out')) : undefined;
+    const format = args.values.get('format') as 'dir' | 'oci-layout' | undefined;
+    const evaluator = createCliEvolutionEvaluator({ repositoryRoot, coreScrubber, taskpackScrubber: scrubber });
+
+    const { runResult, exportedBundle, caughtSignal } = await withSignalAbort(async (signal, getSignal) => {
+      const supervisorRunner = createCliEvolutionSupervisorRunner({
+        coreScrubber,
+        taskpackScrubber: scrubber,
+        signal,
+      });
+      const res = action === 'run'
+        ? await evolution.runEvolutionCampaign({
+            campaignRoot: resolveStateDir(),
+            manifestPath: resolve(get('campaign')),
+            repositoryRoot,
+            evaluator,
+            supervisorRunner,
+            signal,
+            autoExport: outDir === undefined,
+            ...(format !== undefined ? { exportFormat: format } : {}),
+            allowSyntheticProbe,
+            ...(receiptSigningSecret !== undefined ? { receiptSigningSecret } : {}),
+            scrubber: coreScrubber,
+          })
+        : await evolution.resumeEvolutionCampaign({
+            campaignRoot: resolveCampaignDir(),
+            repositoryRoot,
+            evaluator,
+            supervisorRunner,
+            signal,
+            autoExport: outDir === undefined,
+            ...(format !== undefined ? { exportFormat: format } : {}),
+            allowSyntheticProbe,
+            ...(receiptSigningSecret !== undefined ? { receiptSigningSecret } : {}),
+            scrubber: coreScrubber,
+          });
+      try {
+        let extraExport = res.exportedBundle;
+        const sig = getSignal();
+        if (outDir !== undefined && res.campaign.status === 'completed' && sig === null) {
+          extraExport = await evolution.exportEvolutionBundle({
+            store: res.store,
+            campaignId: res.campaign.campaignId,
+            outputDir: outDir,
+            ...(format !== undefined ? { format } : {}),
+            allowSyntheticProbe,
+            overwrite: false,
+            ...(receiptSigningSecret !== undefined ? { receiptSigningSecret } : {}),
+            scrubber: coreScrubber,
+          });
+        }
+        return { runResult: res, exportedBundle: extraExport, caughtSignal: sig };
+      } finally {
+        await res.store.close().catch(() => undefined);
+      }
+    });
+
+    const { store: _unusedStore, ...serializable } = runResult;
+    void _unusedStore;
+    const exportSkipped = outDir !== undefined && exportedBundle === undefined;
+    const payload = {
+      ...serializable,
+      ...(exportedBundle !== undefined ? { exportedBundle } : {}),
+      ...(exportSkipped ? { exportSkippedReason: caughtSignal !== null ? `signal:${caughtSignal}` : `campaign_${runResult.campaign.status}` } : {}),
+    };
+    const exportNote = exportSkipped
+      ? ` export=skipped(${caughtSignal !== null ? caughtSignal : runResult.campaign.status})`
+      : '';
+    await emit(
+      'result',
+      scrubJsonPayload(payload, scrubber),
+      scrubber.scrub(
+        `evolve ${action}: ${runResult.campaign.campaignId} status=${runResult.campaign.status} evals=${runResult.campaign.evaluationsUsed} pareto=${runResult.paretoFrontier.length}${exportNote}`,
+      ),
+    );
+    if (caughtSignal === 'SIGTERM') return 143;
+    if (caughtSignal === 'SIGINT') return 130;
+    if (runResult.campaign.status === 'completed') return 0;
+    if (runResult.campaign.status === 'paused') return 130;
+    return 4;
+  } catch (err) {
+    if (err instanceof evolution.EvolutionError) {
+      const code = err.code;
+      const message = scrubber.scrub(err.message);
+      const path = typeof err.path === 'string' && err.path.length > 0 ? scrubber.scrub(err.path) : null;
+      await emit(
+        'diagnostic',
+        { version: 1, code, message, ...(path !== null ? { path } : {}) },
+        `${code}: ${message}`,
+      );
+      return evolutionExitCode(code);
+    }
+    if (err instanceof TaskpackError) {
+      return await emitTaskpackError(err, emit, scrubber);
+    }
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = scrubber.scrub(rawMessage);
+    await emit(
+      'diagnostic',
+      { version: 1, code: 'CLI_EVOLUTION_UNAVAILABLE', message },
+      `CLI_EVOLUTION_UNAVAILABLE: ${message}`,
+    );
+    return 8;
+  }
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   if (argv.length === 1 && argv[0] === '--help') { await stdout(HELP); return 0; }
   if (argv.length === 2 && argv[0] === 'runner' && argv[1] === '--help') { await stdout(RUNNER_HELP); return 0; }
   if (argv.length === 3 && argv[0] === 'runner' && (argv[1] === 'relay' || argv[1] === 'worker') && argv[2] === '--help') { await stdout(RUNNER_HELP); return 0; }
+  if (argv.length === 2 && argv[0] === 'evolve' && argv[1] === '--help') { await stdout(EVOLVE_HELP); return 0; }
+  if (argv.length === 3 && argv[0] === 'evolve' && (EVOLVE_ACTIONS as readonly string[]).includes(argv[1]!) && argv[2] === '--help') { await stdout(EVOLVE_HELP); return 0; }
   if (argv.length === 1 && argv[0] === '--version') { await stdout(`${CLI_VERSION}\n`); return 0; }
   let sequence = 0, runId: string | null = null, json = argv.includes('--json');
   const emit = async (kind: Envelope['kind'], data: unknown, summary?: string) => { const envelope: Envelope = { version: 1, kind, sequence: ++sequence, runId, data }; if (!json && kind === 'diagnostic') { await stderr(encoded(summary ?? kind) + '\n'); return; } await stdout(json ? encoded(envelope) + '\n' : encoded(summary ?? kind) + '\n'); };
@@ -1892,6 +2246,9 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
     if (args.command === 'runner') {
       return await runRunnerCommand(args, emit);
+    }
+    if (args.command === 'evolve') {
+      return await runEvolveCommand(args, emit);
     }
     if (args.command === 'step') {
       runId = get('run-id');

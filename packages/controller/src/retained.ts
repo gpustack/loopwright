@@ -194,7 +194,10 @@ export async function admitRetainedRun(input: {
   } else {
     const state0 = approvedState(effectiveConfig);
     if (descriptor.configuration.roleModelOverrides !== undefined && state0.input.roleModelOverrides === undefined) {
-      const reloaded = await loadConfiguration({ ...state0.input, roleModelOverrides: descriptor.configuration.roleModelOverrides }, { environment: envFn });
+      const reloaded = await loadConfiguration(
+        { ...state0.input, roleModelOverrides: descriptor.configuration.roleModelOverrides },
+        { environment: input.environment ?? state0.environment },
+      );
       if (!reloaded.ok) throw new ControllerFailure(reloaded.error);
       effectiveConfig = reloaded.value;
     }

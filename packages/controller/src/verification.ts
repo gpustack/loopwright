@@ -25,8 +25,11 @@ import {
   descriptor,
   encodeInventory,
   encodePacket,
+  EVOLVE_BLOCK_LIMITS,
   fileHash,
   inventoryEncodedBytes,
+  isValidEvolveBlockId,
+  isValidEvolveGuardPath,
   JSON_FILE_BYTES,
   maxPacketBytes,
   overlayProtocolBounds,
@@ -240,6 +243,21 @@ function writeProofSection(payload: Uint8Array, view: DataView, startOffset: num
     offset += tree.byteLength;
   }
   return offset;
+}
+
+export function verifierProofPaths(slots: readonly VerifierSlot[]): readonly string[] {
+  const paths: string[] = [];
+  for (const slot of slots) {
+    const impl = slot.handler.implementation;
+    if (impl === 'json-artifact.v1' || impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1') {
+      paths.push(text(slot.handler.parameters.path));
+    } else if (impl === 'evolve-block-guard.v1') {
+      for (const item of list(slot.handler.parameters.files, '', EVOLVE_BLOCK_LIMITS.maxFiles)) {
+        paths.push(text(item, '', 1024));
+      }
+    }
+  }
+  return [...new Set(paths)];
 }
 
 /** Pure byte preflight: no owner, state intent, Worker, timer, credential or network operation. */
@@ -517,6 +535,192 @@ export function prepareVerification(
     return value;
   }
 
+  if (handler === 'evolve-block-guard.v1') {
+    payloadKind = 'guard';
+    const rawParams = slot.handler.parameters;
+    const filesParam = list(rawParams.files, '', EVOLVE_BLOCK_LIMITS.maxFiles).map(item => text(item, '', 1024));
+    const hasAllowedBlockIds = Object.hasOwn(rawParams, 'allowedBlockIds');
+    const hasMaxBlockBytes = Object.hasOwn(rawParams, 'maxBlockBytes');
+    const baseTree = candidate.manifest.spec.baseTree;
+
+    interface PreparedEvolveFile {
+      readonly spec: { readonly baseline: Record<string, unknown>; readonly candidate: Record<string, unknown> };
+      readonly baseProof: ValidatedProof | null;
+      readonly baseOverlayBytes: Uint8Array | null | undefined;
+      readonly hasBaseOverlay: boolean;
+      readonly candOverlayBytes: Uint8Array | null | undefined;
+      readonly hasCandOverlay: boolean;
+      readonly sectionBytes: number;
+      readonly maxLogicalBytes: number;
+    }
+
+    const preparedFiles: PreparedEvolveFile[] = [];
+    let maxLogicalFileBytes = 0;
+    let totalFilesPayloadBytes = 0;
+    let maxMerkleTreeCount = 0;
+    let totalMerkleProofBytes = 0;
+    let sawMerkle = false;
+
+    for (const path of filesParam) {
+      const sourceSelected = source.manifest.spec.entries.find(entry => entry.name === path) ?? null;
+      const sourceDeleted = (source.manifest.spec.deleted ?? []).includes(path);
+      const candSelected = candidate.manifest.spec.entries.find(entry => entry.name === path) ?? null;
+      const candDeleted = (candidate.manifest.spec.deleted ?? []).includes(path);
+
+      let baselineParam: Record<string, unknown>;
+      let baseOverlayBytes: Uint8Array | null | undefined;
+      let hasBaseOverlay = false;
+      let validatedProof: ValidatedProof | null = null;
+      let baseLogicalBytes = 0;
+
+      if (sourceSelected !== null) {
+        const sourceFileEntry = sourceFiles.get(path);
+        if (sourceFileEntry === undefined) {
+          refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
+        }
+        const resolved = resolveTargetOverlayFileSync(sourceFileEntry);
+        baseOverlayBytes = resolved.bytes;
+        hasBaseOverlay = true;
+        baselineParam = { kind: 'overlay' };
+        baseLogicalBytes = resolved.logicalBytes;
+      } else if (!baseTree || sourceDeleted) {
+        baselineParam = { kind: 'missing' };
+      } else {
+        const rawProof =
+          source.baselineProofs && Object.hasOwn(source.baselineProofs, path) ? source.baselineProofs[path] ?? null : null;
+        if (rawProof === null) {
+          baselineParam = { kind: 'missing' };
+        } else {
+          validatedProof = validateBaselineProof(rawProof, source.manifest.spec.baseTree!);
+          baselineParam = {
+            kind: 'merkle_blob',
+            mode: validatedProof.mode,
+            oid: validatedProof.oid,
+            byteLength: validatedProof.byteLength,
+          };
+          baseLogicalBytes = validatedProof.logicalBytes;
+          sawMerkle = true;
+          maxMerkleTreeCount = Math.max(maxMerkleTreeCount, validatedProof.merkle.treeCount);
+          totalMerkleProofBytes += validatedProof.merkle.treeProofBytes;
+          if (totalMerkleProofBytes > EVOLVE_BLOCK_LIMITS.maxMerkleTreeProofBytes) {
+            refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
+          }
+        }
+      }
+
+      let candidateParam: Record<string, unknown>;
+      let candOverlayBytes: Uint8Array | null | undefined;
+      let hasCandOverlay = false;
+      let candLogicalBytes = 0;
+
+      if (candSelected !== null) {
+        const candFileEntry = files.get(path);
+        if (candFileEntry === undefined) {
+          refuse('ARTIFACT_INVALID', `/spec/parameters/files/${path}`, 'verification');
+        }
+        const resolved = resolveTargetOverlayFileSync(candFileEntry);
+        candOverlayBytes = resolved.bytes;
+        hasCandOverlay = true;
+        candidateParam = { kind: 'overlay' };
+        candLogicalBytes = resolved.logicalBytes;
+      } else if (!baseTree) {
+        candidateParam = { kind: 'missing' };
+      } else if (candDeleted) {
+        candidateParam = { kind: 'deleted' };
+      } else {
+        candidateParam = { kind: 'unchanged_baseline' };
+      }
+
+      const maxLogical = Math.max(baseLogicalBytes, candLogicalBytes);
+      maxLogicalFileBytes = Math.max(maxLogicalFileBytes, maxLogical);
+      const baseSectionBytes =
+        validatedProof !== null
+          ? 4 + validatedProof.blob.byteLength + 4 + validatedProof.trees.reduce((sum, tree) => sum + 4 + tree.byteLength, 0)
+          : hasBaseOverlay
+            ? 4 + baseLogicalBytes
+            : 0;
+      const candSectionBytes = hasCandOverlay ? 4 + candLogicalBytes : 0;
+      const sectionBytes = baseSectionBytes + candSectionBytes;
+      totalFilesPayloadBytes += sectionBytes;
+
+      preparedFiles.push({
+        spec: { baseline: baselineParam, candidate: candidateParam },
+        baseProof: validatedProof,
+        baseOverlayBytes,
+        hasBaseOverlay,
+        candOverlayBytes,
+        hasCandOverlay,
+        sectionBytes,
+        maxLogicalBytes: maxLogical,
+      });
+    }
+
+    if (sawMerkle) {
+      merkle = { treeCount: maxMerkleTreeCount, treeProofBytes: totalMerkleProofBytes };
+    }
+    jsonBytes = maxLogicalFileBytes;
+    parameters = {
+      files: filesParam,
+      fileSpecs: preparedFiles.map(item => item.spec),
+      ...(hasAllowedBlockIds ? { allowedBlockIds: rawParams.allowedBlockIds } : {}),
+      ...(hasMaxBlockBytes ? { maxBlockBytes: rawParams.maxBlockBytes } : {}),
+    } as unknown as VerifierHeader['parameters'];
+
+    const sizedPayloadBytes = firstInvBytes + secondInvBytes + totalFilesPayloadBytes;
+    const header = checkedHeader({
+      version: 1,
+      jobId: 'job.' + hash(operationId + '\0' + producerNonce).hex.slice(0, 40),
+      handler,
+      handlerVersion: 1,
+      handlerDigest: slot.handler.digest,
+      checkId: slot.checkId,
+      producerNonce,
+      operationId,
+      dispatchId: 'unbound',
+      generation,
+      subject: subject.value,
+      source: descriptor(source.manifest, source.ref, overlay),
+      candidate: descriptor(candidate.manifest, candidate.ref, overlay),
+      parameters,
+      payloadKind,
+      ...(overlay !== undefined ? { overlay } : {}),
+    });
+    sizeJob(header, sizedPayloadBytes, jsonBytes, merkle, invSizing);
+
+    const firstInv = encodeInventory(source.manifest, overlay);
+    const secondInv = encodeInventory(candidate.manifest, overlay);
+    payload = new Uint8Array(sizedPayloadBytes);
+    const view = new DataView(payload.buffer);
+    let offset = 0;
+    payload.set(firstInv, offset);
+    offset += firstInv.byteLength;
+    payload.set(secondInv, offset);
+    offset += secondInv.byteLength;
+    for (const item of preparedFiles) {
+      if (item.baseProof !== null) {
+        offset = writeProofSection(payload, view, offset, item.baseProof);
+      } else if (item.baseOverlayBytes) {
+        view.setUint32(offset, item.baseOverlayBytes.byteLength);
+        offset += 4;
+        payload.set(item.baseOverlayBytes, offset);
+        offset += item.baseOverlayBytes.byteLength;
+      }
+      if (item.candOverlayBytes) {
+        view.setUint32(offset, item.candOverlayBytes.byteLength);
+        offset += 4;
+        payload.set(item.candOverlayBytes, offset);
+        offset += item.candOverlayBytes.byteLength;
+      }
+    }
+
+    const packetBytes = packetSize(header, payload.byteLength);
+    const requestDigest = hash('loopwright.dev/controller/verifier-request/v1\0' + canonical({ planDigest: plan.planDigest, header, payloadDigest: hash(payload) }));
+    const sealed = freeze(checkedHeader(parsePrivateJson(Buffer.from(canonical(header)), HEADER_BYTES)));
+    const value: PreparedVerification = freeze({ version: 1, slotId, generation, operationId, producerNonce, packetBytes, requestDigest });
+    preparedJobs.set(value, { header: sealed, payload, slot });
+    return value;
+  }
+
   if (!['scope.v1', 'no-change.v1'].includes(handler)) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
   payloadKind = 'inventories';
   parameters = handler === 'scope.v1' ? ({ contract: plan.task } as unknown as VerifierHeader['parameters']) : {};
@@ -635,6 +839,39 @@ export function preflightVerification(
       /[\r\n]/.test(endMarker)
     ) {
       refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+    }
+  } else if (slot.handler.implementation === 'evolve-block-guard.v1') {
+    if (!isRecord(parameters)) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+    const hasAllowedBlockIds = Object.hasOwn(parameters, 'allowedBlockIds');
+    const hasMaxBlockBytes = Object.hasOwn(parameters, 'maxBlockBytes');
+    record(parameters, [
+      'checkId',
+      'files',
+      ...(hasAllowedBlockIds ? ['allowedBlockIds' as const] : []),
+      ...(hasMaxBlockBytes ? ['maxBlockBytes' as const] : []),
+    ]);
+    if (parameters.checkId !== slot.checkId) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+    const files = list(parameters.files, '', EVOLVE_BLOCK_LIMITS.maxFiles).map(item => text(item, '', 1024));
+    if (files.length < 1) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+    const seenFiles = new Set<string>();
+    for (const file of files) {
+      const folded = file.normalize('NFC').toLowerCase();
+      if (!isValidEvolveGuardPath(file) || seenFiles.has(folded)) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+      seenFiles.add(folded);
+    }
+    if (hasAllowedBlockIds) {
+      const ids = list(parameters.allowedBlockIds, '', EVOLVE_BLOCK_LIMITS.maxAllowedBlockIds).map(item =>
+        text(item, '', EVOLVE_BLOCK_LIMITS.maxBlockIdLength),
+      );
+      if (ids.length < 1) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+      const seenIds = new Set<string>();
+      for (const blockId of ids) {
+        if (!isValidEvolveBlockId(blockId) || seenIds.has(blockId)) refuse('CAPABILITY_UNSUPPORTED', '', 'verification');
+        seenIds.add(blockId);
+      }
+    }
+    if (hasMaxBlockBytes) {
+      integer(parameters.maxBlockBytes, 1, Number.MAX_SAFE_INTEGER);
     }
   } else {
     record(parameters, ['checkId']);
@@ -864,6 +1101,7 @@ const EXPECTED_METHODS: Readonly<Record<ByteHandler, VerifierMethod>> = {
   'json-artifact.v1': 'verify_json',
   'json-keys-guard.v1': 'verify_json_keys_guard',
   'line-section-guard.v1': 'verify_line_section_guard',
+  'evolve-block-guard.v1': 'verify_evolve_block_guard',
 };
 
 const ALLOWED_REASONS: Readonly<Record<ByteHandler, readonly VerifierReason[]>> = {
@@ -872,6 +1110,17 @@ const ALLOWED_REASONS: Readonly<Record<ByteHandler, readonly VerifierReason[]>> 
   'json-artifact.v1': ['missing_file', 'invalid_json', 'property_missing', 'property_mismatch'],
   'json-keys-guard.v1': ['missing_file', 'invalid_json', 'disallowed_json_pointer'],
   'line-section-guard.v1': ['missing_file', 'invalid_utf8', 'missing_markers', 'unbalanced_markers', 'outside_section_modified'],
+  'evolve-block-guard.v1': [
+    'missing_file',
+    'invalid_utf8',
+    'missing_markers',
+    'unbalanced_markers',
+    'duplicate_block_id',
+    'block_limit_exceeded',
+    'outside_block_modified',
+    'disallowed_block_id',
+    'block_bytes_exceeded',
+  ],
 };
 
 function checkedReply(input: unknown, header: VerifierHeader, packetDigest: Digest): Disposition {

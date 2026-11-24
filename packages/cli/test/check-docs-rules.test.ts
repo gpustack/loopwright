@@ -984,3 +984,74 @@ test('check-docs.mjs CLI: --report exits 0, strict mode exits 1 on violations, a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('checkDocs Pretty YAML metadata rule: EvolutionCampaign requires metadata.name and rejects metadata.id', async () => {
+  const checkDocs = await loadCheckDocs();
+  const root = buildMinimalRepoFixture();
+  try {
+    writeFileEnsuringDir(
+      join(root, 'docs', 'configuration', 'task-contract.md'),
+      [
+        '# Task Contract',
+        '',
+        'Task contracts and campaigns enforce strict schemas.',
+        '',
+        '## Contents',
+        '',
+        '- [EvolutionCampaign](#evolutioncampaign)',
+        '',
+        '## EvolutionCampaign',
+        '',
+        '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: EvolutionCampaign',
+        'metadata:',
+        '  name: flash-decode',
+        'spec: {}',
+        '```',
+        '',
+        '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: EvolutionCampaign',
+        'metadata:',
+        '  id: legacy-id',
+        'spec: {}',
+        '```',
+        '',
+        '```yaml',
+        'apiVersion: loopwright.dev/v1alpha1',
+        'kind: EvolutionCampaign',
+        'spec: {}',
+        '```',
+        '',
+        '---',
+        '',
+        '**See also** — [Architecture](../getting-started/architecture.md) (execution chain)',
+        '',
+        '**Next** → [Controller and Registry](controller-and-registry.md) — configure controller drafts.',
+        '',
+      ].join('\n')
+    );
+
+    const result = checkDocs({ repoRoot: root, mode: 'strict' });
+    assert.equal(result.ok, false);
+    assert.ok(
+      !result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:11:')),
+      `Valid EvolutionCampaign YAML with metadata.name must pass, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:19:') && e.includes('must declare metadata.name')),
+      `Expected missing metadata.name error for EvolutionCampaign, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:19:') && e.includes('metadata must use name only')),
+      `Expected metadata.id rejection for EvolutionCampaign, got: ${result.errors.join('\n')}`
+    );
+    assert.ok(
+      result.errors.some(e => e.startsWith('docs/configuration/task-contract.md:27:') && e.includes('must include top-level metadata.name')),
+      `Expected missing metadata block error for EvolutionCampaign, got: ${result.errors.join('\n')}`
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

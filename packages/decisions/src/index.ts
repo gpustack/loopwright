@@ -3,7 +3,10 @@ export { DecisionError, DEFAULT_DECISION_POLICY, DECISION_ENDPOINT, DECISION_POL
   DECISION_MAX_QUESTIONS, DECISION_MAX_OPTIONS, DECISION_MIN_CRITERIA, DECISION_MAX_CRITERIA, DECISION_MAX_STATE_DEPTH,
   DECISION_MAX_STATE_BYTES, DECISION_MAX_PUBLIC_METADATA_CHARS, DECISION_INPUT_COST_PER_MTOK_USD,
   DECISION_OUTPUT_COST_PER_MTOK_USD, DECISION_MAX_IMAGE_BASE64_CHARS, DECISION_MAX_IMAGES, DECISION_IMAGE_MEDIA_TYPES,
-  DECISION_FORBIDDEN_AUTHORITY_INTENTS, DECISION_ALLOWED_AUTHORITY_INTENTS, getProviderDialect } from './types.js';
+  DECISION_FORBIDDEN_AUTHORITY_INTENTS, DECISION_ALLOWED_AUTHORITY_INTENTS,
+  DECISION_NOVELTY_DEFAULT_THRESHOLD, DECISION_NOVELTY_DEFAULT_SHINGLE_SIZE, DECISION_NOVELTY_MAX_SLICE_BYTES,
+  DECISION_NOVELTY_MAX_HISTORY_SLICES, DECISION_NOVELTY_MAX_SHINGLES, DECISION_EVOLUTION_MAX_TRACKS,
+  DECISION_EVOLUTION_MAX_METRICS, DECISION_CASCADE_DEFAULT_REGRESSION_TOLERANCE, getProviderDialect } from './types.js';
 export type {
   DecisionErrorCode, DecisionDisclosurePolicy, DecisionFallbackUnavailableAction, DecisionProviderKind,
   DecisionWireDialect, DecisionStartluxOptions, DecisionPolicyConfig, DecisionChoiceQuestion, DecisionScoreQuestion,
@@ -18,6 +21,10 @@ export type {
   DecisionDiffTriageResult, DecisionImageAsset, DecisionBenchmarkArm, DecisionBenchmarkCaseKind,
   DecisionBenchmarkFixture, DecisionBenchmarkCase, DecisionBenchmarkArmSummary, DecisionBenchmarkReport,
   DecisionClientOptions, DecisionSdkRequest, DecisionSdkAdapter,
+  DecisionMutationNoveltyAction, DecisionMutationNoveltyHistoryEntry, DecisionMutationNoveltyInput,
+  DecisionMutationNoveltyResult, DecisionBoundPipeline, DecisionEvolutionMutationKind, DecisionHardwareDiagnostics,
+  DecisionEvolutionStrategyInput, DecisionEvolutionStrategyResult, DecisionCascadeAction,
+  DecisionCascadeEscalationInput, DecisionCascadeEscalationResult,
 } from './types.js';
 export {
   isPlainObject, loadDecisionPolicyFile, parseDecisionPolicyDocument,
@@ -35,10 +42,13 @@ export type {
   DecisionFanOutResult,
 } from './router.js';
 export { assertDecisionAuthorityBoundary, routeTaskCapability, heuristicCapabilityTier, evaluateCyclePrechecks,
-  evaluateCycleAlignment, evaluateSoftCompactionAdvisory, triageCandidateDiff, DECISION_CAPABILITY_JEV_SKILL_CHECKS } from './nodes.js';
+  evaluateCycleAlignment, evaluateSoftCompactionAdvisory, triageCandidateDiff, DECISION_CAPABILITY_JEV_SKILL_CHECKS,
+  normalizeEvolveBlockSource, computeTokenShingleJaccard, evaluateMutationNovelty, heuristicEvolutionStrategy,
+  routeEvolutionStrategy, heuristicCascadeEscalation, evaluateCascadeEscalation } from './nodes.js';
 export type {
   DecisionRouteCapabilityRequest, DecisionCycleAlignmentRequest,
   DecisionSoftCompactionRequest, DecisionDiffTriageRequest,
+  DecisionMutationNoveltyRequest, DecisionRouteEvolutionStrategyRequest, DecisionCascadeEscalationRequest,
 } from './nodes.js';
 export { DEFAULT_DECISION_BENCHMARK_CORPUS, runControlledDecisionBenchmark } from './benchmark.js';
 export type { DecisionBenchmarkOptions } from './benchmark.js';

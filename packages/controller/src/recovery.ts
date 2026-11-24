@@ -19,8 +19,8 @@ import { ControllerEvents } from './events.js';
 import { Finalizer, type ControllerIncident } from './finalize.js';
 import { parsePrivateJson } from './parser.js';
 import { boundFindingsForObservations, hydrateStepVerdicts, normalizeSubmission, type RetainedSubmission } from './submission.js';
-import { freeze, record, same, text } from './schema.js';
-import { Verifier, prepareVerification, type ByteInventory } from './verification.js';
+import { freeze, record, same } from './schema.js';
+import { Verifier, prepareVerification, verifierProofPaths, type ByteInventory } from './verification.js';
 import { Gate, GATE_OUTPUT_BYTES, prepareGate, validateGateUrlOverrides } from './gate.js';
 import {
   BenchmarkGate,
@@ -210,7 +210,7 @@ export function resumeCycleWithPorts(input: RunCycleInput, ports: ControllerPort
       authority = stateValue(store.claim({ ownerId: 'controller.' + owner.nonce, expectedGeneration: original.owner.generation, expectedRevision: original.revision, mode: 'recovery' })).authority;
       const artifacts = new ArtifactStore(join(directory, 'artifacts'), owner, state.vault);
       await artifacts.cleanCasTempFiles();
-      const jsonPaths = [...new Set(plan.verifierSlots.filter(slot => ['json-artifact.v1', 'json-keys-guard.v1', 'line-section-guard.v1'].includes(slot.handler.implementation)).map(slot => text(slot.handler.parameters.path)))];
+      const jsonPaths = verifierProofPaths(plan.verifierSlots);
       const source = await restoreSource(resolve(input.repository), plan.task, owner, artifacts, descriptor.source, descriptor.sourceWorkspace, jsonPaths);
       let progress = new ProgressStore(store, authority, artifacts, plan, lock, descriptor.plan, descriptor.source); const head = await progress.read();
       let context: CycleContext = { loaded: effectiveConfig, plan, lock, directory, source, store, authority, owner, artifacts, progress, descriptor, signal: input.signal ?? new AbortController().signal, onEvent: input.onEvent, ports: effectivePorts };

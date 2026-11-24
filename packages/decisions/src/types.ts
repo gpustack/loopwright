@@ -359,7 +359,120 @@ export const DECISION_ALLOWED_AUTHORITY_INTENTS: readonly string[] = Object.free
   'evaluate_cycle_alignment',
   'advise_soft_compaction',
   'triage_candidate_diff',
+  'advise_mutation_novelty',
+  'route_evolution_strategy',
+  'advise_cascade_escalation',
 ]);
+
+export const DECISION_NOVELTY_DEFAULT_THRESHOLD = 0.85;
+export const DECISION_NOVELTY_DEFAULT_SHINGLE_SIZE = 3;
+export const DECISION_NOVELTY_MAX_SLICE_BYTES = 32_768;
+export const DECISION_NOVELTY_MAX_HISTORY_SLICES = 64;
+export const DECISION_NOVELTY_MAX_SHINGLES = 4_096;
+export const DECISION_NOVELTY_STATE_SLICE_CHARS = 24_576;
+export const DECISION_EVOLUTION_MAX_TRACKS = 32;
+export const DECISION_EVOLUTION_MAX_METRICS = 32;
+export const DECISION_CASCADE_DEFAULT_REGRESSION_TOLERANCE = 0.05;
+
+export type DecisionMutationNoveltyAction = 'accept' | 'reject_resample';
+
+export interface DecisionMutationNoveltyHistoryEntry {
+  readonly id: string;
+  readonly sourceSlice: string;
+}
+
+export interface DecisionMutationNoveltyInput {
+  readonly candidateId: string;
+  readonly candidateSlice: string;
+  readonly historySlices: readonly DecisionMutationNoveltyHistoryEntry[];
+  readonly noveltyThreshold?: number;
+  readonly shingleSize?: number;
+}
+
+export interface DecisionMutationNoveltyResult {
+  readonly action: DecisionMutationNoveltyAction;
+  readonly noveltyScore: number;
+  readonly maxSimilarity: number;
+  readonly matchedHistoryId: string | null;
+  readonly advisoryOnly: true;
+  readonly verificationCertified: false;
+  readonly source: DecisionSource;
+  readonly zone: DecisionConfidenceZone | null;
+  readonly fallbackReason: DecisionFallbackReason;
+  readonly transportCalls: number;
+}
+
+export type DecisionBoundPipeline =
+  | 'hbm'
+  | 'l2'
+  | 'smem_lds_ub'
+  | 'tensor_cube'
+  | 'vector_valu'
+  | 'host_launch'
+  | 'comm'
+  | 'unknown';
+
+export type DecisionEvolutionMutationKind = 'diff_tune' | 'full_rewrite' | 'crossover';
+
+export interface DecisionHardwareDiagnostics {
+  readonly boundPipeline: DecisionBoundPipeline;
+  readonly rooflineHeadroom?: number;
+  readonly achievedSolPct?: number;
+  readonly arithmeticIntensity?: number;
+  readonly occupancyPct?: number;
+  readonly registerCount?: number;
+  readonly sharedMemBytes?: number;
+  readonly localSpillBytes?: number;
+  readonly l2HitPct?: number;
+  readonly bankConflictPct?: number;
+}
+
+export interface DecisionEvolutionStrategyInput {
+  readonly operatorKind: string;
+  readonly tensorRank: number;
+  readonly dtype: string;
+  readonly isReduction?: boolean;
+  readonly isCausal?: boolean;
+  readonly declaredTracks: readonly string[];
+  readonly allowedMutationKinds: readonly DecisionEvolutionMutationKind[];
+  readonly stalledGenerations?: number;
+  readonly hardwareDiagnostics?: DecisionHardwareDiagnostics;
+}
+
+export interface DecisionEvolutionStrategyResult {
+  readonly trackId: string;
+  readonly mutationKind: DecisionEvolutionMutationKind;
+  readonly advisoryOnly: true;
+  readonly verificationCertified: false;
+  readonly source: DecisionSource;
+  readonly zone: DecisionConfidenceZone | null;
+  readonly fallbackReason: DecisionFallbackReason;
+  readonly transportCalls: number;
+}
+
+export type DecisionCascadeAction = 'prune' | 'confirm' | 'escalate';
+
+export interface DecisionCascadeEscalationInput {
+  readonly candidateId: string;
+  readonly smokeCorrectnessPassed: boolean;
+  readonly smokeMetrics: Readonly<Record<string, number>>;
+  readonly referenceMetrics: Readonly<Record<string, number>>;
+  readonly primaryMetric: string;
+  readonly direction: 'minimize' | 'maximize';
+  readonly remainingBudgetRatio: number;
+  readonly regressionToleranceRatio?: number;
+}
+
+export interface DecisionCascadeEscalationResult {
+  readonly action: DecisionCascadeAction;
+  readonly smokeCorrectnessPassed: boolean;
+  readonly advisoryOnly: true;
+  readonly verificationCertified: false;
+  readonly source: DecisionSource;
+  readonly zone: DecisionConfidenceZone | null;
+  readonly fallbackReason: DecisionFallbackReason;
+  readonly transportCalls: number;
+}
 
 export type DecisionCapabilityTier = 'fast' | 'balanced' | 'strongest';
 

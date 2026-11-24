@@ -669,7 +669,7 @@ export function checkPrettyYamlBlocks(relDoc, content, errors) {
       }
     }
 
-    const NAMED_METADATA_KINDS = new Set(["Taskpack", "TrustedRegistry"]);
+    const NAMED_METADATA_KINDS = new Set(["Taskpack", "TrustedRegistry", "EvolutionCampaign"]);
     const METADATA_FREE_KINDS = new Set([
       "ControllerConfig",
       "TaskContract",

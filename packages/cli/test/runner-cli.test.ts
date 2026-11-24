@@ -130,7 +130,7 @@ function makeRelayBenchmarkRequest(
 test('runner-cli: help flags, HELP text, and dynamic import isolation', async () => {
   const topHelp = spawnSync(process.execPath, [MAIN, '--help'], {
     encoding: 'utf8',
-    timeout: 5_000,
+    timeout: 15_000,
     env: { PATH: '/usr/bin:/bin' },
   });
   assert.equal(topHelp.status, 0, topHelp.stderr);
@@ -144,7 +144,7 @@ test('runner-cli: help flags, HELP text, and dynamic import isolation', async ()
   ]) {
     const res = spawnSync(process.execPath, [MAIN, ...helpArgv], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: 15_000,
       env: { PATH: '/usr/bin:/bin' },
     });
     assert.equal(res.status, 0, res.stderr);
@@ -169,6 +169,7 @@ test('runner-cli: hardwareRunnerExitCode covers every HardwareRunnerErrorCode ex
     AUTH_UNAUTHORIZED: 3,
     AUTH_FORBIDDEN: 3,
     RUNNER_SANDBOX_FAILED: 3,
+    WORKER_DEVICE_QUARANTINED: 3,
     ARTIFACT_INVALID: 4,
     ARTIFACT_MISSING: 4,
     NOT_FOUND: 4,

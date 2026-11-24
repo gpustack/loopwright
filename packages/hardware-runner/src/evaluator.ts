@@ -17,9 +17,14 @@ import {
   isVerifierNamespacePath,
   LIMITS,
   SecretScrubber,
+  STAGE_A_STATIC_AUDIT_FAILED,
+  validateBucketMetrics,
+  validateHardwareDiagnostics,
   validateRelativePath,
   VERIFIER_ARTIFACT_LIMITS,
+  type BucketMetricEntry,
   type FindingSeverity,
+  type HardwareDiagnostics,
   type HardwareProvenance,
   type HardwareTargetSpec,
   type MetricThresholdRule,
@@ -59,6 +64,7 @@ import {
   type BenchmarkCandidateArtifacts,
   type BenchmarkOutputArtifact,
   type LeaseGrant,
+  type StageAStaticAuditSpec,
   type WorkerConfig,
 } from './types.js';
 
@@ -69,7 +75,20 @@ const BASE_TREE_BUNDLE_MAGIC = Buffer.from(LWTREE01_MAGIC, 'ascii');
 // (envelope + hardwareProvenance + outputArtifacts + lease credentials) stays within 64 KiB.
 export const MAX_STAGE_B_RESULT_BYTES = 49_152;
 export const MAX_STAGE_STDIO_BYTES = 1_048_576;
+export const MAX_STAGE_A_AUDIT_SCAN_BYTES = 1_048_576;
 export const STAGE_B_RESULT_MARKER_PREFIX = 'LOOPWRIGHT_STAGE_B_RESULT:' as const;
+
+export const TRUSTED_NM_PATHS: readonly string[] = Object.freeze([
+  '/usr/bin/nm',
+  '/usr/local/bin/nm',
+  '/bin/nm',
+]);
+
+export const TRUSTED_CUOBJDUMP_PATHS: readonly string[] = Object.freeze([
+  '/usr/local/cuda/bin/cuobjdump',
+  '/usr/bin/cuobjdump',
+  '/usr/local/bin/cuobjdump',
+]);
 
 export class RunnerTeardownError extends HardwareRunnerError {
   readonly teardownFailed = true as const;
@@ -112,6 +131,8 @@ const STAGE_B_ENVELOPE_KEYS: ReadonlySet<string> = new Set([
   'detail',
   'metrics',
   'findings',
+  'bucketMetrics',
+  'hardwareDiagnostics',
 ]);
 const FINDING_KEYS: ReadonlySet<string> = new Set(['title', 'severity', 'path', 'line', 'evidence']);
 
@@ -169,6 +190,37 @@ export interface StageBResultEnvelope {
   readonly detail?: string | null;
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
+  readonly bucketMetrics?: readonly BucketMetricEntry[];
+  readonly hardwareDiagnostics?: HardwareDiagnostics;
+}
+
+export interface StageBFailureMetadata {
+  readonly timedOut: boolean;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+}
+
+export type StageAAuditToolRunner = (
+  tool: 'nm' | 'cuobjdump',
+  executablePath: string,
+  args: readonly string[],
+  options: { readonly timeoutMs: number; readonly maxOutputBytes: number; readonly signal?: AbortSignal },
+) => Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }>;
+
+export interface AuditSealedStageAOutputsOptions {
+  readonly sealedOutputs: readonly SealedStageAArtifact[];
+  readonly auditSpec: StageAStaticAuditSpec;
+  readonly scrubber: SecretScrubber;
+  readonly toolchainPaths?: readonly string[];
+  readonly maxScanBytes?: number;
+  readonly auditToolRunner?: StageAAuditToolRunner;
+  readonly enableHostAuditTools?: boolean;
+  readonly signal?: AbortSignal;
+}
+
+export interface StageAStaticAuditResult {
+  readonly passed: boolean;
+  readonly findings: readonly StructuredFinding[];
 }
 
 export interface DockerSandboxCompileInput {
@@ -216,6 +268,10 @@ export interface EvaluatedBenchmarkJob {
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
   readonly hardwareProvenance?: HardwareProvenance;
+  readonly allocatedDeviceIndices?: readonly number[];
+  readonly bucketMetrics?: readonly BucketMetricEntry[];
+  readonly hardwareDiagnostics?: HardwareDiagnostics;
+  readonly stageBFailure?: StageBFailureMetadata;
   readonly sealedOutputs: readonly SealedStageAArtifact[];
   cleanup(options?: EvaluatedJobCleanupOptions): Promise<void>;
 }
@@ -282,6 +338,8 @@ export interface EvaluateBenchmarkJobOptions {
   readonly stageBCommand?: { readonly command: string; readonly args?: readonly string[] };
   readonly probe?: (options: CollectHardwareProvenanceOptions) => Promise<HardwareProvenance>;
   readonly processRunner?: (input: StageProcessExecutionInput) => Promise<StageProcessExecutionResult>;
+  readonly auditToolRunner?: StageAAuditToolRunner;
+  readonly enableHostAuditTools?: boolean;
   readonly _testOnlyTrustedDockerRoot?: string;
 }
 
@@ -2809,6 +2867,1137 @@ export async function sealStageAOutputs(options: {
   return Object.freeze(sealed);
 }
 
+const AUDIT_BINARY_EXT_RE = /\.(?:so(?:\.[0-9]+)*|o|cubin|fatbin|elf|hsaco|dylib)$/i;
+const AUDIT_TEXT_EXT_RE = /\.(?:ptx|sass|s|asm|isa|log|rpt|report|txt|json)$/i;
+const FORBIDDEN_AUDIT_GLOB_RE = /[*?[\]]/;
+
+function resolveEffectiveStageAAuditSpec(
+  targetHardware: HardwareTargetSpec,
+  explicitAudit: StageAStaticAuditSpec | undefined,
+): StageAStaticAuditSpec | null {
+  const mergedPatterns: string[] = [];
+  const seen = new Set<string>();
+  for (const list of [targetHardware.forbiddenSymbolPatterns, explicitAudit?.forbiddenSymbolPatterns]) {
+    if (list === undefined) continue;
+    for (const pat of list) {
+      if (!seen.has(pat)) {
+        seen.add(pat);
+        mergedPatterns.push(pat);
+      }
+    }
+  }
+  if (mergedPatterns.length > LIMITS.forbiddenSymbolPatterns) {
+    throw new HardwareRunnerError(
+      'ARTIFACT_INVALID',
+      `combined forbiddenSymbolPatterns exceeds ${LIMITS.forbiddenSymbolPatterns}`,
+      '/stageAAudit/forbiddenSymbolPatterns',
+    );
+  }
+
+  let maxRegisterCount: number | undefined;
+  if (targetHardware.maxRegisterCount !== undefined && explicitAudit?.maxRegisterCount !== undefined) {
+    maxRegisterCount = Math.min(targetHardware.maxRegisterCount, explicitAudit.maxRegisterCount);
+  } else {
+    maxRegisterCount = targetHardware.maxRegisterCount ?? explicitAudit?.maxRegisterCount;
+  }
+
+  let maxLocalSpillBytes: number | undefined;
+  if (targetHardware.maxLocalSpillBytes !== undefined && explicitAudit?.maxLocalSpillBytes !== undefined) {
+    maxLocalSpillBytes = Math.min(targetHardware.maxLocalSpillBytes, explicitAudit.maxLocalSpillBytes);
+  } else {
+    maxLocalSpillBytes = targetHardware.maxLocalSpillBytes ?? explicitAudit?.maxLocalSpillBytes;
+  }
+
+  if (mergedPatterns.length === 0 && maxRegisterCount === undefined && maxLocalSpillBytes === undefined) {
+    return null;
+  }
+
+  return Object.freeze({
+    ...(mergedPatterns.length > 0 ? { forbiddenSymbolPatterns: Object.freeze(mergedPatterns) } : {}),
+    ...(maxRegisterCount !== undefined ? { maxRegisterCount } : {}),
+    ...(maxLocalSpillBytes !== undefined ? { maxLocalSpillBytes } : {}),
+  });
+}
+
+function validateAuditSpecInputs(spec: StageAStaticAuditSpec): void {
+  if (spec.forbiddenSymbolPatterns !== undefined) {
+    if (!Array.isArray(spec.forbiddenSymbolPatterns) || spec.forbiddenSymbolPatterns.length > LIMITS.forbiddenSymbolPatterns) {
+      throw new HardwareRunnerError(
+        'CONFIG_INVALID',
+        `forbiddenSymbolPatterns must contain 0..${LIMITS.forbiddenSymbolPatterns} entries`,
+        '/stageAAudit/forbiddenSymbolPatterns',
+      );
+    }
+    const seen = new Set<string>();
+    for (const pat of spec.forbiddenSymbolPatterns) {
+      if (
+        typeof pat !== 'string'
+        || pat.length < 1
+        || pat.length > LIMITS.forbiddenSymbolPattern
+        || pat.trim() !== pat
+        || !PRINTABLE_ASCII_RE.test(pat)
+        || FORBIDDEN_AUDIT_GLOB_RE.test(pat)
+      ) {
+        throw new HardwareRunnerError(
+          'CONFIG_INVALID',
+          'invalid or glob-containing pattern in forbiddenSymbolPatterns',
+          '/stageAAudit/forbiddenSymbolPatterns',
+        );
+      }
+      if (seen.has(pat)) {
+        throw new HardwareRunnerError('CONFIG_INVALID', 'duplicate pattern in forbiddenSymbolPatterns');
+      }
+      seen.add(pat);
+    }
+  }
+  if (
+    spec.maxRegisterCount !== undefined
+    && (!Number.isSafeInteger(spec.maxRegisterCount) || Object.is(spec.maxRegisterCount, -0) || spec.maxRegisterCount < 0)
+  ) {
+    throw new HardwareRunnerError('CONFIG_INVALID', 'invalid maxRegisterCount', '/stageAAudit/maxRegisterCount');
+  }
+  if (
+    spec.maxLocalSpillBytes !== undefined
+    && (!Number.isSafeInteger(spec.maxLocalSpillBytes) || Object.is(spec.maxLocalSpillBytes, -0) || spec.maxLocalSpillBytes < 0)
+  ) {
+    throw new HardwareRunnerError('CONFIG_INVALID', 'invalid maxLocalSpillBytes', '/stageAAudit/maxLocalSpillBytes');
+  }
+}
+
+/**
+ * Deterministically decode length-prefixed Itanium C++ `_Z...` mangled identifiers (and leading
+ * Mach-O underscores) into `ns::name` forms so `forbiddenSymbolPatterns` such as `'at::native::'`
+ * match mangled symbols (`_ZN2at6native9gemm_cudaE`) offline with zero external `c++filt` dependency.
+ */
+function expandDemangledSymbolForms(rawSymbol: string): readonly string[] {
+  const out = new Set<string>([rawSymbol]);
+  const stripped = rawSymbol.startsWith('__Z') ? rawSymbol.slice(1) : rawSymbol;
+  if (rawSymbol.startsWith('_') && !rawSymbol.startsWith('_Z')) {
+    out.add(rawSymbol.slice(1));
+  }
+  if (!stripped.startsWith('_Z')) {
+    return [...out];
+  }
+
+  let cursor = 2;
+  if (stripped[cursor] === 'L') cursor += 1;
+  if (stripped[cursor] === 'N') {
+    cursor += 1;
+    while (cursor < stripped.length && (stripped[cursor] === 'K' || stripped[cursor] === 'V' || stripped[cursor] === 'r')) {
+      cursor += 1;
+    }
+    const parts: string[] = [];
+    while (cursor < stripped.length && stripped[cursor] !== 'E') {
+      if (stripped[cursor] === 'I') {
+        // Skip template argument list `<...>` balanced on I..E if nested
+        let depth = 1;
+        cursor += 1;
+        while (cursor < stripped.length && depth > 0) {
+          if (stripped[cursor] === 'I') depth += 1;
+          else if (stripped[cursor] === 'E') depth -= 1;
+          cursor += 1;
+        }
+        continue;
+      }
+      let numEnd = cursor;
+      while (numEnd < stripped.length && stripped.charCodeAt(numEnd) >= 48 && stripped.charCodeAt(numEnd) <= 57) {
+        numEnd += 1;
+      }
+      if (numEnd === cursor) break;
+      const segLen = Number.parseInt(stripped.slice(cursor, numEnd), 10);
+      if (!Number.isSafeInteger(segLen) || segLen <= 0 || numEnd + segLen > stripped.length) break;
+      parts.push(stripped.slice(numEnd, numEnd + segLen));
+      cursor = numEnd + segLen;
+    }
+    if (parts.length > 0) {
+      const joined = parts.join('::');
+      out.add(joined);
+      out.add(`${joined}::`);
+    }
+  } else {
+    let numEnd = cursor;
+    while (numEnd < stripped.length && stripped.charCodeAt(numEnd) >= 48 && stripped.charCodeAt(numEnd) <= 57) {
+      numEnd += 1;
+    }
+    if (numEnd > cursor) {
+      const segLen = Number.parseInt(stripped.slice(cursor, numEnd), 10);
+      if (Number.isSafeInteger(segLen) && segLen > 0 && numEnd + segLen <= stripped.length) {
+        out.add(stripped.slice(numEnd, numEnd + segLen));
+      }
+    }
+  }
+  return [...out];
+}
+
+function readNullTerminatedCString(strTab: Buffer, startOffset: number): string {
+  if (startOffset < 0 || startOffset >= strTab.byteLength) return '';
+  const end = strTab.indexOf(0, startOffset);
+  const sliceEnd = end === -1 ? Math.min(strTab.byteLength, startOffset + 512) : Math.min(end, startOffset + 512);
+  if (sliceEnd <= startOffset) return '';
+  return strTab.subarray(startOffset, sliceEnd).toString('utf8');
+}
+
+interface ParsedArtifactStaticInfo {
+  readonly symbols: readonly string[];
+  readonly maxRegisters: number | null;
+  readonly maxSpillBytes: number | null;
+  readonly embeddedTexts: readonly string[];
+  readonly scanError: string | null;
+}
+
+async function parseElfFromHandle(
+  fh: Awaited<ReturnType<typeof open>>,
+  fileSize: number,
+  maxScanBytes: number,
+): Promise<ParsedArtifactStaticInfo> {
+  if (fileSize < 52) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'truncated ELF header (< 52 bytes)' };
+  }
+  const hdrLen = Math.min(64, fileSize);
+  const ehdr = Buffer.allocUnsafe(hdrLen);
+  await readExactFromHandle(fh, ehdr, hdrLen, 0);
+
+  const eiClass = ehdr[4]!; // 1 = 32-bit, 2 = 64-bit
+  const eiData = ehdr[5]!; // 1 = little-endian, 2 = big-endian
+  if ((eiClass !== 1 && eiClass !== 2) || (eiData !== 1 && eiData !== 2)) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'unsupported ELF class or endianness' };
+  }
+  const is64 = eiClass === 2;
+  const isLE = eiData === 1;
+  if (is64 && fileSize < 64) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'truncated ELF64 header (< 64 bytes)' };
+  }
+
+  const readU16 = (buf: Buffer, off: number): number => (isLE ? buf.readUInt16LE(off) : buf.readUInt16BE(off));
+  const readU32 = (buf: Buffer, off: number): number => (isLE ? buf.readUInt32LE(off) : buf.readUInt32BE(off));
+  const readU64AsSafeNumber = (buf: Buffer, off: number): number | null => {
+    const v = isLE ? buf.readBigUInt64LE(off) : buf.readBigUInt64BE(off);
+    if (v > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+    return Number(v);
+  };
+
+  const shOff = is64 ? readU64AsSafeNumber(ehdr, 40) : readU32(ehdr, 32);
+  const shEntSize = readU16(ehdr, is64 ? 58 : 46);
+  let shNum = readU16(ehdr, is64 ? 60 : 48);
+  let shStrNdx = readU16(ehdr, is64 ? 62 : 50);
+
+  if (shOff === null || shOff === 0 || shEntSize < (is64 ? 64 : 40)) {
+    return {
+      symbols: [],
+      maxRegisters: null,
+      maxSpillBytes: null,
+      embeddedTexts: [],
+      scanError: 'ELF binary is missing a valid section header table for static symbol audit',
+    };
+  }
+
+  let scannedBytes = hdrLen;
+  if (shNum === 0 && shOff + shEntSize <= fileSize) {
+    const sh0 = Buffer.allocUnsafe(shEntSize);
+    await readExactFromHandle(fh, sh0, shEntSize, shOff);
+    scannedBytes += shEntSize;
+    const extNum = is64 ? readU64AsSafeNumber(sh0, 32) : readU32(sh0, 20);
+    if (extNum === null || extNum < 1 || extNum > 4096) {
+      return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'invalid extended ELF section count' };
+    }
+    shNum = extNum;
+    if (shStrNdx === 0xffff) {
+      shStrNdx = readU32(sh0, is64 ? 40 : 24);
+    }
+  }
+
+  if (shNum < 1 || shNum > 4096) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'ELF section header count out of bounds' };
+  }
+  const shTableBytes = shNum * shEntSize;
+  if (shOff + shTableBytes > fileSize) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'ELF section header table exceeds file size' };
+  }
+  if (scannedBytes + shTableBytes > maxScanBytes) {
+    return {
+      symbols: [],
+      maxRegisters: null,
+      maxSpillBytes: null,
+      embeddedTexts: [],
+      scanError: `ELF section header table exceeds ${maxScanBytes}-byte Stage A static audit scan cap`,
+    };
+  }
+
+  const shTableBuf = Buffer.allocUnsafe(shTableBytes);
+  await readExactFromHandle(fh, shTableBuf, shTableBytes, shOff);
+  scannedBytes += shTableBytes;
+
+  interface ElfSectionHeader {
+    readonly nameOffset: number;
+    readonly shType: number;
+    readonly shOffset: number;
+    readonly shSize: number;
+    readonly shLink: number;
+    readonly shInfo: number;
+    readonly shEntSize: number;
+  }
+
+  const headers: ElfSectionHeader[] = [];
+  for (let idx = 0; idx < shNum; idx += 1) {
+    const base = idx * shEntSize;
+    const nameOffset = readU32(shTableBuf, base);
+    const shType = readU32(shTableBuf, base + 4);
+    const secOff = is64 ? readU64AsSafeNumber(shTableBuf, base + 24) : readU32(shTableBuf, base + 16);
+    const secSize = is64 ? readU64AsSafeNumber(shTableBuf, base + 32) : readU32(shTableBuf, base + 20);
+    const shLink = readU32(shTableBuf, base + 40 - (is64 ? 0 : 16));
+    const shInfo = readU32(shTableBuf, base + 44 - (is64 ? 0 : 16));
+    const secEntSize = is64 ? readU64AsSafeNumber(shTableBuf, base + 56) : readU32(shTableBuf, base + 36);
+    if (secOff === null || secSize === null || secEntSize === null) {
+      return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'ELF section size overflow' };
+    }
+    if (shType !== 0 && shType !== 8 && secSize > 0 && secOff + secSize > fileSize) {
+      return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'ELF section payload exceeds file size' };
+    }
+    headers.push({
+      nameOffset,
+      shType,
+      shOffset: secOff,
+      shSize: secSize,
+      shLink,
+      shInfo,
+      shEntSize: secEntSize,
+    });
+  }
+
+  const cachedSections = new Map<number, Buffer>();
+  const readSectionBounded = async (secIdx: number): Promise<Buffer | null> => {
+    const existing = cachedSections.get(secIdx);
+    if (existing !== undefined) return existing;
+    const sec = headers[secIdx];
+    if (!sec || sec.shType === 0 || sec.shType === 8 || sec.shSize === 0) {
+      return Buffer.alloc(0);
+    }
+    if (sec.shSize > maxScanBytes - scannedBytes) {
+      return null;
+    }
+    const buf = Buffer.allocUnsafe(sec.shSize);
+    await readExactFromHandle(fh, buf, sec.shSize, sec.shOffset);
+    scannedBytes += sec.shSize;
+    cachedSections.set(secIdx, buf);
+    return buf;
+  };
+
+  let shStrBuf: Buffer = Buffer.alloc(0);
+  if (shStrNdx > 0 && shStrNdx < headers.length) {
+    const loaded = await readSectionBounded(shStrNdx);
+    if (loaded === null) {
+      return {
+        symbols: [],
+        maxRegisters: null,
+        maxSpillBytes: null,
+        embeddedTexts: [],
+        scanError: `ELF .shstrtab exceeds ${maxScanBytes}-byte Stage A static audit scan cap`,
+      };
+    }
+    shStrBuf = loaded;
+  }
+
+  const symbols = new Set<string>();
+  const embeddedTexts: string[] = [];
+  let maxRegisters: number | null = null;
+  let maxSpillBytes: number | null = null;
+
+  for (let idx = 1; idx < headers.length; idx += 1) {
+    const sec = headers[idx]!;
+    const secName = shStrBuf.byteLength > 0 ? readNullTerminatedCString(shStrBuf, sec.nameOffset) : '';
+
+    // SHT_SYMTAB (2) or SHT_DYNSYM (11)
+    if (sec.shType === 2 || sec.shType === 11) {
+      const symBuf = await readSectionBounded(idx);
+      const strBuf = sec.shLink > 0 && sec.shLink < headers.length ? await readSectionBounded(sec.shLink) : Buffer.alloc(0);
+      if (symBuf === null || strBuf === null) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF symbol/string table exceeds ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      const entSize = sec.shEntSize >= (is64 ? 24 : 16) ? sec.shEntSize : (is64 ? 24 : 16);
+      for (let off = 0; off + entSize <= symBuf.byteLength; off += entSize) {
+        const stName = readU32(symBuf, off);
+        if (stName > 0 && stName < strBuf.byteLength) {
+          const symName = readNullTerminatedCString(strBuf, stName);
+          if (symName.length > 0) {
+            symbols.add(symName);
+          }
+        }
+      }
+      continue;
+    }
+
+    // SHT_DYNAMIC (6): inspect DT_NEEDED (d_tag === 1) shared library names
+    if (sec.shType === 6 && sec.shLink > 0 && sec.shLink < headers.length) {
+      const dynBuf = await readSectionBounded(idx);
+      const dynStrBuf = await readSectionBounded(sec.shLink);
+      if (dynBuf === null || dynStrBuf === null) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF .dynamic table exceeds ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      const entSize = sec.shEntSize >= (is64 ? 16 : 8) ? sec.shEntSize : (is64 ? 16 : 8);
+      for (let off = 0; off + entSize <= dynBuf.byteLength; off += entSize) {
+        const tag = is64 ? readU64AsSafeNumber(dynBuf, off) : readU32(dynBuf, off);
+        if (tag === 0) break;
+        if (tag === 1) {
+          const valOff = is64 ? readU64AsSafeNumber(dynBuf, off + 8) : readU32(dynBuf, off + 4);
+          if (valOff !== null && valOff > 0 && valOff < dynStrBuf.byteLength) {
+            const neededLib = readNullTerminatedCString(dynStrBuf, valOff);
+            if (neededLib.length > 0) {
+              symbols.add(neededLib);
+            }
+          }
+        }
+      }
+      continue;
+    }
+
+    // NVIDIA cubin .nv.info / .nv.info.<kernel> sections (SHT_CUDA_INFO = 0x70000000)
+    if (secName === '.nv.info' || secName.startsWith('.nv.info.') || sec.shType === 0x70000000) {
+      const nvBuf = await readSectionBounded(idx);
+      if (nvBuf === null) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF .nv.info metadata exceeds ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      let pos = 0;
+      while (pos + 4 <= nvBuf.byteLength) {
+        const fmt = nvBuf[pos]!;
+        const attr = nvBuf[pos + 1]!;
+        if (fmt === 0x01 || fmt === 0x02) {
+          pos += 4;
+          continue;
+        }
+        if (fmt === 0x03) {
+          const hVal = readU16(nvBuf, pos + 2);
+          if (attr === 0x1b || attr === 0x2f) {
+            maxRegisters = Math.max(maxRegisters ?? 0, hVal);
+          }
+          pos += 4;
+          continue;
+        }
+        if (fmt === 0x04) {
+          const payloadSize = readU16(nvBuf, pos + 2);
+          const nextPos = pos + 4 + payloadSize;
+          if (nextPos > nvBuf.byteLength) break;
+          if (attr === 0x2f) {
+            const regVal = payloadSize >= 8
+              ? readU32(nvBuf, pos + 8)
+              : payloadSize >= 4
+                ? readU32(nvBuf, pos + 4)
+                : 0;
+            maxRegisters = Math.max(maxRegisters ?? 0, regVal);
+          } else if (attr === 0x11) {
+            const frameVal = payloadSize >= 8
+              ? readU32(nvBuf, pos + 8)
+              : payloadSize >= 4
+                ? readU32(nvBuf, pos + 4)
+                : 0;
+            maxSpillBytes = Math.max(maxSpillBytes ?? 0, frameVal);
+          }
+          const alignedStep = (4 + payloadSize + 3) & ~3;
+          pos += Math.max(4, alignedStep);
+          continue;
+        }
+        break;
+      }
+      continue;
+    }
+
+    // Older cubin per-kernel .nv.local.<kernel> section sh_size directly measures local spill/frame bytes!
+    if (secName.startsWith('.nv.local.')) {
+      maxSpillBytes = Math.max(maxSpillBytes ?? 0, sec.shSize);
+      continue;
+    }
+
+    // Embedded PTX sections inside host fatbin ELF — fail closed when scan budget is exceeded
+    if ((secName.includes('ptx') || secName === '.nv_fatbin') && sec.shSize > 0) {
+      if (sec.shSize > maxScanBytes - scannedBytes) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF embedded PTX section "${secName}" (${sec.shSize} bytes) exceeds remaining ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      const embBuf = await readSectionBounded(idx);
+      if (embBuf === null) {
+        return {
+          symbols: [],
+          maxRegisters: null,
+          maxSpillBytes: null,
+          embeddedTexts: [],
+          scanError: `ELF embedded PTX section "${secName}" exceeded ${maxScanBytes}-byte Stage A static audit scan cap`,
+        };
+      }
+      if (embBuf.byteLength > 0) {
+        embeddedTexts.push(embBuf.toString('latin1'));
+      }
+    }
+  }
+
+  return {
+    symbols: [...symbols],
+    maxRegisters,
+    maxSpillBytes,
+    embeddedTexts,
+    scanError: null,
+  };
+}
+
+async function parseMachO64FromHandle(
+  fh: Awaited<ReturnType<typeof open>>,
+  fileSize: number,
+  maxScanBytes: number,
+): Promise<ParsedArtifactStaticInfo> {
+  if (fileSize < 32 || fileSize > maxScanBytes) {
+    return {
+      symbols: [],
+      maxRegisters: null,
+      maxSpillBytes: null,
+      embeddedTexts: [],
+      scanError: fileSize > maxScanBytes
+        ? `Mach-O binary exceeds ${maxScanBytes}-byte Stage A static audit scan cap`
+        : 'truncated Mach-O header',
+    };
+  }
+  const buf = Buffer.allocUnsafe(fileSize);
+  await readExactFromHandle(fh, buf, fileSize, 0);
+  const magic = buf.readUInt32LE(0);
+  const isLE = magic === 0xfeedfacf;
+  const readU32 = (off: number): number => (isLE ? buf.readUInt32LE(off) : buf.readUInt32BE(off));
+  const ncmds = readU32(16);
+  const sizeofcmds = readU32(20);
+  if (ncmds > 2048 || 32 + sizeofcmds > fileSize) {
+    return { symbols: [], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: 'malformed Mach-O load commands' };
+  }
+  const symbols = new Set<string>();
+  let cmdOff = 32;
+  for (let i = 0; i < ncmds && cmdOff + 8 <= 32 + sizeofcmds; i += 1) {
+    const cmd = readU32(cmdOff);
+    const cmdsize = readU32(cmdOff + 4);
+    if (cmdsize < 8 || cmdOff + cmdsize > fileSize) break;
+    // LC_SYMTAB = 0x2
+    if (cmd === 0x2 && cmdsize >= 24) {
+      const symoff = readU32(cmdOff + 8);
+      const nsyms = readU32(cmdOff + 12);
+      const stroff = readU32(cmdOff + 16);
+      const strsize = readU32(cmdOff + 20);
+      if (symoff + nsyms * 16 <= fileSize && stroff + strsize <= fileSize && nsyms <= 131_072) {
+        const strSlice = buf.subarray(stroff, stroff + strsize);
+        for (let s = 0; s < nsyms; s += 1) {
+          const nStrx = readU32(symoff + s * 16);
+          if (nStrx > 0 && nStrx < strSlice.byteLength) {
+            const name = readNullTerminatedCString(strSlice, nStrx);
+            if (name.length > 0) symbols.add(name);
+          }
+        }
+      }
+    }
+    cmdOff += cmdsize;
+  }
+  return { symbols: [...symbols], maxRegisters: null, maxSpillBytes: null, embeddedTexts: [], scanError: null };
+}
+
+function stripCAndAsmComments(source: string): string {
+  // Remove /* ... */ block comments and // ... line comments while preserving newlines.
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\r\n]*/g, '');
+}
+
+function parseTextAndPtxStaticInfo(rawText: string, fileName: string): {
+  readonly tokensAndLines: readonly string[];
+  readonly maxRegisters: number | null;
+  readonly maxSpillBytes: number | null;
+} {
+  let maxRegisters: number | null = null;
+  let maxSpillBytes: number | null = null;
+  const lowerName = fileName.toLowerCase();
+
+  // 1. Parse compiler/ptxas/cuobjdump/assembler resource metrics across full text (including header comments).
+  for (const m of rawText.matchAll(/\bUsed\s+(\d+)\s+registers\b/gi)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxRegisters = Math.max(maxRegisters ?? 0, n);
+  }
+  for (const m of rawText.matchAll(/\b(?:registerCount|register_count|vgpr_count)\s*[:=]\s*(\d+)\b/gi)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxRegisters = Math.max(maxRegisters ?? 0, n);
+  }
+  for (const m of rawText.matchAll(/\bREG\s*:\s*(\d+)\b/g)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxRegisters = Math.max(maxRegisters ?? 0, n);
+  }
+  for (const m of rawText.matchAll(/\b(\d+)\s+bytes\s+spill\s+(?:stores|loads)\b/gi)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxSpillBytes = Math.max(maxSpillBytes ?? 0, n);
+  }
+  for (const m of rawText.matchAll(/\b(\d+)\s+bytes\s+lmem\b/gi)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxSpillBytes = Math.max(maxSpillBytes ?? 0, n);
+  }
+  for (const m of rawText.matchAll(/\b(?:lmem|localSpillBytes|local_spill_bytes|spill_bytes)\s*[:=]\s*(\d+)\b/gi)) {
+    const n = Number.parseInt(m[1]!, 10);
+    if (Number.isSafeInteger(n) && n >= 0) maxSpillBytes = Math.max(maxSpillBytes ?? 0, n);
+  }
+
+  // 2. Strip comments before scanning code tokens/directives and PTX .reg / .local declarations.
+  const codeOnly = stripCAndAsmComments(rawText);
+
+  if (lowerName.endsWith('.ptx') || /\.version\s+\d+\.\d+/.test(codeOnly)) {
+    // Split by `.entry` / `.func` definitions so per-kernel register and local spill budgets are measured accurately.
+    const kernelScopes = codeOnly.split(/(?=\.(?:visible\s+|extern\s+|weak\s+)*(?:entry|func)\b)/g);
+    for (const scope of kernelScopes) {
+      let scopeRegs = 0;
+      let sawRegs = false;
+      for (const regMatch of scope.matchAll(/\.reg\s+(?:\.align\s+\d+\s+)?(\.[A-Za-z0-9_]+)\s+([^;]+);/g)) {
+        const regType = regMatch[1]!.toLowerCase();
+        if (regType === '.pred') continue;
+        const declList = regMatch[2]!;
+        const paramRange = /<(\d+)>/.exec(declList);
+        if (paramRange !== null) {
+          const count = Number.parseInt(paramRange[1]!, 10);
+          if (Number.isSafeInteger(count) && count >= 0) {
+            scopeRegs += count;
+            sawRegs = true;
+          }
+        } else {
+          const count = declList.split(',').map(s => s.trim()).filter(Boolean).length;
+          if (count > 0) {
+            scopeRegs += count;
+            sawRegs = true;
+          }
+        }
+      }
+      if (sawRegs) {
+        maxRegisters = Math.max(maxRegisters ?? 0, scopeRegs);
+      }
+
+      let scopeLocalBytes = 0;
+      let sawLocal = false;
+      for (const locMatch of scope.matchAll(
+        /\.local\s+(?:\.align\s+\d+\s+)?\.(?:b|u|s|f)(8|16|32|64|128)(?:x(\d+))?\s+([^;]+);/g,
+      )) {
+        const bitWidth = Number.parseInt(locMatch[1]!, 10);
+        const vecWidth = locMatch[2] !== undefined ? Number.parseInt(locMatch[2], 10) : 1;
+        const elemBytes = (bitWidth / 8) * vecWidth;
+        const decls = locMatch[3]!.split(',').map(s => s.trim()).filter(Boolean);
+        for (const decl of decls) {
+          const arrMatch = /\[(\d+)\]/.exec(decl);
+          const count = arrMatch !== null ? Number.parseInt(arrMatch[1]!, 10) : 1;
+          if (Number.isSafeInteger(count) && count > 0) {
+            scopeLocalBytes += elemBytes * count;
+            sawLocal = true;
+          }
+        }
+      }
+      if (sawLocal) {
+        maxSpillBytes = Math.max(maxSpillBytes ?? 0, scopeLocalBytes);
+      }
+    }
+  }
+
+  // Structured JSON resource metadata support
+  if (lowerName.endsWith('.json')) {
+    try {
+      const parsedJson = parseStrictJsonBytes(
+        Buffer.from(rawText, 'utf8'),
+        MAX_STAGE_A_AUDIT_SCAN_BYTES,
+        'ARTIFACT_INVALID',
+        '/resourceJson',
+      );
+      const jsonSymbols: string[] = [];
+      const walkJson = (node: unknown, depth: number): void => {
+        if (depth > 16 || node === null || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+          for (const item of node) walkJson(item, depth + 1);
+          return;
+        }
+        const rec = node as Readonly<Record<string, unknown>>;
+        for (const key of Object.keys(rec)) {
+          if (!Object.hasOwn(rec, key)) continue;
+          const val = rec[key];
+          if (
+            (key === 'registerCount' || key === 'registers' || key === 'num_regs')
+            && typeof val === 'number'
+            && Number.isSafeInteger(val)
+            && val >= 0
+          ) {
+            maxRegisters = Math.max(maxRegisters ?? 0, val);
+          } else if (
+            (key === 'localSpillBytes' || key === 'spillBytes' || key === 'lmemBytes')
+            && typeof val === 'number'
+            && Number.isSafeInteger(val)
+            && val >= 0
+          ) {
+            maxSpillBytes = Math.max(maxSpillBytes ?? 0, val);
+          } else if (key === 'symbols' && Array.isArray(val)) {
+            for (const s of val) {
+              if (typeof s === 'string') jsonSymbols.push(s);
+            }
+          } else {
+            walkJson(val, depth + 1);
+          }
+        }
+      };
+      walkJson(parsedJson, 0);
+      if (jsonSymbols.length > 0) {
+        return {
+          tokensAndLines: jsonSymbols,
+          maxRegisters,
+          maxSpillBytes,
+        };
+      }
+    } catch {
+      // Non-JSON or malformed JSON falls through to line/token text scan.
+    }
+  }
+
+  const tokensAndLines: string[] = [];
+  for (const rawLine of codeOnly.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0) continue;
+    tokensAndLines.push(trimmed);
+    for (const tokMatch of trimmed.matchAll(/[A-Za-z_$][A-Za-z0-9_$:@.]*/g)) {
+      tokensAndLines.push(tokMatch[0]!);
+    }
+  }
+
+  return { tokensAndLines, maxRegisters, maxSpillBytes };
+}
+
+const defaultStageAAuditToolRunner: StageAAuditToolRunner = (
+  _tool,
+  executablePath,
+  args,
+  options,
+): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
+  return new Promise((resolveCmd, rejectCmd) => {
+    const child = execFile(
+      executablePath,
+      [...args],
+      {
+        shell: false,
+        cwd: '/',
+        env: {
+          PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+          LANG: 'C',
+          LC_ALL: 'C',
+        },
+        timeout: options.timeoutMs,
+        maxBuffer: options.maxOutputBytes,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        options.signal?.removeEventListener('abort', onAbort);
+        if (error !== null) {
+          const errno = error as NodeJS.ErrnoException & { code?: string | number; killed?: boolean };
+          if (errno.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+            rejectCmd(new Error(`audit tool output exceeded ${options.maxOutputBytes} bytes`));
+            return;
+          }
+          if (errno.killed || errno.code === 'ETIMEDOUT') {
+            rejectCmd(new Error('audit tool timed out'));
+            return;
+          }
+          if (typeof errno.code === 'number') {
+            resolveCmd({ exitCode: errno.code, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+            return;
+          }
+          rejectCmd(error);
+          return;
+        }
+        resolveCmd({ exitCode: 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+      },
+    );
+    const onAbort = () => child.kill('SIGKILL');
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
+
+function resolveOptionalTrustedAuditTool(
+  baseAllowlist: readonly string[],
+  toolchainPaths: readonly string[],
+  binaryName: 'nm' | 'cuobjdump',
+): string | null {
+  const candidates: string[] = [...baseAllowlist];
+  for (const tc of toolchainPaths) {
+    candidates.push(join(tc, 'bin', binaryName), join(tc, binaryName));
+  }
+  const uniqueCandidates = [...new Set(candidates.map(p => resolve(p)))];
+  for (const cand of uniqueCandidates) {
+    try {
+      return verifyTrustedSystemExecutableSync(cand, uniqueCandidates, {}, `Stage A ${binaryName}`);
+    } catch {
+      // Optional host tool not installed or not root-owned.
+    }
+  }
+  return null;
+}
+
+/**
+ * Deterministically audit sealed Stage A outputs (`.so`, `.o`, `.cubin`, `.ptx`, `.sass`, and
+ * resource reports) using `O_NOFOLLOW`, `nlink === 1`, bounded `<= 1 MiB` reads, pure-TypeScript
+ * ELF/Mach-O/PTX/SASS parsers, and optional root-owned `nm`/`cuobjdump` inspection on Linux/CUDA hosts.
+ */
+export async function auditSealedStageAOutputs(
+  options: AuditSealedStageAOutputsOptions,
+): Promise<StageAStaticAuditResult> {
+  const { sealedOutputs, auditSpec, scrubber } = options;
+  validateAuditSpecInputs(auditSpec);
+
+  const patterns = auditSpec.forbiddenSymbolPatterns ?? [];
+  const hasRules =
+    patterns.length > 0
+    || auditSpec.maxRegisterCount !== undefined
+    || auditSpec.maxLocalSpillBytes !== undefined;
+  if (!hasRules || sealedOutputs.length === 0) {
+    return Object.freeze({ passed: true, findings: Object.freeze([]) });
+  }
+
+  const maxScanBytes = options.maxScanBytes ?? MAX_STAGE_A_AUDIT_SCAN_BYTES;
+  const noFollow = 'O_NOFOLLOW' in constants ? constants.O_NOFOLLOW : 0;
+  const findings: StructuredFinding[] = [];
+
+  const pushAuditFinding = (title: string, relPath: string, evidence: string): void => {
+    if (findings.length >= LIMITS.findings) return;
+    const safeTitle = boundDiagnosticSnippet(title, scrubber, LIMITS.findingTitle) || 'Stage A static audit violation';
+    const safeEvidence = boundDiagnosticSnippet(evidence, scrubber, LIMITS.findingEvidence) || STAGE_A_STATIC_AUDIT_FAILED;
+    const built: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    built.title = safeTitle;
+    built.severity = 'high';
+    built.path = relPath;
+    built.evidence = safeEvidence;
+    findings.push(Object.freeze(built as unknown as StructuredFinding));
+  };
+
+  const useHostTools = options.auditToolRunner !== undefined
+    || (options.enableHostAuditTools ?? process.platform === 'linux');
+  const toolRunner = options.auditToolRunner ?? defaultStageAAuditToolRunner;
+  const tcPaths = options.toolchainPaths ?? [];
+  const resolvedNm = useHostTools
+    ? (options.auditToolRunner !== undefined ? '/usr/bin/nm' : resolveOptionalTrustedAuditTool(TRUSTED_NM_PATHS, tcPaths, 'nm'))
+    : null;
+  const resolvedCuobjdump = useHostTools
+    ? (
+        options.auditToolRunner !== undefined
+          ? '/usr/local/cuda/bin/cuobjdump'
+          : resolveOptionalTrustedAuditTool(TRUSTED_CUOBJDUMP_PATHS, tcPaths, 'cuobjdump')
+      )
+    : null;
+
+  for (const item of sealedOutputs) {
+    if (options.signal?.aborted) {
+      throw new HardwareRunnerError('RUNNER_SANDBOX_FAILED', 'Stage A static audit aborted');
+    }
+    const relName = validateSafeRelativeArtifactPath(item.artifact.name, '/outputArtifacts');
+    await assertNoSymlinkAncestors(item.sealedFilePath, {
+      checkLeaf: true,
+      code: 'ARTIFACT_INVALID',
+      diagPath: `/outputArtifacts/${relName}`,
+    });
+
+    const preStat = await lstat(item.sealedFilePath).catch(() => null);
+    if (preStat === null || preStat.isSymbolicLink() || !preStat.isFile() || preStat.nlink !== 1) {
+      throw new HardwareRunnerError(
+        'ARTIFACT_INVALID',
+        `Stage A output "${relName}" failed O_NOFOLLOW/nlink===1 verification before static audit`,
+      );
+    }
+
+    const fh = await open(item.sealedFilePath, constants.O_RDONLY | noFollow).catch(() => {
+      throw new HardwareRunnerError('ARTIFACT_INVALID', `unable to open sealed Stage A output "${relName}" with O_NOFOLLOW`);
+    });
+
+    let isElf: boolean;
+    let parsedInfo: ParsedArtifactStaticInfo | null = null;
+    let textContent: string | null = null;
+
+    try {
+      const st = await fh.stat();
+      if (
+        !st.isFile()
+        || st.isSymbolicLink()
+        || st.nlink !== 1
+        || st.dev !== preStat.dev
+        || st.ino !== preStat.ino
+        || st.size !== item.artifact.byteLength
+      ) {
+        throw new HardwareRunnerError('ARTIFACT_INVALID', `sealed Stage A output "${relName}" mutated before static audit`);
+      }
+      const fileSize = st.size;
+      if (fileSize === 0) continue;
+
+      const magicLen = Math.min(8, fileSize);
+      const magicHeader = Buffer.allocUnsafe(magicLen);
+      await readExactFromHandle(fh, magicHeader, magicLen, 0);
+
+      isElf =
+        magicLen >= 4
+        && magicHeader[0] === 0x7f
+        && magicHeader[1] === 0x45
+        && magicHeader[2] === 0x4c
+        && magicHeader[3] === 0x46;
+      const magic32 = magicLen >= 4 ? magicHeader.readUInt32LE(0) : 0;
+      const isMachO64 = magicLen >= 4 && (magic32 === 0xfeedfacf || magic32 === 0xcffaedfe);
+      const isMachO32 = magicLen >= 4 && (magic32 === 0xfeedface || magic32 === 0xcefaedfe);
+      // Universal Mach-O fat magic is BE 0xCAFEBABE (LE 0xbebafeca), which collides with Java
+      // .class files. Bytes 4-7 encode (minor_version << 16) | major_version for Java (major >= 45)
+      // and nfat_arch for Mach-O fat (1..20), so the 1..20 content bound alone disambiguates
+      // without trusting the filename extension.
+      const isMachOFat =
+        magicLen >= 8
+        && magic32 === 0xbebafeca
+        && magicHeader.readUInt32BE(4) >= 1
+        && magicHeader.readUInt32BE(4) <= 20;
+
+      if (isMachO32 || isMachOFat) {
+        pushAuditFinding(
+          'Unsupported Mach-O binary format in Stage A static audit',
+          relName,
+          `File "${relName}" uses an unsupported 32-bit or universal Mach-O header and failed closed during Stage A static audit`,
+        );
+        continue;
+      }
+
+      const shouldInspectAsBinary = isElf || isMachO64 || AUDIT_BINARY_EXT_RE.test(relName);
+      const shouldInspectAsText = !isElf && !isMachO64 && (AUDIT_TEXT_EXT_RE.test(relName) || AUDIT_BINARY_EXT_RE.test(relName));
+
+      if (!shouldInspectAsBinary && !shouldInspectAsText) {
+        continue;
+      }
+
+      if (isElf) {
+        parsedInfo = await parseElfFromHandle(fh, fileSize, maxScanBytes);
+      } else if (isMachO64) {
+        parsedInfo = await parseMachO64FromHandle(fh, fileSize, maxScanBytes);
+      } else {
+        if (fileSize > maxScanBytes) {
+          pushAuditFinding(
+            'Stage A output exceeds static audit 1 MiB scan limit',
+            relName,
+            `File "${relName}" (${fileSize} bytes) exceeds ${maxScanBytes}-byte (1 MiB) Stage A static audit scan cap`,
+          );
+          continue;
+        }
+        const rawBuf = Buffer.allocUnsafe(fileSize);
+        await readExactFromHandle(fh, rawBuf, fileSize, 0);
+        textContent = rawBuf.toString('utf8');
+      }
+    } finally {
+      await fh.close();
+    }
+
+    if (parsedInfo !== null) {
+      if (parsedInfo.scanError !== null) {
+        pushAuditFinding(
+          'Stage A binary failed static audit inspection',
+          relName,
+          `File "${relName}": ${parsedInfo.scanError}`,
+        );
+        continue;
+      }
+
+      const candidateSymbols = new Set<string>(parsedInfo.symbols);
+      let maxRegisters = parsedInfo.maxRegisters;
+      let maxSpillBytes = parsedInfo.maxSpillBytes;
+
+      for (const emb of parsedInfo.embeddedTexts) {
+        const embParsed = parseTextAndPtxStaticInfo(emb, `${relName}.ptx`);
+        for (const t of embParsed.tokensAndLines) candidateSymbols.add(t);
+        if (embParsed.maxRegisters !== null) maxRegisters = Math.max(maxRegisters ?? 0, embParsed.maxRegisters);
+        if (embParsed.maxSpillBytes !== null) maxSpillBytes = Math.max(maxSpillBytes ?? 0, embParsed.maxSpillBytes);
+      }
+
+      const verifySealedInodeUnchanged = async (toolLabel: string): Promise<boolean> => {
+        try {
+          const recheck = await lstat(item.sealedFilePath);
+          if (
+            !recheck.isFile()
+            || recheck.isSymbolicLink()
+            || recheck.nlink !== 1
+            || recheck.dev !== preStat.dev
+            || recheck.ino !== preStat.ino
+            || recheck.size !== item.artifact.byteLength
+          ) {
+            pushAuditFinding(
+              `Stage A file mutated before ${toolLabel} static audit`,
+              relName,
+              `File "${relName}" inode or size changed between sealed read and ${toolLabel} invocation`,
+            );
+            return false;
+          }
+          return true;
+        } catch (statErr: unknown) {
+          pushAuditFinding(
+            `Stage A file unavailable before ${toolLabel} static audit`,
+            relName,
+            `File "${relName}" lstat failed before ${toolLabel}: ${statErr instanceof Error ? statErr.message : String(statErr)}`,
+          );
+          return false;
+        }
+      };
+
+      // Optional root-owned Linux/CUDA host toolchain inspection (`nm` / `cuobjdump`, 1 MiB stdout cap)
+      if (isElf && resolvedNm !== null) {
+        for (const nmFlags of [['-a', item.sealedFilePath], ['-D', item.sealedFilePath]]) {
+          if (!(await verifySealedInodeUnchanged('nm'))) break;
+          try {
+            const nmRes = await toolRunner('nm', resolvedNm, nmFlags, {
+              timeoutMs: 10_000,
+              maxOutputBytes: maxScanBytes,
+              ...(options.signal !== undefined ? { signal: options.signal } : {}),
+            });
+            if (nmRes.exitCode === 0 && nmRes.stdout.length > 0) {
+              for (const line of nmRes.stdout.split(/\r?\n/)) {
+                const symPart = line.trim().split(/\s+/).pop();
+                if (symPart) candidateSymbols.add(symPart);
+              }
+            }
+          } catch (toolErr: unknown) {
+            const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+            const title = msg.includes('exceeded')
+              ? 'Stage A nm output exceeded 1 MiB static audit cap'
+              : 'Stage A nm static audit invocation failed';
+            pushAuditFinding(title, relName, `File "${relName}": ${msg}`);
+          }
+        }
+      }
+
+      if (isElf && resolvedCuobjdump !== null && /\.(?:cubin|fatbin|so|o)$/i.test(relName)) {
+        if (await verifySealedInodeUnchanged('cuobjdump')) {
+          try {
+            const cuRes = await toolRunner(
+              'cuobjdump',
+              resolvedCuobjdump,
+              ['--dump-resource-usage', '--dump-elf-symbols', item.sealedFilePath],
+              {
+                timeoutMs: 10_000,
+                maxOutputBytes: maxScanBytes,
+                ...(options.signal !== undefined ? { signal: options.signal } : {}),
+              },
+            );
+            if (cuRes.exitCode === 0 && cuRes.stdout.length > 0) {
+              const cuParsed = parseTextAndPtxStaticInfo(cuRes.stdout, `${relName}.sass`);
+              for (const tok of cuParsed.tokensAndLines) candidateSymbols.add(tok);
+              if (cuParsed.maxRegisters !== null) maxRegisters = Math.max(maxRegisters ?? 0, cuParsed.maxRegisters);
+              if (cuParsed.maxSpillBytes !== null) maxSpillBytes = Math.max(maxSpillBytes ?? 0, cuParsed.maxSpillBytes);
+            }
+          } catch (toolErr: unknown) {
+            const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+            const title = msg.includes('exceeded')
+              ? 'Stage A cuobjdump output exceeded 1 MiB static audit cap'
+              : 'Stage A cuobjdump static audit invocation failed';
+            pushAuditFinding(title, relName, `File "${relName}": ${msg}`);
+          }
+        }
+      }
+
+      if (patterns.length > 0) {
+        const matchedPairs = new Set<string>();
+        for (const rawSym of candidateSymbols) {
+          const expanded = expandDemangledSymbolForms(rawSym);
+          for (const pat of patterns) {
+            if (expanded.some(form => form.includes(pat))) {
+              const pairKey = `${pat}\0${rawSym}`;
+              if (!matchedPairs.has(pairKey)) {
+                matchedPairs.add(pairKey);
+                pushAuditFinding(
+                  `Forbidden symbol pattern "${pat}" in Stage A binary`,
+                  relName,
+                  `File "${relName}" matched forbidden symbol pattern "${pat}" on symbol "${rawSym}"`,
+                );
+              }
+            }
+          }
+        }
+      }
+
+      if (auditSpec.maxRegisterCount !== undefined && maxRegisters !== null && maxRegisters > auditSpec.maxRegisterCount) {
+        pushAuditFinding(
+          'Stage A kernel exceeded maxRegisterCount ceiling',
+          relName,
+          `File "${relName}" uses ${maxRegisters} registers (maxRegisterCount=${auditSpec.maxRegisterCount})`,
+        );
+      }
+
+      if (auditSpec.maxLocalSpillBytes !== undefined && maxSpillBytes !== null && maxSpillBytes > auditSpec.maxLocalSpillBytes) {
+        pushAuditFinding(
+          'Stage A kernel exceeded maxLocalSpillBytes ceiling',
+          relName,
+          `File "${relName}" has ${maxSpillBytes} local spill/frame bytes (maxLocalSpillBytes=${auditSpec.maxLocalSpillBytes})`,
+        );
+      }
+      continue;
+    }
+
+    if (textContent !== null) {
+      const parsedText = parseTextAndPtxStaticInfo(textContent, relName);
+      if (patterns.length > 0) {
+        const reportedPatterns = new Set<string>();
+        for (const tokenOrLine of parsedText.tokensAndLines) {
+          const forms = tokenOrLine.includes('_Z') ? expandDemangledSymbolForms(tokenOrLine) : [tokenOrLine];
+          for (const pat of patterns) {
+            if (!reportedPatterns.has(pat) && forms.some(f => f.includes(pat))) {
+              reportedPatterns.add(pat);
+              pushAuditFinding(
+                `Forbidden symbol pattern "${pat}" in Stage A output`,
+                relName,
+                `File "${relName}" matched forbidden symbol pattern "${pat}" in "${tokenOrLine.slice(0, 160)}"`,
+              );
+            }
+          }
+        }
+      }
+
+      if (
+        auditSpec.maxRegisterCount !== undefined
+        && parsedText.maxRegisters !== null
+        && parsedText.maxRegisters > auditSpec.maxRegisterCount
+      ) {
+        pushAuditFinding(
+          'Stage A output exceeded maxRegisterCount ceiling',
+          relName,
+          `File "${relName}" uses ${parsedText.maxRegisters} registers (maxRegisterCount=${auditSpec.maxRegisterCount})`,
+        );
+      }
+
+      if (
+        auditSpec.maxLocalSpillBytes !== undefined
+        && parsedText.maxSpillBytes !== null
+        && parsedText.maxSpillBytes > auditSpec.maxLocalSpillBytes
+      ) {
+        pushAuditFinding(
+          'Stage A output exceeded maxLocalSpillBytes ceiling',
+          relName,
+          `File "${relName}" has ${parsedText.maxSpillBytes} local spill bytes (maxLocalSpillBytes=${auditSpec.maxLocalSpillBytes})`,
+        );
+      }
+    }
+  }
+
+  return Object.freeze({
+    passed: findings.length === 0,
+    findings: Object.freeze(findings),
+  });
+}
+
 function assertNoDecodedSecret(value: string, scrubber: SecretScrubber): void {
   if (scrubber.containsSecret(value)) {
     throw new HardwareRunnerError('ARTIFACT_INVALID', 'Stage B result envelope rejected by SecretScrubber');
@@ -2897,10 +4086,71 @@ function parseEnvelopeFindings(raw: unknown, scrubber: SecretScrubber): readonly
   return Object.freeze(out);
 }
 
+function assertNoRawInvalidStageBNumbers(value: unknown, path: string, depth = 0): void {
+  if (depth > 32) {
+    throw new HardwareRunnerError('ARTIFACT_INVALID', 'Stage B structure exceeds maximum depth', path);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Object.is(value, -0)) {
+      throw new HardwareRunnerError('ARTIFACT_INVALID', 'Stage B numeric value must be finite and not -0', path);
+    }
+    return;
+  }
+  if (typeof value === 'string') {
+    if (hasLoneSurrogate(value)) {
+      throw new HardwareRunnerError('ARTIFACT_INVALID', 'Stage B string contains lone UTF-16 surrogate', path);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      assertNoRawInvalidStageBNumbers(value[i], `${path}/${i}`, depth + 1);
+    }
+    return;
+  }
+  if (value !== null && typeof value === 'object') {
+    const rec = value as Readonly<Record<string, unknown>>;
+    for (const key of Reflect.ownKeys(rec)) {
+      if (typeof key !== 'string' || FORBIDDEN_METRIC_KEYS.has(key) || hasLoneSurrogate(key)) {
+        throw new HardwareRunnerError('ARTIFACT_INVALID', 'forbidden key in Stage B result envelope', path);
+      }
+      assertNoRawInvalidStageBNumbers(rec[key], `${path}/${key}`, depth + 1);
+    }
+  }
+}
+
+function parseEnvelopeBucketMetrics(raw: unknown, scrubber: SecretScrubber): readonly BucketMetricEntry[] {
+  assertNoRawInvalidStageBNumbers(raw, '/stageB/bucketMetrics');
+  const validated = validateBucketMetrics(raw, scrubber);
+  if (!validated.ok) {
+    const first = validated.errors[0];
+    throw new HardwareRunnerError(
+      'ARTIFACT_INVALID',
+      `invalid Stage B bucketMetrics (${first?.code ?? 'INVALID'})`,
+      first?.path ? `/stageB/bucketMetrics${first.path}` : '/stageB/bucketMetrics',
+    );
+  }
+  return validated.value;
+}
+
+function parseEnvelopeHardwareDiagnostics(raw: unknown, scrubber: SecretScrubber): HardwareDiagnostics {
+  assertNoRawInvalidStageBNumbers(raw, '/stageB/hardwareDiagnostics');
+  const validated = validateHardwareDiagnostics(raw, scrubber);
+  if (!validated.ok) {
+    const first = validated.errors[0];
+    throw new HardwareRunnerError(
+      'ARTIFACT_INVALID',
+      `invalid Stage B hardwareDiagnostics (${first?.code ?? 'INVALID'})`,
+      first?.path ? `/stageB/hardwareDiagnostics${first.path}` : '/stageB/hardwareDiagnostics',
+    );
+  }
+  return validated.value;
+}
+
 /**
- * Parse and validate the bounded (`<= 64 KiB`) Stage B JSON result envelope into null-prototype
- * structures, accepting ONLY finite numeric metrics and scanning all decoded strings/keys with
- * `SecretScrubber`.
+ * Parse and validate the bounded (`<= 48 KiB`) Stage B JSON result envelope into null-prototype
+ * structures, accepting ONLY finite numeric metrics, bounded `bucketMetrics`, and closed-enum
+ * sanitized `hardwareDiagnostics` while scanning all decoded strings/keys with `SecretScrubber`.
  */
 export function parseStageBResultEnvelope(
   rawStdout: string,
@@ -2967,6 +4217,12 @@ export function parseStageBResultEnvelope(
 
   const metrics = Object.hasOwn(obj, 'metrics') ? parseEnvelopeMetrics(obj.metrics, scrubber) : undefined;
   const findings = Object.hasOwn(obj, 'findings') ? parseEnvelopeFindings(obj.findings, scrubber) : undefined;
+  const bucketMetrics = Object.hasOwn(obj, 'bucketMetrics')
+    ? parseEnvelopeBucketMetrics(obj.bucketMetrics, scrubber)
+    : undefined;
+  const hardwareDiagnostics = Object.hasOwn(obj, 'hardwareDiagnostics')
+    ? parseEnvelopeHardwareDiagnostics(obj.hardwareDiagnostics, scrubber)
+    : undefined;
 
   const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   out.status = obj.status;
@@ -2974,6 +4230,8 @@ export function parseStageBResultEnvelope(
   if (detail !== undefined) out.detail = detail;
   if (metrics !== undefined) out.metrics = metrics;
   if (findings !== undefined) out.findings = findings;
+  if (bucketMetrics !== undefined) out.bucketMetrics = bucketMetrics;
+  if (hardwareDiagnostics !== undefined) out.hardwareDiagnostics = hardwareDiagnostics;
   assertNoDecodedSecret(canonicalJson(out), scrubber);
   return Object.freeze(out as unknown as StageBResultEnvelope);
 }
@@ -2985,40 +4243,74 @@ function readFiniteMetricValue(metrics: MetricsMap, key: string): number | undef
   return Object.is(val, -0) ? 0 : val;
 }
 
-function checkMetricThresholds(rules: readonly MetricThresholdRule[], metrics: MetricsMap | undefined): string | null {
-  if (rules.length === 0) return null;
-  if (metrics === undefined) {
-    return 'required quantitative metrics map is missing from Stage B output';
+function checkSingleScopeMetricRule(
+  rule: MetricThresholdRule,
+  metrics: MetricsMap,
+  scopePrefix: string,
+): string | null {
+  const observed = readFiniteMetricValue(metrics, rule.metric);
+  if (observed === undefined) {
+    return `${scopePrefix}missing numeric metric "${rule.metric}"`;
   }
-  for (const rule of rules) {
-    const observed = readFiniteMetricValue(metrics, rule.metric);
-    if (observed === undefined) {
-      return `missing numeric metric "${rule.metric}"`;
+  if (rule.kind === 'bounds') {
+    if (rule.min !== undefined && observed < rule.min) {
+      return `${scopePrefix}metric "${rule.metric}" (${observed}) is below min ${rule.min}`;
     }
-    if (rule.kind === 'bounds') {
-      if (rule.min !== undefined && observed < rule.min) {
-        return `metric "${rule.metric}" (${observed}) is below min ${rule.min}`;
+    if (rule.max !== undefined && observed > rule.max) {
+      return `${scopePrefix}metric "${rule.metric}" (${observed}) exceeds max ${rule.max}`;
+    }
+    return null;
+  }
+  const baseline = readFiniteMetricValue(metrics, rule.baselineMetric);
+  if (baseline === undefined) {
+    return `${scopePrefix}missing numeric baseline metric "${rule.baselineMetric}"`;
+  }
+  if (rule.operator === 'min_ratio') {
+    if (!(baseline > 0) || observed / baseline < rule.threshold) {
+      return `${scopePrefix}comparative ratio ${rule.metric}/${rule.baselineMetric} failed min_ratio ${rule.threshold}`;
+    }
+  } else if (rule.operator === 'max_ratio') {
+    if (!(baseline > 0) || observed / baseline > rule.threshold) {
+      return `${scopePrefix}comparative ratio ${rule.metric}/${rule.baselineMetric} failed max_ratio ${rule.threshold}`;
+    }
+  } else if (observed - baseline > rule.threshold) {
+    return `${scopePrefix}comparative delta ${rule.metric}-${rule.baselineMetric} failed max_delta ${rule.threshold}`;
+  }
+  return null;
+}
+
+function checkMetricThresholds(
+  rules: readonly MetricThresholdRule[],
+  metrics: MetricsMap | undefined,
+  bucketMetrics?: readonly BucketMetricEntry[],
+): string | null {
+  if (rules.length === 0) return null;
+  for (const rule of rules) {
+    const scope = rule.bucketScope ?? 'aggregate';
+    if (scope === 'aggregate') {
+      if (metrics === undefined) {
+        return 'required quantitative metrics map is missing from Stage B output';
       }
-      if (rule.max !== undefined && observed > rule.max) {
-        return `metric "${rule.metric}" (${observed}) exceeds max ${rule.max}`;
+      const err = checkSingleScopeMetricRule(rule, metrics, '');
+      if (err !== null) return err;
+      continue;
+    }
+    if (bucketMetrics === undefined || bucketMetrics.length === 0) {
+      return 'required bucketMetrics list is missing from Stage B output for bucket-scoped threshold rule';
+    }
+    if (scope === 'all_buckets') {
+      for (const bucket of bucketMetrics) {
+        const err = checkSingleScopeMetricRule(rule, bucket.metrics, `bucket "${bucket.bucketId}": `);
+        if (err !== null) return err;
       }
       continue;
     }
-    const baseline = readFiniteMetricValue(metrics, rule.baselineMetric);
-    if (baseline === undefined) {
-      return `missing numeric baseline metric "${rule.baselineMetric}"`;
+    const targetBucket = bucketMetrics.find(entry => entry.bucketId === scope.bucketId);
+    if (targetBucket === undefined) {
+      return `target bucket "${scope.bucketId}" is missing from Stage B bucketMetrics`;
     }
-    if (rule.operator === 'min_ratio') {
-      if (!(baseline > 0) || observed / baseline < rule.threshold) {
-        return `comparative ratio ${rule.metric}/${rule.baselineMetric} failed min_ratio ${rule.threshold}`;
-      }
-    } else if (rule.operator === 'max_ratio') {
-      if (!(baseline > 0) || observed / baseline > rule.threshold) {
-        return `comparative ratio ${rule.metric}/${rule.baselineMetric} failed max_ratio ${rule.threshold}`;
-      }
-    } else if (observed - baseline > rule.threshold) {
-      return `comparative delta ${rule.metric}-${rule.baselineMetric} failed max_delta ${rule.threshold}`;
-    }
+    const err = checkSingleScopeMetricRule(rule, targetBucket.metrics, `bucket "${targetBucket.bucketId}": `);
+    if (err !== null) return err;
   }
   return null;
 }
@@ -3149,7 +4441,7 @@ function buildDeviceVisibilityEnv(targetHardware: HardwareTargetSpec): Record<st
   return {};
 }
 
-function boundDiagnosticSnippet(text: string, scrubber: SecretScrubber, maxChars = LIMITS.findingEvidence): string {
+function boundDiagnosticSnippet(text: string, scrubber: SecretScrubber, maxChars: number = LIMITS.findingEvidence): string {
   const scrubbed = scrubber.scrub(text).trim();
   if (!scrubbed) return '';
   if (scrubbed.length <= maxChars) return scrubbed;
@@ -3564,6 +4856,37 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
 
+    // Stage A Static Symbol & Spill Audit: inspect sealed outputs BEFORE mounting held_out_workloads or launching Stage B!
+    const effectiveAuditSpec = resolveEffectiveStageAAuditSpec(job.targetHardware, job.stageAAudit);
+    if (effectiveAuditSpec !== null) {
+      assertLeaseDeadlineNotExpired(deadlineChecker, 'Stage A static symbol/spill audit', options.signal);
+      const auditResult = await auditSealedStageAOutputs({
+        sealedOutputs,
+        auditSpec: effectiveAuditSpec,
+        scrubber,
+        toolchainPaths: canonicalToolchainPaths,
+        ...(options.auditToolRunner !== undefined ? { auditToolRunner: options.auditToolRunner } : {}),
+        ...(options.enableHostAuditTools !== undefined ? { enableHostAuditTools: options.enableHostAuditTools } : {}),
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      });
+      if (!auditResult.passed) {
+        sealedOutputs = Object.freeze([]);
+        await removeTreeFailClosed(internalSupervisorDir);
+        await removeTreeFailClosed(stageARoot);
+        const primaryEvidence = auditResult.findings[0]?.evidence ?? STAGE_A_STATIC_AUDIT_FAILED;
+        keepJobRootForUpload = true;
+        return Object.freeze({
+          status: 'denied',
+          reason: STAGE_A_STATIC_AUDIT_FAILED,
+          detail: primaryEvidence,
+          findings: auditResult.findings,
+          hardwareProvenance,
+          sealedOutputs: Object.freeze([]),
+          cleanup: cleanupJobRoot,
+        });
+      }
+    }
+
     // Fail-closed removal + ENOENT verification of Stage A candidate source & scratch before Stage B begins!
     await removeTreeFailClosed(candidateDir);
     await removeTreeFailClosed(stageAScratchDir);
@@ -3718,6 +5041,14 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
           }),
         ]),
         hardwareProvenance,
+        ...(resolvedDeviceIndices !== undefined
+          ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+          : {}),
+        stageBFailure: Object.freeze({
+          timedOut: true,
+          exitCode: stageBResult.exitCode,
+          signal: stageBResult.signal,
+        }),
         sealedOutputs,
         cleanup: cleanupJobRoot,
       });
@@ -3740,6 +5071,14 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
           }),
         ]),
         hardwareProvenance,
+        ...(resolvedDeviceIndices !== undefined
+          ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+          : {}),
+        stageBFailure: Object.freeze({
+          timedOut: false,
+          exitCode: stageBResult.exitCode,
+          signal: stageBResult.signal,
+        }),
         sealedOutputs,
         cleanup: cleanupJobRoot,
       });
@@ -3753,7 +5092,11 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
     let finalFindings = envelope.findings;
 
     if (finalStatus === 'approved') {
-      const thresholdViolation = checkMetricThresholds(job.metricThresholds, envelope.metrics);
+      const thresholdViolation = checkMetricThresholds(
+        job.metricThresholds,
+        envelope.metrics,
+        envelope.bucketMetrics,
+      );
       if (thresholdViolation !== null) {
         finalStatus = 'denied';
         finalReason = 'METRIC_THRESHOLD_FAILED';
@@ -3778,7 +5121,12 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
       ...(finalDetail !== undefined ? { detail: finalDetail } : {}),
       ...(envelope.metrics !== undefined ? { metrics: envelope.metrics } : {}),
       ...(finalFindings !== undefined ? { findings: finalFindings } : {}),
+      ...(envelope.bucketMetrics !== undefined ? { bucketMetrics: envelope.bucketMetrics } : {}),
+      ...(envelope.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: envelope.hardwareDiagnostics } : {}),
       hardwareProvenance,
+      ...(resolvedDeviceIndices !== undefined
+        ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+        : {}),
       sealedOutputs,
       cleanup: cleanupJobRoot,
     });

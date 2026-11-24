@@ -133,10 +133,26 @@ export function checkedRefusalRecord(input: unknown, plan: CompiledPlan, lock: T
   const overlay = lock.spec.contract.spec.budgets.overlay;
   const bounds = overlayProtocolBounds(overlay);
   const impl = slot?.handler.implementation;
-  const isFileHandler = impl === 'json-artifact.v1' || impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1';
-  const payloadKind: VerifierHeader['payloadKind'] =
-    impl === 'json-artifact.v1' ? 'json' : impl === 'json-keys-guard.v1' || impl === 'line-section-guard.v1' ? 'guard' : 'inventories';
-  const packetAllowed = maxPacketBytes({ payloadKind, ...(overlay ? { overlay } : {}) });
+  const isFileHandler =
+    impl === 'json-artifact.v1' ||
+    impl === 'json-keys-guard.v1' ||
+    impl === 'line-section-guard.v1' ||
+    impl === 'evolve-block-guard.v1';
+  let payloadKind: VerifierHeader['payloadKind'] = 'inventories';
+  if (impl === 'json-artifact.v1') {
+    payloadKind = 'json';
+  } else if (
+    impl === 'json-keys-guard.v1'
+    || impl === 'line-section-guard.v1'
+    || impl === 'evolve-block-guard.v1'
+  ) {
+    payloadKind = 'guard';
+  }
+  const packetAllowed = maxPacketBytes({
+    payloadKind,
+    ...(impl === 'evolve-block-guard.v1' ? { handler: impl } : {}),
+    ...(overlay ? { overlay } : {}),
+  });
 
   const expectedAllowed =
     limits.reason === 'json_file_bytes'

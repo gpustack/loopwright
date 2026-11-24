@@ -4,7 +4,7 @@ import { chmod, writeFile, symlink, link, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { compilePlan, checkpointCapacity } from '../src/compile.js';
-import { approvedState } from '../src/config.js';
+import { approvedState, loadTrustedConfiguration } from '../src/config.js';
 import type { ControllerResult } from '../src/errors.js';
 import type { LoadedConfiguration } from '../src/types.js';
 import { hash } from '../src/schema.js';
@@ -337,5 +337,46 @@ test('registry validates json-keys-guard.v1 and line-section-guard.v1 parameters
       assert.equal(loaded.ok, false);
       if (!loaded.ok) assert.equal(loaded.error.code, badCase.code);
     } finally { await fBad.cleanup(); }
+  }
+});
+
+test('loadTrustedConfiguration binds vault credentials and approvedState.environment strictly to the provided environment lookup', async () => {
+  const f = await configurationFixture();
+  const previous = process.env.PROVIDER_TOKEN;
+  const hostToken = 'S04_HOST_PROCESS_TOKEN_DO_NOT_READ_Aa11';
+  const isolatedToken = 'S04_ISOLATED_VAULT_TOKEN_Bb22Cc33';
+  try {
+    process.env.PROVIDER_TOKEN = hostToken;
+    const envFn = (name: string): string | undefined => (name === 'PROVIDER_TOKEN' ? isolatedToken : undefined);
+    const loaded = good(await loadTrustedConfiguration({ ...f.input, environment: envFn }));
+    const plan = good(await compilePlan(loaded));
+    const state = approvedState(loaded);
+    assert.equal(state.environment('PROVIDER_TOKEN'), isolatedToken);
+    assert.equal(state.environment('UNRELATED_KEY'), undefined);
+    assert.equal(state.environment('x'.repeat(300)), undefined);
+    const resolvers = state.vault.bind({
+      runId: 'run-env-iso',
+      roleId: 'builder',
+      stepId: 'build',
+      providerCredentialRef: 'copilot',
+      selection: plan.roles[0]!.policy.selection,
+      mcp: plan.roles[0]!.policy.mcp,
+    });
+    const resolved = await resolvers.resolveCredential({
+      provider: 'github-copilot',
+      model: 'claude-sonnet-5.5',
+      destination: 'https://api.individual.githubcopilot.com/v1/messages?beta=true',
+      purpose: 'task',
+      runId: 'run-env-iso',
+      roleId: 'builder',
+      stepId: 'build',
+      notAfterMonotonicMs: '1000',
+      signal: new AbortController().signal,
+    });
+    assert.equal(resolved.bearerToken, isolatedToken);
+    assert.equal(process.env.PROVIDER_TOKEN, hostToken);
+  } finally {
+    if (previous === undefined) delete process.env.PROVIDER_TOKEN; else process.env.PROVIDER_TOKEN = previous;
+    await f.cleanup();
   }
 });

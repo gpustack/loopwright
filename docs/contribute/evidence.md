@@ -7,6 +7,8 @@ A valid schema, producer name, hash, or serialized type brand cannot make eviden
 ## Contents
 
 - [Boundary](#boundary)
+- [Block guards](#block-guards)
+- [Hardware bundles](#hardware-bundles)
 
 ## Boundary
 
@@ -65,6 +67,17 @@ Aggregates contain `knownSubtotal`, `unknownCount`, and `complete`/`partial` com
 All-unknown observations have unknown provenance; an empty trusted inventory is explicit complete zero.
 The host must include every admitted request and normalize overlapping provider token categories.
 The library cannot discover omitted calls or certify provider billing. It does not settle a budget ledger.
+
+## Block guards
+
+- **`evolve-block-guard.v1`**: Parses `1..32` `EVOLVE-BLOCK-START: <id>` / `EVOLVE-BLOCK-END: <id>` pairs per file (`//`, `#`, or `/* */`) and rejects nested, duplicate, reordered, or unclosed markers. Every byte outside mutable blocks must match `baseRevision` SHA-256 while optional `allowedBlockIds` and `maxBlockBytes` constrain mutable regions.
+- **Stage A static audits**: `evaluator.ts` inspects sealed Stage A `.so`, `.o`, `.cubin`, `.ptx`, and `.sass` binaries (`O_NOFOLLOW`, `1 MiB` symbol cap) against `forbiddenSymbolPatterns` (`0..64` literal substrings) and `maxRegisterCount`/`maxLocalSpillBytes` before Stage B starts, denying breaches with `STAGE_A_STATIC_AUDIT_FAILED`.
+
+## Hardware bundles
+
+- **Bucketed Stage B diagnostics**: Stage B envelopes (`<= 49,152` bytes stdout, zero exported files) carry optional `bucketMetrics` (`1..64` buckets, `<= 16` numeric metrics, `<= 8` dimensions) and closed-enum `hardwareDiagnostics`. `evaluateAcceptance` enforces `bucketScope` (`aggregate`, `all_buckets`, or `{ bucketId }`) across buckets.
+- **Post-crash quarantine**: After any Stage B timeout or crash, `worker.ts` runs host accelerator probes via `provenance.ts` (`Xid`, uncorrectable ECC, hang) and transitions wedged workers to `WORKER_DEVICE_QUARANTINED` (exit `3`) before polling `/v1/runner/leases:acquire`.
+- **Bundle export (`evolution-bundle.v1`)**: `exportEvolutionBundle` verifies CAS blobs (`O_NOFOLLOW`, `nlink === 1`, SHA-256, `SecretScrubber`), emits `manifest.json`, `dispatch-manifest.json` (`fallback: 'baseline'`), unmodified HMAC-signed `receipts/*.verdict.json`, and `blobs/sha256/<hex>` (`dir` or `oci-layout`), and refuses unverified or `synthetic_fixture` receipts with `EXPORT_UNVERIFIED_FORBIDDEN` unless `--allow-synthetic-probe` is set.
 
 
 ---
