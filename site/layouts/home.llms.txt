@@ -32,13 +32,16 @@
     {{- $lines = $lines | append (printf "- [%s](%s): %s" .label $url .description) -}}
   {{- end -}}
 {{- end -}}
-{{- $lines = $lines | append "" "## Optional" "" (printf "- [Repository navigation](https://github.com/gpustack/loopwright/blob/%s/docs/README.md): Module relationships, design records, code entry points and applicable skills for contributors." .Site.Params.sourceRef) -}}
+{{- $repoSlug := default "gpustack/loopwright" .Site.Params.repoSlug -}}
+{{- $repoNavLabel := default "Repository navigation" .Site.Params.repoNavLabel -}}
+{{- $repoNavDesc := default "Module relationships, design records, code entry points and applicable skills for contributors." .Site.Params.repoNavDescription -}}
+{{- $lines = $lines | append "" "## Optional" "" (printf "- [%s](https://github.com/%s/blob/%s/docs/README.md): %s" $repoNavLabel $repoSlug .Site.Params.sourceRef $repoNavDesc) -}}
 {{- range partial "readme-table-rows.html" (dict "content" $index.Content "heading" "Contribute") -}}
   {{- if eq .kind "row" -}}
     {{- if or (and (ne .target "development.md") (not (hasPrefix .target "contribute/"))) (not (hasSuffix .target ".md")) -}}
       {{- errorf "docs/README.md Contribute entry must be development.md or contribute/**/*.md: %s" .target -}}
     {{- end -}}
-    {{- $url := printf "https://github.com/gpustack/loopwright/blob/%s/docs/%s" $.Site.Params.sourceRef .target -}}
+    {{- $url := printf "https://github.com/%s/blob/%s/docs/%s" $repoSlug $.Site.Params.sourceRef .target -}}
     {{- $lines = $lines | append (printf "- [%s](%s): %s" .label $url .description) -}}
   {{- end -}}
 {{- end -}}

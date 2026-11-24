@@ -121,6 +121,12 @@ spec:
       environmentNames:
         - ZAI_API_KEY
       template: "${ZAI_API_KEY}"
+    - id: mcp-token
+      consumer: mcp
+      destinationRef: workspace-mirror
+      environmentNames:
+        - LOOPWRIGHT_MCP_TOKEN
+      template: "${LOOPWRIGHT_MCP_TOKEN}"
     - id: gate-hmac
       consumer: gate
       destinationRef: ci-gate-signing
@@ -132,6 +138,10 @@ spec:
       classification: credential
       paths:
         - /spec/credentials/0/template
+    - name: LOOPWRIGHT_MCP_TOKEN
+      classification: credential
+      paths:
+        - /spec/credentials/1/template
     - name: UPSTREAM_TAG
       classification: nonsecret
       paths:
@@ -241,6 +251,8 @@ spec:
   credentials:
     - ref: zai-token
       template: "${ZAI_API_KEY}"
+    - ref: mcp-token
+      template: "${LOOPWRIGHT_MCP_TOKEN}"
   controls:
     drainReserveMs: 120000
     maxAttempts: 4

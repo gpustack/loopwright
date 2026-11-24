@@ -7,12 +7,13 @@
 {{- $inIndentCode := false -}}
 {{- $rawLines := split .RawContent "\n" -}}
 {{- $total := len $rawLines -}}
-{{- range $idx, $line := $rawLines -}}
+{{- range $idx, $line := ($rawLines | append "") -}}
+  {{- $isSentinel := eq $idx $total -}}
   {{- $trimmed := strings.TrimSpace $line -}}
   {{- $isBlank := eq $trimmed "" -}}
-  {{- $flush := false -}}
+  {{- $flush := $isSentinel -}}
   {{- $passthrough := false -}}
-  {{- if and (not $comment) (not $inIndentCode) -}}
+  {{- if and (not $isSentinel) (not $comment) (not $inIndentCode) -}}
     {{- $noBq := replaceRE `^( {0,3}> ?)+` "" $line -}}
     {{- $markers := findRE "^ {0,3}(`{3,}|~{3,})" $noBq 1 -}}
     {{- if $markers -}}
@@ -34,7 +35,7 @@
       {{- $passthrough = true -}}
     {{- end -}}
   {{- end -}}
-  {{- if not $passthrough -}}
+  {{- if and (not $isSentinel) (not $passthrough) -}}
     {{- if $comment -}}
       {{- if in $line "-->" -}}
         {{- $comment = false -}}
@@ -63,7 +64,7 @@
         {{- $flush = true -}}
         {{- $passthrough = true -}}
       {{- end -}}
-      {{- if not $passthrough -}}
+      {{- if and (not $isSentinel) (not $passthrough) -}}
         {{- if findRE `^ {0,3}([-*+]|\d+[.)])[ \t]` $line 1 -}}
           {{- $container = "list" -}}
         {{- else if findRE `^ {0,3}\[\^[^\]]+\]:` $line 1 -}}
@@ -119,54 +120,11 @@
     {{- end -}}
     {{- $out = $out | append $masked -}}
   {{- end -}}
-  {{- if $passthrough -}}
+  {{- if and $passthrough (not $isSentinel) -}}
     {{- $out = $out | append $line -}}
     {{- if not $isBlank -}}
       {{- $prevBlank = false -}}
     {{- end -}}
-  {{- end -}}
-  {{- if and (eq (add $idx 1) $total) (gt (len $para) 0) -}}
-    {{- $block := delimit $para "\n" -}}
-    {{- $para = slice -}}
-    {{- $spans := slice -}}
-    {{- $masked := $block -}}
-    {{- range findRE "(?s)(``+(?:[^`]|`[^`])+``+|`[^`\n]+`)" $block -}}
-      {{- $token := printf "__LOOPWRIGHT_MD_CODE_%d__" (len $spans) -}}
-      {{- $spans = $spans | append (dict "token" $token "raw" .) -}}
-      {{- $masked = strings.Replace $masked . $token 1 -}}
-    {{- end -}}
-    {{- range findRE `(?s)!?\[[^\]]*\]\([^\)]+\)` $masked -}}
-      {{- $m := . -}}
-      {{- $prefix := replaceRE `(?s)^(!?\[[^\]]*\]\().*$` "$1" $m -}}
-      {{- $inner := replaceRE `(?s)^!?\[[^\]]*\]\((.*)\)$` "$1" $m -}}
-      {{- $url := "" -}}
-      {{- if findRE `(?s)^\s*<[^>]+>` $inner 1 -}}
-        {{- $url = replaceRE `(?s)^\s*<([^>]+)>.*$` "$1" $inner -}}
-      {{- else -}}
-        {{- $url = replaceRE `(?s)^\s*([^\s]+).*$` "$1" $inner -}}
-      {{- end -}}
-      {{- if $url -}}
-        {{- $dest := partial "link-destination.html" (dict "page" $ "destination" $url "markdown" true) -}}
-        {{- if ne $dest $url -}}
-          {{- $newInner := strings.Replace $inner $url $dest 1 -}}
-          {{- $masked = strings.Replace $masked $m (printf "%s%s)" $prefix $newInner) 1 -}}
-        {{- end -}}
-      {{- end -}}
-    {{- end -}}
-    {{- range findRE `(?m)^(?: {0,3}> ?)* {0,3}\[[^\^][^\]]*\]:[ \t]*<?[^\s>]+>?` $masked -}}
-      {{- $m := . -}}
-      {{- $url := replaceRE `^(?: {0,3}> ?)* {0,3}\[[^\^][^\]]*\]:[ \t]*<?([^\s>]+)>?$` "$1" $m -}}
-      {{- if $url -}}
-        {{- $dest := partial "link-destination.html" (dict "page" $ "destination" $url "markdown" true) -}}
-        {{- if ne $dest $url -}}
-          {{- $masked = strings.Replace $masked $m (strings.Replace $m $url $dest 1) 1 -}}
-        {{- end -}}
-      {{- end -}}
-    {{- end -}}
-    {{- range $spans -}}
-      {{- $masked = replace $masked .token .raw -}}
-    {{- end -}}
-    {{- $out = $out | append $masked -}}
   {{- end -}}
 {{- end -}}
 {{- return (printf "%s\n" (strings.TrimSpace (delimit $out "\n"))) -}}

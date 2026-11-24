@@ -61,7 +61,11 @@ export function resolveHugo(rootDir = process.cwd()) {
     }
   }
 
-  return candidates[0] ?? null;
+  if (candidates.length > 0) {
+    throw new Error(`Hugo >= 0.153 is required; outdated binary detected: ${candidates[0]}`);
+  }
+
+  return null;
 }
 
 function markdownPath(relPath) {
@@ -839,12 +843,17 @@ export function stageReferenceDocs({
 } = {}) {
   const resolvedRoot = path.resolve(rootDir);
   const resolvedDocsDir = path.resolve(docsDir ?? path.join(resolvedRoot, "docs"));
-  const resolvedSourceDir = sourceDir
-    ? path.resolve(sourceDir)
-    : (!fs.existsSync(path.join(resolvedDocsDir, "references")) && path.basename(resolvedDocsDir) === "references"
-        ? resolvedDocsDir
-        : path.join(resolvedDocsDir, "references"));
-  const resolvedStagingDir = path.resolve(stagingDir ?? path.join(resolvedRoot, "site", "resources", "references"));
+  const resolvedSiteDir = path.join(resolvedRoot, "site");
+  let resolvedSourceDir = sourceDir ? path.resolve(sourceDir) : null;
+  if (!resolvedSourceDir) {
+    const defaultRefs = path.join(resolvedDocsDir, "references");
+    if (!fs.existsSync(defaultRefs) && path.basename(resolvedDocsDir) === "references") {
+      resolvedSourceDir = resolvedDocsDir;
+    } else {
+      resolvedSourceDir = defaultRefs;
+    }
+  }
+  const resolvedStagingDir = path.resolve(stagingDir ?? path.join(resolvedSiteDir, "resources", "references"));
 
   if (!fs.existsSync(resolvedSourceDir) || !fs.statSync(resolvedSourceDir).isDirectory()) {
     throw new Error(`reference source directory does not exist: ${resolvedSourceDir}`);
@@ -855,6 +864,13 @@ export function stageReferenceDocs({
     isSubpathOrEqual(resolvedStagingDir, resolvedSourceDir)
   ) {
     throw new Error("reference source and staging directories must not overlap");
+  }
+  if (
+    isSubpathOrEqual(resolvedStagingDir, resolvedRoot) ||
+    isSubpathOrEqual(resolvedStagingDir, resolvedDocsDir) ||
+    isSubpathOrEqual(resolvedStagingDir, resolvedSiteDir)
+  ) {
+    throw new Error(`staging directory must not contain the repository, docs, or site root: ${resolvedStagingDir}`);
   }
   if (fs.existsSync(resolvedStagingDir) && !fs.statSync(resolvedStagingDir).isDirectory()) {
     throw new Error(`staging path is not a directory: ${resolvedStagingDir}`);
@@ -1440,11 +1456,21 @@ export function verifySite(rootDir = process.cwd(), options = {}) {
   }
 
   const expectedOptionalMap = new Map();
+  let repoNavLabel = "Repository navigation";
+  let repoNavDesc = "Module relationships, design records, code entry points and applicable skills for contributors.";
+  const hugoConfigPath = path.join(root, "site", "hugo.toml");
+  if (fs.existsSync(hugoConfigPath)) {
+    const hugoConfigText = fs.readFileSync(hugoConfigPath, "utf8");
+    const labelMatch = hugoConfigText.match(/^\s*repoNavLabel\s*=\s*"([^"]+)"/m);
+    const descMatch = hugoConfigText.match(/^\s*repoNavDescription\s*=\s*"([^"]+)"/m);
+    if (labelMatch?.[1]) repoNavLabel = labelMatch[1];
+    if (descMatch?.[1]) repoNavDesc = descMatch[1];
+  }
   const repoNavUrl = `${repoBlobBase}/${effectiveSourceRef}/docs/README.md`;
   expectedOptionalMap.set(repoNavUrl, {
-    label: "Repository navigation",
+    label: repoNavLabel,
     url: repoNavUrl,
-    desc: "Module relationships, design records, code entry points and applicable skills for contributors."
+    desc: repoNavDesc
   });
 
   const indexedContributeTargets = new Set();

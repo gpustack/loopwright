@@ -56,6 +56,7 @@ Machine-readable field, bound, enum, and schema dictionary for `Taskpack`, `Task
 | `spec.limits.maxTurns` / `maxRepairTurns` | No | Integer (`1..1024`) | Per-dispatch turn caps; `LOOPWRIGHT_MAX_TURNS` / `LOOPWRIGHT_MAX_REPAIR_TURNS` override at runtime |
 | `spec.baselineAlignment` | No | `{ policy, maxConflictFiles: 1..64, maxConflictBytes: 1024..262144 }` | `policy`: `'off' \| 'fail-fast' \| 'extract-context'`; defaults `16` files / `65536` bytes |
 | `spec.memory` | No | `directory`, `apply`, `onNoModelBudget`, GC fields | `ttlDays: 15`, `maxEntries: 128`, `maxPromptEntries: 32`, `checkCodeFingerprint: false`, `checkUpstreamVersions: false`, `publishOnFailure: false`, `skipCi: true` |
+| `spec.output` | No | `{ formats?: ('json'\|'github-step-summary'\|'markdown'\|'text')[] }` | Default output formats emitted by GitHub Action and local CLI runs |
 | `spec.publication` / `triggers` | No | Optional in local mode; enforced on GitHub | `mode: 'pull_request' \| 'disabled'`; `commentCommands: ['retry', 'revise', 'status']`, `commentPrefixes: ['/loopwright']` |
 
 ### Preflight staged resources

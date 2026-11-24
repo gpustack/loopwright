@@ -43,7 +43,7 @@ The agent scans your repository, interviews you one question at a time, waits fo
 
 ## Step 1: Author taskpack
 
-Create `.auto-sync/taskpack.yaml` in the target repository (Loopwright derives `.auto-sync` as the control root):
+Create `.loopwright/taskpack.yaml` in the target repository (Loopwright derives `.loopwright` as the control root; pass `--taskpack <dir>/taskpack.yaml` for a custom root):
 
 ```yaml
 apiVersion: loopwright.dev/v1alpha1
@@ -86,7 +86,7 @@ spec:
       - id: verify-docs
         implementation: command.v1
         parameters:
-          script: .auto-sync/checks/verify.sh
+          script: .loopwright/checks/verify.sh
           timeoutSeconds: 30 # Optional
     externalGates: [] # Optional
   publication:
@@ -95,7 +95,7 @@ spec:
     headBranchPrefix: loopwright-docs-
     titleTemplate: "docs - sync upstream documentation"
   memory:
-    directory: .auto-sync/memory/docs-sync
+    directory: .loopwright/memory/docs-sync
     apply: separate-pull-request
     onNoModelBudget: deterministic-observations-only
   triggers:
@@ -165,7 +165,7 @@ jobs:
           persist-credentials: false
       - uses: gpustack/loopwright@main
         with:
-          taskpack-path: .auto-sync/taskpack.yaml # Optional
+          taskpack-path: .loopwright/taskpack.yaml # Optional
           mode: auto # Optional
           github-app-id: ${{ secrets.LOOPWRIGHT_APP_ID }}
           github-app-private-key: ${{ secrets.LOOPWRIGHT_APP_PRIVATE_KEY }}

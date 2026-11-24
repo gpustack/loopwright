@@ -402,6 +402,12 @@ test('site.mjs unit: rewriteReferenceMarkdown rewrites all 6 target classes whil
       () => stageReferenceDocs({ sourceDir: srcRefs, stagingDir: srcRefs }),
       /must not overlap/
     );
+    const guardedRoot = join(tmpDir, 'guarded-root');
+    mkdirSync(guardedRoot, { recursive: true });
+    assert.throws(
+      () => stageReferenceDocs({ rootDir: guardedRoot, sourceDir: srcRefs, stagingDir: guardedRoot }),
+      /staging directory must not contain the repository, docs, or site root/
+    );
 
     mkdirSync(join(srcRefs, 'nested-subdir'));
     assert.throws(

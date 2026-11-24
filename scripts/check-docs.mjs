@@ -181,7 +181,7 @@ export function getAnchors(filePath) {
       continue;
     }
 
-    const headingMatch = line.match(/^#{1,6}\s+(.+)$/);
+    const headingMatch = line.match(/^(?: {0,3}> ?)* {0,3}#{1,6}\s+(.+)$/);
     if (headingMatch) {
       const rawText = headingMatch[1]
         .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")

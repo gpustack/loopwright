@@ -9,7 +9,6 @@ coverage/
 !.claude/settings.json
 site/public/
 site/resources/
-site/resources/references/
 site/.hugo_build.lock
 .sbin/
 .serena/
