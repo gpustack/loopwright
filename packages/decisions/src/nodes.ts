@@ -11,6 +11,7 @@ import {
   DECISION_NOVELTY_MAX_HISTORY_SLICES,
   DECISION_NOVELTY_MAX_SHINGLES,
   DECISION_NOVELTY_MAX_SLICE_BYTES,
+  DECISION_NOVELTY_STATE_SLICE_CHARS,
   DecisionError,
 } from './types.js';
 import type {
@@ -438,10 +439,21 @@ export function normalizeEvolveBlockSource(source: string): string {
       continue;
     }
     if (ch === '#') {
-      i += 1;
-      while (i < len && source.charAt(i) !== '\n') i += 1;
-      out += ' ';
-      continue;
+      const prevNonSpaceIdx = i - 1;
+      const atLineStartOrAfterSpace =
+        prevNonSpaceIdx < 0
+        || source.charAt(prevNonSpaceIdx) === '\n'
+        || source.charAt(prevNonSpaceIdx) === '\r'
+        || source.charAt(prevNonSpaceIdx) === ' '
+        || source.charAt(prevNonSpaceIdx) === '\t';
+      const restOfLine = source.slice(i + 1);
+      const isPreprocessorDirective = /^\s*(?:include|define|undef|if|ifdef|ifndef|elif|else|endif|pragma|error|line|warning)\b/.test(restOfLine);
+      if (atLineStartOrAfterSpace && !isPreprocessorDirective) {
+        i += 1;
+        while (i < len && source.charAt(i) !== '\n') i += 1;
+        out += ' ';
+        continue;
+      }
     }
     out += ch;
     i += 1;
@@ -613,8 +625,8 @@ export async function evaluateMutationNovelty(
     candidateId: validated.candidateId,
     matchedHistoryId,
     maxSimilarity,
-    normalizedCandidateSlice: normalizedCandidate.slice(0, 24_576),
-    normalizedMatchedSlice: matchedNormalized.slice(0, 24_576),
+    normalizedCandidateSlice: normalizedCandidate.slice(0, DECISION_NOVELTY_STATE_SLICE_CHARS),
+    normalizedMatchedSlice: matchedNormalized.slice(0, DECISION_NOVELTY_STATE_SLICE_CHARS),
   });
   const evaluation = await evaluateDecision({ ...request, state, questions, fallback: () => null });
   const outcome = evaluation.outcomes.find(entry => entry.output.id === 'mutation-cosmetic-clone');
@@ -640,9 +652,11 @@ export async function evaluateMutationNovelty(
     matchedHistoryId,
     advisoryOnly: true,
     verificationCertified: false,
-    source: evaluation.fallbackReason === null ? 'deterministic_heuristic' : 'deterministic_fallback',
+    source: evaluation.fallbackReason === null && evaluation.mode !== 'jev'
+      ? 'deterministic_heuristic'
+      : 'deterministic_fallback',
     zone: evaluation.aggregateZone,
-    fallbackReason: evaluation.fallbackReason,
+    fallbackReason: evaluation.fallbackReason ?? (evaluation.mode === 'jev' ? 'invalid_response' : null),
     transportCalls: evaluation.transportCalls,
   };
 }

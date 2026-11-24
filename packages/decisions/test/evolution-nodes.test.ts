@@ -107,16 +107,17 @@ describe('evaluateMutationNovelty', () => {
     }
   `;
 
-  it('normalizes comments (//, /* */, #) and whitespace while preserving string literals', () => {
+  it('normalizes comments (//, /* */, #) and whitespace while preserving string literals, preprocessor directives, and private fields', () => {
     const withComments = `
       # python-style comment
+      #pragma unroll 4
       const char* tag = "keep // # /* inside */"; // trailing
       /* multi-line
          comment */
-      int   x   =   1 + 2;
+      int   x   =   obj.#secretVal + 2;
     `;
     const normalized = normalizeEvolveBlockSource(withComments);
-    assert.equal(normalized, 'const char* tag = "keep // # /* inside */"; int x = 1 + 2;');
+    assert.equal(normalized, '#pragma unroll 4 const char* tag = "keep // # /* inside */"; int x = obj.#secretVal + 2;');
   });
 
   it('rejects exact whitespace/comment-only clones (Jaccard === 1.0) with 0 transport calls', async () => {
