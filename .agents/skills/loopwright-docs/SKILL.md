@@ -29,7 +29,7 @@ Activate this skill whenever:
 
 1. Read [`docs/README.md`](../../../docs/README.md) and [`references/page-map.md`](references/page-map.md) to identify the single page that owns the concept, contract, or operational procedure.
 2. State each normative fact once on its owning page; link to that page from every other guide or walkthrough.
-3. Verify whether the target page is one of the **13 public site pages** (across 4 groups: `Getting Started`, `Operations`, `Walkthroughs`, `Configuration`) or one of the **12 repository-only pages** (`docs/development.md` and `docs/contribute/**/*.md`, including `docs/contribute/adr/*.md`).
+3. Verify whether the target page is one of the **15 public site pages** (across 4 groups: `Getting Started`, `Operations`, `Walkthroughs`, `Configuration`) or one of the **12 repository-only pages** (`docs/development.md` and `docs/contribute/**/*.md`, including `docs/contribute/adr/*.md`).
 
 ### Step 2: Author with human-first decomposition (`conventions.md`)
 
@@ -48,14 +48,14 @@ Follow every rule in [`references/conventions.md`](references/conventions.md):
    - Use active voice (`Controller rejects stale leases`, not `Stale leases are rejected by the controller`) and imperative step headings (`Step 1: Generate draft configs`).
    - Eliminate all banned AI filler words and self-referential page narration (`seamlessly`, `delve`, `tapestry`, `leverage`, `utilize`, `cutting-edge`, `empower`, `it is worth noting`, `in order to`, `this page describes`, `this document describes`, `comprehensive guide`).
 3. **Follow the 1:1:1 naming rule, page shape, heading, paragraph, table, and reading footer caps**:
-   - **1:1:1 alignment for all 13 public pages**: Every public page must reside at `docs/<slugify(group)>/<slugify(title)>.md` across the 4 groups (`docs/getting-started/`, `docs/operations/`, `docs/walkthroughs/`, `docs/configuration/`), and its `site/data/navigation.yaml` label, `# H1` title, and `docs/README.md` `## All pages` label must match character for character.
+   - **1:1:1 alignment for all 15 public pages**: Every public page must reside at `docs/<slugify(group)>/<slugify(title)>.md` across the 4 groups (`docs/getting-started/`, `docs/operations/`, `docs/walkthroughs/`, `docs/configuration/`), and its `site/data/navigation.yaml` label, `# H1` title, and `docs/README.md` `## All pages` label must match character for character.
    - Start with `# <Exact Title>` matching `docs/README.md` `## All pages` character for character.
    - Write 1–3 intro paragraphs (`<= 5` lines and `<= 500` chars per prose paragraph) before `## Contents`.
    - Keep `## Contents` synchronized in exact order with all subsequent `## ` H2 headings.
    - Keep each page to `<= 10` `##` sections (excluding `## Contents`) and within its line cap (`<= 200` lines for `docs/getting-started/architecture.md`, `<= 220` lines for `docs/contribute/adr/*.md`, and `<= 400` lines for all other non-index `docs/**/*.md` pages).
    - Keep every `##` / `###` / `####` heading to `<= 4` words and `<= 32` characters (`Step N: <Action>` allows `<= 4` words after the colon and `<= 38` total characters), with zero articles (`a`, `an`, `the`) and zero interrogative words (`what`, `where`, `when`, `how`, `which`, `why`, `who`, `whose`, `whom`). Name complete YAML schema sections directly after their resource `kind` (`## Taskpack`, `## TaskContract`, `## TrustedRegistry`, `## ControllerConfig`, `## DecisionPolicy`, `## GitHubAppConfig`).
    - Keep every table column header to `1–3` words and `<= 24` characters without articles (`a`, `an`, `the`), demonstratives (`this`, `that`, `these`, `those`), or interrogatives; keep uniform column counts across all rows and keep every table cell `<= 180` characters.
-   - End every non-index page with a `\n---\n` reading footer: `**See also** — [Title](path.md) (short description) · ...` (required on all 25 pages) and `**Next** → [Title](path.md) — short description` (required on all 13 public site pages).
+   - End every non-index page with a `\n---\n` reading footer: `**See also** — [Title](path.md) (short description) · ...` (required on all 27 pages) and `**Next** → [Title](path.md) — short description` (required on all 15 public site pages).
 
 ### Step 3: Align `docs/README.md` and `site/data/navigation.yaml`
 
@@ -80,10 +80,10 @@ npm run site                           # Build Hugo site, export Markdown/llms.t
 1. **`specs/` are engineering records, never user docs**:
    - Design rationale, rejected alternatives, benchmark methodology, and historical task breakdowns belong in `specs/`.
    - Never rewrite files under `specs/` as user documentation, and never copy raw specification walls of text into `docs/`. User guides state the active operational contract and link to `specs/` only from `docs/README.md` or contributor guides when needed.
-2. **Public site (`13` pages) vs. repository-only `Contribute` (`12` pages) vs. static `llms.txt` references**:
+2. **Public site (`15` pages) vs. repository-only `Contribute` (`12` pages) vs. static `llms.txt` references**:
    - `docs/development.md` and `docs/contribute/**/*.md` (including `docs/contribute/adr/*.md`) remain in repository `docs/` (and in `docs/README.md`) for contributors and coding agents, but are excluded from `site/` (`site/hugo.toml`, `site/data/navigation.yaml`, `site/public/llms.txt`).
-   - `docs/references/bootstrap-interview.md` is excluded from HTML site navigation (`site/data/navigation.yaml` stays at `13` public HTML pages across `4` groups) and exported as static Markdown at `/references/bootstrap-interview.md` alongside `llms.txt` (`scripts/site.mjs` rewrites its relative `docs/` links).
-   - **Hard link boundary**: None of the 13 public `docs/` pages may link to `development.md` or `contribute/**` (directly or via relative path), because those targets do not exist on the published Hugo site. Repository-only pages may link to each other and to any public page.
+   - `docs/references/bootstrap-interview.md` is excluded from HTML site navigation (`site/data/navigation.yaml` stays at `15` public HTML pages across `4` groups) and exported as static Markdown at `/references/bootstrap-interview.md` alongside `llms.txt` (`scripts/site.mjs` rewrites its relative `docs/` links).
+   - **Hard link boundary**: None of the 15 public `docs/` pages may link to `development.md` or `contribute/**` (directly or via relative path), because those targets do not exist on the published Hugo site. Repository-only pages may link to each other and to any public page.
 3. **Keep the front door small (`docs/getting-started/architecture.md <= 200` lines)**:
    - `docs/getting-started/architecture.md` introduces Loopwright's four-stage execution chain (**1. Admit**, **2. Execute**, **3. Verify**, **4. Publish & Remember**), the `architecture-flow.svg` diagram with its hidden Mermaid comment, core vocabulary, and links to deep public configuration pages.
 4. **Evidence and unknown-outcome honesty**:
@@ -101,11 +101,13 @@ npm run site                           # Build Hugo site, export Markdown/llms.t
 | Zero-secret OAuth coding agent operation (`loopwright step`), `--role-model` routing, and local overlay application | [Coding Agents](../../../docs/operations/coding-agents.md) |
 | End-to-end `.loopwright/taskpack.yaml` onboarding and prompt migration walkthrough | [Declarative Taskpack](../../../docs/walkthroughs/declarative-taskpack.md) |
 | End-to-end out-of-repo `TrustedRegistry`, `ControllerConfig`, relationship topology SVG, and CLI governance | [Managed Controller](../../../docs/walkthroughs/managed-controller.md) |
+| End-to-end evolutionary campaign setup (`EVOLVE-BLOCK`, `runner relay\|worker`, `loopwright evolve`, bundle export) | [Evolutionary Campaigns](../../../docs/walkthroughs/evolutionary-campaigns.md) |
 | Complete `Taskpack` (`.loopwright/taskpack.yaml`) field and enum reference | [Taskpack](../../../docs/configuration/taskpack.md) |
 | `TaskContract`, `VerificationProfile`, `AttemptReceipt`, and schema bounds | [Task Contract](../../../docs/configuration/task-contract.md) |
 | Bounded controller loop, `ControllerConfig`, `TrustedRegistry`, and repair retries | [Controller and Registry](../../../docs/configuration/controller-and-registry.md) |
 | Native OS sandboxes (`macos-seatbelt`, `linux-bwrap`, `linux-landlock`), Docker, and `spec.sandbox` | [Sandbox Backends](../../../docs/configuration/sandbox-backends.md) |
 | System-One decision routing, `decisions.yaml`, `spec.decisions`, and 3-zone policy | [Decision Routing](../../../docs/configuration/decision-routing.md) |
+| Complete `EvolutionCampaign` (`campaign.yaml`) schema, islands, `teamEvolution`, and `evolution-bundle.v1` contract | [Evolution Campaign](../../../docs/configuration/evolution-campaign.md) |
 | Canonical RFC 8785 JCS hashing, SHA-256 digests, and domain separation (repo-only) | [Identity](../../../docs/contribute/identity.md) |
 | Independent verification hooks, HMAC `gate.v1` tokens, and receipt authority (repo-only) | [Evidence](../../../docs/contribute/evidence.md) |
 | SQLite WAL state store, lease fencing, monotonic clock guards, and recovery (repo-only) | [State](../../../docs/contribute/state.md) |
@@ -122,20 +124,20 @@ npm run site                           # Build Hugo site, export Markdown/llms.t
 
 | Artifact | Pinned To | Verification Gate |
 | --- | --- | --- |
-| `docs/README.md` `## All pages` | All 25 `docs/**/*.md` files and their exact `# H1` titles | `npm run lint:docs` (`scripts/check-docs.mjs`) |
+| `docs/README.md` `## All pages` | All 27 `docs/**/*.md` files and their exact `# H1` titles | `npm run lint:docs` (`scripts/check-docs.mjs`) |
 | `docs/README.md` `## Module map` | Nine module IDs, guides, specs, code paths, and skill consumers | `npm run lint:docs` (`scripts/check-docs.mjs`) |
 | Each page's `## Contents` | Subsequent `## ` H2 headings in exact document order | `npm run lint:docs` (`scripts/check-docs.mjs`) |
-| Public `docs/` links (`13` pages) | Zero links to `development.md` or `contribute/**` | `npm run lint:docs` and `npm run site` |
-| `site/data/navigation.yaml` | The 13 public `docs/<group>/<slug>.md` pages with exact 1:1:1 group/filename/label/`# H1` parity | `npm run lint:docs` and `npm run site` |
-| `site/public/llms.txt` | Generated from the 13 public pages during `npm run site` | `npm run site` (`scripts/site.mjs`) |
+| Public `docs/` links (`15` pages) | Zero links to `development.md` or `contribute/**` | `npm run lint:docs` and `npm run site` |
+| `site/data/navigation.yaml` | The 15 public `docs/<group>/<slug>.md` pages with exact 1:1:1 group/filename/label/`# H1` parity | `npm run lint:docs` and `npm run site` |
+| `site/public/llms.txt` | Generated from the 15 public pages during `npm run site` | `npm run site` (`scripts/site.mjs`) |
 
 ## Pre-Finish Checklist
 
 - [ ] `node scripts/check-docs.mjs` passes with `0 error(s)`.
-- [ ] `npm run site` passes with `0 broken link(s)` and exports all 13 public pages.
+- [ ] `npm run site` passes with `0 broken link(s)` and exports all 15 public pages.
 - [ ] Every public page satisfies 1:1:1 parity: `docs/<slugify(group)>/<slugify(title)>.md`, `navigation.yaml` label === `# H1` title === `docs/README.md` `## All pages` label.
 - [ ] `docs/getting-started/architecture.md` is `<= 200` lines and embeds `architecture-flow.svg` plus its hidden Mermaid comment.
 - [ ] All configuration blocks use complete two-space Pretty YAML with Kubernetes-aligned top-level header envelopes (`metadata: { name }` on `Taskpack` and `TrustedRegistry`; `apiVersion` + `kind` + `spec` only on `ControllerConfig`, `TaskContract`, `GitHubAppConfig`, and `DecisionPolicy`; or GitHub Actions `name`, `on`, `jobs` — zero bare `spec:` fragments), `Optional`-only inline `#` comments without `: `, `hex: <hash>` placeholders, `<= 20`-word Micro bullets, and uniform 2D enum tables.
-- [ ] Every non-index `docs/**/*.md` page ends with `\n---\n\n**See also** — [Title](path.md) (desc) · ...` (and `**Next** → [Title](path.md) — desc` on all 13 public pages).
+- [ ] Every non-index `docs/**/*.md` page ends with `\n---\n\n**See also** — [Title](path.md) (desc) · ...` (and `**Next** → [Title](path.md) — desc` on all 15 public pages).
 - [ ] Zero public pages link to `development.md` or `contribute/**`.
 - [ ] Zero banned AI filler words, zero interrogative headings or table headers, and zero paragraphs over `5` lines or `500` characters.

@@ -61,7 +61,7 @@ Evaluate every changed file against these five Loopwright-specific axes:
    - **Deterministic error codes**: Every failure path must emit its canonical typed error code (`TASKPACK_MANIFEST_INVALID`, `GITHUB_APP_CONFIG_INVALID`, `DECISION_POLICY_INVALID`, etc.) with actionable diagnostic context and zero swallowed exceptions.
 5. **Test, Documentation, & Closure Parity**:
    - Verify unit and negative-path tests cover new schemas, boundary limits, duplicate keys, symlink rejection, and error codes.
-   - Verify documentation updates obey `loopwright-docs` (`npm run lint:docs` and `npm run site`), keep the 13 public `docs/` pages free of links to `development.md` or `contribute/**`, and keep `.github/workflows/` under least-privilege `permissions` and strictly protected against untrusted taskpack/sandbox writes.
+   - Verify documentation updates obey `loopwright-docs` (`npm run lint:docs` and `npm run site`), keep the 15 public `docs/` pages free of links to `development.md` or `contribute/**`, and keep `.github/workflows/` under least-privilege `permissions` and strictly protected against untrusted taskpack/sandbox writes.
    - Verify capability closure claims in `@loopwright/cli` (`loopwright closure --verify-failures`) honestly separate local/fixture verification from `blocked_external` live qualification.
 
 ### 4. Check hard repository invariants (`.opencodereview/rule.json`)

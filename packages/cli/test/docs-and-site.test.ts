@@ -20,8 +20,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { installedHandlerDigests } from '@loopwright/controller';
+import { parseEvolutionCampaignDocument } from '@loopwright/evolution';
 import { validateTaskpackManifest } from '@loopwright/github-app';
-import { validateTaskpackSuiteManifest, type Json } from '@loopwright/taskpack';
+import { validateTaskpackManifestObject, validateTaskpackSuiteManifest, type Json } from '@loopwright/taskpack';
 import { configurationFixture } from '../../controller/test/config-fixtures.js';
 import { setFixture } from '../../controller/test/progress-fixtures.js';
 
@@ -236,6 +237,39 @@ test('documentation and skills: AGENTS.md, OpenCodeReview rules, and skills exis
   assert.equal(validatedBootstrapSuite.spec.domains.length, 2);
   assert.equal(validatedBootstrapSuite.spec.stages.length, 2);
 
+  // Verify complete EvolutionCampaign Macro YAML example in docs/configuration/evolution-campaign.md validates against schema
+  const evoConfigDoc = readFileSync(join(REPO_ROOT, 'docs', 'configuration', 'evolution-campaign.md'), 'utf8');
+  const evoConfigYamlMatch = evoConfigDoc.match(/## EvolutionCampaign\n\n```yaml\n([\s\S]*?)\n```/);
+  assert.ok(evoConfigYamlMatch?.[1], 'docs/configuration/evolution-campaign.md must include a ## EvolutionCampaign YAML example');
+  const evoConfigParsed = parseDocument(evoConfigYamlMatch[1], { version: '1.2', schema: 'core', uniqueKeys: true });
+  assert.equal(evoConfigParsed.errors.length, 0, 'evolution-campaign.md YAML must parse cleanly');
+  const validatedEvoConfig = parseEvolutionCampaignDocument(evoConfigParsed.toJS() as Record<string, Json>);
+  assert.equal(validatedEvoConfig.metadata.name, 'flash-decode-sm90a');
+  assert.equal(validatedEvoConfig.spec.targetCellId, 'cuda-h100-whole');
+  assert.equal(validatedEvoConfig.spec.stages.mode, 'specialist-then-portfolio');
+  assert.equal(validatedEvoConfig.spec.teamEvolution?.enabled, true);
+
+  // Verify embedded Taskpack and EvolutionCampaign YAML examples in docs/walkthroughs/evolutionary-campaigns.md validate against schema
+  const evoWalkthroughDoc = readFileSync(join(REPO_ROOT, 'docs', 'walkthroughs', 'evolutionary-campaigns.md'), 'utf8');
+  const evoWalkthroughYamlBlocks = [...evoWalkthroughDoc.matchAll(/```yaml\n([\s\S]*?)\n```/g)]
+    .map(m => m[1]!)
+    .map(raw => {
+      const parsed = parseDocument(raw, { version: '1.2', schema: 'core', uniqueKeys: true });
+      assert.equal(parsed.errors.length, 0, 'evolutionary-campaigns.md YAML must parse cleanly');
+      return parsed.toJS() as Record<string, Json>;
+    });
+  const evoWalkthroughTaskpack = evoWalkthroughYamlBlocks.find(doc => doc['kind'] === 'Taskpack');
+  assert.ok(evoWalkthroughTaskpack, 'docs/walkthroughs/evolutionary-campaigns.md must include a YAML Taskpack example');
+  const validatedEvoWalkthroughTaskpack = validateTaskpackManifestObject(evoWalkthroughTaskpack, {
+    controlRoot: '.loopwright',
+    manifestPath: '.loopwright/taskpack.yaml',
+  });
+  assert.equal(validatedEvoWalkthroughTaskpack.metadata.name, 'kernel-evolve-tp');
+  const evoWalkthroughCampaign = evoWalkthroughYamlBlocks.find(doc => doc['kind'] === 'EvolutionCampaign');
+  assert.ok(evoWalkthroughCampaign, 'docs/walkthroughs/evolutionary-campaigns.md must include a YAML EvolutionCampaign example');
+  const validatedEvoWalkthroughCampaign = parseEvolutionCampaignDocument(evoWalkthroughCampaign);
+  assert.equal(validatedEvoWalkthroughCampaign.metadata.name, 'flash-decode-sm90a');
+
   // 4. .claude/skills symlink
   const claudeSkillsPath = join(REPO_ROOT, '.claude', 'skills');
   assert.ok(existsSync(claudeSkillsPath), '.claude/skills must exist');
@@ -259,7 +293,7 @@ test('documentation verification: check-docs.mjs passes with zero errors', () =>
   assert.match(run.stdout, /0 error\(s\)/, 'check-docs.mjs must report 0 error(s)');
 });
 
-test('hugo site: site.mjs build builds 13-page site, exports markdown, renders reading footers, and verifies zero broken links', () => {
+test('hugo site: site.mjs build builds 15-page site, exports markdown, renders reading footers, and verifies zero broken links', () => {
   const siteScript = join(REPO_ROOT, 'scripts', 'site.mjs');
   assert.ok(existsSync(siteScript), 'scripts/site.mjs must exist');
 
@@ -288,7 +322,7 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
   });
 
   assert.equal(build.status, 0, `site.mjs build failed:\nstdout: ${build.stdout}\nstderr: ${build.stderr}`);
-  assert.match(build.stdout, /Verified \d+ HTML pages and 13 Markdown exports; 0 broken link\(s\)/);
+  assert.match(build.stdout, /Verified \d+ HTML pages and 15 Markdown exports; 0 broken link\(s\)/);
 
   const publicDir = join(REPO_ROOT, 'site', 'public');
   assert.ok(existsSync(join(publicDir, 'llms.txt')), 'llms.txt must exist');
@@ -298,7 +332,7 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
   // Verify llms.txt content
   const llms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
   const llmsMatches = llms.match(/^-\s+\[[^\]]+\]\(\/docs\/[^)]+\):/gm);
-  assert.equal(llmsMatches?.length, 13, 'llms.txt must list exactly 13 docs pages');
+  assert.equal(llmsMatches?.length, 15, 'llms.txt must list exactly 15 docs pages');
   assert.match(llms, /\[Bootstrap Interview Reference\]\(\/references\/bootstrap-interview\.md\)/, 'llms.txt must link to Bootstrap Interview Reference');
   assert.ok(!llms.includes('/docs/development/'), 'llms.txt must not contain /docs/development/');
   assert.ok(!llms.includes('/docs/contribute/'), 'llms.txt must not contain /docs/contribute/');
@@ -315,9 +349,9 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
 
   // Verify index.json content
   const index = JSON.parse(readFileSync(join(publicDir, 'index.json'), 'utf8')) as unknown[];
-  assert.ok(Array.isArray(index) && index.length >= 13, 'index.json must contain at least 13 pages');
+  assert.ok(Array.isArray(index) && index.length >= 15, 'index.json must contain at least 15 pages');
 
-  // Verify 13 markdown and html exports exist under docs/<group>/<slug>/
+  // Verify 15 markdown and html exports exist under docs/<group>/<slug>/
   const canonicalPages = [
     'getting-started/architecture',
     'getting-started/installation',
@@ -327,11 +361,13 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
     'operations/coding-agents',
     'walkthroughs/declarative-taskpack',
     'walkthroughs/managed-controller',
+    'walkthroughs/evolutionary-campaigns',
     'configuration/taskpack',
     'configuration/task-contract',
     'configuration/controller-and-registry',
     'configuration/sandbox-backends',
-    'configuration/decision-routing'
+    'configuration/decision-routing',
+    'configuration/evolution-campaign'
   ];
 
   for (const p of canonicalPages) {
@@ -361,7 +397,7 @@ test('hugo site: site.mjs build builds 13-page site, exports markdown, renders r
     env: { ...process.env, SITE_BASE_URL: 'https://docs.gpustack.ai/loopwright/latest/' }
   });
   assert.equal(subpathBuild.status, 0, `subpath site.mjs build failed:\nstdout: ${subpathBuild.stdout}\nstderr: ${subpathBuild.stderr}`);
-  assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 13 Markdown exports; 0 broken link\(s\)/);
+  assert.match(subpathBuild.stdout, /Verified \d+ HTML pages and 15 Markdown exports; 0 broken link\(s\)/);
   const subpathLlms = readFileSync(join(publicDir, 'llms.txt'), 'utf8');
   assert.match(subpathLlms, /\[Bootstrap Interview Reference\]\(\/loopwright\/latest\/references\/bootstrap-interview\.md\)/, 'subpath llms.txt must prefix relURL cleanly');
 

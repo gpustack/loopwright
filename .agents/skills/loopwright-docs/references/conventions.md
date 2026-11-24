@@ -101,7 +101,7 @@ stating the component role, safety boundary, and operator entry point.
 
 ### 1:1:1 Group Directory, Filename Slug, Sidebar Label, and `# H1` Title Rule
 
-Every public documentation page (all 13 pages published to `site/`) must obey strict **1:1:1 alignment**:
+Every public documentation page (all 15 pages published to `site/`) must obey strict **1:1:1 alignment**:
 
 1. **Group directory matches navigation group**: Public pages reside inside one of the 4 group-matching directories under `docs/`:
    - `Getting Started` → `docs/getting-started/`
@@ -117,7 +117,7 @@ Every public documentation page (all 13 pages published to `site/`) must obey st
 
 1. **Trailing `\n---\n` separator**: Every non-index `docs/**/*.md` page must end with a `\n---\n` horizontal rule followed by `**See also** — `.
 2. **Descriptive `See also` items**: Separate multiple items with ` · ` (middle dot). Every item must include a Markdown link `[Title](target.md)` followed by a parenthetical description `(short phrase explaining why to read it)`.
-3. **Descriptive `Next` pointer**: Every public `site/` page (all 13 pages) must include a `**Next** → [Title](target.md) — <short description>` line after `**See also**`. Whenever `**Next**` appears on any repository-only page, it must follow the same `**Next** → [Title](target.md) — <description>` format.
+3. **Descriptive `Next` pointer**: Every public `site/` page (all 15 pages) must include a `**Next** → [Title](target.md) — <short description>` line after `**See also**`. Whenever `**Next**` appears on any repository-only page, it must follow the same `**Next** → [Title](target.md) — <description>` format.
 
 ### Enforced Page Shape Caps
 
@@ -226,4 +226,4 @@ flowchart LR
 
 - **Raw HTML ban in prose**: Outside fenced code blocks and HTML comments, the only permitted raw HTML tag in `docs/**/*.md` is an attribute-free `<br>` or `<br/>`.
 - **Relative links**: Use relative repository paths (`../operations/cli.md`, `./task-contract.md#schema-bounds`) for internal links so both repository readers and `scripts/site.mjs` resolve them deterministically.
-- **Public vs. Contributor link boundary**: The 13 public pages published to `site/` must never link to `docs/development.md` or `docs/contribute/**`.
+- **Public vs. Contributor link boundary**: The 15 public pages published to `site/` must never link to `docs/development.md` or `docs/contribute/**`.

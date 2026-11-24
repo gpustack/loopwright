@@ -119,8 +119,14 @@ Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Re
 Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then interview me one question at a time with repository-grounded defaults to align on writable/protected scope, budgets, verification checks, and role bindings. Wait for my approval on the design summary before computing local Loopwright handler and graph SHA-256 digests, writing out-of-repo registry.yaml and controller.yaml, and validating with loopwright check.
 ```
 
+### Evolution prompt
+
+```text
+Read https://docs.gpustack.ai/loopwright/llms.txt and its Bootstrap Interview Reference (https://docs.gpustack.ai/loopwright/references/bootstrap-interview.md). Inspect this repository first WITHOUT editing any files yet, then follow Evolutionary campaign mode (Mode 3) to interview me one question at a time with repository-grounded defaults on EVOLVE-BLOCK guarded files, target hardware cell and Stage A static audit limits, held-out benchmark-gate.v1 workloads and runner relay/worker topology, objectives, island/niche budgets, optional teamEvolution, and bundle export. Wait for my approval on the design summary before generating .loopwright/taskpack.yaml and .loopwright/campaign.yaml and validating with loopwright evolve check.
+```
+
 ---
 
-**See also** — [Coding Agents](../operations/coding-agents.md) (drive zero-secret `loopwright step` loops from OAuth agents) · [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (simple automated repository mode) · [Managed Controller](../walkthroughs/managed-controller.md) (fine-grained registry and contract mode)
+**See also** — [Coding Agents](../operations/coding-agents.md) (drive zero-secret `loopwright step` loops from OAuth agents) · [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) (simple automated repository mode) · [Managed Controller](../walkthroughs/managed-controller.md) (fine-grained registry and contract mode) · [Evolutionary Campaigns](../walkthroughs/evolutionary-campaigns.md) (multi-generation evolutionary optimization)
 
 **Next** → [Declarative Taskpack](../walkthroughs/declarative-taskpack.md) — author or migrate a `.loopwright/taskpack.yaml` workflow.
