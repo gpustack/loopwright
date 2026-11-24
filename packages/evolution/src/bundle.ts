@@ -251,9 +251,9 @@ interface ParsedReceiptBundle {
 interface VerifiedStageABlob {
   readonly digest: Digest;
   readonly byteLength: number;
-  readonly bytes: Buffer;
   readonly mediaType: string;
   readonly artifactNames: readonly string[];
+  textChecked: boolean;
 }
 
 function createNullRecord<T extends Record<string, unknown>>(): T {
@@ -1375,7 +1375,7 @@ function buildOciLayoutArtifacts(params: {
   readonly dispatchBytes: Buffer;
   readonly dispatchDigest: Digest;
   readonly receipts: readonly { readonly relPath: string; readonly bytes: Buffer; readonly digest: Digest }[];
-  readonly stageABlobs: readonly { readonly relPath: string; readonly bytes: Buffer; readonly digest: Digest; readonly mediaType: string }[];
+  readonly stageABlobs: readonly { readonly relPath: string; readonly byteLength: number; readonly digest: Digest; readonly mediaType: string }[];
 }): OciLayoutArtifacts {
   const extraBlobsByHex = new Map<string, Buffer>();
 
@@ -1443,7 +1443,7 @@ function buildOciLayoutArtifacts(params: {
       makeLayer(
         blob.mediaType,
         blob.digest.hex,
-        blob.bytes.byteLength,
+        blob.byteLength,
         blob.relPath,
       ),
     );
@@ -1880,6 +1880,7 @@ export async function exportEvolutionBundle(
     });
 
     for (const art of sortedReceiptArtifacts) {
+      const isTextual = isTextualArtifact(art.name, art.mediaType);
       const existing = verifiedBlobsByHex.get(art.digest.hex);
       if (existing !== undefined) {
         if (existing.byteLength !== art.byteLength) {
@@ -1888,9 +1889,14 @@ export async function exportEvolutionBundle(
             `conflicting byteLength for blob ${art.digest.hex}`,
           );
         }
-        if (isTextualArtifact(art.name, art.mediaType)) {
-          const text = decodeUtf8Strict(existing.bytes, `/blobs/sha256/${art.digest.hex}`);
+        if (isTextual && !existing.textChecked) {
+          const blobBytes = await readVerifiedCasBlob(options.store.campaignRoot, art.digest.hex, {
+            expectedByteLength: art.byteLength,
+            maxBytes: maxBlobBytes,
+          });
+          const text = decodeUtf8Strict(blobBytes, `/blobs/sha256/${art.digest.hex}`);
           assertCleanSecretText(text, scrubber, `/blobs/sha256/${art.digest.hex}`);
+          existing.textChecked = true;
         }
         continue;
       }
@@ -1900,7 +1906,7 @@ export async function exportEvolutionBundle(
         maxBytes: maxBlobBytes,
       });
 
-      if (isTextualArtifact(art.name, art.mediaType)) {
+      if (isTextual) {
         const text = decodeUtf8Strict(blobBytes, `/blobs/sha256/${art.digest.hex}`);
         assertCleanSecretText(text, scrubber, `/blobs/sha256/${art.digest.hex}`);
       }
@@ -1908,9 +1914,9 @@ export async function exportEvolutionBundle(
       verifiedBlobsByHex.set(art.digest.hex, {
         digest: art.digest,
         byteLength: art.byteLength,
-        bytes: blobBytes,
         mediaType: inferBlobMediaType(art.name, art.mediaType),
         artifactNames: [art.name],
+        textChecked: isTextual,
       });
     }
   }
@@ -1943,7 +1949,7 @@ export async function exportEvolutionBundle(
   const sortedStageABlobs = [...verifiedBlobsByHex.values()]
     .map(blob => ({
       relPath: `blobs/sha256/${blob.digest.hex}`,
-      bytes: blob.bytes,
+      byteLength: blob.byteLength,
       digest: blob.digest,
       mediaType: blob.mediaType,
     }))
@@ -1975,7 +1981,7 @@ export async function exportEvolutionBundle(
     pushMember(rec.relPath, rec.digest, rec.bytes.byteLength, EVOLUTION_RECEIPT_MEDIA_TYPE);
   }
   for (const blob of sortedStageABlobs) {
-    pushMember(blob.relPath, blob.digest, blob.bytes.byteLength, blob.mediaType);
+    pushMember(blob.relPath, blob.digest, blob.byteLength, blob.mediaType);
   }
   members.sort((a, b) => compareUtf16(a.path, b.path));
 
@@ -2056,7 +2062,12 @@ export async function exportEvolutionBundle(
     for (const blob of sortedStageABlobs) {
       if (writtenBlobHexes.has(blob.digest.hex)) continue;
       writtenBlobHexes.add(blob.digest.hex);
-      await writeNewFileNoFollow(join(stagingDir, blob.relPath), blob.bytes, 0o644);
+      // Re-read one verified CAS blob at a time so export peak memory stays O(1) blob.
+      const blobBytes = await readVerifiedCasBlob(options.store.campaignRoot, blob.digest.hex, {
+        expectedByteLength: blob.byteLength,
+        maxBytes: maxBlobBytes,
+      });
+      await writeNewFileNoFollow(join(stagingDir, blob.relPath), blobBytes, 0o644);
     }
 
     if (ociArtifacts !== null) {
