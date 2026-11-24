@@ -1605,6 +1605,9 @@ export async function runHardwareWorker(options: RunHardwareWorkerOptions): Prom
               probeMode: config.probeMode,
               capabilities: config.capabilities,
               targetHardware: grant.job.targetHardware,
+              ...(evaluated.allocatedDeviceIndices !== undefined
+                ? { allocatedDeviceIndices: evaluated.allocatedDeviceIndices }
+                : {}),
               scrubber,
             });
           } catch (probeErr: unknown) {

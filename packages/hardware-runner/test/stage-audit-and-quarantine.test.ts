@@ -397,6 +397,22 @@ test('types & backward parity: legacy BenchmarkRequest and SignedBenchmarkVerdic
     (err: unknown) => err instanceof HardwareRunnerError && err.code === 'ARTIFACT_INVALID',
   );
 
+  // Reject combined targetHardware + stageAAudit forbiddenSymbolPatterns exceeding LIMITS.forbiddenSymbolPatterns
+  assert.throws(
+    () =>
+      parseBenchmarkRequest({
+        ...legacyReq,
+        targetHardware: {
+          ...legacyReq.targetHardware,
+          forbiddenSymbolPatterns: Array.from({ length: 40 }, (_, i) => `hw_sym_${i}`),
+        },
+        stageAAudit: {
+          forbiddenSymbolPatterns: Array.from({ length: 30 }, (_, i) => `audit_sym_${i}`),
+        },
+      }),
+    (err: unknown) => err instanceof HardwareRunnerError && err.code === 'ARTIFACT_INVALID',
+  );
+
   // Verify HardwareDiagnosticsSummary type alignment and quarantine error code typing
   const errCode: HardwareRunnerErrorCode = 'WORKER_DEVICE_QUARANTINED';
   assert.equal(errCode, 'WORKER_DEVICE_QUARANTINED');
@@ -709,6 +725,28 @@ test('Stage A static symbol & spill audit: denies ELF64 (.so/.o/.cubin), PTX, an
         }),
       (err: unknown) => err instanceof HardwareRunnerError && err.code === 'ARTIFACT_INVALID',
     );
+    // Unsupported 32-bit Mach-O .dylib fails closed instead of falling through to UTF-8 text scan
+    const machO32Path = join(tamperDir, 'legacy32.dylib');
+    const machO32Buf = Buffer.alloc(32, 0);
+    machO32Buf.writeUInt32LE(0xfeedface, 0);
+    await writeFile(machO32Path, machO32Buf, { mode: 0o400 });
+    const machO32Audit = await auditSealedStageAOutputs({
+      sealedOutputs: [
+        {
+          artifact: {
+            name: 'legacy32.dylib',
+            digest: { algorithm: 'sha256', hex: sha256Hex(machO32Buf) },
+            byteLength: machO32Buf.byteLength,
+          },
+          sealedFilePath: machO32Path,
+        },
+      ],
+      auditSpec: { forbiddenSymbolPatterns: ['cublas'] },
+      scrubber: new SecretScrubber(),
+    });
+    assert.equal(machO32Audit.passed, false);
+    assert.match(machO32Audit.findings[0]?.title ?? '', /Unsupported Mach-O/i);
+
     const symPath = join(tamperDir, 'sym.ptx');
     await symlink(realFile, symPath);
     await assert.rejects(

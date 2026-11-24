@@ -268,6 +268,7 @@ export interface EvaluatedBenchmarkJob {
   readonly metrics?: MetricsMap;
   readonly findings?: readonly StructuredFinding[];
   readonly hardwareProvenance?: HardwareProvenance;
+  readonly allocatedDeviceIndices?: readonly number[];
   readonly bucketMetrics?: readonly BucketMetricEntry[];
   readonly hardwareDiagnostics?: HardwareDiagnostics;
   readonly stageBFailure?: StageBFailureMetadata;
@@ -3755,6 +3756,18 @@ export async function auditSealedStageAOutputs(
         && magicHeader[3] === 0x46;
       const magic32 = magicLen >= 4 ? magicHeader.readUInt32LE(0) : 0;
       const isMachO64 = magicLen >= 4 && (magic32 === 0xfeedfacf || magic32 === 0xcffaedfe);
+      const isUnsupportedMachO =
+        magicLen >= 4
+        && (magic32 === 0xfeedface || magic32 === 0xcefaedfe || magic32 === 0xbebafeca || magic32 === 0xcafebabe);
+
+      if (isUnsupportedMachO) {
+        pushAuditFinding(
+          'Unsupported Mach-O binary format in Stage A static audit',
+          relName,
+          `File "${relName}" uses an unsupported 32-bit or universal Mach-O header and failed closed during Stage A static audit`,
+        );
+        continue;
+      }
 
       const shouldInspectAsBinary = isElf || isMachO64 || AUDIT_BINARY_EXT_RE.test(relName);
       const shouldInspectAsText = !isElf && !isMachO64 && (AUDIT_TEXT_EXT_RE.test(relName) || AUDIT_BINARY_EXT_RE.test(relName));
@@ -5021,6 +5034,9 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
           }),
         ]),
         hardwareProvenance,
+        ...(resolvedDeviceIndices !== undefined
+          ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+          : {}),
         stageBFailure: Object.freeze({
           timedOut: true,
           exitCode: stageBResult.exitCode,
@@ -5048,6 +5064,9 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
           }),
         ]),
         hardwareProvenance,
+        ...(resolvedDeviceIndices !== undefined
+          ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+          : {}),
         stageBFailure: Object.freeze({
           timedOut: false,
           exitCode: stageBResult.exitCode,
@@ -5098,6 +5117,9 @@ export async function evaluateBenchmarkJob(options: EvaluateBenchmarkJobOptions)
       ...(envelope.bucketMetrics !== undefined ? { bucketMetrics: envelope.bucketMetrics } : {}),
       ...(envelope.hardwareDiagnostics !== undefined ? { hardwareDiagnostics: envelope.hardwareDiagnostics } : {}),
       hardwareProvenance,
+      ...(resolvedDeviceIndices !== undefined
+        ? { allocatedDeviceIndices: Object.freeze([...resolvedDeviceIndices]) }
+        : {}),
       sealedOutputs,
       cleanup: cleanupJobRoot,
     });

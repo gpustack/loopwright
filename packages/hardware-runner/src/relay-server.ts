@@ -680,6 +680,21 @@ export function parseBenchmarkRequest(
   const stageAAudit = Object.hasOwn(root, 'stageAAudit')
     ? parseStageAStaticAuditSpec(root.stageAAudit, '/stageAAudit')
     : undefined;
+  if (
+    targetHardware.forbiddenSymbolPatterns !== undefined
+    && stageAAudit?.forbiddenSymbolPatterns !== undefined
+  ) {
+    const combinedPatterns = new Set<string>([
+      ...targetHardware.forbiddenSymbolPatterns,
+      ...stageAAudit.forbiddenSymbolPatterns,
+    ]);
+    if (combinedPatterns.size > LIMITS.forbiddenSymbolPatterns) {
+      wireInvalid(
+        `combined forbiddenSymbolPatterns exceeds ${LIMITS.forbiddenSymbolPatterns}`,
+        '/stageAAudit/forbiddenSymbolPatterns',
+      );
+    }
+  }
   const heldOutWorkloadId = parsePrintableText(root.heldOutWorkloadId, 1, 128, '/heldOutWorkloadId', true);
   if (!SAFE_FILENAME_ID_RE.test(heldOutWorkloadId)) {
     wireInvalid('invalid heldOutWorkloadId', '/heldOutWorkloadId');
