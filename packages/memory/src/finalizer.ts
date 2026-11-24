@@ -437,6 +437,7 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
             && hardwareScopesOverlap(candidate.scope.hardwareScope, entryHardwareScope))
           .map(candidate => candidate.id),
       )].sort().slice(0, 32);
+    let skippedForHardwareEvidenceCount = 0;
     const buildEntry = (id: string, claimKey: string, claim: string, kind: MemoryEntry['kind'], refs: readonly MemoryEvidenceRef[]): MemoryEntry | null => {
       let entryHardwareScope: HardwareMemoryScope | undefined;
       if (hardwareScope !== undefined) {
@@ -455,6 +456,7 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
               && !hardwareScopesOverlap(candidate.scope.hardwareScope, hardwareScope),
           );
           if (wouldClobberOtherHardware) {
+            skippedForHardwareEvidenceCount += 1;
             return null;
           }
           entryHardwareScope = undefined;
@@ -558,6 +560,10 @@ export async function finalizeRunMemory(input: MemoryFinalizerInput): Promise<Me
       passedCheckClaimKeys,
     });
     operations = swept.operations;
+    if (skippedForHardwareEvidenceCount > 0) {
+      const skipNote = `hardware_evidence_required_skipped:${skippedForHardwareEvidenceCount}`;
+      reason = reason === null ? skipNote : `${reason}; ${skipNote}`;
+    }
     if (deterministicTruncated || swept.truncated) {
       reason = reason === null
         ? 'proposal_operations_truncated_at_limit'

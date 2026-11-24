@@ -1110,6 +1110,7 @@ describe('finalizer hardwareScope gating integration', () => {
         false,
         'local_execution pass on gfx942 must not emit hardware-universal fact clobbering sm_100a entry',
       );
+      assert.match(gfxOutcome.reason ?? '', /hardware_evidence_required_skipped:1/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
